@@ -1,6 +1,6 @@
 # Remove the 64-ulp restore slack once every effect ramp is clamped
 
-Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-4(b)).
+Stream G of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-4(b)).
 Filed 2026-10-05 as the follow-up that *Keep every effect parameter ramp inside its endpoints*
 (#1409) flags to root in its Non-goals. Code anchors verified on `codex/d15-stream-g` at
 `1a2a6bc4b`, before #1301 and #1409 land; #1409 moves the lines of
@@ -70,11 +70,18 @@ continues bit for bit.
 
 - **D0. Root decision (2026-10-05).** The decision-15 root coordinator, under the owner's
   no-shortcuts delegation (`no-shortcuts-correctness-first`), filed this follow-up to #1409 in
-  stream A: once every effect ramp is clamped (#1409), every effect's restore refuses any ramp word
+  stream A (moved to stream G the same day, below): once every effect ramp is clamped (#1409), every effect's restore refuses any ramp word
   outside its strict domain or designed range, with no rounding slack, and every state the engine
   produces still restores bit for bit. Rationale: a validator that admits words the engine never
   holds is a wider contract than the product needs, and the slack's only justification (#1278: the
-  unclamped law's own overshoot) is gone. Stream A owns effect payload code and files it.
+  unclamped law's own overshoot) is gone. Stream A owns effect payload code and filed it.
+  Moved into G so #1409 and #1411 merge together; no window with blind probes on main. Root
+  decision (2026-10-05, same delegation): #1409 alone leaves #1301's six probe tests unable to
+  catch anything (its clamp keeps every engine snapshot inside the domain, so the 64-ulp slack
+  admits every word the probes could see refused), so main must never carry #1409 without this
+  slice. #1409 and #1411 land in the same Stream G pull request, #1409's commits first; neither
+  merges alone. Stream G owns this slice; the effect payload readers it edits stay stream A's (and
+  the effect owners') code, edited here as a named exception.
 - **D1. One strict rule.** For every ramped word of every effect: the target, and the `current`
   whether the ramp is moving or settled, lie in the parameter's strict domain (as the reader already
   checks for a target and a settled current: `parameter_state_valid`, `parameter_value_valid`,
@@ -119,6 +126,8 @@ continues bit for bit.
 
 ## Authorized paths
 
+All of these are edited in the one Stream G pull request that also carries #1409.
+
 - `crates/effect-runtime/src/state_payload.rs` (`ramp_path_within`, the module doc and
   `ramp_path_inside`'s doc only)
 - `crates/compressor/src/state.rs`, `crates/gate-expander/src/lib.rs`,
@@ -132,8 +141,10 @@ continues bit for bit.
 - `crates/delay/tests/MUTATIONS.md` (M18, M19 only)
 - This spec
 
-`crates/effect-runtime` is stream G's column; `ramp_path_within` and its docs are a named exception
-recorded in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`.
+`crates/effect-runtime` is stream G's column. The effect payload readers and their refusal rows
+(stream A's payload code, and the effect owners'), `crates/delay/tests/MUTATIONS.md` (M18, M19) and
+the probe evidence are named exceptions for this slice, recorded in
+`docs/handoffs/decision-15-2026-10-05/STREAMS.md`.
 
 ## Non-goals
 
@@ -150,8 +161,10 @@ recorded in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`.
 
 ## Hazards
 
-- **Order.** This slice is valid only after #1409 is on the tree (and #1301 before it). On a tree
-  without #1409's clamp, the six probes turn red: the effects' own snapshots would be refused.
+- **Order.** This slice is valid only on top of #1409 (and #1301 before it), and it ships in the
+  same pull request as #1409: #1409 alone leaves the six probes blind, and this slice alone (without
+  #1409's clamp) turns them red, because the effects' own snapshots would be refused. Neither
+  order is allowed on main by itself.
 - **Hot files.** The payload readers are also edited by stream A's carry slices (#1279, #1280,
   #1282) and #1409 deletes test rows in the same files; rebase onto whichever landed, keep their
   clauses, and change only the range rules.
@@ -181,10 +194,35 @@ recorded in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`.
    `a_restored_near_edge_ramp_continues_bit_for_bit`, and every crate's existing mid-ramp restore
    continuation and round-trip test (restored state snapshots back to the payload and renders bit for
    bit). No digest table moves.
-3. **The probe's catch (PR evidence, not committed).** With this slice applied, revert #1409's clamp
-   at one render site per effect (for example the gate's `channel_step` prologue); that effect's
-   `the_effects_own_edge_ramp_snapshots_restore` is red with full walk. Record each effect's result
-   and revert.
+3. **Every probe catches again (PR evidence, not committed; required for merge).** On the combined
+   #1409 + #1411 tree, each of #1301's six probe tests,
+   `the_effects_own_edge_ramp_snapshots_restore` in the crate's `tests/randomized.rs` (driven by
+   `EffectDifferential::assert_edge_ramps_restore`), is red again on its mutant. A mutant reverts
+   #1409's clamp to the old update `current + step` (or the site's start-plus-steps form) at that
+   effect's render sites, the #1409 Context numbering:
+   - delay (`crates/delay/tests/randomized.rs`): site 7, `delay_chunk` (feedback, mix, damping `g`
+     and the shared cross feedback; the parameters #1301's M18 caught);
+   - compressor (`crates/compressor/tests/randomized.rs`): site 4, `RampVec::advance_where`, and
+     site 2 as the compressor's `Channel::advance_ramps` reaches it (`LinearRamp::next_value` and
+     `advance_block`'s first-frame word);
+   - gate (`crates/gate-expander/tests/randomized.rs`): site 5, `channel_step`'s `RAMPING`
+     prologue (threshold, ratio, range, hysteresis; the parameters #1301's gate strict-current
+     mutant caught);
+   - multiband (`crates/multiband-compressor/tests/randomized.rs`): site 6, `run_segment`;
+   - true-peak limiter (`crates/true-peak-limiter/tests/randomized.rs`): site 9,
+     `RampLanes::advance` (the limit and release coefficients; the ceiling ramp #1301's 4-ulp
+     mutant caught);
+   - transient shaper (`crates/transient-shaper/tests/randomized.rs`): site 2, `LinearRamp` as the
+     shaper's `advance` reaches it (attack amount, sustain amount, mix).
+
+   For each, run the test per pull request (no variable set) and full
+   (`MISO_ENGINE_RANDOMIZED_SCALE=1`): both are red with at least one "its own snapshot is refused"
+   line; record each count, whether the two violation lists are byte-identical, and green after
+   revert, in this spec. #1301's three restore-side mutants (delay M18, gate strict current,
+   limiter 4-ulp budget) are this slice's product and are no longer mutants; this render-side
+   table replaces them as the probes' recorded catches. If any of the six probes stays green on its
+   mutant, the pull request does not merge: stop and report to root with the evidence; do not
+   weaken the probe, the mutant or this gate.
 4. Commands:
    - `cargo test --locked --all-targets -p effect-runtime -p compressor -p gate-expander -p multiband-compressor -p delay -p transient-shaper -p true-peak-limiter -p soft-clip -p conformance`
    - `MISO_ENGINE_RANDOMIZED_SCALE=1 cargo test --locked -p compressor -p gate-expander -p multiband-compressor -p delay -p transient-shaper -p true-peak-limiter -p soft-clip --test randomized`
@@ -202,8 +240,8 @@ recorded in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`.
 ## Dependencies
 
 - *Keep every effect parameter ramp inside its endpoints* (#1409, stream G), whose clamp makes every
-  engine ramp word lie inside its domain; #1409 in turn lands after #1301 (stream J), whose probe
-  gate 2 runs.
+  engine ramp word lie inside its domain; it ships in the same Stream G pull request as this slice,
+  its commits first. #1409 in turn lands after #1301 (stream J), whose probe gates 2 and 3 run.
 
 ## Attempt record
 

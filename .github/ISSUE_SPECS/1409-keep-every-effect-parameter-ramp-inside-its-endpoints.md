@@ -178,8 +178,22 @@ through the clamp #1408 adds for the builtins.
   those counts, beside the note root filed on 2026-10-05 (if #1301's spec has already left
   `.github/ISSUE_SPECS/`, the note goes in a comment on GitHub #1301 instead). It does not edit the
   probe, its six caller tests or `crates/delay/tests/MUTATIONS.md`; a lost catch is reported to
-  root, and the restore-slack removal that gives the probe a catch again is stream A's follow-up
-  (*Remove the 64-ulp restore slack once every effect ramp is clamped*, #1411).
+  root, and the restore-slack removal that gives the probe a catch again is #1411 (*Remove the
+  64-ulp restore slack once every effect ramp is clamped*), which ships in the same pull request
+  (D9).
+- **D9. Root confirmation (2026-10-05).** The decision-15 root coordinator, under the same
+  delegation, confirmed two points. (a) The four extra tests assert superseded behaviour: the
+  limiter's `"moving limit walked past its bounds by its step"` row
+  (`crates/true-peak-limiter/src/lib.rs:~7623`), the compressor's two payload tests and rows
+  (`crates/compressor/tests/payload.rs:396`, `a_step_that_leaves_the_domain_before_the_snap_is_refused`,
+  and `:450`, `"a moving path below zero"`), and soft clip's overshoot tests
+  (`crates/soft-clip/tests/state_roundtrip.rs` and `crates/soft-clip/tests/randomized.rs`, D8(b)).
+  This slice rewrites or deletes them in the same pull request, as `AGENTS.md` requires (a change
+  that supersedes a test deletes it in the same PR). They stay in D6 and D8(b) and in the
+  authorized paths. (b) Main must never carry a window in which #1301's six probe tests catch
+  nothing, so this slice and #1411 ship in one Stream G pull request, this slice's commits first;
+  neither merges alone. This slice's record of the lost catches (D8(c), gate 5) is PR evidence
+  only; #1411's gate 3 is the gate that makes each of the six probes red again on its mutant.
 - **D7. Bits move only where the old word passed its target**, from that frame until the snap.
   The PR carries one-time before/after evidence over every test and pinned artifact that renders an
   effect ramp: each moved case, its first moved frame, its largest change, and confirmation that on
@@ -253,8 +267,8 @@ exceptions recorded in
 
 - The builtins (#1408), the SVF coefficient word ramps of the EQ and the input filter (#1407), the
   delay tap crossfade, `OnePole99`, the indexed route ramp; any window, countdown, snap or design
-  function; the 64-ulp restore slacks (with D2 they are unused headroom; stream A's #1411 removes
-  them after this slice).
+  function; the 64-ulp restore slacks (with D2 they are unused headroom; #1411 removes them in the
+  same Stream G pull request, D9).
 - Rejected alternatives:
   - Prove no overshoot per parameter: the probe finds reachable overshoots on every domain edge.
   - Clamp to the parameter's domain instead of `[start, target]`: still renders values the user
@@ -309,7 +323,8 @@ exceptions recorded in
    crate's `the_effects_own_edge_ramp_snapshots_restore` per pull request (no variable set) and
    full (`MISO_ENGINE_RANDOMIZED_SCALE=1`), and record each "its own snapshot is refused" count,
    whether the two lists are byte-identical, and green after revert, in this spec and the #1301
-   note (D8).
+   note (D8). This record is PR evidence only, not a merge gate: a count that falls to zero is
+   expected, and #1411's gate 3, in the same pull request, restores a catch for each probe (D9).
 6. Commands:
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p effect-contract -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`
@@ -342,6 +357,8 @@ exceptions recorded in
 - *Make the shared edge-ramp restore probe cheap enough for every pull request* (#1301, stream J),
   which lands first: this slice re-measures its mutation counts on the probe as #1301 leaves it and
   amends its spec (D8)
+- *Remove the 64-ulp restore slack once every effect ramp is clamped* (#1411, stream G), which
+  ships in the same pull request, after this slice's commits (D9)
 
 ## Attempt record
 
