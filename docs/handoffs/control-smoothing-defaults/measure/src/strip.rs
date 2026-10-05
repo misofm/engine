@@ -1,20 +1,25 @@
-//! One track's live fader/mute and 2x2 matrix/pan sections, driven exactly as the console drives
-//! them.
+//! One track's live input trim/polarity, fader/mute and 2x2 matrix/pan sections, driven exactly as
+//! the console drives them.
 //!
-//! The DSP is the engine's own: `builtins::FaderMuteRampBuiltins` (the section
-//! `ConsoleFaderProcessor` binds for a console-driven track) and the `MatrixBuiltins` a
-//! `BuiltinChain` prepares, retargeted through `set_target_smoothed` exactly as the matrix drain
-//! does. A banked strip runs the same `FaderRampStage`/`MatrixStage` at a wider lane type, and
-//! banking never changes per-lane arithmetic (AGENTS.md; `BuiltinFaderBank` docs), so these bits are
-//! the bits a banked track renders.
+//! The DSP is the engine's own: the `InputBuiltins` a `BuiltinChain` prepares, retargeted through
+//! `set_polarity_invert` and `set_trim_db` (both `InputStage::set_trim_signed`, the D11 retarget of
+//! one signed coefficient); `builtins::FaderMuteRampBuiltins` (the section `ConsoleFaderProcessor`
+//! binds for a console-driven track); and the `MatrixBuiltins` a `BuiltinChain` prepares,
+//! retargeted through `set_target_smoothed` exactly as the matrix drain does. A banked strip runs
+//! the same `InputStage`/`FaderRampStage`/`MatrixStage` at a wider lane type, and banking never
+//! changes per-lane arithmetic (AGENTS.md; `BuiltinFaderBank` docs), so these bits are the bits a
+//! banked track renders.
 //!
 //! Delivery timing is the console's: a record admitted at sample `at` is drained at the top of the
 //! first render block that starts at or after `at` (`drain_fader_controls`/`drain_matrix_controls`
-//! in `builtins-compiler`), and the chain order is fader/mute then matrix/pan.
+//! in `builtins-compiler`, and the input drain of `BuiltinBankProcessor::drain_controls`), and the
+//! chain order is input (trim/polarity, its filters off), then fader/mute, then matrix/pan. An
+//! input section at its defaults (trim 0 dB, polarity off, filters off) multiplies by exactly
+//! `1.0`, so the fader and matrix measurements render the same bits with or without it.
 
 use builtins::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameters, ChannelParameters, DualMonoBlock,
-    FaderMuteRampBuiltins, MatrixBuiltins, pan_matrix,
+    FaderMuteRampBuiltins, InputBuiltins, MatrixBuiltins, pan_matrix,
 };
 
 /// The render quantum every launch host uses (the browser's Web Audio quantum).
@@ -26,6 +31,10 @@ pub enum Control {
     Mute(bool),
     /// Both lanes' pan position, lowered through the engine's `pan_matrix(left, right)`.
     Pan(f32),
+    /// Both lanes' polarity inversion: the input trim coefficient carried through zero.
+    Polarity(bool),
+    /// Both lanes' input trim in dB, keeping the polarity.
+    TrimDb(f32),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,30 +46,53 @@ pub struct Event {
 }
 
 pub struct Strip {
+    input: InputBuiltins,
     fader: FaderMuteRampBuiltins,
     matrix: MatrixBuiltins,
 }
 
 impl Strip {
     pub fn new(rate: u32, muted: bool) -> Self {
-        let lane = ChannelParameters {
-            muted,
-            ..ChannelParameters::default()
-        };
+        Self::with(
+            rate,
+            ChannelParameters {
+                muted,
+                ..ChannelParameters::default()
+            },
+        )
+    }
+
+    /// A strip whose two lanes are prepared with `lane`.
+    pub fn with(rate: u32, lane: ChannelParameters) -> Self {
         let parameters = BuiltinParameters {
             left: lane,
             right: lane,
             ..BuiltinParameters::default()
         };
         let fader = FaderMuteRampBuiltins::new(parameters).expect("prepared fader");
-        let (_, _, matrix) = BuiltinChain::new(rate, parameters)
+        let (input, _, matrix) = BuiltinChain::new(rate, parameters)
             .expect("prepared chain")
             .into_sections();
-        Self { fader, matrix }
+        Self {
+            input,
+            fader,
+            matrix,
+        }
     }
 
     fn apply(&mut self, event: &Event) {
         match event.control {
+            Control::Polarity(inverted) => {
+                self.input.set_polarity_invert(
+                    BuiltinLaneSelector::Both,
+                    inverted,
+                    event.smoothing_samples,
+                );
+            }
+            Control::TrimDb(db) => self
+                .input
+                .set_trim_db(BuiltinLaneSelector::Both, db, event.smoothing_samples)
+                .expect("trim_db inside [-144, 24]"),
             Control::FaderDb(db) => self
                 .fader
                 .set_fader_db(BuiltinLaneSelector::Both, db, event.smoothing_samples)
@@ -93,6 +125,10 @@ impl Strip {
             let block =
                 DualMonoBlock::new(&mut left[start..end], &mut right[start..end], start as u64)
                     .expect("block");
+            self.input.process(block);
+            let block =
+                DualMonoBlock::new(&mut left[start..end], &mut right[start..end], start as u64)
+                    .expect("block");
             self.fader.process(block);
             let block =
                 DualMonoBlock::new(&mut left[start..end], &mut right[start..end], start as u64)
@@ -108,9 +144,31 @@ impl Strip {
 /// With `left = 1, right = 0` the outputs are exactly the `ll` (left out) and `rl` (right out)
 /// matrix coefficients times the fader gain, because the ramp kernels multiply and nothing else.
 pub fn probe(rate: u32, muted: bool, frames: usize, events: &[Event]) -> (Vec<f32>, Vec<f32>) {
+    probe_with(
+        rate,
+        ChannelParameters {
+            muted,
+            ..ChannelParameters::default()
+        },
+        frames,
+        events,
+    )
+}
+
+/// [`probe`] through a strip prepared with `lane` on both lanes.
+///
+/// The input trim multiplies first and nothing else follows it but the fader and matrix
+/// multiplies, so with the fader at unity and the identity matrix the left output is exactly the
+/// trim coefficient's trajectory.
+pub fn probe_with(
+    rate: u32,
+    lane: ChannelParameters,
+    frames: usize,
+    events: &[Event],
+) -> (Vec<f32>, Vec<f32>) {
     let mut left = vec![1.0_f32; frames];
     let mut right = vec![0.0_f32; frames];
-    Strip::new(rate, muted).render(&mut left, &mut right, events);
+    Strip::with(rate, lane).render(&mut left, &mut right, events);
     (left, right)
 }
 

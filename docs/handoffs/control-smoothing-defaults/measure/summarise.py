@@ -4,6 +4,7 @@
     python3 summarise.py [DATA_DIR]      # default: ../data next to this script
 
 Each cell is the 48 kHz value; a bracketed range is the spread over the four launch rates.
+Sections 5-6 come from `measure`'s seven files; section 9 from `live`'s four, when present.
 """
 
 from __future__ import annotations
@@ -156,9 +157,137 @@ def whatif() -> None:
            "kick raised-cosine"], lines)
 
 
+def pick(rows: list[dict], **match: str) -> list[dict]:
+    return [r for r in rows if all(r[k] == v for k, v in match.items())]
+
+
+def polarity() -> None:
+    rows = load("polarity_click.csv")
+    mute = load("mute_click.csv")
+    worst = max(
+        abs(float(r["oob_db"] or 0) - float(u["oob_db"] or 0))
+        for r in rows if r["transition"] == "invert"
+        for u in pick(rows, rate_hz=r["rate_hz"], material=r["material"], transition="restore",
+                      ramp_ms=r["ramp_ms"])
+    )
+    print(f"Polarity: restore versus invert, largest out-of-band difference: {worst:.2f} dB\n")
+    lines = []
+    for ms in sorted({r["ramp_ms"] for r in rows}, key=float):
+        flip = lambda material: pick(rows, material=material, transition="invert", ramp_ms=ms)
+        line = [ms, cell(flip("bass"), "oob_db"), cell(flip("bass"), "ctr_max_db"),
+                cell(flip("kick"), "oob_db"), cell(flip("kick"), "ctr_max_db"),
+                cell(flip("mix"), "hf_splatter_db")]
+        same = pick(mute, rate_hz="48000", material="bass", transition="mute", ramp_ms=ms)
+        half = pick(mute, rate_hz="48000", material="bass", transition="mute",
+                    ramp_ms=f"{float(ms) / 2:g}")
+        b = pick(flip("bass"), rate_hz="48000")[0]
+        line.append(f"{float(b['oob_db']) - float(same[0]['oob_db']):+.2f}" if same else "n/a")
+        line.append(f"{float(b['oob_db']) - float(half[0]['oob_db']):+.2f} / "
+                    f"{float(b['ctr_max_db']) - float(half[0]['ctr_max_db']):+.2f}" if half else "n/a")
+        lines.append(line)
+    print("Polarity flip (invert), 48 kHz\n")
+    table(["ramp ms", "bass OOB", "bass CTR", "kick OOB", "kick CTR", "mix HF splatter",
+           "bass OOB minus mute at same length", "bass OOB / CTR minus mute at half length"], lines)
+
+
+def transfer() -> None:
+    rows = load("law_transfer.csv")
+    for law in ("route-indexed", "input-trim"):
+        sel = pick(rows, law=law)
+        diff = max(float(r["max_abs_diff"]) for r in sel)
+        settle = all(r["both_settle_exactly"] == "true" for r in sel)
+        measured = [r for r in sel if r["d11_bass_oob_db"]]
+        oob = max(abs(float(r["d11_bass_oob_db"]) - float(r["law_bass_oob_db"])) for r in measured)
+        ctr = max(abs(float(r["d11_bass_ctr_max_db"]) - float(r["law_bass_ctr_max_db"]))
+                  for r in measured)
+        print(f"{law}: {len(sel)} rows, largest |coefficient difference| {diff:.3e}, "
+              f"all settle on the same bits: {settle}; bass OOB within {oob:.2f} dB, "
+              f"CTR within {ctr:.2f} dB")
+        for case in sorted({r["case"] for r in sel}):
+            print(f"  {case}: largest difference "
+                  f"{max(float(r['max_abs_diff']) for r in pick(sel, case=case)):.3e}")
+    print()
+
+
+def crossfade_cells(rows: list[dict], material: str) -> list[str]:
+    if material in ("mix", "mix-wide"):
+        return [cell(rows, "hf_splatter_db")]
+    return [cell(rows, "oob_db"), cell(rows, "ctr_max_db")]
+
+
+def bypass() -> None:
+    rows = load("bypass_crossfade.csv")
+    ramps = sorted({r["ramp_ms"] for r in rows}, key=float)
+    for material in ("bass", "kick", "mix"):
+        lines = []
+        effects = []
+        for r in rows:
+            if r["material"] == material and r["effect"] not in effects:
+                effects.append(r["effect"])
+        for effect in effects:
+            sel = pick(rows, effect=effect, material=material, transition="bypass")
+            line = [effect, cell(pick(sel, ramp_ms=ramps[0]), "step_db")]
+            for ms in ramps:
+                line.append(" / ".join(crossfade_cells(pick(sel, ramp_ms=ms), material)))
+            lines.append(line)
+        measure = "HF splatter dB" if material == "mix" else "OOB / CTR dB"
+        print(f"Bypass crossfade, {material}, {measure} (unbypass mirrors bypass)\n")
+        table(["effect", "step dB"] + [f"{ms} ms" for ms in ramps], lines)
+    worst = max(
+        abs(float(r["oob_db"] or r["hf_splatter_db"]) - float(u["oob_db"] or u["hf_splatter_db"]))
+        for r in rows if r["transition"] == "bypass"
+        for u in pick(rows, rate_hz=r["rate_hz"], effect=r["effect"], material=r["material"],
+                      transition="unbypass", ramp_ms=r["ramp_ms"])
+    )
+    print(f"Unbypass versus bypass, largest click difference: {worst:.2f} dB\n")
+    # Against the mute reference at the same rate, material and length: the largest excess of
+    # an effect's click (OOB and CTR on bass and kick, HF splatter on the mix), and on the bass
+    # and kick, how closely the click is the mute's plus the step energy.
+    excess = (float("-inf"), "")
+    scale = []
+    for r in rows:
+        if r["effect"] == "mute-reference" or r["transition"] != "bypass":
+            continue
+        ref = pick(rows, rate_hz=r["rate_hz"], effect="mute-reference", material=r["material"],
+                   transition="bypass", ramp_ms=r["ramp_ms"])[0]
+        columns = ["oob_db", "ctr_max_db"] if r["oob_db"] else ["hf_splatter_db"]
+        for column in columns:
+            over = float(r[column]) - float(ref[column])
+            if over > excess[0]:
+                where = f"{r['effect']} {r['material']} {r['rate_hz']} Hz {r['ramp_ms']} ms {column}"
+                excess = (over, where)
+        if r["oob_db"] and float(r["step_db"]) > -40.0 and r["ramp_ms"] != "0":
+            scale.append(float(r["oob_db"]) - float(ref["oob_db"]) - float(r["step_db"]))
+    print(f"Largest excess of an effect's click over the mute reference's at the same length: "
+          f"{excess[0]:+.2f} dB ({excess[1]})")
+    print(f"Bass and kick, 2-20 ms, step above -40 dB: OOB minus (mute OOB + step) from "
+          f"{min(scale):+.2f} to {max(scale):+.2f} dB\n")
+
+
+def link() -> None:
+    rows = load("link_glide.csv")
+    ramps = sorted({r["ramp_ms"] for r in rows}, key=float)
+    lines = []
+    for material in ("mix", "mix-wide", "bass-kick"):
+        sel = pick(rows, material=material, transition="link")
+        r48 = pick(sel, rate_hz="48000")[0]
+        line = [material, r48["channel_correlation"], cell(pick(sel, ramp_ms=ramps[0]), "step_db")]
+        for ms in ramps:
+            line.append(" / ".join(crossfade_cells(pick(sel, ramp_ms=ms), material)))
+        lines.append(line)
+    print("Link glide dual_mono -> maximum (unlink mirrors link): HF splatter dB (mix), "
+          "OOB / CTR dB (bass-kick)\n")
+    table(["material", "correlation", "step dB"] + [f"{ms} ms" for ms in ramps], lines)
+
+
 if __name__ == "__main__":
     print(f"Data: {DATA}\n")
     mute()
     drag()
     pan()
     whatif()
+    if (DATA / "polarity_click.csv").exists():
+        polarity()
+        transfer()
+        bypass()
+        link()

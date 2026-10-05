@@ -1,12 +1,12 @@
 # Default ramp lengths for live mute, fader and pan changes (#1055)
 
-Date: 2026-09-28. Research only, for open issue #1055; it sets the `controlSmoothing` defaults that
-#1054 needs. Base: `research-1055` at `ed0556a9` (`codex/batch-slim-1`); evidence commit `7b12cc26`.
-No product code, test, gate, script or workflow changed. `measure/` is the harness (a standalone
-package with its own `[workspace]`), `data/` the CSVs, `listening/` the blinded packet.
-`scripts/check-workspace-policy.sh` and `scripts/check-env-vocabulary.sh` pass with these files.
-(The research agent could not write this file; root saved its text, lightly condensed: every
-number, table and citation is kept.)
+Dates: 2026-09-28 (sections 1-8) and 2026-10-05 (section 9, every live row of decision 15).
+Research only, for #1055; it sets the `controlSmoothing` defaults #1054 ships. Sections 1-8: base
+`ed0556a9`, evidence `7b12cc26`; section 9: base `main` at `8be19c86e`. No product code, test,
+gate, script or workflow changed. `measure/` is the harness (a standalone package with its own
+`[workspace]`), `data/` the CSVs, `listening/` the blinded packet. The workspace-policy and
+env-vocabulary scripts pass with these files. (Sections 1-8: root saved the research agent's
+text, lightly condensed; every number, table and citation is kept.)
 
 ## 1. Answer
 
@@ -49,6 +49,9 @@ Mute: 5 ms if the owner cannot tell the 5 ms bass mute from the 50 ms one; other
 otherwise 20 ms, unless 20 ms audibly softens a rhythmic mute. Fader and pan: stay at 20 ms unless
 a 30 Hz drag with 20 ms is audibly stepped; then 35 ms, or a documented requirement that hosts send
 updates at 60 Hz or faster.
+These are the measured defaults; *Run the blinded listening session for the live ramp defaults*
+(#1388) runs the preregistered session on them, and its result changes default values only, never
+a key or a rule (decision 15, D15-1). Section 9 gives every other live row's key and default.
 
 **For #1054.** Today the browser SDK defaults `smoothingSamples` to 0: the hard switch in row one of
 every table below (a mute click 36 dB below the bass, 62 dB above the threshold in quiet). Any
@@ -117,7 +120,7 @@ manuals document interface behaviour only, not DSP evidence [CITATION-POLICY]; h
   `set_mute` and `MatrixBuiltins::set_target_smoothed` with `pan_matrix`; 128-frame blocks; records
   at the first block boundary at or after admission; fader before matrix; the section 1 rounding;
   all four launch rates; nothing timed; fixed-seed SplitMix64. The CSVs reproduce byte for byte over
-  three runs; stimuli re-render identically; 9 unit tests; clippy clean.
+  three runs; stimuli re-render identically; 9 unit tests (section 9 adds 7); clippy clean.
 - **Material** (synthesised, `measure/src/material.rs`): `bass`, a sustained A1 55 Hz additive tone
   at -15.4 dBFS RMS with all partials at or below 1 kHz (the worst case, nothing masks the click);
   `kick`, a 150-45 Hz glide with a 350 ms body and a short beater at 120 BPM, transitions 110-190 ms
@@ -255,6 +258,8 @@ positive controls, exact one-sided binomial tests, decision rules in `PREREGISTR
 come from the engine's own ramps (`control_smoothing_measure stimuli`); `listening.py self-test`
 passes including tamper detection. The owner runs `prepare`, then `run --block M|F|R`, then
 `reveal` (`listening/README.md`). **No human has listened; there is no listening result.**
+The defaults are the measured ones; #1388 runs this preregistered session on them, and a listening
+result changes values only (D15-1). Section 9 adds no contrast, for the reasons in 9.6.
 
 ## 7. Verified and not verified
 
@@ -266,7 +271,7 @@ Not verified: whether any human hears these differences (packet unrun); real pro
 (the packet accepts `--mix-wav`); banked, AArch64 or wasm renders of the stimuli (per-lane and
 unfused, so they should match); the primary texts of Terhardt, Zwicker, Schroeder, Viemeister,
 Kohlrausch et al. and Katz's printed JAES paper (restatements read, as marked); console behaviour
-documentation does not state.
+documentation does not state. Section 9's verified and open items are in 9.7.
 
 ## 8. Bibliography
 
@@ -304,4 +309,277 @@ text.
 - [VIEMEISTER] N. F. Viemeister, J. Acoust. Soc. Am. 66(5):1364-1380, 1979, doi:10.1121/1.383531 (abstract only).
 - [DESLOGE] J. G. Desloge et al., J. Acoust. Soc. Am. 129(6):3884-3896, 2011, doi:10.1121/1.3583550 (via a summarising fetch).
 - [BS1387] ITU-R BS.1387-1 (2001), §4.2.
+- [REISS-COMP] D. Giannoulis, M. Massberg and J. D. Reiss, "Digital Dynamic Range Compressor Design: A Tutorial and Analysis", J. Audio Eng. Soc. 60:399-408, 2012; the repository's compressor reference (`dsp-research/BIBLIOGRAPHY.md`). Not opened for section 9: the author link now redirects and the AES page refused the fetch; 9.5 rests on the engine's kernel anchors and an inline derivation, and cites this key for context only. https://aes.org/publications/elibrary-page/?id=16354
 - [CITATION-POLICY] `dsp-research/CITATION_POLICY.md`.
+
+## 9. Every live row (decision 15)
+
+Date 2026-10-05; base `main` at `8be19c86e`; #1055's decision-15 addition, attempt 1. Decision 15
+ramps every live value over the session's `controlSmoothing` (D15-1, D15-13 E5). This section gives
+each row's kernel, ramp law, key and default. **The defaults are the measured ones**: sections 5-6
+and this section set them; *Run the blinded listening session for the live ramp defaults* (#1388)
+runs the preregistered session (`listening/`) on the shipped table; a listening result changes
+default values only, never a key or a rule (D15-1). Every `path:line` was read on `8be19c86e`. No
+file named by the issue's own anchors changed since `6fb211594`, and each still reads as the issue
+quotes it (`crates/builtins/src/lib.rs:1434-1478` and `:1436-1439`, `crates/graph/src/runtime.rs:861`,
+`crates/lane/src/kernels.rs:1073-1168`, `crates/host-core/src/vca.rs:1-13`,
+`crates/effect-contract/src/live.rs:841-843`).
+
+### 9.1 The table (D1)
+
+Abbreviations: `B` = `crates/builtins/src/lib.rs`, `K` = `crates/lane/src/kernels/builtins.rs`,
+`W` = `hosts/host-web/src/lib.rs`. D11 = linear in amplitude from the current value over a fresh
+window of `N` samples, one division per record, the exact target on update `N` (section 3).
+
+| row | kernel anchor | ramp law | key | default ms | evidence |
+|---|---|---|---|---:|---|
+| fader | `FaderRampStage::retarget`, `B:2730-2750`; `gain_mute_ramp_block`, `K:159-202` | D11 | `faderMs` | 20 | `fader_drag.csv` (5.2) |
+| mute | `FaderRampStage::set_mute`, `B:2773-2794`; the kernel's `andnot` clear, `K:159-178` | D11 to `+0.0` | `muteMs` | 10 | `mute_click.csv`, `mute_timing.csv` (5.1) |
+| solo | `LiveControlSoloState::effective_mute`, `crates/host-core/src/solo.rs:255-263`: solo reaches render as the strip's mute record | the mute's | `muteMs` | 10 | source: it is a mute record |
+| pan | `pan_matrix`, `B:4363`; `MatrixBuiltins::set_target_smoothed`, `B:4345`; `matrix2x2_ramp_block`, `K:422-470` | D11 on the four coefficients | `panMs` | 20 | `pan_drag.csv`, `pan_jump.csv` (5.4) |
+| raw matrix | `MatrixStage::set_target_over`, `B:3008-3049` | the pan's (same stage) | `panMs` | 20 | source: the stage and law pan was measured on |
+| input trim | `InputStage::set_trim_db` → `set_trim_signed`, `B:1480-1500`, `B:1434-1478`; `input_chain_ramp_block`, `K:618-726` | D11, bit-identical to the fader | `faderMs` | 20 | `law_transfer.csv` (`input-trim`: difference 0) and `fader_drag.csv` (9.3) |
+| polarity invert | `InputStage::set_polarity_invert`, `B:1502-1519`: `set_trim_signed` carries the coefficient through zero (`B:1436-1439`) | D11 from +1 to -1 or back | `muteMs` **x 2** | 20 | `polarity_click.csv` (9.2) |
+| send gain | `LiveRoute` drain and mix, `crates/graph/src/runtime.rs:861-931`; `IndexedRamp`, `crates/lane/src/kernels.rs:1073-1168`; `route_mix_ramp_block`, `:1177-1263` | indexed; equals D11 within D11's rounding | `faderMs` | 20 | `law_transfer.csv` (`route-indexed`) and `fader_drag.csv` (9.3) |
+| send mute | the same route ramp to `[+0.0; 4]` (`RouteControlRecord`, `crates/graph/src/lib.rs:922-967`) | indexed | `muteMs` | 10 | `law_transfer.csv` and `mute_click.csv` (9.3) |
+| send matrix | the same route ramp, `runtime.rs:861-931`, its four coefficients from `gated_route_coefficients`, `crates/graph/src/lib.rs:785-812` | indexed | `panMs` | 20 | `law_transfer.csv` and `pan_drag.csv` (9.3) |
+| send `follows_mute` toggle | the follow record, `W:5274-5364` (its ramp is the strip mute record's); `RouteControlProducer::record`, `crates/host-core/src/route_controls.rs:82-107`; `RouteGate`, `gated_route_coefficients`, `crates/graph/src/lib.rs:759-812` | the send mute's: a source column to or from `+0.0` | `muteMs` | 10 | source (9.3) |
+| VCA offset | `crates/host-core/src/vca.rs:1-13`; the VCA fader pass stages member `FaderDb` records, `W:5179-5214` | the member fader's (D11) | `faderMs` | 20 | source (9.3) and `fader_drag.csv` |
+| VCA mute | `vca.rs:1-13`; `LiveControlSoloState::set_vca_mute`, `solo.rs:311`; member `Mute` records, `W:5215-5273` | the member mute's (D11) | `muteMs` | 10 | source (9.3) and `mute_click.csv` |
+| effect bypass crossfade | today a whole-block select, `crates/effect-contract/src/live.rs:841-843` (`BypassShunt`, `:822-990`); #1341 D2-D3 | indexed crossfade `dry + (wet - dry) m(k)`, emulated (`measure/src/crossfade.rs`) | `muteMs` | 10 | `bypass_crossfade.csv` (9.4) |
+| detector link glide | compressor `link_frame`, `crates/compressor/src/kernel.rs:317-340`, `curve_target`, `:349-361`, `ballistic`, `:364-369`; #1370 D2-D3 | linear ramp of the detector weights, emulated as an output crossfade | `faderMs` | 20 | `link_glide.csv` (9.5) |
+
+Samples at 44.1 / 48 / 88.2 / 96 kHz: 10 ms is 441 / 480 / 882 / 960 and 20 ms is 882 / 960 /
+1764 / 1920 (section 1's rounding). The polarity row is twice the rounded mute length,
+`2 * mute_samples` (882 / 960 / 1764 / 1920 at the default), so its per-sample step, `2 / (2N)`,
+is exactly the mute's, `1 / N`. Everything else matches #1054 D3 and #1341; the one difference is
+9.8.
+
+### 9.2 Polarity invert (question 4): `muteMs` is the key, but twice its length
+
+The flip retargets the signed trim from `+1` to `-1` (or back) over `N`: its gain is exactly
+`2 g_mute - 1`, twice a mute's ramp of the same `N` plus a constant, so it spreads twice the
+amplitude. Measured (`polarity_click.csv`, the mute method: same 16 bass, 12 kick and 24 mix
+events; restore mirrors invert to 0.00 dB):
+
+| flip ramp ms | bass OOB / CTR dB | kick OOB / CTR dB | mix HF splatter dB | bass OOB / CTR against the mute at **half** the length |
+|---:|---:|---:|---:|---:|
+| 0 | -30.3 / +68.4 | -28.5 / +70.0 | -16.5 | n/a |
+| 2 | -57.5 / +41.0 | -52.5 / +47.4 | -35.7 | -1.3 / -1.9 dB (mute 1 ms) |
+| 5 | -64.8 / +32.3 | -60.3 / +35.4 | -45.6 | n/a |
+| 10 | -71.3 / +24.3 | -66.2 / +29.2 | -50.8 | -0.5 / -2.0 dB (mute 5 ms) |
+| 20 | -77.3 / +18.8 | -72.3 / +23.1 | -56.4 | +0.0 / +0.6 dB (mute 10 ms) |
+| 50 | -84.6 / +10.9 | -80.5 / +15.1 | -64.5 | n/a |
+
+48 kHz; across the launch rates within 1.1 dB (OOB), 1.4 dB (CTR) and 2.5 dB (mix). At the same
+length the flip is the mute plus 5.6-6.0 dB on the bass (6.02 dB is the factor of two). At twice
+the length it is the mute: the 20 ms flip against the 10 ms mute is -77.3 / +18.8 against
+-77.3 / +18.3 on the bass, -72.3 / +23.1 against -72.2 / +23.2 on the kick and -56.4 against -56.8
+on the mix; at every launch rate the 20 ms flip is within 0.8 dB of the 10 ms mute on every measure.
+The two slope corners of a linear ramp set its click (5.1), and a flip over `2N` has exactly the
+mute's corners.
+
+**Answer.** `muteMs` is the right key and not enough length. At 10 ms the flip clicks like a 5 ms
+mute (bass CTR +24.3 dB; about +4 dB over the threshold in quiet at 20 dB quieter playback), which is
+the case section 1 rejected for the mute. Section 9 sets the polarity row to **twice the mute
+length**: 20 ms at the default, with the mute's click at every session value of `muteMs`, including
+any value #1388's result sets, because the parity is a property of the law, not of one length.
+
+`faderMs` (also 20 ms by default) was considered and rejected: it would hold the parity only while
+`faderMs` happens to be twice `muteMs`, so a listening result that moves `muteMs` (values only,
+D15-1), or a session that shortens `faderMs` for responsive faders, would make the flip click with
+no rule left to fix it. A combined trim and polarity edit on one lane (#1261 D2 orders the trim
+record, then the polarity record, on the one coefficient) ramps over the polarity record's length;
+with the defaults both are 20 ms.
+
+### 9.3 Trim, sends, `follows_mute` and VCA (question 4): laws already measured
+
+- **Input trim.** `set_trim_db` reaches `set_trim_signed` (`B:1434-1478`): one division per record,
+  then `input_chain_ramp_block`'s steps 1-3 are `gain_mute_ramp_block`'s steps 1-3 (`K:638-650`).
+  Measured: the same moves in dB through the trim and through the fader give bit-identical
+  coefficient trajectories (`law_transfer.csv`, `input-trim`: largest difference 0 at every length
+  and rate, for a 0 to -24 dB jump and the 800 ms drags at 30 and 60 Hz; harness test
+  `trim_and_fader_ramps_are_bit_identical`). Every fader result is a trim result: `faderMs`, 20 ms.
+- **Sends (gain, mute, matrix).** The live route ramps by the indexed law, not D11: `LiveRoute::drain`
+  starts `IndexedRamp::new(coefficients_at(position), target, length)` per record and `mix` runs
+  `route_mix_ramp_block` (`runtime.rs:896-931`). The harness drives the shipped kernel the same way
+  (`route_probe`) and compares it with the D11 fader, mute and matrix trajectories over the same
+  moves: mute, unmute, a 0 to -24 dB jump, a full pan jump, and the 800 ms fader and pan drags at 30
+  and 60 Hz, at every length the earlier files measured (0-50 ms) and every launch rate
+  (`law_transfer.csv`, 352 rows). The trajectories differ by at most 1.4e-4 (-77 dB re unity; 96 kHz,
+  50 ms drag), which is D11's own accumulated rounding (a running sum of `N` steps, at most about
+  `N * 2^-25`); the indexed law is a pure function of the index. Both end on the same bits in every
+  case, and the bass out-of-band energy and click-to-threshold ratio agree within 0.03 dB and
+  0.08 dB. So the fader, mute and pan results transfer: send gain `faderMs`, send mute `muteMs`, send
+  matrix `panMs`.
+- **`follows_mute` toggle.** Source argument. A follow record is built by
+  `RouteControlProducer::record` from the send's mirrored gain, matrix and mute and the new source
+  lanes (`route_controls.rs:82-107`); `gated_route_coefficients` zeroes the column of each followed
+  muted lane (`graph/src/lib.rs:759-812`), and the record ramps on the same `LiveRoute` indexed ramp
+  as a send mute: one column to or from `+0.0`, a lane-wise send mute. The browser's follow pass
+  already gives it the strip mute record's ramp (`W:5274-5364`), and #1226 D5 gives the C ABI's the
+  session mute length. The toggle itself is not live on this tree (`follows_mute` is "Fixed for the
+  plan", `crates/host-core/src/live_route_state.rs:46-47`); #1226 and #1342 make it live with the same
+  record. `muteMs`, 10 ms.
+- **VCA offset and mute.** Source argument. A VCA has no audio path (`vca.rs:1-13`). Its offset
+  reaches render as member `FaderDb` records (the VCA fader pass, `W:5179-5214`) and its mute as
+  member `Mute` records through the one strip-mute owner (`solo.rs:311`, `W:5215-5273`): the fader
+  and mute kernels measured in sections 5.1-5.2. VCA offset `faderMs` 20 ms, VCA mute `muteMs` 10 ms
+  (#1247 D5 maps the C ABI rows the same way).
+
+### 9.4 The bypass crossfade (question 5): `muteMs`, 10 ms
+
+**Method.** For each launch effect with a shunt (every native effect but the delay and the
+multiband compressor, `effect_compiler::lowers_session_bypass`), the effect's own scalar instance
+renders the material from its first frame (wet), and the engine's `BypassShunt` gives the
+latency-matched dry signal. The switch lands at the materials' event blocks and is emulated with
+#1341's law: `out = dry + (wet - dry) * m(k)`, `m` word 0 of an `IndexedRamp`, frame `f` of the
+applying block at `k = f + 1`, one `f32` subtract, multiply and add, both ends exact copies; 0 ms is
+today's whole-block step. A constant gain moves nothing, so the click is the splatter of
+`m (wet - dry)`; OOB, CTR and HF splatter are read on it, relative to the dry programme
+(`src/live_rows.rs`). `mute-reference` rows crossfade the programme to silence under the same
+measure and reproduce `mute_click.csv` within 0.03 dB.
+
+**Representative settings** (calibrated per material and rate; values in the CSV's `setting`):
+compressor at its defaults (ratio 4, knee 6 dB, attack 10 ms, release 100 ms, no makeup), threshold
+set for 6.0 dB peak gain reduction (about -20.8, -12.8 and -19.4 dBFS on bass, kick and mix at
+48 kHz); true-peak limiter at its defaults, ceiling set for 6.0 dB peak reduction (-14.6, -6.9 and
+-8.0 dBTP); EQ band 1 a bell at 100 Hz, Q 0.707, +6 dB and -6 dB; soft clip driven +12 dB with its
+output level-matched to the dry RMS (-9.4, -6.2 and -9.9 dB); transient shaper attack +50 % (kick
+and mix); gate closing on the kick (threshold -6 dBFS, ratio 20, range 80 dB, no hysteresis,
+attack 1 ms, hold 20 ms, release 50 ms; it opens on each hit and closes in the body, where the
+switches fall).
+
+**Results**, 48 kHz (`bypass_crossfade.csv`; 2 and 5 ms in the CSV; bypass and unbypass agree to
+0.00 dB; across the launch rates OOB within 2.4 dB, CTR and the mix's HF splatter within 6 dB):
+
+| effect | step dB, bass / kick / mix | today, 0 ms: bass OOB / CTR, kick OOB / CTR, mix HF | 10 ms | 20 ms |
+|---|---|---|---|---|
+| mute-reference | 0 / 0 / 0 | -36.3 / +62.3, -34.5 / +64.0, -22.5 | -77.4 / +18.3, -72.2 / +23.3, -56.8 | -83.4 / +12.8, -78.4 / +17.1, -62.4 |
+| compressor | -6.3 / -9.6 / -9.3 | -42.6 / +56.0, -43.7 / +55.8, -31.6 | -83.7 / +12.0, -81.7 / +14.9, -65.1 | -89.7 / +6.7, -88.0 / +8.8, -71.2 |
+| limiter | -6.3 / -11.8 / -14.4 | -43.0 / +55.7, -46.4 / +54.3, -39.0 | -83.6 / +13.0, -84.5 / +13.5, -69.3 | -90.0 / +6.5, -90.9 / +7.3, -74.9 |
+| EQ +6 dB | -3.4 / -5.8 / -3.6 | -39.6 / +59.7, -40.7 / +57.3, -25.2 | -80.6 / +15.8, -78.5 / +16.9, -65.9 | -86.4 / +9.6, -84.6 / +10.7, -73.1 |
+| EQ -6 dB | -7.3 / -8.3 / -7.6 | -43.8 / +55.8, -43.1 / +55.1, -29.7 | -84.7 / +11.8, -80.9 / +14.2, -70.0 | -90.5 / +5.8, -87.0 / +8.6, -76.9 |
+| saturator | -13.7 / -11.2 / -13.5 | -50.9 / +50.1, -46.8 / +52.3, -36.3 | -90.5 / +9.4, -83.8 / +12.4, -65.2 | -96.2 / +2.3, -89.3 / +7.1, -72.0 |
+| transient shaper | - / -62.5 / -15.0 | -, -105.7 / -6.1, -39.1 | -, -116.7 / -22.9, -72.4 | -, -117.3 / -22.9, -73.3 |
+| gate | - / -0.8 / - | -, -34.7 / +63.2, - | -, -72.4 / +23.1, - | -, -78.5 / +17.1, - |
+
+`step` is the energy of `wet - dry` around the switch relative to the dry programme. The crossfade's
+click is the mute's at the same length scaled by that step: on the bass and kick, wherever the step
+is above -40 dB, the click's OOB is the mute reference's plus the step within -1.1 to +1.8 dB, at
+every length from 2 ms and every rate. No effect's click exceeds the mute reference's at the same
+length, rate and material on any measure (largest excess -0.04 dB: the gate on the kick, which
+switches between a closed gate and the open kick, which is a mute). The saturator's own harmonics
+fill the out-of-band region 30 dB above its 10 ms click (`wet_oob_db` -58.9 dB on the bass). The
+transient shaper's kick switches fall in the body, after its attack boost has decayed (step
+-62 dB); its mix row, whose switches fall at random times, carries its transients.
+
+**Answer.** `muteMs` is the right key and 10 ms the right default. A bypass toggle is a switch
+between two latency-matched versions of one programme, and its crossfade clicks like a mute of the
+same length scaled by the size of the change; every representative setting changes the programme
+by at most a mute's step (steps of -0.8 to -15 dB), so at 10 ms its click is at most a 10 ms mute's, the
+criterion that set `muteMs` (section 1), and 37-41 dB below today's step out of band (29-41 dB in
+the mix's HF splatter). A setting that changes the level by more than a mute does (an EQ boost above
++6 dB, or large makeup gain) clicks more in proportion to its step, as a hand-switched bypass would,
+and the crossfade still removes the same 37-41 dB of today's step.
+
+### 9.5 The detector link glide (question 6): `faderMs`, 20 ms
+
+**Method.** The compressor at its defaults with the threshold set for 6.0 dB peak gain reduction
+under `maximum`, prepared once with `dual_mono` and once with `maximum`; the switch is emulated as
+the same output crossfade as 9.4 with the `dual_mono` output as dry and the `maximum` output as wet.
+This emulates #1370's detector blend (D2-D3: the lane's detector moves linearly from its own
+magnitude to the linked one). Materials: the mix (channel correlation 0.95), `mix-wide` (its right
+channel 0.37 s later, correlation 0.10, so the channels are uncorrelated) and `bass-kick` (bass
+left, kick right, correlation 0.01, band-limited so OOB and CTR exist).
+
+**Why the emulation's click bounds the real glide's.** In #1370 the blend acts on the detector,
+before the static curve (`curve_target`, `kernel.rs:349-361`) and the attack/release smoother
+(`ballistic`, `:364-369`: `y += c (target - y)`, `c = 1 - exp(-1 / (tau fs))`,
+`crates/effect-runtime/src/envelope.rs:163-176`). The emulation moves the output gain linearly
+between the two modes' already-smoothed gains, so its gain path has two slope corners and a
+spectrum falling 12 dB per octave [SMITH-SASP]. In the real glide the blend's corners reach the gain
+only through the one-pole: its response `c / |1 - (1 - c) e^(-j 2 pi f / fs)|` is at most 1 and
+falls 6 dB per octave above `1 / (2 pi tau)` (16 Hz for the default 10 ms attack), and its output
+slope is continuous, so the real gain path falls at least 18 dB per octave there. At 1.5 kHz, where
+OOB and HF splatter read, the attack smoother alone divides the corners by `2 pi f tau`, about 94
+(39 dB). The static curve can make the start of a `dual_mono` to `maximum` glide steeper than a
+linear crossfade: above the knee the gain is a power of the detector, so with `a = 1 - 1/ratio` and a
+channel ratio `rho` the initial slope is `a (rho - 1) / (1 - rho^-a)` times the crossfade's mean
+slope, about 8 (18 dB) for ratio 4 at 20 dB of channel difference. The smoother covers that for
+attack times of about 1 ms and more; at the 0.1 ms minimum it does not, and the real glide can then
+click up to about 18 dB more than the emulation. #1370's own gates and its listening item cover
+the real glide.
+
+**Results**, 48 kHz (`link_glide.csv`; link and unlink agree to 0.00 dB; across rates OOB within
+2.0 dB, CTR 2.4 dB, HF splatter 4.2 dB):
+
+| material | step dB | 0 ms | 5 ms | 10 ms | 20 ms | 50 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| mix, HF splatter | -33.1 | -55.4 | -85.4 | -90.9 | -96.5 | -104.4 |
+| mix-wide, HF splatter | -21.0 | -46.8 | -74.3 | -79.4 | -85.1 | -91.6 |
+| bass-kick, OOB / CTR | -18.8 | -54.7 / +51.2 | -90.0 / +13.5 | -95.3 / +7.2 | -103.3 / +1.2 | -110.2 / -6.8 |
+
+**Answer.** `faderMs` is right. A link change moves gain reduction, continuously, like a fader,
+and is not time-critical like a mute. At 20 ms the bound's click on the most exposed material is
+-103 dB out of band, CTR +1.2 dB at the loud calibration (1-2 of 10 events above the threshold in
+quiet, none at 20 dB quieter playback), 24-26 dB out of band and 17-18 dB in CTR under the bass's
+10 ms mute at every rate; on the mixes its HF splatter is 26-28 dB (`mix-wide`) and 38-40 dB (`mix`)
+under the mix's 10 ms mute. `muteMs` would also pass with the default ballistics (bass-kick
+-95 dB, CTR +7 dB at 10 ms), but `faderMs` keeps the margin the bound's limit needs: even 18 dB worse
+than the emulation (0.1 ms attack, channels 20 dB apart), a 20 ms glide stays at a 10 ms mute's click,
+where a 10 ms glide would reach a 5 ms mute's.
+
+### 9.6 Listening (D3): no new contrast
+
+No contrast is added to `listening/PREREGISTRATION.md`, and the packet is unchanged:
+
+- **Polarity.** At twice `muteMs` its click equals the mute's at `muteMs` within 0.8 dB on every
+  measure and rate (9.2), so the M block's mute decision carries over through the factor. A
+  listening result may change values only (D15-1), so no contrast could change the factor; a
+  polarity contrast's only possible rule would move `muteMs` for polarity's sake.
+- **Bypass crossfade.** Its click is at most the mute's at the same length for every representative
+  setting (9.4): the M block bounds it.
+- **Link glide.** Its bound sits 17 dB or more under the mute's at the defaults on every measure
+  (9.5): there is nothing for a listener to find that the M block does not bound.
+
+### 9.7 Objective, pending, verified and not verified
+
+**Objective, on this tree:** every law and anchor in 9.1; the trim's bit identity with the fader;
+the route law's agreement with D11; the polarity factor; the bypass and link clicks of the
+emulations. **Awaits #1388:** only the values of `muteMs`, `faderMs` and `panMs` (sections 1 and 6).
+Every row follows its key's value, the polarity row as twice `muteMs`; no row awaits a listening
+result of its own.
+
+Verified: the four new CSVs reproduce byte for byte over two four-rate runs, and their 48 kHz rows
+match a third, single-rate run; the seven earlier CSVs reproduce byte for byte with the extended
+harness; 16 harness tests pass, clippy clean; the crossfade tests turn red when the emulation
+accumulates `m` or computes either end (mutation runs, recorded in the #1055 spec's attempt record);
+every crossfade case asserts that the `f32` emulation copies both ends and stays within four `f32`
+epsilons (relative to the larger plane) of the analysed `dry + m (wet - dry)`; the mute-reference rows reproduce `mute_click.csv` within
+0.03 dB; every effect block rendered reports nothing (no invalid span, no sanitised or non-finite
+sample).
+
+Not verified: the real #1341 crossfade and #1370 glide (both are emulated; their issues' gates test
+the kernels); the link bound below about 1 ms of attack (9.5); whether the brief level dip of a
+polarity flip, which is under -20 dB for a tenth of the ramp at the midpoint, is audible as a dip on
+an exposed sustained note (the click measures do not assess it; a listening check belongs with a
+polarity-kernel successor, not with #1388); effect settings beyond the representative ones (the
+click scales with the step); a transient shaper switched during a kick's attack; banked, AArch64 or
+wasm renders (per-lane, unfused kernels, so they should match).
+
+### 9.8 For #1054, #1341 and the other dependants (D2)
+
+- **Keys:** every row's key matches #1054 D3 and #1341: `fader_ms` for fader, input trim, send
+  gain, VCA offset and the detector link glide; `mute_ms` for mute, solo, polarity invert, send mute,
+  the send's `follows_mute` toggle, VCA mute and the bypass crossfade; `pan_ms` for pan, matrix and
+  send matrix. `CONTROL_SMOOTHING_DEFAULT` stays mute 10, fader 20, pan 20.
+- **One length differs: polarity invert is twice the mute ramp.** #1054 D3 and D4 follow:
+  `LiveRamps::for_row(PolarityInvert)` returns `2 * mute_samples` (192,000 samples at the 1000 ms
+  bound and 96 kHz, inside the trim kernel's exact `f32` countdown, `2^24`), and the schema
+  document's table says so. #1261 D2 follows (its `PolarityInvert` record carries
+  `for_row(PolarityInvert)`, not `mute_samples`), and so do the hosts' resolution of an absent
+  length (#1364) and `LiveRamps::resolve` (#1394), which fall back to `for_row`. An edit that
+  carries its own length keeps it.
+- **#1341:** `mute_ms` and its 10 ms default are confirmed for the bypass crossfade. **#1370 and
+  #1371:** `fader_ms` and 20 ms are confirmed for the link glide.
