@@ -20,7 +20,7 @@ WORKFLOW = ".github/workflows/qualification.yml"
 DEBUG_A_FEATURES = (
     "--features builtins-compiler/test-support,graph/test-support,"
     "host-web/test-support,host-core/test-support,effect-compiler/test-support,"
-    "protocol/test-support,engine/realtime-audit\n"
+    "protocol/test-support,control-plane/test-support,engine/realtime-audit\n"
 )
 DEBUG_B_FEATURES = (
     "--features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support\n"
@@ -120,8 +120,8 @@ def main() -> int:
         fails(f"{package}/test-support removed from test-debug-b", {package},
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
-          {"builtins-compiler", "effect-compiler", "graph", "host-core", "host-web", "protocol",
-           "rack"},
+          {"builtins-compiler", "control-plane", "effect-compiler", "graph", "host-core",
+           "host-web", "protocol", "rack"},
           (WORKFLOW, DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, DEBUG_B_FEATURES, "--features math/lane\n"))
