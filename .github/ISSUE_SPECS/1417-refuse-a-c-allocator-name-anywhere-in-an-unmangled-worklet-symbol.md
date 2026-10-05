@@ -120,6 +120,34 @@ not edited; this body records the correct wiring.
 - Gate 4's function counts and the shipped module's digest (it must not change: only the script
   changes).
 
+## Amendment 1 (root, 2026-10-05)
+
+Attempt 1 passed (`docs/handoffs/decision-15-2026-10-05/verdicts/stream-j2/1417-attempt1.md`).
+Its verifier found that D1 still admits C allocator entry points that are not spelled with one of
+the four names: `posix_memalign`, `aligned_alloc`, `memalign`, jemalloc's `sdallocx` and
+`rallocx`, mimalloc's `mi_zalloc` and snmalloc's `sn_rust_alloc`. An LTO-inlined C-backed
+allocator on an over-aligned path can call `posix_memalign` with no `malloc` beside it. Root ruled
+that this is the same issue's purpose and folds it into the batch follow-ups:
+
+- **A1. Widen D1.** The C alternative refuses any unmangled name that contains `free`, `alloc`,
+  `memalign` or `sbrk`, for example `^(?!_R|_ZN).*(?:free|alloc|memalign|sbrk)` (still in its own
+  group, so the lookahead applies to it alone). The fail-safe rule of D1 stands: an unmangled
+  engine name that matches is renamed, not exempted.
+- **A2. Self-test cases.** Add fail cases `posix_memalign`, `aligned_alloc`, `memalign`,
+  `sdallocx`, `rallocx`, `mi_zalloc` and `sn_rust_alloc`. Each passes under attempt 1's rule (red
+  on revert) and is refused under A1. Re-check every existing case under A1, and record any whose
+  catch A1 makes redundant, with the action taken.
+- **A3. The real tree.** The named twin's unmangled names still pass under A1 (the verifier found
+  none containing `alloc`, `align` or `sbrk`), and the refused set of defined functions is
+  recorded against attempt 1's.
+- **A4. The `_ZN` docstring.** A `_ZN` prefix is Itanium C++ mangling, used by Rust's legacy
+  scheme and by C++ namespaced names alike. Say what the rule assumes: the worklet links no C++,
+  so a `_ZN` name in it is a Rust legacy item, and a C++ dependency would need this rule
+  revisited.
+
+The batch verifier re-checks A1 to A4 (gates 1 to 5 and the mutations, with A2's cases). GitHub
+#1417 is synced at the follow-up commit.
+
 ## Dependencies
 
 - None. *Anchor the worklet callgraph checker's C allocator names* (#1234) is on `main`.
