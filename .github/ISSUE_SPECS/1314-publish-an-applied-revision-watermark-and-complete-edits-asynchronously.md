@@ -83,7 +83,9 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
     candidate.
   - **No candidate pending.** Only then does `PlanPublisher::set_revision` store into the `Active`
     cell. It returns which cell it wrote (`RevisionTarget::{Pending, Active}`), so the control
-    plane can debug-assert that it never writes `Active` while it records a pending candidate.
+    plane can debug-assert that it never writes `Pending` while it records no pending candidate
+    (Amendment 1: the converse is racy, because render may adopt the candidate between the
+    command's epoch synchronisation and the commit, and `Active` is then correctly its cell).
   - The C ABI writes the revision as the **last write** of a live or model-only commit: after
     every record push, target publication and `commit_owner`.
   - For a rebuild it sets the reservation's revision before `reservation.commit()`.
@@ -166,6 +168,8 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
 - `crates/control-plane/src/` (the D2 call sites and the reader in its plan state; #1309 moved them
   there)
 - `scripts/check-capi-abi.sh` (the frozen symbol list only), `docs/C_ABI_V1_QUALIFICATION.md`
+- Amendment 1: `scripts/check-realtime-policy.sh` (its file and region floors only, raised to the
+  measured counts; the script's own rule requires the raise in the change that adds a marker).
 
 ## Non-goals
 
@@ -251,6 +255,14 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
 - Gate 8: red if a revision committed while a candidate is withdrawn or published is written to
   the `Active` cell: the watermark would report it at block 0, while P0, which does not carry the
   candidate's content, still renders.
+
+## Amendment 1 (root, 2026-10-05)
+
+Two rulings on the attempt-1 verdict. D2's debug assertion checks the race-free direction the code
+uses (a `Pending` write while no pending candidate is recorded), not the racy converse. The
+realtime-policy floors in `scripts/check-realtime-policy.sh` are raised to the measured file and
+region counts, so deleting a new marker turns the gate red; the raise lands in stream B's batch 1
+after its last slice, at the counts measured then.
 
 ## Dependencies
 

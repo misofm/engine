@@ -102,6 +102,9 @@ this, and the warm successor (stream C) publishes `Primed`.
   `crates/engine/src/realtime/plan_exchange.rs`, `crates/engine/src/realtime/plan.rs` (the D3
   hook only), `crates/engine/src/realtime/mod.rs` (exports and its exchange tests).
 - `crates/control-plane/src/` (D6 call sites only).
+- Amendment 1, the added `PlanAdoption::Next` argument only (D6's signature change):
+  `tools/audit/src/{builtins_graph,graph,realtime}.rs`, `crates/graph/tests/rt11_swap_carry_alloc.rs`,
+  `crates/host-core/tests/successor_swap.rs`, `crates/host-core/tests/support/successor.rs`.
 
 ## Non-goals
 
@@ -168,6 +171,12 @@ this, and the warm successor (stream C) publishes `Primed`.
   unprimed.
 - Gate 2: an ordering bug between the readiness read, the claim and withdraw that only some
   interleavings expose.
+
+## Amendment 1 (root, 2026-10-05)
+
+D6's `reserve_replacement(plan, adoption)` breaks six callers outside the original authorized
+paths. Root authorized them for the added `PlanAdoption::Next` argument only (the attempt-1
+verifier confirmed each edit is mechanical).
 
 ## Dependencies
 
