@@ -98,3 +98,70 @@ and prove first that an unmutated copy, staged the same way, passes.
 
 - Work only from this body. Read `scripts/check-capi-abi.sh` first; do not survey the workspace.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Change: `capi_abi_self_test` in `scripts/check-capi-abi.sh` only. `stage_header <leg>` copies the
+real header to `$scratch_root/<leg>/miso_engine_v1.h`; `expect_header_failure` refuses a staged
+copy that is byte-identical to the original (`cmp -s`), requires the checker to fail, captures its
+stderr and refuses a failure whose stderr contains `No such file or directory`. A header staging
+control (`header-staging-control/miso_engine_v1.h`, unmodified, passed through
+`MISO_ENGINE_CAPI_HEADER`) must pass before the three legs run. The baseline control and the
+non-header legs are unchanged; the default path is untouched.
+
+Hazard check: at the head commit the first `uint64_t reserved[4];` is the tail of
+`miso_engine_v1_engine_config` (header line 160); its size is pinned by
+`MISO_ENGINE_V1_ENGINE_CONFIG_SIZE` (40) in both fixtures. No leg turned green, so no pin gap.
+
+Gates (x86_64-unknown-linux-gnu):
+
+1. `bash scripts/check-capi-abi.sh` -> rc 0, `C ABI check: ok (x86_64-unknown-linux-gnu, shared and static linkage)`.
+2. `bash scripts/check-capi-abi.sh --self-test` -> rc 0, `C ABI mutation tests: ok`.
+3. Red on revert (`stage_header` writing `$scratch_root/<leg>.h` again) -> rc 1,
+   `C ABI mutation self-test FAILED: header staging control (unmodified staged header) did not pass`
+   (stderr shows `fatal error: miso_engine_v1.h: No such file or directory`). With the staging
+   control also removed, deliverable 3 catches it: rc 1,
+   `C ABI mutation self-test FAILED: header-constant-drift failed on a missing file, not on drift:`.
+4. Layout `sed` replaced by `s/NO_SUCH_PATTERN_1232/x/` -> rc 1,
+   `C ABI mutation self-test FAILED: header-layout-drift did not change the staged header`.
+5. Constant `sed` deleted -> rc 1,
+   `C ABI mutation self-test FAILED: header-constant-drift did not change the staged header`.
+6. `bash scripts/check-workspace-policy.sh` rc 0; `bash scripts/test-workspace-policy.sh` rc 0
+   (`workspace policy mutation tests: ok`).
+
+First diagnostic per leg, with the staged header named correctly:
+
+- header-constant-drift: `crates/capi/tests/c/header_smoke.cpp:7:42: error: static assertion failed` (`MISO_ENGINE_V1_ABI_VERSION == UINT32_C(0x00010000)`).
+- header-layout-drift: `crates/capi/tests/c/header_smoke.cpp:8:52: error: static assertion failed` (`sizeof(miso_engine_v1_engine_config) == MISO_ENGINE_V1_ENGINE_CONFIG_SIZE`).
+- header-signature-drift: `crates/capi/tests/c/abi_smoke.c:59:56: error: initialization of 'uint32_t (* const)(void)' ... from incompatible pointer type 'uint32_t (*)(uint32_t)' [-Werror=incompatible-pointer-types]`.
+
+Test value: the repaired legs turn red if the header's ABI constant, a struct layout or a function
+signature drifts without the fixtures following, which the vacuous legs never exercised; the
+staging control and the identical-copy check turn red if staging or a `sed` pattern silently stops
+producing a real mutation.
+
+### Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05)
+
+The verifier passed attempt 1. Its MINOR and both NITs are folded into `expect_header_failure`
+(inside `capi_abi_self_test` only); the default checker path is unchanged.
+- MINOR-1: each header leg runs with `LC_ALL=C`, and the missing-file refusal matches both GCC's
+  `No such file or directory` and clang's `'miso_engine_v1.h' file not found`.
+- NIT-1: a missing staged file is refused by name (`[[ -f ]]`), and `cmp` is branched on
+  explicitly: 0 refuses an unchanged copy, 1 continues, any other status refuses.
+- NIT-2: the mutated header must compile alone (`$CC -std=c11 -Wall -Wextra -Werror -pedantic
+  -fsyntax-only -x c`) before the leg runs, so a leg's red has to come from the fixtures' pins.
+
+Mutation evidence (each applied to the script, the self-test run, then the script restored; the
+same mutation on the attempt-1 script for comparison):
+
+| Mutation | Attempt 1, gcc | Attempt 1, clang | Fold, gcc | Fold, clang |
+|---|---|---|---|---|
+| M1: constant leg staged under its old name `<leg>.h` | rc 1 (missing file) | rc 0, `ok` | rc 1 (missing file) | rc 1 (missing file) |
+| M2: constant leg's `sed` deleted, staged path never written | rc 0, `ok` | rc 0, `ok` | rc 1 (`staged header is missing`) | rc 1 (same) |
+| M3: layout leg's `sed` drops the `;` (header syntax broken) | rc 0, `ok` | rc 0, `ok` | rc 1 (`does not compile alone`) | rc 1 (same) |
+
+Unmutated: `check-capi-abi.sh --self-test` rc 0 with gcc and with `CC=clang CXX=clang++`;
+`check-capi-abi.sh` rc 0. The non-English-locale case is not reproduced here (no gcc/libc
+translations installed); `LC_ALL=C` removes it by construction.

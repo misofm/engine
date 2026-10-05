@@ -15,7 +15,6 @@ const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
 const OBSERVATION_FRAMES = 2_048;
 const SPECTRUM_FRAMES = 2_048;
 const CONTINUOUS_FRAMES = 6_144;
-const CONTINUOUS_BLOCKS = CONTINUOUS_FRAMES / 128;
 const PEAK_FREQUENCY_HZ = 750;
 const PEAK_LEFT_AMPLITUDE = 0.1;
 const PEAK_RIGHT_AMPLITUDE = 0.05;
@@ -563,18 +562,27 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
         return peak;
       }),
     );
+    // Both waits share one wall-clock deadline (the hop probe's 10 s), so a slow runner that
+    // delivers late still passes while a subscription that never delivers fails in bounded time.
+    const deadlineMs = 10_000;
+    const deadline = performance.now() + deadlineMs;
+    let automaticTimer: ReturnType<typeof setTimeout> | undefined;
     const automaticDelivery = await Promise.race([
       callbackSeen.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+      new Promise<boolean>((resolve) => { automaticTimer = setTimeout(() => resolve(false), deadlineMs); }),
     ]);
+    clearTimeout(automaticTimer);
     // Both automatic reads and explicit pumps invoke onUpdate. Keep its live list while waiting
-    // for a ready/available publication with a result present through readLatest().
+    // for a ready/available publication with a result present through readLatest(). pump() can
+    // return at once, so yield to the event loop between pumps and stop only at the deadline.
     const notifications = automaticNotifications;
-    for (let attempt = 0; attempt < CONTINUOUS_BLOCKS; attempt += 1) {
+    for (;;) {
       if (recoveryDelivery !== undefined && subscription.readLatest() !== undefined) break;
       const notification = await subscription.pump();
       if (notification?.status === "ready" && notification.available
         && subscription?.readLatest() !== undefined) break;
+      if (performance.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const first = subscription.readLatest();
     if (first === undefined) throw new Error("continuous spectrum did not publish a window");

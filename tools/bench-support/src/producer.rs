@@ -24,8 +24,14 @@ use std::time::{Duration, Instant};
 /// producer that is running queues one in microseconds.
 pub const QUEUED_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Sets its flag when dropped, so the producer thread stops however the render loop ends.
-struct StopOnDrop<'a>(&'a AtomicBool);
+/// Sets its flag (with `Release`) when dropped, so a peer thread that loops until the flag is set
+/// stops however the owning thread's loop ends: normally, by a failed assertion or by a panic.
+///
+/// Bind it (`let _stop = StopOnDrop(&stop);`, never `let _ = ...`) before the loop whose end
+/// releases the peer, inside the `std::thread::scope` that joins the peer, so that an unwinding
+/// panic sets the flag before the scope waits on the peer (issue #1251). Dropping it does not
+/// allocate, lock or make a syscall, so it may end an armed audit scope.
+pub struct StopOnDrop<'a>(pub &'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {
     fn drop(&mut self) {

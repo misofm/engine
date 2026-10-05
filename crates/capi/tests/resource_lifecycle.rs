@@ -1022,11 +1022,12 @@ impl Budget {
 /// slot, and a console slot's remainder now binds as a padded bank instead of rendering per node.
 /// The ninth track's EQ is one more bank at eight lanes (8,192 -> 16,384 scratch and runtime
 /// buffer, 616 -> 805 metadata) and at four (8,192 -> 12,288, 736 -> 921). A padded bank charges
-/// scratch for every lane and member metadata for its members only. The four-lane values are
-/// derived, not measured: the old four-lane baseline plus one four-lane bank (4,096 bytes of scratch
-/// and of runtime buffer; one bank record, four mask bytes and one member, 185 bytes, which is the
-/// eight-lane move less four mask bytes). The graph rows moved by the same amounts and stay inside
-/// their budgets (253,934 of 261,248 at eight lanes).
+/// scratch for every lane and member metadata for its members only. At four lanes that is the old
+/// baseline plus one four-lane bank (4,096 bytes of scratch and of runtime buffer; one bank record,
+/// four mask bytes and one member, 185 bytes, which is the eight-lane move less four mask bytes).
+/// #1304 measured these four-lane rows on 2026-10-05 (12,288, 12,288 and 921, as derived; see the
+/// #1263 paragraph for the command), so their ceilings stand. The graph rows moved by the same
+/// amounts and stay inside their budgets (253,934 of 261,248 at eight lanes).
 /// | largest named allocation | 90,720 | the same |
 ///
 /// #1256 raised the two builtin payload rows, a structural move: every C ABI plan now carries each
@@ -1043,32 +1044,35 @@ impl Budget {
 /// on x86-64 by track count. graph session+plan and incremental move 253,934 -> 382,918 and graph
 /// metadata 56,137 -> 185,121 (+128,984 each); the prepared plan's observed bytes move by exactly
 /// as much, so the slack above is unchanged. The eight-lane ceilings are the new values plus 10 %,
-/// rounded up to 64. The four-lane ceilings are derived, not measured: the four-lane baseline
-/// (230,845 + #1098's 16,453 for session+plan; 56,840 + 69 for metadata) plus the eight-lane
-/// move, plus 10 %. That move is an upper bound at four lanes, because three four-lane banks
-/// hold fewer lanes (12) than two eight-lane banks (16) and a bank's per-lane terms (the packed
-/// span window, the lane array, the shunt over the AoSoA block) outweigh its per-bank staging
-/// window. capi retained moved 258,231 -> 273,640 (+15,409) inside its budget: the effect
-/// producer table (nine 104-byte producers) and its owned payload, the EQ owners and the effect
-/// and strip IDs (14,425), and 16 bytes in each of the three provider-epoch slots (48).
+/// rounded up to 64. The four-lane rows were measured by #1304 on 2026-10-05 (`e3375bc1d`, whose
+/// graph rows equal #1263's) under qemu-user: `CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu` with
+/// that target's runner and linker (the full cross environment is in the #1304 spec's Attempt
+/// record), then `scripts/run-aarch64-tests.sh`'s debug-mode budget-test command, which prints them
+/// on every AArch64 debug run. graph session+plan and incremental 341,210 and graph metadata
+/// 166,309; the ceilings are those plus 10 %, rounded up to 64. #1263's parent measured 231,794 and
+/// 56,893 there, so the four-lane move is 109,416 (nine members x 2,104 plus three four-lane banks
+/// x 30,160), against 128,984 at eight lanes. capi retained moved 258,231 -> 273,640 (+15,409)
+/// inside its budget: the effect producer table (nine 104-byte producers) and its owned payload,
+/// the EQ owners and the effect and strip IDs (14,425), and 16 bytes in each of the three
+/// provider-epoch slots (48).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
         eight_lanes: 421_248,
-        four_lanes: 413_952,
+        four_lanes: 375_360,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
         eight_lanes: 421_248,
-        four_lanes: 413_952,
+        four_lanes: 375_360,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
         eight_lanes: 203_648,
-        four_lanes: 204_544,
+        four_lanes: 182_976,
     },
     Budget {
         row: "graph_delay_bytes",
@@ -2025,8 +2029,10 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
 }
 
 /// Stops the render thread of the #1258 live-edit race however the control thread leaves the
-/// scope, so a failed assertion cannot hang the join. The plan-swap race keeps its own copy in
-/// `plan_swap_race.rs` (#1273).
+/// scope, so a failed assertion cannot hang the join. A copy of
+/// `bench_support::producer::StopOnDrop`, kept because naming anything from `bench_support` links
+/// its `#[global_allocator]`, which conflicts with this file's counting allocator at compile time
+/// (#1251 D4). The plan-swap race keeps its own copy in `plan_swap_race.rs` (#1273).
 struct StopOnDrop<'a>(&'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {

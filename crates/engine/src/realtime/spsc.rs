@@ -504,7 +504,8 @@ mod tests {
     use super::{QueueGeneration, bounded_spsc, bounded_spsc_internal};
     use core::num::NonZeroUsize;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     struct DropProbe(Arc<AtomicUsize>);
 
@@ -531,6 +532,43 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 
+    /// Sets its flag when dropped, so a peer learns that this thread left its loop however it left
+    /// it. `engine` cannot use `bench_support::producer::StopOnDrop`: `bench-support` depends on
+    /// `engine` (#1251 D3).
+    struct EndedOnDrop(Arc<AtomicBool>);
+
+    impl Drop for EndedOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    /// How long one side of the stress waits on a full or empty queue before it fails. The peer
+    /// moves the queue within microseconds whenever it is running.
+    const STALL_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Fails the side that waits on the queue once its peer has ended, or after
+    /// [`STALL_DEADLINE`] without progress. `peer_ended` must have been read before the failed
+    /// queue operation: a peer that ended published its last operation first, so a queue still
+    /// full or empty after it ended stays that way.
+    fn fail_if_stalled(
+        peer_ended: bool,
+        stalled_since: &mut Option<Instant>,
+        side: &str,
+        peer: &str,
+        position: u64,
+    ) {
+        assert!(
+            !peer_ended,
+            "spsc stress: the {peer} ended while the {side} waited at item {position}"
+        );
+        let since = *stalled_since.get_or_insert_with(Instant::now);
+        assert!(
+            since.elapsed() < STALL_DEADLINE,
+            "spsc stress: the {side} made no progress at item {position} within {STALL_DEADLINE:?}"
+        );
+    }
+
     #[test]
     fn concurrent_spsc_stress() {
         const ITEMS: u64 = 1_000_000;
@@ -539,13 +577,32 @@ mod tests {
             QueueGeneration(7),
         )
         .expect("queue");
+        // Each thread marks its end however it leaves its loop, so a failed assertion on one side
+        // fails the other's wait instead of leaving it spinning on a full or empty queue (#1251).
+        let producer_ended = Arc::new(AtomicBool::new(false));
+        let consumer_ended = Arc::new(AtomicBool::new(false));
+        let (producer_end, consumer_peer) =
+            (Arc::clone(&producer_ended), Arc::clone(&consumer_ended));
         let producer_thread = std::thread::spawn(move || {
+            let _ended = EndedOnDrop(producer_end);
             let mut next = 0;
+            let mut stalled_since = None;
             while next < ITEMS {
+                let peer_ended = consumer_peer.load(Ordering::Acquire);
                 match producer.try_push(next) {
-                    Ok(()) => next += 1,
+                    Ok(()) => {
+                        next += 1;
+                        stalled_since = None;
+                    }
                     Err(full) => {
                         assert_eq!(full.value, next);
+                        fail_if_stalled(
+                            peer_ended,
+                            &mut stalled_since,
+                            "producer",
+                            "consumer",
+                            next,
+                        );
                         std::thread::yield_now();
                     }
                 }
@@ -553,16 +610,29 @@ mod tests {
             producer
         });
         let consumer_thread = std::thread::spawn(move || {
+            let _ended = EndedOnDrop(consumer_ended);
             let mut expected = 0;
             let mut checksum = 0_u128;
+            let mut stalled_since = None;
             while expected < ITEMS {
+                let peer_ended = producer_ended.load(Ordering::Acquire);
                 match consumer.try_pop() {
                     Ok(value) => {
                         assert_eq!(value, expected);
                         checksum = checksum.wrapping_add(u128::from(value));
                         expected += 1;
+                        stalled_since = None;
                     }
-                    Err(_) => std::thread::yield_now(),
+                    Err(_) => {
+                        fail_if_stalled(
+                            peer_ended,
+                            &mut stalled_since,
+                            "consumer",
+                            "producer",
+                            expected,
+                        );
+                        std::thread::yield_now();
+                    }
                 }
             }
             (consumer, checksum)

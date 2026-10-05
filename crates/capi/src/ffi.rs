@@ -2495,13 +2495,21 @@ mod tests {
     #[test]
     fn plan_queries_are_pure_and_concurrent_with_render() {
         const BLOCKS: u64 = if cfg!(miri) { 16 } else { 2_000 };
+        /// How long the query thread waits for the render thread's next block before it fails. A
+        /// debug build renders one in about a millisecond.
+        const RENDER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
         let (engine, session, plan) = compiled_fixture();
-        let rendering = std::sync::atomic::AtomicBool::new(true);
+        // Set however the render thread leaves its loop, so a failed render assertion releases the
+        // query thread instead of hanging the scope's join (#1251).
+        let render_ended = std::sync::atomic::AtomicBool::new(false);
+        let rendered = std::sync::atomic::AtomicU64::new(0);
         let render_handle = SendPlanPtr(plan);
         let query_handle = SendPlanPtr(plan);
-        let rendering_ref = &rendering;
+        let render_ended_ref = &render_ended;
+        let rendered_ref = &rendered;
         std::thread::scope(|scope| {
             scope.spawn(move || {
+                let _ended = bench_support::producer::StopOnDrop(render_ended_ref);
                 let plan = render_handle.get();
                 let mut pcm = vec![0.0_f32; 256];
                 let output = PlanarOutput {
@@ -2520,14 +2528,30 @@ mod tests {
                         unsafe { miso_engine_v1_render_f32_planar(plan, block * 128, &output) },
                         RESULT_OK
                     );
+                    rendered_ref.store(block + 1, std::sync::atomic::Ordering::Relaxed);
                 }
-                rendering_ref.store(false, std::sync::atomic::Ordering::Release);
             });
             scope.spawn(move || {
                 let plan = query_handle.get().cast_const();
                 let mut queries = 0_u64;
                 let mut storage = [0_u8; 64];
-                while rendering_ref.load(std::sync::atomic::Ordering::Acquire) || queries == 0 {
+                let mut progress = (0, std::time::Instant::now());
+                // The stall check reads the clock once every `STALL_CHECK_POLLS` queries, so it
+                // does not thin out the queries that race render.
+                const STALL_CHECK_POLLS: u64 = 1_024;
+                while !render_ended_ref.load(std::sync::atomic::Ordering::Acquire) || queries == 0 {
+                    if queries.is_multiple_of(STALL_CHECK_POLLS) {
+                        let blocks = rendered_ref.load(std::sync::atomic::Ordering::Relaxed);
+                        if blocks == progress.0 {
+                            assert!(
+                                progress.1.elapsed() < RENDER_DEADLINE,
+                                "plan queries: the render thread rendered no block after \
+                                 {blocks} within {RENDER_DEADLINE:?}"
+                            );
+                        } else {
+                            progress = (blocks, std::time::Instant::now());
+                        }
+                    }
                     let mut resources = empty_report();
                     assert_eq!(
                         // SAFETY: The plan is live and this any-thread query only reads the
