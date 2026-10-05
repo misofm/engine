@@ -390,3 +390,14 @@ columns; the wording is unchanged.
 **Gates.** `cargo test --locked -p capi`: ok (73 lib, 2 race, 11 lifecycle). `cargo fmt --all --
 --check`: ok. `cargo clippy --locked -p capi --all-targets --all-features -- -D warnings`: ok.
 `check-host-core-policy.sh`, `test-host-core-policy.sh`, `check-workspace-policy.sh`: ok.
+
+### Batch follow-up (Amendment 3, commit 043ed73c6)
+
+`scripts/test-test-support-ci.py`: `DEBUG_A_FEATURES` gains `control-plane/test-support` (the exact
+literal of the `test-debug-a` `--features` at `qualification.yml:619`), and the
+"every test-support feature removed from test-debug-a" case expects `control-plane`.
+`python3 -B scripts/test-test-support-ci.py` passes; reverting only the anchor edit fails with
+"mutation anchor must occur once in qualification.yml", and restoring it passes.
+`check-test-support-ci.py`, `check-workspace-policy.sh`, `check-realtime-policy.sh` (93 regions in
+26 files, equal to the floors), `test-realtime-policy.sh`, `check-ci-path-routing.py` and
+`cargo fmt --all -- --check` pass.
