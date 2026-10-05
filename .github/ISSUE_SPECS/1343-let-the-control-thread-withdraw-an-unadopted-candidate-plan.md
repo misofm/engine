@@ -362,11 +362,14 @@ changed, because the verdict found the implementation correct and only its proof
 - `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied`: a claim CAS without `Release`, or a
   `try_reserve` load without `Acquire`, lets control's write race render's move out of the same
   cell; no other test reaches cell reuse.
-- `hand_over_runs_only_on_the_applied_block`: a hand-over that runs only on an owner's first swap;
-  no other test catches it (engine, `host-core` `successor_swap` and `graph`
-  `rt11_swap_carry_alloc` stay green under it, per the verifier's run).
-- `stale_claim_after_withdraw_and_republish_fails_on_the_generation`: a transition that does not
-  advance the generation, so a stale claim succeeds after a withdraw and republish.
+- `hand_over_runs_only_on_the_applied_block`: corrected by the batch follow-up below. Its defect (a
+  hand-over that runs only on an owner's first swap) is also caught by two `capi` tests, which the
+  attempt-1 search did not run, so the test had no catch of its own and is deleted.
+- `stale_claim_after_withdraw_and_republish_fails_on_the_generation`: a mailbox word whose
+  transitions never advance the generation, so a stale claim succeeds after a withdraw and
+  republish. One transition that alone forgets to advance (withdrawal only, or publication only)
+  keeps it green, correctly: every cycle that returns the cell states to the same values also
+  contains another advancing transition, so no ABA follows.
 
 **Gates.**
 1. `cargo test --locked -p engine --features realtime-audit`: 44 + 4 + 1 passed.
@@ -382,3 +385,22 @@ changed, because the verdict found the implementation correct and only its proof
    --all-targets --all-features -- -D warnings` ok; `check-workspace-policy.sh` ok;
    `check-cross-targets.sh` PASS. The worklet chain was not re-run: the change is inside
    `#[cfg(test)]` modules, so the browser-compiled module is unchanged.
+
+### Batch follow-up (2026-10-05)
+
+Folds the attempt-2 verdict (`PASS`; MINOR m-1, NIT n-1).
+
+- m-1: `carry::hand_over_runs_only_on_the_applied_block` is deleted from
+  `crates/engine/src/realtime/mod.rs`. The pin on "the hand-over runs on every applied swap" is
+  `capi`'s `runtime::tests::control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`
+  (four carrying swaps on one owner, `carried_count() == round`) and
+  `runtime::live_tests::a_prepared_bypass_change_rebuilds_and_renders_the_committed_model` (the
+  rendered output). The attempt-1 deletion was right in effect; its stated reason was wrong.
+  Mutation run after the deletion (`enter_block`'s `carry_from` behind
+  `if self.carried == 0 && self.carry_mismatched == 0`): `cargo test --locked -p capi --lib` red on
+  exactly those two tests (79 passed, 2 failed; `tests.rs:1589` and `live_tests.rs:2910`);
+  `cargo test --locked -p engine --features realtime-audit` green (54 + 4 + 1), so the engine no
+  longer holds a redundant pin. Reverted: both green.
+- n-1: the attempt-2 test-value line for
+  `stale_claim_after_withdraw_and_republish_fails_on_the_generation` is narrowed above to the
+  defect it catches (no transition advances the generation).
