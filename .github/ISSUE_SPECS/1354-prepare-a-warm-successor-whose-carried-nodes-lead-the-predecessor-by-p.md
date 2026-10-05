@@ -151,6 +151,15 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   the line's length in W. It is exact, not an estimate: #1286 measures the adoption block at
   `ΣP = P_MAX` against it.
 - **D4. Preparation.** `SuccessorBase` gains `warm: Option<&WarmLead>`.
+  - It also gains a constructor, `SuccessorBase::new(inventory, committed)`, with `warm: None`.
+    Every literal construction site moves to it in this change:
+    `crates/host-core/tests/successor_swap.rs:988`,
+    `crates/host-core/tests/support/successor.rs:101`,
+    `crates/capi/tests/resource_lifecycle.rs:1591`, and the control plane's `prepare_runtime` call
+    (`crates/capi/src/runtime/control.rs:910` today, under `crates/control-plane/src/` after
+    #1309 D2). A warm successor sets its field on the value `new` returns
+    (`SuccessorBase { warm: Some(&lead), ..SuccessorBase::new(inventory, committed) }`). A later
+    field (#1397's `forced_restart`) then changes `new` and no construction site.
   - With `Some`, preparation compiles with D2's floors, marks every node of each `restart_whole`
     strip not carried (its source-claim lines still carry, #1402 D1), and adds those strips to
     `restarted_strips()`, so #1324 ducks them. It installs the carry program in move mode.
@@ -166,12 +175,17 @@ a block and no return path: render adopts the warm successor in move mode (#1355
 ## Deliverables
 
 1. D1-D4 in `crates/host-core/src/prepare.rs`, re-exported from `crates/host-core/src/lib.rs`.
+   D4's move of every `SuccessorBase` literal site to `SuccessorBase::new`.
 2. `crates/host-core/tests/warm_successor.rs` (new) with gates 1-9.
 
 ## Authorized paths
 
 - `crates/host-core/src/prepare.rs`, `crates/host-core/src/lib.rs` (re-exports only)
 - `crates/host-core/tests/warm_successor.rs` (new)
+- The `SuccessorBase` construction sites only (D4): `crates/host-core/tests/successor_swap.rs`,
+  `crates/host-core/tests/support/successor.rs`, `crates/capi/tests/resource_lifecycle.rs`, and
+  the control plane's `prepare_runtime` call in `crates/control-plane/src/` (package
+  `control-plane`, created by #1309)
 - `.github/ISSUE_SPECS/1354-prepare-a-warm-successor-whose-carried-nodes-lead-the-predecessor-by-p.md`
 
 ## Non-goals
@@ -180,7 +194,7 @@ a block and no return path: render adopts the warm successor in move mode (#1355
 - No readiness check, no prime and no adoption (#1320, #1355). No `Primed` publication (#1311,
   #1360).
 - No source-read offset change (#1396, #1355). No duck or fade (#1324, #1397).
-- No control-plane or C ABI wiring (#1360).
+- No control-plane or C ABI wiring (#1360), beyond D4's move of one construction site.
 
 ## Objective gates
 
@@ -308,5 +322,7 @@ every plan is prepared with an explicit `source_ring_frames = stall_ring_frames(
 - *Carry fader, mute and pan ramps across a plan swap* (#1277): `restarted_strips()`.
 - *Duck-swap a strip whose state cannot continue across a plan swap* (#1324): the restart set R.
 - *Give a plan a source-read clock that leads its render clock* (#1396): `ΣP` in the inventory.
+- *Extract the C ABI control plane into a portable crate both hosts call* (#1309): D4 edits the
+  control plane's `SuccessorBase` construction site in the crate it creates.
 - *Carry source-claim lines across a plan swap and fill a grown line for a prime* (#1402): D4 keeps
   a `restart_whole` strip's claim lines carried (#1402 D1).

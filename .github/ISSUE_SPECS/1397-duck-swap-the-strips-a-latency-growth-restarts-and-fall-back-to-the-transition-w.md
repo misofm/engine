@@ -94,8 +94,9 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      #1354 D2 step 3 makes), and step 4's duck set is computed from that compile's arrivals,
      before any carry join. It is then prepared from that compile as an ordinary successor, with
      the predecessor's source-read offset (#1396 D2) and with the duck set as
-     `SuccessorBase::forced_restart`, a new field (`&[String]`, strip IDs, sorted; empty for every
-     other successor). Preparation applies #1324 D2-D3 to every strip in it, the same as to a
+     `SuccessorBase::forced_restart`, a new field (`&[String]`, strip IDs, sorted). #1354 D4's
+     `SuccessorBase::new` sets it empty, so every other successor leaves it empty and no
+     construction site changes; the transition sets it on the value `new` returns. Preparation applies #1324 D2-D3 to every strip in it, the same as to a
      strip the carry join restarts: a whole pre-fader restart, armed. It adds those strips to
      `restarted_strips()`, after which #1324 D1's sidechain rule runs again over the whole set.
      - With a donor, the donor's added rings are donated (*Prepare a successor across a withdrawn
@@ -103,8 +104,15 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
        begins a candidate's consumers before it claims it (#1355 D2).
      - The cross-plan admission is not run again. The warm submit admitted this re-preparation
        (`AdmissionPeak::WithReprepare`, *Size the C ABI's plan capacities and resource admission
-       for a superseding candidate*, #1398 D4). The model and base are the ones submit prepared,
+       for a superseding candidate*, #1398 D4). The model is the committed one submit admitted,
        and the floors are no higher, so the plan's resource row is no larger than the donor's.
+     - With a donor, the base is #1344 D2's: `inventory` is the donor's `carried_base` (#1344
+       D1), and `committed` is the running epoch's kept model (#1310 D3) with #1325 D6's duck
+       overlay applied when the epoch has one (each overlay strip's channels and each overlay
+       route muted). A strip the donor
+       restarted whole is then fresh against that base and restarted again, so it is ducked and
+       armed; it never imports a ducked fader without a retarget. At submit there is no donor,
+       and the base is the one an ordinary successor of the running plan is prepared against.
      - At submit it is ordinary preparation, and a failure returns the error before the commit.
   2. Only after that preparation succeeds is the donation applied. Then the donor is dropped on the
      control thread. Every live edit written to its cells is also in the committed model, and the
@@ -119,17 +127,17 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      every strip whose content timing moves: a strip with a node whose arrival grows over the
      predecessor, or a strip with an outgoing edge (route, send, or its path into the output)
      whose compensation line changes length. A line that changes length restarts with a gap, so
-     its strip must be ducked. When the output's arrival grows, every strip that reaches the
-     output is in the set. It then runs #1324 D1's sidechain rule over these strips, repeats
+     its strip must be ducked. When the output's arrival grows, every strip in both plans that
+     reaches the output is in the set. An added strip is never in it (it is #1354 D2's N, and
+     #1288 D1 arms it). It then runs #1324 D1's sidechain rule over these strips, repeats
      until no strip is added (as #1324 D1 iterates), and returns that closed set. Preparation
      runs D1 again after the carry join over the whole `restarted_strips()` (step 1), so the
      strips the join restarts add their consumers too. So a carried effect keyed from a
      `post_input`, `insert_send`, `insert_return` or `pre_fader` tap of a ducked strip joins the
-     set. A `post_fader` or
-     `post_pan` tap needs no rule: #1324 D4's `C` empties that line by `S`, and the armed fader
-     keeps it at `+0.0` until the fire. A track's `input` tap and a submix's `input` tap keep the
-     consumer carried exactly as #1324 D1 states. The prepared successor's `restarted_strips()`
-     is the duck set the transition ducks.
+     set. A `post_fader` or `post_pan` tap needs no rule: #1324 D4's `C` empties that line by
+     `S`, and the armed fader keeps it at `+0.0` until the fire. A track's `input` tap and a
+     submix's `input` tap keep the consumer carried exactly as #1324 D1 states. The prepared
+     successor's `restarted_strips()` is the duck set the transition ducks.
   5. It is published as #1324 D4 publishes, with one `S` and #1324 D4's `C`, which counts every
      `EffectSidechain` line from a ducked strip's `post_fader` or `post_pan` tap into a carried
      node. Before publication it writes

@@ -56,11 +56,12 @@ never leaves it muted.
   tap or destination does not put the source strip in this set (D15-9: a re-pointed route is
   ramped at route level and never ducks its source strip; #1283 and #1284 leave it out; #1363
   ramps the route itself).
-  - **A forced restart.** A strip in `SuccessorBase::forced_restart` (the transition's duck set,
-    *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
-    successor cannot adopt*, #1397 D2 step 1) is in `restarted_strips()` like a strip the carry
-    join restarts, and D1-D3 apply to it the same way: it is restarted (D2), armed (D3), and
-    the sidechain rule below runs over it. The field is empty for every other successor.
+  - **A forced restart.** *Duck-swap the strips a latency growth restarts, and fall back to the
+    transition when a warm successor cannot adopt* (#1397 D2 step 1) adds the field
+    `SuccessorBase::forced_restart`, the transition's duck set. It holds only strips in both plans.
+    A strip in it is in `restarted_strips()` like a strip the carry join restarts, and D1-D3 apply
+    to it the same way: it is restarted (D2), armed (D3), and the sidechain rule below runs over
+    it. The field is empty for every other successor.
   - **Sidechain consumers join the set.** A sidechain edge (`GraphEdgeId::EffectSidechain`) has no
     gain lane: the compiler wires the routed sidechain's source tap straight into the effect's
     `SidechainInput` port (`crates/graph-compiler/src/compile.rs:390-416`; the tap's stage,

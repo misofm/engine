@@ -159,9 +159,11 @@ start at rest at the adopted block.
    true-peak limiter insert (`D > 0`); (d) case (a) at 48 kHz with the added track holding a
    compressor insert whose routed sidechain reads the `pre_fader` tap of a carried track that holds
    a true-peak limiter insert (486 samples, `crates/true-peak-limiter/src/lib.rs:242`; the model
-   mutes that track like every other, and its `pre_fader` tap precedes the mute). The compressor
-   adds no latency (`crates/compressor/src/lib.rs:295`), so no node of the added strip is latent,
-   but its main path gets a 486-sample compensation line and `D` is 486. Each output equals a fresh
+   mutes that track like every other, and its `pre_fader` tap precedes the mute). That carried
+   track's source is fed exact zeros before the swap block, so its warm limiter emits exact zeros
+   on `[S, S + 486)` like the reference's fresh one, and the compressor's detector state at the
+   fire is the same in both runs. The compressor adds no latency
+   (`crates/compressor/src/lib.rs:295`), so no node of the added strip is latent, but its main path gets a 486-sample compensation line and `D` is 486. Each output equals a fresh
    plan of the successor session, fed the same source frames at the same blocks, with the strip
    muted and given a live unmute of `N` samples at the D3 fire block: bit-identical for every block.
 5. **Browser form.** Gate 4(a) with both runs prepared between render calls
