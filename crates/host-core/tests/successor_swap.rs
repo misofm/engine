@@ -1941,3 +1941,275 @@ fn a_successor_refuses_an_unnormalized_committed_model() {
     reversed.tracks.reverse();
     let _ = b.prepare_successor(&predecessor.inventory, &reversed, &caps(), backend);
 }
+
+/// One plan's collapse counters, summed over every plan of a [`swapping_run`].
+#[derive(Clone, Copy, Debug, Default)]
+struct CollapseTally {
+    /// Collapsed chain-blocks.
+    collapsed: u64,
+    /// `[disengages, re-engages, agreement proofs]`.
+    transitions: [u64; 3],
+    /// Swaps whose input lanes carried.
+    carried: usize,
+}
+
+/// Render `sessions[0]`, then swap to `sessions[1]`, `sessions[0]`, ... every `swap_every`
+/// blocks, each successor prepared from its predecessor and adopting it, for `blocks` blocks of
+/// `quantum` frames (the shape is `[quantum, blocks, swap_every]`). `writes` go to whichever plan renders their block next. `forced_dual` forces
+/// every plan's mono collapse off: the class-A oracle.
+fn swapping_run(
+    sessions: [&Session; 2],
+    feed: &Feed,
+    [quantum, blocks, swap_every]: [usize; 3],
+    writes: &[LiveWrite],
+    backend: Backend,
+    forced_dual: bool,
+) -> (Vec<Vec<u32>>, CollapseTally) {
+    let mut plan = LivePlan::fresh(sessions[0], backend);
+    plan.prepared.plan.force_mono_collapse_off(forced_dual);
+    let mut current = 0_usize;
+    let mut tally = CollapseTally::default();
+    let mut output = Vec::with_capacity(blocks);
+    let mut next = 0_usize;
+    plan.submit(feed, quantum, 0);
+    for block in 0..blocks {
+        while next < writes.len() && writes[next].block == block {
+            plan.push(&writes[next]);
+            next += 1;
+        }
+        if block > 0 && block % swap_every == 0 {
+            tally.collapsed += plan.prepared.plan.bank_collapse_counters()[0];
+            let [disengages, reengages, proofs] = plan.prepared.plan.bank_collapse_transitions();
+            tally.transitions[0] += disengages;
+            tally.transitions[1] += reengages;
+            tally.transitions[2] += proofs;
+            let following = 1 - current;
+            let mut successor = LivePlan::successor(
+                sessions[following],
+                &plan.prepared.inventory,
+                &sessions[current].model,
+                backend,
+            );
+            successor.prepared.plan.force_mono_collapse_off(forced_dual);
+            assert_eq!(
+                successor
+                    .prepared
+                    .sources
+                    .adopt_persisting(&mut plan.prepared.sources),
+                1
+            );
+            successor.submit(feed, quantum, block);
+            let carry = successor
+                .prepared
+                .plan
+                .adopt_predecessor_plan(&mut plan.prepared.plan);
+            if carry == CarryOutcome::Carried {
+                tally.carried += 1;
+            }
+            plan = successor;
+            current = following;
+        }
+        output.push(plan.render(quantum));
+        if block + 1 < blocks && (block + 1) % swap_every != 0 {
+            plan.submit(feed, quantum, block + 1);
+        }
+    }
+    tally.collapsed += plan.prepared.plan.bank_collapse_counters()[0];
+    let [disengages, reengages, proofs] = plan.prepared.plan.bank_collapse_transitions();
+    tally.transitions[0] += disengages;
+    tally.transitions[1] += reengages;
+    tally.transitions[2] += proofs;
+    (output, tally)
+}
+
+/// Random live input-filter records for [`a_collapsed_chain_renders_the_forced_dual_bits`], every
+/// one a valid prepared target at 48 kHz.
+///
+/// Each `swap_every`-block plan segment carries background `Both` records -- enables to a random
+/// design, disables and re-sends of the strip's last record, on either section -- which keep a
+/// mono strip's channels in agreement. Every second segment also drives one strip apart with a
+/// one-channel record, then disables both its sections on both channels, so the lane is back at
+/// rest, agreeing, before the swap: its successor chain must earn the collapse back with an M3
+/// proof over carried state.
+fn random_filter_writes(seed: u64, blocks: usize, swap_every: usize) -> Vec<LiveWrite> {
+    use builtins::BuiltinLaneSelector;
+    const STRIPS: [&str; 9] = [
+        "eq0", "eq1", "eq2", "eq3", "eq4", "eq5", "eq6", "eq7", "eq8",
+    ];
+    let mut state = seed ^ 0x1407_c011_a95e;
+    let mut next = move || {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let design = |section: usize, unit: f32| {
+        let (hpf, lpf) = if section == 0 {
+            (25.0 + 400.0 * unit, 0.0)
+        } else {
+            (0.0, 2_000.0 + 14_000.0 * unit)
+        };
+        builtins::prepare_input_filter_pair(48_000, hpf, lpf)
+            .expect("design")
+            .targets[section]
+    };
+    let disable = |section: usize| {
+        builtins::prepare_input_filter_pair(48_000, 0.0, 0.0)
+            .expect("disable")
+            .targets[section]
+    };
+    let record = |lanes, target: builtins::PreparedInputFilterTarget| {
+        builtins_compiler::TrackInputRecord::PreparedFilter {
+            target: builtins::PreparedInputFilterTarget { lanes, ..target },
+        }
+    };
+    let mut last = [[None::<builtins::PreparedInputFilterTarget>; 2]; STRIPS.len()];
+    let mut writes = Vec::new();
+    // The strip a segment drives apart, and the block range it keeps background records off it.
+    let mut apart: Option<(usize, core::ops::Range<usize>)> = None;
+    for block in 1..blocks {
+        let offset = block % swap_every;
+        if offset == 0 {
+            apart = None;
+        }
+        if offset == 4 && (block / swap_every) % 2 == 1 {
+            let strip = (next() % STRIPS.len() as u64) as usize;
+            let section = (next() % 2) as usize;
+            let lanes = if next() % 2 == 0 {
+                BuiltinLaneSelector::Left
+            } else {
+                BuiltinLaneSelector::Right
+            };
+            let unit = (next() % 10_000) as f32 / 10_000.0;
+            writes.push(LiveWrite {
+                block,
+                strip: STRIPS[strip],
+                record: record(lanes, design(section, unit)),
+            });
+            // Back to rest, on both channels, well before the swap.
+            for section in 0..2 {
+                writes.push(LiveWrite {
+                    block: block + 12,
+                    strip: STRIPS[strip],
+                    record: record(BuiltinLaneSelector::Both, disable(section)),
+                });
+            }
+            last[strip] = [None; 2];
+            apart = Some((strip, block..swap_every * (block / swap_every + 1)));
+        }
+        for (strip, name) in STRIPS.iter().enumerate() {
+            if apart
+                .as_ref()
+                .is_some_and(|(held, range)| *held == strip && range.contains(&block))
+            {
+                continue;
+            }
+            if next() % 100 >= 5 {
+                continue;
+            }
+            let section = (next() % 2) as usize;
+            let target = match next() % 10 {
+                0..=3 => design(section, (next() % 10_000) as f32 / 10_000.0),
+                4..=7 => disable(section),
+                _ => match last[strip][section] {
+                    Some(target) => target,
+                    None => continue,
+                },
+            };
+            last[strip][section] = Some(target);
+            writes.push(LiveWrite {
+                block,
+                strip: name,
+                record: record(BuiltinLaneSelector::Both, target),
+            });
+        }
+    }
+    writes.sort_by_key(|write| write.block);
+    writes
+}
+
+/// #1407 attempt 2, the collapsed-stage invariant: the mono collapse is class A, so a chain that
+/// collapses renders, block for block, exactly the bits of the same plans forced dual -- under
+/// random live filter enables, disables and re-sends (`Both` and one-channel), collapse engages,
+/// disengages and M3 re-engages, and plan swaps that carry each lane's live filter, integrators
+/// included, into a successor that collapses at once.
+///
+/// Red (attempt-1 code, f44cf54bf): the rule-3 predicate reads channel `1`'s integrators, frozen
+/// since the collapse engaged; a symmetric disable that completes collapsed then a symmetric
+/// enable takes rule 3 on channel `0` and rule 4 on channel `1`. Red on a mutant that decides
+/// channel `1`'s elision over its own frozen integrators while collapsed (the plan splits).
+fn a_collapsed_chain_renders_the_forced_dual_bits(backend: Backend) {
+    const QUANTUM_FRAMES: usize = 16;
+    const RUN_BLOCKS: usize = 480;
+    const SWAP_EVERY: usize = 40;
+    let a = Session::compile(at_quantum(filtered_session(true), QUANTUM_FRAMES));
+    let b = Session::compile(at_quantum(
+        with_muted_track(filtered_session(true)),
+        QUANTUM_FRAMES,
+    ));
+    let plane = |channel: u32| {
+        (0..(QUANTUM_FRAMES * RUN_BLOCKS) as u32)
+            .map(|frame| {
+                let step = frame
+                    .wrapping_mul(7_919)
+                    .wrapping_add(channel * 31)
+                    .wrapping_add(41)
+                    % 1_999;
+                (step as f32 - 999.5) / 2_000.0
+            })
+            .collect::<Vec<f32>>()
+    };
+    let feed = Feed {
+        id: SOURCE,
+        planes: [plane(0), plane(1)],
+    };
+    let mut reached = CollapseTally::default();
+    for seed in 0..3_u64 {
+        let writes = random_filter_writes(seed, RUN_BLOCKS, SWAP_EVERY);
+        let (dual, _) = swapping_run(
+            [&a, &b],
+            &feed,
+            [QUANTUM_FRAMES, RUN_BLOCKS, SWAP_EVERY],
+            &writes,
+            backend,
+            true,
+        );
+        let (run, tally) = swapping_run(
+            [&a, &b],
+            &feed,
+            [QUANTUM_FRAMES, RUN_BLOCKS, SWAP_EVERY],
+            &writes,
+            backend,
+            false,
+        );
+        let first = run.iter().zip(&dual).position(|(run, dual)| run != dual);
+        assert_eq!(
+            first, None,
+            "{backend:?} seed {seed}: the collapsed run left the forced-dual bits ({tally:?})"
+        );
+        reached.collapsed += tally.collapsed;
+        reached.carried += tally.carried;
+        for (sum, value) in reached.transitions.iter_mut().zip(tally.transitions) {
+            *sum += value;
+        }
+    }
+    // The generator reaches what the invariant is about: collapsed blocks, disengages, carried
+    // swaps, and M3 proofs that re-engage a carried lane. (A within-plan re-engage is out of reach
+    // for this chain: a one-channel input record latches its lane's `LIVE` term for the plan.)
+    assert!(reached.collapsed > 0, "{backend:?}: {reached:?}");
+    assert!(reached.transitions[0] > 0, "{backend:?}: {reached:?}");
+    assert!(reached.transitions[2] > 0, "{backend:?}: {reached:?}");
+    assert!(reached.carried > 0, "{backend:?}: {reached:?}");
+}
+
+#[test]
+fn a_collapsed_chain_renders_the_forced_dual_bits_at_four_lanes() {
+    a_collapsed_chain_renders_the_forced_dual_bits(Backend::Simd4);
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_collapsed_chain_renders_the_forced_dual_bits_at_eight_lanes() {
+    a_collapsed_chain_renders_the_forced_dual_bits(Backend::Simd8);
+}

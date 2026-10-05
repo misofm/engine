@@ -3,42 +3,63 @@
 **Issue**: #210 (owner ruling, adopted by the coordinator 2026-08-27), implementing #178's schema
 half. **Landed**: phase 3.
 
-**#808 amendment:** #804 supplies the workload that reopens
-the HPF/LPF tier. Fixed 12 dB/oct Butterworth filters are the accepted slice; #191
-variable slopes remain separate. The native owner and existing input queues now
-apply off-render prepared targets with a fixed 64-update coefficient ramp. Shared
-host admission validates mixed batches atomically, and browser/headless SDKs share
-the same helper. The corrected packed artifact passed browser/headless qualification and attempt2
-adversarial review. The historical phase 3 tiering below describes the original decision; this amendment
-supersedes its requirement to deliver slope changes together with liveness.
+**#808 amendment:** #804 supplies the workload that reopens the HPF/LPF tier. Fixed 12 dB/oct
+Butterworth filters are the accepted slice; #191 variable slopes remain separate. The native owner
+and existing input queues now apply off-render prepared targets with a fixed 64-update coefficient
+ramp. Shared host admission validates mixed batches atomically, and browser/headless SDKs share the
+same helper. The corrected packed artifact passed browser/headless qualification and attempt2
+adversarial review. The historical phase 3 tiering below describes the original decision; this
+amendment supersedes its requirement to deliver slope changes together with liveness.
 
-`refresh_filter_plan` now recomputes the exact coefficient/integrator predicate and
-forces in-flight sections non-elidable. Retarget, completion, reset, evidence state
-writes and integrator restoration use that authority. Sample A uses current words;
-sample A+64 uses the exact target, under any re-send history. Disabled completion clears only the addressed
-integrators before the first identity sample.
+`refresh_filter_plan` now recomputes the exact coefficient/integrator predicate and forces
+in-flight sections non-elidable. Retarget, completion, reset, evidence state writes and integrator
+restoration use that authority. Sample A uses current words; sample A+64 uses the exact target,
+under any re-send history. Disabled completion clears only the addressed integrators before the
+first identity sample. Settled all-disabled filters execute no SVF recurrences even during
+trim/polarity ramps; trim timing, sanitization and signed-zero normalization remain unchanged.
+Mixed banks keep the existing fallback.
 
-A retarget follows four rules (#1407, decision 15 D15-4(b)), each covered channel
-deciding from its own words: (1) a target bit-equal to the in-flight target of a lane
-whose countdown is non-zero leaves current, target, step and countdown untouched; a
-settled lane never takes this rule; (2) the identity target on a lane whose current
-words are not the identity freezes `c1`, `a2`, `a3` (step `+0.0`), ramps only the mix
-and restarts the countdown, so a disable is a 64-sample crossfade from the filtered
-output to the dry input; (3) a design target on a settled disabled lane -- countdown
-zero, all six current words bitwise the identity, both integrators `+0.0` -- writes the
-target's recursion words at once and ramps only the mix, the reverse crossfade; (4)
-every other retarget ramps all six words. Every recursion word the kernel can load is
-then a design, the identity at rest, or a linear mixture of designs. Settled all-disabled filters execute
-no SVF recurrences even during trim/polarity ramps; trim timing, sanitization and
-signed-zero normalization remain unchanged. Mixed banks keep the existing fallback.
+A retarget follows four rules (#1407, decision 15 D15-4(b)), each covered channel deciding from
+its own words: (1) a target bit-equal to the in-flight target of a lane whose countdown is non-zero
+leaves current, target, step and countdown untouched; a settled lane never takes this rule; (2) the
+identity target on a lane whose current words are not the identity freezes `c1`, `a2`, `a3` (step
+`+0.0`), ramps only the mix and restarts the countdown, so a disable is a 64-sample crossfade from
+the filtered output to the dry input; (3) a design target on a settled disabled lane -- countdown
+zero, all six current words bitwise the identity, both integrators `+0.0` -- writes the target's
+recursion words at once and ramps only the mix, the reverse crossfade; (4) every other retarget
+ramps all six words.
 
-The symmetry read surface includes current/target/step/countdown filter words. Mono
-processing mirrors the ramp state after each block; disengagement restores only
-integrators, preserving newly admitted asymmetric targets. Frozen input drains
-apply the same Left/Right/Both LIVE-latch rules as trim. Live-capable compiled inputs
-retain a conservative Infinite tail even if initially disabled; plain disabled
-inputs without console control retain FiniteZero. Storage and actual input work
-remain accounted for. Session automation syntax does not imply a render feed.
+The ramp arithmetic (#1407 attempt 2): the first four words of a ramp step from the current word,
+`current + step`; every later word is `target - step * remaining`, from the target, the step and
+the countdown left after that frame; a recursion word whose step is `+0.0` holds; the 64th update
+snaps to the target. No word carries more than four additions. Every recursion word `w` the kernel
+can load is then a design, the identity at rest with `+0.0` integrators, or within a proven `f32`
+rounding allowance `E` of the convex hull of the designs its history used, componentwise. Each
+word is within `rho_j` of its ramp's exact mixture (`j h + (j/64)|t - c| u` for the four stepped
+words, `(1 - j/64)|t - c|(2u + u^2) + h` after them, `u = 2^-24`, `h` the word's half-ulp:
+`2^-25` for `c1` and `a3`, `2^-26` for `a2`), and a restart carries `(1 - j/64)` of its start
+word's error, so at block size `q` the allowance is the contraction's fixed point
+`E = max over j >= q of (64/j) rho_j` (and the interior-word maximum over it). At block sizes 1 to
+4 it is the floor `E = 64 h + u D` (`D = (1, 0.3, 1)`, the words' ranges): `(1.967e-6, 9.715e-7,
+1.967e-6)`. Because `A(w)` is affine in the words and `||.||_V` is convex,
+`||A(w)||_V <= q_design + 2 sup ||[[e1, e2], [-e2, e3]]||_V` over `|e_i| <= E_i`, which is
+`q_design + 1.419e-5` at every launch rate and block size (smaller from block size 5); with the
+maximum-cutoff design (`q - 1 = -5.213e-5` at 44.1/88.2 kHz, `-5.241e-5` at 48/96 kHz) every
+reachable recursion word has `||A(w)||_V <= 1 - 3.79e-5`. Measured on gate 4's histories, close
+retarget chains at the maximum cutoff included, the worst excess over the history's largest design
+is `2.62e-7`. For a design, `||A(d)||_V` equals the spectral radius only to within `1.97e-8`
+(44.1/88.2 kHz) and `3.94e-8` (48/96 kHz) at the maximum cutoff, because the `f32` words are not
+exactly `k = sqrt(2)`-consistent; the bound uses the norm.
+
+The symmetry read surface includes current/target/step/countdown filter words. Mono processing
+mirrors the ramp state after each block; disengagement restores only integrators, preserving newly
+admitted asymmetric targets. While a stage is collapsed, channel `0` is the only live state: no
+decision reads channel `1`'s frozen integrators -- the rule-3 predicate and the elision plan read
+channel `0`'s for both -- so every `Both` record applies channel `0`'s decision to both channels
+(#1407 attempt 2). Frozen input drains apply the same Left/Right/Both LIVE-latch
+rules as trim. Live-capable compiled inputs retain a conservative Infinite tail even if initially
+disabled; plain disabled inputs without console control retain FiniteZero. Storage and actual
+input work remain accounted for. Session automation syntax does not imply a render feed.
 
 **Class**: a *design* ruling -- what is live, at what price, and what the decision drags with it --
 rather than the null optimization measurement this directory's README describes. It is filed here

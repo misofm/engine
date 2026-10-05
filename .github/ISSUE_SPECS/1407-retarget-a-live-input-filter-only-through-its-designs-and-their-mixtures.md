@@ -11,9 +11,12 @@ A live HPF/LPF edit on the builtin input section can only ever put a recursion w
 that is a designed filter, the disabled identity at rest, or a linear mixture of designs. A disable
 becomes a 64-sample crossfade from the filtered to the dry signal, with the filter running at its
 own design; an enable from rest becomes the reverse crossfade. Re-sending the same target is a
-no-op on a ramp in flight. With this, the section is provably stable in `f32` under every control
-history the hosts admit, a disable settles and elides again even while hosts keep re-sending it, and
-#1329 can bound the tail of a strip with a live input lane.
+no-op on a ramp in flight. With this (and Amendment 1's ramp arithmetic), every recursion word the
+kernel loads lies within a proven `f32` rounding allowance of the convex hull of the designs its
+history used, so the section's zero-input step is a contraction, `||A(w)||_V <= 1 - 3.79e-5`, at
+every launch rate and block size under every control history the hosts admit; a disable settles and
+elides again even while hosts keep re-sending it; a collapsed strip renders exactly the bits of the
+same strip rendered dual; and #1329 can bound the tail of a strip with a live input lane.
 
 ## Context
 
@@ -108,6 +111,52 @@ history the hosts admit, a disable settles and elides again even while hosts kee
   expected to move (the probe left `audit fixture-builtins --check` and `test-debug-a` green). If
   one moves, stop and list it in the PR.
 
+## Amendment 1 (root decisions for attempt 2, 2026-10-05)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`; math delegated), after attempt 1's FAIL verdict
+(`/home/bl/misofm/submix-verdicts/1407-attempt1.md`; decisions
+`/tmp/claude-1002/-home-bl-misofm-engine/258223fb-6f51-4ebb-b550-04d18c009589/scratchpad/1407-attempt2-decisions.md`).
+Where this amendment and the frozen decisions above differ, this amendment holds.
+
+- **A1. The collapsed-stage invariant (verdict BLOCKER 1, option (b)).** "While a stage is
+  collapsed, channel `0` is the only live state; no decision may read channel `1`'s state, and every
+  `Both` record applies channel `0`'s decision to both channels." The rule-3 predicate reads the
+  integrators of the channel the stage actually advanced (channel `0` while collapsed) for both
+  channels. Every other read of channel-`1` state on the drain and record-application path while
+  collapsed is audited and follows the same rule (attempt 2 lists each site). D3's integrator clause
+  stays: it protects restored state. A per-channel record that could make L and R differ must
+  desymmetrize before it applies, if such a path exists.
+- **A2. Root-authorized extension of D5.** The authorized paths extend to exactly the sites A1's
+  audit needs, and to the filter coefficient-word updates of the two filter-ramp bodies in
+  `crates/lane/src/kernels/builtins.rs` (A3). #1408's `ramp_toward` clamp and its eight trim, fader
+  and matrix sites are not touched.
+- **A3. The ramp arithmetic (verdict MAJOR 2: `f32` rule-4 ramps left the hull by up to `2.57e-6`
+  against gate 4's `8.63e-7`).** Root decided: try option (iii), each filter ramp word computed as
+  `target - step * remaining` from the words the ramp already holds, no new state and no sealed-size
+  change, the V8 spill gate clean; fall back to option (i) (restated claims, gate 4 bound a computed
+  `q_ramp`) only if (iii) fails those conditions. In both cases the claims are restated as a proven
+  bound (an analytic per-frame rounding term plus the contraction argument for chained retargets, in
+  closed form, confirmed by the measured worst case), gate 4's bound becomes that computed `q_ramp`
+  with its margin, gate 4's endpoint draws stop setting every history's bound, and #1329's D5 gets
+  the numeric restatement in the same commit. Applied (implementer's math decision under the
+  delegation, recorded in attempt 2): (iii) for every word after the fourth, and the first four
+  words stepped from the current word, because the proven bound of (iii) applied to every word is
+  `P = 6.10e-5` at block size 1, which exceeds the maximum-cutoff design's margin `5.21e-5`: a word
+  computed from the target carries a rounding of nearly the whole `target - start` distance, and a
+  host restarting every frame compounds it 64 times. With four stepped words the bound is the floor
+  `1.419e-5` at every block size, measured excess stays at the (iii) level, and nothing accumulates
+  beyond four additions. The rule-2 freeze moves into the kernel's update as "a recursion word with a
+  `+0.0` step holds", because a target-relative word with a zero step is the target, not the current
+  word. Design-to-design retargets now move rendered bits (attempt 2 lists them). This supersedes
+  D2's "No kernel change", D6's "a design-to-design retarget ... render today's bits", the kernels
+  item of "Non-goals" and the "render kernel is unchanged" benchmark note.
+- **A4. Folded minors.** Gate 2b pins rule 2's unconditional countdown restart (verdict MINOR 3,
+  mutant M2c). The "slowest design" wording becomes the maximum-cutoff design (NIT 5); "equals the
+  spectral radius" is stated to its precision (NIT 6); the ruling's lines are held to 100 columns and
+  the old #808 tail sentences return before the new rules (NIT 8). The release gate-4 sweep workflow
+  is a separate follow-up issue the coordinator files (NIT 9); no workflow changes here.
+
 ## DSP evidence (AGENTS.md)
 
 - **Equations:** TPT SVF in stored A1 form [SIMPER-SVF] [ZAVALISHIN-TPT]: `v3 = v0 - ic2`,
@@ -117,18 +166,47 @@ history the hosts admit, a disable settles and elides again even while hosts kee
   `||.||_V`; each design has `||A(d)||_V < 1`. Because `A(w)` is affine in `(c1, a2, a3)`, a word
   `w = (1 - t) d1 + t d2` has `||A(w)||_V <= max(||A(d1)||_V, ||A(d2)||_V)` (triangle
   inequality), and by induction every word reached by ramps, freezes and restarts among designs lies
-  in their convex hull, whose norm maximum is at a design. Under today's law, ramps toward the
-  identity (`A = I`, norm 1) and restart chains reach words whose margin `1 - ||A||_V` is below the
-  `f32` inflation; under D1-D4 no history reaches the identity's recursion words except through the
-  completion snap, which clears the integrators in the same step.
-- **Coefficient and update rules:** D1-D4. The disable crossfade is `y = (1 - t) y_filtered + t v0`
-  with `t = n / 64` up to the rounding of the interpolated mix words (the bypass declick of
-  [SMITH-SASP]'s crossfade form, applied to the mix row only).
-- **Numerical limits (measured with the probe, `/tmp/claude-1002/v1329-blocker/m.txt`):** random
-  restart chains at quanta 1-63, worst exact `q - 1` over reachable recursion words: `-5.21e-5`
-  (44.1 kHz), `-5.20e-5` (48 kHz), `-5.21e-5` (88.2 kHz), `-5.24e-5` (96 kHz), which is the
-  slowest design; sampled `f32` within `2.5e-7` of exact, about 60x margin against `8.6e-7`.
-  No subnormal recursion word is reachable (today's chains reach `0x00000020`).
+  in their convex hull in exact arithmetic, whose norm maximum is at a design. In `f32` every word
+  lies within a proven componentwise allowance `E` of that hull ("Numerical limits"), and a word
+  `w = h + e` with `h` in the hull has `||A(w)||_V <= ||A(h)||_V + 2 ||[[e1, e2], [-e2, e3]]||_V`.
+  Under the pre-#1407 law, ramps toward the identity (`A = I`, norm 1) and restart chains reach
+  words whose margin `1 - ||A||_V` is below the `f32` inflation; under D1-D4 no history reaches the
+  identity's recursion words except through the completion snap, which clears the integrators in
+  the same step.
+- **Coefficient and update rules:** D1-D4, and Amendment 1's ramp arithmetic: the first four words
+  of a ramp are `current + step`, every later word is `target - step * remaining`, a recursion word
+  with a `+0.0` step holds, and the 64th update snaps to the target. The disable crossfade is
+  `y = (1 - t) y_filtered + t v0` with `t = n / 64` up to the rounding of the interpolated mix words
+  (the bypass declick of [SMITH-SASP]'s crossfade form, applied to the mix row only).
+- **Numerical limits (proven; Amendment 1 withdraws attempt 1's sampled "within `2.5e-7`").** A
+  ramp from word `c` to design `t` has step `s = fl(t - c) / 64`; its word after frame `j` is within
+  `rho_j` of the exact mixture `(1 - j/64) c + (j/64) t`, with `rho_j = j h + (j/64)|t - c| u` for
+  the four stepped words (`fl(w + s)`) and `rho_j = (1 - j/64)|t - c|(2u + u^2) + h` after them
+  (`fl(t - fl(s * (64 - j)))`); `u = 2^-24`; `h` is the word's half-ulp, `2^-25` for `c1` and `a3`
+  (never above `1`), `2^-26` for `a2` (never above `1/(2 + sqrt(2))`). Every word lies between its
+  ramp's start and target (rounding is monotone and the stored step undershoots the distance), so
+  `|t - c|` is at most the word's range over every design, `D = (1, 0.3, 1)`. A restart from a word
+  `e` off the hull carries `(1 - j/64) e` of it (the contraction), so with restarts at least `q`
+  frames apart a restart word is off by at most `E_start = max over q <= j <= 63 of (64/j) rho_j`
+  and any word by at most `E = max over j of (1 - j/64) E_start + rho_j`; a freeze, a rule-3 jump
+  and the snap add nothing. At `q = 1..4` this is the floor `E = 64 h + u D =
+  (1.967e-6, 9.716e-7, 1.967e-6)`, which any 64-update law has (64 restarts' final roundings at
+  contraction `63/64`). The norm it can add, `P = 2 sup ||[[e1, e2], [-e2, e3]]||_V` over
+  `|e_i| <= E_i` (attained at a vertex of the box, the norm being convex), is `1.419e-5` at
+  `q <= 4`, `3.95e-6` at `q = 16` and `1.16e-6` at `q = 63`. So every reachable word has
+  `||A(w)||_V <= q_design + 1.419e-5`; with the maximum-cutoff design, the largest norm
+  (`q - 1 = -5.213e-5` at 44.1/88.2 kHz, `-5.241e-5` at 48/96 kHz), `||A(w)||_V <= 1 - 3.79e-5` at
+  every rate, `3.79e-5` of margin before #1329 D3's kernel inflation `8.63e-7`. The same argument
+  gives `P = 6.10e-5` at `q = 1` when every word is computed from the target (option (iii) as first
+  stated), which does not prove `< 1`, and `1.42e-5` at every `q` for the pre-#1407 accumulated
+  law. Measured on gate 4 (release, every rate, quanta 1-63): the worst excess of a reached norm
+  over its history's largest design is `0` on log-uniform and endpoint histories and `2.62e-7`
+  (44.1/88.2 kHz), `1.96e-7` (48/96 kHz) on close-retarget chains at the maximum cutoff; the
+  accumulated law reaches `2.569e-6` on the verifier's close-retarget probe, which this law brings
+  to `2.62e-7` (`1.13e-7` with every word from the target). For a design, `||A(d)||_V` equals the spectral radius only to within
+  `1.97e-8` (44.1/88.2 kHz) and `3.94e-8` (48/96 kHz) at the maximum cutoff, because the `f32` words are not exactly `k = sqrt(2)`-consistent; the bound uses
+  the norm. No subnormal recursion word is reachable (gate 4 asserts it; the pre-#1407 chains reach
+  `0x00000020`).
 - **Latency and tail:** latency 0, unchanged. A disable's filtered contribution reaches weight 0 at
   the completion frame, where the integrators clear; the section then elides. The tail bound is
   #1329's.
@@ -139,9 +217,13 @@ history the hosts admit, a disable settles and elides again even while hosts kee
   word arises. The per-block non-finite check is unchanged.
 - **Citations:** [SIMPER-SVF], [ZAVALISHIN-TPT], [ORFANIDIS-ISP] (finite-wordlength effects and
   stability of recursive filters), [SMITH-SASP] (crossfades), all in `dsp-research/BIBLIOGRAPHY.md`.
-- **Fixtures and objective tests:** gates 1-4 below, in `crates/builtins/tests/filter_liveness.rs`.
-- **Benchmarks:** none; the change is on the control drain (per admitted target), not per frame, and
-  the render kernel is unchanged.
+- **Fixtures and objective tests:** gates 1-4 and 2b below, in
+  `crates/builtins/tests/filter_liveness.rs`; gate 6 in `crates/host-core/tests/successor_swap.rs`;
+  gate 7 in `crates/lane/tests/filter_ramp_line.rs`.
+- **Benchmarks:** none. The retarget law is on the control drain (per admitted target). The ramp
+  arithmetic changes only the two filter-ramp bodies, which run for at most 64 frames after a
+  retarget: per word a multiply, a subtract and a select beside the add, one compare per section and
+  a compare and select per recursion word. The settled path is unchanged.
 - **Listening:** none run. The audible change is a live enable/disable: a 64-sample crossfade
   instead of a 64-sample coefficient sweep through near-identity words, the standard bypass
   declick.
@@ -149,16 +231,29 @@ history the hosts admit, a disable settles and elides again even while hosts kee
 ## Deliverables
 
 1. Rules 1-4 in `InputStage::apply_prepared_filter`, with its doc comment stating them.
-2. Gates 1-4 as tests in `crates/builtins/tests/filter_liveness.rs`.
-3. The #808 paragraph of `docs/rulings/builtins-input-liveness-d2.md` states rules 1-4 and that
-   sample A+64 uses the exact target under any re-send history.
+2. Gates 1-4 and 2b as tests in `crates/builtins/tests/filter_liveness.rs`; gate 6 in
+   `crates/host-core/tests/successor_swap.rs`; gate 7 in `crates/lane/tests/filter_ramp_line.rs`.
+3. The #808 paragraph of `docs/rulings/builtins-input-liveness-d2.md` states rules 1-4, that
+   sample A+64 uses the exact target under any re-send history, the ramp arithmetic with its proven
+   bound, and the collapsed-stage invariant.
 4. This spec's evidence: the gate-4 per-rate maxima, recomputed by the implementer.
+5. (Amendment 1) The collapsed-stage invariant (A1) and the ramp arithmetic (A3); #1329's D5
+   restated numerically.
 
 ## Authorized paths
 
-- `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter` and its doc comment only)
+- `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter` and its doc comment; by
+  Amendment 1 A2 also the collapsed-stage invariant's sites: the `InputStage::collapsed` flag and
+  `live_state_channel`, `refresh_filter_plan`, `process_mono`, `desymmetrize`, and a debug
+  assertion in `process`; and A3's per-block leading countdown, `load_filter_leading`, passed to
+  the two filter-ramp bodies)
+- `crates/lane/src/kernels/builtins.rs` (Amendment 1 A2: the filter coefficient-word updates of
+  `input_chain_ramp_block_filter` and `input_chain_ramp_block_filter_mono`, and their helper)
 - `crates/builtins/tests/filter_liveness.rs`
-- `docs/rulings/builtins-input-liveness-d2.md` (the #808 amendment paragraph only)
+- `crates/host-core/tests/successor_swap.rs` (gate 6) and `crates/lane/tests/filter_ramp_line.rs`
+  (gate 7)
+- `docs/rulings/builtins-input-liveness-d2.md` (the #808 amendment paragraphs only)
+- `.github/ISSUE_SPECS/1329-*.md` (D5's numeric restatement only, Amendment 1 A3)
 - this spec
 
 `crates/builtins` is stream A's column: this is a stream G named exception, recorded in
@@ -203,6 +298,10 @@ history the hosts admit, a disable settles and elides again even while hosts kee
    pre-disable words bit for bit, while `m0`, `m1`, `m2` move. Also with a disable applied while a
    design-to-design ramp is in flight (frame 20 of 64): the recursion words then stay at that
    frame's interior words. Red on revert.
+   **2b (Amendment 1).** An enable from rest and a disable drained at the same boundary (every
+   launch rate, both sections): the section reads identity words, `+0.0` integrators and elided on
+   both channels exactly from frame 64 on. Red on M2c (rule 2 restarting the countdown only when the
+   mix differs).
 3. **Enable from rest** (every launch rate, both sections): from the prepared disabled state, apply
    a design target and render one frame of non-zero input. Assert the current `c1`, `a2`, `a3`
    equal the target's after the first frame, the mix words are the identity mix advanced by one
@@ -213,12 +312,40 @@ history the hosts admit, a disable settles and elides again even while hosts kee
    only): for every quantum 1..=63, 16 seeded histories of 512 blocks each drawn from {enable to a
    design with log-uniform cutoff in `[10 Hz, max]`, disable, re-send the in-flight target,
    design-to-design retarget}, for both sections. After every frame read the `c1`, `a2`, `a3` words
-   and evaluate `||A(w)||_V` in `f64`. Assert every value `<= q_design + 6 * 2^-24 * kappa`, where
-   `q_design` is the largest `||A(d)||_V` over the designs the history used and `kappa = 2.414`.
+   and evaluate `||A(w)||_V` in `f64`. Assert every value `<= q_design + P(q)`, where
+   `q_design` is the largest `||A(d)||_V` over the designs the history used and `P(q)` is the
+   proven allowance at that quantum ("Numerical limits", computed in the test, never pinned).
    Record the per-rate maxima in this spec. Red on revert (restart chains exceed it).
+   **Amendment 1.** The log-uniform histories draw no endpoints, so each is held at its own largest
+   design norm. Two further histories per quantum draw one design in four at exactly 10 Hz or the
+   maximum cutoff, and four close-retarget histories start settled at the maximum cutoff and
+   retarget every block: alternating the maximum and the next lower `f32` cutoff, dragging the
+   cutoff three ulps a block up and down, alternating the maximum and 1 Hz below it, and the first
+   pattern with a disable every sixteenth block and an enable back on the next. Every recursion word
+   must be normal or zero. Per rate the test also asserts the stability proof's numeric condition,
+   maximum-cutoff design norm plus `P(1)` below `1`.
+6. **Collapsed equals dual** (Amendment 1 A1; `successor_swap.rs`, `Simd4`, and `Simd8` where
+   `avx2` is on): the all-mono filtered nine-track session at quantum 16, 480 blocks, swapped to and
+   from its muted-track successor every 40 blocks with each lane's live filter carried, under three
+   seeded random record streams: `Both` enables to random designs, disables and re-sends at 5 % per
+   strip per block, and every second plan segment one strip driven apart by a `Left` or `Right`
+   enable, then both its sections disabled on both channels so it rests again before the swap. The
+   collapsing run must equal the same run with `force_mono_collapse_off` on every plan, block for
+   block, bit for bit; the generator must reach collapsed blocks, disengages, carried swaps and M3
+   proofs. (No scalar run: the scalar backend has no bank and never collapses.) Red on attempt 1's
+   code and on a mutant that reads channel `1` while collapsed.
+7. **Ramp words on the line** (Amendment 1 A3; `filter_ramp_line.rs`, every width): random ramps
+   (fresh, part-way, settled; disabling with `+0.0` recursion steps) through both filter-ramp
+   bodies frame by frame; every word after every frame equals the scalar oracle bit for bit: the
+   first four words `start + k * step` stepped, later words `target - step * remaining`, a
+   recursion word with a zero step held, the target at countdown zero.
 5. Commands:
    - `cargo test --locked --all-targets -p lane -p builtins -p dsp-reference --features builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness`
+   - (Amendment 1) `cargo test --locked -p host-core --features test-support --test successor_swap`,
+     `cargo test --locked -p lane --features test-support --test filter_ramp_line`,
+     `bash scripts/run-wasm-gates.sh` (V8 spill gate included, its four held rows clean) and
+     `bash scripts/check-cross-targets.sh`
    - the `test-debug-a` workspace command from `.github/workflows/qualification.yml`
    - `cargo build --locked --release -p audit && bash scripts/check-builtins-fixtures.sh . target/release/audit`
    - the worklet chain, as in `qualification.yml`:
@@ -238,8 +365,19 @@ history the hosts admit, a disable settles and elides again even while hosts kee
 - Gate 3: an enable that sweeps the recursion up from the identity, or a rule-3 predicate that
   ignores the integrators and releases restored state through the new design, is red.
 - Gate 4: judged by what its generator reaches: re-sends, mid-ramp disables and retargets at every
-  quantum below 64, the histories that reach the near-identity words; any rule that lets a word
-  leave the convex hull of designs exceeds the bound.
+  quantum below 64, the histories that reach the near-identity words, and (Amendment 1) close
+  retarget chains at the maximum cutoff; any rule that lets a word leave the convex hull of the
+  designs its history used by more than the proven rounding allowance exceeds the bound, and each
+  history is held at its own largest design.
+- Gate 2b (Amendment 1): a rule 2 that restarts the countdown only when the mix differs leaves an
+  enable-then-disable drained together settled on the design recursion under the identity mix,
+  never cleared, never elided.
+- Gate 6 (Amendment 1): any read of channel `1`'s frozen integrators while a stage is collapsed
+  (the rule-3 predicate, the elision plan) makes a collapsed strip leave the bits of the same strip
+  rendered dual, which no other test drives through live filter records and carried swaps.
+- Gate 7 (Amendment 1): a filter-ramp body that steps every word from the previous one, computes
+  every word from the target, changes the stepped window or drops the zero-step hold is red at
+  rounding level, at every width and in both bodies.
 
 ## Dependencies
 
@@ -324,3 +462,136 @@ settled design (HPF 1 kHz, LPF 1 kHz, LPF 15 Hz; every launch rate; two-sine inp
 - `check-builtins-policy.sh`, `check-workspace-policy.sh`: ok. `cargo clippy --locked --workspace --all-targets -- -D warnings`: clean. `cargo fmt --all -- --check`: clean.
 
 **Open:** no listening run (spec: none required). AArch64 test execution is CI-only.
+
+### Attempt 2 (implementer, 2026-10-05)
+
+**Change.** Amendment 1 applied.
+- *A1, the collapsed-stage invariant* (`crates/builtins/src/lib.rs`). `InputStage::collapsed` (one
+  byte in existing padding: `size_of::<InputStage<_>>` stays 688 / 2,064 / 3,904 bytes at `f32` /
+  `Simd4` / `Simd8`, measured before and after) is set by `process_mono` and cleared by
+  `desymmetrize`; `live_state_channel(channel)` is channel `0` while it is set. Audit of every read
+  of channel-`1` state on the drain and record-application path while collapsed:
+  - `apply_prepared_filter`'s rule-3 predicate read `state.section[channel]`: now
+    `state.section[live_state_channel(channel)]` (the BLOCKER).
+  - `refresh_filter_plan` (called by the drain's `apply_prepared_filter`, and by `process_mono`
+    after each ramp block) decided channel `1`'s elision over its frozen integrators, which split
+    the plan when a disable completed collapsed and tripped `process_mono`'s
+    `plan_is_channel_symmetric` assertion: channel `1` is now decided over channel `0`'s
+    integrators while collapsed.
+  - `apply_prepared_filter`'s other reads (`coef.section`, `filter_target`, `filter_step`,
+    `filter_remaining`), `set_trim_signed` (`TrimDb`, `PolarityInvert`) and the symmetry
+    predicates read records, not state; `process_mono` mirrors those records onto channel `1` at
+    the bottom of every collapsed block, and nothing else writes them, so at a drain they are the
+    dual run's.
+  - `export_lane` and `channels_agree` read channel `1`'s integrators but are not reached
+    collapsed: a carry calls `disengage_for_carry` (the disengage copy) first, and the M3 proof is
+    asked only of a chain rendering dual. Left as they are (a redirect in `export_lane` was tried
+    and survives every test, mutant C3, so it was dropped as unreachable). A dual `process` after a
+    collapsed block without the copy is now a debug assertion.
+  - No record writes integrators, so no per-channel record needs to desymmetrize before it
+    applies: a one-channel record decides over channel `0`'s integrators, the witness then declines,
+    and the disengage copy hands channel `1` exactly those integrators.
+  - D3's integrator clause is kept.
+- *A3, the ramp arithmetic* (`crates/lane/src/kernels/builtins.rs`, `filter_ramp_words`, shared
+  by `input_chain_ramp_block_filter` and `_mono`). The first four words of a ramp are
+  `current + step`; every later word is `target - step * remaining`; a recursion word with a `+0.0`
+  step holds (rule 2's freeze: the target-relative form would otherwise jump it to `0`); done snaps
+  to the target. The stepped window is driven by a per-lane leading countdown the owner builds per
+  block (`InputStage::load_filter_leading`, `remaining - 60`, never stored), not by a splatted
+  `60.0`: with the splat, the iOS assembly of `builtins` gained two `memset_pattern16` calls (186 to
+  188; the first form, with the splat inside the helper, 190), which `check-cross-targets.sh`
+  refuses (known defect #1018). With the countdown word it stays at 186. No new state word, no
+  sealed size moved, #1408's clamp and sites untouched.
+  - *Why not (iii) on every word:* proven allowance at block size 1 is `P = 6.10e-5` against the
+    maximum-cutoff margin `5.21e-5`, so it proves nothing there (the target-relative word rounds
+    nearly the whole `target - start` distance, compounded 64 times by a per-frame restart). The
+    first trial, only the first word stepped, proved `P = 3.01e-5`; four stepped words reach the
+    floor `P = 1.419e-5` (`E = 64 h + u D`) at every block size. Measured excess on the verifier's
+    close-retarget probe: `1.13e-7` with every word from the target, `2.62e-7` with four stepped
+    words, `2.569e-6` for the accumulated law. So (iii) "met its conditions" (no state, no sealed
+    size, spill gate clean) but not the bound; the four-word refinement is the implementer's math
+    decision under the delegation, recorded in Amendment 1 A3 for root review.
+- *Gate 4* (`filter_liveness.rs`): the bound is `q_design + P(q)` with `P(q)` computed in the test
+  from the closed form (`word_allowance`, `norm_allowance`); 16 log-uniform histories with no
+  endpoint draws, 2 endpoint histories, 4 close-retarget histories per quantum; every recursion word
+  normal or zero; per rate the stability condition `q_top + P(1) < 1` is asserted. Gate 3's
+  expected frame-0 words are the stepped form (unchanged from attempt 1). New gate 2b
+  `a_disable_in_the_enables_drain_still_completes_and_elides`, gate 6
+  `a_collapsed_chain_renders_the_forced_dual_bits_at_{four,eight}_lanes`, gate 7
+  `every_filter_ramp_word_lies_on_the_line_to_its_target`.
+- Ruling (`docs/rulings/builtins-input-liveness-d2.md`): the #808 paragraphs rewrapped to 100
+  columns, the old #808 tail returned before the rules, the ramp arithmetic with its proven bound
+  and the collapsed-stage invariant added. #1329's D5 restated numerically.
+
+**Gate-4 per-rate results (release, quanta 1-63, 22 histories x 512 blocks, both sections):**
+
+| Rate | max-cutoff design `q - 1` | norm - spectral radius | `P(1)` | `q_ramp - 1` | worst excess: log-uniform / endpoints / close |
+|---|---|---|---|---|---|
+| 44.1 kHz | `-5.2133e-5` | `1.97e-8` | `1.4188e-5` | `-3.7945e-5` | `0` / `0` / `2.622e-7` |
+| 48 kHz | `-5.2411e-5` | `3.94e-8` | `1.4188e-5` | `-3.8223e-5` | `0` / `0` / `1.964e-7` |
+| 88.2 kHz | `-5.2133e-5` | `1.97e-8` | `1.4188e-5` | `-3.7945e-5` | `0` / `0` / `2.622e-7` |
+| 96 kHz | `-5.2411e-5` | `3.94e-8` | `1.4188e-5` | `-3.8223e-5` | `0` / `0` / `1.964e-7` |
+
+`P(q)`: `1.419e-5` (q <= 4), `3.95e-6` (16), `1.16e-6` (63). Debug runs 48 kHz at quanta
+{1, 2, 7, 63}.
+
+**Rendered bits that move (before = `ad96a6327`, after = this attempt; one-off comparison with the
+verifier's dump probe, not committed; all four launch rates, two-sine input, block of 256 then 4 x
+64 after the target at frame A = 256).**
+- Design-to-design retarget (new in this attempt, A3): HPF 1 kHz to 2 kHz moves 78-110 frames
+  from A+6 on, max |diff| `9.24e-7` (44.1 kHz), `4.77e-7`, `4.17e-7`, `2.98e-7`; LPF 15 Hz to 30 Hz
+  moves 56-227 frames from A+20, max |diff| `7.0e-10` to `4.7e-9`. Frames A to A+4 (the stepped
+  words) are bit-identical.
+- Disable / enable of the HPF (1 kHz) move 53-57 / 35-40 frames inside A+5..A+63, max |diff|
+  `4.17e-7` / `3.58e-7`; the crossfade now tracks the `f64` blend more closely (disable `5.0e-8` to
+  `6.2e-8` after against `3.5e-7` to `3.9e-7` before; enable `4.1e-8` to `6.4e-8` against `2.0e-7`
+  to `3.2e-7`). The LPF disable/enable (1 kHz, 15 Hz) are bit-identical: their mix words are exact
+  in both laws.
+- Collapsed runs now equal dual runs where attempt 1 did not (gate 6).
+- Pinned artifacts: none moved. `check-builtins-fixtures.sh`: ok (50 files); the wasm G5 corpus
+  matches its pins on both legs; `check-browser-expected-resources.py --artifacts`: ok; no re-pin.
+
+**Mutation evidence** (each applied to the working tree, run, reverted; the sweep runs the whole
+`builtins` crate debug, gate 6 debug, gate 7 debug and `filter_liveness` release):
+
+| Mutant | Red |
+|---|---|
+| M0 law reverted to `a18a2652d` | gates 1, 2, 2b, 3, 4 |
+| M1 rule 1 removed | gate 1 |
+| M1s rule 1 on settled lanes | `tests::trim_refresh_preserves_asymmetric_settled_filter_steps` (D1 canary) |
+| M2 rule 2 removed | gates 2, 4 |
+| M2c countdown restarts only when the mix differs | gate 2b (verdict MINOR 3) |
+| M3 rule 3 removed | gates 2b, 3, 4 |
+| M3b predicate ignores integrators | gate 3 |
+| C1 rule-3 predicate reads channel `1` while collapsed | gate 6, both widths |
+| C2 plan decides channel `1` over its own frozen integrators | gate 6 (debug abort at `process_mono`'s plan-symmetry assertion; release-only it renders the same bits) |
+| attempt-1 `lib.rs` (`f44cf54bf`) | gate 6, both widths (seed 0) |
+| C3 `export_lane` reads channel `1` while collapsed | none: unreachable (see audit); change not kept |
+| K1 every word stepped (accumulated law) | gates 4 (release) and 7 |
+| K2 every word from the target | gates 3 and 7 |
+| K3 zero-step hold dropped | gates 2, 4 and 7 |
+| ML3 mono body alone reverted to the accumulated law | gate 7 |
+| stepped window 3 instead of 4 (lane constant) | gate 7 (before the owner-built countdown) |
+
+Test value: gate 2b defends rule 2's unconditional restart (M2c); gate 6 defends the collapsed-stage
+invariant (C1, C2, attempt-1 code) under live filter records and carried swaps, which no other test
+drives; gate 7 defends the ramp arithmetic in both bodies at every width at rounding level (K1, K2,
+K3); gate 4 now holds each history to its own designs and the proven allowance (M0, M2, M3, K1, K3).
+
+**Gate commands and results (x86-64-v3 host, final tree):**
+- `cargo test --locked --all-targets -p lane -p builtins -p dsp-reference --features builtins/test-support,lane/test-support`: pass (235 passed, 0 failed).
+- `cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness`: pass (14 passed); per-rate table above.
+- `cargo test --locked -p host-core --features test-support --test successor_swap`: pass (34 passed, gate 6 at both widths).
+- `test-debug-a` workspace command: pass (1,428 passed, 0 failed). `test-debug-b` DSP command: pass (834 passed, 0 failed).
+- `cargo build --locked --release -p audit && bash scripts/check-builtins-fixtures.sh . target/release/audit`: `builtins fixtures: ok (50 files)`.
+- `bash scripts/run-wasm-gates.sh`: ok (native + wasm simd128 + V8 EQ loops); the four held V8 rows (dual depth-1 tail, mono depth-2 pair, mono depth-1 tail, mono depth-2 masked) all `ok`, no carried stack slot.
+- Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`): pass; shipped module sha256 `8d3920eeed352468a4fe2dda1446311a933d919d086a0ff31236a0b6b4f9c95f`.
+- `bash scripts/check-cross-targets.sh`: PASS (`builtins` iOS `memset_pattern16` at its ceiling 186; AArch64 rows check/lint only, tests CI-only).
+- `check-builtins-policy.sh`, `check-workspace-policy.sh`, `check-lane-policy.sh`, `check-realtime-policy.sh`: ok. `cargo clippy --locked --workspace --all-targets -- -D warnings` and with `builtins/test-support,lane/test-support,host-core/test-support`: clean. `cargo fmt --all -- --check`: clean.
+
+**Open:** root review of the four-stepped-word refinement of option (iii) (Amendment 1 A3); the
+decision-15 ruling sentence is relayed by the coordinator; the release gate-4 sweep workflow is the
+coordinator's follow-up issue; no listening run (spec: none required); AArch64 test execution is
+CI-only. The proof's scope excludes test-support state injection (`set_lane_state_words` restoring
+non-zero integrators onto an identity section makes rule 4 ramp from the identity, as gate 3's
+second case does on purpose).

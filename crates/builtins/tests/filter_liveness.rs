@@ -533,6 +533,45 @@ fn a_disable_freezes_the_recursion_words_and_moves_only_the_mix() {
     }
 }
 
+/// Gate 2, the countdown: a disable always restarts the 64-update countdown, even when the mix it
+/// ramps already holds the identity. An enable from rest and a disable drained at the same block
+/// boundary leave the recursion at the design and the mix at the identity; the disable must still
+/// count down to the completion snap, which writes the identity recursion and clears the
+/// integrators, so the section elides from frame 64.
+///
+/// Red: rule 2 restarting the countdown only when a mix word differs from its target. The section
+/// then settles at the design recursion under the identity mix, with live integrators and an
+/// identity target, and never elides.
+#[test]
+fn a_disable_in_the_enables_drain_still_completes_and_elides() {
+    for rate in LAUNCH_RATES {
+        for section in 0..2 {
+            let mut input = disabled_at(rate);
+            let hz = if section == 0 { 1_000.0 } else { 2_000.0 };
+            input
+                .apply_prepared_filter(design(rate, section, hz))
+                .expect("enable");
+            input
+                .apply_prepared_filter(disable(rate, section))
+                .expect("disable");
+            for elapsed in 1..=128_u64 {
+                render_frame(&mut input, elapsed, 0.5);
+                let elided = builtins::test_support::input_elision_plan(&input);
+                for (channel, elided) in elided.iter().enumerate() {
+                    let settled = current_words(&input, channel, section) == IDENTITY_BITS
+                        && state_words(&input, channel, section) == [0, 0]
+                        && elided[section];
+                    assert_eq!(
+                        settled,
+                        elapsed >= 64,
+                        "rate {rate} section {section} channel {channel} frame {elapsed}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Gate 3: an enable from a settled disabled section jumps the recursion and crossfades the
 /// mix, so its first sample is the dry input; restored integrators on an identity section take
 /// the six-word ramp instead.
@@ -547,14 +586,16 @@ fn an_enable_from_rest_jumps_the_recursion_only_when_the_integrators_are_zero() 
             let output = render_frame(&mut input, 0, 0.625);
             assert_eq!(output[0].to_bits(), 0.625_f32.to_bits());
             assert_eq!(output[1].to_bits(), (-0.625_f32).to_bits());
+            // The kernel's frame-0 word, as it computes it: the start plus one step.
+            let after_one = |start: f32, target: f32| start + (target - start) * (1.0 / 64.0);
             let identity_mix = [1.0_f32, 0.0, 0.0];
             let expected = [
                 words[0],
                 words[1],
                 words[2],
-                identity_mix[0] + (words[3] - identity_mix[0]) * (1.0 / 64.0),
-                identity_mix[1] + (words[4] - identity_mix[1]) * (1.0 / 64.0),
-                identity_mix[2] + (words[5] - identity_mix[2]) * (1.0 / 64.0),
+                after_one(identity_mix[0], words[3]),
+                after_one(identity_mix[1], words[4]),
+                after_one(identity_mix[2], words[5]),
             ];
             for channel in 0..2 {
                 assert_eq!(
@@ -576,7 +617,7 @@ fn an_enable_from_rest_jumps_the_recursion_only_when_the_integrators_are_zero() 
             render_frame(&mut restored, 0, 0.625);
             let ramped: [f32; 6] = core::array::from_fn(|index| {
                 let start = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0][index];
-                start + (words[index] - start) * (1.0 / 64.0)
+                after_one(start, words[index])
             });
             for channel in 0..2 {
                 assert_eq!(
@@ -589,27 +630,91 @@ fn an_enable_from_rest_jumps_the_recursion_only_when_the_integrators_are_zero() 
     }
 }
 
-/// `||A(w)||_V` in `f64`: the zero-input state step `A(w) = [[1 - 2 c1, -2 a2], [2 a2, 1 - 2 a3]]`
-/// in the norm `||x||_V^2 = x1^2 + sqrt(2) x1 x2 + x2^2`, the shared eigenbasis norm of every
-/// `k = sqrt(2)` design. With `M = R^T R`, `R = [[1, r], [0, r]]`, `r = 1/sqrt(2)`, the induced
-/// norm is the spectral norm of `R A R^-1`, `R^-1 = [[1, -1], [0, 1/r]]`.
-fn v_norm(c1: f32, a2: f32, a3: f32) -> f64 {
-    let (c1, a2, a3) = (f64::from(c1), f64::from(a2), f64::from(a3));
-    let a = [[1.0 - 2.0 * c1, -2.0 * a2], [2.0 * a2, 1.0 - 2.0 * a3]];
+/// `||M||_V` in `f64` for a 2x2 matrix `M`: the operator norm induced by
+/// `||x||_V^2 = x1^2 + sqrt(2) x1 x2 + x2^2`, the shared eigenbasis norm of every `k = sqrt(2)`
+/// design. With `R = [[1, r], [0, r]]`, `r = 1/sqrt(2)` (so `||x||_V = ||R x||_2`), it is the
+/// spectral norm of `R M R^-1`, `R^-1 = [[1, -1], [0, 1/r]]`.
+fn v_norm_of(m: [[f64; 2]; 2]) -> f64 {
     let r = core::f64::consts::FRAC_1_SQRT_2;
-    let ra = [
-        [a[0][0] + r * a[1][0], a[0][1] + r * a[1][1]],
-        [r * a[1][0], r * a[1][1]],
+    let rm = [
+        [m[0][0] + r * m[1][0], m[0][1] + r * m[1][1]],
+        [r * m[1][0], r * m[1][1]],
     ];
     let b = [
-        [ra[0][0], -ra[0][0] + ra[0][1] / r],
-        [ra[1][0], -ra[1][0] + ra[1][1] / r],
+        [rm[0][0], -rm[0][0] + rm[0][1] / r],
+        [rm[1][0], -rm[1][0] + rm[1][1] / r],
     ];
     let frobenius_sq =
         b[0][0] * b[0][0] + b[0][1] * b[0][1] + b[1][0] * b[1][0] + b[1][1] * b[1][1];
     let determinant = b[0][0] * b[1][1] - b[0][1] * b[1][0];
     let discriminant = (frobenius_sq * frobenius_sq - 4.0 * determinant * determinant).max(0.0);
     (0.5 * (frobenius_sq + discriminant.sqrt())).sqrt()
+}
+
+/// `||A(w)||_V` in `f64` for the zero-input state step
+/// `A(w) = [[1 - 2 c1, -2 a2], [2 a2, 1 - 2 a3]]` of the recursion words `w = (c1, a2, a3)`.
+fn v_norm(c1: f32, a2: f32, a3: f32) -> f64 {
+    let (c1, a2, a3) = (f64::from(c1), f64::from(a2), f64::from(a3));
+    v_norm_of([[1.0 - 2.0 * c1, -2.0 * a2], [2.0 * a2, 1.0 - 2.0 * a3]])
+}
+
+/// The proven rounding allowance of the live retarget law at block size `quantum`: how far, per
+/// recursion word `(c1, a2, a3)`, an `f32` word the kernel loads can lie from the convex hull of
+/// the designs its history used (#1407 attempt 2; the proof is in the spec's "Numerical limits"
+/// and in `docs/rulings/builtins-input-liveness-d2.md`).
+///
+/// A ramp from the word `c` to a design `t` has step `s = fl(t - c) / 64`. Its word after frame
+/// `j` is the exact mixture `(1 - j/64) c + (j/64) t` up to
+///
+/// * `rho_j = j h + (j/64) |t - c| u` for `j <= 4`, stepped from `c` as `fl(w + s)`, and
+/// * `rho_j = (1 - j/64) |t - c| (2u + u^2) + h` for `5 <= j <= 63`, computed from the target as
+///   `fl(t - fl(s * (64 - j)))`,
+///
+/// with `u = 2^-24` and `h` the half-ulp of the word: `2^-25` for `c1` and `a3`, which never
+/// exceed `1`, and `2^-26` for `a2`, which never exceeds `1 / (2 + sqrt(2))`. Every word lies
+/// between its ramp's start and target, so `|t - c|` is at most the word's range over every design,
+/// `D = (1, 0.3, 1)`. A ramp restarted from a word `e` off the hull carries `(1 - j/64) e` of it
+/// (the contraction), so with restarts at least `quantum` frames apart a restart's start word is
+/// off by at most `E_start = max over quantum <= j <= 63 of (64 / j) rho_j` (zero from `64`), and
+/// any word by at most `E = max over 1 <= j <= 63 of (1 - j/64) E_start + rho_j`. A rule-2 freeze
+/// holds a word, a rule-3 jump writes a design and the completion snap writes the target: none
+/// adds error. At block sizes 1 to 4 this is `E = 64 h + u D`, the floor every law has (64
+/// restarts' final roundings, contracted by `63/64`).
+fn word_allowance(quantum: usize) -> [f64; 3] {
+    // `2^-24`, `2^-25`, `2^-26`, exact in `f64`.
+    let u = 1.0 / 16_777_216.0;
+    let range = [1.0, 0.3, 1.0];
+    let half_ulp = [u / 2.0, u / 4.0, u / 2.0];
+    core::array::from_fn(|index| {
+        let rho = |j: usize| {
+            let j_f = j as f64;
+            if j <= 4 {
+                j_f * half_ulp[index] + j_f / 64.0 * range[index] * u
+            } else {
+                (64.0 - j_f) / 64.0 * range[index] * (2.0 * u + u * u) + half_ulp[index]
+            }
+        };
+        let start = (quantum.max(1)..64)
+            .map(|j| 64.0 / j as f64 * rho(j))
+            .fold(0.0_f64, f64::max);
+        (1..64)
+            .map(|j| (64 - j) as f64 / 64.0 * start + rho(j))
+            .fold(0.0_f64, f64::max)
+    })
+}
+
+/// The `V`-norm the allowance can add: `A` is affine in the words, so a word `h + e` with `h` in
+/// the hull has `||A(h + e)||_V <= ||A(h)||_V + 2 ||[[e1, e2], [-e2, e3]]||_V`, and the norm is
+/// convex, so its supremum over the box `|e_i| <= E_i` is at a vertex.
+fn norm_allowance(quantum: usize) -> f64 {
+    let e = word_allowance(quantum);
+    let mut worst = 0.0_f64;
+    for signs in 0..8_u32 {
+        let sign = |bit: u32| if signs & (1 << bit) == 0 { 1.0 } else { -1.0 };
+        let (e1, e2, e3) = (sign(0) * e[0], sign(1) * e[1], sign(2) * e[2]);
+        worst = worst.max(2.0 * v_norm_of([[e1, e2], [-e2, e3]]));
+    }
+    worst
 }
 
 struct SplitMix(u64);
@@ -628,58 +733,152 @@ impl SplitMix {
     }
 }
 
-/// Gate 4: every recursion word any seeded history reaches, at every quantum below the ramp, has
-/// a `V`-norm no larger than the history's slowest design plus the `f32` inflation bound. The
-/// identity recursion is reachable only at rest, with both integrators `+0.0`.
+/// The history kinds gate 4 draws, each judged against its own designs.
+#[derive(Clone, Copy, Debug)]
+enum History {
+    /// Enables, disables, re-sends and retargets to designs log-uniform in `[10 Hz, max]`.
+    LogUniform,
+    /// The same, with one design draw in four taking `10 Hz` or the maximum cutoff exactly.
+    Endpoints,
+    /// Close retargets near the maximum cutoff (the design with the largest norm), restarted
+    /// every block: `0` alternates the maximum and the next lower `f32` cutoff, `1` drags the
+    /// cutoff up and down by three ulps a block, `2` alternates the maximum and 1 Hz below it,
+    /// `3` is `0` with a disable every sixteenth block and an enable back on the next.
+    Close(u8),
+}
+
+/// Gate 4: every recursion word any seeded history reaches, at every block size below the ramp,
+/// has a `V`-norm no larger than the largest design norm that history used plus the proven
+/// rounding allowance at that block size ([`norm_allowance`]). The identity recursion is
+/// reachable only at rest, with both integrators `+0.0`, and no recursion word is subnormal.
+///
+/// Each history is judged against its own designs, so a log-uniform history is held at its own
+/// largest norm (the lowest or highest cutoff it drew) and the maximum-cutoff design is reached by
+/// the endpoint and close-retarget histories, not by every history. The numeric condition of the
+/// stability proof -- the maximum-cutoff design's norm plus the allowance at block size 1 is below
+/// 1 -- is asserted per rate.
 #[test]
 fn every_reachable_recursion_word_stays_inside_the_hull_of_the_designs() {
-    const KAPPA: f64 = 2.414;
-    let inflation = 6.0 * (1.0 / 16_777_216.0) * KAPPA;
     let (rates, quanta): (&[u32], Vec<usize>) = if cfg!(debug_assertions) {
         (&[48_000], vec![1, 2, 7, 63])
     } else {
         (&LAUNCH_RATES, (1..=63).collect())
     };
+    let histories: Vec<History> = (0..16)
+        .map(|_| History::LogUniform)
+        .chain([History::Endpoints, History::Endpoints])
+        .chain((0..4).map(History::Close))
+        .collect();
     for &rate in rates {
-        let maximum_hz = f64::from(builtin_filter_cutoff_maximum_hz(rate).expect("rate"));
-        let mut worst_norm = 0.0_f64;
-        let mut worst_excess = f64::NEG_INFINITY;
-        let mut worst_design = 0.0_f64;
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("rate");
+        let maximum_hz = f64::from(maximum);
+        let top = design(rate, 1, maximum).coefficients;
+        let q_top = v_norm(top[0], top[1], top[2]);
+        // The norm against the spectral radius at the maximum cutoff: they differ because the
+        // `f32` words are not exactly `k = sqrt(2)`-consistent. Reported, not asserted.
+        let radius = {
+            let (c1, a2, a3) = (f64::from(top[0]), f64::from(top[1]), f64::from(top[2]));
+            let (p, q, r, s) = (1.0 - 2.0 * c1, -2.0 * a2, 2.0 * a2, 1.0 - 2.0 * a3);
+            let (trace, determinant) = (p + s, p * s - q * r);
+            let discriminant = trace * trace - 4.0 * determinant;
+            if discriminant < 0.0 {
+                determinant.sqrt()
+            } else {
+                ((trace.abs() + discriminant.sqrt()) / 2.0).max(0.0)
+            }
+        };
+        let q_ramp_top = q_top + norm_allowance(1);
+        assert!(
+            q_ramp_top < 1.0,
+            "rate {rate}: the stability proof needs {q_top} + {} < 1",
+            norm_allowance(1)
+        );
+        // `[log-uniform, endpoints, close]`: the worst excess of a reached norm over its history's
+        // largest design norm, and the allowance it was held to.
+        let mut worst = [(f64::NEG_INFINITY, 0.0_f64); 3];
         for &quantum in &quanta {
-            for history in 0..16_u64 {
+            let allowance = norm_allowance(quantum);
+            for (history, kind) in histories.iter().enumerate() {
                 let mut rng = SplitMix(
-                    u64::from(rate) << 32 ^ (quantum as u64) << 8 ^ history ^ 0x1407_0000_0000,
+                    u64::from(rate) << 32
+                        ^ (quantum as u64) << 8
+                        ^ history as u64
+                        ^ 0x1407_0000_0000,
                 );
                 let mut input = disabled_at(rate);
                 let mut sent = [disable(rate, 0), disable(rate, 1)];
                 let mut q_design = [0.0_f64; 2];
                 let mut reached = [0.0_f64; 2];
                 let mut frame = 0_u64;
-                for _ in 0..512 {
+                let draw = |rng: &mut SplitMix, rate: u32, section: usize, endpoints: bool| {
+                    let hz = match (endpoints, rng.next() % 8) {
+                        (true, 0) => 10.0,
+                        (true, 1) => maximum,
+                        _ => math::exp(
+                            math::log(10.0)
+                                + rng.unit() * (math::log(maximum_hz) - math::log(10.0)),
+                        ) as f32,
+                    };
+                    design(rate, section, hz.clamp(10.0, maximum))
+                };
+                if let History::Close(_) = kind {
+                    // Settle both sections on the maximum-cutoff design first.
+                    for (section, sent) in sent.iter_mut().enumerate() {
+                        *sent = design(rate, section, maximum);
+                        input.apply_prepared_filter(*sent).expect("start");
+                    }
+                    for _ in 0..128 {
+                        render_frame(&mut input, frame, 0.25);
+                        frame += 1;
+                    }
+                }
+                for block in 0..512_u32 {
                     for section in 0..2 {
-                        let target = match rng.next() % 4 {
-                            // Enable to (or retarget to) a design, log-uniform in [10 Hz, max].
-                            // One draw in eight takes an endpoint exactly: the maximum
-                            // cutoff is the design with the largest norm.
-                            0 | 3 => {
-                                let hz = match rng.next() % 16 {
-                                    0 => 10.0,
-                                    1 => maximum_hz as f32,
-                                    _ => math::exp(
-                                        math::log(10.0)
-                                            + rng.unit()
-                                                * (math::log(maximum_hz) - math::log(10.0)),
-                                    ) as f32,
-                                };
-                                let hz = hz.clamp(10.0, maximum_hz as f32);
-                                let target = design(rate, section, hz);
-                                let c = target.coefficients;
-                                q_design[section] = q_design[section].max(v_norm(c[0], c[1], c[2]));
-                                target
+                        let target = match *kind {
+                            History::LogUniform | History::Endpoints => match rng.next() % 4 {
+                                0 | 3 => draw(
+                                    &mut rng,
+                                    rate,
+                                    section,
+                                    matches!(kind, History::Endpoints),
+                                ),
+                                1 => disable(rate, section),
+                                _ => sent[section],
+                            },
+                            History::Close(pattern) => {
+                                let lower = f32::from_bits(maximum.to_bits() - 1);
+                                match pattern {
+                                    3 if block % 16 == 15 => disable(rate, section),
+                                    0 | 3 => design(
+                                        rate,
+                                        section,
+                                        if block % 2 == 0 { lower } else { maximum },
+                                    ),
+                                    1 => {
+                                        let k = block % 200;
+                                        let k = if k < 100 { k } else { 200 - k };
+                                        design(
+                                            rate,
+                                            section,
+                                            f32::from_bits(maximum.to_bits() - 3 * k),
+                                        )
+                                    }
+                                    _ => design(
+                                        rate,
+                                        section,
+                                        if block % 2 == 0 {
+                                            maximum - 1.0
+                                        } else {
+                                            maximum
+                                        },
+                                    ),
+                                }
                             }
-                            1 => disable(rate, section),
-                            _ => sent[section],
                         };
+                        let c = target.coefficients;
+                        if c[0..3] != [0.0, 0.0, 0.0] {
+                            q_design[section] = q_design[section].max(v_norm(c[0], c[1], c[2]));
+                        }
                         sent[section] = target;
                         input.apply_prepared_filter(target).expect("target");
                     }
@@ -694,16 +893,19 @@ fn every_reachable_recursion_word_stays_inside_the_hull_of_the_designs() {
                                     assert_eq!(
                                         state_words(&input, channel, section),
                                         [0, 0],
-                                        "identity recursion with live state: rate {rate} quantum {quantum} history {history}"
+                                        "identity recursion with live state: rate {rate} \
+                                         quantum {quantum} history {history}"
                                     );
                                     continue;
                                 }
-                                let norm = v_norm(
-                                    f32::from_bits(words[0]),
-                                    f32::from_bits(words[1]),
-                                    f32::from_bits(words[2]),
+                                let [c1, a2, a3] =
+                                    [words[0], words[1], words[2]].map(f32::from_bits);
+                                assert!(
+                                    [c1, a2, a3].iter().all(|word| word.is_normal()),
+                                    "subnormal or non-finite recursion word {words:08x?}: \
+                                     rate {rate} quantum {quantum} history {history}"
                                 );
-                                *reached = reached.max(norm);
+                                *reached = reached.max(v_norm(c1, a2, a3));
                             }
                         }
                     }
@@ -716,23 +918,40 @@ fn every_reachable_recursion_word_stays_inside_the_hull_of_the_designs() {
                     assert!(q_design < 1.0);
                     let excess = reached - q_design;
                     assert!(
-                        excess <= inflation,
-                        "rate {rate} quantum {quantum} history {history} section {section}: \
-                         reached {:.6e} over design {:.6e} by {excess:.3e} (bound {inflation:.3e})",
+                        excess <= allowance,
+                        "rate {rate} quantum {quantum} history {history} ({kind:?}) section \
+                         {section}: reached {:.6e} over design {:.6e} by {excess:.3e} \
+                         (allowance {allowance:.3e})",
                         reached - 1.0,
                         q_design - 1.0,
                     );
-                    worst_norm = worst_norm.max(reached);
-                    worst_design = worst_design.max(q_design);
-                    worst_excess = worst_excess.max(excess);
+                    let slot = match kind {
+                        History::LogUniform => 0,
+                        History::Endpoints => 1,
+                        History::Close(_) => 2,
+                    };
+                    if excess > worst[slot].0 {
+                        worst[slot] = (excess, allowance);
+                    }
                 }
             }
         }
         println!(
-            "rate {rate}: max ||A(w)||_V - 1 = {:.3e}, max design q - 1 = {:.3e}, \
-             max excess over the history's design = {worst_excess:.3e} (bound {inflation:.3e})",
-            worst_norm - 1.0,
-            worst_design - 1.0,
+            "rate {rate}: max-cutoff design q - 1 = {:.4e} (norm - spectral radius {:.2e}), \
+             allowance at quantum 1 = {:.4e}, \
+             q_ramp - 1 = {:.4e}; worst excess over the history's design (allowance at that \
+             quantum): log-uniform {:.3e} ({:.3e}), endpoints {:.3e} ({:.3e}), close {:.3e} \
+             ({:.3e})",
+            q_top - 1.0,
+            q_top - radius,
+            norm_allowance(1),
+            q_ramp_top - 1.0,
+            worst[0].0,
+            worst[0].1,
+            worst[1].0,
+            worst[1].1,
+            worst[2].0,
+            worst[2].1,
         );
     }
 }

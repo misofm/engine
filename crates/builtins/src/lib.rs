@@ -51,14 +51,15 @@ use lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
-            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
-            gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
-            input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
-            input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
-            input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
-            matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
-            plan_is_channel_symmetric, zero_lanes_block,
+            GainMuteRamp, INPUT_FILTER_LEADING_UPDATES, InputChainCoef, InputChainPlan,
+            InputChainState, InputTrimRamp, Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block,
+            fader_matrix_block_without_identity, gain_mute_block, gain_mute_ramp_block,
+            input_chain_block_elided, input_chain_block_mono_elided, input_chain_plan,
+            input_chain_ramp_block_elided, input_chain_ramp_block_filter,
+            input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
+            mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity,
+            matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric, section_is_identity,
+            zero_lanes_block,
         },
     },
 };
@@ -958,6 +959,27 @@ pub(crate) struct InputStage<L: Lane> {
     /// feature existed. The cost of the feature to such a session is this one `bool` test per bank
     /// per block, and the `false` arm is byte-identical work.
     ramping: bool,
+    /// Whether the last block this stage rendered was collapsed ([`InputStage::process_mono`])
+    /// and no disengage ([`InputStage::desymmetrize`]) has run since.
+    ///
+    /// # The collapsed-stage invariant (#1407)
+    ///
+    /// While a stage is collapsed, channel `0` is the only live state: the one-plane body advances
+    /// channel `0`'s integrators and leaves channel `1`'s frozen at the values they held when the
+    /// collapse engaged, and only the disengage copy repairs them. So no decision may read
+    /// channel `1`'s state while this is set, and every `Both` record applies channel `0`'s
+    /// decision to both channels. The reads that would otherwise see the frozen words go through
+    /// [`InputStage::live_state_channel`]: the live filter retarget's rule-3 predicate and the
+    /// elision plan. The lane export and `channels_agree` also read channel `1`'s integrators, and
+    /// neither is reached collapsed: a carry disengages first (`disengage_for_carry`), and the M3
+    /// proof is asked only of a chain rendering dual. A dual block after a collapsed one without
+    /// the disengage copy is a debug assertion in [`InputStage::process`]. The coefficient, target, step and countdown records need
+    /// no such redirection, because `process_mono` mirrors them onto channel `1` at the bottom of
+    /// every collapsed block, so at a drain they are what the dual run would hold.
+    ///
+    /// One byte beside `ramping` and `symmetry`, in padding the struct already had: no sealed
+    /// size moves.
+    collapsed: bool,
     /// One flag per lane: [`InputStage::compute_lane_channel_symmetry`]'s verdict, held rather
     /// than re-derived.
     ///
@@ -1065,6 +1087,7 @@ impl<L: Lane> InputStage<L> {
             ramp,
             remaining: [[0; MAX_BANK_LANES]; 2],
             ramping: false,
+            collapsed: false,
             symmetry: 0,
             lifetime_recovered: [0; 2],
         };
@@ -1263,8 +1286,21 @@ impl<L: Lane> InputStage<L> {
     /// Recompute the elision plan while a filter target is in flight.  An in-flight section is
     /// conservative even when its current words still happen to be identity words: the target
     /// is already accepted and the ramp body must execute it.
+    ///
+    /// While the stage is collapsed, channel `1`'s sections are decided over channel `0`'s
+    /// integrators (the collapsed-stage invariant, [`InputStage::collapsed`]): a disable that
+    /// completes collapsed clears channel `0`'s integrators only, and deciding channel `1` over
+    /// its frozen words would split the plan between the channels.
     fn refresh_filter_plan(&mut self) {
         let mut plan = input_chain_plan::<L>(&self.coef, &self.state);
+        if self.collapsed {
+            for section in 0..2 {
+                plan.elided[1][section] = section_is_identity::<L>(
+                    &self.coef.section[1][section],
+                    &self.state.section[0][section],
+                );
+            }
+        }
         for channel in 0..2 {
             for section in 0..2 {
                 if self.filter_remaining[channel][section]
@@ -1277,6 +1313,33 @@ impl<L: Lane> InputStage<L> {
             }
         }
         self.plan = plan;
+    }
+
+    /// The channel whose integrators stand for `channel`'s: channel `0` while the stage is
+    /// collapsed, `channel` itself otherwise. See [`InputStage::collapsed`].
+    const fn live_state_channel(&self, channel: usize) -> usize {
+        if self.collapsed { 0 } else { channel }
+    }
+
+    /// Each lane's leading countdown for the filter-ramp bodies: its ramp countdown less
+    /// `64 - INPUT_FILTER_LEADING_UPDATES`, so the bodies step a word from the current one while it
+    /// is at least zero (#1407). Built per block, like [`InputStage::load_filter_countdown`], and
+    /// never stored.
+    fn load_filter_leading(&self) -> [[L; 2]; 2] {
+        let floor = (INPUT_FILTER_RAMP_SAMPLES - INPUT_FILTER_LEADING_UPDATES) as f32;
+        let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
+        for (channel, channel_words) in words.iter_mut().enumerate() {
+            for (section, section_words) in channel_words.iter_mut().enumerate() {
+                for (lane, word) in section_words.iter_mut().enumerate() {
+                    *word = self.filter_remaining[channel][section][lane]
+                        .min(INPUT_FILTER_RAMP_SAMPLES) as f32
+                        - floor;
+                }
+            }
+        }
+        core::array::from_fn(|channel| {
+            core::array::from_fn(|section| lane_words::<L>(&words[channel][section]))
+        })
     }
 
     fn load_filter_countdown(&self) -> [[L; 2]; 2] {
@@ -1416,7 +1479,9 @@ impl<L: Lane> InputStage<L> {
             ];
             let current_words: [f32; 6] = core::array::from_fn(|index| current_values[index][lane]);
             let current_is_identity = bit_equal(&current_words, &IDENTITY);
-            let state = self.state.section[channel][section];
+            // The collapsed-stage invariant: while collapsed, channel `1`'s integrators are frozen
+            // and channel `0`'s stand for both, so both channels decide over channel `0`'s.
+            let state = self.state.section[self.live_state_channel(channel)][section];
             let settled_disabled = remaining[lane] == 0
                 && current_is_identity
                 && lane_read::<L>(state.ic1)[lane].to_bits() == 0
@@ -1696,12 +1761,17 @@ impl<L: Lane> InputStage<L> {
         // The feature's off gate, and the whole of its steady-state cost: one `bool`. The `false`
         // arm is the call this function has always made, on the prepared coefficient words, with
         // the elision plan Job 1 decided -- byte-identical work.
+        debug_assert!(
+            !self.collapsed,
+            "a dual block after a collapsed one needs the disengage copy first (desymmetrize)"
+        );
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..2);
             if self.ramping {
                 self.load_countdown();
             }
             let mut filter_remaining = self.load_filter_countdown();
+            let filter_leading = self.load_filter_leading();
             #[cfg(test)]
             FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
             let mut report = input_chain_ramp_block_filter::<L>(
@@ -1715,6 +1785,7 @@ impl<L: Lane> InputStage<L> {
                 &self.filter_target,
                 &self.filter_step,
                 &mut filter_remaining,
+                filter_leading,
             );
             if self.ramping {
                 self.settle(prefix, 0..2);
@@ -1839,12 +1910,15 @@ impl<L: Lane> InputStage<L> {
         // holds: by the time `desymmetrize` runs, this block's drain may legitimately have moved
         // one channel's words and not the other's.
         debug_assert!(self.trim_ramp_channels_agree());
+        // From here until the disengage copy, channel `0` is the only live state.
+        self.collapsed = true;
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..1);
             if self.ramping {
                 self.load_countdown();
             }
             let mut filter_remaining = self.load_filter_countdown();
+            let filter_leading = self.load_filter_leading();
             #[cfg(test)]
             FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
             let mut report = input_chain_ramp_block_filter_mono::<L>(
@@ -1857,6 +1931,7 @@ impl<L: Lane> InputStage<L> {
                 &self.filter_target,
                 &self.filter_step,
                 &mut filter_remaining,
+                filter_leading,
             );
             if self.ramping {
                 self.settle(prefix, 0..1);
@@ -1994,6 +2069,7 @@ impl<L: Lane> InputStage<L> {
     /// froze.** `process_mono` froze the integrators. It did not freeze the ramp; it mirrored it.
     fn desymmetrize(&mut self) {
         self.state.section[1] = self.state.section[0];
+        self.collapsed = false;
         self.refresh_filter_plan();
     }
 

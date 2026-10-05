@@ -851,6 +851,7 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
+    mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
@@ -912,15 +913,19 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
                 let remaining = filter_remaining[channel][section].sub(one);
                 let done = remaining.le(zero);
                 filter_remaining[channel][section] = remaining;
-                let current = &mut coefficients[channel][section];
+                let lead = filter_leading[channel][section].sub(one);
+                filter_leading[channel][section] = lead;
+                let leading = zero.le(lead);
                 let target = &filter_target[channel][section];
-                let step = &filter_step[channel][section];
-                current.c1 = L::select(done, target.c1, current.c1.add(step.c1));
-                current.a2 = L::select(done, target.a2, current.a2.add(step.a2));
-                current.a3 = L::select(done, target.a3, current.a3.add(step.a3));
-                current.m0 = L::select(done, target.m0, current.m0.add(step.m0));
-                current.m1 = L::select(done, target.m1, current.m1.add(step.m1));
-                current.m2 = L::select(done, target.m2, current.m2.add(step.m2));
+                filter_ramp_words(
+                    &mut coefficients[channel][section],
+                    target,
+                    &filter_step[channel][section],
+                    remaining,
+                    done,
+                    leading,
+                    zero,
+                );
                 let identity = L::mask_and(
                     L::mask_and(current_target_identity(target), done),
                     L::mask_not(no_lanes::<L>()),
@@ -954,6 +959,73 @@ fn current_target_identity<L: Lane>(target: &SvfCoef<L>) -> L::Mask {
     )
 }
 
+/// Advances one section's six filter ramp words after a frame (#1407).
+///
+/// The first [`INPUT_FILTER_LEADING_UPDATES`] words of a ramp step from the current word,
+/// `current + step`; every later word is computed from the target, the step and the countdown left
+/// after this frame, `target - step * remaining`, never from the previous word. So a ramp
+/// accumulates at most four additions, and every word is within a fixed rounding of the line from
+/// the word the ramp started at to its target.
+///
+/// Why the split, and why at four: a word computed from the target carries a rounding of the
+/// whole remaining distance `step * remaining`, which near the start of a ramp is nearly the whole
+/// `target - start`; a word stepped from the start carries one rounding of the word per step
+/// taken. A host that restarts a ramp every `q` frames compounds the error of its restart word
+/// `64 / q` times (the contraction of the old start's error by `1 - q / 64` per restart), and
+/// stepping the first four words is what keeps that compounded error at its floor, `64` half-ulps
+/// of the word, at every block size: past four steps the target-relative word is the smaller
+/// one. The bound and its proof are in `docs/rulings/builtins-input-liveness-d2.md`.
+///
+/// A recursion word (`c1`, `a2`, `a3`) whose step is zero holds its current word until the
+/// completion snap. That is how rule 2 of the live retarget law (a disable) freezes the recursion
+/// at its current words while only the mix ramps: the owner writes a `+0.0` step, and the
+/// target-relative form alone would jump the word to the identity's zero. Every other zero step
+/// belongs to a word already equal to its target (rule 3's jumped recursion, or a word a rule-4
+/// retarget does not move), so the hold changes nothing for it. The mix words never freeze, so
+/// they take no hold.
+///
+/// Partition-invariant by construction: the word depends only on the countdown, which the owner
+/// reloads exactly from its integer countdown at the top of every ramping block, and on the
+/// current word, which the owner keeps across blocks.
+#[inline(always)]
+fn filter_ramp_words<L: Lane>(
+    current: &mut SvfCoef<L>,
+    target: &SvfCoef<L>,
+    step: &SvfCoef<L>,
+    remaining: L,
+    done: L::Mask,
+    leading: L::Mask,
+    zero: L,
+) {
+    let word = |current: L, target: L, step: L| {
+        L::select(
+            done,
+            target,
+            L::select(leading, current.add(step), target.sub(step.mul(remaining))),
+        )
+    };
+    let held = |current: L, target: L, step: L| {
+        let hold = L::mask_and(step.eq(zero), L::mask_not(done));
+        L::select(hold, current, word(current, target, step))
+    };
+    current.c1 = held(current.c1, target.c1, step.c1);
+    current.a2 = held(current.a2, target.a2, step.a2);
+    current.a3 = held(current.a3, target.a3, step.a3);
+    current.m0 = word(current.m0, target.m0, step.m0);
+    current.m1 = word(current.m1, target.m1, step.m1);
+    current.m2 = word(current.m2, target.m2, step.m2);
+}
+
+/// How many of a filter ramp's 64 updates step from the current word (#1407).
+///
+/// The owner hands the filter-ramp bodies each lane's leading countdown, `remaining - 60` before
+/// the block (`remaining` its integer ramp countdown), and a frame steps from the current word
+/// while that countdown, decremented with the ramp's, is still at least zero: the frames that leave
+/// a ramp countdown of `63` down to `60`. Carried as a per-lane word rather than compared against a
+/// splatted `60.0` so the bodies hold no new vector constant: on Apple targets each one is a
+/// `memset_pattern16` call in the render function (known defect #1018).
+pub const INPUT_FILTER_LEADING_UPDATES: u32 = 4;
+
 /// Mono-collapse form of [`input_chain_ramp_block_filter`].  Only channel zero advances; the
 /// owner mirrors its complete filter and trim records onto channel one after the block.
 #[allow(clippy::too_many_arguments)]
@@ -968,6 +1040,7 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
+    mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let limit = L::splat(NONFINITE_LIMIT);
@@ -1017,15 +1090,19 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
             let remaining = filter_remaining[0][section].sub(one);
             let done = remaining.le(zero);
             filter_remaining[0][section] = remaining;
-            let current = &mut coefficients[section];
+            let lead = filter_leading[0][section].sub(one);
+            filter_leading[0][section] = lead;
+            let leading = zero.le(lead);
             let target = &filter_target[0][section];
-            let step = &filter_step[0][section];
-            current.c1 = L::select(done, target.c1, current.c1.add(step.c1));
-            current.a2 = L::select(done, target.a2, current.a2.add(step.a2));
-            current.a3 = L::select(done, target.a3, current.a3.add(step.a3));
-            current.m0 = L::select(done, target.m0, current.m0.add(step.m0));
-            current.m1 = L::select(done, target.m1, current.m1.add(step.m1));
-            current.m2 = L::select(done, target.m2, current.m2.add(step.m2));
+            filter_ramp_words(
+                &mut coefficients[section],
+                target,
+                &filter_step[0][section],
+                remaining,
+                done,
+                leading,
+                zero,
+            );
             let identity = L::mask_and(current_target_identity(target), done);
             state[section].ic1 = state[section].ic1.andnot(identity);
             state[section].ic2 = state[section].ic2.andnot(identity);

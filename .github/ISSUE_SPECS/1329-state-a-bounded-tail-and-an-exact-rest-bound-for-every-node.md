@@ -94,10 +94,16 @@ gets its own slice (see "Non-goals").
   `builtins`: the bound over the whole cutoff domain (each section disabled or in `[10 Hz, max]`),
   trim +24 dB, any history of filter targets and their 64-sample ramps. All builtin sections share
   `k = sqrt(2)`, so every designed step matrix is the bilinear map of one fixed `M` and they share
-  eigenvectors `V`. Under #1407, the recursion words any history reaches are the designs, the
-  identity with +0.0 integrators, and the f32-accumulated interior words of 64-step ramps and
-  restart chains among designs. `q_ramp = max ||A(w)||_V` over them, plus `6*2^-24*kappa`, must be
-  `< 1`. The state at N is bounded by the invariant ball `R = g * max_w b(w)/(1 - q(w))`, with `b`
+  eigenvectors `V`. Under #1407 (its Amendment 1 and "Numerical limits"), every recursion word any
+  history reaches is the identity with +0.0 integrators, or lies componentwise within the proven
+  `f32` allowance `E = 64 h + u D = (1.967e-6, 9.716e-7, 1.967e-6)` (for `c1`, `a2`, `a3`, at
+  every block size) of the convex hull of the designs the history used, so
+  `||A(w)||_V <= q_design + 1.419e-5`. Over the whole domain the largest design norm is the
+  maximum-cutoff design's, `q - 1 = -5.213e-5` (44.1 and 88.2 kHz) and `-5.241e-5` (48 and
+  96 kHz), so `q_ramp = max ||A(w)||_V <= 1 - 3.794e-5` (44.1, 88.2 kHz) and `1 - 3.822e-5` (48,
+  96 kHz); with the kernel inflation `6*2^-24*kappa = 8.63e-7`, `q_ramp + 8.63e-7 < 1` with at
+  least `3.70e-5` to spare at every launch rate. The derivation uses this computed `q_ramp`, not a
+  sampled maximum. The state at N is bounded by the invariant ball `R = g * max_w b(w)/(1 - q(w))`, with `b`
   the V-norm of the input column. The free response starts at N + 64. `g = 10^(24/20)`, valid by
   #1408. Production
   evaluates the closed form at the worst-case pair below (round 1: HPF one ulp below the maximum
