@@ -17,21 +17,25 @@ resource report says so. A declaration with nothing to reset changes nothing.
   Without a reset they never come down.
 - No C ABI call lets a host say "continuity is not needed". The render clock must stay contiguous
   ("render.time.discontinuity", `crates/capi/include/miso_engine_v1.h:72-75`). Seeks are per
-  source (`miso_engine_v1_source_seek`, `miso_engine_v1_source_seek_at`, `:293-303`). The feature
-  bits end at `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32), with mask 63 (`:136-142`;
-  `crates/capi/src/abi.rs:64-71`).
+  source (`miso_engine_v1_source_seek`, `miso_engine_v1_source_seek_at`, `:293-303`). On
+  `6fb211594` the last feature bit is `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (`:136-142`;
+  `crates/capi/src/abi.rs:64-71`). Other decision-15 entry points may take bits before this slice
+  merges.
 - The successor entry points take a `SuccessorBase` (`crates/host-core/src/prepare.rs:641-647`).
 - D15-17: a host-declared stop turns any pending catch-up into a plain rebuild with no continuity
   constraint, applied at the next render. The accumulated read-ahead `ΣP` of the warm successor
-  resets at the same declaration (D15-8). *Pre-roll a successor whose latency grows* (#1287)
-  introduces that read-ahead, so #1287 owns resetting it at the declaration defined here.
+  resets at the same declaration (D15-8). *Give a plan a source-read clock that leads its render
+  clock* (#1396), a slice of *Pre-roll a successor whose latency grows* (#1287), introduces that
+  read-ahead and resets it at the declaration defined here.
 
 ## Decisions frozen for this slice
 
 - **D1. The declaration.**
   - A new C ABI entry point, `uint32_t miso_engine_v1_declare_discontinuity(miso_engine_v1_session
-    *session)`, guarded by the next free feature bit (`MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY`),
-    and the mask grows to match.
+    *session)`, guarded by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY`. Its value is the next
+    free bit when this slice merges, and the mask grows to match. This spec fixes no bit number;
+    code, tests and docs name the bit by its symbol (decision 15, D15-12: a feature bit per
+    addition).
   - It is a control-thread call. Its meaning: the next block the host renders need not continue the
     previous output, because the host has stopped or is about to seek every source.
   - The header documents the duty: a host calls it at a stop, and before a seek of every source.
@@ -48,7 +52,11 @@ resource report says so. A declaration with nothing to reset changes nothing.
     compare-and-swap* (#1310).
   - If no floor is raised, the call returns OK and publishes nothing.
 - **D3. Host-core.** `SuccessorBase` gains `discontinuity: bool`. When it is true, the successor
-  is compiled with an empty floor map, and the join carries sources only. The inventory records
+  is compiled with an empty floor map, and the join carries sources only. Its source-read offset
+  is 0 (#1396 D2, which lands after this slice and reads this flag). The declaration may or may not
+  be followed by a seek: a stop without a seek follows #1396 D3. Each carried consumer keeps its
+  read position, so no frame is repeated or skipped, and the source-read clock steps back to the
+  render clock at the adoption block. The inventory records
   natural arrivals beside floored ones, so D2's test is a comparison of two numbers.
 - **D4. Acked-batch rule.** Preparation can fail (budgets, ceilings). On failure the call returns
   the preparation error and nothing changes. On success the plan is published with its retirement
@@ -57,8 +65,8 @@ resource report says so. A declaration with nothing to reset changes nothing.
 - **D5. Both hosts.** The call is implemented in the control plane, in the crate of *Extract the C
   ABI control plane into a portable crate both hosts call* (#1309). The C ABI exposes it here. The
   browser reaches the same function when *Run the browser control plane in a Worker and keep the
-  AudioWorklet render-only* (#1332) lands, and its SDK surface belongs to *Replace the session from
-  the browser SDK* (#1296).
+  AudioWorklet render-only* (#1332) lands, and its SDK surface belongs to *Apply session
+  transactions from the browser SDK* (#1296).
 
 ## Deliverables
 
@@ -80,7 +88,8 @@ resource report says so. A declaration with nothing to reset changes nothing.
 
 ## Non-goals
 
-- No read-ahead reset (#1287 implements it at this declaration).
+- No read-ahead reset: #1396 sets the discontinuity successor's source-read offset to 0 (its D2)
+  and defines the stop without a seek (its D3).
 - No browser export (#1332, #1296).
 - No change to the render clock's contiguity rule.
 
@@ -100,7 +109,9 @@ resource report says so. A declaration with nothing to reset changes nothing.
 4. **Failure changes nothing.** With a resource cap set so that the floorless preparation fails,
    the call returns the preparation error, and the active plan, its floors and the committed model
    are unchanged.
-5. **ABI surface.** `query_capabilities` reports the new bit, and the mask test pins the new mask.
+5. **ABI surface.** `query_capabilities` reports `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY`,
+   and the mask test checks that the mask is the OR of every feature symbol, the new one
+   included (by symbol, never by a literal number).
 6. Commands:
    - `cargo test --locked -p host-core -p control-plane -p capi --features host-core/test-support`
    - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`

@@ -28,9 +28,9 @@ the C ABI's guarantees:
 - a refused transaction leaves the running engine and the model untouched.
 
 The watermark reports when the revision is in effect. On a page that is not isolated, the same
-call runs the blocking rebuild on the audio thread. It is reported and counted. This slice is the
-Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewritten slices
-#1293-#1297.
+call runs the blocking rebuild in the worklet's message handler, never inside `process()`. It is
+reported and counted. This slice is the Rust host, tested natively. The Wasm export, worklet wiring
+and SDK are the rewritten slices #1293-#1297.
 
 ## Context
 
@@ -50,7 +50,10 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
   status.next_absolute_sample }` (`:3234-3239`). It has no plan exchange.
 - **The C ABI's shape, which this slice reuses.**
   - The control thread moves the persisting source producers into the candidate at commit
-    (`crates/capi/src/runtime/control.rs:1010-1019`).
+    (`crates/capi/src/runtime/control.rs:1010-1019`). In the browser the producers have one
+    owner, the Worker: *Move browser source submission and seeks into the Worker* (#1387) puts the
+    `SourceControlSet` there, and #1381 D1-D2 puts it inside the Worker's `SessionState`, which
+    routes every source call.
   - It publishes through `PlanPublisher::reserve_replacement`
     (`crates/engine/src/realtime/plan_exchange.rs:265`).
   - Render adopts in `RealtimePlanOwner::enter_block` (`:375`). That step continues the clock,
@@ -60,7 +63,10 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
   - `SuccessorBase { inventory, committed }` (`crates/host-core/src/prepare.rs:641`).
   - `prepare_host_runtime_with_live_controls_successor` (`:926`).
   - `SourceControlSet::adopt_persisting` (`crates/host-core/src/source.rs:286`).
-  - No successor wrapper exists yet for the two spectrum branches.
+  - No successor entry exists yet for the two spectrum branches, and the no-spectrum branch
+    (`prepare_host_runtime_with_selected_meters_between_render_calls`, `prepare.rs:1051`) has no
+    concurrent form. *Prepare every browser preparation branch concurrently, as a successor too,
+    in host-core* (#1401) adds all of them.
 - **Cost.** A 64-track boot is 23.9 ms (V8 p50) against a 2.667 ms quantum (round-1 C4;
   *Measure a session rebuild on the browser's audio thread*, #1289, closed). In Worker mode this
   cost leaves the audio thread. In `single` mode it is the blocking rebuild that D15-10 accepts,
@@ -71,11 +77,12 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
 - **D1. Entry point.** The control half's `apply(transaction) -> Result<{revision, path},
   refusal>` is `control_plane::SessionState`'s transaction apply (`crates/control-plane`,
   #1309). It runs in the Worker on the `SessionState` that #1381 constructs. It prepares through
-  the adapter preparation hook that #1381 adds.
-  - A `rebuild` delta prepares through host-core successor wrappers for each of `compile_ready`'s
-    three branches. This slice adds the two spectrum wrappers beside
-    `prepare_host_runtime_with_live_controls_successor`.
-  - The wrappers use the concurrent preparation variants, never `_between_render_calls`. The
+  the browser's `RuntimePreparer` (*Prepare through an adapter-supplied preparer in the
+  control-plane crate*, #1400).
+  - A `rebuild` delta prepares through #1401's successor entry for the boot's branch: the
+    single-capture or collection spectrum successor, or the concurrent selected-meter successor
+    (`prepare_host_runtime_with_selected_meters_successor`).
+  - These entries are concurrent; none is a `_between_render_calls` entry. The
     producers live in the Worker, and render runs at the same time.
   - The current spectrum configuration is kept. A transaction that removes the strip a spectrum
     capture observes is refused as `web.apply.spectrum_target`.
@@ -106,29 +113,33 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
     candidate.
   - Live edits submitted while a candidate is pending are written to the newest candidate's lanes
     (D15-17).
-- **D6. Single mode.** With no Worker, the same `apply` runs on the worklet thread between two
-  render calls, and the same render half adopts at the next block.
+- **D6. Single mode.** With no Worker, the same `apply` runs in the worklet's control handler, in
+  its message handler, never inside `process()` and outside the render-locked window. The same
+  render half adopts at the next block.
   - Path stays `rebuild`.
-  - Each such apply increments the host status's saturating `blockingRebuilds` counter, which
-    #1332 D1 defines.
-  - The service step (#1348) runs after the render call, never inside it.
-- **D7. Observation.** Meter, observation and spectrum state of unchanged owners carry across the
-  swap as *Carry meter, observation and spectrum state across a plan swap* (#1327) specifies
+  - Each such apply increments the host status's saturating `blockingRebuilds` counter, and its
+    allocations and frees count in `singleModeControlAllocations` (both #1332 D1). Decision 15
+    accepts this, counted and reported, for a non-isolated page only (D15-10). The render-locked
+    allocation count stays exactly 0.
+  - The service step runs from the same handler on #1381 D6's service message, never inside
+    `process()`, so the retired plan is freed there.
+- **D7. Observation.** Meter and effect observation state of unchanged owners carry across the
+  swap as *Carry meter and effect observation state across a plan swap* (#1327) specifies, and
+  spectrum capture state as *Carry spectrum capture state across a plan swap* (#1395) specifies
   (D15-14). The meter lease carries.
 
 ## Deliverables
 
 1. D1-D6 in `hosts/host-web/src/lib.rs`: the control half's `apply` with the browser's
    successor preparation, publication, and the `blockingRebuilds` increment.
-2. The two spectrum successor wrappers in `crates/host-core/src/prepare.rs`.
-3. Native tests in `hosts/host-web/src/tests.rs`.
+2. Native tests in `hosts/host-web/src/tests.rs`, and the integration test binary
+   `hosts/host-web/tests/structural_apply_realtime.rs` (gate 7).
 
 ## Authorized paths
 
-- `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`, `hosts/host-web/Cargo.toml`
-  (dev-dependency `bench-support` only)
-- `crates/host-core/src/prepare.rs`, `crates/host-core/src/lib.rs`: the two spectrum successor
-  wrappers only. Root orders this after stream A's open edits to `prepare.rs`.
+- `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`,
+  `hosts/host-web/tests/structural_apply_realtime.rs` (new), `hosts/host-web/Cargo.toml`
+  (dev-dependency `bench-support` only, if no earlier slice added it)
 
 ## Non-goals
 
@@ -174,14 +185,19 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
 5. **Each preparation branch.** Gate 1 passes with a single spectrum capture and with a spectrum
    collection configured.
 6. **Companions.** A prepared companion bound before the apply is refused after it.
-7. **Realtime.** Across gates 1, 2 and 4, the render thread counts `allocations == 0 && frees == 0`
-   around every render call (`bench_support::alloc` thread-scoped counters, after warm-up). Every
-   retired plan is dropped on the control thread.
-8. **Single mode.** Gate 1 driven on one thread (apply between render calls) gives the same blocks
-   and the same response. `blockingRebuilds` is exactly 1.
+7. **Realtime.** Integration test binary `hosts/host-web/tests/structural_apply_realtime.rs`.
+   Decision 15 rules that host-web's native allocation-count gates live in an integration binary,
+   never in `src/tests.rs`, which already registers a `#[global_allocator]`. It links
+   `bench_support::alloc`, calls `assert_installed()` first, and runs the scripts of gates 1, 2
+   and 4 through the test-support halves (#1381). The render thread's thread-scoped counters read
+   `allocations == 0 && frees == 0` around every render call, after warm-up. Every retired plan
+   is dropped on the control thread.
+8. **Single mode.** Gate 1 driven on one thread (apply between render calls, as the message
+   handler runs it) gives the same blocks and the same response. `blockingRebuilds` is exactly 1.
+   On the browsers' non-isolated leg, `singleModeControlAllocations` grows across the apply and
+   `miso_engine_web_v1_render_allocation_count` stays 0.
 9. **Commands:**
-   - `cargo test --locked -p host-web --features host-web/test-support`
-   - `cargo test --locked -p host-core --features host-core/test-support`
+   - `cargo test --locked -p host-web --features host-web/test-support` (runs gate 7's binary)
    - `bash scripts/check-web-audioworklet.sh`
    - `bash scripts/test-web-audioworklet.sh`
    - the browser legs: `npm run qualify -- --artifacts ... --sdk-root ... --browser <b> --check-matrix --self-test-mutations`
@@ -201,8 +217,8 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
   never completes.
 - Gate 6: turns red if a companion addressed by an old strip index reaches the new plan.
 - Gate 7: turns red if the render half drops a retired plan, or allocates on adoption.
-- Gate 8: turns red if single mode takes a different code path that diverges in bits, or is not
-  counted.
+- Gate 8: turns red if single mode takes a different code path that diverges in bits, or if its
+  rebuild or its allocations are not counted.
 - Superseded tests: none. The old body's tests were never written.
 
 ## Dependencies
@@ -219,4 +235,8 @@ Rust host, tested natively. The Wasm export, worklet wiring and SDK are the rewr
 - *Give every browser plan live strip fader and mute lanes* (#1326): the transitions on the
   browser need a live strip mute.
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), for gates 1 and 2.
-- *Carry meter, observation and spectrum state across a plan swap* (#1327), for D7.
+- *Carry meter and effect observation state across a plan swap* (#1327), for D7.
+- *Carry spectrum capture state across a plan swap* (#1395), for D7's spectrum carry.
+- *Move browser source submission and seeks into the Worker* (#1387): the producers' owner.
+- *Prepare every browser preparation branch concurrently, as a successor too, in host-core* (#1401).
+- *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400).

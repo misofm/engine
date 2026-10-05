@@ -37,8 +37,11 @@ function body.
   `pub tail_and_rest: fn(sample_rate: u32, quality: EffectQuality) -> (TailSamples, RestBound)`.
   It runs on the control thread; render never calls it.
 - **D2. `RestBound`.** `pub enum RestBound { Bounded(RestSamples), Unstated }` in `effect-contract`.
-  `Unstated` is the effect-side counterpart of `TailSamples::Infinite`: "no bound stated yet".
-  Both go in *Retire the Infinite tail* (#1378).
+  `Unstated` is the effect-side counterpart of `TailSamples::Infinite`. It is not a lasting
+  variant: it exists only because the per-effect slices land one at a time, and the same stream-G
+  sequence deletes it. *Retire the Infinite tail* (#1378) depends on every per-effect slice
+  (#1372-#1376) and removes `Unstated` together with `Infinite`, so no release of the sequence's
+  end state contains either. Its doc comment says exactly that and names #1378.
 - **D3. One source.** `QualityDescriptor::tail` is deleted. `expected_prepared_metadata` calls
   `(descriptor.tail_and_rest)(rate, quality)` and fills `PreparedEffectMetadata::{tail, rest}`.
   `EffectProgramKey` gains `rest`, for the same reason it carries `tail`. The `effect-compiler`
@@ -65,9 +68,22 @@ function body.
   `crates/compressor/src/lib.rs`, `crates/true-peak-limiter/src/lib.rs`,
   `crates/multiband-compressor/src/lib.rs`, `crates/delay/src/lib.rs`,
   `crates/gate-expander/src/lib.rs`, `crates/transient-shaper/src/lib.rs`, `crates/soft-clip/src/lib.rs`
-- `crates/conformance/src/effect.rs`; tests that build `QualityDescriptor` or read
-  `quality.tail` (`crates/true-peak-limiter/src/lib.rs:5124`, `crates/delay/src/lib.rs:1798`,
-  `crates/graph-compiler/src/lib.rs` test fixtures)
+- `crates/conformance/src/effect.rs`
+- Tests that read `quality.tail`, moved onto `tail_and_rest` with the same expected value:
+  `crates/true-peak-limiter/src/lib.rs:5124`, `crates/gate-expander/tests/contract.rs:37`,
+  `crates/transient-shaper/tests/contract.rs:35`, `crates/soft-clip/tests/contract.rs:32`
+- Struct literals that must gain the new field (`tail_and_rest` on an `EffectDescriptor`, `rest`
+  on a `PreparedEffectMetadata` or an `EffectProgramKey`, `tail` removed from a
+  `QualityDescriptor`), that field only: `crates/effect-contract/tests/response_analysis.rs`,
+  `crates/conformance/tests/effect_contract.rs`, `crates/effect-compiler/tests/native_session.rs`,
+  `crates/true-peak-limiter/tests/observation.rs`, `crates/compressor/tests/native_points.rs`,
+  `crates/transient-shaper/src/corpus.rs`, `crates/builtins-compiler/src/lib.rs`,
+  `crates/host-core/src/control_preparation.rs`, `crates/graph/src/lib.rs`,
+  `crates/graph-compiler/src/lib.rs`, `crates/graph-compiler/src/tests/bank_padding.rs`,
+  `crates/graph-compiler/src/tests/console_banking.rs`, `crates/rack-compiler/src/lib.rs`,
+  `crates/rack/src/lib.rs`, `crates/rack/tests/live_control_bank.rs`, `hosts/host-web/src/tests.rs`.
+  The implementer re-greps for each struct name before starting; a literal missed here is in
+  scope for the field only.
 - this spec
 
 ## Non-goals
@@ -77,8 +93,8 @@ function body.
 
 ## Hazards
 
-- *Validate effect descriptors once per type and drop node-ID string compares from graph
-  compilation* (#1330, stream J) also edits descriptor validation; whichever lands second rebases.
+- *Validate each effect descriptor once per type, not once per prepared instance* (#1330, stream J)
+  also edits descriptor validation; whichever lands second rebases.
 
 ## Objective gates
 

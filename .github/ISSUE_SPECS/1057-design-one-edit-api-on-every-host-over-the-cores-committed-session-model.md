@@ -53,7 +53,7 @@ how completion is observed, how a save works, and what each choice costs.
   path in its response*, #1313). The applied-revision watermark is a query (D15-17, *Publish an
   applied-revision watermark and complete edits asynchronously*, #1314).
 - **D3. Browser SDK surface.** `engine.apply(transaction)` returns `{revision, path}`, where path
-  is `live`, `model_only` or `rebuild` (plus `rebuild_with_transition` for a counted fallback).
+  is exactly one of `live`, `model_only` or `rebuild`.
   The watermark `(revision, first sample in effect, outcome flags)` is a status field. Submit is
   synchronous only for what can fail; completion is observed, never awaited (D15-17).
 - **D4. `replaceSession(document)`** exists only as a convenience. It diffs the document against

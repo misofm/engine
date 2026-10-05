@@ -16,7 +16,7 @@ changes.
 ## Context
 
 - **The evidence.** A phase profile of the browser module's preparation
-  (`/home/bl/misofm/submix-verdicts/PLAN-2026-10-05-adversary-round1.md`, C4, scratch profiles, not
+  (`docs/handoffs/decision-15-2026-10-05/PLAN-2026-10-05-adversary-round1.md`, C4, scratch profiles, not
   committed) attributes 11-12 % of preparation, inclusive, to `GraphNodeId` compares in the compiler
   hot path. The frozen workload is #1289's four boot documents
   (`artifacts/steps/web-rebuild-base/report.md`).

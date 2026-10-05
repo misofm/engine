@@ -38,15 +38,17 @@ worklet only renders and swaps.
   retire browser plans through the Worker's service loop* (#1381) puts the control plane in the
   Worker and runs the service step of *Add miso_engine_v1_service for bounded control work between
   edits* (#1348) after every Worker message and on a one-quantum timer; in `single` mode the
-  worklet runs it after a block that adopted a successor (#1381 D4). #1381 rebinds the render-side
+  worklet runs it after a block that adopted a successor (#1381 D6). #1381 rebinds the render-side
   meter, observation and spectrum companions at adoption in Rust (its D3); it adds no
   Worker-to-worklet message channel. *Admit browser live edits in the Worker through the committed
   model* (#1382) moves live commands into the Worker over #1332's page-to-control-plane port.
 - The exports come from *Export transaction apply and anchored seek from the browser engine
   module* (#1293). The `replace` export is *Diff a replacement document against the committed
-  model and export replace from the browser engine module* (#1386). The watermark is in the
-  worklet's status words, and the Worker reads the full record through `SessionState::watermark`
-  (*Publish the applied-revision watermark in the browser status*, #1349, D2 and D3).
+  model and export replace from the browser engine module* (#1386). The service and watermark
+  exports come from #1381: `miso_engine_web_v1_service(handle)` runs #1348's service step, and the
+  watermark-and-counters export copies the full watermark record (`SessionState::watermark`) and
+  the control counters. The watermark's status words in the worklet are *Publish the
+  applied-revision watermark in the browser status* (#1349).
 - The hermetic harness `scripts/test-web-audioworklet.mjs` (run by
   `scripts/test-web-audioworklet.sh`) drives the worklet and wrapper against fake exports, so it
   proves message, ordering and view logic, not rendered bits. Real bits are *Qualify a structural
@@ -69,8 +71,9 @@ worklet only renders and swaps.
   (*Move browser source submission and seeks into the Worker*, #1387), through
   `miso_engine_web_v1_source_seek_at`. Feeds that use the shared PCM ring do not use it (*Feed and
   retire the sources a browser edit adds or removes*, #1297).
-- **D3. Watermark.** After each #1348 service step (run as #1381 D4 schedules it), the control
-  half reads `SessionState::watermark` (#1349 D3); when it advanced, it posts `miso.watermark.v1 { tag, revision, sample, outcome }` to the page. Posts coalesce to
+- **D3. Watermark.** After each call of `miso_engine_web_v1_service(handle)` (#1381; scheduled
+  as #1381 D6 says), the control half reads the watermark through #1381's watermark-and-counters
+  export; when it advanced, it posts `miso.watermark.v1 { tag, revision, sample, outcome }` to the page. Posts coalesce to
   the latest value; when one post replaces an unsent one, its `outcome` is the OR of both, so no
   outcome flag is lost (D15-17). `miso.status.v1` replies gain `appliedRevision`, `appliedSample`
   and `appliedOutcome`, read from #1349's status words.
@@ -111,7 +114,7 @@ worklet only renders and swaps.
 
 ## Non-goals
 
-- No Rust change. No SDK API (*Apply session transactions from the browser SDK*, #1296). No real-browser
+- No Rust change: every export used here comes from #1293, #1381 or #1386. No SDK API (*Apply session transactions from the browser SDK*, #1296). No real-browser
   leg (#1295). No growth handling (#1332).
 
 ## Objective gates

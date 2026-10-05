@@ -8,8 +8,9 @@ Code anchors verified on `main` at `6fb211594`.
 The browser reports the same applied-revision watermark as the C ABI, with the same meaning. The
 worklet's status block carries `(revision, first sample fully in effect, outcome flags)` after
 every render that advances it, and the Worker's control plane can read the full record, counters
-included, through one engine-side call. The SDK's `engine.apply` (stream H) then reports completion
-from these fields instead of the browser's own `applied_at_sample` arithmetic.
+included, through one engine-side call that the Worker's watermark-and-counters export (#1381)
+returns. The SDK's `engine.apply` (stream H) then reports completion from these fields instead of
+the browser's own `applied_at_sample` arithmetic.
 
 ## Context
 
@@ -29,7 +30,14 @@ from these fields instead of the browser's own `applied_at_sample` arithmetic.
 - The browser does not render through `RealtimePlanOwner` today; *Swap and retire browser plans
   through the Worker's service loop* (#1381) makes the worklet render through it, with the Worker
   holding the publisher and retirer and calling the service step of *Add miso_engine_v1_service for
-  bounded control work between edits* (#1348).
+  bounded control work between edits* (#1348). #1381 also adds the Worker's wasm exports this
+  slice is read through: `miso_engine_web_v1_service(handle)` and a watermark-and-counters export,
+  with their layout mirrors.
+- *Report live_values_superseded in the browser status and prove both hosts drain strip cells
+  alike* (#1399, D1) takes offset 48 for `live_values_superseded`, leaving `reserved: [u64; 3]`
+  (offsets 56, 64, 72).
+- #1381 D5 adds `SessionState::watermark(&self) -> Result<PlanWatermark, WatermarkBusy>` in the
+  control-plane crate: a read of #1314's `PlanWatermarkReader`, counters included.
 
 ## Decisions frozen for this slice
 
@@ -37,14 +45,17 @@ from these fields instead of the browser's own `applied_at_sample` arithmetic.
   gains `watermark: Option<PlanWatermark>`: `Some` exactly on a block that advanced it (#1314 D3),
   with the values render just published. The worklet copies from it; it never reads the seqlock it
   writes.
-- **D2. Status words.** `WebStatus.reserved[0..3]` become `watermark_revision` (offset 48),
-  `watermark_first_sample` (56) and `watermark_outcome_flags` (64); `reserved` shrinks to
-  `[u64; 1]` at 72. Size stays 80. The flag bits are #1314's (`EXACT = 1`, `PREROLL_FALLBACK = 2`,
-  `TRANSITION_FALLBACK = 4`, `SUPERSEDED = 8`). Boot writes the initial watermark
+- **D2. Status words.** After #1399, the three `reserved` words become `watermark_revision`
+  (offset 56), `watermark_first_sample` (64) and `watermark_outcome_flags` (72). The record then
+  reads, from offset 48: `live_values_superseded` (#1399), the three watermark words, and no
+  reserved word; size stays 80 and no expansion word remains (D15-3 asks for exactly these three
+  words). The outcome flags fit one `u64` word. The flag bits are #1314's (`EXACT = 1`,
+  `PREROLL_FALLBACK = 2`, `TRANSITION_FALLBACK = 4`, `SUPERSEDED = 8`). Boot writes the initial watermark
   (`(initial revision, 0, EXACT)`); `render_next` overwrites the three words when D1 is `Some`.
-- **D3. Worker hook.** The control-plane crate exposes `SessionState::watermark(&self) ->
-  Result<PlanWatermark, WatermarkBusy>`, reading #1314's reader (counters included). The Worker
-  calls it from its service loop; the SDK exposes it (stream H). No new wasm export in this slice.
+- **D3. Worker hook.** This slice reuses the `SessionState::watermark()` accessor that #1381 D5
+  adds; it adds no accessor of its own. The Worker reads the full record through #1381's
+  watermark-and-counters export; the SDK exposes it (stream H). This slice adds no wasm export:
+  the status words ride the existing `miso_engine_web_v1_status_ptr`.
 - **D4. Single-instance mode.** A non-isolated page (#1332 D1 `single`) uses the same status words
   and the same render report; nothing differs.
 - **D5. Acked-batch question.** No queue; the status words are a level. The ack bytes do not
@@ -52,14 +63,13 @@ from these fields instead of the browser's own `applied_at_sample` arithmetic.
 
 ## Deliverables
 
-1. D1 in the engine; D3 in the control-plane crate.
+1. D1 in the engine.
 2. D2 in `WebStatus`, boot and `render_next`; every layout mirror regenerated with the repository's
    generators.
 
 ## Authorized paths
 
 - `crates/engine/src/realtime/plan_exchange.rs`, `watermark.rs`
-- `crates/control-plane/src/control.rs`
 - `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs` (status words only; stream H owns
   this crate, so root orders this after #1381)
 - `tools/parameter-metadata/src/abi_layout.rs`, `sdk/assets/miso-engine-v1-abi-layout.json`,
@@ -78,9 +88,11 @@ from these fields instead of the browser's own `applied_at_sample` arithmetic.
    equal to the C ABI's `miso_engine_v1_plan_watermark` for the same script.
 2. **Report only on advance.** Engine unit test: `RealtimeRenderReport::watermark` is `None` on a
    block with no revision change and `Some` with the published values on the advancing block.
-3. **Hook.** Control-plane test: `watermark()` returns the counters #1314 publishes (`exact_count`
-   grows by 2 for the gate-1 script).
-4. **Layout.** `hosts/host-web` layout tests pin the new offsets; `python3 -B scripts/check-abi-layout-v1.py`
+3. **Status equals the record.** After gate 1's script, the three status words equal the
+   `revision`, `first_sample` and `outcome_flags` that #1381's `SessionState::watermark()` returns
+   for the same session.
+4. **Layout.** `hosts/host-web` layout tests pin the new offsets (`live_values_superseded` 48,
+   the watermark words 56, 64, 72, size 80); `python3 -B scripts/check-abi-layout-v1.py`
    and its self-test, `bash scripts/check-sdk-generated.sh` and the parameter-metadata `--check`
    pass, and each fails if one mirror omits a word.
 5. Commands:
@@ -96,12 +108,16 @@ from these fields instead of the browser's own `applied_at_sample` arithmetic.
 - Gate 1: red if the browser computes its own application sample instead of copying render's
   watermark (it would report r1 or r2 before the swap).
 - Gate 2: red if the report carries a value on every block or misses the advancing one.
-- Gate 3: red if the hook reads the status words (no counters) instead of the record.
-- Gate 4: red if a mirror keeps the old `reserved: [u64; 4]` layout.
+- Gate 3: red if `render_next` writes the status words from a different advance than the one the
+  record published (for example, a block late).
+- Gate 4: red if a mirror keeps the old `reserved` words or overlaps #1399's word at 48.
 
 ## Dependencies
 
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
-- *Swap and retire browser plans through the Worker's service loop* (#1381).
+- *Swap and retire browser plans through the Worker's service loop* (#1381): the service and
+  watermark-and-counters exports, and the `SessionState::watermark()` accessor D3 reuses.
+- *Report live_values_superseded in the browser status and prove both hosts drain strip cells
+  alike* (#1399): it takes offset 48 first.

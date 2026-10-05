@@ -7,7 +7,7 @@ Code anchors verified on `main` at `6fb211594`.
 
 A host changes a multiband compressor insert's detector link mode while it plays, and the change
 is a live update: no rebuild, both bands' detectors glide from one link law to the other over the
-session ramp, and multiband inserts that differ only by link mode share one bank. Decision 14 rule
+edit's ramp or the session default, and multiband inserts that differ only by link mode share one bank. Decision 14 rule
 3 makes a value live unless a reason keeps it prepared; the multiband's link has none (below).
 
 ## Context
@@ -23,7 +23,7 @@ session ramp, and multiband inserts that differ only by link mode share one bank
 - *Lower the link mode to per-lane state in the linked effects' banks* (#1368) adds the
   descriptor flag `lane_link` and the key lowering; *Ramp a lane's detector link between modes*
   (#1370) defines `retarget_link` and the blend; *Carry the link record from the edit to the lane*
-  (#1371) delivers the `Link` record and the classifier rows for `lane_link` effects. The multiband
+  (#1371) delivers the lane's link cell and the classifier rows for `lane_link` effects. The multiband
   was left out of them because it is not console-eligible.
 - **No reason to keep it prepared.** No optimisation needs a constant mode: the arm is already
   chosen per block (above). No glitch is forced: the link feeds each band's level into the smoothed
@@ -48,7 +48,8 @@ session ramp, and multiband inserts that differ only by link mode share one bank
 - **D4. Payload.** Each channel's payload gains the lane's mode and the two weight ramps, after the
   existing words; restore validates them as #1370 D6 does. `STATE_LAYOUT_VERSION` stays 1.
 - **D5. Classifier.** No new code: #1371's rule covers every `lane_link` effect, so a multiband
-  insert's link change becomes a `Link` record. Add the multiband rows to its tests.
+  insert's link change becomes one link-cell write, with the edit's ramp or the session default
+  (#1371 D3). Add the multiband rows to its tests.
 - **D6. Bypass.** The prepared-bypass arm is untouched here; *Give the multiband compressor a live
   bypass shunt* (#1340) owns the bypass.
 
@@ -90,8 +91,8 @@ session ramp, and multiband inserts that differ only by link mode share one bank
    the arrival frame equal the target mode's `link_levels` bit for bit; bank-mates keep their bits.
 4. **Payload.** A lane snapshotted mid-switch and restored renders bit-identically to the
    uninterrupted one.
-5. **Live end to end.** A committed insert link change on the C ABI classifies to one `Link`
-   record and no rebuild.
+5. **Live end to end.** A committed insert link change on the C ABI classifies to one link-cell
+   write and no rebuild.
 6. **Realtime.** A switching block makes zero allocations and frees (`tests/no_alloc_render.rs`).
 7. Commands:
    - `cargo test --locked --all-targets -p multiband-compressor -p effect-runtime -p dsp-reference --features math/lane,lane/test-support`

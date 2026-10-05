@@ -44,7 +44,7 @@ No rendered bit and no EQ refusal moves.
   `math::sqrt` and `f64::sqrt`, so the result is bit-identical.
 - **D3. The EQ delegates.** `word_spectral_norm(words)` stays public with the same signature and
   becomes one call to `transition_norm(words.c1, words.a2, words.a3)`. The EQ's two constants are
-  deleted and its uses (`:899`, `:915`, `:2742`) name the shared ones.
+  deleted and its two uses (`:899`, `:2742`) and the doc link (`:816`) name the shared ones.
 - **D4. Totality is a test, not a branch.** Gate 1 proves `design_lr4` returns `Some` for every
   `f32` in `[80, 8000]` at 44.1, 48, 88.2 and 96 kHz, and that every designed triple has
   `transition_norm <= NORM_TOLERANCE`. That is what licenses #1338 to call `design_lr4_words` on
@@ -71,8 +71,8 @@ No rendered bit and no EQ refusal moves.
 
 - `crates/multiband-compressor/src/lib.rs` (D1 only), `crates/multiband-compressor/tests/designer_total.rs` (new)
 - `crates/effect-runtime/src/lib.rs` (the module line), `crates/effect-runtime/src/svf.rs` (new)
-- `crates/parametric-eq/src/lib.rs` (`word_spectral_norm` and the two constants only; #1337 edits
-  other parts of this file, so rebase on whichever lands first)
+- `crates/parametric-eq/src/lib.rs` (`word_spectral_norm`, the two constants and their uses only;
+  #1337 edits other parts of this file, so rebase on whichever lands first)
 
 ## Non-goals
 

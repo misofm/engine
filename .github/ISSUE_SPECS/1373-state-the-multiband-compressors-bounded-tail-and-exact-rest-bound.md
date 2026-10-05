@@ -28,25 +28,32 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
 
 - **D1. Contract and method** as in *State a bounded tail and an exact-rest bound for every node*
   (#1329) D1-D3, over the whole crossover domain at each rate, with a crossover glide in flight
-  (#1338's 64 samples).
+  (#1338's 64 samples). This slice owns the glide-in-flight case: #1338 D7 leaves the tail to
+  stream G, so the derivation, the bound and gate 2's glide run are all here, and this slice lands
+  after #1338.
 - **D2. Gains.** The node's floor is relative to its input peak, so the crossover residual is
   bounded at `eps / G_max`, with `G_max` the largest band amplitude (`gain_from_db` of the maximum
   makeup with no reduction) times the all-pass split's ℓ1 gain. The band gains are memoryless
   multipliers of the band signals, so they add no tail of their own.
-- **D3. Rest.** The maximum of the crossover's certified rest (#1329 machinery, two sections in
-  series) and each detector/smoother word's `one_pole_rest_samples` (#1375), with #1375 D3's stall
-  check.
-- **D4. Reuse.** Call #1329's SVF bounds in `lane::tail`; no copy.
+- **D3. Rest.** #1329 D2's definition: output `±0.0` and every signal-state word (the crossover's
+  integrator words, each band's detector and its dB smoother) equal under `f32` `==` to the rest
+  state `Z` (a freshly reset instance with the same parameters, fed `R` zeros). The bound is the maximum of the crossover's certified
+  rest (#1329 machinery, two sections in series) and each detector/smoother word's
+  `one_pole_rest_samples` (#1375) toward its value in `Z`, with #1375 D3's stall check.
+- **D4. Reuse.** Call #1329's SVF bounds in `math::tail` (`crates/math/src/tail.rs`); no copy.
 
 ## Deliverables
 
-1. `tail_and_rest` for the effect, built on `lane::tail` (D4).
+1. `tail_and_rest` for the effect, built on `math::tail` (D4).
 2. Tests (gates 1-3). Docs: `dsp-research/multirate-crossovers.md` (tail and rest lines).
 
 ## Authorized paths
 
 - `crates/multiband-compressor/src/lib.rs` (descriptor and `tail_and_rest` only),
   `crates/multiband-compressor/tests/tail_contract.rs` (new)
+- `docs/derivations/1373-multiband-compressor-tail-and-rest.md` (new): the glide-in-flight bound
+- `crates/graph-compiler/src/lib.rs` (the multiband fixture's `Infinite` assertion at `:12735`,
+  rewritten to the computed value)
 - `dsp-research/multirate-crossovers.md`, this spec
 
 ## Non-goals
@@ -55,13 +62,19 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
 
 ## Objective gates
 
-1. **Recompute**: brute-force `f64` impulse response of the two-section split (to 4,000,000
-   samples) at the D1 extreme and at 80 Hz, 1 kHz and 8 kHz: `T_b <= T`, and at the extreme
-   `T <= T_b + T / 100`.
+1. **Recompute**: for each crossover in {the D1 extreme, 80 Hz, 1 kHz, 8 kHz}, a brute force
+   computes the `f64` impulse responses `h_low`, `h_high` of the two-section split (designed `f32`
+   words, `f64` arithmetic) to 4,000,000 samples and
+   `S_b(j) = G_max * sum_{j <= m < 4e6} (|h_low[m]| + |h_high[m]|)`, `G_max` from D2; `T_b(e)` is
+   the smallest `j` with `S_b(j) < e`. Soundness at every crossover: `T_b(eps / 2) <= T`.
+   Tightness at the extreme only: `T <= T_b(eps * 2^-5)`, the same 30 dB margin as #1329 gate 1
+   and for the same reasons (fixed `k = sqrt(2)`, so the shared-eigenvector bound applies); a
+   value above it is a finding for Sol, not a gate change.
 2. **Soundness, real kernel** (release, every rate): extreme crossover, maximum makeup, worst-sign
-   input, crossover prepared (#1338 adds the glide-in-flight case to this test when it makes the
-   crossover live; D1's derivation already covers glides):
-   `|y| < P * eps` from `N + T`; all state words `+0.0` from `N + R`, for `P = 10^(24/20)` and `1e29`.
+   input (`P * sign` of the reversed `h_low + h_high` over the last 1,000,000 samples before `N`),
+   two runs: crossover prepared, and a crossover glide from 8 kHz to the extreme started 32 samples
+   before `N` (in flight at `N`). `|y| < P * eps` from `N + T`; D3's rest from `N + R`, for
+   `P = 10^(24/20)` and `1e29`.
 3. **Rest recompute** for the detector words, as #1375 gate 3.
 4. Commands: the `test-debug-b` command; the conformance fixtures check;
    `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`.
@@ -79,3 +92,4 @@ its crossover and detector state reach exact rest. Today it declares `Infinite`.
 - *Define how node tails compose through gain in the graph extent* (#1379)
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   one-pole helper
+- *Make the multiband compressor's crossover live* (#1338): the glide this slice bounds

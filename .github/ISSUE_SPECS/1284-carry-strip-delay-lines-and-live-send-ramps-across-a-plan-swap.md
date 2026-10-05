@@ -13,9 +13,11 @@ Three kinds of state keep their exact values through a plan swap, in move mode a
 
 After this slice every DSP state family of a plan carries in both modes. A structural edit that
 changes no node's latency is then bit-continuous for every unchanged path. Meters follow in #1327.
-A transaction that also changes a carried send's live value sounds like "live edit, then structural
-edit" (D15-7). A changed `delay_samples` restarts its line, and the strip is reported for the
-duck-swap transition (D15-9).
+A changed `delay_samples` restarts its line, and the strip is reported for the duck-swap transition
+(D15-9). A re-pointed send never ducks its source strip: it is a route removed plus a route added,
+which *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363) ramps at
+route level (decision 15, D15-9). The retarget of a carried send whose live value changed is
+*Deliver value-only send edits to the running C ABI plan* (#1225) D8.
 
 ## Context
 
@@ -27,10 +29,11 @@ duck-swap transition (D15-9).
 - A live send is `NodeKind::LiveRoute(Box<LiveRoute>)` (`runtime.rs:861-874`): an `IndexedRamp`,
   its position, its mute and its control lane. At bind it is settled on the prepared coefficients.
   Its `drain` (`:896`) applies the records present at entry directly to the ramp.
-- The send records the classifier emits arrive with *Deliver value-only send and submix-strip edits
-  to the running C ABI plan* (#1225) and *Let C ABI sends follow their source strip's mute live*
-  (#1226). Until they land, every send value change is a prepared difference. Decision 15 also makes
-  `follows_mute` live in the browser (#1342).
+- The send records the classifier emits arrive with #1225 and *Let C ABI sends follow their
+  source strip's mute live* (#1226); decision 15 also makes `follows_mute` live in the browser
+  (#1342). Until they land the classifier emits no route record, so every send value change is a
+  prepared difference. #1225 D8 adds the carried send's retarget when it makes them live; this slice
+  does not depend on it.
 - The scaffold, both modes, the base, the retarget pattern and the restart set come from #1322,
   #1277 (D2-D6) and *Carry compensation lines across a plan swap* (#1283).
 
@@ -43,23 +46,26 @@ duck-swap transition (D15-9).
   - A changed `delay_samples` is a prepared value (decision 14; D15-9). Its line starts at rest, and
     the strip goes into the restart set, so #1324's duck-swap removes the click.
 - **D2. Live sends.** The key is the route ID. The route's source, tap and destination are
-  structural: if any of them differs, the send does not carry, and its source strip goes into the
-  restart set. Gain, matrix, mute and `follows_mute` are live exactly when the classifier emits a
-  record for their change (#1277 D3). Any other difference in them is prepared and restarts the
-  send.
+  structural.
+  - If any of them differs, the route is re-pointed (decision 15, D15-9): its
+    ramp state does not carry, and its source strip does **not** go into the restart set. #1363
+    D1(b) ramps it at route level, as the old route removed plus the new route added.
+  - Gain, matrix, mute and `follows_mute` are live exactly when the classifier emits a record for
+    their change (#1277 D3). A send whose only differences are live carries.
+  - A send with any other value difference does not carry and starts at its prepared value. Its
+    source strip does not go into the restart set; #1363 handles it like a re-pointed route. Once
+    #1225, #1226 and #1342 have landed, every value of a send into a submix is live, so this case no
+    longer arises.
   - **Move mode:** at the swap block, drain the predecessor's route lane (the records present at
     entry), then copy the ramp, its position and its mute.
   - **Copy mode:** the same drain-then-copy. The drain applies records at the boundary the
     predecessor's next block would apply them, so it is bit-neutral (#1322 D2).
-- **D3. Carry, then retarget.** For a carried send whose live values differ, the successor entry
-  points push the classifier's route records into the successor's route lane before they return.
-  In copy mode the records are kept for publication (#1277 D5). This slice extracts the per-route
-  record derivation the same way #1277 D5 did for strips. If #1225 has not landed, the classifier
-  emits no route record, D3 has nothing to push, and gate 3 runs when #1225 lands.
+- **Moved out.** The former D3 (carry, then retarget for sends) and its gate are #1225 D8 and its
+  gate 7. This slice writes no route record and edits no classifier code.
 
 ## Deliverables
 
-1. D1-D3 in `crates/graph`, and the inventory rows, the join and D3 in `crates/host-core`.
+1. D1-D2 in `crates/graph`, and the inventory rows and the join in `crates/host-core`.
 2. Gap-free tests in `crates/host-core/tests/successor_swap.rs`.
 
 ## Authorized paths
@@ -67,13 +73,12 @@ duck-swap transition (D15-9).
 - `crates/graph/src/lib.rs`, `crates/graph/src/runtime.rs`
 - `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`,
   `crates/host-core/tests/support/successor.rs`
-- `crates/host-core/src/live_delta.rs`: D3's extraction only. This is stream B's file, and root
-  orders the merge.
 
 ## Non-goals
 
 - No change to delay or ramp kernels. No floors (#1285).
-- No duck-swap itself (#1324).
+- No duck-swap itself (#1324), and no route-level ramp (#1363).
+- No send retarget (#1225 D8).
 
 ## Objective gates
 
@@ -85,16 +90,14 @@ duck-swap transition (D15-9).
    Prepare with live controls. Admit a send-level record with a multi-block ramp between blocks 5
    and 6. Prepare B (A plus a muted track whose ID sorts first) from the base. Every block equals
    the reference fed the same record at the same block.
-2. **Prepared changes restart.** A strip whose `delay_samples` changed starts its line at rest. A
-   send re-pointed to another submix starts at its prepared value. `restarted_strips()` is exactly
-   those two source strips.
-3. **Carry, then retarget** (with #1225 on `main`). B also changes a carried send's gain. Run 1 is
-   the structural swap with D3's retarget. Run 2 pushes the same record to A just before the swap
-   and prepares B from a base that holds it. The two runs are bit-identical.
-4. **Copy mode.** Gate 1 with a copy after block 6, followed at once by the adoption. Every block
+2. **Prepared changes.** A strip whose `delay_samples` changed starts its line at rest. A send
+   re-pointed to another submix starts at its prepared value, and its ramp is not carried.
+   `restarted_strips()` is exactly the delay-changed strip; the re-pointed send's source strip is
+   not in it.
+3. **Copy mode.** Gate 1 with a copy after block 6, followed at once by the adoption. Every block
    equals the move run, and A equals its uncopied twin.
-5. **Realtime.** The swap block and the copy call make zero allocations and frees.
-6. Commands:
+4. **Realtime.** The swap block and the copy call make zero allocations and frees.
+5. Commands:
    - `cargo test --locked -p graph -p host-core --features graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
@@ -107,13 +110,12 @@ duck-swap transition (D15-9).
   - a send ramp restarted from its target steps the level;
   - a record is lost because the copy ran before the drain.
 - Gate 2: carrying a line whose `delay_samples` changed plays the old alignment. A send carried into
-  a new destination mixes the old ramp into the wrong bus. Either turns it red.
-- Gate 3: a missing retarget keeps the old send level. It turns red.
-- Gate 4: a copy-mode ring swap leaves the predecessor with the successor's at-rest line. Its twin
+  a new destination mixes the old ramp into the wrong bus. A re-pointed send that still ducks its
+  source strip puts it in the restart set. Each turns it red.
+- Gate 3: a copy-mode ring swap leaves the predecessor with the successor's at-rest line. Its twin
   turns red.
 
 ## Dependencies
 
 - *Carry compensation lines across a plan swap* (#1283).
-- For gate 3 only: *Deliver value-only send and submix-strip edits to the running C ABI plan*
-  (#1225).
+- None on #1225: the send retarget lives there (D8) and #1225 depends on this slice.

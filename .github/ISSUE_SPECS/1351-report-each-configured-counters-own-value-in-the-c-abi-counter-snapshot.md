@@ -20,12 +20,15 @@ counter the C ABI does not serve is refused with a type.
 - **The real values.** The provider answers `COUNTERS_GET` from `counter_snapshot`
   (`crates/host-core/src/control_provider.rs:345-367`), filled lazily by `set_counter` (`:597`):
   `TELEMETRY_COALESCED` and `TELEMETRY_DROPPED` from `set_telemetry_counters` (`:251-262`, called
-  at every command, `control.rs:850-853`) and `CANCELED_AUTOMATION` from
+  by `command` only, `control.rs:850-853`) and `CANCELED_AUTOMATION` from
   `record_canceled_automation` (`:369`). Before its first write a counter is absent, so
   `COUNTERS_GET` answers `NOT_FOUND` for it.
 - **Configuration is never refused.** `ControlProvider::telemetry_configure` returns the
   configuration with no error path (`controller.rs:598-603`); the controller stores whatever it
   echoes (`:3059-3075`).
+- *Add miso_engine_v1_service for bounded control work between edits* (#1348) gives the control
+  plane one service step, `SessionState::service` (D1: `synchronize_plan_epochs`, then
+  `collect_render_activity`), which every control call runs first (D2).
 - The snapshot event is lossy telemetry by contract (`docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   "Automation and events").
 
@@ -39,8 +42,11 @@ counter the C ABI does not serve is refused with a type.
   outside the served set is `ParameterProviderError::NotFound`, which the controller answers with
   `StatusCode::NotFound`; the stored configuration does not change. Meter handles use the same
   path in #1352.
-- **D3. Own values.** The snapshot's values are, for each configured ID in order, the provider's
-  current value for that ID, read after the control plane refreshes the provider's counters.
+- **D3. Own values, refreshed by the service step.** The telemetry counter refresh of
+  `control.rs:850-853` moves into `SessionState::service` (#1348 D1), before
+  `collect_render_activity`, so every control call refreshes the provider's counters once, not
+  only `command`. The snapshot's values are, for each configured ID in order, the provider's
+  current value for that ID, read after that refresh in the same service step.
 - **D4. Cadence.** The control plane stages a snapshot only when render has completed at least
   `counter_period_blocks` blocks since the last staged one (the render sequence counts blocks),
   with `observed_sample` the render sample at that point. Blocks rendered with no control call in
@@ -57,7 +63,8 @@ counter the C ABI does not serve is refused with a type.
 
 ## Authorized paths
 
-- `crates/control-plane/src/control.rs` (`collect_render_activity` only).
+- `crates/control-plane/src/control.rs` (`collect_render_activity` and the refresh in `service`
+  only).
 - `crates/host-core/src/control_provider.rs` (the counter set and `telemetry_configure`).
 - `crates/protocol/src/controller.rs` (the trait signature and the `TelemetryConfigure` arm),
   every in-repo `ControlProvider` implementation for the new signature.
@@ -72,7 +79,8 @@ counter the C ABI does not serve is refused with a type.
 1. **Own values (new capi test).** Configure `[TELEMETRY_COALESCED, TELEMETRY_DROPPED]` with
    period 1; render blocks with control calls between them until the lossy lane has dropped or
    coalesced at least one record. Every staged snapshot's values equal `COUNTERS_GET` for the same
-   IDs at that call, and differ from the render-call count at least once.
+   IDs at that call, and differ from the render-call count at least once. One of those calls is a
+   `source_submit`, not a command, so a refresh limited to `command` turns this red.
 2. **Cadence (same file).** Period 4: three rendered blocks and a control call stage nothing; the
    fourth block and a call stage one snapshot.
 3. **Refusal (same file).** Configuring `MALFORMED_FRAMES` (7), which the C ABI does not serve,
@@ -94,3 +102,5 @@ counter the C ABI does not serve is refused with a type.
 ## Dependencies
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
+- *Add miso_engine_v1_service for bounded control work between edits* (#1348): the service step
+  that refreshes the counters (D3).

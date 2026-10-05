@@ -3,9 +3,10 @@
 Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8).
 Code anchors verified on `main` at `6fb211594`.
 
-**Order in stream A.** #1300, then this issue, then #1277 and the other carry slices. Every later
-DSP carry slice (#1277, #1279-#1284) implements both modes for its own state family against the
-rules frozen here. Landing copy mode after them would reopen six merged slices. Observers (#1327)
+**Order in stream A.** This issue, then *Let soft-clip restore its own non-finite history* (#1300),
+then #1277 and the other carry slices. The edge with #1300 is order only: neither touches the
+other's code. Every later DSP carry slice (#1277, #1279-#1284) implements both modes for its own
+state family against the rules frozen here. Landing copy mode after them would reopen six merged slices. Observers (#1327)
 are the exception: their copy-mode rule depends on the warm successor's clock, so #1287 owns it.
 
 ## Product outcome
@@ -78,11 +79,11 @@ the copy-mode rules: source consumers and strip input sections.
 - **D7. The rule for every later family.** Each carry slice states its copy-mode mechanism and adds
   a copy-mode gate. The mechanism is a copy into the successor's preallocated storage. It never
   swaps owned storage, and it never moves a queue consumer, because the predecessor keeps both. A
-  family whose pending live records cannot be applied to lane state at the boundary (an effect
-  lane, which only stages records) refuses copy mode while a record is pending. *Carry
-  live-controlled effect lanes across a plan swap* (#1280) adds that refusal. It reports
-  `PredecessorMismatch` and counts the refusal in the graph plan, so `CarryOutcome` and the
-  exchange's match on it stay unchanged.
+  family whose pending live values cannot be applied to lane state at the boundary (an effect
+  lane, which only stages them) copies them unread instead: *Carry live-controlled effect lanes
+  across a plan swap* (#1280) lands after the effect lanes become latest-target cells (#1345) and
+  copies each unread cell value into the successor without consuming it. No family refuses copy
+  mode for a pending live value.
 - **D8. Not here.** The exchange's copy request, the return queue and exact-sample adoption are
   *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311) and
   #1287. This slice adds only the hook, the wrapper and the graph sections. Tests call the
@@ -154,5 +155,6 @@ the copy-mode rules: source consumers and strip input sections.
 
 ## Dependencies
 
-- None open. It builds on #1270-#1276 and #1278, all on `main`. Stream order: after *Let soft-clip
-  restore its own non-finite history* (#1300).
+- None open. It builds on #1270-#1276 and #1278, all on `main`.
+- Stream order only: before *Let soft-clip restore its own non-finite history* (#1300), which
+  lands before the effect-lane carries (#1279-#1282).

@@ -70,8 +70,8 @@ the foundation for a per-strip console link override (#1369) and a live link swi
 ## Deliverables
 
 1. D1 and D2 in `crates/effect-contract`; the descriptor field set in every descriptor (the four
-   effects, the other launch effects, and the test descriptors in `effect-contract`, `conformance`,
-   `graph` and `builtins-compiler`).
+   effects, the other launch effects, and the test descriptors in `effect-contract`,
+   `effect-compiler`, `conformance`, `graph`, `builtins-compiler` and `host-web`).
 2. D3-D5 in the four effect crates.
 3. Tests per gate.
 
@@ -80,9 +80,15 @@ the foundation for a per-strip console link override (#1369) and a live link swi
 - `crates/effect-contract/src/lib.rs`
 - `crates/compressor/src/`, `crates/gate-expander/src/`, `crates/transient-shaper/src/`,
   `crates/true-peak-limiter/src/`, and each crate's `tests/`
-- the descriptor literal only in `crates/delay/src/lib.rs`, `crates/multiband-compressor/src/lib.rs`,
+- the descriptor literal only (every full `EffectDescriptor { .. }` literal on `main`):
+  `crates/delay/src/lib.rs`, `crates/multiband-compressor/src/lib.rs`,
   `crates/parametric-eq/src/lib.rs`, `crates/soft-clip/src/lib.rs`, `crates/conformance/src/effect.rs`,
-  `crates/graph/src/lib.rs`, `crates/builtins-compiler/src/lib.rs`
+  `crates/graph/src/lib.rs` (`:3603`, `:6588`), `crates/builtins-compiler/src/lib.rs` (`:6020`),
+  `crates/effect-contract/tests/response_analysis.rs` (`:72`),
+  `crates/effect-compiler/tests/native_session.rs` (`:78`), `hosts/host-web/src/tests.rs` (`:6857`).
+  The `..original` literals in `crates/conformance/tests/effect_contract.rs` need no edit.
+- `scripts/check-web-audioworklet-callgraph.py` (`KERNEL_ROSTER`, `:204`: the four effects' rows
+  only, if an arm's symbol is renamed or a general arm is added)
 - `crates/graph-compiler/tests/` (gate 2)
 - Stream A edits payload code in the same effect crates; this slice changes no payload.
 

@@ -30,9 +30,16 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
   Input filters and bypass require the word to be 0 (`:4210`, `:4492`). Observe reads it as a window
   (`:4480`). The effect-parameter path never reads it, because effect ramps are the descriptor's.
 - **The table.** *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and
-  pan changes* (#1054) adds `SessionModel::control_smoothing_samples` and `LiveRamps { fader,
-  mute, pan }`. Its D3 maps each row to a key: fader, trim, send gain and VCA offset use `fader`;
-  mute, solo, polarity, send mute and VCA mute use `mute`; pan, matrix and send matrix use `pan`.
+  pan changes* (#1054) adds `SessionModel::control_smoothing_samples`, and `LiveRamps` with a field
+  per key and `for_row(row)`. *Carry an optional per-edit ramp length on live session edits*
+  (#1394) adds `LiveRamps::resolve(row, edit_ramp)` and the transaction field. #1054's D3 maps
+  each row to a key: fader, trim, send gain and VCA offset use `fader`; mute, solo, polarity, send
+  mute and VCA mute use `mute`; pan, matrix and send matrix use `pan`. #1054 also teaches the key to the JSON schema
+  (`docs/session-v1.schema.json`) and to the SDK's canonical writer
+  (`sdk/src/internal/session-json.ts:13-29`, `:50-65`), so `SessionBuilder.toJson()` can write it.
+- **The authoring request.** The CLI's strict request decoder lists the root keys it accepts
+  (`sdk/src/cli/session-request.ts:504`) and builds through `session()` (`:508-513`). Without a
+  `controlSmoothing` key there, a request cannot author the setting.
 - **Browser boot.** host-web prepares through host-core
   (`hosts/host-web/src/lib.rs:2027`, `:6661`).
 - **The SDK builder** emits the session model in `sdk/src/core/session.ts:1645-1662`.
@@ -69,7 +76,11 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 
 1. D1 and D2 in `hosts/host-web/src/lib.rs`.
 2. D3 in `sdk/src/core/live-controls.ts`, and the docs of every `smoothingSamples` option.
-3. D4 in `sdk/src/core/session.ts` (`SessionOptions`, `:117-124`, and the model emit).
+3. D4 in `sdk/src/core/session.ts` (`SessionOptions`, `:117-124`, and the model emit), and the
+   authoring request's `controlSmoothing` key in `sdk/src/cli/session-request.ts` (`:504`), passed
+   to `session()`. The canonical writer (`sdk/src/internal/session-json.ts`) and the JSON schema
+   already carry the key from #1054, so `toJson()` writes what D4 emits; this slice does not edit
+   them.
 4. The parity test (gate 3), with `capi` added as a dev-dependency of `host-web`, tests only.
 5. The tests below.
 
@@ -78,18 +89,24 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 - `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`, `hosts/host-web/Cargo.toml`
   (dev-dependency only), `hosts/host-web/tests/control_smoothing_parity.rs` (new). Stream H owns
   host-web; root sequences the merge.
-- `sdk/src/core/live-controls.ts`, `sdk/src/core/session.ts`,
+- `sdk/src/core/live-controls.ts`, `sdk/src/core/session.ts`, `sdk/src/cli/session-request.ts`,
   `sdk/test/live-controls-evals.mjs`, `sdk/test/builder-evals.mjs`
+- (`sdk/src/internal/session-json.ts` and `docs/session-v1.schema.json` are #1054's.)
 - `sdk/src/browser/shipped-host.d.ts` (docs only)
 
 ## Non-goals
 
 - No effect-parameter ramp change: effect ramps come from the descriptor.
-- No bypass crossfade: *Crossfade the bypass switch over the session ramp* (#1341).
+- No bypass crossfade: *Crossfade the bypass switch over the session ramp* (#1341), and for the
+  browser command *Crossfade the browser's live bypass command over the session ramp* (#1393),
+  which reads the `LiveRamps` D2 keeps.
 - No transaction edit of the key: *Edit control_smoothing by a session transaction, model-only*
   (#1365).
 - No change to the browser's control-plane location (decision 15 D15-10). If the Worker control
-  plane has landed, D2 goes wherever admission lives then.
+  plane has landed, D2 goes wherever admission lives then: *Admit browser live edits in the Worker
+  through the committed model* (#1382) lowers the sentinel to `None` in the `ramp_samples` field
+  of *Carry an optional per-edit ramp length on live session edits* (#1394 D1) and a finite word
+  to `Some`, and the classifier resolves it with `LiveRamps::resolve` (#1394 D5).
 
 ## Hazards
 
@@ -110,7 +127,10 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
    - Every ramped builder method writes `0xFFFFFFFF` at offset 16 when no length is given, and the
      given value otherwise.
    - `smoothingSamples: 4294967295` throws.
-   - `builder-evals.mjs`: `controlSmoothing` round-trips into the model, and 1000.5 throws.
+   - `builder-evals.mjs`: `controlSmoothing` round-trips into the model and through `toJson()`
+     to the canonical bytes the Rust writer gives, and 1000.5 throws. A strict request with
+     `controlSmoothing` builds the same session; one with an unknown key inside it is refused at
+     `$.controlSmoothing`.
 3. **Parity** (`hosts/host-web/tests/control_smoothing_parity.rs`, new).
    - One session with two tracks, at each launch rate: 44.1, 48, 88.2 and 96 kHz.
    - A scripted sequence with no per-edit length: a fader move, a mute, an unmute and a pan move

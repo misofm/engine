@@ -7,8 +7,8 @@ This issue started as owner question Q5 of the #1053 batch (`docs/handoffs/live-
 should a C ABI plan size each effect's span window by the lane depth (16), rather than by the
 caller's `maximum_automation_spans_per_block` (S)? **Decision 15, D15-5 answers it, so the owner
 question is closed.** The answer is to size the window once, from the span producers the plan
-really has: the live lane depth, plus the stored-automation spans per block that preparation
-computes. The caller's S then bounds only `AUTOMATION_ENQUEUE` density. The old draft's
+really has: the live parameter cells of *Hold effect parameter, bypass and EQ-target values in
+latest-target cells* (#1345), plus the stored-automation spans per block that preparation computes. The caller's S then bounds only `AUTOMATION_ENQUEUE` density. The old draft's
 `min(S, 16)` cap is superseded by D15-5. That cap would have needed a second resize when stored
 automation renders, which is the kind of later fix the owner principle forbids. The issue was
 retitled for decision 15 (formerly *Bound C ABI live effect windows by lane depth (owner
@@ -18,7 +18,7 @@ question)*).
 
 Each prepared effect's per-block automation span window is sized from its plan's own span
 producers, on both hosts. The caller's S stops costing memory: on the nine-track reference session
-the C ABI graph rows fall by about 80 KB at S = 128, and they no longer grow with S (about 1.4 MB
+the C ABI graph rows fall by about 60 KB at S = 128, and they no longer grow with S (about 1.4 MB
 per eight-lane bank at S = 4,096 today).
 
 ## Context
@@ -37,9 +37,16 @@ per eight-lane bank at S = 4,096 today).
   automation yet (#1058), so the segment term is a producer that does not exist.
 
 **How the window follows the capacity.**
-- An effect lane's ring holds `min(depth, automation_capacity)` records
+- Today an effect lane's ring holds `min(depth, automation_capacity)` records
   (`crates/effect-compiler/src/prepare.rs:1360-1365` and `:1399-1400`; the C ABI depth is
-  `LIVE_QUEUE_DEPTH` = 16, `compile.rs:11-13`). Each record stages at most one span.
+  `LIVE_QUEUE_DEPTH` = 16, `compile.rs:11-13`). Each record stages at most one span. #1345
+  replaces that ring with one latest-target cell per `(parameter_index, channel)` of every
+  `Block`-rate parameter (#1345 D1), and its render stages at most `automation_capacity` parameter
+  spans per block, deferring any excess dirty cell (#1345 D4). So the live producer of spans is
+  the cell count, not a queue depth.
+- The parametric EQ has 22 `Block`-rate parameters, all `PerLane`: four automatable fields of
+  each of its four bands and its six cut parameters (`crates/parametric-eq/src/lib.rs:491-528`,
+  `:530-561`, table at `:564`). It therefore has 44 live parameter cells.
 - The banked live-control stage allocates a staging window and a packed window of
   `automation_capacity` spans per lane (`crates/rack/src/lib.rs:1023`). The #1012 pairing rule
   requires the window to equal the capacity (`check_window`, `crates/effect-contract/src/lib.rs:1273-1279`;
@@ -53,16 +60,22 @@ per eight-lane bank at S = 4,096 today).
   `effect-contract/src/lib.rs:2466-2475`).
 
 **Reference numbers** (`crates/capi/tests/resource_lifecycle.rs:1039-1053`; nine console-slot EQs,
-S = 128, eight lanes): `graph_session_plus_plan_bytes` and `graph_incremental_plan_bytes` are
-382,918, and `graph_metadata_bytes` is 185,121. A capacity of 16 would make the two eight-lane
-banks 2 x 360 x 112 = 80,640 bytes smaller: a predicted 302,278 and 104,481.
+S = 128, eight lanes): at `6fb211594`, `graph_session_plus_plan_bytes` and
+`graph_incremental_plan_bytes` are 382,918, and `graph_metadata_bytes` is 185,121. #1345 moves
+these rows (cells replace the queue and the target staging), so this issue's base is the rows
+measured after #1345. A capacity of 44 instead of 128 makes the two eight-lane banks
+2 x 360 x 84 = 60,480 bytes smaller than that base, if #1345 keeps the bank's 360-byte per-span
+term.
 
 ## Decisions frozen for this slice
 
 - **D1. One sizing function, in host-core preparation.** For each prepared effect instance:
   `capacity = live + stored`. Its terms:
-  - `live` is the instance's live lane depth (`HostLiveControlRequest::control_queue_depth`)
-    when it has a live lane, and 0 when it has none;
+  - `live` is the instance's live parameter cell count when it has a live lane, and 0 when it
+    has none. The count is #1345 D1's: one cell for each `Block`-rate `Shared` parameter and two
+    for each `Block`-rate `PerLane` one (44 for the parametric EQ). Prepared-target cells and the
+    bypass cell stage no span and do not count. With this term #1345 D4's deferral never fires
+    for a live edit, because the window holds every live cell;
   - `stored` is the per-block span bound for the instance's stored automation, as #1058's design
     computes it at preparation;
   - if #1058's design routes `AUTOMATION_ENQUEUE` batches into effect span windows, their
@@ -84,14 +97,15 @@ banks 2 x 360 x 112 = 80,640 bytes smaller: a predicted 302,278 and 104,481.
 
   `ResponsePreviewLimits` (`crates/host-core/src/response.rs:64-73`) is the EQ response preview,
   not a render plan, and is not touched.
-- **D4. Why no bit moves.** A drain stages at most `depth` live spans, below the cut-off
-  `span_index < automation_capacity`, so no staged span crosses it. D2 keeps every
-  `EffectProgramKey` equal across a cohort. The gates prove it.
-- **D5. A test lever for small queues.** Two tests reach their small effect queue through S = 4
-  (`crates/capi/src/runtime/live_tests.rs:2416-2424`, `an_eq_edit_designing_more_targets_than_its_queue_rebuilds`;
-  `:2806-2812`, `an_eq_bypass_beside_targets_filling_its_queue_rebuilds`). They get a
-  `#[cfg(test)]` live depth of 4 on the control plane's live request instead. Their assertions do
-  not change.
+- **D4. Why no bit moves.** A block stages at most one span per dirty live cell. Before this
+  issue the window is S = 128 (at least the 44 cells), and after it the window is the cell count
+  itself, so in both cases no dirty cell is deferred and the same spans are staged in the same
+  order. D2 keeps every `EffectProgramKey` equal across a cohort. The gates prove it.
+- **D5. No small-queue test lever.** Two tests reached a small effect queue through S = 4
+  (`crates/capi/src/runtime/live_tests.rs:2419`, `an_eq_edit_designing_more_targets_than_its_queue_rebuilds`;
+  `:2806`, `an_eq_bypass_beside_targets_filling_its_queue_rebuilds`). Both assert the
+  queue-capacity rebuild that #1345 D5 removes, so neither survives #1345, and this issue needs no
+  test lever. (#1345 gate 6 names the first; the second asserts the same removed rebuild.)
 - **D6. Budgets and docs.**
   - Lower the eight-lane graph ceilings to the measured values plus 10 %, rounded up to 64. Give
     the reason in the `REFERENCE_BUDGETS` doc comment. Lower the four-lane ceilings the same way,
@@ -114,7 +128,6 @@ D1-D6.
 - One line in each `HostPrepareCaps` literal: in `crates/host-core/src/` and `crates/host-core/tests/`,
   and in `crates/capi/tests/resource_lifecycle.rs` (where `host_caps` at `:524` mirrors
   `prepare_caps`).
-- `crates/capi/src/runtime/live_tests.rs`: the two tests of D5 only.
 - `crates/capi/tests/resource_lifecycle.rs`: the budgets and their comment, and gate 2's test.
 - `docs/C_ABI_V1_QUALIFICATION.md` (the #1263 section); `docs/handoffs/live-updates-1053/README.md`
   (Q5 only); this spec.
@@ -131,24 +144,24 @@ D1-D6.
 
 - **`host_caps` mirrors `prepare_caps`.** If only one of them changes, the exact-charge oracles go
   red for the wrong reason. Change both.
-- **The over-capacity rebuild.** `an_effect_edit_larger_than_its_queue_rebuilds` (#1264) must keep
-  passing, and so must the EQ's 12-target limit.
+- **The EQ's 12-target limit** must keep refusing as it does after #1345.
 - **A cohort split** would change cost, not bits, but it would move the budgets. D2 forbids it.
 
 ## Objective gates
 
 1. **No rendered bit moved (PR evidence).** Run `cargo build --locked --release -p audit -p bench -p capi -p session-validator`,
-   then `./target/release/audit capi`, at base and at head. Both runs show allocations,
+   then `./target/release/audit capi`, at base (after #1345) and at head. Both runs show allocations,
    deallocations, locks, syscalls and `total_violations` of 0, and the same `pcm_digest`. Also:
    - `cargo test --locked -p capi` passes, including every `live_tests` case and
      `c_abi_plans_with_live_lanes_render_like_lanes_free_plans`;
    - the browser legs of the `browser` job in `.github/workflows/qualification.yml` pass, with
      unchanged digests.
 2. **The window no longer follows S** (new committed test in `resource_lifecycle.rs`). Compile the
-   reference session at S = 128 and at S = 4,096: the three graph rows are equal. With the D5 test
-   depth of 4, they are smaller than at depth 16.
-3. **Exact numbers (PR evidence).** Record the reference graph rows at eight lanes (predicted
-   302,278 / 104,481) and at four lanes (from the AArch64 debug log), before and after. Every other
+   reference session at S = 128 and at S = 4,096: the three graph rows are equal.
+   A host-core unit test of D1's function: an EQ instance with a live lane gets 44, the same
+   instance without one gets 1, and a cohort of the two gets 44 (D2).
+3. **Exact numbers (PR evidence).** Record the reference graph rows at eight lanes (predicted: the
+   post-#1345 base minus 60,480) and at four lanes (from the AArch64 debug log), before and after. Every other
    row must be unchanged, and any difference from the prediction explained.
 4. **Budgets.** `reference_session_retained_rows_stay_within_their_budgets` passes at both widths
    with the D6 ceilings.
@@ -164,10 +177,13 @@ D1-D6.
 
 - Gate 2 turns red if an effect window is sized by the caller's S again. No existing test catches
   that, because every C ABI resource test runs at S = 128.
-- The D5 tests keep their own test value. Only their lever changes.
+- The D1 unit test turns red if the live term counts a queue depth, the bypass or target cells,
+  or a channel too few, or if a cohort splits.
 
 ## Dependencies
 
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): its cells
+  are D1's live term.
 - *Research: render stored session automation in the engine, identically on every platform* (#1058):
   its design gives D1's stored term, and says whether `AUTOMATION_ENQUEUE` feeds effect windows.
   This issue lands in the same batch as the first issue that renders stored automation, filed

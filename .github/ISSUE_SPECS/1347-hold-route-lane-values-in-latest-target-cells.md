@@ -99,6 +99,6 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
-- Followed by *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225),
+- Followed by *Deliver value-only send edits to the running C ABI plan* (#1225),
   *Let C ABI sends follow their source strip's mute live* (#1226) and *Deliver value-only VCA edits
   to the running C ABI plan* (#1247).

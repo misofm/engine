@@ -62,14 +62,22 @@ bit is the same before and after.
   with `maximum_capi_retained_bytes` named `maximum_control_retained_bytes`. capi validates its
   struct (`limits_are_valid`, `compile.rs:510`, stays in capi) and converts once in
   `miso_engine_v1_compile_session`. `prepare_caps` (`compile.rs:523`) takes `ControlLimits`.
-- **D4. Plain report.** The crate defines `PlanResources`: every field of `PlanResourceReport`
-  except `struct_size`, `abi_version` and `reserved`; the tail is `effect_contract::TailSamples`;
-  `capi_retained_bytes` is named `control_retained_bytes`. capi builds its `repr(C)` report from
-  it in `miso_engine_v1_plan_resources` and wherever it returns one, with the same values.
-- **D5. Adapter allocations.** The crate's constructor takes `adapter_allocations: &[u64]`, the
-  sizes of the fixed allocations the adapter keeps per session. capi passes the layouts of
-  `Session` and `Plan` (today's `compile.rs:233-234` rows). They enter the fixed allocation rows
-  and the largest-allocation fold exactly where those two rows are today.
+- **D4. Plain report, adapter-shaped rows.** The crate defines `PlanResources`: every field of
+  `PlanResourceReport` except `struct_size`, `abi_version` and `reserved`; the tail is
+  `effect_contract::TailSamples`; `capi_retained_bytes` is named `control_retained_bytes`. The
+  report table keeps the adapter's row type, so its bytes do not change:
+  `SharedPlanState<Row>` stores `Mutex<Vec<(u64, Row)>>` with `Row: From<PlanResources> + Copy`
+  (`crates/capi/src/runtime/plan.rs:8` stores `(u64, PlanResourceReport)` today). capi
+  instantiates `Row = PlanResourceReport` and converts once, when a row is inserted; its
+  `miso_engine_v1_plan_resources` copies the stored row as today.
+- **D5. Adapter allocations.** The crate's constructor takes `adapter_allocations: &[u64]`, the byte
+  sizes of the fixed allocations the adapter keeps per session: capi passes `Session` and `Plan`
+  (today's `compile.rs:233-234` rows). They enter the fixed allocation rows and the
+  largest-allocation fold exactly where those two rows are today. The report-table row
+  (`compile.rs:232`, `checked_layout::<(u64, PlanResourceReport)>(2)`) is charged from the
+  adapter's `Row` type (D4), so it is the same layout and the same bytes as today. Together, D4 and
+  D5 keep every fixed row, `capi_retained_bytes` and the largest-allocation fold unchanged, which
+  gate 1 checks.
 - **D6. Typed failures.** The crate never spells `capi.`. `CompileFailure` becomes an enum:
   `Resource(ResourceFault)` with `ResourceFault::{Arithmetic, Platform, Limit, Allocation,
   ProtocolQueue, PlanExchange}`, and `Diagnostics(Vec<u8>)` for the session and preparation
@@ -125,10 +133,10 @@ bit is the same before and after.
   (`crates/host-core/src/prepare.rs`).
 - Making the render-activity code adapter-chosen (D7).
 - An adapter preparation hook. `prepare_runtime` moves as it is, with the C ABI's lane selection
-  (`C_ABI_LIVE_LANES`, `LIVE_QUEUE_DEPTH`); the `RuntimePreparer` trait that lets each adapter
-  supply its own preparation, with capi's implementation being today's `prepare_runtime`, lands
-  with the browser's implementation in *Swap and retire browser plans through the Worker's service
-  loop* (#1381, D1).
+  (`C_ABI_LIVE_LANES`, `LIVE_QUEUE_DEPTH`). The `RuntimePreparer` trait that lets each adapter
+  supply its own preparation, with capi's implementation being today's live request and lane
+  selection, lands with the browser's implementation in *Prepare through an adapter-supplied
+  preparer in the control-plane crate* (#1400).
 
 ## Hazards
 
@@ -146,7 +154,7 @@ bit is the same before and after.
    `cargo build --locked --release -p audit -p capi && target/release/audit capi`. Both report
    `allocations`, `deallocations`, `locks`, `syscalls` and `total_violations` 0 and the same
    `pcm_digest`. `cargo test --locked -p capi --test resource_lifecycle -- --nocapture` prints the
-   same resource rows at both.
+   same resource rows at both, `capi_retained_bytes` and the report-table row included (D4-D5).
 2. **The C ABI suite is unchanged and green.** `cargo test --locked -p capi` passes with no test
    added, deleted or weakened; `git diff --stat` on `crates/capi/src/runtime/tests.rs`,
    `live_tests.rs` and `crates/capi/tests/` shows import and accessor changes only.

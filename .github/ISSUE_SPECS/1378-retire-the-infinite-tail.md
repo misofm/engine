@@ -7,8 +7,9 @@ Code anchors verified on `main` at `6fb211594`.
 
 Every plan reports a finite tail and every node states its exact-rest bound, so neither the engine
 nor a host can report "no bound". After the per-effect slices, no node returns `Infinite` or
-`Unstated`; this slice deletes both from the contract, the graph, the canonical plan text and the
-C ABI, so nothing can bring them back.
+`Unstated`; this slice deletes both from the contract, the graph and the canonical plan text, and
+deletes the C ABI's infinite tail kind (the `tail_kind` word stays, reserved and always `0`), so
+nothing can bring them back.
 
 ## Context
 
@@ -21,8 +22,9 @@ C ABI, so nothing can bring them back.
   (`crates/graph-compiler/src/canonical.rs:141-145`).
 - **C ABI.** `MISO_ENGINE_V1_TAIL_FINITE`/`_TAIL_INFINITE` (`crates/capi/include/miso_engine_v1.h:127-128`)
   and the `tail_kind` field of `miso_engine_v1_plan_resource_report` (`:252`); Rust side
-  `crates/capi/src/abi.rs:36-39`, `:260-263`, mapping `crates/capi/src/runtime/compile.rs:649-650`;
-  `crates/capi/tests/c/abi_smoke.c:20`.
+  `crates/capi/src/abi.rs:36-39`, `:260-263`, mapping `crates/capi/src/runtime/compile.rs:649-650`,
+  import `crates/capi/src/runtime/mod.rs:45`, zero fill `crates/capi/src/ffi.rs:1414`;
+  `crates/capi/tests/c/abi_smoke.c:20-21`. `MISO_ENGINE_V1_TAIL_FINITE` is `0`.
 - **Fault injection.** The conformance test effect's `ChangingTail` fault sets `Infinite`
   (`crates/conformance/src/effect.rs:396-398`).
 
@@ -33,30 +35,49 @@ C ABI, so nothing can bring them back.
 - **D2. Graph.** PDC adds tails without a special case; `maximum_finite_tail_samples` is renamed
   `maximum_tail_samples` everywhere it is set. Canonical text writes the tail as a plain integer.
   Every canonical digest that moves is re-pinned one at a time, with the reason in the commit.
-- **D3. C ABI.** Remove `tail_kind`, `MISO_ENGINE_V1_TAIL_FINITE` and `MISO_ENGINE_V1_TAIL_INFINITE`;
-  `tail_samples` is always the bound. This is a prelaunch V1 layout change (AGENTS.md: prelaunch
-  identity stays `V1`); the header, `abi.rs`, the layout checker's expectations and
-  `abi_smoke.c` change together. If *Document the seek contract and the C ABI growth rule in the
-  header* (#1317) has made fields append-only before this lands, the field stays with a single
-  documented value instead, and the spec records that ruling.
+- **D3. C ABI: no layout change.** `miso_engine_v1_plan_resource_report` keeps its layout: the
+  `tail_kind` word stays at its offset and name, is documented as reserved, and always reads `0`
+  (`MISO_ENGINE_V1_TAIL_FINITE`, which stays defined as `0`). `tail_samples` is always the bound.
+  `MISO_ENGINE_V1_TAIL_INFINITE` (header, `abi_smoke.c`) and the Rust `TAIL_INFINITE` are deleted,
+  so no producer can write `1`; `compile.rs` writes `TAIL_FINITE` unconditionally. Decision:
+  removing a mid-struct word would move every later field's offset, which a host built against
+  today's header would misread with no diagnostic; a reserved word costs eight bytes and breaks
+  nothing. A struct's size and offsets are unchanged, so the layout checker
+  (`scripts/check-abi-layout-v1.py`) and `MISO_ENGINE_V1_*_SIZE` constants do not change. This is
+  an in-place V1 field meaning, so it takes no feature bit (decision 15, D15-3 recorded
+  resolution). *Document the seek contract and the C ABI growth rule in the header* (#1317) is
+  consistent with this either way: nothing is removed or reordered.
 - **D4. Fault injection.** `ChangingTail` changes the tail by one sample instead of to `Infinite`.
 
 ## Deliverables
 
-1. The type changes, every producer and consumer updated, the C ABI change, the canonical text change
-   and its re-pins.
-2. Docs: `docs/EFFECT_CONTRACT_V1.md`, `docs/BUILTINS_AND_METERING_V1.md`, `docs/C_ABI_V1_QUALIFICATION.md`.
+1. The type changes, every producer and consumer updated, the C ABI change (D3), the canonical
+   text change and its re-pins.
+2. Docs: `docs/EFFECT_CONTRACT_V1.md`, `docs/BUILTINS_AND_METERING_V1.md`,
+   `docs/C_ABI_V1_QUALIFICATION.md` (`:253`, `:332` mention `tail_kind`: say it is reserved and
+   always `MISO_ENGINE_V1_TAIL_FINITE`).
 
 ## Authorized paths
 
 - `crates/effect-contract/src/lib.rs`, `crates/effect-compiler/src/prepare.rs`
 - The `tail_and_rest` functions of the eight effect crates (type change only)
-- `crates/builtins/src/tail.rs`, `crates/builtins-compiler/src/lib.rs` (type change only)
+- `crates/builtins/src/tail.rs`, `crates/builtins/src/lib.rs`, `crates/builtins-compiler/src/lib.rs`
+  (type change only)
 - `crates/graph/src/lib.rs`, `crates/graph-compiler/src/`, `crates/graph-compiler/tests/`,
   `fixtures/graph/v1/`, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/`
-- `crates/capi/include/miso_engine_v1.h`, `crates/capi/src/`, `crates/capi/tests/`,
-  `scripts/check-abi-layout-v1.py` (expectations only)
+- `crates/capi/include/miso_engine_v1.h`, `crates/capi/src/` (including `abi.rs`, `ffi.rs`,
+  `runtime/mod.rs`, `runtime/compile.rs`, `runtime/tests.rs`), `crates/capi/tests/c/abi_smoke.c`
 - `crates/conformance/src/effect.rs`
+- The `TailSamples::Finite(n)` → `TailSamples(n)` spelling only, in every other file that names it
+  (verified on `6fb211594`): `crates/graph/src/runtime.rs`, `crates/graph/src/program/tests.rs`,
+  `crates/graph/tests/rt1_direct_bank_alloc.rs`, `crates/graph/tests/rt9_resident_bank_input_alloc.rs`,
+  `crates/graph/tests/rt10_source_in_place_alloc.rs`, `crates/graph/tests/rt11_swap_carry_alloc.rs`,
+  `crates/source/src/lib.rs`, `crates/rack-compiler/src/lib.rs`, `crates/rack/tests/live_control_bank.rs`,
+  `crates/effect-compiler/tests/native_session.rs`, `crates/effect-contract/tests/response_analysis.rs`,
+  `crates/parametric-eq/tests/bank.rs`, `crates/gate-expander/tests/contract.rs`,
+  `crates/soft-clip/tests/contract.rs`, `crates/transient-shaper/tests/contract.rs`,
+  `crates/transient-shaper/src/corpus.rs`, and the `tests/tail_contract.rs` files the per-effect
+  slices added. The implementer re-greps `TailSamples` and `RestBound` before starting.
 - the three docs above, this spec
 
 ## Non-goals
@@ -68,8 +89,11 @@ C ABI, so nothing can bring them back.
 1. **No unbounded node**: at preparation, every effect's and builtin's `rest` is `RestSamples` and
    its tail a number; a conformance run over every effect at every rate checks both against
    `tail_and_rest` (the #1377 gate, now on the new types).
-2. **C ABI**: `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`;
-   `cargo build --locked --release -p audit && ./target/release/audit capi`; the C smoke test.
+2. **C ABI**: `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`
+   (layout unchanged, D3); `cargo build --locked --release -p audit && ./target/release/audit capi`;
+   the C smoke test, whose `ABI_ASSERT(MISO_ENGINE_V1_TAIL_FINITE == 0)` stays and whose
+   `TAIL_INFINITE` assertion goes. A `capi` runtime test asserts `tail_kind == 0` on a plan that
+   reported `Infinite` before the per-effect slices (an EQ session).
 3. **Re-pins** limited to canonical text: `bash scripts/check-graph-determinism.sh`; every moved digest
    differs from its old text only in tail tokens (stated in the commit).
 4. Commands: the `test-debug-a` and `test-debug-b` commands from `.github/workflows/qualification.yml`;
@@ -79,7 +103,8 @@ C ABI, so nothing can bring them back.
 ## Test value
 
 - The type change is the guard: an `Infinite` or `Unstated` value can no longer be written, so no
-  new test is needed for it. The updated `ChangingTail` fault keeps the metadata-mismatch path
+  new type test is needed. The `tail_kind == 0` test: a `compile.rs` that still writes a kind from
+  a stale mapping, or a reserved word left uninitialised, is red. The updated `ChangingTail` fault keeps the metadata-mismatch path
   covered. Superseded: tests that assert `Infinite` (`crates/host-core/tests/live_lanes.rs`,
   `crates/graph-compiler/src/lib.rs` fixtures, `crates/capi/src/runtime/tests.rs:2725-2727`,
   `:2764-2767`) are rewritten to numbers in this PR.

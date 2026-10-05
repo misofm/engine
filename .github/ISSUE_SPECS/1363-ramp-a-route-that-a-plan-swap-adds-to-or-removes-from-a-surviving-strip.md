@@ -7,9 +7,11 @@ Code anchors verified on `main` at `6fb211594`.
 
 When a structural edit adds a route (a send, or a strip's path to an output) between two strips
 that both keep playing, the route's signal enters at its destination with a fade instead of a step.
-When it removes such a route, the signal fades out instead of stopping dead. Every other path stays
-bit-identical. D15-9 covers added, edited and removed strips (#1288, #1324, #1325); a route whose
-two ends survive was left with a step at its destination.
+When it removes such a route, the signal fades out instead of stopping dead. A route re-pointed to
+another destination, source or tap does both, and its source strip keeps playing untouched. When a
+strip fades in after a swap (added, duck-swapped or restored), its sends from taps before the fader
+fade in with it. Every other path stays bit-identical. D15-9 covers added, edited and removed strips
+(#1288, #1324, #1325) at their faders; the routes that bypass a fader were left with a step.
 
 ## Context
 
@@ -33,18 +35,50 @@ two ends survive was left with a step at its destination.
 
 ## Decisions frozen for this slice
 
-- **D1. Which routes.** A route whose source strip and destination exist in both the displaced
-  plan and the successor, and whose ID is in exactly one of the two models (route IDs are stable;
-  a changed destination is a removal plus an addition). A route whose end is added or removed is
-  covered by that strip's fade (#1288, #1325). A value change on a route that stays is not this
-  issue (#1225).
+- **D1. Which routes.** Three cases, all decided on the control thread from the base model and the
+  successor's model:
+  - (a) **Added or removed.** A route whose source strip and destination exist in both plans and
+    whose ID is in exactly one of the two models: D3 or D4.
+  - (b) **Re-pointed (R8), or a prepared value change.** A route whose ID is in both models and
+    either (1) whose source strip, tap or destination differs, or (2) whose source strip, tap and
+    destination are equal but one of `gain_db`, `mute`, `channel_matrix` or `follows_mute` differs
+    (or its `follows_mute` source's mute does) and the change is prepared on this host: the route
+    has no live lane in the plan render runs or in the successor, or `classify_live_delta`
+    (`crates/host-core/src/live_delta.rs:211`) refuses that change were it the only change to the
+    base model. Today (2) is every send value on the C ABI, which attaches no route lane; it shrinks
+    as *Deliver value-only send edits to the running C ABI plan* (#1225), *Let C ABI sends follow
+    their source strip's mute live* (#1226) and *Make a send's follows_mute live in the browser*
+    (#1342) make those changes live. A value change on a route with a live lane that the classifier
+    accepts is carried and retargeted instead (#1284, #1225 D8) and takes no entry here. Either form
+    is the old route removed (D4, a fading copy under a graph ID no model contains, at its
+    predecessor values) plus the new route added (D3, at its successor values), both over `N`, so a
+    prepared value change glides instead of stepping at `S`. Its source strip is never ducked:
+    *Carry compensation lines across a plan swap* (#1283) and *Carry strip delay lines and live send
+    ramps across a plan swap* (#1284) no longer put it in the restart set (stream A changes them).
+  - (c) **Sends that bypass an armed fader.** Every route out of a strip whose fader the successor
+    arms (#1288 D1, #1324 D3, #1325 D6) whose tap precedes the fader (`input`, `post_input`,
+    `insert_send`, `insert_return`, `pre_fader`; `SendTap`, `crates/session/src/model.rs:856-871`).
+    It is prepared and fired as an added route (D3), with the strip's claim. Routes from
+    `post_fader` and `post_pan` pass the armed fader and are not armed.
+
+  A route of case (a) or (b) whose source strip's fader is armed takes no entry of its own when its
+  tap follows the fader (the fader's fade already shapes it; two ramps would multiply), and is case
+  (c) when its tap precedes it. A route whose destination strip is added or removed passes that
+  strip's fader and needs nothing here. The ramp-out of a removed or duck-swapped strip's pre-fader
+  sends runs on the predecessor in phase 1 (#1325 D2, #1324 D4). A live value change on a route
+  that stays is not this issue (#1225); a prepared one is case (b).
 - **D2. Transition route.** The graph gains a route op form that ramps without a lane:
   `LiveRoute::control` becomes `Option`. A transition route binds in this form, never folds, and
-  takes an entry in #1288's fade table (D3 there), with `claim = None`.
+  takes an entry in #1288's fade table (D3 there), with the claim D3 gives it. A route that has a
+  live lane (*Hold route-lane values in latest-target cells*, #1347) keeps it and arms the same
+  way; the arm is route-op state, not a lane record. Once *Give every route whose tap precedes its
+  strip's fader a live lane on every plan* (#1391) lands, every route of case (c) is such a route.
 - **D3. Added route.** Prepared settled at `[+0.0; 4]`, muted. Its fire retargets the ramp to the
-  route's prepared gated coefficients (`mute = false`) over `N`. Its delay is its
-  `compensation_delay`, so the fade starts at the first block boundary at or after the moment the
-  signal leaves the line at rest.
+  route's prepared gated coefficients (`mute = false`) over `N`. Its delay is the latency from its
+  source strip's input to its tap (0 for a route of case (a) or (b) from a surviving strip, whose
+  tap is already warm) plus its `compensation_delay`, so the fade starts at the first block boundary
+  at or after the moment the signal leaves the line at rest. Its claim is its source strip's claim
+  in case (c), else `None`. Like every entry of #1288's table it fires no earlier than adoption.
 - **D4. Removed route.** The successor is compiled from the committed model plus each removed route
   at its predecessor values (a "fading route"; the committed model and snapshots never contain it).
   Its compensation line carries as any line does (#1283), so the signal continues. It is prepared at
@@ -64,7 +98,8 @@ two ends survive was left with a step at its destination.
 
 ## Deliverables
 
-1. D2 in `crates/graph`; D1, D3-D6 in host-core successor preparation and the inventory.
+1. D2 in `crates/graph`; D1, D3-D6 in host-core successor preparation and the inventory; case (c)
+   reads the armed strip set #1288's arm entry point receives.
 2. Tests below. Header comment and `docs/C_ABI_V1_QUALIFICATION.md` text.
 
 ## Authorized paths
@@ -76,7 +111,8 @@ two ends survive was left with a step at its destination.
 
 ## Non-goals
 
-- Value edits of a surviving route (#1225 and its browser twin).
+- Live value edits of a surviving route (#1225 and its browser twin); a prepared value change is
+  case (b).
 - Making every route live on every plan.
 - No crossfade between plans; ghost strips stay deferred by D15-9 until a listening test measures
   an audible dip.
@@ -94,11 +130,26 @@ between render calls.
    predecessor's output with the route live-muted with `N` at `S`: bit-identical.
 3. **Only the route moves.** With A's source fed exact zeros, gates 1 and 2 leave every block equal
    to a run without the transaction.
-4. **Fading route retires.** A second structural transaction prepared after `S + N` drops the fading
+4. **Re-pointed send (R8).** Track A sends `post_fader` to submix B; a transaction re-points that
+   route (same ID) to submix C. B's input equals gate 2's fade-out, C's input equals gate 1's
+   fade-in, and A's own output to the master equals a run with no transaction, bit for bit (A is
+   not ducked). The same with the tap changed from `post_fader` to `pre_fader` instead.
+5. **Prepared send value change (D1 (b) (2)).** Prepared without route lanes (as the C ABI
+   prepares before #1225): track A sends `post_fader` into submix B at `gain_db = -12`; a
+   structural transaction adds a muted track and also sets that send to `gain_db = 0`. B's input
+   from A equals a reference plan compiled through D4's fading-route path with both routes, the old
+   one (-12 dB) live-muted with `N` at `S` and the new one (0 dB) muted at start and live-unmuted
+   with `N` at `S`: bit-identical in every block. The same with the send's `follows_mute` changed
+   from `false` to `true` while A is muted. With route lanes and #1225's classifier the gain edit
+   instead carries and retargets: no fading copy is prepared.
+6. **Pre-fader send of an added strip.** A transaction adds track T with a `pre_fader` send into
+   submix R. R's input from T equals a fresh plan of the successor session with that route muted at
+   start and unmuted with `N` at T's fader fire block (#1288 D3); before it, exact zeros.
+7. **Fading route retires.** A second structural transaction prepared after `S + N` drops the fading
    route with no change in output; one prepared before it keeps the ramp going: gate 2's blocks hold.
-5. **Realtime.** Zero allocations and frees over the swap and ramp blocks
+8. **Realtime.** Zero allocations and frees over the swap and ramp blocks
    (`the_swap_block_allocates_and_frees_nothing`, `successor_swap.rs:476`).
-6. Commands:
+9. Commands:
    - `cargo test --locked -p graph -p host-core -p capi --features graph/test-support,host-core/test-support,builtins-compiler/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `bash scripts/check-graph-policy.sh`, `bash scripts/check-host-core-policy.sh`,
@@ -114,11 +165,19 @@ between render calls.
 - Gate 2: a removal that drops the route at `S`, or a fading route whose line does not carry, turns
   it red.
 - Gate 3: a transition that touches other routes or folds a ramp into a neighbour turns it red.
-- Gate 4: a fading route dropped mid-ramp, or never dropped, turns it red.
+- Gate 4: a re-point treated as a value change (a step at both destinations) or one that ducks
+  the source strip turns it red.
+- Gate 5: a prepared send value change rebuilt at its new constant (a step at `S`), or a live
+  one that still takes a fading copy (a needless double route), turns it red.
+- Gate 6: a pre-fader send left unarmed beside an armed fader (it enters at full level at
+  adoption, a step at R) turns it red.
+- Gate 7: a fading route dropped mid-ramp, or never dropped, turns it red.
 
 ## Dependencies
 
 - *Fade in a strip that a swap adds during playback* (#1288).
+- *Supersede an unadopted candidate plan by compare-and-swap* (#1310) (base model of case (c)
+  restores).
 - *Carry compensation lines across a plan swap* (#1283).
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284).
 - *Keep every node's latency from dropping during playback* (#1285).

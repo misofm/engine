@@ -7,11 +7,12 @@ Code anchors verified on `main` at `6fb211594`.
 
 A live bypass toggle on any effect that has a bypass shunt no longer steps the output by
 `wet - dry`. It crossfades linearly between the effect's wet output and its latency-matched dry
-signal, over the session's mute ramp (`control_smoothing.mute_ms`, or the default table). This
-holds on both hosts: the browser's `COMMAND_EFFECT_BYPASS` and a C ABI transaction that changes a
-bypass. The effect's latency does not change. From the first sample after the ramp, the output is
-bit-identical to today's whole-block select. A session whose `mute_ms` is 0 renders exactly
-today's bits. Decision 14's F7 (the bypass half) is closed.
+signal, over the session's mute ramp (`control_smoothing.mute_ms`, or the default table). In this slice
+the render paths (per node and banked) crossfade, a plan swap carries a crossfade in flight, and
+the C ABI's bypass transactions use it. The effect's latency does not change. From the first sample
+after the ramp, the output is bit-identical to today's whole-block select. A session whose
+`mute_ms` is 0 renders exactly today's bits. The browser's `COMMAND_EFFECT_BYPASS` gets the session
+ramp in *Crossfade the browser's live bypass command over the session ramp* (#1393).
 
 ## Context
 
@@ -46,19 +47,24 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
   `LiveRamps::mute_samples` (`crates/host-core/src/live_delta.rs:33-58`). The C ABI qualification
   document says "The switch is a step: there is no bypass crossfade (decision 14, F7)"
   (`docs/C_ABI_V1_QUALIFICATION.md:450-452`).
-- **Hot file.** `crates/effect-contract/src/live.rs` is edited first by
-  *Carry live-controlled effect lanes across a plan swap* (#1280), which adds
-  `EffectControlLane::inherit_from`. It is then edited by
-  *Hold live values in latest-target cells on both hosts* (#1312), which turns the live bypass into
-  a cell. This slice lands third (plan risk 3).
+- **Hot file, and the order.** `crates/effect-contract/src/live.rs` is edited first by
+  *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345), which turns
+  the live bypass into a one-word cell drained first (#1345 D1, D3). Then *Carry live-controlled
+  effect lanes across a plan swap* (#1280) carries those cells and the shunt words in move mode and
+  in copy mode (#1280 D2-D6), under the copy rules of *Carry plan state by copy as well as by move*
+  (#1322). This slice lands after all three (plan risk 3) and extends both carries.
 
 ## Decisions frozen for this slice
 
-- **D1. The bypass value and its ramp travel as one unit.** The bypass record (or the bypass cell,
-  if #1312 has made it one) carries `bypassed: bool` and `ramp_samples: u32`. Every producer fills
-  `ramp_samples` from `LiveRamps::for_session(model).mute_samples`. There is no per-command
-  override: the browser's `smoothing_samples` word stays required zero. A host asks for a step by
-  setting `mute_ms` to 0.
+- **D1. The bypass value and its ramp travel as one unit.** #1345's bypass cell widens from one
+  word to two, `bypassed` and `ramp_samples`, written and drained as one unit (D15-2: a cell holds
+  its target words and its ramp together). The producer fills `ramp_samples` from
+  `LiveRamps::for_session(model).mute_samples` (#1054 D4). The bypass is the one live row with no
+  per-edit length (D15-1 recorded resolution): a host asks for a step by setting `mute_ms` to 0.
+  The browser decode, which this slice does not change in behaviour, writes `ramp_samples = 0`;
+  *Crossfade the browser's live bypass command over the session ramp* (#1393), which needs #1364's
+  browser `LiveRamps`, gives it the session ramp. Its `smoothing_samples` word stays required
+  zero.
 - **D2. Lane state.** `EffectControlLane` holds:
   - the target (`bypass`);
   - a one-word mix ramp `m`, where `m = 1` is wet and `m = 0` is dry, as an `IndexedRamp` that uses
@@ -95,8 +101,10 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
 - **D6. Mono collapse.** A ramping lane counts as bypassed for the witness: `UNBYPASSED` is false
   from the record until the ramp settles at wet. Collapse is declined during a ramp exactly as it
   is under a bypass.
-- **D7. Carry.** The mix ramp and `k` are live lane state. #1280's `inherit_from` and #1322's
-  copy-mode carry copy them with `bypass`. A swap in the middle of a ramp continues the ramp.
+- **D7. Carry.** The mix ramp and `k` are live lane state, carried with the bypass cell by #1280's
+  lane carry in both modes. Move mode moves them. Copy mode copies them and leaves the
+  predecessor's untouched, so the predecessor renders on bit for bit (#1322's copy rule). A swap in
+  the middle of a ramp continues the ramp.
 - **D8. Acked-batch question.** No queue or admission rule changes, and a record still applies at
   its block boundary. A bypass record is never acked without effect: its ramp starts at the next
   block.
@@ -107,18 +115,12 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
    the shunt's doc rewritten ("Selection is whole-block" becomes the crossfade rule).
 2. D4-D5 at the two call sites: `crates/graph/src/runtime.rs:3530-3585` and
    `crates/rack/src/lib.rs:1318-1462`.
-3. D1 producers:
-   - the classifier (`live_delta.rs:391-393`);
-   - the browser decode, from a `LiveRamps` that host-web computes at preparation from its
-     session;
-   - every other construction of the record (mechanical; listed by
-     `grep -rn 'EffectControlRecord::Bypass'`).
-4. D7 in #1280's `inherit_from` and in #1322's copy carry, if that has landed.
-5. Docs:
-   - `docs/C_ABI_V1_QUALIFICATION.md:450-452`;
-   - the `COMMAND_EFFECT_BYPASS` doc (`hosts/host-web/src/lib.rs:836-844`);
-   - the SDK's `bypass` doc (`sdk/src/core/live-controls.ts:930-943`);
-   - `docs/EFFECT_CONTRACT_V1.md`'s bypass text.
+3. D1 producers: the classifier (`live_delta.rs:391-393`) with the session mute ramp; the browser
+   decode (`hosts/host-web/src/lib.rs:4489-4501`) with `ramp_samples = 0` (D1); every other
+   construction of the record or cell (mechanical).
+4. D7 in #1280's move and copy carries.
+5. Docs: `docs/C_ABI_V1_QUALIFICATION.md:450-452` and `docs/EFFECT_CONTRACT_V1.md`'s bypass
+   text.
 6. The tests below.
 
 ## Authorized paths
@@ -130,12 +132,18 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
   `crates/host-core/tests/successor_swap.rs`
 - `crates/graph-compiler/tests/bypass_shunt_identity.rs`, `crates/graph-compiler/tests/bypass_cohorts.rs`
 - `crates/capi/src/runtime/live_tests.rs`, `docs/C_ABI_V1_QUALIFICATION.md`
-- `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs` (stream H owns them)
-- `sdk/src/core/live-controls.ts` (docs only), `docs/EFFECT_CONTRACT_V1.md`
-- Mechanical record-shape updates in any file that builds `EffectControlRecord::Bypass`
+- `docs/EFFECT_CONTRACT_V1.md`
+- Mechanical record-shape updates in any file that builds a bypass record or cell, including
+  `hosts/host-web/src/lib.rs` (D1's zero only; stream H owns it)
 
 ## Non-goals
 
+- **The browser's bypass command.** *Crossfade the browser's live bypass command over the session
+  ramp* (#1393): host-web fills `ramp_samples` from the `LiveRamps` it keeps for the running
+  session (*Resolve an absent live ramp to the session default on the browser and in the SDK*,
+  #1364, D2), the `COMMAND_EFFECT_BYPASS`, shipped-host and SDK `bypass` docs, and the gate that a
+  C ABI bypass transaction and a browser bypass command render the same bits. It depends on this
+  issue and #1364.
 - No crossfade for a prepared bypass. The delay and the multiband compressor get shunts in
   *Give the delay a live bypass shunt* (#1339) and *Give the multiband compressor a live bypass
   shunt* (#1340). Once they land, D3 covers them with no further edit.
@@ -175,13 +183,12 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
    from 480 frames later.
 4. **Zero ramp.** With `mute_ms = 0`, every existing shunt-identity and bypass-cohort test passes
    unchanged, and gate 1's X equals D from the first sample of block 3.
-5. **Both hosts** (`crates/capi/src/runtime/live_tests.rs` and `hosts/host-web/src/tests.rs`).
-   - A C ABI bypass transaction and a browser bypass command on the same session render the same
-     bits, and both follow gate 1's law with the session's `mute_ms`.
-   - The C ABI ramp blocks allocate nothing (`bench_support::alloc` thread counters, statics
-     warmed).
+5. **C ABI** (`crates/capi/src/runtime/live_tests.rs`). A bypass transaction on a playing session
+   follows gate 1's law with the session's `mute_ms`, then equals a control booted bypassed. The
+   ramp blocks allocate nothing (`bench_support::alloc` thread counters, statics warmed).
 6. **Carry** (`crates/host-core/tests/successor_swap.rs`). A swap at a block inside a ramp renders
-   bit-identically to the same session without the swap.
+   bit-identically to the same session without the swap, in move mode and in copy mode; in copy
+   mode the predecessor, rendered on, equals its own unswapped render.
 7. **Cross-target.** `bash scripts/check-cross-targets.sh` and the browser legs pass. The mix uses
    no fused multiply-add, so the native, AArch64 and Wasm bits match.
 8. **Commands:**
@@ -193,7 +200,6 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
    - `bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,
      `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`,
      `bash scripts/test-web-audioworklet.sh`
-   - `bash scripts/check-sdk-types.sh && bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-effect-runtime-policy.sh`,
      `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
@@ -213,8 +219,9 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
   current mix.
 - Gate 4 turns red if a zero length is not a step, which would move today's bits for an explicit
   0.
-- Gate 5 turns red if one host forgets the session ramp (for example, the browser keeps 0).
-- Gate 6 turns red if the carry drops the ramp position, so the successor jumps to the endpoint.
+- Gate 5 turns red if the C ABI producer forgets the session ramp (the toggle steps).
+- Gate 6 turns red if the carry drops the ramp position, so the successor jumps to the endpoint,
+  or if copy mode advances the predecessor's ramp.
 
 ## Dependencies
 
@@ -222,6 +229,10 @@ today's bits. Decision 14's F7 (the bypass half) is closed.
   (#1054), for `LiveRamps::mute_samples` and D3's row table.
 - *Research: default ramp lengths for live mute, fader and pan changes (cited, measured, listened)*
   (#1055), whose decision-15 addition confirms `mute_ms` for the bypass row.
-- *Carry live-controlled effect lanes across a plan swap* (#1280), then *Hold live values in
-  latest-target cells on both hosts* (#1312). Both edit `live.rs` first.
-- *Carry plan state by copy as well as by move* (#1322), if it has landed: D7 extends its copy.
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): D1 widens
+  its bypass cell.
+- *Carry plan state by copy as well as by move* (#1322): D7 follows its copy rules.
+- *Carry live-controlled effect lanes across a plan swap* (#1280): D7 extends its carries.
+
+Dependent: *Crossfade the browser's live bypass command over the session ramp* (#1393) depends on
+this issue.

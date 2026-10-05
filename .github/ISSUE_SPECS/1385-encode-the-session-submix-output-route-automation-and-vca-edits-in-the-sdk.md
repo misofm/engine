@@ -43,10 +43,14 @@ stored automation and VCAs in one `engine.apply` transaction. The bytes equal th
   uses. Every automation target goes through `resolveAutomationTarget`, so #1335's refusal applies
   to transactions exactly as to built sessions.
 - **D3. Encoding.** The same writer and payload discipline as #1383 D3; no new writer.
+- **D4. Per-edit ramp.** `setConsole`, `setRouteChannelMatrix`, `setRouteGainDb`, `setRouteMute`
+  and `setVcaFader` take the optional `{ rampSamples?: number }` of #1383 D2 and write the
+  `ramp_samples` field of *Carry an optional per-edit ramp length on live session edits* (#1394
+  D1) when it is given, never when it is omitted.
 
 ## Deliverables
 
-1. D1-D3 in `sdk/src/core/transaction.ts`.
+1. D1-D4 in `sdk/src/core/transaction.ts`.
 2. Cases in `sdk/test/transaction-evals.mjs`.
 
 ## Authorized paths
@@ -61,7 +65,8 @@ stored automation and VCAs in one `engine.apply` transaction. The bytes equal th
 ## Objective gates
 
 1. **Bytes equal the codec's.** For each method in D1 at least once (`setAutomationSegments` with 0,
-   1 and 3 segments; `setConsole` with an empty and a two-slot console), #1383's oracle
+   1 and 3 segments; `setConsole` with an empty and a two-slot console; each D4 method with
+   `rampSamples` omitted, 0 and 960), #1383's oracle
    re-encoding equals the SDK's bytes exactly.
 2. **Semantics equal the builder's.** A transaction that adds a submix, routes a track to it with
    `followsMute`, adds a VCA over two tracks and adds automation on a block-rate EQ gain: the
@@ -76,7 +81,8 @@ stored automation and VCAs in one `engine.apply` transaction. The bytes equal th
 ## Test value
 
 - Gate 1: a field order, count or width error in any of the 25 payloads makes the codec decode a
-  different edit or refuse the frame; it turns red.
+  different edit or refuse the frame; it turns red. So does a D4 method that writes 0 for an
+  omitted `rampSamples`.
 - Gate 2: a byte-valid encoder that maps a spec field to the wrong session field (a route's tap,
   a VCA member list) changes the snapshot; it turns red.
 - Gate 3: a transaction path that skips `resolveAutomationTarget` would let an app store automation
@@ -86,3 +92,4 @@ stored automation and VCAs in one `engine.apply` transaction. The bytes equal th
 
 - *Build and encode session transactions in the SDK* (#1383).
 - *Refuse automation on effect parameters that are not block-rate* (#1335).
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for D4's field.

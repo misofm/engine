@@ -8,8 +8,8 @@ Slice 12 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 
 An effect that renders per node in both plans, and whose prepared values are unchanged, keeps its
 exact state through a plan swap. Examples are a delay's echoes and feedback tail, a multiband
-compressor, and any insert the planner leaves unbanked in both plans. Its live state and pending
-records come along, so no acknowledged edit is lost. There are two modes:
+compressor, and any insert the planner leaves unbanked in both plans. Its live state and unread live
+values come along, so no acknowledged edit is lost. There are two modes:
 - **Move mode** (an ordinary swap) costs a few words per effect, whatever the state size. A delay
   holds two seconds per channel.
 - **Copy mode** (the warm successor of D15-8) copies the state once into the successor's
@@ -32,7 +32,7 @@ records come along, so no acknowledged edit is lost. There are two modes:
 - The per-node payload pair is render-safe and exact mid-ramp for every effect, the delay included
   since `e0e4e8a20` (#1278 D2a). A payload copy of a delay at 96 kHz would still pass about 1.5 MiB
   through a scratch buffer twice.
-- The effect rule, the retarget and the inherited control state come from *Carry live-controlled
+- The effect rule, the retarget and the carried control state come from *Carry live-controlled
   effect lanes across a plan swap* (#1280). The bank and per-node flips come from #1281.
 
 ## Decisions frozen for this slice
@@ -48,16 +48,16 @@ records come along, so no acknowledged edit is lost. There are two modes:
   - For an effect whose bypass is lowered, a live bypass is lane state and carries.
 - **D2. Move mode.** When both plans hold the owner per node, swap their `processor` boxes
   (`core::mem::swap`). For a `LiveControlEffect`, also swap the `BypassShunt` (same frames and
-  latency by D1). The successor's lane inherits the predecessor's control state with
-  `EffectControlLane::inherit_from` (#1280 D2), so pending records render in the successor. No
+  latency by D1). The successor's lane takes the predecessor's control state with
+  `EffectControlLane::carry_from` (#1280 D2), so unread live values render in the successor. No
   payload, no copy, no allocation.
 - **D3. Copy mode.** `PreparedNativeEffect` gains a required method, `copy_state_from(&mut self,
   source: &dyn PreparedNativeEffect) -> Result<(), StatePayloadError>`, delivered by #1362. It
   copies every state word from a same-type, same-layout instance into this one's existing
   storage in one pass, and refuses anything else without writing. This slice calls it for every
-  carried per-node owner. It copies the shunt's dry, line and cursor words, and copies the lane's
-  live control terms; nothing is inherited, and copy mode refuses while a record is pending
-  (#1280 D6). The bytes go into `carry_program_copy_bytes`.
+  carried per-node owner. It copies the shunt's dry, line and cursor words, and the lane's control
+  state through `carry_from` (#1280 D2, D6), which never consumes a predecessor value. The bytes
+  go into `carry_program_copy_bytes`.
 - **D4. Mixed wrappers.** If one plan has live controls on the owner and the other does not (no
   host does this today), the owner does not carry, and the join records it in the restart set.
 
@@ -87,10 +87,10 @@ records come along, so no acknowledged edit is lost. There are two modes:
    adds a muted track whose ID sorts first. Swap after block 6, while the tail rings. The swapped
    run and a fresh B fed the same PCM from frame 0 are bit-identical for 64 blocks. With this
    slice's section of the program disabled, the tail stops at block 7.
-2. **Pending records and live bypass.** Prepare with live controls. Admit a delay-time record to A
-   just before the swap (not yet rendered), and a live bypass of a per-node compressor insert a
+2. **Unread values and live bypass.** Prepare with live controls. Write a delay-time value to A's
+   cell just before the swap (not yet rendered), and a live bypass of a per-node compressor insert a
    block earlier (one track, so it does not bank). Prepare B from the base. Every block equals the
-   reference fed the same records at the same blocks.
+   reference fed the same values at the same blocks.
 3. **A prepared bypass change restarts.** A committed bypass change on the delay: the join has no
    pair for it, its successor instance starts at rest, and `restarted_strips()` is exactly that
    strip.
@@ -110,7 +110,7 @@ records come along, so no acknowledged edit is lost. There are two modes:
 
 - Gate 1: a carry that leaves per-node effects at rest cuts the tail. It turns red.
 - Gate 2: a move that keeps the successor's own lane state drops the acknowledged live bypass and
-  the pending record. It turns red: the compressor's bypass is a lowered lane bypass, so the gate
+  the unread value. It turns red: the compressor's bypass is a lowered lane bypass, so the gate
   sees it.
 - Gate 3: a rule that ignores the prepared bypass moves an unbypassed delay into a plan whose
   committed bypass is on. It turns red.

@@ -169,22 +169,27 @@ governs. Stream F is C ABI live completeness, built on cells.
 
 | Issue | Title | Stream | Depends on |
 |---|---|---|---|
-| #1312 | *Hold live values in latest-target cells on both hosts* | B | #1309, #1277 |
-| #1345 | *Hold effect parameter, bypass and EQ-target values in latest-target cells* | B | #1312, #1280 |
+| #1312 | *Hold live values in latest-target cells on both hosts* | B | #1309, #1348 |
+| #1345 | *Hold effect parameter, bypass and EQ-target values in latest-target cells* | B | #1312 |
 | #1346 | *Hold strip input-lane values in latest-target cells* | B | #1312 |
 | #1347 | *Hold route-lane values in latest-target cells* | B | #1312 |
+| #1399 | *Report live_values_superseded in the browser status and prove both hosts drain strip cells alike* | B | #1312 |
 | #1313 | *Report each transaction's edit path in its response* | B | #1309 |
-| #1314 | *Publish an applied-revision watermark and complete edits asynchronously* | B | #1309 |
-| #1364 | *Resolve an absent live ramp to the session default on the browser and in the SDK* | E | #1054; land after #1335 or rebase |
+| #1314 | *Publish an applied-revision watermark and complete edits asynchronously* | B | #1309, #1343 |
+| #1364 | *Resolve an absent live ramp to the session default on the browser and in the SDK* | E | #1054, #1335 |
 | #1365 | *Edit control_smoothing by a session transaction, model-only* | E | #1054 |
+| #1393 | *Crossfade the browser's live bypass command over the session ramp* | E | #1341, #1364 |
+| #1388 | *Run the blinded listening session for the live ramp defaults* | E | #1054, #1055 |
+| #1394 | *Carry an optional per-edit ramp length on live session edits* | E | #1054 |
 | #1268 | *Elide a builtin input filter section again after a live disable settles it to identity* | F | none |
-| #1261 | *Apply value-only input trim and polarity edits to the running C ABI plan* | F | #1309, #1312, #1346, #1054, #1329, #1328 |
-| #1262 | *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets* | F | #1261, #1268, #1329, #1328, #1346, #1312 |
-| #1225 | *Deliver value-only send and submix-strip edits to the running C ABI plan* | F | #1309, #1312, #1347, #1054 |
-| #1226 | *Let C ABI sends follow their source strip's mute live* | F | #1225, #1309, #1312, #1347, #1054 |
-| #1247 | *Deliver value-only VCA edits to the running C ABI plan* | F | #1226, #1309, #1312, #1347, #1054 |
-| #1267 | *Apply value-only submix-strip input-section and effect edits to the running C ABI plan* | F | #1225, #1261, #1262, #1312, #1346, #1309 |
-| #1306 | *Size each effect's automation span window from the producers its plan has* | F | #1058, #1309, #1304 |
+| #1261 | *Apply value-only input trim and polarity edits to the running C ABI plan* | F | #1054, #1309, #1312, #1328, #1329, #1346, #1394 |
+| #1262 | *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets* | F | #1261, #1268, #1328, #1329, #1346 |
+| #1225 | *Deliver value-only send edits to the running C ABI plan* | F | #1054, #1277, #1284, #1309, #1312, #1347, #1394 |
+| #1390 | *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* | F | #1054, #1225, #1277, #1309, #1312, #1394 |
+| #1226 | *Let C ABI sends follow their source strip's mute live* | F | #1054, #1225, #1309, #1312, #1347, #1390, #1394 |
+| #1247 | *Deliver value-only VCA edits to the running C ABI plan* | F | #1054, #1226, #1309, #1312, #1347, #1390, #1394 |
+| #1267 | *Apply value-only submix-strip input-section and effect edits to the running C ABI plan* | F | #1261, #1262, #1309, #1312, #1345, #1346, #1390 |
+| #1306 | *Size each effect's automation span window from the producers its plan has* | F | #1058, #1304, #1309, #1345 |
 
 Prerequisites owned elsewhere: *Extract the C ABI control plane into a portable crate both hosts
 call* (#1309, stream B); *Session `controlSmoothing`: configurable ramp lengths for live mute,

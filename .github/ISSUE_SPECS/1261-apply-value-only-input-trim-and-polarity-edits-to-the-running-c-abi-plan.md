@@ -81,7 +81,10 @@ bounded tail of decision 15 D15-4. Today such an edit rebuilds the plan.
     `checked_trim_gain` becomes `pub`, documented as `checked_fader_gain` is.
   - **Ramps.** Per *Session `controlSmoothing`: configurable ramp lengths for live mute, fader
     and pan changes* (#1054) D3 and D4, a TrimDb record carries `LiveRamps::fader_samples` (the
-    `fader_ms` key) and a PolarityInvert record `LiveRamps::mute_samples` (the `mute_ms` key).
+    `fader_ms` key) and a PolarityInvert record `LiveRamps::mute_samples` (the `mute_ms` key),
+    each read through `LiveRamps::resolve` with the strip's `Input` entry, so a
+    `SetTrackBuiltins` that carries its own length uses it (*Carry an optional per-edit ramp
+    length on live session edits*, #1394 D6).
     No input-specific ramp field exists (D15-1: every live value ramps; an explicit 0 stays
     legal).
   - `delay_samples` stays compared, so its change is `Structure`.
@@ -141,8 +144,12 @@ Run every command from the repository root.
 
    `cargo test --locked -p host-core --all-targets --features host-core/test-support`
 2. **Equal to a rebuild.** New cases in the capi live tests, on `long_session` rewritten through
-   `with_model` with no console slots and no inserts (its stock form has a console EQ, whose
-   state would carry the ramp's difference), so nothing downstream keeps state:
+   `with_model` so that nothing at or after the trim keeps state: no console slots and no inserts
+   (its stock form has a console EQ), and every strip's `hpf_hz` and `lpf_hz` set to `0.0` on both
+   lanes, which turns the input filters off (the pattern `submix_session` uses,
+   `crates/capi/src/runtime/live_tests.rs:977-981`). The parity session's filters run after the
+   trim in the input stage, so with them on, their state would keep the ramp's difference forever
+   and no block would equal the rebuild:
    - a trim of -6 dB on the left lane;
    - a polarity flip on both lanes.
 
@@ -193,6 +200,7 @@ Run every command from the repository root.
 - *Hold strip input-lane values in latest-target cells* (#1346)
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054), for the ramp keys (its D3)
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for the per-edit ramp
 - *State a bounded tail and an exact-rest bound for every node* (#1329), which replaces the
   live-input-lane `Infinite` rule
 - *Flush the SVF jointly so builtin and EQ filters reach exact rest* (#1328), on which #1329's

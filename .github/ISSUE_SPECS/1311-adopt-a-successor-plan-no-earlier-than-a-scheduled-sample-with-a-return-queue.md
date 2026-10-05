@@ -6,92 +6,126 @@ Code anchors verified on `main` at `6fb211594`.
 ## Product outcome
 
 The plan exchange can hold a published candidate until a chosen render sample. A candidate
-published "no earlier than S" is adopted at the first block that starts at or after S; one
-published "exactly at S" is adopted at the block that starts at S, and if render first sees it
-later, render hands it back to the control thread through a capacity-1 return queue instead of
-adopting it late. Until it is due, the candidate stays withdrawable, so a later structural edit can
-still supersede it. Duck-swap and two-phase removal (stream D) schedule swaps with this, and the
-warm successor (stream C) uses exact adoption and the return queue.
+published "no earlier than S" is adopted at the first block that starts at or after S. One
+published "exactly at S" is adopted at the block that starts at S. If render first sees it later,
+render hands it back to the control thread instead of adopting it late: the candidate stays in its
+mailbox cell, marked `Returned` with a reason, until its owner takes it. That cell is the return
+queue, of capacity 1. Until it is due, a candidate stays withdrawable, so a later structural edit
+can still supersede it. Duck-swap and two-phase removal (stream D) schedule swaps with this, and
+the warm successor (stream C) uses exact adoption and the return path.
 
 ## Context
 
-- Today the render thread adopts a reserved candidate at the first block after publication:
-  `enter_block` pops it into `pending` and swaps unless retirement is full
-  (`crates/engine/src/realtime/plan_exchange.rs:375-437`; applied at `:436`). There is no notion
-  of a due sample, and no path from render back to control other than retirement
+- Today the render thread adopts a reserved candidate at the first block after publication
+  (`enter_block`, `crates/engine/src/realtime/plan_exchange.rs:375-437`; applied at `:436`). There
+  is no notion of a due sample, and no path from render back to control other than retirement
   (`PlanRetirer::try_reclaim`, `:512`).
 - The incoming plan adopts the outgoing plan's clock at the swap (`:415-418`), so "the block that
   starts at S" means `absolute_sample == S` on the host's render timeline, in both
   `render_contiguous` (`:448`) and `render` (`:473`).
-- `RealtimePlanOwner` already keeps saturating counters for deferred and carried swaps
-  (`deferred_count` `:361`, `carried_count` `:366`).
-- The mailbox of #1343 replaces the publication queue with two cells and
-  one atomic state word: the control thread fills an empty cell and marks it full; the render
-  thread claims a full cell by compare-and-swap; the control thread withdraws a full cell by
-  compare-and-swap. The loser of a race never touches the cell.
+- `RealtimePlanOwner` keeps a saturating `carried_count` (`:366`).
+- *Let the control thread withdraw an unadopted candidate plan* (#1343) replaces publication with a
+  two-cell mailbox in `crates/engine/src/realtime/spsc.rs`: one `AtomicU64` state word holds a
+  generation and a 2-bit state per cell (`Empty`, `Full`, `Active`). Render claims a `Full` cell by
+  one compare-and-swap that makes it `Active` and the old `Active` cell `Empty`. Control withdraws a
+  `Full` cell by compare-and-swap: `Withdrawal::{Withdrawn, Taken, Nothing}`. It also removes
+  `deferred_count` and `DeferredRetirementFull`.
 
 ## Decisions frozen for this slice
 
 - **D1. Adoption mode on the reservation.** `PlanAdoption::{Next, NoEarlierThan(u64),
   ExactlyAt(u64)}` is fixed when the control thread reserves a replacement and stored in the cell
-  beside the plan. `Next` is today's behaviour; every existing caller passes it.
-- **D2. Render reads the due sample before it claims.** The cell's due sample lives in an
-  `AtomicU64` written before the cell is marked full. Render loads the state word, then the due
-  sample, and claims (compare-and-swap on the whole word, generation included) only when the
-  block's start is at or past the due sample. A word that changed between the two loads makes the
-  claim fail; render then does nothing this block and looks again next block. Render never spins
-  and never claims a candidate that is not due, so a scheduled candidate stays withdrawable until
-  its block.
-- **D3. Exactly at S, else return.** For `ExactlyAt(S)`, a claim at a block starting at `S`
-  adopts. A claim at a later block does not adopt: render pushes the candidate, with its retirement
-  credit, into the return queue (an SPSC of capacity 1, preallocated at exchange creation, render
-  to control). `RealtimePlanOwner::returned_count` counts these, saturating.
-- **D4. The return queue never drops.** At most one candidate is in flight, and the control thread
-  drains the return queue before every reservation, so render's push finds room. If it does not
-  (a broken invariant), render keeps the candidate in a one-entry render-local slot and retries the
-  push at the next block; it never adopts it and never frees it.
+  beside the plan, with the due sample. Both are written before the cell is marked `Full`. `Next`
+  is today's behaviour; every existing caller passes it.
+- **D2. Render reads the due sample before it claims.** Render loads the state word (`Acquire`),
+  then the `Full` cell's mode and due sample. It claims (#1343's one compare-and-swap, generation
+  included) only when the block's start is at or past the due sample. If control withdrew and
+  republished between the two loads, the generation changed and the claim fails. Render then does
+  nothing this block and looks again next block. Render never spins and never claims a candidate
+  that is not due, so a scheduled candidate stays withdrawable until its block.
+- **D3. Exactly at S, else returned in place.** The cell state gains a fourth value, `Returned`,
+  which the 2-bit field already has room for. The state word also gains a `ReturnReason` field for
+  the one cell that can be `Returned`.
+  - For `ExactlyAt(S)`, a claim at a block starting at `S` adopts.
+  - At a later block, render does not adopt. Its one compare-and-swap marks the cell `Returned`
+    with `ReturnReason::Late` instead of `Active`. The plan, its retirement credit, its revision
+    word (#1314) and its epoch stay in the cell. Render never touches a `Returned` cell again.
+  - The compare-and-swap fails only if control withdrew the candidate first.
+  - `RealtimePlanOwner::returned_count` counts returns, saturating.
+  - The reason exists so that every way of returning a candidate is told apart from a late one.
+    This issue defines the whole `ReturnReason` enum, so later slices add no reason bits:
+    - `Late`: an `ExactlyAt` candidate render saw after its sample (this issue).
+    - `Copying`: render claimed a copy-and-return candidate and is copying into it now (written by
+      *Snapshot a running plan into a returned successor at a block*, #1354 D1).
+    - `Copied`: that copy finished (#1354 D1).
+    - `CopyRefused`: that copy was refused, the candidate untouched (#1354 D1), so a refused copy
+      can never be taken for a copied one.
+    - `PreRollBound`: render's bounded pre-roll could not finish (*Fall back from a missed catch-up
+      deadline: bounded render-thread pre-roll, then the transition*, #1358 D4).
+  - The reason field is 3 bits, enough for the five values.
+  - Render changes a `Returned` word in exactly one case: it stores `Copied` or `CopyRefused` over
+    its own `Copying`. Control never changes a `Copying` cell (D6).
+- **D4. The return path never drops, and needs no push.** A returned candidate stays in its cell,
+  so nothing render does on return can fail or need room. While a cell is `Returned`, the other
+  cell is `Active` and nothing can be published, so a second return is impossible. The return path
+  costs no bytes beyond #1343's two cells: the reason is three bits of the state word. The returned
+  plan's memory is the candidate's, already counted as the pending plan.
 - **D5. Off-grid schedules.** `ExactlyAt(S)` with `S` not a multiple of the quantum relative to the
   plan's clock origin is refused at reservation with a typed error. `NoEarlierThan(S)` accepts any
   `S` and adopts at the first block whose start is at or past it.
-- **D6. Control-side API.** `PlanPublisher::reserve_replacement(plan, adoption)`, and
-  `PlanReturns::try_reclaim() -> Option<(PlanEpoch, PreparedRenderPlan)>` beside
-  `PlanRetirer`. The control plane threads `PlanAdoption::Next` through its publication and drains
-  the return queue in `synchronize_plan_epochs`. A `Next` candidate is never returned, so a
-  returned candidate there is an internal fault: it is dropped on the control thread and the call
-  reports `CommandError::Internal`. The callers that schedule own their returned candidates.
+- **D6. Control-side API.** `PlanPublisher::reserve_replacement(plan, adoption)`.
+  `PlanPublisher::withdraw()` gains two outcomes:
+  - `Withdrawal::Returned { candidate: UnadoptedCandidate, reason: ReturnReason }`, for a
+    `Returned` cell whose reason is `Late`, `Copied`, `CopyRefused` or `PreRollBound`. It is one
+    compare-and-swap that marks the cell `Empty` and cannot fail, because render does not change
+    the word while a cell is `Returned` with one of these reasons (D3).
+  - `Withdrawal::InFlight`, for a `Returned` cell whose reason is `Copying`. The word is unchanged
+    and the candidate stays in its cell. The caller never waits on it: it acts on its next call
+    (#1354 D1; the structural path's handling is *Supersede a running catch-up by a structural
+    edit*, #1357 D1). This issue produces no `Copying` cell, so here `InFlight` appears only in a
+    unit test that sets the word directly.
+  - `Withdrawal::Taken` keeps meaning adopted, and only that. A returned candidate is never
+    reported as `Taken`.
+  - Nothing drains returns in the background. `synchronize_plan_epochs` and the service step of
+    #1348 never take a `Returned` candidate. Only the code that published the candidate takes it,
+    with `withdraw`, as the catch-up does (#1355, #1360). The structural path treats `Returned` like
+    `Withdrawn`: the plan render runs is still the predecessor (#1310 D1).
+  - The control plane threads `PlanAdoption::Next` through its publication. A `Next` candidate is
+    never returned, by D3's construction.
 - **D7. Acked-batch question: can an ack ever precede a drop? No.** Scheduling changes when a
-  candidate is adopted, never whether its content survives: an unclaimed candidate stays in its
-  cell (withdrawable, D2), a claimed one is adopted or returned whole (D3), and a returned one is
-  held until the control thread takes it (D4). Nothing render does discards a candidate.
+  candidate is adopted, never whether its content survives. An unclaimed candidate stays in its
+  cell, withdrawable (D2). A claimed one is adopted. A late one stays in its cell, `Returned`, until
+  the control thread takes it whole (D3, D6). Nothing render or the service step does discards a
+  candidate.
 
 ## Deliverables
 
-1. D1-D5 in `plan_exchange.rs`, with doc comments that state the claim and return rules.
+1. D1-D5 in `spsc.rs` (the state and reason bits) and `plan_exchange.rs`, with doc comments that
+   state the claim and return rules.
 2. D6 in the control plane.
 3. A loom model of claim, withdraw and return.
 
 ## Authorized paths
 
-- `crates/engine/src/realtime/plan_exchange.rs`, `crates/engine/src/realtime/mod.rs` (exports and
+- `crates/engine/src/realtime/spsc.rs` (the mailbox state machine and its loom tests),
+  `crates/engine/src/realtime/plan_exchange.rs`, `crates/engine/src/realtime/mod.rs` (exports and
   its exchange tests).
 - `crates/control-plane/src/` (D6 call sites only).
-- `.github/workflows/qualification.yml`: the loom step's test filter (gate 2) only; outside
-  stream B's file set, sequenced by the coordinator.
 
 ## Non-goals
 
 - Choosing S for any edit (duck-swap #1324, two-phase removal #1325, warm successor #1287).
-- The copy-at-B mode of D15-8 step 2 (render copies its state into a candidate and returns it):
-  *Pre-roll a successor whose latency grows* (#1287) adds it on this return queue, after *Carry
-  plan state by copy as well as by move* (#1322).
+- The copy-and-return mode of D15-8 step 2 and its return reasons: *Snapshot a running plan into a
+  returned successor at a block* (#1354), after *Carry plan state by copy as well as by move*
+  (#1322).
 - Supersession (#1310).
 
 ## Hazards
 
-- The due-sample load and the state-word load are two loads: D2's generation in the word is what
+- The due-sample load and the state-word load are two loads. D2's generation in the word is what
   makes a stale due sample harmless. A design that reads the due sample after claiming would let
   render hold an undue candidate and make it unwithdrawable.
-- `render` (`:473`) takes an explicit time; compare against `time.absolute_sample`, not the plan's
+- `render` (`:473`) takes an explicit time: compare against `time.absolute_sample`, not the plan's
   own clock.
 
 ## Objective gates
@@ -99,15 +133,18 @@ warm successor (stream C) uses exact adoption and the return queue.
 1. **Engine unit tests (new, `crates/engine/src/realtime/mod.rs`):**
    - `NoEarlierThan(S)`: blocks before S render the predecessor (`SwapOutcome::None`, its plan ID);
      the first block starting at or after S applies the swap.
-   - `ExactlyAt(S)`: published on time, it applies at S; published after render passed S, it is
-     returned (`returned_count` 1, `try_reclaim` yields it, the predecessor keeps rendering).
+   - `ExactlyAt(S)` published on time applies at S.
+   - `ExactlyAt(S)` published after render passed S is returned: `returned_count` 1, the
+     predecessor keeps rendering, `withdraw` yields `Returned { reason: Late }` with the epoch and
+     plan ID intact, and before that `withdraw` nothing new can be published.
+   - After the returned candidate is taken, a `Next` republish of it is adopted at the next block.
    - A `NoEarlierThan` candidate withdrawn before S is never adopted.
    - `ExactlyAt` off the grid is refused at reservation.
-   - Retirement credits balance after each case (reserve, return, reclaim).
-2. **Loom (new `spsc_loom_plan_mailbox_*` tests, or a filter change to the loom step).** Render
-   claims while control withdraws and republishes: exactly one side wins each race, a due
-   candidate is adopted at most once, an undue one is never claimed, and a returned one reaches
-   control. Command: `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom
+   - Retirement credits balance after each case (reserve, return, take, drop or republish).
+2. **Loom (new `spsc_loom_plan_mailbox_*` tests in `spsc.rs`).** Render claims or returns while
+   control withdraws and republishes: exactly one side wins each race, a due candidate is adopted
+   at most once, an undue one is never claimed, and a returned one is taken by control exactly once
+   and never reported `Taken`. Command: `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom
    --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom` (the CI step,
    `qualification.yml:678`).
 3. **Render stays allocation-free and syscall-free.** `cargo build --locked --release -p audit
@@ -115,6 +152,7 @@ warm successor (stream C) uses exact adoption and the return queue.
    `total_violations` 0. `bash scripts/check-realtime-policy.sh` and
    `bash scripts/test-realtime-policy.sh`.
 4. **No behaviour change for `Next`.** `cargo test --locked -p capi`,
+   `cargo test --locked -p control-plane --features test-support`,
    `cargo test --locked -p host-core --features control-provider,test-support --test
    successor_swap`, `cargo test --locked -p graph --features test-support --test
    rt11_swap_carry_alloc`, `cargo test --locked -p engine --features realtime-audit`.
@@ -124,14 +162,15 @@ warm successor (stream C) uses exact adoption and the return queue.
 ## Test value
 
 - Gate 1, `NoEarlierThan`: a swap applied at the first block regardless of S.
-- Gate 1, `ExactlyAt` late: a candidate adopted late (breaking the warm successor's exact catch-up)
-  or dropped instead of returned.
+- Gate 1, `ExactlyAt` late: a candidate adopted late (breaking the warm successor's exact catch-up),
+  dropped instead of returned, or reported as `Taken` (which would make supersession build against
+  a plan render does not run).
 - Gate 1, withdrawn before S: render claiming an undue candidate, which would make a scheduled
   candidate impossible to supersede.
-- Gate 2: an ordering bug between claim and withdraw that only some interleavings expose.
+- Gate 2: an ordering bug between claim, return and withdraw that only some interleavings expose.
 
 ## Dependencies
 
 - *Let the control thread withdraw an unadopted candidate plan* (#1343). This slice follows it in
-  `plan_exchange.rs`, and both precede stream C's edits there.
+  `spsc.rs` and `plan_exchange.rs`, and both precede stream C's edits there.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for D6.

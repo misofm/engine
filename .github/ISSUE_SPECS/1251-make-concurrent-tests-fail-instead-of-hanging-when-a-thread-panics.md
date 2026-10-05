@@ -1,6 +1,7 @@
 # Make concurrent tests fail instead of hanging when a thread panics
 
 Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+Code anchors verified on `main` at `6fb211594`.
 
 Tooling issue, the follow-up that *Make the live-route allocation gates wait on the queue and fail
 instead of hanging* (#1250, closed by PR #1249) left out of scope. Its verdict (Sol, MINOR-1)
@@ -31,9 +32,9 @@ A channel whose sender is dropped when its thread unwinds (`recv_timeout` return
 `Disconnected`) is an equally good release for a lockstep handshake, except inside an armed audit
 scope (see Hazards).
 
-## Sites (verified on `main` at `1cb677a76`)
+## Sites
 
-1. **`crates/capi/src/ffi.rs:2295` `plan_queries_are_pure_and_concurrent_with_render`.** The scoped
+1. **`crates/capi/src/ffi.rs:2496` `plan_queries_are_pure_and_concurrent_with_render`.** The scoped
    render thread runs `assert_eq!` in a loop and clears `rendering` only after it; the query thread
    spins on `while rendering || queries == 0`. A render failure hangs the scope. This is #1250's
    exact shape.
@@ -54,12 +55,12 @@ scope (see Hazards).
    `scoped_allocator_attribution_controls_are_live_and_isolated`.** A three-`Barrier` lockstep
    (`:60-80`): a worker assertion failure leaves the main thread blocked in `done.wait()`, inside
    `audit::in_render_scope`.
-6. **`crates/capi/src/runtime/tests.rs:2001`
+6. **`crates/capi/src/runtime/tests.rs:2949`
    `barrier_schedule_separates_one_source_producer_from_exclusive_render`.** A two-`Barrier`
-   lockstep (`:2012-2013`) between a source producer and a renderer: either side's failed
+   lockstep (`:2960-2961`) between a source producer and a renderer: either side's failed
    assertion leaves the other blocked at a barrier.
 
-**NIT (#1250 verdict, NIT-1).** `crates/capi/tests/resource_lifecycle.rs:1505` defines its own
+**NIT (#1250 verdict, NIT-1).** `crates/capi/tests/resource_lifecycle.rs:2030` defines its own
 `StopOnDrop`, identical to the helper's private one (`tools/bench-support/src/producer.rs:28`).
 
 ## Decisions

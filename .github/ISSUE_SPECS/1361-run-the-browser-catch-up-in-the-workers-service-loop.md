@@ -31,7 +31,7 @@ its outcome (`PREROLL_FALLBACK` or `TRANSITION_FALLBACK`), counted.
   catch-up slice. The slice size is `CATCH_UP_SLICE_BLOCKS` (#1360 D2), and the loop yields between
   calls.
 - **D2. Non-isolated page.** The control plane runs in single-instance mode with no off-thread
-  executor, so classification uses `CatchUpMode::RenderOnly` (#1358 D6).
+  executor, so classification uses `CatchUpMode::RenderOnly` (#1358 D5).
 - **D3. Allocation.** The worklet's render-locked allocation counter stays at exactly 0 across the
   copy, a pre-roll and adoption (#1333's runtime gate).
 - **D4. Acked-batch question.** As #1360 D6, unchanged.
@@ -80,3 +80,7 @@ its outcome (`PREROLL_FALLBACK` or `TRANSITION_FALLBACK`), counted.
 - *Publish the applied-revision watermark in the browser status* (#1349).
 - *Gate AudioWorklet render against allocation statically and at runtime* (#1333).
 - *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331).
+- *Replace the running browser session in the Rust host* (#1290), *Export transaction apply and
+  anchored seek from the browser engine module* (#1293) and *Send a session transaction to the
+  browser control plane* (#1294): the browser path that submits the structural transaction this
+  issue's gates apply during playback.

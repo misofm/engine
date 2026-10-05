@@ -33,6 +33,11 @@ transaction format.
   `cargo run --locked -q -p host-web --example sdk_render_oracle` and asserts the SDK against its
   answer, never a committed digest (`hosts/host-web/examples/sdk_render_oracle.rs:1-23`).
   `host-web` does not depend on `protocol` today (`hosts/host-web/Cargo.toml:25-33`).
+- The per-edit ramp: *Carry an optional per-edit ramp length on live session edits* (#1394 D1)
+  appends an optional `ramp_samples: u32` field after the last field of each live-value edit.
+  In this slice's opcodes those are `SetTrackBuiltins`, `SetEffectLinkMode`, `SetTrackFader`,
+  `SetTrackMatrixOrPan` and `SetTrackConsole`. Absent means the session default; an explicit 0 is
+  a step (decision 15, D15-1).
 
 ## Decisions frozen for this slice
 
@@ -46,6 +51,11 @@ transaction format.
   - strip effects: `putTrackEffect`, `removeTrackEffect`, `setTrackEffectOrder`,
     `setEffectIdentity`, `setEffectQuality`, `setEffectBypass`, `setEffectLinkMode`,
     `setEffectSidechain`, `upsertEffectParam`, `removeEffectParam`.
+
+  The five live-value methods of Context take a last optional argument `{ rampSamples?: number }`.
+  When given, it must be an integer in `0..=4294967295` (else `MisoUsageError`) and is written as
+  #1394's `ramp_samples` field; when omitted, the field is absent. The SDK does not bound it by the
+  rate: the engine refuses a length above one second with `session.edit.ramp_out_of_range`.
 
   Each method validates its arguments with the same validators `SessionBuilder` uses, and
   `build()` returns the `SessionTransaction`. An empty transaction is refused with a
@@ -85,8 +95,8 @@ transaction format.
 ## Objective gates
 
 1. **Bytes equal the codec's.** In `transaction-evals.mjs`, for each method in D2 (each at least
-   once; repeated fields with 0, 1 and 3 values), the oracle's re-encoding equals the SDK's bytes
-   exactly. This is a wire format, so byte equality is the claim.
+   once; repeated fields with 0, 1 and 3 values; each live-value method with `rampSamples`
+   omitted, 0 and 960), the oracle's re-encoding equals the SDK's bytes exactly. This is a wire format, so byte equality is the claim.
 2. **Semantics equal the builder's.** A base session from `SessionBuilder`, a transaction that adds
    a source and a track with an EQ insert, and a second transaction that removes a track: each
    oracle snapshot equals the `toJson()` of a `SessionBuilder` that declares the result directly.
@@ -104,8 +114,9 @@ transaction format.
 ## Test value
 
 - Gate 1: a field written out of order, a wrong field count, a missing repeated value or a wrong
-  integer width makes the codec decode different edits or refuse the frame; it turns red. No
-  existing test encodes a transaction in TypeScript.
+  integer width makes the codec decode different edits or refuse the frame; it turns red. So does
+  an SDK that writes 0 for an omitted `rampSamples` (the engine would step instead of using the
+  session default). No existing test encodes a transaction in TypeScript.
 - Gate 2: an encoder that is byte-valid but maps a spec field to the wrong session field (for
   example, left and right builtins swapped) produces a different snapshot; it turns red.
 - Gate 3: a builder that emits a frame the engine must refuse would cost a round trip and hide the
@@ -113,4 +124,5 @@ transaction format.
 
 ## Dependencies
 
-- none. #1296 and #1385 depend on this issue.
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for the
+  `ramp_samples` field. #1296 and #1385 depend on this issue.

@@ -49,7 +49,7 @@ same commit.
   runs this check.
 - **Opcodes** (#1241): `UpsertVca` `0x0700`, `RemoveVca` `0x0701` and `SetVcaFader` `0x0702`
   (`crates/protocol/src/model.rs:112-116`).
-- **After #1225 and #1226:**
+- **After #1225, #1226 and #1390:**
   - strip records cover tracks and submixes;
   - route records come from `route_target`, which reads the effective mute;
   - follow-source mutes and `follows_mute` are live;
@@ -83,8 +83,10 @@ same commit.
   cap is refused with the same `host.resource.count` diagnostic and changes nothing.
   `compiled_model_admission` (`crates/capi/src/runtime/compile.rs:76`, in `crates/control-plane/src/compile.rs` after #1309) already charges model growth.
 - **D5. Ramps (D15-1).** A `FaderDb` record uses the session's fader length, and a `Mute` record
-  uses its mute length. Both come from `LiveRamps::for_session(next)` (#1054). One VCA move ramps
-  every member it moves over that length.
+  uses its mute length. Both come from `LiveRamps::for_session(next)` (#1054), read through
+  `LiveRamps::resolve` with the VCA's `VcaFader` or `VcaMute` entry, so a `SetVcaFader` that
+  carries its own length uses it (*Carry an optional per-edit ramp length on live session edits*,
+  #1394 D6). One VCA move ramps every member it moves over that length.
 - **D6. No mirror.** The C ABI keeps no `LiveVcaState`. The classifier reads both committed models
   (#1053 D9: the committed model is the authority), so membership drift cannot occur. Remove the
   "keeps no live VCA state until #1247" clause from `vca.rs:59-61`. In its place, say that the C ABI
@@ -182,9 +184,12 @@ same commit.
 ## Dependencies
 
 - *Let C ABI sends follow their source strip's mute live* (#1226), and through it *Deliver
-  value-only send and submix-strip edits to the running C ABI plan* (#1225)
+  value-only send edits to the running C ABI plan* (#1225)
+- *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390),
+  for submix strip records
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
 - *Hold live values in latest-target cells on both hosts* (#1312)
 - *Hold route-lane values in latest-target cells* (#1347)
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054)
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for D5

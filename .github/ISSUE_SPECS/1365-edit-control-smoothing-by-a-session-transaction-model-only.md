@@ -26,9 +26,17 @@ ordinary session transaction" holds.
   - Payload specs: `crates/protocol/src/schema.rs:1134-1180` (`set_session_id`, `set_console`),
     selected at `:1566-1571`.
   - Encode: `crates/protocol/src/session_wire.rs:355-366`. Decode: `:1183-1205`.
-- **Corpus.** `crates/conformance/src/protocol_corpus.rs` encodes one edit per allocated opcode
-  (`:77-92`). It pins one FNV-1a-64 roll of the whole corpus, with a re-pin history (`:706-730`).
-  The simd128 leg is `scripts/check-protocol-wasm-parity.sh`.
+- **Corpus and its pins.** `crates/conformance/src/protocol_corpus.rs` encodes one edit per
+  allocated opcode (`:77-92`) and pins one FNV-1a-64 roll of the whole corpus,
+  `COMPLETE_SCHEMA_HASH`, with a re-pin history (`:706-737`). A new opcode moves these files, as
+  #1241's opcodes did (commit `210bd252f`):
+  - `scripts/check-protocol-wasm-parity.sh:172-173`, the two lines that spell the pinned hash;
+  - `crates/protocol/src/controller/tests.rs:327-328`, the all-opcode edit count (46) and the edit
+    limit one below it (45);
+  - `docs/CONTROL_PROTOCOL_CONFORMANCE.md:3`, the hash, the edit count and the re-pin list;
+  - `docs/CONTROL_PROTOCOL_REGISTRY.md`, the opcode table and "exactly 46 allocated opcodes"
+    (`:83`);
+  - `fuzz/corpus/complete-schema-manifest.md:3-4` and its re-pin history (`:30`).
 - **Model-only classification.** `classify_live_delta` masks the fields no prepared plan reads
   (`crates/host-core/src/live_delta.rs:230-236`, #1260 D1-D2), so a delta that changes only them
   is live with no records. The C ABI test of that rule is `model_only_edits` and
@@ -52,16 +60,20 @@ ordinary session transaction" holds.
   value, so records produced by the same transaction ramp over the new lengths.
 - **D5. Acked-batch question.** The edit pushes nothing to render. The ack means the committed
   model holds the value, and no record is dropped to reach that.
-- **D6. Corpus.** One `SetControlSmoothing` edit with `Some` joins the corpus transaction. The
-  roll is re-pinned once, with a history line giving the reason "#1365 appends `SetControlSmoothing`
-  (`0x0008`)". This is a wire format, so the pin is allowed.
+- **D6. Corpus.** One `SetControlSmoothing` edit with `Some` joins the corpus transaction, so it
+  carries 47 edits; the frame count stays 46. The roll is re-pinned once, from whatever value is on
+  `main` when this lands (*Carry an optional per-edit ramp length on live session edits*, #1394,
+  re-pins it too; whichever merges second re-pins from the first's value), with the history line
+  "#1365 appends `SetControlSmoothing` (`0x0008`)". Every pin file of Context moves in the same
+  commit: the hash in the parity script, the edit count 47 and limit 46 in the controller test, and the hash, count and
+  history in the three documents. This is a wire format, so the pin is allowed.
 
 ## Deliverables
 
-1. D1-D3 in `crates/protocol/src/{model,schema,session_wire}.rs`, with
-   `docs/CONTROL_PROTOCOL_SEMANTICS.md` if it lists root edits.
+1. D1-D3 in `crates/protocol/src/{model,schema,session_wire}.rs`, with the opcode's row (payload
+   and field numbers) in `docs/CONTROL_PROTOCOL_REGISTRY.md`'s session-edit table.
 2. D4 in `crates/host-core/src/live_delta.rs` (the mask and its doc rule `:181-183`).
-3. D6 in `crates/conformance/src/protocol_corpus.rs`.
+3. D6 in `crates/conformance/src/protocol_corpus.rs` and every pin file of Context.
 4. `docs/C_ABI_V1_QUALIFICATION.md`: the model-only list gains `control_smoothing`.
 5. The tests below.
 
@@ -70,9 +82,12 @@ ordinary session transaction" holds.
 - `crates/protocol/src/{model,schema,session_wire}.rs`, `crates/protocol/src/session_wire/tests.rs`,
   `crates/protocol/src/model.rs` tests. Stream B owns `crates/protocol`; root sequences the merge.
 - `crates/host-core/src/live_delta.rs` (stream B), `crates/host-core/tests/live_delta.rs`
-- `crates/conformance/src/protocol_corpus.rs`
+- `crates/conformance/src/protocol_corpus.rs`, `scripts/check-protocol-wasm-parity.sh` (the two hash
+  lines), `crates/protocol/src/controller/tests.rs` (the count and limit),
+  `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
+  `fuzz/corpus/complete-schema-manifest.md`
 - `crates/capi/src/runtime/live_tests.rs` (tests only)
-- `docs/CONTROL_PROTOCOL_SEMANTICS.md`, `docs/C_ABI_V1_QUALIFICATION.md`
+- `docs/C_ABI_V1_QUALIFICATION.md`
 
 ## Non-goals
 
@@ -107,7 +122,8 @@ ordinary session transaction" holds.
    `control_smoothing` is `Ok` with no records. One that also moves a fader carries the new
    length on its `FaderDb` record.
 6. **Corpus.** `cargo run --locked -p conformance --example conformance_fixtures -- --check` and
-   `bash scripts/check-protocol-wasm-parity.sh` pass with the one re-pin (D6).
+   `bash scripts/check-protocol-wasm-parity.sh` pass with the one re-pin (D6), and the controller
+   test's boundary row (`controller/tests.rs:327-328`) passes at 47 and 46.
 7. **Commands:**
    - `cargo test --locked -p protocol --features test-support`, `cargo test --locked -p capi`,
      `cargo test --locked -p host-core --features test-support --test live_delta`,

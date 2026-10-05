@@ -1,6 +1,7 @@
 # Route the builtins fader domain checks through checked_fader_gain
 
 Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+Code anchors verified on `main` at `6fb211594`.
 
 Refactor follow-up of *Classify a committed session delta as a live track fader, mute and pan
 update or a rebuild* (#1255, slice of umbrella #1053). Its verdict (Sol, attempt 1, NIT-1;
@@ -9,7 +10,7 @@ spell the `[-144, 24]` dB fader domain themselves instead of calling the shared 
 Recorded in `docs/handoffs/live-updates-1053/README.md`, "Follow-up candidates". A pure refactor:
 no rendered bit and no diagnostic changes.
 
-## Problem (verified on `main` at `d2fe0555a`)
+## Problem
 
 - **The authority.** `checked_fader_gain` (`crates/builtins/src/lib.rs:4292-4297`, `pub`) refuses a
   `db` that is not finite or is outside `-144.0..=24.0` with `BuiltinParameterError::GainDomain`,
@@ -21,17 +22,25 @@ no rendered bit and no diagnostic changes.
   `BuiltinChain::new` runs (`:3201`) and which session preparation reaches through
   `crates/builtins-compiler/src/lib.rs:3258`, `:3488`, `:3552` and `:3559`.
   - Its per-lane loop (`:3282-3295`) checks, for left then right: `trim_db` in domain, then
-    `fader_db` in domain (`:3286`, spelled `!(-144.0..=24.0).contains(&lane.fader_db)`), then the
+    `fader_db` in domain (`:3286-3287`, spelled `!lane.fader_db.is_finite() ||
+    !(-144.0..=24.0).contains(&lane.fader_db)`), then the
     two filter cutoffs, then the filter order. The first failure returns.
   - Its `fader` closure (`:3304-3309`) then builds each `FaderLane` with `db_gain(params.fader_db)?`
     and `faders` (`:3314`) pairs them. That is exactly what `fader_lanes` computes.
-- **Copy 2: `gain_path`** (`crates/builtins-compiler/src/lib.rs:5031-5044`), which names the field
+- **Copy 2: `gain_path`** (`crates/builtins-compiler/src/lib.rs:5032-5044`), which names the field
   a `GainDomain` refusal points at (`parameter_diagnostic`, `:5004-5029`). For left then right it
   returns the `trim_db` path, then the `fader.{lane}_db` path (`:5040`, spelled
   `!fader.is_finite() || !(-144.0..=24.0).contains(&fader)`). builtins-compiler already depends on
   builtins (`crates/builtins-compiler/Cargo.toml:17`).
 - **The doc says so.** `checked_fader_gain`'s doc (`crates/builtins/src/lib.rs:4282-4287`) names
   the two copies as still spelled separately.
+- **The latest-target cells do not touch these copies.** *Hold live values in latest-target cells
+  on both hosts* (#1312, decision 15 D15-2) replaces the fader and matrix FIFO drains
+  (`crates/builtins-compiler/src/lib.rs:1063-1135`) and their producers with cells. The render
+  setters it calls (`set_fader_db`, `:3869` and `:4191` in builtins) and the live-delta
+  classifier keep calling `checked_fader_gain`; preparation (`prepare_sections`) and diagnostics
+  (`gain_path`) are not in its scope. Both slices edit `crates/builtins-compiler/src/lib.rs`, in
+  disjoint functions.
 - **Why it matters.** The copies agree today. If the fader domain ever changes in one place, a
   value could pass the live path and fail preparation (or the reverse), so a live commit would
   leave a committed model that its own rebuild refuses (#1053 D9), or a refusal would point at the
@@ -57,10 +66,11 @@ cannot err: it errs only on a non-normal coefficient, and `[-144, 24]` dB maps t
 
 ## Decisions
 
-- **D1. `prepare_sections`.** In the per-lane loop, replace the two `fader_db` clauses of the
-  condition at `:3283-3287` with a call `checked_fader_gain(lane.fader_db)?;` placed after the
-  `trim_db` check and before the filter checks, so the order of checks, and so which error a
-  multiply-invalid lane reports, is unchanged. Replace the `fader` closure and `faders`
+- **D1. `prepare_sections`.** In the per-lane loop, split today's single `if` (`:3283-3288`):
+  keep its two `trim_db` clauses as the `if`, and replace its two `fader_db` clauses
+  (`:3286-3287`) with a call `checked_fader_gain(lane.fader_db)?;` placed after that `if` and
+  before the filter checks. The order of checks, and so which error a multiply-invalid lane
+  reports, is unchanged. Replace the `fader` closure and `faders`
   (`:3304-3309`, `:3314`) with `let faders = [fader_lanes(parameters)?];`.
 - **D2. `gain_path`.** Replace the `fader` condition at `:5040` with
   `builtins::checked_fader_gain(fader).is_err()`. The `trim_db` condition stays as it is.
@@ -114,15 +124,15 @@ Run every command from the repository root.
    - `cargo test --locked -p builtins-compiler --features test-support`
    - `cargo test --locked -p host-core --all-targets --features control-provider,test-support`
    - `cargo build --locked --release -p audit -p capi`, then `./target/release/audit capi` on this
-     branch and on `d2fe0555a`: the `pcm_digest` field is equal, and allocations, frees, locks and
+     branch and on its merge base: the `pcm_digest` field is equal, and allocations, frees, locks and
      syscalls are 0.
    - `bash scripts/check-builtins-fixtures.sh . target/release/audit` passes (the builtins PCM
      fixtures are unchanged).
    - `cargo test --locked --release -p audit -p bench -p console-workload`
 2. **One authority (PR evidence, not committed).** In a scratch copy, change
-   `checked_fader_gain`'s upper bound from `24.0` to `25.0`. On `d2fe0555a` the two tests of D4
+   `checked_fader_gain`'s upper bound from `24.0` to `25.0`. On the merge base the two tests of D4
    stay green (the copies still refuse); on this branch both go red. Record both runs.
-3. **The browser module.** Build it on this branch and on `d2fe0555a` and report both SHA-256
+3. **The browser module.** Build it on this branch and on its merge base and report both SHA-256
    digests (it may change: preparation code moved):
    `rm -rf target/ci/qualification-artifacts target/ci/qualification-named-twin && mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts && sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm`;
    then `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`,
@@ -148,6 +158,9 @@ preparation tests now guard the shared domain.
 
 - *Carry fader, mute and pan ramps across a plan swap* (#1277). Both edit `crates/builtins`; this
   slice lands after it. #1255 is on `main`.
+- *Hold live values in latest-target cells on both hosts* (#1312) is not a dependency: either may
+  land first. If #1312 lands first, re-read `checked_fader_gain`'s callers before writing D3's
+  list (its cell drain still reaches the two `set_fader_db` setters).
 
 ## Standing rules for the implementer
 

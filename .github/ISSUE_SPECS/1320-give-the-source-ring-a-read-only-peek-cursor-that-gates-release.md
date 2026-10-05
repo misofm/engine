@@ -43,14 +43,29 @@ armed, and nothing extra while none is.
   sequence number. Before the data-queue push it writes `(sequence, block index)` into a
   publication log with `allocated_block_count` entries, then stores `published_sequence` with
   `Release`. All of it is allocated at ring preparation.
-- **D3. One peek endpoint per ring.** `PcmSourceProducer::take_peek(&mut self) -> Option<PcmSourcePeek>`
-  hands out the ring's single peek endpoint (an `Arc` clone of the shared state, no allocation);
-  a second call returns `None`. `PcmSourcePeek` is `Send`, not `Sync`, and is used off the
-  render thread.
+- **D3. One peek endpoint per ring, and its lifecycle.**
+  - `PcmSourceProducer::take_peek(&mut self) -> Option<PcmSourcePeek>` hands out the ring's single
+    peek endpoint (an `Arc` clone of the shared state, a reference-count increment and no
+    allocation). It sets `peek_outstanding` and returns `None` while one is outstanding.
+  - A peek ends when it is dropped. `Drop for PcmSourcePeek` does what `abandon` does if the peek is
+    still armed (D8), then clears `peek_outstanding` (`Release`). After that, `take_peek` succeeds
+    again, so every later latency growth can take a new peek.
+  - Where each peek ends (fixed by the catch-up slices, never left open): a catch-up that diverges,
+    is superseded, falls back or is stopped drops its peeks on the control thread (#1355, #1357,
+    #1358, #1359). At adoption, render moves each peek out of the successor's source entry into the
+    retiring predecessor's entry, in exchange for the consumer (#1355). The predecessor is
+    reclaimed off render, and its drop ends the peeks there.
+  - `PcmSourcePeek` is `Send`, not `Sync`. It is used by whichever thread owns the plan that holds
+    it: the control thread during a catch-up, and the render thread during a bounded pre-roll
+    (#1358) and at adoption (#1355). Its operations are loads, stores and lent slices: no
+    allocation, free, lock or syscall. So they meet render's rules on either thread. Two threads
+    never use one peek at once.
 - **D4. Arming, on render, at a block boundary.** `PcmSourceConsumer::arm_peek(&mut self) -> bool`
   records the sequence and source frame of the next block it will play, and its active
-  generation. It then stores `Armed` (`Release`). It returns `false` and changes nothing if a peek
-  is already armed. Stores only: no allocation, no lock.
+  generation. It then stores `Armed` (`Release`). If the state is `Abandoned`, it first completes
+  the abandon exactly as `begin_block` would (D8), so a catch-up abandoned in one service call can
+  be armed again at the very next block. It returns `false` and changes nothing if a peek is armed,
+  or if the ring's hold cap (D6) is 0. Stores and bounded pushes only: no allocation, no lock.
 - **D5. Reading.** `PcmSourcePeek::begin_block(&mut self) -> PeekRead` returns:
   - `Ready`: the next block of the armed generation, contiguous with the peek's next frame. Its
     planes are lent by `played_plane(channel)`, with the same shape as the consumer's.
@@ -66,8 +81,16 @@ armed, and nothing extra while none is.
   sequence, loaded once per `begin_block` (`Acquire`). Every other block waits in a FIFO of block
   indices with `allocated_block_count` slots, preallocated at ring preparation. The same load drains
   the FIFO front. The FIFO cannot overflow, because no more blocks exist.
+  - **Render-side cap.** `PcmSourceRingConfig` gains `peek_hold_cap_blocks: u32`, the most blocks
+    the gate may hold. If gating one more block would exceed it, the consumer stores `Diverged`,
+    recycles every gated block and disarms, all in that `begin_block`. So a lagging catch-up costs
+    the predecessor at most the cap's blocks of admission, never its playback. Host-core sets the
+    cap to the ring's blocks above `default_source_ring_frames` for the session's rate and quantum
+    (`crates/host-core/src/prepare.rs:65`, the config built at `:1207`). A ring with no headroom
+    has cap 0 and is never armed. *Fall back from a missed catch-up deadline: bounded render-thread
+    pre-roll, then the transition* (#1358) D2 adds that headroom to the default ring.
 - **D7. Divergence.** While armed, the consumer stores `Diverged` when it underruns, observes a
-  seek command, discards a block, or changes generation. The peek then answers `Diverged`. The
+  seek command, discards a block, changes generation, or reaches the hold cap (D6). The peek then answers `Diverged`. The
   caller abandons that catch-up (#1355 D2 decides what follows); exactness is never assumed past a
   divergence.
 - **D8. Disarming.**
@@ -97,12 +120,21 @@ armed, and nothing extra while none is.
    `--cfg loom`, with the shared state on loom types the way `spsc.rs` does it. Add `loom = "=0.7.2"`
    as a `crates/source` dev-dependency and one step to the loom leg of
    `.github/workflows/qualification.yml`.
-4. `bench-support` as a `crates/source` dev-dependency, for gate 5.
+   - `RUSTFLAGS='--cfg loom'` reaches every crate in the build. `engine` swaps its SPSC onto
+     `loom::` types under `cfg(loom)` (`crates/engine/src/realtime/spsc.rs:36-40`), but `loom` is
+     only its dev-dependency (`crates/engine/Cargo.toml:16-18`), so `engine` built as a dependency
+     of `source` fails with E0433. Add `[target.'cfg(loom)'.dependencies] loom = "=0.7.2"` to
+     `crates/engine/Cargo.toml`, beside the dev-dependency, with its comment. It is inert without
+     `--cfg loom`, so production, Wasm and render never link it. The existing engine leg is
+     unchanged.
+4. `bench-support` as a `crates/source` dev-dependency, for gate 7.
 
 ## Authorized paths
 
 - `crates/source/src/lib.rs`, `crates/source/src/peek.rs` (new), `crates/source/Cargo.toml`,
   `crates/source/tests/peek.rs` (new), `Cargo.lock`
+- `crates/engine/Cargo.toml` (the `cfg(loom)` target dependency only)
+- `crates/host-core/src/prepare.rs` (the hold cap in the ring config only)
 - The source resource-report assertions in `crates/source/src/lib.rs` tests,
   `crates/host-core/tests/` and `crates/capi/tests/`
 - `.github/workflows/qualification.yml`: the loom step only
@@ -113,7 +145,8 @@ armed, and nothing extra while none is.
   block* (#1354) arms the peeks, and *Catch up a returned successor and adopt it exactly at a
   scheduled sample* (#1355) binds them into a successor's source set.
 - No change to seek semantics (stream B, #1316-#1319).
-- No second peek per ring, and no peek on the render thread.
+- No second peek per ring at a time. No catch-up render on the render thread here: the pre-roll
+  that reads peeks there is #1358's, under D3's thread rule.
 
 ## Objective gates
 
@@ -121,7 +154,7 @@ armed, and nothing extra while none is.
    Arm at block B. Run in both orders: the peek reads 6 blocks before render plays them, and render
    plays 4 blocks before the peek reads them. In both, every frame's planes from the peek are
    bit-identical to `played_plane` for the same frame.
-2. **The gate holds released storage.** Arm. Render plays 4 blocks while the peek reads none. The
+2. **The gate holds released storage.** Hold cap 8. Arm. Render plays 4 blocks while the peek reads none. The
    producer then refills every block it can get with different content. The peek's 4 reads still
    equal the original content. The producer's admissions drop by exactly the held blocks. After
    the peek reads them, admissions return to the configured depth.
@@ -132,12 +165,19 @@ armed, and nothing extra while none is.
 4. **Adoption advance.** After the peek has read `P = 3` quanta beyond render,
    `advance_past_peek(3 * quantum)` makes the next played block start at the old next frame plus
    `3 * quantum` and releases the 3 blocks. Asking for 4 quanta returns `false` and changes nothing.
-5. **Realtime.** `arm_peek`, a gated `begin_block_at`, `disarm_peek` and `advance_past_peek` make
+5. **Lagging peek is capped.** Cap 3. Arm. The peek reads nothing while render plays 4 blocks and
+   the producer keeps every free block filled. At the fourth, the peek reads `Diverged`, the
+   consumer is unarmed, and render never underruns. The producer's admission depth is back to
+   configured at the next submit. With cap 0, `arm_peek` returns `false`.
+6. **Lifecycle.** `take_peek` returns `None` while a peek is outstanding. Dropping the peek, armed
+   or not, makes the next `take_peek` succeed; dropping it armed releases its gated blocks at the
+   consumer's next `begin_block`. An `arm_peek` right after `abandon` succeeds in the same block.
+7. **Realtime.** `arm_peek`, a gated `begin_block_at`, `disarm_peek` and `advance_past_peek` make
    zero allocations and frees on the render thread. Measure with `bench_support::alloc`'s
    current-thread counters after warm-up.
-6. **Loom.** `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p source --lib peek_loom`
+8. **Loom.** `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p source --lib peek_loom`
    passes. Its invariant is that no block is published again while the peek can still read it.
-7. Commands:
+9. Commands:
    - `cargo test --locked -p source`
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `cargo test --locked -p capi`
@@ -155,8 +195,12 @@ armed, and nothing extra while none is.
   catch-up read PCM that render never played. Red.
 - Gate 4: an advance that drops one block too many or too few makes the successor read a frame
   twice or skip one. Red.
-- Gate 5: a FIFO grown on demand, or an `Arc` clone on arm, counts an allocation. Red.
-- Gate 6: a `Relaxed` publication or release store lets the model read a reused block. Red.
+- Gate 5: a gate with no render-side cap holds every block for a lagging peek, and render
+  underruns. Red.
+- Gate 6: a peek whose drop never clears `peek_outstanding` makes the second latency growth
+  impossible; an `arm_peek` that refuses on `Abandoned` loses one republication. Red.
+- Gate 7: a FIFO grown on demand, or an `Arc` clone on arm, counts an allocation. Red.
+- Gate 8: a `Relaxed` publication or release store lets the model read a reused block. Red.
 
 ## Dependencies
 

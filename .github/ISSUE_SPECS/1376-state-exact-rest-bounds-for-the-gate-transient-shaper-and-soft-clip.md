@@ -32,15 +32,26 @@ three.
   the half-band length and the polyphase layout. Exact zero, so `TailDecay(0)`. The test recomputes
   it from the filter length and the latency; if the recomputation is not 29, the declared value
   changes and the commit says why.
-- **D2. Rest.** Gate and transient shaper: the maximum over their one-pole words of
-  `one_pole_rest_samples` at the slowest release in the domain, and the hold counter's maximum, for
-  #1329 D2's two peak cases. Soft clip: its histories are FIR delay lines and its ramps hold no
-  input-driven state, so `R` is the number of samples after `N` until every history word is zero,
-  from the history lengths; it is the same for both peak cases.
+- **D2. Rest.** #1329 D2's definition: output `±0.0` and every signal-state word equal under
+  `f32` `==` to the rest state `Z`, which is not "all zero" and not always the reset state. The
+  gate resets open (`gain_db = 0`, `open = OPEN_WORD`, `hold` loaded;
+  `crates/gate-expander/src/lib.rs:504-515`) but with zero input it closes: its `Z` has the gain
+  word at the range floor (`-range` dB), the hysteresis closed and the hold counter expired. The
+  derivation proves the gate's gain smoother reaches `-range` exactly (not a stall one ulp away),
+  so `Z` is unique; otherwise D3 applies. The transient shaper's `Z` is its reset state (followers
+  at `+0.0`). Bounds: gate and transient shaper, the maximum over their one-pole words of
+  `one_pole_rest_samples` (#1375) for the distance to `Z` at the slowest release in the domain,
+  plus the hold counter's maximum, for #1329 D2's two peak cases. Soft clip: its histories are FIR
+  delay lines and its ramps hold no input-driven state, so `Z` is the reset state and `R` is the
+  number of samples after `N` until every history word is zero, from the history lengths; it is
+  the same for both peak cases.
 - **D3. Stall check** as in #1375 D3 for every one-pole word. A stall is reported to Sol as a class-B
   defect; no bound is stated for that effect.
-- **D4. Gain.** Gate: `0 dB`. Transient shaper: its maximum attack/sustain boost. Soft clip: the
-  output parameter's maximum plus the half-band's ℓ1 gain, mixed with the dry path's.
+- **D4. Gain** (#1379 D1: a peak gain and an incremental gain after silence). Gate: `0 dB`
+  (`g <= 1`). Transient shaper: its maximum attack/sustain boost (output `g * x`). Soft clip: the
+  output parameter's maximum plus the half-band's ℓ1 gain twice (interpolator and decimator) and
+  the cubic's Lipschitz constant `sup |c'(u)| = 1`, mixed with the dry path's; the Lipschitz
+  constant makes it an incremental gain, not only a peak gain.
 
 ## Deliverables
 
@@ -66,10 +77,16 @@ three.
    samples of full-scale noise then zeros: output exactly zero from `latency + tail` after the last
    non-zero input, and (soft clip) non-zero at `latency + tail - 1` for some input, so 29 is the
    smallest.
-2. **Rest, real kernel**: the same runs at `P = 10^(24/20)` and `P = 1e29` reach all-zero state
-   words (state payload snapshot) by `latency + R`.
+2. **Rest, real kernel**: the same runs at `P = 10^(24/20)` and `P = 1e29` reach D2's rest by
+   `latency + R`: output `±0.0`, and the state payload snapshot equals, word for word under `f32`
+   `==`, that of `Z` (a freshly reset instance with the same parameters and settled ramps, fed the
+   same number of zero samples), cursor words excepted and named by the test. Both instances then
+   render the same 4,096 samples of seeded noise and agree under `==`. For the gate, a third
+   instance fed only `R` zeros from reset must equal `Z` too, so the closed state is the same from
+   every history.
 3. **Recompute**: soft clip's tail from the filter length and latency in the test; gate and shaper
-   rest from a brute-force `f32` iteration of each word (helper at most 1 % above, never below).
+   rest from a brute-force `f32` iteration of each word toward its value in `Z` (with `B` the
+   brute-force count: `B <= helper <= B + max(2, ceil(B / 100))`).
 4. Commands: the `test-debug-b` command from `.github/workflows/qualification.yml`; the conformance
    fixtures check; `cargo clippy --locked --workspace --all-targets -- -D warnings`;
    `cargo fmt --all -- --check`.
@@ -78,7 +95,9 @@ three.
 
 - Gate 1: a soft-clip declared tail shorter than the decimator's flush, or a gate/shaper output term
   that survives silence, is red; nothing renders past these tails today.
-- Gate 2: a stalled one-pole word or a bound from the wrong release coefficient is red.
+- Gate 2: a stalled one-pole word, a gate gain that settles an ulp off `-range` (history-dependent
+  rest), or a bound from the wrong release coefficient is red; an all-zero check could never pass
+  on the gate.
 - Gate 3: a stated value that no longer follows its designer (for example a half-band length change)
   is red.
 

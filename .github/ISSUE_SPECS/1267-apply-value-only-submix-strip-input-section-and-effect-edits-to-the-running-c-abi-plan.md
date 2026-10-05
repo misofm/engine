@@ -4,8 +4,8 @@ Stream F of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-contr
 Code anchors verified on `main` at `6fb211594`.
 
 Follow-up of the umbrella *Deliver value-only fader, mute and pan transactions to the running C ABI
-plan through the live console lanes* (#1053) and of *Deliver value-only send and submix-strip edits
-to the running C ABI plan* (#1225). It closes the submix half of follow-up F5 of decision 14
+plan through the live console lanes* (#1053) and of *Deliver value-only submix-strip fader, mute and
+pan edits to the running C ABI plan* (#1390). It closes the submix half of follow-up F5 of decision 14
 (`docs/rulings/live-update-versus-rebuild-2026-10-04.md`).
 
 ## Product outcome
@@ -25,7 +25,8 @@ apply to every strip (its Q5 answer: buses keep trim and polarity).
 - **The classifier today.** `classify_live_delta` (`crates/host-core/src/live_delta.rs:211`) walks
   `current.tracks` only. The step-3 mask copies only track fields (`:228-256`), so every submix
   field is structural (#1053 guard G1, doc `:155-157`). `effect_records` (`:334`) takes a `&Track`
-  and calls `lower_track`. After #1225, a submix strip's `fader` and `matrix_or_pan` are masked;
+  and calls `lower_track`. After #1390, a submix strip's `fader`
+  and `matrix_or_pan` are masked;
   after #1261 and #1262, a track's input section is.
 - **The lanes.** host-core attaches one control producer per strip, submixes included, after the
   tracks (`HostLiveControlHandles::strip_controls`, `crates/host-core/src/prepare.rs:424-433`), with
@@ -34,7 +35,7 @@ apply to every strip (its Q5 answer: buses keep trim and polarity).
   (`:434-441`). The C ABI already selects the effect lanes (`crates/capi/src/runtime/compile.rs:18-21`).
 - **The commit.** `commit_live` resolves strip producers in `strips.controls[..track_count]`
   (`crates/capi/src/runtime/control.rs:1093-1109`) and effect producers by `(track_id, address)`
-  (`:1124-1128`). #1225 widens the strip resolution to submixes. #1309 moves `control.rs`
+  (`:1124-1128`). #1390 widens the strip resolution to submixes. #1309 moves `control.rs`
   unchanged to `crates/control-plane/src/control.rs`; capi's tests stay in capi.
 - **Delivered track rules.** Effect parameters (#1264), the parametric EQ through its owner
   (#1265) and bypass with the prepared-bypass exception (#1266) are closed and live on tracks.
@@ -51,8 +52,9 @@ apply to every strip (its Q5 answer: buses keep trim and polarity).
 - **D2. No new lane, record, setting or ABI item.** If a rule needs a submix-specific exception,
   stop and record it rather than invent one.
 - **D3. The C ABI.** `commit_live` resolves a submix's input writer and its effect producers by
-  ID, as #1225 and #1264 do, and writes the submix's input values through #1346's cells and its effect values through
-  #1312's, after every fallible check.
+  ID, as the submix-strip slice and #1264 do. It writes the submix's input values through #1346's
+  cells and its effect values (parameters, bypass, EQ targets) through #1345's cells, after every
+  fallible check.
   Acked-batch question: as #1261 D5, no ack precedes a drop.
 - **D4. Still structural.** A submix's `delay_samples` (decision 14, rule 1) and its ID set.
 - **D5. Guard G1.** Mark G1 superseded in #1053's spec, citing this issue, if the spec is still in
@@ -116,12 +118,13 @@ Run every command from the repository root.
 
 ## Dependencies
 
-- *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225)
+- *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390)
 - *Apply value-only input trim and polarity edits to the running C ABI plan* (#1261)
 - *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets*
   (#1262)
 - *Hold live values in latest-target cells on both hosts* (#1312)
 - *Hold strip input-lane values in latest-target cells* (#1346)
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345)
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
 
 ## Standing rules for the implementer

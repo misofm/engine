@@ -116,15 +116,25 @@ Run every command from the repository root.
 3. **A round trip ends where a rebuild would.** Enable an HPF live, render, then disable it live.
    From block E + ceil((64 + `latency_samples`) / quantum) + 1 after the disable, the output is
    bit-identical to a `Reference` compiled from the committed snapshot (filters off) fed the same
-   source, on #1261's gate-2 session (`long_session` with no console slots and no inserts) at
-   48 kHz. Both runs read a variant of `source_sample`
+   source, on #1261's gate-2 session (`long_session` with no console slots, no inserts and every
+   input filter off before the edit) at 48 kHz. Both runs read a variant of `source_sample`
    (`crates/capi/src/runtime/live_tests.rs:23`, which is never zero) that puts exact `-0.0`
    samples inside the compared window.
-4. **The reported tail holds.** At 48 kHz, on one track with no console slots and no inserts,
-   enable live the input section's worst-case pair that #1329 D5's derivation names, feed one impulse of peak 1.0 and then zeros (the session's
-   source declares enough frames to cover the whole window): every output sample from the plan's
-   reported `tail_samples` (plus `latency_samples`) after the impulse has a magnitude below
-   `10^(-144/20)`.
+4. **The reported tail holds against the worst-sign input** (release build). At 48 kHz, on one
+   track with no console slots, no inserts and trim 0 dB, enable live on both lanes the pair
+   `builtins::input_section_worst_case_pair(48_000)` returns (#1329 D5), and let its 64-sample
+   ramp settle. Let `T` be the plan's reported `tail_samples` and `L` its `latency_samples`.
+   - **h.** A twin plan with the same edit is fed one unit impulse at sample `N0`; `h[m]` is its
+     output at `N0 + L + m`, for `m` in `[T, 2T]`.
+   - **Input.** The plan under test is fed `x[N - 1 - i] = sign(h[T + 1 + i])` for `i` in `[0, T)`
+     (peak 1.0; a zero `h` gives `+1.0`), and zeros from `N` on. Then
+     `y[N + L + T] = sum |h[T + 1 + i]|` over the window. This input maximizes the output
+     at `N + L + T` over every input of peak 1.0 that ends at `N`, so an under-reported `T` shows
+     there; an impulse cannot, because a single sample excites only one term of the tail sum.
+   - **Assert.** Every output sample from `N + L + T` (#1329 D1's first bounded sample) until the
+     end of the run (`N + L + 2T`) has
+     a magnitude below `10^(-144/20)`.
+   - The session's source declares enough frames to cover `[0, N + L + 2T)`.
 5. **Nothing else changes.** `cargo test --locked -p capi`,
    `cargo test --locked -p control-plane --all-targets --features control-plane/test-support`; #1261's gates 5 and 6. 4-lane (NEON)
    is CI-only here.
@@ -137,7 +147,8 @@ Run every command from the repository root.
 - Gate 2: red if the C ABI designs or addresses a target differently from the browser's lane.
 - Gate 3: red if a live disable leaves a filter section active or its integrators non-zero (a
   sign-of-zero difference on the `-0.0` samples).
-- Gate 4: red if the C ABI reports a tail shorter than the live filter's real decay.
+- Gate 4: red if the C ABI reports a tail shorter than the live filter's real decay for the
+  worst-case input, including an under-report that a unit impulse would miss.
 - **Superseded in the same PR:** the case #1261 moved to a route's `gain_db` stays; any classifier
   or capi case that asserts an `hpf_hz` or `lpf_hz` edit rebuilds is changed to the live path.
 

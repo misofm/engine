@@ -89,8 +89,8 @@ both are width-independent and out of scope here.)
 
 - Production code, any eight-lane ceiling, the width-independent rows, `REFERENCE_MODEL_BUDGET`.
 - Changing the 10 % rule or the budget test's assertions.
-- The C ABI's live-window cost itself (the owner question *Bound C ABI live effect windows by lane
-  depth*).
+- The C ABI's live-window cost itself (*Size each effect's automation span window from the
+  producers its plan has*, #1306).
 
 ## Hazards
 

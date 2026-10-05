@@ -8,11 +8,14 @@ The former blocker, owner question Q6 of #1269 (is `replaceSession` a public sec
 answered by decision 15 D15-11: the SDK's one edit API is `engine.apply(transaction)`, and
 `replaceSession` is only a convenience over it.
 
+Scope: the shared SDK core and the browser engine. The headless engine's `apply` is the successor
+*Apply session transactions from the headless SDK engine* (#1389).
+
 ## Product outcome
 
-A browser app, and the headless SDK engine, edit a playing session through one API:
+A browser app edits a playing session through one API:
 `engine.apply(transaction)` resolves with `{ revision, path }` as soon as the control plane commits
-(`path` is `live`, `model_only`, `rebuild` or `rebuild_with_transition`). `engine.replaceSession(session)`
+(`path` is `live`, `model_only` or `rebuild`). `engine.replaceSession(session)`
 diffs the given session against the committed model into one transaction and applies it. The app
 observes completion through the watermark: `engine.watermark()` returns the latest
 `{ revision, sample, outcome }`, and `engine.applied(revision)` resolves when the watermark covers
@@ -24,7 +27,8 @@ committed session.
 - `createEngine` (`sdk/src/browser/engine.ts:483`) boots through a scratch Worker first
   (`scratchBootInWorker`, `:1302`; rationale from `:93`). The headless engine
   (`sdk/src/headless/engine.ts`, `OfflineEngine` at `:114`) calls the module's exports directly
-  through `WasmBoundary` (`sdk/src/core/boundary.ts:326`); its `sessionMap()` is at `:568`.
+  through `WasmBoundary` (`sdk/src/core/boundary.ts:326`). `OfflineEngine.sessionMap()`
+  (`headless/engine.ts:205`) delegates to `WasmBoundary.sessionMap()` (`boundary.ts:568`).
 - `EngineLiveControls` (`sdk/src/core/live-controls.ts:976`) resolves stable IDs against a session
   map and holds a `withSession` builder to the booted document byte for byte (`#booted` at `:981`,
   `assertBootedSession` at `:276`). A handle keeps addressing strip indices of that document.
@@ -53,7 +57,8 @@ committed session.
 
 ## Decisions frozen for this slice
 
-- **D1. API.** On the browser and headless engines:
+- **D1. API.** On the browser engine (the types live in `sdk/src/core/` so the headless successor
+  reuses them):
   - `apply(transaction: SessionTransaction): Promise<EditOutcome>` with
     `EditOutcome = { revision: bigint; path: EditPath }`. A refusal rejects with a
     `MisoEngineError` carrying the engine result and diagnostic; nothing was committed.
@@ -71,18 +76,22 @@ committed session.
   edit: the control plane validates and prepares off the audio thread (D15-10). A sample rate or
   quantum change is refused by the engine with its typed result.
 - **D3. Ordering and rebinding.** The SDK keeps one ordered control channel. While an `apply` or
-  `replaceSession` is in flight, a live submit waits for its reply before it is posted. Each
-  committed reply whose revision advanced bumps a map epoch; the SDK re-reads the session map and
-  the committed document (`committedDocument()`) before the next live edit is resolved. An edit
-  object resolved under an older epoch is rejected with a typed stale-edit `MisoUsageError` and
-  posts nothing; a fresh `edit.track(id)` resolves against the new map. `withSession` holds its
-  builder to the committed document instead of the booted one.
+  `replaceSession` is in flight, a live submit waits for its reply before it is posted.
+  - The map epoch changes only when the plan shape changes: a reply with path `rebuild` bumps it.
+    A `live` or `model_only` reply, and every live edit, advance `revision` but leave the epoch,
+    the session map and every resolved edit object valid.
+  - After a `rebuild` reply the SDK re-reads the session map and the committed document
+    (`committedDocument()`) before the next live edit is resolved. An edit object resolved under
+    an older epoch is rejected with a typed stale-edit `MisoUsageError` and posts nothing; a fresh
+    `edit.track(id)` resolves against the new map.
+  - `withSession` holds its builder to the committed document, read through
+    `committedDocument()` when it is called, instead of the booted one.
 - **D4. Sources.** A transaction that adds a source starts it as the engine contract says
   (generation 1, frame 0, until the app seeks it). A removed source keeps playing until its strip's
   phase-2 swap (*Remove a strip in two phases: ramp out, then a scheduled swap*, #1325). Feeding and
   retiring sources through the SDK PCM feed is *Feed and retire the sources a browser edit adds or removes*
   (#1297).
-- **D5. Documentation.** The SDK README gains "Edit a playing session": `apply`, the four paths,
+- **D5. Documentation.** The SDK README gains "Edit a playing session": `apply`, the three paths,
   pending until the watermark covers a revision, the outcome flags, `replaceSession` as a
   convenience, what carries across a rebuild and what restarts, and that a non-isolated page's
   structural edit blocks the audio thread and is counted (D15-10).
@@ -92,7 +101,7 @@ committed session.
 
 ## Deliverables
 
-1. D1-D4 in `sdk/src/core/boundary.ts`, `sdk/src/headless/engine.ts`, `sdk/src/browser/engine.ts`,
+1. D1-D4 in `sdk/src/core/boundary.ts`, `sdk/src/browser/engine.ts`,
    `sdk/src/core/live-controls.ts`, `sdk/src/browser/live-controls.ts`,
    `sdk/src/browser/measurement.ts`, and their type exports.
 2. D5 in `sdk/README.md`.
@@ -100,30 +109,37 @@ committed session.
 
 ## Authorized paths
 
-- `sdk/src/`, `sdk/test/`, `sdk/README.md`
+- `sdk/src/core/`, `sdk/src/browser/`, `sdk/src/index.ts` and the barrel type exports,
+  `sdk/test/browser-evals.mjs`, `sdk/test/live-controls-evals.mjs`, `sdk/README.md`
 
 ## Non-goals
 
 - No transaction encoder (#1383). No PCM feed change (#1297). No worklet, Worker or Rust
   change.
+- No headless `apply` (`sdk/src/headless/`): that is *Apply session transactions from the
+  headless SDK engine* (#1389), which reuses this slice's core types and D3 rebinding and proves
+  the bits on the real module.
 
 ## Objective gates
 
-1. **Structural edit, headless, real module.** A 4-track session renders 6 blocks;
-   `replaceSession` adds a fifth muted track on an existing source with an EQ insert and resolves
-   with path `rebuild` and revision +1; the engine renders until `applied` resolves, then 6 more
-   blocks. Every block equals a fresh headless engine booted from the new session and fed the same
-   PCM from frame 0.
-2. **Live path and watermark.** `apply` of a fader-only transaction resolves with path `live`;
-   `applied(revision)` resolves with outcome `exact` and the sample of the first block rendered
-   after the call.
-3. **Browser protocol.** In `browser-evals.mjs`: `apply` posts exactly one `miso.apply.v1`; a
-   refusal reply rejects with the result and diagnostic and leaves `revision` unchanged.
+All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engine's test doubles
+(real bits in a browser are #1295).
+
+1. **Structural edit.** `replaceSession` of a document that adds a fifth track posts exactly one
+   `miso.replace.v1`; a `rebuild` reply with revision +1 resolves it with `{ revision, path:
+   "rebuild" }`, and `revision` reads the new value.
+2. **Live path and watermark.** `apply` of a fader-only transaction posts one `miso.apply.v1` and
+   resolves with path `live`. `applied(revision)` stays pending until a `miso.watermark.v1` covers
+   that revision, then resolves with that event's `sample` and `outcome`; a watermark event for an
+   older revision does not resolve it. After `dispose()` a pending `applied` rejects.
+3. **Refusal.** A refusal reply rejects with the result and diagnostic and leaves `revision`
+   unchanged; the next `apply` carries the unchanged expected revision.
 4. **Ordering and stale edits.** A live submit issued while an `apply` is in flight posts nothing
    until the reply. After a `rebuild` reply, an edit resolved before it rejects as stale and posts
    nothing; a new `edit.track(id)` on the added track succeeds; one on a removed track rejects as
-   unknown. After a `live` reply the waiting submit is posted unchanged.
-5. **withSession.** After a commit, `withSession(oldBuilder)` rejects and
+   unknown. After a `live` reply (and after a live edit) an edit object resolved before it still
+   posts, unchanged, and the session map is not re-read.
+5. **withSession.** After a `rebuild` commit, `withSession(oldBuilder)` rejects and
    `withSession(newBuilder)` succeeds.
 6. Commands, with an artifact directory built as in `qualification.yml`'s `artifact` job and
    `npm ci` in `sdk/`: `bash scripts/check-sdk-generated.sh <artifacts>`,
@@ -132,13 +148,14 @@ committed session.
 
 ## Test value
 
-- Gate 1: an SDK path that reboots instead of applying, or rebinds before the commit, turns it red.
-- Gate 2: a watermark read that reports the commit sample instead of the applied block, or an
-  `applied` that resolves before the watermark covers the revision, turns it red.
+- Gate 1: an SDK path that reboots instead of applying, or that leaves `revision` at the old value,
+  turns it red.
+- Gate 2: an `applied` that resolves at the commit reply instead of the watermark, or on a
+  watermark for an older revision, turns it red.
 - Gate 3: a refusal that advances `revision` makes the next `apply` carry a wrong expected revision.
 - Gate 4: an edit resolved under the old map and posted after a rebuild addresses a shifted strip
-  index and is acknowledged on the wrong strip; it turns red. A submit that is rejected after a
-  `live` reply would refuse ordinary fader drags during edits.
+  index and is acknowledged on the wrong strip; it turns red. An epoch bumped on every revision
+  would reject ordinary fader drags after any live edit; it turns red too.
 - Gate 5: a `withSession` still held to the booted document binds insert IDs of a session that no
   longer runs.
 
@@ -157,3 +174,5 @@ committed session.
 - *Build and encode session transactions in the SDK* (#1383).
 - *Admit browser live edits in the Worker through the committed model* (#1382).
 - *Publish the applied-revision watermark in the browser status* (#1349).
+
+Dependent: *Apply session transactions from the headless SDK engine* (#1389).

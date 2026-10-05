@@ -66,28 +66,42 @@ predecessor's mix, delayed by exactly `P`. The proof below is recorded here and 
   its read index at `S + P`. The plan's source-read clock then exceeds its render clock by `ΣP`.
 - **W5. Edits during the window.**
   - At publication the control plane writes the retarget records that *Carry fader, mute and pan
-    ramps across a plan swap* (#1277) D5 holds, then the held live edits.
+    ramps across a plan swap* (#1277) D5 holds, then the held live edits. It does this before every
+    publication of the warm successor: `ExactlyAt(S)` and the fallback `PreRoll` alike.
   - A live edit is held in the control plane, written to the successor's cells at publication, and
     applied at S. Its revision completes with S.
+  - A warm successor drains no live lane (cell or queue) before the first block render runs it
+    after adoption. So a missed S, or more catch-up after it, cannot apply a held edit early (#1355).
   - A structural edit supersedes the catch-up by compare-and-swap; the catch-up restarts from a
     new B.
-- **W6. Bounds.** `ΣP <= P_max`, which is set by ring headroom. Floors and `ΣP` reset at a
-  host-declared discontinuity.
-  - #1323 lands before any read-ahead exists. So the catch-up slices reset `ΣP` themselves:
-    #1323's discontinuity successor gets source-read offset 0 (#1355 D1).
-  - Observers (meters, observation taps, spectrum) are carried through the catch-up (#1327 D4).
-    A warm successor whose observers are not carried is never adopted.
-- **W7. Fallbacks.** These apply on a missed deadline, a host that renders nothing, a peek
-  divergence that recurs past the deadline, or a browser that is not isolated.
-  - First, render-thread pre-roll bounded by `k_max`.
+- **W6. Bounds and clocks.**
+  - Every successor inherits its predecessor's source-read offset; a warm successor adds its lead.
+    So an ordinary rebuild never moves the source-read clock back. Only a host-declared
+    discontinuity resets the offset (and `ΣP`) to 0, and with it the floors (*Give a plan a source-read
+    clock that leads its render clock*, #1396).
+  - `ΣP + P <= P_max`, which is set by ring headroom. A warm successor that would pass it is not
+    refused: the edit takes the transition (W7).
+  - Observers are carried through the catch-up: meters and observation taps per #1327 D4, and
+    spectrum captures per *Carry spectrum capture state across a plan swap* (#1395). A
+    warm successor whose observers are not carried is never adopted.
+- **W7. Fallbacks.** These apply when the deadline (W8) passes, when a peek divergence recurs past
+  it, when no warm successor can be prepared (the `P_max` bound, a peek still outstanding, the copy
+  byte ceiling of #1354), or on a browser page that is not isolated. A host that renders nothing is
+  never a trigger: decision 15, D15-17, counts the deadline in render samples.
+  - First, render-thread pre-roll bounded by `k_max` (where a warm successor exists).
   - Then the transition: the D15-9 duck-swap (#1324) of the strips whose arrival grows.
   - Each fallback is counted and reported through the watermark's `preroll_fallback` or
-    `transition_fallback` flag.
+    `transition_fallback` flag, from the outcome word render reads per adopted epoch (#1355).
 - **W8. Deadline.** It is counted in render samples from B, so a paused host never falls back. A
   host-declared stop turns a pending catch-up into a plain rebuild, applied at the next render.
-- **W9. Constants.** `k_max`, the deadline and `P_max` are engine constants. Their values come from
-  the records of *Record the swap block's cost on the 64-track console* (#1286) and *Prove two Wasm
-  instances on one shared memory in three browser engines and on iOS* (#1331).
+- **W9. Constants.** `k_max`, the deadline and `P_max` are engine constants. *Record the swap
+  block's cost on the 64-track console* (#1286) D3 owns the single derivation of each, from a timed
+  successor rendering real material, together with *Prove two Wasm instances on one shared memory
+  in three browser engines and on iOS* (#1331) for the browser rows. No other spec restates a
+  formula; #1358 only cites #1286 D3.
+- **W10. Edited strips.** An edit that both grows latency and restarts strips (#1324 D1, such as a
+  latent insert added to an audible strip) ducks those strips on the predecessor before the copy
+  at B, and fades them in at the adopted block S. Unchanged paths stay exact.
 
 ## Proof obligation (kept; this slice records it)
 
@@ -127,8 +141,11 @@ here:
 ## Authorized paths
 
 - `crates/graph-compiler/src/pdc.rs`, `crates/graph-compiler/src/lib.rs`,
+  `crates/graph-compiler/src/compile.rs` (the claim lines beside `inserted_delays`, `:870`),
+  `crates/graph-compiler/src/estimate.rs` (their bytes, beside the `InsertedDelay` row at `:385`),
+  `crates/graph-compiler/src/canonical.rs` (their evidence and `dot` rows, `:157`, `:343`),
   `crates/graph-compiler/tests/latency_growth.rs` (new)
-- `crates/graph/src/lib.rs` (the claim-line runtime only)
+- `crates/graph/src/lib.rs` and `crates/graph/src/runtime.rs` (the claim-line runtime only)
 - `crates/host-core/tests/latency_growth.rs` (new), `.github/ISSUE_SPECS/1287-pre-roll-a-successor-whose-latency-grows.md`
 
 ## Non-goals
@@ -196,16 +213,20 @@ Every slice must also meet the old gate 5: zero allocations and frees on render.
 3. *Render a successor plan off the render thread with a pinned floating-point environment*
    (#1321).
 4. *Snapshot a running plan into a returned successor at a block* (#1354): W2, including the
-   observers (#1327 D4).
-5. *Catch up a returned successor and adopt it exactly at a scheduled sample* (#1355):
-   - W3-W4 and W6, including the `ΣP` reset at #1323's declaration;
-   - it takes the old gates 1, 2 and 4 (gate 4 now per D15-12).
-6. *Hold live edits during a catch-up and apply them at the adoption sample* (#1356): W5, first
-   bullet.
-7. *Supersede a running catch-up by a structural edit* (#1357): W5, second bullet.
-8. *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition*
-   (#1358): W7-W9, including the old gate 3.
-9. *Turn a pending catch-up into a plain rebuild at a host-declared stop* (#1359): W8, last
+   observers (#1327 D4, and #1395).
+5. *Give a plan a source-read clock that leads its render clock* (#1396, split from #1355): W6's
+   offset inheritance and its reset at #1323's declaration, and the render-clock
+   reader; it takes the old gate 4 (now per D15-12).
+6. *Catch up a returned successor and adopt it exactly at a scheduled sample* (#1355): W3-W4, the
+   drain deferral of W5, the per-epoch outcome word; it takes the old gates 1 and 2.
+7. *Hold live edits during a catch-up and apply them at the adoption sample* (#1356): W5, held
+   live edits.
+8. *Supersede a running catch-up by a structural edit* (#1357): W5, structural edits.
+9. *Duck-swap the strips a latency growth restarts, and fall back to the transition when no
+   catch-up can finish* (#1397, split from #1358): W7's transition and W10.
+10. *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition*
+   (#1358): W7's pre-roll, W8-W9, including the old gate 3.
+11. *Turn a pending catch-up into a plain rebuild at a host-declared stop* (#1359): W8, last
    sentence.
-10. *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* (#1360).
-11. *Run the browser catch-up in the Worker's service loop* (#1361).
+12. *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* (#1360).
+13. *Run the browser catch-up in the Worker's service loop* (#1361).

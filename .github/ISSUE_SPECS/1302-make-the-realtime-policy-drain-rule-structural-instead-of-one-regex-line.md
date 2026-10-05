@@ -1,6 +1,7 @@
 # Make the realtime-policy drain rule structural instead of one regex line
 
-Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
+Code anchors verified on `main` at `6fb211594`.
 
 Tooling follow-up of *Bound the builtin fader and matrix drains to the records present at block
 entry* (#1253, slice of umbrella #1053, decision D11). Its verdict (Sol, attempt 1, N1;
@@ -8,9 +9,9 @@ entry* (#1253, slice of umbrella #1053, decision D11). Its verdict (Sol, attempt
 single-line regex that three ordinary spellings pass. Recorded in
 `docs/handoffs/live-updates-1053/README.md`, "Follow-up candidates". No production code changes.
 
-## Problem (verified on `main` at `d2fe0555a`)
+## Problem
 
-- **The rule.** `scripts/check-realtime-policy.sh:78-84` runs one `gate_scan_forbidden` over the
+- **The rule.** `scripts/check-realtime-policy.sh:79-84` runs one `gate_scan_forbidden` over the
   extracted marked bodies with the pattern
   `while[[:space:]]+let[[:space:]]+Ok[[:space:]]*\(.*=.*\.try_pop[[:space:]]*\(`. It sees one
   line at a time.
@@ -28,9 +29,10 @@ single-line regex that three ordinary spellings pass. Recorded in
      ```
   2. `loop { let Ok(record) = control.try_pop() else { break }; .. }`;
   3. `while let Ok(record) = Consumer::try_pop(control) { .. }`.
-- **What the umbrella says.** #1053 D11 (`.github/ISSUE_SPECS/1053-*.md:226-230`): "The realtime
-  policy gate refuses an unbounded `try_pop` loop in a marked region." The gate proves less than
-  that.
+- **What the gate's comment says.** `check-realtime-policy.sh:79-82`: a render-thread drain pops
+  at most the records present at block entry. The gate proves less than that. (#1053 D11,
+  `.github/ISSUE_SPECS/1053-*.md:125-128`, now says only that each builtin drain is bounded and
+  that with cells it becomes a dirty-mask scan; it no longer names this gate.)
 - **Why a region-level rule is not enough.** The verdict's suggestion, "a `try_pop(` in a marked
   body requires `available_at_entry` in the same region", is weak here because regions are large:
   `crates/graph/src/runtime.rs` has a region spanning `:321-933` that holds the route drain's
@@ -69,8 +71,21 @@ exactly six times. Each must pass the new rule:
 
 Not in any marked region, so out of this rule's reach: the input drain
 `BuiltinBankProcessor::drain_controls` (`crates/builtins-compiler/src/lib.rs:460-506`, bounded
-today), the two test-only oracle drains (`:4350`, `:4420`), and `plan_exchange.rs:501`, `:513` and
-`:521` (control-side retirement).
+today), the three test-only oracle drains (`:4252`, `:4350`, `:4420`, all
+`#[cfg(any(test, feature = "test-support"))]`), and `plan_exchange.rs:501`, `:513` and `:521`
+(control-side retirement).
+
+### The latest-target cells change the set, not the rule
+
+Decision 15, D15-2 replaces the FIFO drains of live values with latest-target cells: strip fader,
+mute and matrix (*Hold live values in latest-target cells on both hosts*, #1312), effect parameter,
+bypass and EQ target (#1345), strip input lane (#1346) and route lanes (#1347). A cell drain is a
+dirty-mask scan with no `try_pop`, so sites 1-4 above leave the set as those issues land. What
+stays FIFO (automation, Observe records, structural and time-stamped records, and the plan
+publication of site 5) keeps popping from SPSC queues, and any new FIFO drain in render must be
+bounded. The rule is therefore written against shapes, not against today's six sites: the
+self-test fixture (gate 2) carries every bounded shape itself, so the rule stays tested whether it
+lands before or after the cells.
 
 The marked code has no tab, no loop label, no `= loop {` and no `//` inside a string literal
 (checked over the extracted bodies), and `cargo fmt --all -- --check` is a required qualification
@@ -80,9 +95,10 @@ step (`.github/workflows/qualification.yml:456`). The rule below relies on rustf
 
 - **D1. Recommendation: the structural rule, not a narrower D11.** A ~40-line awk pass over each
   marked region (sketch below) passes all six sites above and refuses all three verdict variants;
-  it was prototyped against this tree. That is within half a day, and it makes D11's sentence
+  it was prototyped against this tree. That is within half a day, and it makes the gate's comment
   true. Narrowing D11 to "refuses the one-line `while let Ok(..) = ..try_pop()` spelling" would
-  leave the C ABI's concurrent drains guarded by a rule that rustfmt alone can defeat.
+  leave the concurrent FIFO drains that stay after the cells guarded by a rule that rustfmt alone
+  can defeat.
 - **D2. The rule.** Within each marked region (the lines strictly between a `BEGIN` and its `END`):
   1. *Code.* Drop everything from the first `//` on a line. Skip lines that are then blank.
      Indentation is the count of leading spaces.
@@ -123,11 +139,14 @@ step (`.github/workflows/qualification.yml:456`). The rule below relies on rustf
   regions (`check-realtime-policy.sh:73-74`). The self-test fixture sits exactly on those floors
   (`scripts/test-realtime-policy.sh:284-300`) and its floor cases depend on that: add the new
   fixture shapes as extra lines inside existing fixture regions, never as a new file or region.
-- **D6. D11's wording.** Amend #1053 D11's second sentence to name what the gate proves: the gate
+- **D6. The claim lives in the gate.** The new rule's comment states what the gate proves: it
   refuses a `try_pop` whose innermost loop in a marked region is not bounded by a count taken from
   `available_at_entry`, and refuses the unbounded iterator constructors; it reads rustfmt layout.
+  #1053 is not edited (its D11 no longer names this gate).
+- **D7. Independent of the cells.** No dependency either way on #1312, #1345, #1346 or #1347. If
+  one lands first and removes a real site, nothing here changes except that site's evidence line.
 
-### Sketch (prototyped at `d2fe0555a`; the implementer owns the final form)
+### Sketch (prototyped on this tree; the implementer owns the final form)
 
 ```awk
 function code(s,  i){ i=index(s,"//"); if(i) s=substr(s,1,i-1); sub(/[ \t]+$/,"",s); return s }
@@ -170,7 +189,6 @@ inside { n++; c[n] = code($0); ln[n] = FNR }
 - `scripts/check-realtime-policy.sh`: the rule of D2-D4 and its comment only.
 - `scripts/test-realtime-policy.sh`: fixture lines inside existing regions, the new mutation
   cases, and the tool-failure injection case of gate 2.
-- `.github/ISSUE_SPECS/1053-*.md`: D11's second sentence only (D6).
 - This spec.
 
 ## Non-goals
@@ -204,7 +222,8 @@ inside { n++; c[n] = code($0); ln[n] = FNR }
 ## Objective gates
 
 1. **The tree passes, unchanged.** `bash scripts/check-realtime-policy.sh` prints
-   `realtime policy: ok (89 marked regions in 25 files)`.
+   `realtime policy: ok (N marked regions in M files)` with the counts of the tree it merges onto
+   (89 and 25 at `6fb211594`; a cell slice that lands first may move them, with its floors).
 2. **The self-test.** `bash scripts/test-realtime-policy.sh` prints
    `realtime policy mutation tests: ok`, with:
    - the valid fixture carrying, inside existing regions, the four bounded shapes of sites 1, 4, 5
@@ -247,13 +266,14 @@ mutation cases are its tests.
 ## Evidence
 
 - Gate 1's line, and gate 2's final line.
-- For each of the six real sites, the innermost loop line the rule found (or "no loop"), printed
+- For each real site still present (six at `6fb211594`), the innermost loop line the rule found (or "no loop"), printed
   once by a debug run (not committed).
 - Gate 3's two outputs.
 
 ## Dependencies
 
-- None. #1253 is on `main`.
+- None. #1253 is on `main`. The cell slices (#1312, #1345, #1346, #1347) may land before or after
+  this one (D7).
 
 ## Standing rules for the implementer
 

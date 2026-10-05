@@ -17,7 +17,7 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
 - The static gate checks three exports by their direct `call` edges only:
   `miso_engine_web_v1_render`, `_meter_poll` (with a trap owner) and `_command_submit`
   (`--allocation-only`) in `scripts/check-web-audioworklet.sh:474-502`.
-  `scripts/check-web-audioworklet-callgraph.py` parses only `call N` (`CALL`, `:96`) and its
+  `scripts/check-web-audioworklet-callgraph.py` parses only `call N` (`CALL`, `:96`; `HEADER` is `:95`) and its
   `closure()` follows only those edges (`:294-313`). Forbidden names: `FORBIDDEN` (`:103-106`).
 - Blind spot: the whole executor sits behind `executor: Option<Box<dyn PreparedPlanExecutor>>`
   (`crates/engine/src/realtime/plan.rs:550`) and is reached by `executor.render(...)` (`:943`), a
@@ -33,6 +33,15 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
   `:70-76`). `WebBootOptions` is `Copy + Default` (`hosts/host-web/src/lib.rs:1204-1206`). With
   `+atomics`, std registers a destructor for a thread local that needs drop, lazily, which
   allocates. Without atomics (today) thread locals are plain statics and register nothing.
+- The three staging thread locals `RESPONSE_STAGING`, `SPECTRUM_STAGING` and
+  `OBSERVATION_STAGING` (`ffi.rs:510-512`) are lazily initialised by `ResponseStaging::new()` (`:430`),
+  `SpectrumStaging::new()` (`:124`) and `ObservationStaging::new()` (`:257`), which allocate
+  (`Box`, `vec!`, `Vec::with_capacity`). The first export that touches one allocates it. The
+  worklet touches them after boot: `miso_engine_web_v1_spectrum_read` (`:2873`),
+  `_spectrum_stream_read` (`:2995`), `_track_response_capture` (`:3354`), `_observation_read`
+  (`:4175`) and their pointer and capacity accessors. Instances that never boot touch them too:
+  the SDK's headless response and spectrum modules (`sdk/src/core/response.ts`,
+  `sdk/src/core/spectrum.ts`). Nobody else owns these thread locals: this slice does.
 - Exports are a frozen list: `expected_exports` in `scripts/check-web-audioworklet.sh:203`, the
   ABI layout generator's list (`tools/parameter-metadata/src/abi_layout.rs:172` area), and
   `scripts/check-abi-layout-v1.py:154` area; generated SDK copies `sdk/assets/miso-engine-v1-abi-layout.json`
@@ -59,11 +68,16 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
     native rlib links into test binaries and tools that register their own allocator.
   - `fn render_locked<R>(f: impl FnOnce() -> R) -> R` sets the flag, runs `f`, clears it. No
     nesting, no RAII guard (panic is abort).
-- D2. **Lock scope.** The lock covers the dynamic extent of every export in the render-thread
-  set: today `miso_engine_web_v1_render`, `miso_engine_web_v1_command_submit` and
-  `miso_engine_web_v1_meter_poll`, the same set the static gate checks. Each wraps its body in
-  `render_locked`. #1332 makes the set the worklet's whole post-boot export set; the mechanism
-  does not change.
+- D2. **Lock scope.** The lock covers the dynamic extent of every export in the render-locked
+  set. Each wraps its body in `render_locked`. The set is:
+  - `miso_engine_web_v1_render`, `miso_engine_web_v1_command_submit` and
+    `miso_engine_web_v1_meter_poll`, the set the static gate checks (D4);
+  - the worklet's staging reads: `miso_engine_web_v1_observation_read`, `_track_response_capture`,
+    `_spectrum_read`, `_spectrum_stream_read`, and every pointer, capacity and byte-count accessor
+    of the three stagings that the worklet calls (`_observation_*_ptr`/`_capacity`/`_bytes`,
+    `_track_response_*_ptr`/`_capacity`/`_bytes`, `_spectrum_*_ptr`/`_capacity`/`_bytes`).
+
+  #1332 makes the set the worklet's whole post-boot export set; the mechanism does not change.
 - D3. **Reading it.** New export `miso_engine_web_v1_render_allocation_count() -> u32` returns
   `RENDER_ALLOCATIONS`. It is added to every frozen export list above and the generated SDK copies
   are regenerated. The worklet answers a new port message (in `receive`, never in `process()`)
@@ -88,10 +102,23 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
   with `take()`, which drops it explicitly. `BOOT_STAGING` becomes const-initialised and
   destructor-free: `options` is stored inline (a `const` zero/default constructor replaces
   `Box::new`), `document` becomes `ManuallyDrop<Vec<u8>>` starting at `Vec::new()`, and
-  `reset_after_dispose` keeps freeing it by assignment. Add
-  `const _: () = assert!(!core::mem::needs_drop::<T>())` for both static types. The other four
-  thread locals are not touched: they are reached only from boot, response and spectrum exports,
-  which #1332 moves to the Worker.
+  `reset_after_dispose` keeps freeing it by assignment.
+  - The three stagings become const-initialised and destructor-free:
+    `static RESPONSE_STAGING: Cell<Option<&'static RefCell<ResponseStaging>>> = const { Cell::new(None) }`,
+    and the same shape for `SPECTRUM_STAGING` and `OBSERVATION_STAGING`.
+  - One accessor per staging, `response_staging()` and so on, returns the reference. If the slot
+    is empty it allocates once, `Box::leak(Box::new(RefCell::new(T::new())))`, and stores it. Every
+    existing `X_STAGING.with(|slot| ...)` call goes through the accessor; the `RefCell` borrow rules
+    are unchanged.
+  - Both boot exports (`ffi.rs:3681`, `:3687`) call the three accessors before they return. A
+    booted instance therefore never allocates a staging later, inside or outside the locked window.
+    An instance that never boots (the SDK's headless modules) allocates on first touch, outside any
+    locked window, as today.
+  - A staging lives as long as its instance, as today's lazily initialised statics do. It is never
+    freed on the worklet. A `&'static` reference is `Copy`, so #1332 can hand the three references
+    to the worklet's instance inside its transfer token without allocating.
+  - Add `const _: () = assert!(!core::mem::needs_drop::<T>())` for all five static types.
+  - `NEXT_HANDLE` is already a const `Cell<u32>` and is not touched.
 - D6. **Native counters unchanged**: `bench_support::alloc`, `audit capi` and the effect allocation
   audits are not touched.
 - D7. Trap-on-allocate mode is not built: the counter is the gate, and a trap would end audio in
@@ -100,17 +127,22 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
 ## Deliverables
 
 1. `hosts/host-web/src/render_lock.rs` (D1) and its unit tests; D2 and D3 wiring in
-   `hosts/host-web/src/ffi.rs`; D5 conversions.
-2. Worklet message and qualification gate and mutation (D3).
-3. The three static rules with self-test cases (D4) and their invocation in
+   `hosts/host-web/src/ffi.rs`; D5 conversions. `RenderLockedAllocator` is `pub` (re-exported from
+   the crate root) so an integration test binary can register it.
+2. The integration test binary `hosts/host-web/tests/render_locked_staging.rs` (gate 8).
+3. Worklet message and qualification gate and mutation (D3). The qualification workload that
+   precedes the count read includes at least one observation read, one track response capture,
+   one spectrum read and one spectrum stream read.
+4. The three static rules with self-test cases (D4) and their invocation in
    `scripts/check-web-audioworklet.sh`.
-4. Frozen export lists and regenerated SDK ABI copies.
-5. `hosts/host-web/MUTATIONS.md` rows for the new tests.
+5. Frozen export lists and regenerated SDK ABI copies.
+6. `hosts/host-web/MUTATIONS.md` rows for the new tests.
 
 ## Authorized paths
 
 - `hosts/host-web/src/render_lock.rs` (new), `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs`
-  (module line only), `hosts/host-web/src/tests.rs`
+  (module line and the re-export only), `hosts/host-web/src/tests.rs`
+- `hosts/host-web/tests/render_locked_staging.rs` (new)
 - `hosts/host-web/web/miso-engine-v1-audio-worklet.js`
 - `hosts/host-web/qualification/qualification.js`, `hosts/host-web/qualification/run.mjs`
 - `hosts/host-web/MUTATIONS.md`
@@ -157,6 +189,19 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
    parameter-metadata -- --check <out>`.
 7. `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features --
    -D warnings`, `bash scripts/check-workspace-policy.sh`.
+8. **Stagings never allocate in the locked window.** Integration test binary
+   `hosts/host-web/tests/render_locked_staging.rs` (decision 15 rules that host-web's native
+   allocation-count gates live in an integration binary, never in `src/tests.rs`, which already
+   registers a `#[global_allocator]`). It registers `RenderLockedAllocator<System>` as its
+   `#[global_allocator]` and holds one `#[test]`, so no other test shares the global counter.
+   - On a fresh thread (a fresh thread-local block), it boots a session with one observed effect
+     and a spectrum capture through the ffi boot exports.
+   - It calls `observation_read`, `track_response_capture`, `spectrum_read`,
+     `spectrum_stream_read` and every staging accessor of D2 once each, through the exports.
+   - `miso_engine_web_v1_render_allocation_count()` reads exactly 0 before and after.
+   - Command: `cargo test --locked -p host-web --test render_locked_staging`.
+   - PR evidence, not committed: with one boot-time accessor call removed, the count reads 1 or
+     more.
 
 ## Test value
 
@@ -170,8 +215,12 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
 - Self-test cases for D4.1 and D4.2: a closure member that registers a thread-local destructor, or
   that contains `memory.atomic.wait32`, turns them red; once atomics are allowed (#1332) no other
   rule catches either.
-- `needs_drop` assertions: reverting `LIVE_HOST` or `BOOT_STAGING` to a type that needs drop fails
+- `needs_drop` assertions: reverting any of the five thread locals to a type that needs drop fails
   to compile; on today's non-atomic build no other check sees it.
+- Gate 8 (`render_locked_staging`): a staging that is still lazily allocated on first touch, so a
+  booted worklet allocates it inside the locked window the first time it reads observations,
+  responses or spectra, turns it red. The browser gate sees this only if its workload happens to
+  touch each staging first inside the window; this test touches each one on a fresh thread.
 - No test is superseded.
 
 ## Dependencies

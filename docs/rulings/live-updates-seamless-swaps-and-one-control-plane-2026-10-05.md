@@ -64,8 +64,14 @@ when a dependency forces the order, and then sequence the correct solution.
 - #1054 covers every live row: fader, mute, pan or matrix (a model `smoothing_samples` of 0 means
   "session default"), input trim and polarity, sends (gain, mute, matrix), VCA offset and mute.
 - SDK defaults stop being 0 (decision 14 F7, SDK half).
+- *Recorded resolution:* a live edit carries an optional per-edit ramp length end to end, through
+  the one edit API (absent means the session default, an explicit 0 stays legal). #1054 owns the
+  field, #1364 resolves an absent length, #1382 carries it from browser records. The bypass
+  crossfade alone always uses the session mute ramp (#1341). Default values come from #1055's
+  cited and measured research; #1388 runs the blinded listening session, and a listening result
+  changes only the default values.
 - *Rationale:* a step is a click (#1053 A2 D3). The caller must not decide smoothness by omission.
-- *Issues:* #1055, #1054, #1364, #1365 (stream E).
+- *Issues:* #1055, #1054, #1394, #1364, #1365, #1388 (stream E).
 
 **D15-2. Live value lanes become latest-target cells, on both hosts in one slice.**
 - Gated conditions:
@@ -75,10 +81,12 @@ when a dependency forces the order, and then sequence the correct solution.
   4. an exact `live_values_superseded` counter.
 - Automation, Observe records, structural edits and every time-stamped record stay FIFO.
 - Design: each cell holds its target words and ramp as one unit; a per-lane dirty mask; a canonical
-  drain order, fader before mute; a multi-word cell uses a sequence word that render reads once and
-  never spins on.
+  drain order, fader before mute; a multi-word cell is published so that render reads a whole value
+  without spinning and never skips the latest committed value (the agreed plan's single sequence
+  word could skip a torn read; #1312 fixes the mechanism).
 - The ack bytes are unchanged. Their meaning is: render converges to the committed value no later
-  than the first block whose render begins after the submit returns.
+  than the first block whose render begins after the submit returns, or, while a successor is
+  pending, at its adoption, which the watermark reports (D15-17).
 - `AGENTS.md`'s "never silently lost" gains one sentence that defines supersession.
 - *Rationale:* live records carry no sample time and apply at block entry, so FIFO and cells are
   observationally identical, except that FIFO is worse for "step then ramp". The engine already
@@ -86,7 +94,7 @@ when a dependency forces the order, and then sequence the correct solution.
   BACKPRESSURE for live values on a paused host. Acked-batch question: a superseded value is never
   dropped silently; the committed model holds it, render converges to it, and the counter is exact.
 - *Issues:* *Hold live values in latest-target cells on both hosts* (#1312, strip fader, mute and
-  matrix lanes) and its sibling slices #1345 (effect parameter, bypass and EQ-target), #1346 (strip
+  matrix lanes; its browser status counter is #1399) and its sibling slices #1345 (effect parameter, bypass and EQ-target), #1346 (strip
   input lane) and #1347 (route lanes), all stream B.
 
 **D15-3. Edit outcome reporting.**
@@ -165,8 +173,9 @@ when a dependency forces the order, and then sequence the correct solution.
      supersedes the catch-up.
   6. `ΣP` is bounded by ring headroom (`P_max`).
 - **Fallbacks, each counted and reported:** render-thread pre-roll bounded by `k_max`, then the
-  transition: the D15-9 duck-swap of the strips whose arrival grows. They apply on a timeout, a host that renders nothing, or a non-isolated
-  browser.
+  transition: the D15-9 duck-swap of the strips whose arrival grows. They apply on a deadline
+  counted in render samples, or on a non-isolated browser page. (The agreed plan also listed "a host
+  that renders nothing"; D15-17 removes it, see below.)
 - **No permanent latency reserve.**
 - *Recorded resolution:* "a host that renders nothing" is not a fallback trigger. D15-17 counts the
   deadline in render samples, so a paused host's edit stays pending and never falls back; D15-17
@@ -176,8 +185,8 @@ when a dependency forces the order, and then sequence the correct solution.
   samples. A reserve is a permanent cost. Render-thread pre-roll is a 5x-9x spike in one callback.
   The catch-up is exact for every path, the edited one included, and render pays one bounded copy
   (round 1, C2; round 2).
-- *Issues:* #1285, #1323, #1322, #1362 (stream A); #1287 and its slices #1320, #1321, #1353-#1361
-  (stream C); #1311 (stream B).
+- *Issues:* #1285, #1323, #1322, #1362 (stream A); #1287 and its slices #1320, #1321, #1353-#1361,
+  #1396, #1397 (stream C); #1311 (stream B).
 
 **D15-9. Transitions for strips whose state cannot continue.**
 - **Added strip:** fades in from its first played block, over the session mute ramp (#1288).
@@ -194,7 +203,7 @@ when a dependency forces the order, and then sequence the correct solution.
     *Recorded resolution:* the control thread first withdraws the unadopted candidate by
     compare-and-swap (#1343), then prepares the newer one against the plan render is running, and
     moves the withdrawn candidate's host-fed sources, acked PCM and held seeks into it (#1344), so no
-    acked submission is dropped. Three plans coexist during that preparation. The C ABI has no
+    acked submission is dropped (#1398 sizes the capacities and admission). Three plans coexist during that preparation. The C ABI has no
     default caps (every limit is the caller's), so the header states the sizing rule and the
     repository's reference limits admit three plans; a host that configures smaller caps sees the
     typed resource refusal of whichever cap the peak exceeds, never BACKPRESSURE;
@@ -204,7 +213,12 @@ when a dependency forces the order, and then sequence the correct solution.
   Once #1371 lands, a link-mode change on the four linked console effects is live (#1236).
 - A planned transition is not a fallback: its revision completes as `exact` (or `superseded`) and
   sets no fallback flag.
-- A route that a swap adds to or removes from a surviving strip ramps in or out (#1363).
+- A route that a swap adds to or removes from a surviving strip ramps in or out (#1363). A re-pointed
+  route is a removal plus an addition, ramped at route level; it never ducks its source strip.
+  Sends whose tap precedes a transitioning strip's fader ramp with that strip's transition, so every
+  such route gets a live lane on every plan (#1391). This narrows decision 13's O9 (routes into the
+  output stay folded) for those routes only; every other route keeps the fold. An added strip's
+  pending fade-in survives a later swap (#1392).
 - A true crossfade (ghost strips) is deferred. It reopens on a measured, audible dip in a listening
   test.
 - *Rationale:* no click and no double render. Supersession removes the structural BACKPRESSURE that
@@ -219,6 +233,10 @@ when a dependency forces the order, and then sequence the correct solution.
   COOP/COEP.
 - A non-isolated page keeps the same API and the same artifact (a local shared memory, single
   instance). Its structural edit runs the blocking rebuild, reported and counted.
+- *Recorded resolution (single mode):* with no Worker, the one instance runs the same control plane
+  in the worklet's message handler, outside `process()`. Its control allocations are counted and
+  reported; the render-locked allocation count stays exactly 0 in both modes. This is the one
+  exception to "compile plans only on control/worker threads", and `AGENTS.md` records it.
 - **Toolchain:** a pinned dated nightly with `-Zbuild-std` on `wasm32-unknown-unknown`, for the
   browser artifact only; everything else stays on the stable pin. A nightly bump re-records the
   three-browser matrix and the AArch64/native parity gates. The stable `wasm32-wasip1-threads`
@@ -251,7 +269,8 @@ when a dependency forces the order, and then sequence the correct solution.
 - #1057 becomes the design note for this. Its personal-mix owner question stays open and blocks
   nothing here.
 - #1291 and #1292 close as not planned: the committed model replaces their three-way merge.
-- *Issues:* #1309 (stream B); #1290, #1293-#1297, #1383, #1385, #1386 (stream H); #1057 (stream K).
+- *Issues:* #1309, #1400 (streams B, H); #1290, #1401, #1293-#1297, #1383, #1385, #1386, #1389 (stream H);
+  #1057 (stream K).
 - *Rationale:* decision 14 C1 (one edit API) and decision 2 of `engine-footprint-2026-09-28.md`
   (the core engine owns the edited session). A merge in the browser would be throwaway work.
 
@@ -279,8 +298,8 @@ when a dependency forces the order, and then sequence the correct solution.
 - **E2 (F2):** make live the gate-expander's attack, hold and release (#1336); the parametric EQ
   band's `enabled` and `kind` (other `m`/`k` words on the same SVF state, via prepared targets,
   #1337); the multiband crossover, with a test that the band sum stays continuous (#1366, #1338).
-  Rule 3 also covers link mode: a strip's console link mode (#1236 and its slices #1368-#1371) and
-  the multiband compressor's link mode (#1367) become live.
+  Under the same finding, link mode becomes live: a strip's console link mode (#1236 and its slices
+  #1368-#1371) and the multiband compressor's link mode (#1367).
 - **E3 (F3):** `follows_mute` live (D15-6).
 - **E4 (F4), and rule 3 extended:** a **correctness reason may keep a value prepared**, recorded
   with its reopening condition. This adds a third reason to decision 14's rule 3 (glitch,
@@ -289,11 +308,11 @@ when a dependency forces the order, and then sequence the correct solution.
   compressor get a live bypass shunt (#1339; #1340 after #1069). Until those land, lifting their
   bypass is a rebuild with a D15-9 transition.
 - **E5 (F7):** the bypass switch crossfades over the session ramp, and is bit-identical after the
-  ramp (#1341, stream E).
+  ramp (#1341; the browser command #1393; stream E).
 - **F9:** VCA membership is live on the C ABI (D15-6, #1247).
 
 **D15-14. Meter, observation and spectrum state carry** across swaps for unchanged owners, under
-P1, on both hosts (#1327, stream A).
+P1, on both hosts (#1327 meters and observation taps, #1395 spectrum; stream A).
 
 **D15-15. Preparation performance**, both hosts: validate static effect descriptors once per type
 (about 9% of preparation, #1330); no `GraphNodeId` string compares in the compiler hot path (11-12%
@@ -401,7 +420,7 @@ where it differs; the issue bodies are rewritten to match.
 - #1291 *Keep browser live strip state across a session replacement* and #1292 *Keep browser live
   effect edits across a session replacement*: not planned (D15-11).
 - #1020 *Research: can the C ABI deliver live parameter changes through the browser's live-control
-  lane?*: answered by #1053 (delivered) and D15-11 (one portable control plane, #1309).
+  lane?*: answered by #1053's delivered slices (#1255, #1257) and D15-11 (one portable control plane, #1309).
 
 ### Defects found while writing the specs
 
@@ -421,7 +440,8 @@ Filed under the no-shortcuts principle (stream B), outside D15-1 to D15-17:
 - **Decision 14.** Its four rules stand. Rule 3 gains the correctness reason (E4). Its F1-F9 are
   answered above. Its record gains a pointer to this one.
 - **Decision 13.** DESIGN 5.7's structural `follows_mute` is reversed (E3). #1247 D1's structural
-  VCA membership is reversed on the C ABI (F9).
+  VCA membership is reversed on the C ABI (F9). O9's fold of routes into the output is narrowed for
+  routes whose tap precedes the fader (D15-9, #1391).
 - **`engine-footprint-2026-09-28.md`.** Decision 1 (researched ramp defaults) is delivered by
   D15-1. Decision 2 (the core engine owns the edited session) is delivered by D15-11. Ruling R3
   (no sidecar or WebSocket transport) is untouched: the Worker is an in-process instance on shared

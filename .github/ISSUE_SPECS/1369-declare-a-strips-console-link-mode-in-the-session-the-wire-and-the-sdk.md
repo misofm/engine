@@ -55,30 +55,47 @@ still binds one bank (#1368).
 ## Deliverables
 
 1. D1-D3 in `crates/session`, the schema docs and the fixtures.
-2. D4 in `crates/protocol`.
-3. D5 in `sdk/` with regenerated outputs.
-4. The binding-text amendments (K3 verdict MINOR-2), in this PR:
+2. D4 in `crates/protocol`, and the repin of `COMPLETE_SCHEMA_HASH`
+   (`crates/conformance/src/protocol_corpus.rs:737`), the single cross-target corpus owner, with
+   one doc line in its repin history naming this issue (the console entry appends `LINK_MODE`).
+3. The new field in every Rust `ConsoleEntry { .. }` literal (the model adds a field, so each one
+   must name it; `"slot"`/`ConsoleLinkMode::Slot` everywhere).
+4. D5 in `sdk/` with regenerated outputs, and the CLI's console-entry request parser.
+5. The binding-text amendments (K3 verdict MINOR-2), in this PR:
    - `AGENTS.md` (`:31`), the console sentence: the slot's `link_mode` becomes the default a strip's
      entry may override.
    - `docs/rulings/engine-footprint-2026-09-29.md`, the **Shape** bullet (`:48`): an amendment note
      that the entry now also carries `link_mode` (`slot` or a link token), citing decision 13 Q1 and
      this issue.
    - `docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`, Q1 (`:185`): recorded as delivered.
-5. The `author-session` skill and the app handoff drop the bus-compression hazard guidance
+6. The `author-session` skill and the app handoff drop the bus-compression hazard guidance
    (DESIGN 2.2b, `docs/handoffs/submix-sends-2026-10-02/DESIGN.md`).
 
 ## Authorized paths
 
 - `crates/session/src/`, `crates/session/tests/`, `docs/SESSION_SCHEMA_V1.md`,
   `docs/session-v1.schema.json`
-- `crates/protocol/src/schema.rs`, `crates/protocol/src/session_wire.rs`, `crates/protocol/tests/`
-- `crates/effect-compiler/src/prepare.rs` (the console entry's path in D2's diagnostic only)
+- `crates/protocol/src/schema.rs`, `crates/protocol/src/session_wire.rs`,
+  `crates/protocol/src/session_wire/tests.rs`, `crates/protocol/tests/`
+- `crates/conformance/src/protocol_corpus.rs` (the console-entry literals and the
+  `COMPLETE_SCHEMA_HASH` repin only)
+- `crates/effect-compiler/src/prepare.rs` (the console entry's path in D2's diagnostic only),
+  `crates/effect-compiler/tests/` (gate 2), `crates/graph-compiler/tests/` (gate 5)
+- the new field only, in every other `ConsoleEntry { .. }` literal on `main`:
+  `crates/protocol/src/controller/tests.rs`, `crates/host-core/src/control_provider.rs` (`:782`),
+  `crates/host-core/tests/` (`live_addressing.rs`, `submix_strip.rs`, `strip_meters.rs`,
+  `live_delta.rs`, `randomized.rs`), `crates/capi/src/runtime/live_tests.rs`,
+  `crates/graph-compiler/src/lib.rs`, `hosts/host-web/src/tests.rs`,
+  `tools/audit/src/builtins_graph.rs`, `tools/audit/src/fixture_builtins.rs`,
+  `tools/console-workload/src/lib.rs`
 - every checked-in session JSON document and embedded test session (D3's key only)
-- `sdk/src/core/types.ts`, `sdk/src/core/session.ts`, `sdk/test/`, `sdk/src/generated/`,
-  `sdk/assets/` (generated only); stream H owns `sdk/`: coordinate the merge
+- `sdk/src/core/types.ts`, `sdk/src/core/session.ts`, `sdk/src/cli/session-request.ts`,
+  `sdk/test/`, `sdk/src/generated/`, `sdk/assets/` (generated only); stream H owns `sdk/`:
+  coordinate the merge
 - `AGENTS.md`, `docs/rulings/engine-footprint-2026-09-29.md`,
   `docs/rulings/submix-strips-sends-and-vca-2026-10-02.md` (the three amendments only)
-- the `author-session` skill file and `docs/handoffs/submix-sends-2026-10-02/` (D5 of deliverables only)
+- `.claude/skills/author-session/SKILL.md` and `docs/handoffs/submix-sends-2026-10-02/DESIGN.md`
+  (deliverable 6 only)
 
 ## Non-goals
 
@@ -105,6 +122,9 @@ still binds one bank (#1368).
    unknown token.
 7. Commands:
    - `cargo test --locked -p session -p protocol -p effect-compiler -p graph-compiler --features protocol/test-support,effect-compiler/test-support,graph/test-support`
+   - `cargo test --locked -p conformance --test conformance_corpus` (the repinned corpus hash)
+   - `cargo test --locked -p host-core -p capi -p host-web -p audit -p console-workload --features host-core/test-support,host-core/control-provider,host-web/test-support`
+     (every `ConsoleEntry` literal still builds and passes)
    - `cargo run --locked -p session-validator -- validate <file>` on each migrated document
    - `bash scripts/check-session-policy.sh`; `bash scripts/test-builtins-fixtures.sh`
    - `bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,

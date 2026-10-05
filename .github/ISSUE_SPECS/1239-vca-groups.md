@@ -152,5 +152,5 @@ and their GitHub issues are closed and verified.
   delivered).
 - *Record the submix, send and VCA ruling* (#1197; the VCA ruling).
 - #1247 also: *Deliver value-only fader, mute and pan transactions to the running C ABI plan through
-  the live console lanes* (#1053), *Deliver value-only send and submix-strip edits to the running C
-  ABI plan* (#1225), *Let C ABI sends follow their source strip's mute live* (#1226).
+  the live console lanes* (#1053), *Deliver value-only send edits to the running C ABI plan*
+  (#1225), *Let C ABI sends follow their source strip's mute live* (#1226).

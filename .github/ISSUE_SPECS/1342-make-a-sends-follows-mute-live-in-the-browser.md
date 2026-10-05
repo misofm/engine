@@ -9,8 +9,14 @@ In the browser, a transaction that turns a send's `follows_mute` on or off is a 
 rebuild. This applies to a route into a submix whose plan carries a route lane. The response
 reports `path: "live"`. The plan does not change. The send moves to its new effective matrix
 columns through the existing route ramp. After the ramp, the output is bit-identical to a plan
-prepared from the committed model with the same solo state. *Let C ABI sends follow their source
-strip's mute live* (#1226) is the C ABI half, and it also delivers the shared classifier rule.
+prepared from the committed model with the same solo state.
+
+No browser code composes the follow. *Let C ABI sends follow their source strip's mute live*
+(#1226) makes the toggle a live row of the shared classifier and builds follow records in the
+shared commit. *Admit browser live edits in the Worker through the committed model* (#1382 D3)
+adds the browser's solo term to that same composition. This slice proves the browser gets the
+result, including with solo. It adds no production code unless a gate finds a browser-only gap,
+and any such fix goes into the shared commit (D2).
 
 ## Context
 
@@ -20,63 +26,55 @@ strip's mute live* (#1226) is the C ABI half, and it also delivers the shared cl
 - **The mirror marks the flag fixed.** `LiveRoute::follows_mute` is documented "Fixed for the
   plan" (`crates/host-core/src/live_route_state.rs:46`).
   - `LiveRouteState::try_new` seeds `source_lane_muted` from the effective mute only when the
-    flag is set (`:97-120`).
+    flag is set (`:97-120`). The browser seeds it from the solo state (`hosts/host-web/src/lib.rs:6952`).
   - `LiveRouteState::follow` (`:189`) and `LiveRouteMuteFollow::delta` (`:232`, `:242`)
-    recompute a following route's lanes.
-  - The shadow, commit and rollback (`:206`) make a batch all or nothing.
-- **The browser composes follows today, but only for mute changes.**
-  - The admission's follow pass runs after strip, solo and VCA mute records
-    (`hosts/host-web/src/lib.rs:5274-5290`). It reads the browser's effective mute
-    `user_mute || vca_mute || (any_solo && !solo_safe && !my_solo)` (`:860-868`).
-  - The mirror is seeded from the solo state (`:6952`).
-  - Send records use kinds 13-15 (`:907-916`). No command kind changes `follows_mute`.
+    recompute a following route's lanes. The shadow, commit and rollback (`:206`) make a batch all
+    or nothing.
+  - #1226 D7 adds `LiveRouteState::set_follows_mute`; #1382 D3 calls it from the shared commit.
+- **The browser's effective mute** is `user_mute || vca_mute || (any_solo && !solo_safe &&
+  !solo)` (`crates/host-core/src/solo.rs:11-13`). Today host-web's own follow pass composes it
+  (`hosts/host-web/src/lib.rs:5274-5290`). #1382 D5 deletes that pass; #1382 D3 composes the same
+  term in the shared commit.
+- **No browser command kind changes `follows_mute`.** Send records use kinds 13-15
+  (`hosts/host-web/src/lib.rs:907-916`).
 - **Route lanes exist only when the plan is prepared with route lanes.** See
   `crates/host-core/src/prepare.rs:1574-1591`: no control channel, or `lanes.routes` false,
   attaches none.
 - **The classifier.** `classify_live_delta` (`crates/host-core/src/live_delta.rs:211`) still has
-  the #1053 G2 guard (`:133`, `:278`, `:542-546`). #1226 removes that guard and makes a
-  `follows_mute` change on a live route a live row of the shared classifier.
+  the #1053 G2 guard (`:133`, `:278`, `:542-546`). #1226 removes it.
 
 ## Decisions frozen for this slice
 
 - **D1. One path.** The browser receives this edit only as a transaction through the Worker's
   committed model (D15-11). This slice adds no worklet command kind and no SDK live-control
   method.
-- **D2. Composition, in the Worker's control half.** For each live route whose `follows_mute`
-  changes in the delta:
-  1. set the mirror's flag with `LiveRouteState::set_follows_mute` (#1226 D7). It goes through
-     the shadow, and turning the flag off also clears `source_lane_muted`;
-  2. recompute `source_lane_muted` with `LiveRouteState::follow`, through the browser's effective
-     mute (user, VCA and solo terms, from the control half's solo state);
-  3. if the lanes changed, build one record with `RouteControlProducer::record` from the
-     mirror's post-commit gain, matrix and mute plus the new lanes, over the session's route ramp
-     (an absent ramp resolves to the session default, per #1364; an explicit 0 stays a step).
-
-  A toggle that leaves `source_lane_muted` unchanged writes no record.
-- **D3. Ordering inside one transaction.** The follow pass runs after every strip, solo and VCA
-  mute change and every send value change in the same transaction. It reads their post-commit
-  values. A transaction that mutes the source and turns on `follows_mute` produces one record per
-  route.
-- **D4. All or nothing.** Every fallible check (domain, room or cell write rules, protocol token)
-  runs before the first write, as in #1053's commit order. A refusal leaves the model, revision,
-  mirror and lanes unchanged.
-- **D5. No route lane, no live.** If the plan has no lane for the route, the classifier returns
-  `rebuild`. That is the browser's structural path (*Replace the running browser session in the
-  Rust host*, #1290). This is a correct path, not a fallback.
+- **D2. One composition.** The follow records come from the shared commit: #1226 D3-D5 for the
+  model terms (own mute, VCA mute) and the ramp (the session mute length), and #1382 D3 for the
+  solo term and the mirror flag. host-web adds no composition and keeps no second copy. If a
+  test of this slice finds the shared composition wrong for the browser, the fix goes into the
+  shared commit through #1226 or #1382, never into host-web.
+- **D3. No route lane, no live.** Every browser entry that attaches live controls attaches a lane
+  per route into a submix (`HostLiveLanes::ALL`, `crates/host-core/src/prepare.rs:382-387`). If a
+  plan has no lane for the route (live controls off), the shared classifier returns `rebuild`, the
+  browser's structural path (*Replace the running browser session in the Rust host*, #1290). This
+  is a correct path, not a fallback.
+- **D4. Acked-batch question: can an ack ever precede a drop? No.** This slice adds no queue and
+  no write path. The shared commit's checks run before its first write (#1226 D4, #1382 D4), and
+  route lanes are latest-target cells (#1347).
 
 ## Deliverables
 
-1. D2-D4 in host-web's Worker-side control half.
-2. Native tests in `hosts/host-web/src/tests.rs`.
+1. Native tests in `hosts/host-web/src/tests.rs`, and the integration test binary
+   `hosts/host-web/tests/follows_mute_realtime.rs` (gate 4).
 
 ## Authorized paths
 
-- `hosts/host-web/src/lib.rs`, `hosts/host-web/src/control_targets.rs`,
-  `hosts/host-web/src/tests.rs`
+- `hosts/host-web/src/tests.rs`, `hosts/host-web/tests/follows_mute_realtime.rs` (new)
 
 ## Non-goals
 
-- No change in `crates/host-core` (#1226 owns the classifier rule and the mirror setter).
+- No change in `crates/host-core` or `crates/control-plane`: #1226 owns the classifier rule and
+  the mirror setter, and #1382 owns the solo term in the shared commit.
 - No C ABI change. No follow on routes into the output: those are refused at validation and
   never live.
 - No SDK surface. `engine.apply` is not changed here.
@@ -84,10 +82,8 @@ strip's mute live* (#1226) is the C ABI half, and it also delivers the shared cl
 ## Hazards
 
 - **A redundant record moves bits.** Re-entering the ramp kernel on a settled lane can turn `+0.0`
-  into `-0.0` (`crates/host-core/src/solo.rs:58-70`). D2 writes a record only when the lanes
-  change.
-- **A stale flag.** If the mirror's flag is not updated, a later mute of the source is followed,
-  or ignored, wrongly. Gate 2 checks this.
+  into `-0.0` (`crates/host-core/src/solo.rs:58-70`). The shared commit writes a record only when
+  a target changes (#1226 D3); gate 2 holds the browser to it.
 
 ## Objective gates
 
@@ -105,15 +101,20 @@ strip's mute live* (#1226) is the C ABI half, and it also delivers the shared cl
    - Run at 44.1, 48, 88.2 and 96 kHz, with 1 and 10 tracks.
 2. **No redundant record, and the flag carries.**
    - Turn on `follows_mute` for a send whose source is unmuted. Assert no route record is written
-     (the route lane's free count or dirty mask is unchanged).
-   - Then mute the source. The send follows, and the output matches a fresh plan.
-3. **All or nothing.** A transaction that turns `follows_mute` on and also sets an out-of-domain
-   send gain is refused. Model, revision, mirror and every lane are unchanged. The next 8 blocks
-   are bit-identical to a run without the call.
-4. **Realtime.** In gate 1, the render thread counts `allocations == 0 && frees == 0` around every
-   render call after warm-up (`bench_support::alloc` thread-scoped counters).
+     (the route lane's cell is unchanged).
+   - Then mute the source, and then solo another track. The send follows each, and the output
+     matches a fresh plan.
+3. **Each preparation branch.** Gate 1's toggle is `live` with no spectrum, with a single
+   spectrum capture and with a spectrum collection (the three branches of `compile_ready`,
+   `hosts/host-web/src/lib.rs:6617`). With live controls off it is `rebuild`, and the output after
+   adoption equals a fresh plan of the committed model.
+4. **Realtime.** Integration test binary `hosts/host-web/tests/follows_mute_realtime.rs`.
+   Decision 15 rules that host-web's native allocation-count gates live in an integration binary,
+   never in `src/tests.rs`. It links `bench_support::alloc`, calls `assert_installed()` first, and
+   runs gate 1's script. The render thread's thread-scoped counters read `allocations == 0 &&
+   frees == 0` around every render call after warm-up.
 5. **Commands:**
-   - `cargo test --locked -p host-web --features host-web/test-support`
+   - `cargo test --locked -p host-web --features host-web/test-support` (runs gate 4's binary)
    - `bash scripts/check-web-audioworklet.sh`
    - `bash scripts/test-web-audioworklet.sh`
    - the browser legs of *Run the browser control plane in a Worker and keep the AudioWorklet
@@ -124,19 +125,21 @@ strip's mute live* (#1226) is the C ABI half, and it also delivers the shared cl
 
 ## Test value
 
-- Gate 1: turns red if a `follows_mute` toggle is still rebuilt, zeroes the wrong column or lane,
-  carries a stale gain, or ignores the solo term of the browser's effective mute.
+- Gate 1: turns red if a `follows_mute` toggle is still rebuilt in the browser, zeroes the wrong
+  column or lane, carries a stale gain, or ignores the solo term of the browser's effective mute.
+  #1226's gates run on the C ABI, which has no solo.
 - Gate 2: turns red if the toggle re-emits an unchanged target (sign of zero moves), or if the
-  mirror's flag is not updated, so a later source mute is not followed.
-- Gate 3: turns red if the mirror flag or a record is written before a later check refuses.
+  mirror's flag is not updated, so a later source mute or solo is not followed.
+- Gate 3: turns red if one preparation branch drops the route lanes, so the toggle falls to
+  `rebuild` there, or if the no-lane case is refused instead of rebuilt.
 - Gate 4: turns red if the follow composition runs on, or allocates on, the render thread.
 
 ## Dependencies
 
-- *Let C ABI sends follow their source strip's mute live* (#1226): the classifier rule and the
-  mirror setter.
+- *Let C ABI sends follow their source strip's mute live* (#1226): the classifier rule, the
+  follow composition and the mirror setter.
 - *Admit browser live edits in the Worker through the committed model* (#1382): browser
-  transactions reach the shared classifier only through it.
+  transactions reach the shared commit only through it, and its D3 composes the solo term.
 - *Hold route-lane values in latest-target cells* (#1347): route lanes are cells.
-- *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364).
 - *Report each transaction's edit path in its response* (#1313).
+- *Replace the running browser session in the Rust host* (#1290): gate 3's `rebuild` case.

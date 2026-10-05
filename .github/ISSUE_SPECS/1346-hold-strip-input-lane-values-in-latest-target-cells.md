@@ -75,9 +75,10 @@ replaced value. The C ABI's input edits (#1261, #1262) are built on these cells.
 
 ## Objective gates
 
-1. **Many edits, one block (new host-web test).** 30 trim edits on one strip, then 30 HPF edits,
-   each admitted; one render equals a twin that sent only the last of each; the counter grows by
-   58.
+1. **Many edits, one block (new host-web test).** 30 `Both` trim edits on one strip, then 30
+   `Both` HPF edits (section 0), each admitted; one render equals a twin that sent only the last
+   of each; the counter grows by 116 in #1312 D2's per-cell unit (each `Both` edit writes two
+   cells, so each kind adds `2 × 29 = 58`).
 2. **Order (new builtins-compiler test).** One block with trim, polarity and both filter sections
    dirty renders as a twin that applies them as records in the order trim, polarity, filter.
 3. **Witness (new builtins-compiler tests).** A `Both` trim on a mono stem keeps the bank

@@ -27,9 +27,9 @@ mode.
 - #1069 (*Multiband compressor: a ramp's cut moves a lane's bits in a bank*, open): a multiband lane
   with a ramp in flight is not bit-identical between a bank and a per-node instance until #1069
   lands. The gates use the compressor and the limiter.
-- The effect rule, the retarget, the inherited queue, the copy-mode refusal and the shunt copy come
-  from *Carry console effect lanes across a plan swap* (#1279, D1) and *Carry live-controlled
-  effect lanes across a plan swap* (#1280, D2-D6).
+- The effect rule, the retarget, the carried cells and the shunt copy come from *Carry console
+  effect lanes across a plan swap* (#1279, D1) and *Carry live-controlled effect lanes across a
+  plan swap* (#1280, D2-D6).
 
 ## Decisions frozen for this slice
 
@@ -39,11 +39,11 @@ mode.
   - per-node `snapshot_state_payload` → bank `restore_track_state_payload`;
   - bank `snapshot_track_state_payload` → per-node `restore_state_payload`.
 
-  The control state follows #1280's `inherit_from`. The shunt words move between the per-node
+  The control state follows #1280 D2's `carry_from`. The shunt words move between the per-node
   `BypassShunt` and the lane's words of the bank line, relative to the bank's shared cursor.
 - **D3. Copy mode.** The same payload path. Both snapshots take `&self`, and a collapsed bank is
-  desymmetrized first, which is bit-neutral (#1322 D2). The control state is copied, not
-  inherited, and copy mode refuses while a record is pending (#1280 D6). The shunt words are
+  desymmetrized first, which is bit-neutral (#1322 D2). The control state follows the same
+  `carry_from` (#1280 D2, D6), which never consumes a predecessor value. The shunt words are
   copied. The bytes go into `carry_program_copy_bytes`.
 
 ## Deliverables
@@ -70,12 +70,12 @@ mode.
    to the reference. At `Backend::Simd4`, the same with three and four tracks. Repeat with the
    limiter insert.
 2. **A bank falls apart.** The reverse edit (remove one track from a full group) is bit-identical.
-3. **Live state.** Gate 1 with live controls and a compressor record pending at the swap is
-   bit-identical to the reference fed the same record. A second case also changes the threshold of
+3. **Live state.** Gate 1 with live controls and a compressor value unread in A's cell at the swap
+   is bit-identical to the reference fed the same value. A second case also changes the threshold of
    a lane that changes representation (a live value): it is bit-identical to "live edit, then
    structural edit" (#1280 gate 5's shape).
-4. **Copy mode.** Gates 1 and 2 with a copy, followed at once by the adoption, and no pending
-   record. Every block equals the move run, and the predecessor equals its uncopied twin.
+4. **Copy mode.** Gates 1 and 2 with a copy, followed at once by the adoption, and one unread
+   compressor value at the copy. Every block equals the move run, and the predecessor equals its uncopied twin.
 5. **Realtime.** Each swap block and copy call makes zero allocations and frees.
 6. Commands:
    - `cargo test --locked -p rack -p graph -p host-core --features rack/test-support,graph/test-support,host-core/test-support`

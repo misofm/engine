@@ -85,12 +85,16 @@ the lift is heard with the tail already in place.
   delay's bypass carries the instance (ring and feedback tail), then applies the committed bypass
   as a lane record. This replaces the delay leg of #1282's gate 3 ("a committed bypass change on
   the delay is not carried"). The multiband leg stays until #1340.
-- **D6. No crossfade here.** The switch stays the shunt's whole-block select. *Crossfade the bypass
-  switch over the session ramp* (#1341) adds the crossfade for every shunt, the delay's included.
+- **D6. Crossfaded from the first commit.** This slice lands after *Crossfade the bypass switch
+  over the session ramp* (#1341). #1341 crossfades every shunt, per-node and banked, over the
+  session mute ramp, so the delay's new live bypass crossfades from the day it ships; this slice
+  adds no switch code of its own.
 - **D7. Acked-batch question.** After this slice a delay bypass record is never acked without
-  effect: it changes the lane flag that the next block's shunt reads. If *Refuse commands that
-  would be acknowledged with no effect* (#1315) lands first, its refusal for the delay keys on
-  `lowers_session_bypass`, so D1 lifts it with no further edit.
+  effect: it changes the lane flag that the next block's shunt reads. *Refuse commands that would
+  be acknowledged with no effect* (#1315) lands first; its browser refusal of a prepared-bypass
+  lift keys on `lowers_session_bypass` (#1315 D4), so D1 lifts it for the delay with no further
+  edit. The delay half of #1315's gate 3 (a delay lift refused) is rewritten here as gate 5's
+  admitted, heard lift; its multiband half stays until #1340.
 
 ## Deliverables
 
@@ -124,7 +128,7 @@ the lift is heard with the tail already in place.
 - No change to the delay kernel, its D7 check or its prepared-bypass code path. Other callers and
   oracles still use `PreparedEffectMetadata::bypass`.
 - The delay still never banks. No bank kernel.
-- No bypass crossfade (#1341). No multiband change (#1340), and no deletion of
+- No new crossfade code (#1341 owns it). No multiband change (#1340), and no deletion of
   `lowers_session_bypass` or `LiveRebuild::PreparedBypass` (#1340).
 
 ## Hazards
@@ -152,12 +156,14 @@ the lift is heard with the tail already in place.
    with no rebuild.
 4. **C ABI live lift** (new, `crates/capi/src/runtime/live_tests.rs`). A track with a
    session-bypassed delay insert. A transaction that lifts only the bypass commits with no plan
-   replacement. From the next block its output is bit-identical to a control booted with the delay
-   enabled and fed the same PCM. The wet path ran all along, so no rebuild or carry is needed for
+   replacement. With `control_smoothing.mute_ms = 0`, from the next block its output is
+   bit-identical to a control booted with the delay enabled and fed the same PCM; with the default
+   table, from the first block after #1341's crossfade ends. The wet path ran all along, so no rebuild or carry is needed for
    equality. The lift block allocates and frees nothing (`bench_support::alloc` thread counters).
 5. **Browser** (`hosts/host-web/src/tests.rs:9099-9140`, rewritten). The delay leaves the exceptions.
-   Lifting a session-bypassed delay live renders the authored-unbypassed session bit for bit, and
-   the multiband stays the exception. SDK: `console-evals.mjs`'s cross-check (`:1044-1067`) passes
+   Lifting a session-bypassed delay live renders the authored-unbypassed session bit for bit after
+   the crossfade (a step with `mute_ms = 0`), and the multiband stays the exception. The delay half
+   of #1315's gate 3 test (lift refused) is rewritten as this admitted lift. SDK: `console-evals.mjs`'s cross-check (`:1044-1067`) passes
    with the shorter list.
 6. **Carry with a bypass change** (new, `crates/host-core/tests/successor_swap.rs`). Session A has
    a bypassed delay insert ringing at 50 ms and feedback `0.9`. B is A with the delay unbypassed,
@@ -196,6 +202,9 @@ the lift is heard with the tail already in place.
 
 - *Carry per-node effect instances across a plan swap* (#1282). This slice lands after it and
   replaces the delay leg of #1282's gate 3 (D5).
+- *Crossfade the bypass switch over the session ramp* (#1341), so the live switch never steps (D6).
+- *Refuse commands that would be acknowledged with no effect* (#1315), whose delay refusal this
+  slice lifts (D7).
 - The final deletion of `lowers_session_bypass`, `PREPARED_BYPASS_EFFECTS`'s last entry and
   `LiveRebuild::PreparedBypass` is in *Give the multiband compressor a live bypass shunt* (#1340),
   which lands after this one.

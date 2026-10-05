@@ -41,6 +41,12 @@ blocks, with honest flags.
   the per-plane maxima over that many blocks in plan-local state and, when a window closes,
   publishes its two peaks, the window's end sample and a window sequence. A window open across a
   plan swap restarts at the swap block.
+- **D3a. Torn-read-free publication.** The four words are one record, published with the
+  safe-Rust single-writer seqlock of `crates/engine/src/realtime/observe.rs` (module doc
+  `:12-18`): render, the only writer, makes the sequence odd, stores the words, makes it even. The
+  control thread reads with the bounded retry of `MAXIMUM_READ_ATTEMPTS` (`observe.rs:71`); a read
+  that gives up stages nothing this call and reads again at the next one. The control thread
+  never pairs one window's left peak with another window's right peak or end sample.
 - **D4. The batch.** For each closed window the control thread has not staged, it stages one
   batch: `{1, Left, flags, left}` and `{1, Right, flags, right}`. `flags` has the valid bit, and
   the clipped bit when that peak exceeds `1.0`. The held bit is never set. A window replaced by a
@@ -79,6 +85,9 @@ blocks, with honest flags.
 3. **Period (same file).** With period 4, three blocks and a call stage nothing.
 4. **Refusal (same file).** Configuring handle 2 answers `NOT_FOUND` and leaves the configuration
    unchanged.
+4a. **No torn window (new stress test beside the record type).** A writer thread publishes
+   windows whose four words all derive from one counter while a reader thread reads; every
+   successful read is self-consistent, and giving up is the only alternative.
 5. **Superseded oracle bytes.** `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`
    (`crates/capi/src/runtime/tests.rs:1857`) pins a meter batch with one left-labelled record;
    re-pin those wire bytes with this issue as the reason.
@@ -96,6 +105,7 @@ blocks, with honest flags.
 - Gate 2: a flag word that never reports clipping.
 - Gate 3: a cadence that ignores the configured period.
 - Gate 4: a handle accepted that names nothing.
+- Gate 4a: a window record read while render is rewriting it, mixing two windows.
 
 ## Dependencies
 

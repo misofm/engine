@@ -18,7 +18,7 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
 - `begin_block_at(first_sample)` (`crates/source/src/lib.rs:1108-1117`) applies a held anchored
   seek in the block whose first sample reaches the anchor, at `frame + lateness`
   (`observe_seek_at_block_boundary`, `:1323-1363`). The graph driver passes the render block's
-  first sample (`:1719-1721`). D1-a: once #1287 makes the graph read sources ahead of render, an
+  first sample (`:1719-1721`). D1-a: once #1396 makes the graph read sources ahead of render, an
   anchor on the render clock would drift by that read-ahead; anchoring on the source-read clock
   keeps a host that never learns the read-ahead aligned.
 - A plain seek applies at the first block render begins after the command is popped. Nothing
@@ -40,9 +40,9 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
 - **D1. Clock name.** `begin_block_at`'s parameter is renamed `source_read_sample` and documented as
   "the plan's source-read clock: the absolute sample of source time this block reads; equal to the
   render clock in this version". `SeekAt::anchor_sample` and `HeldSeek::anchor_sample` are
-  documented on the same clock. The graph driver passes its `first_sample` unchanged; *Pre-roll a
-  successor whose latency grows* (#1287) is the issue that makes the two clocks differ, and it must
-  pass the source-read sample here.
+  documented on the same clock. The graph driver passes its `first_sample` unchanged; *Give a plan
+  a source-read clock that leads its render clock* (#1396) is the issue that makes the two clocks
+  differ, and it must pass the source-read sample here.
 - **D2. Per-ring seek report.** Each ring gets one shared record, allocated with the ring on the
   control thread and charged as a new `SourceResourceReport::seek_report_bytes` row (in overhead
   and total). Words: `generation`, `first_sample`, `source_frame`, `cumulative_underrun_frames`,
@@ -72,9 +72,12 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
   uint64_t cumulative_underrun_frames; uint64_t cumulative_held_frames; uint64_t reserved[2];`.
   It reads the newest committed session's ring (like `seek`). Unknown source:
   `INVALID_ARGUMENT`, `source.id.unknown`. Wrong size or nonzero reserved: `INVALID_ARGUMENT`.
-  Busy read: `BACKPRESSURE`, `source.report.busy`. Feature bit
-  `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT = 128` (bit 7; the next free bit if taken). 17 frozen
-  symbols with #1314's.
+  Busy read: `BACKPRESSURE`, `source.report.busy`. A malformed source ID (null, empty, non-UTF-8,
+  over 127 bytes) returns `INVALID_ARGUMENT` here as on `seek`; its `source.id.invalid` diagnostic
+  is #1350's, which lands after this slice and covers this entry point. Feature bit
+  `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT`: the next free bit when this merges, never a reused
+  one; tests and the smoke program use the symbol, never a number. The frozen symbol list grows
+  by one.
 - **D7. Facade.** `SourceControlSet::seek_report(id) -> Result<SourceSeekReport, SourceControlError>`
   in host-core, reading the producer's reader; a vacated or vacant entry is `source.ring.vacated`
   as for `seek`. Its `seek_at` doc (`crates/host-core/src/source.rs:209-221`) says the source clock
@@ -100,11 +103,11 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
 
 ## Non-goals
 
-- The source-read offset itself (#1287). The browser export of the report (stream H, #1332 and the
+- The source-read offset itself (#1396). The browser export of the report (stream H, #1332 and the
   rewritten #1293). The seek header text (#1317).
 - The `source.id.invalid` diagnostic for a malformed ID on this entry point: *Tighten the seek
-  entry points: source.id.invalid, a typed held preparation, timed reads only* (#1350), whichever
-  of the two lands second adds it. The shared service step that this session call runs first:
+  entry points: source.id.invalid, a typed held preparation, timed reads only* (#1350), which
+  depends on this slice and gates it. The shared service step that this session call runs first:
   *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 
 ## Objective gates
@@ -147,5 +150,5 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
 ## Dependencies
 
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the record
-  module this generalizes, and feature bit order.
+  module this generalizes.
 - *Report held source blocks apart from underruns* (#1318): the held counter this reports.

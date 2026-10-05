@@ -1,6 +1,6 @@
-# Deliver value-only send and submix-strip edits to the running C ABI plan
+# Deliver value-only send edits to the running C ABI plan
 
-Stream F of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-1, D15-2, D15-6).
+Stream F of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-1, D15-2, D15-6, D15-7).
 Code anchors verified on `main` at `6fb211594`.
 
 Slice 27 of *Submix strips and live aux sends* (#1196). Rewritten 2026-10-05 for decision 15. The
@@ -11,14 +11,11 @@ design record cited as `DESIGN` is `docs/handoffs/submix-sends-2026-10-02/DESIGN
 
 ## Product outcome
 
-A C ABI host, such as a fan's phone, can change any of these on the running plan:
-
-- a send's `gain_db`, `mute` or `channel_matrix` (a route whose destination is a submix);
-- a bus's (submix strip's) fader dB, lane mute, or pan/matrix.
-
-None of these changes rebuilds the plan, leaves a silent block, resets a source ring or steps
-hard. Track faders, mutes and pans are already live (#1257). After this slice a bus or send edit
-lands on the same plan, ramped, and is never lost.
+A C ABI host, such as a fan's phone, can change a send's `gain_db`, `mute` or `channel_matrix` (a
+route whose destination is a submix) on the running plan. The change never rebuilds the plan,
+leaves a silent block, resets a source ring or steps hard. Track faders, mutes and pans are already
+live (#1257). After this slice a send edit lands on the same plan, ramped, and is never lost, also
+when the same transaction makes a structural edit that swaps the plan.
 
 ## Context
 
@@ -54,34 +51,36 @@ lands on the same plan, ramped, and is never lost.
   The opcodes are `SetRouteChannelMatrix` `0x0504`, `SetRouteGainDb` `0x0505` and `SetRouteMute`
   `0x0506` (`crates/protocol/src/model.rs:96-100`). `SetTrackFader` `0x020f` and
   `SetTrackMatrixOrPan` `0x0210` address a submix by its ID (#1204).
-- **Superseded tests.** These tests assert today's G1 behaviour:
-  - `a_submix_fader_change_is_structural` (`crates/host-core/tests/live_delta.rs:402`);
-  - the G1 case ("a submix fader") of
-    `deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing`
-    (`crates/capi/src/runtime/live_tests.rs:1015`; its fixture `submix_session` is at `:969`).
+- **Tests that stay.** `a_submix_fader_change_is_structural`
+  (`crates/host-core/tests/live_delta.rs:402`) and the G1 case ("a submix fader") of
+  `deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing`
+  (`crates/capi/src/runtime/live_tests.rs:1015`; its fixture `submix_session` is at `:969`) keep
+  passing here; *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390) inverts them. The structural "route gain" case
+  (`crates/host-core/tests/live_delta.rs:497`) edits a route into the output and stays.
+- **Carry.** *Carry strip delay lines and live send ramps across a plan swap* (#1284) carries a
+  live send's ramp, position and mute by route ID (its D2). A carried send keeps the predecessor's
+  target. *Carry fader, mute and pan ramps across a plan swap* (#1277 D5) retargets carried strips
+  with records extracted from the classifier; nothing yet does it for sends.
 
 ## Decisions frozen for this slice
 
-- **D1. Classification.** Besides what is live today, a delta is live when it changes only these:
-  - a **submix** strip's `fader` (dB and mutes) and `matrix_or_pan`. Submixes are paired by ID,
-    exactly as tracks are, and the submix set must be equal, pairwise in normalized order;
-  - the `gain_db`, `mute` and `channel_matrix` of a route whose destination is a submix. Routes are
-    paired by route ID, and the route set must be equal.
+- **D1. Classification.** Besides what is live today, a delta is live when it changes only the
+  `gain_db`, `mute` and `channel_matrix` of routes whose destination is a submix. Routes are paired
+  by route ID, and the route set must be equal.
 
   Everything else stays structural:
+  - every submix field (#1390 makes `fader` and `matrix_or_pan` live);
   - the route set;
   - a route's source, tap, destination or `follows_mute` (`follows_mute` becomes live in #1226);
-  - **any** field of a route into the output (decision 14 rule 3, optimisation reason O9);
-  - every other submix field;
+  - **any** field of a route into the output (decision 14 rule 3, optimisation reason O9), in this
+    slice. Decision 15, D15-9, narrows O9: a route whose tap precedes its strip's fader gets a live
+    lane, into the output too, through *Give every route whose tap precedes its strip's fader a live
+    lane on every plan* (#1391), which grows this D1 set; `post_fader` and `post_pan` routes into
+    the output stay structural;
   - a mute change on a follow source (guard G2, which #1226 removes);
   - any delta of a model that has a VCA (guard G3, which #1247 removes).
-- **D2. Strip records for submixes.** A submix uses exactly the track rules of today's classifier:
-  - one `FaderDb` per changed lane, and one `Mute` per changed lane;
-  - one matrix record when a lowered bit changes;
-  - domain checks through `checked_fader_gain` and `lower_matrix_or_pan`.
-
-  `LiveDelta::strips` then holds the tracks first and then the submixes, each in canonical ID order,
-  which matches `HostLiveControlHandles::strips`.
+- **D2. No submix strip record.** `LiveDelta::strips` keeps holding track records only. #1390
+  adds submix records after the tracks.
 - **D3. Route records come from the two models, never from a mirror.**
   - One function, `route_target(model, route) -> (coefficients, silenced)`, computes a route's
     target exactly as preparation does: `route_coefficients(gain_db, matrix, mute, follow_zeroed)`.
@@ -94,12 +93,16 @@ lands on the same plan, ramped, and is never lost.
   - A gain edit on a muted route changes no target bit, so it emits nothing. The later unmute
     record carries the new gain.
 - **D4. Ramps (D15-1).**
-  - Strip records take their lengths as track records do.
   - A route record whose gate changes (`silenced`, or any `follow_zeroed` lane) uses the session's
     mute length. Any other route record uses the send-level length.
   - Both lengths come from `LiveRamps::for_session(next)`, with the send lengths that *Session
-    `controlSmoothing`* (#1054) defines. A live route record is a step only when the session sets
-    a length of 0.
+    `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes* (#1054)
+    defines. A live route record is a step only when the session sets a length of 0.
+  - A per-edit ramp carried by the transaction replaces the session length for that record; an
+    explicit 0 is a step (rule R9). The record reads it as `LiveRamps::resolve(row, edit_ramp)`
+    with the route's `RouteGain`, `RouteMute` or `RouteMatrix` entry, and a follow record with its
+    source strip's `Mute` entry (*Carry an optional per-edit ramp length on live session edits*,
+    #1394 D3, D5, D6).
 - **D5. Route lanes on the C ABI.** `C_ABI_LIVE_LANES` sets `routes: true`. The C ABI epoch keeps
   the `route_controls` handles beside its strip and effect producers, addressed by route ID. The
   lanes are the latest-target cells of *Hold live values in latest-target cells on both hosts*
@@ -119,17 +122,31 @@ lands on the same plan, ramped, and is never lost.
 - **D7. Resources.** The route cells and their IDs are charged where the C ABI charges its strip
   producers today (`capi_resources`, `compile.rs:140`). The graph rows grow by
   `graph::route_control_resources`. The `resource_lifecycle` oracles change by exactly those rows.
+- **D8. Carry, then retarget (D15-7; formerly #1284 D3).** A transaction that makes a structural
+  edit and also changes a carried send's live value sounds like "live edit, then structural edit".
+  - The per-route record derivation of D3 is one function, `route_records(current, next, ramps)`,
+    which `classify_live_delta` calls; nothing is duplicated (the pattern of #1277 D5).
+  - For every send that #1284 carries and whose live values differ between the base and the
+    successor's model, the successor entry points that return `HostLiveControlHandles` write that
+    route's record into the successor's route cell before they return. The write is infallible
+    (#1347), so it adds no failure to preparation.
+  - At the swap block the carry copies the predecessor's ramp, then the successor drains its own
+    cell. The record applies on the swap block's first sample, exactly where a live edit written to
+    the predecessor just before the swap would apply.
+  - Copy mode writes nothing at preparation. The records are kept on the prepared successor and
+    written at publication, as #1277 D5 does for strips.
 
 ## Deliverables
 
 1. D1-D3 in the classifier, with `LiveDelta::routes`.
 2. D4-D6 in the control plane's live commit path, and D5 in the C ABI lane selection.
 3. D7.
-4. In `docs/C_ABI_V1_QUALIFICATION.md`, replace the paragraph at `:78-81` and the "Rebuild" bullet
-   (`:280-284`). The new text says that submix strip values and sends into submixes are
-   value-only. It also says what still rebuilds: a route into the output, `follows_mute` (until
-   #1226), a follow-source mute (until #1226) and any session with a VCA (until #1247).
-5. The superseded tests in Context, inverted in the same PR: a submix fader edit is live.
+4. D8 in host-core's successor preparation.
+5. In `docs/C_ABI_V1_QUALIFICATION.md`, update the "Rebuild" bullet (`:280-284`) and add a
+   sentence after the paragraph at `:78-81`: sends into submixes are value-only. What still
+   rebuilds: a submix strip value (until #1390), a route into the output (until #1391 for a tap
+   before the fader; always for `post_fader` and `post_pan`),
+   `follows_mute` and a follow-source mute (until #1226), and any session with a VCA (until #1247).
 
 ## Authorized paths
 
@@ -137,17 +154,23 @@ lands on the same plan, ramped, and is never lost.
 - `crates/control-plane/src/control.rs`: `commit_live` and its helpers (moved there by #1309).
 - `crates/control-plane/src/compile.rs`: `C_ABI_LIVE_LANES` and `capi_resources` (moved there by
   #1309).
-- `crates/host-core/src/prepare.rs`: route-lane attachment only.
+- `crates/host-core/src/prepare.rs`: route-lane attachment and D8's successor retarget only.
 - These test files:
   - `crates/host-core/tests/live_delta.rs`;
   - `crates/capi/src/runtime/live_tests.rs`;
-  - `crates/capi/tests/resource_lifecycle.rs`.
+  - `crates/capi/tests/resource_lifecycle.rs`;
+  - `crates/host-core/tests/successor_swap.rs` and `crates/host-core/tests/support/successor.rs`
+    (gate 7).
 - `docs/C_ABI_V1_QUALIFICATION.md`, and this spec.
 
 ## Non-goals
 
-- No `follows_mute` change and no follow-source mute (#1226). No VCA (#1247).
-- No live route into the output (decision 14 O9).
+- No submix strip value (#1390). No `follows_mute` change and no
+  follow-source mute (#1226). No VCA (#1247).
+- No live route into the output (decision 14 O9). Routes into the output whose tap precedes the
+  fader become live in *Give every route whose tap precedes its strip's fader a live lane on every
+  plan* (#1391); `post_fader` and `post_pan` routes into the output stay structural (O9 as narrowed
+  by decision 15, D15-9).
 - No submix input section and no submix effect (#1267).
 - No browser change. No new C symbol, opcode or field, and no struct layout change.
 
@@ -158,8 +181,8 @@ lands on the same plan, ramped, and is never lost.
   in bulk.
 - **Delayed sends.** A send with a compensation delay keeps running while muted (`DESIGN.md` P4).
   Its settled comparison point therefore adds that delay.
-- **Carry.** Stream A's carry program owns the route lanes' ramp state across a plan swap. This
-  slice does not change it.
+- **Carry.** #1284 owns copying the route lanes' ramp state across a plan swap. D8 only writes
+  the retarget record into the successor's cell; it does not change the copy.
 - **Addressing.** Strips are found by ID through `strips`, and routes by ID through
   `route_controls`. Never index into the model's vectors.
 
@@ -168,8 +191,7 @@ lands on the same plan, ramped, and is never lost.
 1. **PCM through the C ABI** (new tests beside today's live PCM tests).
    - Fixture: `submix_session`, with a bus `b`, a send into `b`, and the bus's route into the
      output. Each lane carries a distinct, non-constant signal, and the send matrix is asymmetric.
-   - Through `SESSION_TRANSACTION_APPLY`, apply `0x0505`, `0x0506` and `0x0504` on the send, and
-     `0x020f` and `0x0210` on `b`.
+   - Through `SESSION_TRANSACTION_APPLY`, apply `0x0505`, `0x0506` and `0x0504` on the send.
    - Each edit keeps the same plan: no new epoch, no pending candidate, no re-seek and no silent
      block.
    - The comparison point is `latency_samples`, plus the record's ramp, plus the send's
@@ -179,9 +201,11 @@ lands on the same plan, ramped, and is never lost.
      compensation delay: a true-peak limiter insert on a sibling contributor, at 48 kHz.
 2. **The boundary of liveness.** Each of these still rebuilds (a new epoch), and the plan then
    renders the committed model:
-   - `0x0505` on a route into the output;
+   - `0x0505` on a `post_fader` or `post_pan` route into the output (#1391 makes earlier taps
+     live);
    - `0x0507` on a send;
-   - `0x020f` muting a track that a `follows_mute` send reads.
+   - `0x020f` muting a track that a `follows_mute` send reads;
+   - `0x020f` on the bus `b` (a submix strip value, until #1390).
 3. **No ack before a drop.**
    - A transaction whose second route value fails the domain check writes no cell. The model, the
      revision and the replay cache are unchanged.
@@ -192,10 +216,10 @@ lands on the same plan, ramped, and is never lost.
 4. **Classifier unit tests.**
    - A gain edit on a muted route emits no route record. Its unmute emits one record, which carries
      the new gain.
-   - A submix fader edit emits one strip record, addressed by the submix ID.
+   - A matrix edit that lowers to the same gated target bits emits nothing.
 5. **Realtime.** Extend
    `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`
-   (`crates/capi/tests/resource_lifecycle.rs:2900`) with send and bus edits, over 20 runs:
+   (`crates/capi/tests/resource_lifecycle.rs:2900`) with send edits, over 20 runs:
    - `allocations == 0` and `frees == 0` around every render call after warm-up;
    - zero `INTERNAL` results;
    - a final block bit-identical to a fresh plan of the final committed model.
@@ -210,19 +234,30 @@ lands on the same plan, ramped, and is never lost.
    - `for x in host-core realtime workspace; do bash scripts/check-$x-policy.sh && bash scripts/test-$x-policy.sh || exit 1; done`
    - `bash scripts/check-cross-targets.sh`
    - `bash scripts/run-aarch64-tests.sh debug` on an arm64 host, or CI's `aarch64-debug` job.
+7. **Carry, then retarget** (in `crates/host-core/tests/successor_swap.rs`, on gate 1 of #1284's
+   session: a live send from a track into a submix). B is A plus a muted track whose ID sorts
+   first, and B also changes the carried send's gain.
+   - Run 1 is the structural swap with D8's retarget.
+   - Run 2 writes the same record to A just before the swap and prepares B from a base that holds
+     it.
+   - Every block of the two runs is bit-identical, in move mode and in copy mode (copy after
+     block 6, then the adoption).
+   - `cargo test --locked -p graph -p host-core --features graph/test-support,host-core/test-support`
 
 ## Test value
 
-- Gate 1 turns red if a send or bus edit is still structural, if a live route target differs from
+- Gate 1 turns red if a send edit is still structural, if a live route target differs from
   the prepared one, or if a record lands on the wrong strip or route.
-- Gate 2 turns red if the classifier treats an output route, `follows_mute` or a follow-source mute
-  as live before its slice. The plan would then render something other than the committed model.
+- Gate 2 turns red if the classifier treats an output route, `follows_mute`, a follow-source mute
+  or a submix strip value as live before its slice. The plan would then render something other than the committed model.
 - Gate 3 turns red if a cell is written before a later check fails, if a superseded write is lost
   without being counted, or if a route cell back-pressures.
 - Gate 4 turns red if the route diff compares raw fields instead of gated targets. A redundant
   record restarts a settled ramp and moves a zero's sign (`crates/host-core/src/solo.rs:58-70`).
 - Gate 5 turns red if the route drain or the live commit allocates on the render thread, or if a
   send edit that races a swap reaches the retiring plan.
+- Gate 7 turns red if a carried send keeps the predecessor's level after a transaction that also
+  changed it (a missing retarget), or if the retarget applies a block late or early.
 
 ## Dependencies
 
@@ -231,3 +266,7 @@ lands on the same plan, ramped, and is never lost.
 - *Hold route-lane values in latest-target cells* (#1347)
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054), for the send lengths in D4
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for the per-edit ramp in
+  D4
+- *Carry strip delay lines and live send ramps across a plan swap* (#1284), for D8
+- *Carry fader, mute and pan ramps across a plan swap* (#1277), whose D5 is D8's pattern

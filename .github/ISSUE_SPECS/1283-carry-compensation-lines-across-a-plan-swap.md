@@ -1,6 +1,6 @@
 # Carry compensation lines across a plan swap
 
-Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8).
+Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8, D15-9).
 Slice 13 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors verified on `main` at
 `6fb211594`.
 
@@ -9,8 +9,9 @@ Slice 13 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 In a session with plug-in delay compensation, adding a track or a zero-latency effect no longer
 empties the compensation lines. Every compensated path keeps its delayed audio through the swap, at
 the output and inside submixes alike, in move mode and in copy mode. A route that the transaction
-re-points does not carry its line. Its source strip is reported for the transition of *Duck-swap a
-strip whose state cannot continue across a plan swap* (#1324).
+re-points does not carry its line under its route ID, and its source strip is never ducked for it:
+a re-pointed route is a route removed plus a route added, which *Ramp a route that a plan swap adds
+to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 
 ## Context
 
@@ -34,7 +35,9 @@ strip whose state cannot continue across a plan swap* (#1324).
   source and destination nodes are the same in both. A line has no live value, so there is no
   retarget.
   - A re-pointed route keeps its route ID but gets a new source or destination. Its line does not
-    carry: it starts at rest, and the route's source strip goes into the restart set.
+    carry: the new route's line starts at rest. Its source strip does **not** go into the restart
+    set. #1363 D1(b) and D4 keep the old route as a fading route whose line carries from the
+    predecessor's, and fade the new route in.
   - An effect owner that restarts (#1279 D1) does not stop the lines around it from carrying.
 - **D2. Equal length, move mode.** Swap the two rings and the cursor.
 - **D3. Equal length, copy mode.** Copy both rings and the cursor into the successor's
@@ -72,6 +75,7 @@ strip whose state cannot continue across a plan swap* (#1324).
 
 - No change to how PDC computes delays. No floors (#1285) and no catch-up (#1287).
 - No strip or submix input delay lines, and no live send ramps (#1284).
+- No route-level ramp for a re-pointed route, and no fading-route line mapping (#1363).
 
 ## Objective gates
 
@@ -85,8 +89,9 @@ strip whose state cannot continue across a plan swap* (#1324).
    limiter insert, so the other's edge into the submix carries a line. B adds a muted zero-latency
    track to that submix. Bit-identical in every block.
 3. **Head alignment** (deliverable 2) passes.
-4. **A re-pointed route restarts.** B re-points one route to another submix. Its line starts at
-   rest, every other line carries, and `restarted_strips()` is exactly the route's source strip.
+4. **A re-pointed route does not duck its strip.** B re-points one route to another submix. Its
+   line under the route ID starts at rest, every other line carries, and `restarted_strips()` is
+   empty.
 5. **Copy mode.** Gates 1 and 2 with a copy after block 6, followed at once by the adoption. Every
    block equals the move run, and A, rendered on after the copy, equals its uncopied twin.
 6. **Realtime.** The swap block and the copy call make zero allocations and frees.
@@ -104,8 +109,9 @@ strip whose state cannot continue across a plan swap* (#1324).
 - Gate 2: a carry that handles only edges into the output leaves submix lines at rest. It turns red.
 - Gate 3: a copy that starts from the predecessor's write position instead of its read position,
   or that ignores `P`, turns it red.
-- Gate 4: a rule keyed only by route ID carries a re-pointed route's line into the wrong bus. It
-  turns red.
+- Gate 4: a rule keyed only by route ID carries a re-pointed route's line into the wrong bus. A
+  rule that still restarts the source strip for a re-pointed route puts it in the restart set.
+  Either turns it red.
 - Gate 5: a copy-mode swap of the rings leaves the predecessor with the successor's at-rest line.
   Its twin turns red.
 

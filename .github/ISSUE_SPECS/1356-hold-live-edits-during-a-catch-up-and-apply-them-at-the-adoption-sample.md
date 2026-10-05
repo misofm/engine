@@ -17,8 +17,12 @@ effect from S. The running plan's output is not changed by them, so the catch-up
   There is no exact replay of an edit applied to the predecessor at an earlier sample. So D15-17
   holds the edit and applies it at S.
 - *Hold live values in latest-target cells on both hosts* (#1312) makes fader, mute and matrix
-  lanes into latest-target cells (D1-D3). Validation precedes every write (D6). Effect, input and
-  route records stay FIFO (D9).
+  lanes into latest-target cells (D1-D3). Validation precedes every write (D6). Its D9 leaves
+  effect, input and route records FIFO; *Hold effect parameter, bypass and EQ-target values in
+  latest-target cells* (#1345), *Hold strip input-lane values in latest-target cells* (#1346) and
+  *Hold route-lane values in latest-target cells* (#1347) make those lanes cells too. After them
+  every live value is a latest-target cell, so no live value is ever refused for room (D15-2).
+  Observation subscriptions stay a FIFO (#1345 D2); they are not live values.
 - *Carry fader, mute and pan ramps across a plan swap* (#1277) D5 keeps a copy-mode successor's
   retarget records for publication. #1355 D5 writes them just before it publishes `ExactlyAt(S)`.
 - Today `commit_live` (`crates/capi/src/runtime/control.rs:1065`) pushes to the newest plan's
@@ -34,28 +38,31 @@ effect from S. The running plan's output is not changed by them, so the catch-up
   - A pending rebuild that is not catching up keeps today's rule (#1053 D7): the newest
     candidate's cells.
 - **D2. The hold.** It is allocated when the warm successor is prepared, from the successor's own
-  lane shapes:
-  - for every cell lane, one shadow of the cell's words with a written flag (latest target wins,
-    as in a cell; supersession counted as #1312 D2 counts it);
-  - for every FIFO lane, a list with the successor queue's capacity, minus the records #1277 D5
-    already holds for it.
-
-  A FIFO commit that would overflow its list is refused with typed `BACKPRESSURE` before commit.
-- **D3. Write at publication.** #1355 D5 writes in this order:
+  lane shapes: for every live cell (#1312, #1345, #1346, #1347), one shadow of the cell's words
+  with a written flag. Latest target wins, as in a cell, and supersession is counted as #1312 D2
+  counts it. A hold has fixed size and is never full, so no live edit is refused with
+  `BACKPRESSURE` during a catch-up (D15-2). Observation subscriptions are not held; they keep
+  #1345 D2's rule against the newest plan.
+- **D3. Write before every publication.** Before each publication of the warm successor, the
+  exact one (#1355 D5) and the fallback pre-roll (#1358 D4) alike, the control plane writes in this
+  order:
   1. the #1277 D5 retarget records;
-  2. then the hold, cells and FIFO lists in their canonical drain order;
-  3. then it publishes `ExactlyAt(S)`.
+  2. then the hold's written cells, in their canonical order;
+  3. then the epoch's outcome word (#1355 D8), then it publishes.
 
-  A returned candidate keeps what was written. Edits committed after that write go into the
-  successor's cells or queues directly, because the successor is published and not yet rendering.
-- **D4. Abandon.** When a catch-up is abandoned (divergence, supersession, fallback, stop), the
-  hold is not lost. Every held edit is already in the committed model, which the next candidate is
-  prepared from, so the hold is dropped with the catch-up.
+  A returned candidate keeps what was written, undrained until adoption (#1355 D4). Edits committed
+  after that write go into the successor's cells directly; they too wait for adoption.
+- **D4. Dropping the hold.** The hold is dropped only on a path that prepares the committed model
+  again: divergence (#1355 D2), supersession (#1357), the transition (*Duck-swap the strips a latency
+  growth restarts, and fall back to the transition when no catch-up can finish*, #1397) and a stop (#1359). #1358 gates the pre-roll case. Every held edit is in the committed model that candidate is prepared
+  from, and the carry's retargets (#1277 D5) ramp a carried strip to it. On every path that adopts
+  this successor instead (exact adoption, a pre-roll), the hold has been written into it (D3)
+  before publication, so nothing is dropped.
 - **D5. Completion.** A held revision completes with S, with the outcome of the catch-up that
   adopts it (#1314 D5).
-- **D6. Acked-batch question.** Every fallible check, the FIFO room included, runs before the
-  commit. The hold is written only after them. A held edit reaches the successor (D3) or the
-  committed model a later candidate is built from (D4). An ack can never precede a drop.
+- **D6. Acked-batch question.** Every fallible check runs before the commit, and the hold cannot be
+  full. A held edit reaches the successor before any publication that may adopt it (D3), or the
+  committed model of a re-prepared candidate (D4). An ack can never precede a drop.
 
 ## Deliverables
 
@@ -79,8 +86,9 @@ effect from S. The running plan's output is not changed by them, so the catch-up
    - The predecessor's blocks before S are bit-identical to a run with no edit.
    - From S, the output equals a run where the same record is pushed to the successor just before
      its first block at S.
-2. **Effect parameter (FIFO).** The same with an EQ gain record. A burst one record beyond D2's
-   capacity is refused with `BACKPRESSURE`, and the model and revision are unchanged.
+2. **Effect parameter, never refused.** The same with an EQ gain. A burst of 10,000 EQ gain commits
+   during the window all return OK. At S the last one applies, and `live_values_superseded` rises
+   by 9,999.
 3. **Latest wins.** Two fader commits during the window apply as the second alone at S.
    `live_values_superseded` rises by 1.
 4. **Watermark.** The held revision's watermark advance reports `first_sample == S` and `EXACT`.
@@ -96,8 +104,7 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 ## Test value
 
 - Gate 1: an edit pushed to the predecessor during the window changes its blocks before S. Red.
-- Gate 2: a FIFO list that grows, or drops, past capacity passes a burst the queue cannot hold.
-  Red.
+- Gate 2: a hold kept as a bounded list refuses part of the burst with `BACKPRESSURE`. Red.
 - Gate 3: a hold kept as a FIFO for cells applies the first value at S. Red.
 - Gate 4: completion reported at publication, not at S, gives the wrong sample. Red.
 - Gate 5: the hold written before the retargets lets the join's value win over the user's. Red.
@@ -106,6 +113,9 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 
 - *Catch up a returned successor and adopt it exactly at a scheduled sample* (#1355).
 - *Hold live values in latest-target cells on both hosts* (#1312).
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345).
+- *Hold strip input-lane values in latest-target cells* (#1346).
+- *Hold route-lane values in latest-target cells* (#1347).
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), D5.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

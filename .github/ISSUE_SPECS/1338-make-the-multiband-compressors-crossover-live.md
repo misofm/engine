@@ -89,8 +89,9 @@ crossover is prepared-only, and decision 14 F2 records no reason for it.
   target words to equal `design_lr4(crossover_hz)` bit for bit, and requires the current and target
   triples to pass `transition_norm` within `RAMP_PATH_NORM_TOLERANCE` and `NORM_TOLERANCE`. A
   refused restore changes nothing.
-- **D7. Latency, tail, NaN.** Latency stays 0; the tail declaration is unchanged (*State a bounded
-  tail and an exact-rest bound for every node*, #1329, owns it). The crossover value is
+- **D7. Latency, tail, NaN.** Latency stays 0; the tail declaration is unchanged here. *State the
+  multiband compressor's bounded tail and exact-rest bound* (#1373) owns the tail, the crossover
+  glide's in-flight case included, and lands after this slice. The crossover value is
   domain-checked at admission and again by `parameter_value_valid` in `apply_automation`; the words
   are positive and normal; the four recursive words keep their `flush`; the once-per-block D7
   boundary check is unchanged.

@@ -43,8 +43,9 @@ Four seek-path defects found in the #1275 review are closed:
 - **D1. `source.id.invalid`.** Defined once in capi beside its other own diagnostics
   (`crates/capi/src/runtime/error.rs`, or its #1309 successor). Set on a null, empty, non-UTF-8 or
   over-127-byte source ID in `source_seek_entry`, in `miso_engine_v1_source_submit_planar_f32`, and
-  in `miso_engine_v1_source_seek_report` if #1316 has landed. Result codes unchanged
-  (`INVALID_ARGUMENT`). Null pointers for other arguments keep their current behaviour.
+  in `miso_engine_v1_source_seek_report` (added by #1316, which lands before this slice). Result
+  codes unchanged (`INVALID_ARGUMENT`). Null pointers for other arguments keep their current
+  behaviour.
 - **D2. Typed preparation.** `prepare_seek` returns `SeekPreparation { Applied, Held, NotReady }`:
   `Applied` when today's `true`; `Held` when the requested generation and frame are exactly the held
   anchored seek's; `NotReady` otherwise (including the playing generation while a newer seek is
@@ -78,8 +79,8 @@ Four seek-path defects found in the #1275 review are closed:
 ## Objective gates
 
 1. **Diagnostic.** In `ffi.rs` tests: after a refused call that set another diagnostic, each of
-   the four malformed-ID forms on `seek`, `seek_at` and `submit` returns `INVALID_ARGUMENT` and
-   `last_error` reads `source.id.invalid`.
+   the four malformed-ID forms on `seek`, `seek_at`, `submit` and `source_seek_report` returns
+   `INVALID_ARGUMENT` and `last_error` reads `source.id.invalid`.
 2. **Held preparation.** Source unit test: anchor a seek in the future, `prepare_seek` with its
    generation and frame returns `Held`; through the driver, `prepare_source_seek` returns `true`
    and the next block's `source_generation_changed` is false until the anchor block, where it is
@@ -105,5 +106,5 @@ Four seek-path defects found in the #1275 review are closed:
 
 ## Dependencies
 
-- none (D1's third entry point applies only if *Anchor every seek on the plan's source-read clock*
-  (#1316) has landed; whichever lands second adds it).
+- *Anchor every seek on the plan's source-read clock* (#1316): the `source_seek_report` entry point
+  D1 covers, and the source-read clock that D4's `read_block_at` takes.

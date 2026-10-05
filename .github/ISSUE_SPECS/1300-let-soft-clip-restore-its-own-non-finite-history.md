@@ -2,8 +2,10 @@
 
 Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8).
 Code anchors verified on `main` at `6fb211594`: no file this spec cites changed since `d2fe0555a`.
-Stream A runs it first: the move-mode and copy-mode carries (D15-7, D15-8 step 2) restore soft-clip
-lanes through the same payload calls, so an own-snapshot refusal would leave a carried lane at rest.
+Stream A order (the one edge with #1322): *Carry plan state by copy as well as by move* (#1322),
+then this issue, then the effect-lane carries (#1279-#1282). Those carries restore soft-clip lanes
+through the same payload calls, in move and copy mode (D15-7, D15-8 step 2), so an own-snapshot
+refusal would leave a carried lane at rest. #1322 touches no soft-clip code; the edge is order only.
 
 Successor item of *Make every banked effect's state restore allocation-free* (#1278, closed). Its
 attempt-1 amendment and attempts 2 and 3 left it open as "soft-clip's two open non-finite history
@@ -77,7 +79,7 @@ trim of at most `+24 dB` (`crates/builtins-compiler/src/lib.rs:5037`) cannot rai
 non-finite input. The fix is still owed: the contract applies per effect, and a direct caller or the
 conformance differential can reach these states. It is low priority.
 
-**Carry consequence.** The console carry (#1279, spec D4, lines 47-48) defines what happens when a
+**Carry consequence.** The console carry (#1279 D6) defines what happens when a
 restore refuses: the lane is left at rest and a carry-refusal counter goes up. That fallback stays
 as it is. After this issue, soft-clip never sends its own snapshot down it.
 
@@ -94,7 +96,7 @@ rendered bit, and it is what #1071's rule already requires.
     delivers;
   - it moves rendered bits. A bypassed or identity lane would be muted because its unused wet path
     overflowed, and finite audio before a late non-finite sample would be zeroed a block early.
-- **(B) Define the carry's behaviour on a refused own snapshot.** This is already defined: #1279 D4
+- **(B) Define the carry's behaviour on a refused own snapshot.** This is already defined: #1279 D6
   leaves the lane at rest and counts it. Leaving it there breaks the contract's exact-continuation
   promise for these states, and it counts as "refusals" states the effect produced itself. Rejected
   as the fix, but kept as the generic fallback.
@@ -160,7 +162,7 @@ attempt-2 overshoot bound, subnormal mix steps), and it needs its own tests. See
   separate item. It stays open and needs its own issue.
 - The #1071 attempt-1 NIT-1 tightening of `X`/`e` to `0 or |x| >= FLUSH_EPS`.
 - `ProcessReport`'s per-frame `nonfinite_*_blocks` count in the scalar wrapper (#1073).
-- No carry, graph, rack or host change. #1279 D4 stays the generic refusal fallback.
+- No carry, graph, rack or host change. #1279 D6 stays the generic refusal fallback.
 - No extension of the conformance randomized generator to plant non-finite or huge inputs.
 
 ## Hazards
@@ -206,7 +208,7 @@ attempt-2 overshoot bound, subnormal mix steps), and it needs its own tests. See
 2. **Rejection test** (`a_restore_rejects_..._every_invalid_word`, `state_roundtrip.rs`).
    - Delete the rows that are now self-produced words: `bad(12, NaN)` (`:521`), `bad(73, NaN)`
      (`:529`) and `bad(103, inf)` (`:530`).
-   - Keep `bad(12, 1)`, `bad(43, 1)` and `bad(43, inf)` (`:522`, `:527`, `:533`).
+   - Keep `bad(12, 1)`, `bad(43, 1)` and `bad(43, inf)` (`:527`, `:522`, `:533`).
    - Add `bad(43, -inf)`.
 
    Mutations, each applied, run, then reverted, and recorded:
@@ -255,8 +257,10 @@ attempt-2 overshoot bound, subnormal mix steps), and it needs its own tests. See
 
 ## Dependencies
 
-- None. #1071 and #1278 are on `main`. It is independent of the carry slices (#1279-#1282), which
-  benefit from it but do not wait on it.
+- No code dependency. #1071 and #1278 are on `main`.
+- Stream order only: after *Carry plan state by copy as well as by move* (#1322). It lands before
+  *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane carries
+  (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusal.
 
 ## Standing rules for the implementer
 

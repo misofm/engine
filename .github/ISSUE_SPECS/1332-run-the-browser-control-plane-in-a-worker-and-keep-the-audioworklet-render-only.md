@@ -6,8 +6,9 @@ Code anchors verified on `main` at `6fb211594`.
 This spec is the first slice of the Worker control plane: boot and disposal move to a Worker, and
 the worklet only renders. The rest of D15-10 is split into ordered slices: the predecessor
 *Ship the browser module with one imported shared memory at every instantiation site* (#1380), and
-the successors *Swap and retire browser plans through the Worker's service loop* (#1381) and
-*Admit browser live edits in the Worker through the committed model* (#1382).
+the successors, in order: *Move browser source submission and seeks into the Worker* (#1387),
+*Swap and retire browser plans through the Worker's service loop* (#1381) and *Admit browser live
+edits in the Worker through the committed model* (#1382).
 
 ## Product outcome
 
@@ -16,8 +17,9 @@ dedicated Worker, and disposes it there. The AudioWorklet instance shares the Wo
 `WebAssembly.Memory`. After boot it only renders, and it never allocates or frees. A 64-track boot
 no longer stalls the audio thread: today it costs 23.9 ms (V8 p50) against a 2.667 ms quantum
 (round-1 C4). A page that is not isolated keeps the same API and the same artifact. It runs one
-instance on a local shared memory, as #1380 ships it. The host reports which
-mode it runs in.
+instance on a local shared memory, as #1380 ships it, and runs its control work in the worklet's
+message handler, never inside `process()`. The host reports which mode it runs in and, in that
+mode, how many control allocations ran in the worklet.
 
 ## Context
 
@@ -47,6 +49,13 @@ mode it runs in.
   `memory.grow` (`:512-522`). The artifact set is seven frozen files (`:180-193`). The build
   script copies them (`scripts/build-web-audioworklet.sh:141-145`). The call-graph gate checks
   only `render`, `meter_poll` and `command_submit` (`:476-500`).
+- **The process body.** `scripts/check-web-audioworklet.sh:4` bans `new `, `subarray`,
+  `WebAssembly` and more inside the `PROCESS_POLICY_BEGIN`/`END` body, so `process()` cannot
+  rebuild a view. The seventh growth site (`:1823`) is inside `process()` (`:1813`); the other six
+  are in message handlers.
+- **Growth of a shared memory.** A grown shared memory returns a new `SharedArrayBuffer` from
+  `memory.buffer`. The old one stays valid, keeps its old length and aliases the same bytes, so a
+  view over it still addresses every byte below the old length.
 - **Isolation.** The first-party app already sends COOP `same-origin` and COEP `require-corp`
   (round-1 C4 evidence, app repository). The qualification server sends neither
   (`hosts/host-web/qualification/server.mjs`).
@@ -59,10 +68,23 @@ mode it runs in.
 
   The mode is reported in the boot result as `instanceMode`. The SDK exposes it as
   `engine.instanceMode` (`"worker" | "single"`).
-  The host status gains one saturating counter, `blockingRebuilds`. It is 0 in `worker` mode.
-  In `single` mode, *Replace the running browser session in the Rust host* (#1290) increments it
-  once per structural edit that its single-mode apply runs on the audio thread. Nothing else in
+  The host status gains two saturating counters. Both read 0 in `worker` mode. Nothing else in
   the public API changes.
+  - `blockingRebuilds`: in `single` mode, *Replace the running browser session in the Rust host*
+    (#1290) increments it once per structural edit that its single-mode apply runs in the
+    worklet's message handler.
+  - `singleModeControlAllocations`: in `single` mode, the allocations, reallocations and frees
+    that ran in the worklet instance outside the render-locked window (boot, control messages, the
+    service step). It is how decision 15 counts and reports the one place this engine allocates on
+    an audio thread (D15-10, single mode; `AGENTS.md`). The render-locked count stays exactly 0 in
+    both modes.
+
+  Mechanism: #1333's `RenderLockedAllocator` gains a second counter, `CONTROL_ALLOCATIONS`, that
+  each allocator call increments when the render-locked flag is clear (one `Relaxed` add). A new
+  export, `miso_engine_web_v1_control_allocation_count() -> u32`, returns it. In `single` mode the
+  worklet reads it in its message handler, never in `process()`, and reports it in the host
+  status. In `worker` mode the counter also counts the Worker's allocations, which are not on an
+  audio thread, so the status reports 0.
 - **D2. Worker mode, boot.**
   1. The main realm creates one shared `WebAssembly.Memory`, using the module's declared maximum
      (#1380 pins it).
@@ -73,7 +95,8 @@ mode it runs in.
      unchanged.
   4. A new export, `miso_engine_web_v1_host_release(handle) -> u64`, moves the booted host out of
      the Worker's handle table into a transfer token (a raw pointer to a heap box). This is a move:
-     nothing is dropped.
+     nothing is dropped. The token also carries the three staging references that boot allocated
+     (#1333 D5: `&'static` references, `Copy`), so the worklet never allocates a staging.
   5. The Worker also reserves the worklet instance's stack and TLS block through
      `miso_engine_web_v1_instance_reserve() -> u32`, which follows the recipe that #1331 recorded.
   6. The main realm passes the memory, the module, the stack/TLS address and the token to the
@@ -82,7 +105,8 @@ mode it runs in.
   1. The worklet instantiates the module on the same memory and initializes its stack and TLS
      from the reserved block.
   2. It calls `miso_engine_web_v1_host_adopt(token) -> u32`, which puts the host in its own
-     handle table without allocating.
+     handle table and the three staging references in its own staging thread locals, without
+     allocating.
   3. From then on it calls only the exports it calls today after boot.
   4. It never calls `boot`, `dispose`, `host_release` or `instance_reserve`.
   5. Every export the worklet calls after `instance_reserve`, including `host_adopt` and
@@ -90,9 +114,10 @@ mode it runs in.
      to the worklet's whole post-boot export set, as #1333 D2 anticipates. The mechanism does not
      change.
   6. Source submission and seeks stay on the worklet thread in this slice, because they are where
-     they are today; each source keeps one producer thread. They move to the Worker in
-     *Move browser source submission and seeks into the Worker* (#1387). This is ordering, not
-     an interim design: the C ABI shape puts the producers in the control half.
+     they are today; each source keeps one producer thread. They move to the Worker in the next
+     slice, *Move browser source submission and seeks into the Worker* (#1387), before any
+     session state lives in the Worker (#1381). This is ordering, not an interim design: the C ABI
+     shape puts the producers in the control half.
 - **D4. Disposal.**
   1. A dispose request reaches the worklet. It stops rendering and releases the host with
      `host_release`, which moves it out and frees nothing.
@@ -101,10 +126,18 @@ mode it runs in.
 
   Only the Worker ever frees. A worklet that is torn down without a dispose request leaks
   nothing: the memory is reclaimed with both realms.
-- **D5. Growth.** A changed `memory.buffer` is growth by the other instance. The worklet rebuilds
-  its views over the new buffer at each of the seven sites and continues. It no longer turns
-  this into a sticky `REPREPARE`. In `single` mode the worklet never grows memory after boot, so
-  the same code is never reached there.
+- **D5. Growth.** A changed `memory.buffer` is growth, never a fault. Both modes grow: the Worker
+  in `worker` mode, and the worklet's own control handler in `single` mode (decision 15's single-mode control work
+  allocates there).
+  1. `process()` never checks or rebuilds a view. Every view it uses (status, output planes,
+     meter frame) was built over memory that existed when it was built, and a view over an older
+     `SharedArrayBuffer` stays valid for the bytes it covers after growth. The check at `:1823`
+     is deleted. The process body keeps every ban of `check-web-audioworklet.sh:4`.
+  2. Each message handler (the six other sites) compares `memory.buffer` with its cached buffer
+     at entry. On a change it rebuilds every cached view over the new buffer, then continues.
+     The sticky `REPREPARE` at those sites is deleted.
+  3. Rebuilt views replace the boot-time ones that `process()` reads only between two `process()`
+     calls, because handlers and `process()` run on the same thread.
 - **D6. Failure.** A Worker boot failure returns the same result codes and diagnostic bytes as
   today's worklet boot. The worklet is never started for a failed boot. If the Worker raises
   `error` or `messageerror` before its boot reply, boot fails with the typed reason
@@ -121,7 +154,9 @@ mode it runs in.
 - **D8. Policy gates are rewritten to the new invariants, never deleted** (round-1 C4,
   requirement 4).
   - The artifact set gains `miso-engine-v1-control-worker.js` (eight files).
-  - The frozen export set gains `host_release`, `host_adopt` and `instance_reserve`.
+  - The frozen export set gains `host_release`, `host_adopt`, `instance_reserve` and
+    `control_allocation_count`.
+  - The process body may not read `memory.buffer` (D5.1).
   - `host_adopt` and `host_release` each get the full call-graph gate (no allocator, no
     deallocator, no drop glue), like `meter_poll`.
   - JS capability rules:
@@ -134,8 +169,9 @@ mode it runs in.
 
 ## Deliverables
 
-1. D2-D5 in `hosts/host-web/src/ffi.rs` (three exports) and the three JS files. The new
-   `hosts/host-web/web/miso-engine-v1-control-worker.js`.
+1. D2-D5 in `hosts/host-web/src/ffi.rs` (four exports) and the three JS files. The new
+   `hosts/host-web/web/miso-engine-v1-control-worker.js`. D1's control counter in
+   `hosts/host-web/src/render_lock.rs`.
 2. D1 and D6 in the main-realm host and in `sdk/src/browser/engine.ts` (`instanceMode`).
 3. D8 in `scripts/check-web-audioworklet.sh`, plus the one copy line in
    `scripts/build-web-audioworklet.sh`.
@@ -146,14 +182,17 @@ mode it runs in.
 
 ## Authorized paths
 
-- `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`
+- `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs`,
+  `hosts/host-web/src/render_lock.rs` (the control counter only)
+- `hosts/host-web/tests/worker_handoff.rs` (new), `hosts/host-web/Cargo.toml` (the `bench-support`
+  dev-dependency)
 - `hosts/host-web/web/` (the three host JS files, `.d.ts`, the new Worker file)
 - `hosts/host-web/qualification/`, `hosts/host-web/DEPLOYMENT.md`,
   `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`
 - `sdk/src/browser/engine.ts`, `sdk/src/browser/shipped-host.d.ts`, `sdk/` packaging of the new
   artifact file
 - `scripts/check-web-audioworklet.sh`, `scripts/check-web-audioworklet-callgraph.py`
-- The frozen export lists that #1293 names, for the three new exports only:
+- The frozen export lists that #1293 names, for the four new exports only:
   `tools/parameter-metadata/src/abi_layout.rs` (`EXPORTS`), `scripts/check-abi-layout-v1.py`, and
   the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`.
   The first two are outside stream H's ownership; root sequences them.
@@ -174,8 +213,9 @@ mode it runs in.
 
 - A host that the Worker drops while the worklet still holds it is a use-after-free. D4's order
   (release, post, then dispose) is the only allowed path.
-- `host_adopt` must not touch a `thread_local!` that registers a destructor. #1333 makes them
-  const and destructor-free first.
+- `host_adopt` must not touch a `thread_local!` that registers a destructor, or allocate a
+  staging. #1333 makes all five const and destructor-free first, and D2.4 hands the stagings
+  over.
 
 ## Objective gates
 
@@ -185,26 +225,37 @@ mode it runs in.
 2. **The worklet never allocates after boot.** On the isolated leg,
    `miso_engine_web_v1_render_allocation_count` (#1333 D3) reads exactly 0 for the worklet
    instance. The window runs from `host_adopt` to `host_release`,
-   over a workload of 350 blocks with live commands, meter polls, an observation read, a spectrum
-   read, source submits and seeks. The gate's mutation self-test still turns red.
-3. **Disposal frees only in the Worker.** A native test in `hosts/host-web/src/tests.rs` boots a
-   host and moves it through `host_release`. It adopts it with `host_adopt` on a second thread
-   and renders 8 blocks, then releases and disposes it on the first thread. It asserts:
-   - `bench_support::alloc` counts `allocations == 0 && frees == 0` on the second thread from
-     adopt to release;
-   - the first thread's frees are greater than 0.
+   over a workload of 350 blocks with live commands, meter polls, an observation read, a track
+   response capture, a spectrum read, source submits and seeks. On the non-isolated leg the same
+   workload reads 0 too. The gate's mutation self-test still turns red.
+3. **Disposal frees only in the Worker.** Integration test binary
+   `hosts/host-web/tests/worker_handoff.rs`. Decision 15 rules that host-web's native
+   allocation-count gates live in an integration binary, never in `src/tests.rs`, which already
+   registers a `#[global_allocator]`. It links `bench_support::alloc` and calls
+   `assert_installed()` first. Through the ffi exports, it boots a host on thread 1 and moves it
+   through `host_release`. It adopts it with `host_adopt` on thread 2 (a fresh thread-local
+   block, as a joined instance has), renders 8 blocks, reads observations, a track response and a
+   spectrum, then releases. Thread 1 adopts and disposes. It asserts:
+   - thread 2's thread-scoped counters read `allocations == 0 && frees == 0` from adopt to
+     release;
+   - thread 1's frees are greater than 0.
 4. **Growth is not a fault.** On the isolated leg, the qualification harness grows the shared
-   memory from the Worker by one page after `host_adopt` (a qualification-only message). The
-   worklet renders 64 more blocks with an unchanged digest and reports no `REPREPARE`.
+   memory from the Worker by one page after `host_adopt` (a qualification-only message). On the
+   non-isolated leg, the same message grows it from the worklet's control handler. On both legs,
+   the worklet renders 64 more blocks with an unchanged digest, then answers a meter poll and an
+   observation read over rebuilt views, and reports no `REPREPARE`.
 5. **Mode reporting.** The isolated leg reports `instanceMode === "worker"`, the non-isolated leg
-   `"single"`. Both legs pass the full existing qualification matrix.
+   `"single"`. Both legs pass the full existing qualification matrix. The non-isolated leg reports
+   `singleModeControlAllocations > 0` after boot (boot allocates), and the isolated leg reports
+   0.
 6. **Policy self-tests.** Each new rule in `check-web-audioworklet.sh` has a red mutation in the
    script's self-test:
    - a second `new Worker(` in the main realm;
    - `Atomics.wait` in the worklet;
-   - drop glue planted in `host_adopt`'s closure.
+   - drop glue planted in `host_adopt`'s closure;
+   - a `memory.buffer` read planted in the process body.
 7. **Commands** (verified in `.github/workflows/qualification.yml`):
-   - `cargo test --locked -p host-web --features host-web/test-support`
+   - `cargo test --locked -p host-web --features host-web/test-support` (runs gate 3's binary)
    - `bash scripts/check-web-audioworklet.sh` (self-building form), and the CI form:
      `rm -rf target/ci/qualification-artifacts target/ci/qualification-named-twin && mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts && bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`
    - `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts`
@@ -222,11 +273,12 @@ mode it runs in.
 - Gate 2: turns red if any export the worklet calls after boot reaches the allocator. The static
   gate can miss this behind `call_indirect`.
 - Gate 3: turns red if `host_release` or `host_adopt` drops or allocates (for example, a
-  `RefCell<Option<_>>` replace that drops the old value), or if dispose runs on the render side.
-- Gate 4: turns red if growth by the Worker is still treated as a sticky fault, which would break
-  every later slice that allocates in the Worker while audio plays.
-- Gate 5: turns red if an isolated page silently runs `single` mode, or a non-isolated page fails
-  instead of running it.
+  `RefCell<Option<_>>` replace that drops the old value, or a staging the joined instance
+  allocates on first read), or if dispose runs on the render side.
+- Gate 4: turns red if growth is still treated as a sticky fault, or if a handler keeps a stale
+  view after growth. Either would break every later slice that allocates while audio plays.
+- Gate 5: turns red if an isolated page silently runs `single` mode, a non-isolated page fails
+  instead of running it, or single mode's control allocations go uncounted.
 - Gate 6: each mutation proves its rule can still fire.
 
 ## Dependencies
@@ -238,9 +290,11 @@ mode it runs in.
 - *Build the browser artifact on a pinned nightly toolchain* (#1334).
 - *Ship the browser module with one imported shared memory at every instantiation site*
   (#1380).
+- *Design: one edit API on every host over the core's committed session model* (#1057). The ports
+  of D7 carry that API's messages, so its design note fixes what they serve.
 
 ## Successor slices
 
+- *Move browser source submission and seeks into the Worker* (#1387), next.
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
 - *Admit browser live edits in the Worker through the committed model* (#1382).
-- *Move browser source submission and seeks into the Worker* (#1387).

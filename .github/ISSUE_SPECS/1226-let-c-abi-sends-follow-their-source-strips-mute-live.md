@@ -22,9 +22,10 @@ one all-or-nothing commit.
 
 ## Context
 
-- **After *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225):**
-  - the classifier (`crates/host-core/src/live_delta.rs`) pairs tracks, submixes and routes into
-    submixes;
+- **After *Deliver value-only send edits to the running C ABI plan* (#1225):**
+  - the classifier (`crates/host-core/src/live_delta.rs`) pairs tracks and routes into submixes,
+    and pairs submixes after *Deliver value-only submix-strip fader, mute and pan edits to the
+    running C ABI plan* (#1390), which makes a bus's own mute live;
   - it emits route records from `route_target(model, route)`, which computes `follow_zeroed` from
     the source strip's `effective_strip_faders()` mute (#1225 D3), exactly as preparation does
     (`crates/graph-compiler/src/compile.rs:323-358`);
@@ -52,7 +53,9 @@ one all-or-nothing commit.
   - the G2 case ("a followed mute") of
     `deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing`
     (`crates/capi/src/runtime/live_tests.rs:1015`);
-  - #1225's gate-2 cases for `0x0507` and for a follow-source mute.
+  - #1225's gate-2 cases for `0x0507` and for a follow-source mute;
+  - #1390's G2 cases for a bus source: its gate-3 case (a bus mute that a `follows_mute` send
+    reads) and its gate-4 `FollowedMute` unit test (#1390 D4 extends G2 to submix sources).
 
 ## Decisions frozen for this slice
 
@@ -70,7 +73,9 @@ one all-or-nothing commit.
   checked together. Then they are written to their cells and committed, in #1225 D6's order. A
   domain refusal on any record writes no cell.
 - **D5. Ramps (D15-1).** A follow record is a gate change, so it uses the session's mute length,
-  the same length as the strip mute record it follows (#1225 D4). The strip and its sends
+  the same length as the strip mute record it follows (#1225 D4), including a per-edit length the
+  strip's mute edit carries: its `Mute` entry, read through `LiveRamps::resolve` (*Carry an
+  optional per-edit ramp length on live session edits*, #1394 D6). The strip and its sends
   therefore ramp together.
 - **D6. Stored automation.** No host renders stored mute automation yet. When *Research: render
   stored session automation in the engine, identically on every platform* (#1058) designs mute
@@ -176,9 +181,12 @@ one all-or-nothing commit.
 
 ## Dependencies
 
-- *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225)
+- *Deliver value-only send edits to the running C ABI plan* (#1225)
+- *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390),
+  for a bus whose mute a send follows
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
 - *Hold live values in latest-target cells on both hosts* (#1312)
 - *Hold route-lane values in latest-target cells* (#1347)
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054)
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for D5

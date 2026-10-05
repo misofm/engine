@@ -36,20 +36,30 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   by reading each kernel that no output term other than `gain * delayed input` exists (dry and wet
   of the mix both read the same delayed input; a sidechain only feeds the detector). If any other
   term exists, the slice stops and reports it.
-- **D2. Rest.** `RestBound::Bounded` from each recursive state word's decay with zero input
-  (detector envelopes, gain smoother `d`, lookahead ring, sliding-minimum window): ring and window
-  words are zero after their length; each one-pole word rests after
-  `ceil(ln(E_max / FLUSH_EPS) / -ln(c_eff))` samples, where `E_max` is the word's largest reachable
-  value for the two peak cases of #1329 D2 and `c_eff` its slowest coefficient over the parameter
-  domain at that rate, inflated by `f32` rounding. A shared helper
-  `effect_runtime::tail::one_pole_rest_samples(c_max, e_max) -> u64` holds the formula for #1376.
+- **D2. Rest.** `RestBound::Bounded`, with #1329 D2's definition: output `±0.0` and every
+  signal-state word equal under `f32` `==` to the rest state `Z`. Rest is not "all zero". For both
+  effects `Z` is the reset state (with zero input the reset state is a fixed point: no reduction is
+  required). The limiter's reset state is the one its `clear_runtime` writes
+  (`crates/true-peak-limiter/src/lib.rs:624-643`): `history`, `main_ring` and `reduction` at
+  `0.0`, `required_ring`, `box_ring` and `prefix` at `1.0`, `box_sum` at `Wb`; `phase` is a cursor,
+  not signal state. With zero input every required gain is `1.0`, so each ring returns to `1.0`
+  after its length, and `box_sum` returns to `Wb` exactly because it is an exact running sum on the
+  `2^-14` grid (crate doc, `:19`). The compressor's detector and gain words return to their reset
+  values. The bound is the maximum over words: a ring or window word rests after its length plus
+  the latency; each one-pole word rests after `ceil(ln(E_max / FLUSH_EPS) / -ln(c_eff))` samples
+  (distance to its rest value, `E_max` the largest reachable distance for the two peak cases of
+  #1329 D2, `c_eff` the slowest coefficient over the parameter domain at that rate, inflated by
+  `f32` rounding). The limiter's `d` (`fma(c, (1 - s) - d, d)`) rests at `+0.0` by its flush once
+  `s == 1` exactly. A shared helper `effect_runtime::tail::one_pole_rest_samples(c_max, e_max) -> u64`
+  holds the formula for #1373, #1374 and #1376.
 - **D3. Stall check.** For every one-pole word, prove (in the doc comment of the helper's caller) that
   no `f32` fixed point exists above `FLUSH_EPS` with zero input at the slowest coefficient. For the
   two-product form the condition is `c < 1 - 2^-24`; for the `e + c (u - e)` form it is
   `c > 2^-24`, scale-free. If a word fails, stop and report it to Sol as a class-B defect, as in
   *Flush the SVF jointly so builtin and EQ filters reach exact rest* (#1328); do not state a bound.
-- **D4. Gain.** `PeakGain` is the compressor's maximum makeup plus `mix` (it never raises above
-  makeup), and the limiter's `0 dB` (`g <= 1`).
+- **D4. Gain.** `PeakGain` (#1379 D1: a peak gain and an incremental gain after silence) is the
+  compressor's maximum makeup (`mix` never raises above it; after silence the output is
+  `g * x` with `g <= makeup`), and the limiter's `0 dB` (`g <= 1`).
 
 ## Deliverables
 
@@ -62,6 +72,9 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   `tail_and_rest` only), `crates/effect-runtime/src/tail.rs` (new), `crates/effect-runtime/src/lib.rs`
   (module line)
 - `crates/compressor/tests/tail_contract.rs`, `crates/true-peak-limiter/tests/tail_contract.rs` (new)
+- The limiter unit test that asserts an `Infinite` tail (`crates/true-peak-limiter/src/lib.rs:5124`,
+  moved onto `tail_and_rest` by #1377) and the limiter fixture's `Infinite` assertion in `crates/graph-compiler/src/lib.rs:12321`,
+  rewritten to `Finite(0)`
 - `dsp-research/dynamics.md`, `dsp-research/true-peak.md`, this spec
 
 ## Non-goals
@@ -74,11 +87,17 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
    (fastest/slowest attack and release, maximum makeup, `mix` 0, 0.5, 1, ratio maximum, limiter
    lookahead 0 and maximum), feed 4,096 samples of full-scale noise then zeros: every output sample
    from `latency` after the last non-zero input is exactly zero.
-2. **Rest, real kernel**: the same runs, at `P = 10^(24/20)` and `P = 1e29`, reach all-zero state
-   words (through the state payload snapshot) by `latency + R`, `R` the stated bound.
-3. **Recompute**: the helper's value for each word equals a brute-force `f32` iteration of that word's
-   recurrence from `E_max` with zero input, counted to `+0.0` (allowed slack: the helper is at most
-   1 % above, never below).
+2. **Rest, real kernel**: the same runs, at `P = 10^(24/20)` and `P = 1e29`, reach D2's rest by
+   `latency + R`, `R` the stated bound: from there every output is `±0.0`, and the state payload
+   snapshot equals, word for word under `f32` `==`, the snapshot of `Z`: a freshly reset instance
+   with the same parameters and settled ramps, fed the same number of zero samples, except the
+   cursor words the test names (`phase`, ring write positions). As a cursor-independent check, both instances then render the same 4,096
+   samples of seeded noise and their outputs agree under `==`.
+3. **Recompute**: the helper's value for each word is checked against a brute-force `f32`
+   iteration of that word's recurrence from `E_max` with zero input, counted until it equals its
+   value in `Z` (with `B` that count:
+   `B <= helper <= B + max(2, ceil(B / 100))`; the two-sample floor covers the `ceil` and rounding
+   of short fast-coefficient runs).
 4. Commands: the `test-debug-b` command from `.github/workflows/qualification.yml`; the conformance
    fixtures check; `cargo clippy --locked --workspace --all-targets -- -D warnings`;
    `cargo fmt --all -- --check`.
@@ -87,8 +106,9 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
 
 - Gate 1: a mix or makeup path that leaks a delayed or filtered term past latency is red; no test
   checks output beyond latency after silence.
-- Gate 2: a state word that stalls above the flush (D3) or a bound computed from the wrong
-  coefficient is red.
+- Gate 2: a state word that stalls above the flush (D3), a bound computed from the wrong
+  coefficient, or a limiter box sum that drifts off `Wb` is red; an all-zero rest check could not
+  pass on the limiter at all.
 - Gate 3: a helper formula off by the rounding inflation under-reports and is red.
 
 ## Dependencies

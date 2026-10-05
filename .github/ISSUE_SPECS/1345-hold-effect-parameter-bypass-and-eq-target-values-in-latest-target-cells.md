@@ -77,7 +77,7 @@ Superseded values are counted by #1312's `live_values_superseded`.
 
 ## Authorized paths
 
-- `crates/effect-contract/src/live.rs` (after #1280; then E5), `crates/effect-contract/src/` tests.
+- `crates/effect-contract/src/live.rs` (before #1280; then E5), `crates/effect-contract/src/` tests.
 - `crates/effect-compiler/src/prepare.rs` (the producer and lane attachment only).
 - `crates/rack/`, `crates/graph/` only where they construct the lane or call `stage` (stream A's
   crates; sequenced by the coordinator).
@@ -130,5 +130,6 @@ Superseded values are counted by #1312's `live_values_superseded`.
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
-- *Carry live-controlled effect lanes across a plan swap* (#1280), which edits
-  `crates/effect-contract/src/live.rs` first.
+
+Dependent: *Carry live-controlled effect lanes across a plan swap* (#1280) carries the cells this
+issue creates, so it lands after this issue and edits `crates/effect-contract/src/live.rs` after it.

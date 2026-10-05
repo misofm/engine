@@ -17,7 +17,7 @@ a `NativeEffectRegistry`. No rendered bit and no diagnostic a host can observe c
 ## Context
 
 - **The evidence.** A phase profile of the browser module's preparation
-  (`/home/bl/misofm/submix-verdicts/PLAN-2026-10-05-adversary-round1.md`, C4, "Cost", scratch
+  (`docs/handoffs/decision-15-2026-10-05/PLAN-2026-10-05-adversary-round1.md`, C4, "Cost", scratch
   profiles, not committed) attributes 8-9 % of preparation to per-instance descriptor validation.
   The frozen workload is #1289's four boot documents (`artifacts/steps/web-rebuild-base/report.md`:
   64-track boots 23.4-39.2 ms p50 under V8).
@@ -80,7 +80,8 @@ a `NativeEffectRegistry`. No rendered bit and no diagnostic a host can observe c
 
 ## Non-goals
 
-- Node-ID string compares in graph compilation (the proposed successor issue).
+- Node-ID string compares in graph compilation: *Resolve graph node IDs to dense indices once per
+  graph compilation* (#1384).
 - A witness type for validated descriptors, or any change to the factory trait.
 - Any other preparation cost (parse, identity hashing, bind/lower).
 - Optimizing to improve the number. The measurement is descriptive (`AGENTS.md`, benchmarks).

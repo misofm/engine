@@ -18,7 +18,9 @@ catch-up ends at once.
   `miso_engine_v1_declare_discontinuity` (D1). If any floor is raised, it prepares the committed
   model with no floors, carrying only the sources (D2-D3). It supersedes a pending candidate
   through #1310 (D2).
-- #1355 D1 sets the discontinuity successor's source-read offset to 0, so `ΣP` resets there.
+- *Give a plan a source-read clock that leads its render clock* (#1396, split from #1355)
+  sets the discontinuity successor's source-read offset to 0 (its D2), so `ΣP` resets there, and
+  defines a stop without a seek (its D3): no frame is repeated or skipped.
 - A catch-up's successor is control-owned, published-unclaimed, or adopted (#1357 Context). It
   holds armed peeks (#1320) and a hold (#1356).
 
@@ -26,9 +28,12 @@ catch-up ends at once.
 
 - **D1. A declaration ends the catch-up.** When #1323's declaration runs with a catch-up pending:
   1. It takes the successor back as #1357 D1 does.
-  2. After every fallible check of #1323 D4, it abandons the peeks, drops the hold and drops the
-     plan on the control thread.
-  3. It publishes #1323's discontinuity successor for the next block.
+  2. #1323's preparation takes the displaced successor as donor (#1310 D2): the rings of sources
+     the edit added are reused, never dropped or allocated again. The peeks stay untouched with the
+     displaced successor while preparation can fail.
+  3. After every fallible check of #1323 D4, it drops the displaced successor on the control
+     thread, which ends its peeks (#1320 D3), and drops the hold (#1356 D4).
+  4. It publishes #1323's discontinuity successor for the next block.
 
   This happens even when the predecessor has no raised floor, because the successor's lead counts
   as raised.
@@ -65,7 +70,10 @@ catch-up ends at once.
 2. **Published but unclaimed.** The same after `ExactlyAt(S)` is published and before `S`.
 3. **Refused.** A declaration whose preparation fails leaves the catch-up adopting at `S` as without
    it.
-4. Commands: those of #1356, plus `cargo test --locked -p capi`.
+4. **Rings and peeks.** With an edit that also adds a source, the discontinuity successor holds the
+   ring the displaced successor prepared. After the stop, a new growth edit takes every peek with
+   `take_peek`.
+5. Commands: those of #1356, plus `cargo test --locked -p capi`.
 
 ## Test value
 
@@ -73,9 +81,13 @@ catch-up ends at once.
   with read-ahead and floors that #1323 was meant to remove. Red.
 - Gate 2: a withdraw that misses the published state leaves two candidates pending. Red.
 - Gate 3: abandoning before the fallible checks loses the catch-up on a refusal. Red.
+- Gate 4: a declaration that prepares a new ring for an added source loses the chunks already
+  submitted; one that never ends the displaced peeks blocks every later growth. Red.
 
 ## Dependencies
 
 - *Reset latency floors at a host-declared discontinuity* (#1323).
 - *Supersede a running catch-up by a structural edit* (#1357).
 - *Catch up a returned successor and adopt it exactly at a scheduled sample* (#1355).
+- *Give a plan a source-read clock that leads its render clock* (#1396).
+- *Supersede an unadopted candidate plan by compare-and-swap* (#1310), D2.

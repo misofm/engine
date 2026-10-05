@@ -8,8 +8,9 @@ Code anchors verified on `main` at `6fb211594`.
 Any strip, track or submix, runs a console slot at its own detector link mode, as a DAW lets each
 plugin instance choose stereo-linked or multi-mono, without splitting the slot's bank. Changing
 that mode on a playing session is a live update: the detector glides from one link law to the
-other over the session ramp, with no rebuild and no click. This is a small umbrella. It records
-the owner's direction and the frozen design, and names its slices: #1368, #1369, #1370 and #1371.
+other over the edit's ramp or the session default, with no rebuild and no click. This is a small
+umbrella. It records the owner's direction and the frozen design, and names its slices: #1368,
+#1369, #1370 and #1371, plus the multiband follow-on #1367.
 
 ## Owner direction
 
@@ -99,15 +100,20 @@ code on `main`:
   SDK writes `"slot"` by default and accepts a per-strip `linkMode`.
 - **D3. Wire (L2).** The console entry message appends one field (an in-place V1 amendment, on the
   decision 12 and 13 precedent). Nothing is renumbered and there is no `ABI_VERSION` bump.
-- **D4. Live switch (L3).** A new `EffectControlRecord::Link(LinkMode)` reaches the lane like a
-  bypass record. Each lane holds two link weights per channel, `w_link` (own magnitude to linked
-  combination) and `w_avg` (maximum to average), as `LinearRamp`s over the session's
-  `controlSmoothing` default (D15-1; #1054). While a ramp runs, the detector is
-  `combined = max + w_avg * (avg - max)` and `d = own + w_link * (combined - own)`, with each
-  effect's operation order frozen in its slice. At rest the weights are exactly 0 or 1, and the
+- **D4. Live switch (L3).** Each linked lane gains a one-word latest-target link cell (mode and
+  ramp length) on the effect lane's cells (*Hold effect parameter, bypass and EQ-target values in
+  latest-target cells*, #1345), drained after bypass and before parameters; a link edit is never
+  refused for room (D15-2). Each lane holds two link weights per channel, `w_link` (own magnitude
+  to linked combination) and `w_avg` (maximum to average), as `LinearRamp`s over the edit's own
+  ramp (the `Link` row of *Carry an optional per-edit ramp length on live session edits*, #1394
+  D3, read through `LiveRamps::resolve`, #1394 D5), or, when the edit has none, the session
+  default `LiveRamps::link_samples` (the `fader_ms` key, #1054 D3 and D4; D15-1; root ruling R9).
+  While a ramp runs, the detector is `combined = max + w_avg * (avg - max)` and
+  `d = own + w_link * (combined - own)`, with each effect's operation order frozen in its slice. At rest the weights are exactly 0 or 1, and the
   kernel takes today's `select` form from the derived masks, so a settled lane renders today's bits.
-  The classifier emits `Link` for a changed console-entry override, a changed slot default (one
-  record per strip whose entry says `slot`), and a changed insert link mode, for these four effects.
+  The classifier writes the link cell for a changed console-entry override, a changed slot default
+  (one write per strip whose entry says `slot`), and a changed insert link mode, for these four
+  effects.
 - **D5. Limiter agreement.** After a switch into `maximum`, the linked-pair record `gain_linked`
   is false until both channels' gain words agree again. The limiter re-checks agreement
   (`gain_state_agrees`) once its ring has been fully rewritten under `maximum`, so the fast path
@@ -116,7 +122,7 @@ code on `main`:
   effect's payload codec (#1370), so *Carry console effect lanes across a plan swap* (#1279) and *Carry
   live-controlled effect lanes across a plan swap* (#1280) carry them. #1279's D1 lists link mode
   among the values that must be bit-equal for a carry; for these four effects that clause becomes
-  "carry, then retarget" with a `Link` record once L3 lands. The payload codecs are stream A's code
+  "carry, then retarget" with a link-cell write once L3 lands. The payload codecs are stream A's code
   in the same effect crates: coordinate each crate's `write_lane`/`restore_lane` (or equivalent)
   edit with stream A.
 
@@ -155,10 +161,11 @@ code on `main`:
      SIMD/scalar tolerance, lands on today's bits once the ramp ends, and never moves a bank-mate's
      bits; the limiter's output never exceeds its ceiling across any switch, on a full-scale
      two-channel fixture whose channels differ by 20 dB; D5's record returns within one ring length.
-   - **L3b, #1371: *Carry the link record from the edit to the lane*** on both hosts: the record, its
-     application at the block boundary, and the classifier rows of D4. Gates: the classifier turns
-     each of D4's three edits into `Link` records and no rebuild; on the C ABI a committed override
-     change commits with no plan replacement, and the render equals a reference fed the same record;
+   - **L3b, #1371: *Carry the link record from the edit to the lane*** on both hosts: the link
+     cell, its application at the block boundary, and the classifier rows of D4. Gates: the
+     classifier turns each of D4's three edits into link writes and no rebuild; a paused host's many
+     link edits are all admitted and the last wins; on the C ABI a committed override
+     change commits with no plan replacement, and the render equals a reference fed the same link write;
      a swap during a link ramp carries it (with #1279 and #1280).
 
 ## Invariants
@@ -179,7 +186,7 @@ code on `main`:
 
 ## Objective gates (umbrella)
 
-- #1368, #1369, #1370 and #1371 closed with Sol PASS, their evidence upstream and their GitHub issues
+- #1368, #1369, #1370, #1371 and #1367 closed with Sol PASS, their evidence upstream and their GitHub issues
   synchronized.
 - `AGENTS.md`'s console sentence and decision 12's Shape bullet carry the per-strip link-mode
   override, landed in L2's PR, with no decision-13 qualifier left on it.
@@ -207,9 +214,23 @@ Each slice states its own. The umbrella's claims are what these defend:
 
 ## Dependencies
 
+This umbrella closes last, after its slices:
+
+- *Lower the link mode to per-lane state in the linked effects' banks* (#1368).
+- *Declare a strip's console link mode in the session, the wire and the SDK* (#1369).
+- *Ramp a lane's detector link between modes* (#1370).
+- *Carry the link record from the edit to the lane* (#1371).
+- *Make the multiband compressor's link mode live* (#1367).
+
+The slices in turn depend on:
+
 - *Carry console effect lanes across a plan swap* (#1279).
 - *Carry live-controlled effect lanes across a plan swap* (#1280).
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345), for L3b's
+  link cell.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
-  (#1054), for L3's ramp default.
+  (#1054), for `LiveRamps::link_samples` (`fader_ms`).
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for L3's per-edit ramp
+  field and `LiveRamps::resolve`.
 - Batch K3 of *Submix strips and live aux sends* (#1196) has merged (`6f1788f3a`); it no longer
   blocks.

@@ -23,10 +23,11 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - **What a lift does today.** The browser's `COMMAND_EFFECT_BYPASS` admits a lift that renders
   nothing different, because the processor was prepared bypassed (`hosts/host-web/src/lib.rs:836-844`).
   The C ABI classifier returns `LiveRebuild::PreparedBypass` for any multiband bypass change
-  (`crates/host-core/src/live_delta.rs:136-140`, `:376-383`), so the edit is a rebuild. Until this
-  issue lands, decision 15 makes that rebuild a D15-9 transition (*Duck-swap a strip whose state
-  cannot continue across a plan swap*, #1324), and *Refuse commands that would be acknowledged with
-  no effect* (#1315) refuses the browser's inert lift. That is context, not a deliverable here.
+  (`crates/host-core/src/live_delta.rs:136-140`, `:376-383`), so the edit is a rebuild. Decision
+  15 makes that rebuild a D15-9 transition (*Duck-swap a strip whose state cannot continue across a
+  plan swap*, #1324), and *Refuse commands that would be acknowledged with no effect* (#1315), which
+  lands before this slice, refuses the browser's inert lift (its D4, keyed on
+  `lowers_session_bypass`). D1 here lifts that refusal for the multiband (D8).
 - **The precedent.** The transient shaper's per-lane recovery (#1092): `recover_lanes`
   (`crates/transient-shaper/src/lib.rs:507-538`) zeroes both channels of each failed lane, resets
   that lane's state with `replace_lane` (`:827`), and leaves every other lane bit-unchanged. The
@@ -89,8 +90,15 @@ bits. This closes decision 14's F4 for the multiband compressor.
   of #1282's D1 that says a committed multiband bypass change is a prepared bypass that is not
   carried no longer holds: under the C ABI that change is now a live `Bypass` record, and the owner
   carries. No new payload word: recovery state is not carried.
-- **D6. Switch shape.** The shunt switches at a block boundary, as today. Its crossfade is *Crossfade
-  the bypass switch over the session ramp* (#1341, stream E, D15-13 E5); nothing here pre-empts it.
+- **D6. Switch shape.** This slice lands after *Crossfade the bypass switch over the session
+  ramp* (#1341, stream E, D15-13 E5), which crossfades every shunt over the session mute ramp, the
+  banked one included. The multiband's live bypass therefore crossfades from its first commit; this
+  slice adds no switch code.
+- **D8. #1315's refusal lifts.** Once `lowers_session_bypass` is deleted, #1315 D4's browser
+  refusal has no instance left to refuse, and a multiband lift is admitted and heard. The multiband
+  half of #1315's gate 3 test (lift refused) is rewritten as an admitted lift that renders the
+  authored-unbypassed session after the crossfade. If #1315's prepared-bypass refusal path then has
+  no caller, this slice deletes it with its doc comment text.
 
 ## Effect evidence (AGENTS.md list)
 
@@ -124,7 +132,9 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - `crates/capi/src/runtime/live_tests.rs` (rewrite `a_prepared_bypass_change_rebuilds_and_renders_the_committed_model`,
   `:2716-2722`, see gate 5; stream B owns the file)
 - `docs/C_ABI_V1_QUALIFICATION.md` (the one sentence at `:393`)
-- `hosts/host-web/src/lib.rs` (the `COMMAND_EFFECT_BYPASS` doc comment only),
+- `hosts/host-web/src/lib.rs` (the `COMMAND_EFFECT_BYPASS` doc comment, and #1315's
+  prepared-bypass refusal if D8 leaves it no caller), `hosts/host-web/src/tests.rs` (D8's
+  rewrite of #1315's gate-3 multiband half),
   `sdk/src/browser/shipped-host.d.ts` (doc only), `sdk/src/core/live-controls.ts` and
   `sdk/test/console-evals.mjs` (D3b only); stream H owns these, so coordinate the merge
 
@@ -133,7 +143,7 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - Making the multiband console-eligible, or letting it bind a padded bank (`CONSOLE_ELIGIBLE_EFFECTS`,
   `prepare.rs:223-230`; `lib.rs:1569-1574`).
 - A live crossover (*Make the multiband compressor's crossover live*, #1338).
-- The bypass crossfade (#1341).
+- New crossfade code (#1341 owns it).
 - Any change to the delay (#1339).
 
 ## Objective gates
@@ -159,12 +169,13 @@ bits. This closes decision 14's F4 for the multiband compressor.
 5. **A live lift is heard, bit-exactly.** In `crates/host-core/tests/live_delta.rs`: the classifier
    turns a multiband bypass change, in each direction, into one `EffectControlRecord::Bypass`
    ahead of any parameter records. Then, on a plan prepared with live controls and the multiband
-   insert bypassed, a `Bypass(false)` record admitted before block 4: blocks 0-3 equal the dry
-   input, and every block from 4 on is bit-identical to a plan prepared with the insert enabled
-   and fed the same input (the wet path ran throughout). On the C ABI, rewrite
+   insert bypassed and `control_smoothing.mute_ms = 0`, a `Bypass(false)` record admitted before
+   block 4: blocks 0-3 equal the dry input, and every block from 4 on is bit-identical to a plan
+   prepared with the insert enabled and fed the same input (the wet path ran throughout). With the
+   default table, the same holds from the first block after #1341's crossfade ends. On the C ABI, rewrite
    `a_prepared_bypass_change_rebuilds_and_renders_the_committed_model` as the live case: the
-   bypass change commits with no plan replacement, and the render from the next block equals
-   the control that never bypassed.
+   bypass change commits with no plan replacement, and the render from the first block after the
+   crossfade equals the control that never bypassed.
 6. **Realtime.** The bank render path still allocates nothing (`tests/no_alloc_render.rs`), the
    recovery block included.
 7. Commands:
@@ -207,3 +218,6 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - *Give the delay a live bypass shunt* (#1339), for D3's deletions.
 - *Carry live-controlled effect lanes across a plan swap* (#1280).
 - *Carry per-node effect instances across a plan swap* (#1282).
+- *Crossfade the bypass switch over the session ramp* (#1341), so the live switch never steps (D6).
+- *Refuse commands that would be acknowledged with no effect* (#1315), whose multiband refusal
+  this slice lifts (D8).

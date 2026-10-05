@@ -9,8 +9,9 @@ A C host author can write correct seek code and correct version checks from
 `miso_engine_v1.h` alone. The header states the seek contract in full (the source-read clock and its
 origin, held behaviour, replacement, the in-flight BACKPRESSURE string, displacement by a
 transaction, far-past anchors, choosing the anchor, the source-rate assumption, and how a plain
-seek's landing is reported) and the ABI growth rule (a feature bit per addition, never compare the
-mask with `==`, and the bit does not protect a directly linked host). The repository's own C smoke
+seek's landing is reported) and the ABI growth rule (a feature bit per added symbol or named
+struct word, none for a new value of an existing enum, never compare the mask with `==`, and the
+bit does not protect a directly linked host). The repository's own C smoke
 test stops modelling the `==` comparison it tells hosts never to write.
 
 ## Context
@@ -62,16 +63,19 @@ test stops modelling the `==` comparison it tells hosts never to write.
   by a transaction; far-past anchors and the region end; the rate assumption. Every statement names
   its diagnostic string where one exists. No statement promises anything the code does not do.
 - **D2. Growth rule** in the header, beside `MISO_ENGINE_V1_ABI_VERSION` (`:111`):
-  `ABI_VERSION` changes only on a break. Each addition (a symbol, a named former reserved word, a
-  new result or enum value a host can receive) gets its own feature bit. Hosts test each bit they
-  need with `&`, tolerate unknown bits, and never compare `feature_mask` with `==`. A feature bit
-  protects only a host that resolves the symbol at run time; a host that links a symbol directly
-  fails to load against an older library before it can test anything.
+  `ABI_VERSION` changes only on a break. Each added symbol and each former reserved struct word
+  given a name gets its own feature bit, the next free one when it merges. A new value of an
+  existing enum or result code, and an in-place V1 protocol field, takes no bit (decision 15,
+  D15-3 recorded resolution), so hosts tolerate enum values they do not know and treat an
+  unknown result code as a failure. Hosts test each bit they need with `&`, tolerate unknown
+  bits, and never compare `feature_mask` with `==`. A feature bit protects only a host that
+  resolves the symbol at run time; a host that links a symbol directly fails to load against an
+  older library before it can test anything.
 - **D3. Qualification record.** `C_ABI_V1_QUALIFICATION.md:112-113` is corrected to D2's wording,
   and a short "ABI growth" paragraph states D2 once for the record.
 - **D4. Smoke test.** `abi_smoke.c` drops the `!= MISO_ENGINE_V1_FEATURE_MASK` comparison and
-  instead requires each bit the header defines, one `&` test per bit. The exact-mask check stays in
-  the Rust tests named above.
+  instead requires each feature bit the header defines, one `&` test per `MISO_ENGINE_V1_FEATURE_*`
+  symbol, never a bit number. The exact-mask check stays in the Rust tests named above.
 
 ## Deliverables
 

@@ -31,20 +31,34 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 
 ## Decisions frozen for this slice
 
-- **D1. Classify.** The control plane's rebuild path asks host-core for the edit's lead `P`. With
-  `P > 0`, an armed predecessor and an off-thread host, the candidate is prepared warm (#1354 D3)
-  and published `CopyAndReturn`. Otherwise it is published as today. The transaction response is
-  `rebuild` either way (*Report each transaction's edit path in its response*, #1313).
+- **D1. Classify.** The control plane's rebuild path calls `host_core::warm_lead` (#1354 D3), the
+  only computation of the lead `P`.
+  - With `P > 0` and an off-thread host, the candidate is prepared warm (#1354 D3) and published
+    `CopyAndReturn`; when it also restarts strips, it is composed with their duck as *Duck-swap
+    the strips a latency growth restarts, and fall back to the transition when no catch-up can
+    finish* (#1397) D1 states.
+  - If warm preparation returns `WarmUnavailable` (#1354 D3, #1355 D7), the candidate is prepared
+    as #1397's transition (D2) at once. A valid edit is never refused for it.
+  - With no growth, it is published as today.
+
+  The transaction response is `rebuild` in every case (*Report each transaction's edit path in its
+  response*, #1313).
 - **D2. Service step.** `SessionState::service` gains one step after `synchronize_plan_epochs`,
   `CatchUp::service(CATCH_UP_SLICE_BLOCKS)`. That step covers:
-  1. reclaiming the returned candidate;
+  1. taking the catch-up's own candidate back when its cell is `Returned`, with `withdraw()`
+     (`Withdrawal::Returned { reason }`, #1311 D6; #1354's `Copied` or `CopyRefused`, `Late`, or
+     #1358's `PreRollBound`). There is no return queue, and `synchronize_plan_epochs` drains
+     nothing and never takes a returned candidate (#1348 D7). A `Withdrawal::InFlight` (#1311 D6,
+     #1354 D1) is retried at the next call; nothing waits on render. When a structural edit
+     superseded an in-flight catch-up (*Supersede a running catch-up by a structural edit*, #1357
+     D1), this item completes that withdrawal once the copy has ended and publishes the held newer
+     candidate (#1357 D1a);
   2. one bounded slice of rendering;
   3. the deadline check (#1358 D3);
   4. publication (#1355 D5) or a fallback publication (#1358).
 
-  `CATCH_UP_SLICE_BLOCKS` is a host-core constant. It is sized from #1286's record so one call
-  stays under one quantum's real-time budget on the AVX2 row, and the record row is named in a
-  comment. #1348 D3's bound is restated to include it.
+  `CATCH_UP_SLICE_BLOCKS` is a host-core constant with the value #1286 D3 item 6 derives; its comment names the record row and
+  this spec restates no formula. #1348 D3's bound is restated to include it.
 - **D3. Threads.** The catch-up renders on whichever thread calls a session function, and the
   header says so. `CanonicalFpEnv` (#1321) protects that thread's control word.
 - **D4. Header and qualification doc.**
@@ -109,7 +123,11 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Turn a pending catch-up into a plain rebuild at a host-declared stop* (#1359), and through it
-  #1354-#1358.
+  #1354-#1357.
+- *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition*
+  (#1358): the deadline check and the pre-roll publication D2 calls.
+- *Duck-swap the strips a latency growth restarts, and fall back to the transition when no
+  catch-up can finish* (#1397): D1's composition and transition.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Report each transaction's edit path in its response* (#1313).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

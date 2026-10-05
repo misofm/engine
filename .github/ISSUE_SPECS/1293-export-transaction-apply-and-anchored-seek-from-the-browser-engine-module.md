@@ -44,17 +44,22 @@ module* (#1386), which uses this slice's staging and outcome record.
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332) sets the
   modes: `worker` (control half in the Worker) and `single` (one instance in the worklet).
   *Swap and retire browser plans through the Worker's service loop* (#1381) puts
-  `control_plane::SessionState` in the Worker and prepares with the producers there (its D1).
+  `control_plane::SessionState` in the Worker and boots it with the producers there (its D1),
+  preparing through the browser's preparer from *Prepare through an adapter-supplied preparer in
+  the control-plane crate* (#1400).
   *Admit browser live edits in the Worker through the committed model* (#1382) moves live commands
   there.
 - **Source producers.** #1332 D3 item 6 keeps source submission and seeks on the worklet thread,
   but #1290 D4 moves the persisting producers into the candidate on the control thread at commit,
-  and #1381 D1 prepares "because the producers live in the Worker". Only the C ABI shape is
-  consistent: producers belong to the control half. No filed slice moves submission and seeks into
-  the Worker; this slice needs that move (see Dependencies).
+  and #1381 D1 hands the Worker's producers to `SessionState`, which prepares through #1400's
+  preparer. Only the C ABI shape is consistent: producers belong to the control half. *Move
+  browser source submission and seeks into the Worker* (#1387) makes that move; this slice needs
+  it (see Dependencies).
 - The path codes come from *Report each transaction's edit path in its response* (#1313).
   Completion is the watermark, in the browser status (*Publish the applied-revision watermark in
-  the browser status*, #1349); it is not part of this record.
+  the browser status*, #1349); it is not part of this record. The control half's two other exports,
+  `miso_engine_web_v1_service(handle)` (the service step) and the watermark-and-counters export,
+  come from #1381 with their mirrors; this slice adds neither.
 - *Anchor every seek on the plan's source-read clock* (#1316) adds a per-ring seek report
   (`generation`, `first_sample`, `source_frame`, cumulative underrun and held frames) behind
   `SourceControlSet::seek_report(id)` and assigns its browser export to this slice.
@@ -113,7 +118,8 @@ module* (#1386), which uses this slice's staging and outcome record.
 ## Non-goals
 
 - No document diff or `replace` export (#1386). No control-plane logic (#1290, #1309). No
-  watermark or service loop (#1349, #1381). No Worker or worklet JavaScript (*Send a session
+  service or watermark export: `miso_engine_web_v1_service(handle)` and the watermark-and-counters
+  export are #1381's, and the status words are #1349's. No Worker or worklet JavaScript (*Send a session
   transaction to the browser control plane*, #1294). No SDK API (*Apply session transactions from
   the browser SDK*, #1296).
 - No change to the plain seek export's semantics; its anchoring and report are #1316's.
