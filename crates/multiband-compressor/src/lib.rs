@@ -512,19 +512,32 @@ pub fn lr4_step<L: Lane>(x: L, c: &Lr4Coef<L>, s: &mut Lr4State<L>) -> (L, L) {
 /// `g = tan(pi fc / fs)`, `k = sqrt(2)`, `t = g (g + k)`, `c1 = t / (1 + t)`, `a2 = g (1 - c1)`,
 /// `a3 = g a2`. The tangent comes from `math`, never the platform libm (D6).
 ///
-/// The rounded triple is then checked *back*: `g` is recovered from `c1` alone, the analytic
-/// second-order low-pass magnitude at the requested crossover is evaluated from it, and it must be
-/// the half-power point to 0.005 dB. That is a test of the `f32` rounding of the damping
-/// coefficient — the thing amendment A1 exists for — and not a restatement of the design.
-fn design_lr4(sample_rate: u32, crossover_hz: f32) -> Option<[f32; 3]> {
-    if sample_rate == 0 || !parameter_value_valid(&SPECS[0], crossover_hz) {
-        return None;
-    }
+/// This is the computation alone: no domain test, no check-back, no failure. It is infallible by
+/// proof rather than by branch: `tests/designer_total.rs` shows that [`design_lr4`] accepts every
+/// `f32` crossover in the legal domain at every launch rate, returns exactly these words, and that
+/// each triple passes [`effect_runtime::svf::NORM_TOLERANCE`] (#1366 D4). Outside that domain the
+/// words are meaningless; callers that cannot guarantee the domain call [`design_lr4`].
+#[must_use]
+pub fn design_lr4_words(sample_rate: u32, crossover_hz: f32) -> [f32; 3] {
     let g = math::tan(core::f64::consts::PI * f64::from(crossover_hz) / f64::from(sample_rate));
     let t = g * (g + BUTTERWORTH_K);
     let c1 = t / (1.0 + t);
     let a1 = 1.0 - c1;
-    let designed = [c1 as f32, (g * a1) as f32, (g * (g * a1)) as f32];
+    [c1 as f32, (g * a1) as f32, (g * (g * a1)) as f32]
+}
+
+/// Tests the domain, designs with [`design_lr4_words`], and checks the rounded words back.
+///
+/// The rounded triple is checked *back*: `g` is recovered from `c1` alone, the analytic
+/// second-order low-pass magnitude at the requested crossover is evaluated from it, and it must be
+/// the half-power point to 0.005 dB. That is a test of the `f32` rounding of the damping
+/// coefficient — the thing amendment A1 exists for — and not a restatement of the design.
+#[must_use]
+pub fn design_lr4(sample_rate: u32, crossover_hz: f32) -> Option<[f32; 3]> {
+    if sample_rate == 0 || !parameter_value_valid(&SPECS[0], crossover_hz) {
+        return None;
+    }
+    let designed = design_lr4_words(sample_rate, crossover_hz);
     if !designed.into_iter().all(normal_or_zero)
         || !(0.0..1.0).contains(&designed[0])
         || designed[1] <= 0.0

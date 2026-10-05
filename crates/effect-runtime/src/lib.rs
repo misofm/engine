@@ -50,5 +50,6 @@ pub mod envelope;
 pub mod params;
 pub mod ramp;
 pub mod state_payload;
+pub mod svf;
 
 pub mod corpus;
