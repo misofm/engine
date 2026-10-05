@@ -126,6 +126,13 @@ when a dependency forces the order, and then sequence the correct solution.
   builtin computes it from its designer, per rate, on the control thread, with a test that
   recomputes it (never a digest). Every node also states an exact-rest bound. Gain-only processors
   report 0 beyond their latency.
+  A live input-filter retarget (#1407) moves the recursion only through designs and their
+  mixtures: every recursion word the kernel loads is a design, the identity at rest with +0.0
+  integrators, or within a proven f32 rounding allowance (64 half-ulps plus u·D per word) of the
+  convex hull of the designs its history used, so the section's zero-input step stays a
+  contraction, ||A(w)||_V ≤ q_design + 1.419e-5 ≤ 1 − 3.79e-5, at every launch rate and block
+  size; a collapsed strip decides every record over channel 0's state and renders the bits of the
+  same strip rendered dual. (Root, 2026-10-05; #1407 Amendment 1.)
 - (c) #1261 and #1262 then report the bounded tail, never `Infinite`.
 - *Rationale:* exact zero was provably never reached at the top of the cutoff domain, and the EQ
   had a second trap (round 1, B4.3; round 2, "Bits moved"). With the fix, exact rest is reached

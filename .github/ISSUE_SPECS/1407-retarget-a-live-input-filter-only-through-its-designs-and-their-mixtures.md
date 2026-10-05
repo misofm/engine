@@ -151,6 +151,10 @@ Where this amendment and the frozen decisions above differ, this amendment holds
   word. Design-to-design retargets now move rendered bits (attempt 2 lists them). This supersedes
   D2's "No kernel change", D6's "a design-to-design retarget ... render today's bits", the kernels
   item of "Non-goals" and the "render kernel is unchanged" benchmark note.
+  - **Root accepted (2026-10-05).** The four-stepped-word refinement of (iii) (the first four ramp
+    words `current + step`, every later word `target - step * remaining`, a `+0.0`-step word held)
+    is accepted by root: it is what makes the proven bound `||A(w)||_V <= q_design + 1.419e-5 <=
+    1 - 3.79e-5` hold at block size 1, which (iii) on every word (`P = 6.10e-5`) cannot.
 - **A4. Folded minors.** Gate 2b pins rule 2's unconditional countdown restart (verdict MINOR 3,
   mutant M2c). The "slowest design" wording becomes the maximum-cutoff design (NIT 5); "equals the
   spectral radius" is stated to its precision (NIT 6); the ruling's lines are held to 100 columns and
