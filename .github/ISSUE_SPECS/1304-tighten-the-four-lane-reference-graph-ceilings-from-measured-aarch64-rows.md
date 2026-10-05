@@ -141,3 +141,82 @@ lanes, a structural move of more than 10 %, which today passes up to about 16-23
 - A test that greps source or prose is refused.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (2026-10-05, branch `codex/d15-stream-j` on `e3375bc1d`)
+
+**D1.** `scripts/run-aarch64-tests.sh` debug mode, after the main run and before the
+expected-failure loop:
+`cargo test --locked "${packages[@]}" --features "$features" --test resource_lifecycle -- --exact
+reference_session_retained_rows_stay_within_their_budgets --nocapture`. Cargo accepts
+`--test resource_lifecycle` across the product packages (only `capi` has it), so the `-p capi`
+fallback was not needed. Nothing rebuilds: after the main run's `--all-targets` build (here
+`--no-run`, same packages and features, AArch64 under qemu) the D1 command printed only
+`Finished ... in 0.30s` and no `Compiling` line.
+
+**D2 source: qemu-user, not CI.** User-space toolchain only, nothing written to the repo or system:
+`rustup target add aarch64-unknown-linux-gnu`; `apt-get download` + `dpkg -x` of
+`qemu-user-static` 8.2.2, `libc6{,-dev}-arm64-cross` 2.39, `libgcc-13-dev-arm64-cross`,
+`libgcc-s1-arm64-cross`, `linux-libc-dev-arm64-cross` into `$R`; linker
+`clang --target=aarch64-linux-gnu --sysroot=$R --gcc-toolchain=$R/usr -B<rustlib>/bin/gcc-ld
+-fuse-ld=lld`. Run (D1's exact cargo form, with `scripts/run-aarch64-tests.sh`'s debug `packages`
+and `features`):
+
+```
+CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=<the clang wrapper above> \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="$R/usr/bin/qemu-aarch64-static -L $R/usr/aarch64-linux-gnu" \
+cargo test --locked "${packages[@]}" --features "$features" --test resource_lifecycle -- \
+    --exact reference_session_retained_rows_stay_within_their_budgets --nocapture
+```
+
+Log lines (with the new ceilings):
+
+```
+graph_session_plus_plan_bytes: 341210 of 375360
+graph_incremental_plan_bytes: 341210 of 375360
+graph_metadata_bytes: 166309 of 182976
+effect_bank_scratch_bytes: 12288 of 13568
+effect_bank_runtime_buffer_bytes: 12288 of 13568
+effect_bank_metadata_bytes: 921 of 1024
+test reference_session_retained_rows_stay_within_their_budgets ... ok
+```
+
+**Gate 1 table (D3: `ceil(row x 1.1 / 64) x 64`).**
+
+| row | measured four-lane | source | old ceiling | new ceiling |
+|---|---|---|---|---|
+| graph_session_plus_plan_bytes | 341,210 | qemu-user, `e3375bc1d` | 413,952 | 375,360 |
+| graph_incremental_plan_bytes | 341,210 | qemu-user, `e3375bc1d` | 413,952 | 375,360 |
+| graph_metadata_bytes | 166,309 | qemu-user, `e3375bc1d` | 204,544 | 182,976 |
+| effect_bank_scratch_bytes | 12,288 | qemu-user, `e3375bc1d` | 13,568 | 13,568 |
+| effect_bank_runtime_buffer_bytes | 12,288 | qemu-user, `e3375bc1d` | 13,568 | 13,568 |
+| effect_bank_metadata_bytes | 921 | qemu-user, `e3375bc1d` | 1,024 | 1,024 |
+
+**D4, row by row.** The three effect-bank rows held exactly (12,288 / 12,288 / 921). Graph
+metadata 166,309 against the predicted 166,325 (-16); its ceiling 182,976 is the predicted one.
+Graph session+plan and incremental 341,210 against the predicted 356,714 (-15,504), so the
+ceiling is 375,360, not 392,448. Why: the #1263 *move* prediction is exact, the *baseline* was not.
+The same qemu command on `986301820^` (the parent of #1263 attempt 1) reads 231,794 and 56,893, and
+on `986301820` 341,210 and 166,309: both rows move by exactly 109,416 (9 x 2,104 + 3 x 30,160).
+The derivation's baseline added #1098's eight-lane graph move (+16,453) to the four-lane
+session+plan row, but at four lanes that row stood at 231,794, not 247,298; metadata stood at
+56,893, not 56,909.
+
+**Gate 2 (one-time, not committed).** Under the same qemu command, the first graph ceiling set to
+341,146 (64 below the row): `FAILED`, panic `retained rows over their budget ...
+["graph_session_plus_plan_bytes 341210 > 341146"]`. Restored to 375,360: `ok`. The PR's own
+AArch64 debug job must still pass and print these rows (D2).
+
+**Gates 3-4 (x86-64).** `cargo test --locked -p capi --test resource_lifecycle`: 14 of 15
+runs `ok` (11 passed); the very first run reported one failed test of 11, and its log was not
+captured; 14 reruns did not reproduce it. The eight-lane ceilings are unchanged, so the x86 run
+does not read any value this change touches; the flake is unexplained and recorded, not fixed.
+`cargo fmt --all -- --check` ok; `cargo clippy --locked -p capi --all-targets --all-features --
+-D warnings` ok; `bash scripts/check-workspace-policy.sh` ok; `bash -n scripts/run-aarch64-tests.sh`
+ok; `python3 -B scripts/test-ci-path-routing.py` and `scripts/check-ci-path-routing.py` pass.
+AArch64 release job: not run here (the D1 step is debug-only); it is the PR's.
+
+*Test value.* No new test (as the brief states); the mutation above shows the tightened four-lane
+ceiling binds.
