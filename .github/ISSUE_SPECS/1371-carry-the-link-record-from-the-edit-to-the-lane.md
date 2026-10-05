@@ -36,7 +36,7 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   changes* (#1054) owns the session default table (its D3 names one key per live row). Its D3
   table maps the detector link glide to `fader_ms`, read as `LiveRamps::link_samples` (its D4).
   *Carry an optional per-edit ramp length on live session edits* (#1394) owns the optional
-  per-edit ramp field on a transaction edit (decision 15, D15-1; root ruling R9: absent means the
+  per-edit ramp field on a transaction edit (decision 15, D15-1 recorded resolution: absent means the
   session default, an explicit 0 is legal and is a step), `EditRamps` with its `Link` row (#1394
   D3: `SetTrackConsole` on the strip, `SetEffectLinkMode` on the effect, `SetConsole` on the
   console) and `LiveRamps::resolve` (#1394 D5).
@@ -66,7 +66,7 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   where `edit_ramp` is the `EditRamps` entry for the write's `Link` row (#1394 D3, D6): the
   effect's entry for an insert link change, the strip's for a console-entry override, the
   console's for a slot-default change. That is the edit's own ramp when the transaction carries
-  one (root ruling R9; an explicit 0 is a step), else `LiveRamps::link_samples`, which #1054 D3
+  one (decision 15, D15-1 recorded resolution; an explicit 0 is a step), else `LiveRamps::link_samples`, which #1054 D3
   maps to the session's `fader_ms` key ("detector link glide"). Absent ramps from the browser and the SDK are resolved by *Resolve an absent live
   ramp to the session default on the browser and in the SDK* (#1364); this slice reads the
   resolved field.

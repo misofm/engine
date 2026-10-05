@@ -1,6 +1,6 @@
 # Reset latency floors at a host-declared discontinuity
 
-Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-8, D15-17).
+Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-8, D15-17; D15-8 (round-5 amendment)).
 Code anchors verified on `main` at `6fb211594`.
 
 ## Product outcome
@@ -9,7 +9,8 @@ Latency does not ratchet up for the life of a session. *Keep every node's latenc
 during playback* (#1285) keeps a removed limiter's latency while audio plays. When the host
 declares a discontinuity (it has stopped, or it is about to seek every source), the engine drops
 every latency floor. The next render runs the session at its natural latency, and the plan
-resource report says so. A declaration with nothing to reset changes nothing.
+resource report says so. A pending warm successor is replaced by that plain rebuild. A declaration
+with nothing to reset changes nothing.
 
 ## Context
 
@@ -22,11 +23,15 @@ resource report says so. A declaration with nothing to reset changes nothing.
   `crates/capi/src/abi.rs:64-71`). Other decision-15 entry points may take bits before this slice
   merges.
 - The successor entry points take a `SuccessorBase` (`crates/host-core/src/prepare.rs:641-647`).
-- D15-17: a host-declared stop turns any pending catch-up into a plain rebuild with no continuity
-  constraint, applied at the next render. The accumulated read-ahead `ΣP` of the warm successor
-  resets at the same declaration (D15-8). *Give a plan a source-read clock that leads its render
-  clock* (#1396), a slice of *Pre-roll a successor whose latency grows* (#1287), introduces that
-  read-ahead and resets it at the declaration defined here.
+- D15-8 (round-5 amendment): a pending warm successor is a candidate published `Primed {
+  not_before, lead_blocks }` (*Adopt a successor plan no earlier than a scheduled sample*, #1311)
+  whose carried nodes are floored at `a(n) + P`. At a host-declared stop it is superseded by a
+  plain rebuild through #1310, with no continuity constraint, and its revision completes `exact`
+  or `superseded`. This slice owns that rule; it absorbs the retired #1359.
+- The accumulated read-ahead `ΣP` of the warm successor resets at the same declaration (D15-8).
+  *Give a plan a source-read clock that leads its render clock* (#1396), a slice of *Grow latency
+  during playback by adopting a primed warm successor* (#1287), introduces that read-ahead and
+  resets it at the declaration defined here.
 
 ## Decisions frozen for this slice
 
@@ -42,15 +47,31 @@ resource report says so. A declaration with nothing to reset changes nothing.
   - The ABI growth rule of *Document the seek contract and the C ABI growth rule in the header*
     (#1317) applies: one feature bit, the mask never compared with `==`.
 - **D2. What it does.**
-  - If the newest plan (the pending candidate, or else the active plan) was compiled with any floor
-    above its node's natural arrival, the control plane prepares the committed model as a successor
-    at a discontinuity. That successor has no floors and carries only the source consumers (ring,
-    generation and read position). Every other owner starts at rest: there is no continuity
-    constraint. It is published for adoption at the next block.
+  - The declaration rebuilds if the newest plan (the pending candidate, or else the active plan)
+    was compiled with any floor above its node's natural arrival, or reads its sources ahead of
+    render (a source-read offset above 0). The control plane then prepares the committed model as a
+    successor at a discontinuity. That successor has no floors and carries only the source
+    consumers (ring, generation and read position). Every other owner starts at rest: there is no
+    continuity constraint. It is published for adoption at the next block.
+  - The offset term matters because a plan can lead with no raised floor: after a warm growth, a
+    later edit can make a node's natural arrival equal its floor. The offset is recorded in the
+    inventory by *Give a plan a source-read clock that leads its render clock* (#1396) D2, which
+    lands after this slice and adds the term to this test. Before #1396 no plan has an offset, so
+    the floor term alone is the whole test.
   - The call lives in `crates/control-plane/src/`; the capi entry point only forwards to it.
   - A pending candidate is superseded by *Supersede an unadopted candidate plan by
-    compare-and-swap* (#1310).
-  - If no floor is raised, the call returns OK and publishes nothing.
+    compare-and-swap* (#1310): withdrawn, used as the donor of the rings it created (#1310 D2), its
+    persisting producers returned to the running epoch (#1310 D5 step 5), then dropped.
+  - **A pending warm successor.** A `Primed` candidate always has a raised floor (its carried nodes
+    are floored at `a(n) + P`, and `P > 0`), so the declaration always rebuilds while one is
+    pending, even when the active plan has no raised floor. It is superseded as above. The
+    discontinuity successor is published `Next`, never with the withdrawn candidate's `Primed`
+    kind: it has no lead, no readiness check, no deadline and no transition. The same holds before
+    a seek of every source. The control plane's `PrimedCandidate` record of the withdrawn candidate
+    is dropped with it, and the discontinuity successor leaves none (*Classify a latency-growth
+    edit and publish its warm successor from the control plane*, #1403 D4, which adds the record
+    and this drop).
+  - If neither term holds, the call returns OK and publishes nothing.
 - **D3. Host-core.** `SuccessorBase` gains `discontinuity: bool`. When it is true, the successor
   is compiled with an empty floor map, and the join carries sources only. Its source-read offset
   is 0 (#1396 D2, which lands after this slice and reads this flag). The declaration may or may not
@@ -58,10 +79,36 @@ resource report says so. A declaration with nothing to reset changes nothing.
   read position, so no frame is repeated or skipped, and the source-read clock steps back to the
   render clock at the adoption block. The inventory records
   natural arrivals beside floored ones, so D2's test is a comparison of two numbers.
+  - **The constructor.** This is the first slice that adds a field to `SuccessorBase`, so it also
+    adds `SuccessorBase::new(inventory, committed)`. `new` sets every other field to its neutral
+    value: `discontinuity: false` here. Each later slice that adds a field extends `new` with that
+    field's neutral value (*Prepare a warm successor whose carried nodes lead the predecessor by
+    P*, #1354 D4: `warm: None`; *Duck-swap the strips a latency growth restarts, and fall back to
+    the transition when a warm successor cannot adopt*, #1397 D2: `forced_restart` empty).
+  - Every literal construction site that exists when this slice lands moves to `new` in this
+    change:
+    - `crates/host-core/tests/successor_swap.rs:988` and
+      `crates/host-core/tests/support/successor.rs:101`;
+    - `crates/capi/tests/resource_lifecycle.rs:1591`;
+    - the control plane's sites in `crates/control-plane/src/`: the `prepare_runtime` call
+      (`crates/capi/src/runtime/control.rs:910` on `6fb211594`, moved by #1309 D2) and #1310 D2's
+      base across a withdrawn candidate;
+    - `crates/host-core/tests/withdrawn_successor.rs`, the gates of *Prepare a successor across a
+      withdrawn candidate plan* (#1344), which lands before this slice through #1310.
+
+    A site added by a slice that is not ordered against this one is in the list if that slice
+    lands first. The discontinuity successor is
+    `SuccessorBase { discontinuity: true, ..SuccessorBase::new(inventory, committed) }`. Every
+    later site is built through `new`, and a later field changes `new` and no construction site.
 - **D4. Acked-batch rule.** Preparation can fail (budgets, ceilings). On failure the call returns
   the preparation error and nothing changes. On success the plan is published with its retirement
   credit reserved, as a structural transaction is. The model and the revision do not change. No
   acknowledged edit is lost: the committed model is the source of the successor.
+  - **Completion.** The discontinuity successor carries the committed revision, so a withdrawn
+    candidate's revision completes when that successor is adopted. #1310 D6 stores its
+    `superseded` word with that same revision as B's: the advance is `EXACT`, with `SUPERSEDED`
+    when the withdrawn candidate had itself folded in earlier revisions. It is never
+    `TRANSITION_FALLBACK`: no continuity is owed after a declared stop, so nothing fell back.
 - **D5. Both hosts.** The call is implemented in the control plane, in the crate of *Extract the C
   ABI control plane into a portable crate both hosts call* (#1309). The C ABI exposes it here. The
   browser reaches the same function when *Run the browser control plane in a Worker and keep the
@@ -74,12 +121,17 @@ resource report says so. A declaration with nothing to reset changes nothing.
    `crates/capi/src/abi.rs`, the header prototype and text, and `docs/C_ABI_V1_QUALIFICATION.md`.
 2. D2 and D4 in `crates/control-plane/src/` (package `control-plane`, lib `control_plane`, created
    by #1309).
-3. D3 in `crates/host-core/src/prepare.rs`.
-4. Tests in `crates/host-core/tests/successor_swap.rs` and `crates/capi/src/runtime/tests.rs`.
+3. D3 in `crates/host-core/src/prepare.rs`, with the move of every literal `SuccessorBase` site
+   to `SuccessorBase::new`.
+4. Tests in `crates/host-core/tests/successor_swap.rs`, `crates/capi/src/runtime/tests.rs` and the
+   control-plane crate's unit tests (gate 5).
 
 ## Authorized paths
 
 - `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`
+- The `SuccessorBase` construction sites only (D3): `crates/host-core/tests/support/successor.rs`,
+  `crates/host-core/tests/withdrawn_successor.rs` (#1344's) and
+  `crates/capi/tests/resource_lifecycle.rs`
 - `crates/capi/src/ffi.rs`, `crates/capi/src/abi.rs`, `crates/capi/src/runtime/tests.rs`,
   `crates/capi/include/miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md`, and
   `crates/control-plane/src/` (#1309). These are stream B's files; root orders the merge after
@@ -109,11 +161,26 @@ resource report says so. A declaration with nothing to reset changes nothing.
 4. **Failure changes nothing.** With a resource cap set so that the floorless preparation fails,
    the call returns the preparation error, and the active plan, its floors and the committed model
    are unchanged.
-5. **ABI surface.** `query_capabilities` reports `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY`,
+5. **A declared stop supersedes a pending warm successor (new control-plane test,
+   `test-support`).** Gate 1's A runs with no raised floor. Commit its `RemoveTrack` edit, and
+   publish the resulting B (floored at A's arrivals by #1285, so above its natural ones) through a
+   `test-support` publication hook as `Primed { not_before, lead_blocks: 1 }`, with `not_before`
+   64 blocks ahead. Render 4 blocks (B stays pending), then declare a discontinuity and render 8
+   blocks.
+   - The block after the declaration is the discontinuity successor's, and from it the output
+     equals a fresh B compiled without floors, fed the same PCM from the frames the carried
+     consumers stood at; `latency_samples` is B's natural latency.
+   - The withdrawal reported `Withdrawn`, and B was never adopted.
+   - The watermark advances to the committed revision at that block with `EXACT` and without
+     `TRANSITION_FALLBACK`. Repeated with a structural edit committed and superseded before B (so
+     B folds in one revision): `EXACT | SUPERSEDED`, `superseded_count` grows by 1.
+   - Owners and retirement credits balance, and no producer was dropped on the control thread.
+6. **ABI surface.** `query_capabilities` reports `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY`,
    and the mask test checks that the mask is the OR of every feature symbol, the new one
    included (by symbol, never by a literal number).
-6. Commands:
-   - `cargo test --locked -p host-core -p control-plane -p capi --features host-core/test-support`
+7. Commands:
+   - `cargo test --locked -p host-core -p control-plane -p capi --features
+     host-core/test-support,control-plane/test-support`
    - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`
    - `cargo build --locked --release -p audit && ./target/release/audit capi`
    - `bash scripts/check-workspace-policy.sh`, `cargo fmt --all -- --check`,
@@ -129,9 +196,18 @@ resource report says so. A declaration with nothing to reset changes nothing.
 - Gate 3: a declaration that always rebuilds resets every effect tail on every stop. It turns red.
 - Gate 4: a declaration that drops floors before its preparation succeeds leaves a plan whose next
   successor loses latency mid-playback. It turns red.
+- Gate 5: a declaration that publishes its successor with the pending candidate's `Primed` kind,
+  or leaves a warm candidate to its own adoption, plays the floored plan past the stop (the
+  successor waits for `not_before` and readiness), so the floors survive it; one that reports the
+  revision as `TRANSITION_FALLBACK` miscounts a stop as a fallback. Gates 1-4 have no `Primed`
+  candidate. It turns red.
 
 ## Dependencies
 
 - *Keep every node's latency from dropping during playback* (#1285).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
+- *Adopt a successor plan no earlier than a scheduled sample* (#1311): the `Primed` kind gate 5
+  publishes.
+- *Publish an applied-revision watermark and complete edits asynchronously* (#1314): gate 5's
+  outcome flags.

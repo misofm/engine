@@ -789,6 +789,34 @@ describe("validation refusals name the offending path", () => {
     );
   });
 
+  test("an effect automation on a prepared-only parameter is refused by name", () => {
+    // Issue #1335 D5: the engine refuses an effect target that is not automatable at the block
+    // rate (`effect.automation.rate`), so the builder refuses it first. Red mutation: check only
+    // the declared `(parameter, channel)` for an effect row, as before, and `band-1-enabled`
+    // builds a session the engine refuses.
+    const base = session({ id: "auto", sampleRateHz: 48_000 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+      .track("t", {
+        source: "stem",
+        inserts: [effect("miso.parametric-eq", { "band-1-enabled": true, "band-1-gain": -2 }, { slotId: "eq" })],
+      });
+    const ride = (parameter, startValue, endValue) => ({
+      id: parameter,
+      target: { trackId: "t", rack: "inserts", slotId: "eq", parameter, channel: "both" },
+      segments: [{ shape: "step", startSample: 0n, endSample: 480n, startValue, endValue }],
+    });
+    assert.throws(
+      () => base.automation(ride("band-1-enabled", 1, 1)),
+      (error) => {
+        assert.ok(error instanceof MisoUsageError);
+        assert.match(error.message, /automation\("band-1-enabled"\)\.target\.parameter/);
+        assert.match(error.message, /band-1-enabled is prepared-only/);
+        return true;
+      },
+    );
+    assert.doesNotThrow(() => base.automation(ride("band-1-gain", -2, 0)));
+  });
+
   test("an effect parameter outside its catalog domain is refused by name", () => {
     assert.throws(
       () => effect("miso.compressor", { ratio: 100 }),

@@ -98,11 +98,16 @@ what lets the browser's control plane prepare in the Worker while the worklet re
 
 1. **Gap-free successor, each branch.** In `browser_successor.rs`, for each of the three
    successor entries (single capture on track `eq0`, a two-target collection, selected meters):
-   prepare session A (the nine-track `parametric-eq-nine-track` fixture), render 6 blocks, prepare
-   B (A plus a muted track) as its successor, move the producers with `adopt_persisting`, swap
-   through the plan exchange and render 6 more. The swap block reports `CarryOutcome::Carried`.
+   prepare session A, render 6 blocks, prepare B (A plus a muted track) as its successor, move
+   the producers with `adopt_persisting`, swap through the plan exchange and render 6 more. The swap block reports `CarryOutcome::Carried`.
    Every block equals B prepared fresh through the matching boot entry and fed the same PCM from
-   frame 0.
+   frame 0. Session A is the console-free shape of `successor_swap.rs`'s `session_a()`
+   (`crates/host-core/tests/successor_swap.rs:46-67`): the `parametric-eq-nine-track` fixture cut
+   to tracks `eq0` and `eq1` and their main routes, both session console sections and every
+   track's console and inserts cleared, input filters off. `browser_successor.rs` builds it
+   itself. The full fixture has a console EQ slot, whose state carries only after *Carry console
+   effect lanes across a plan swap* (#1279), so a successor of it restarts that state and the gate
+   would fail for a reason this slice does not own.
 2. **The successor's capture works.** After the swap in gate 1's single-capture case, arming the
    successor's capture and rendering one window returns a completed window for the target.
 3. **Concurrent, and the same bits.** The selected-meter boot entry forms no fused bank

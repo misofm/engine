@@ -2318,6 +2318,35 @@ impl ConstantFeed {
         }
         Ok(())
     }
+
+    /// Seeks the source to frame 0 under the next generation, as a host re-anchors a source that
+    /// fell behind the render clock (#1404). The next [`Self::fill`] submits from frame 0.
+    ///
+    /// The seek must be accepted. The source's command queue has one slot, which every rendered
+    /// block empties, and the feed seeks only inside `fill`. So the caller calls this after a
+    /// render, with no `fill` in between.
+    ///
+    /// # Safety
+    ///
+    /// `session` must be live and used by this thread alone for the call.
+    unsafe fn restart(&mut self, session: *mut Session) -> Result<(), String> {
+        let id = b"fixture-source";
+        self.generation += 1;
+        // SAFETY: As the caller guarantees.
+        let code = unsafe {
+            miso_engine_v1_source_seek(session, id.as_ptr(), id.len() as u64, self.generation, 0)
+        };
+        if code != RESULT_OK {
+            // SAFETY: As the caller guarantees.
+            let error = unsafe { last_error_c(session) };
+            return Err(format!(
+                "restart seek: {code} {}",
+                String::from_utf8_lossy(&error)
+            ));
+        }
+        self.fed = 0;
+        Ok(())
+    }
 }
 
 /// Feeds the source and renders one block on this thread; returns the block's planar PCM.
@@ -2651,6 +2680,13 @@ impl RaceControl<'_> {
 /// thread resumes. Without the pause the render thread drains the lanes faster than this thread
 /// fills them, and no retry would ever run.
 ///
+/// The render thread never waits for PCM, so the source falls behind the render clock by however
+/// many blocks the render thread outran this thread's feed. The source stays on the render clock:
+/// it renders `+0.0` for a block it has no PCM for, and it discards PCM that arrives for a block
+/// already rendered. So the settle restarts the source after its first block
+/// ([`ConstantFeed::restart`]), and the final block plays fed PCM however far behind the race left
+/// the source (#1404).
+///
 /// The render thread never asserts: it records a refused block and stops. Every wait on this
 /// thread has a deadline, and `StopOnDrop` stops the render thread however this thread leaves the
 /// scope, so a failure on either side ends the run instead of hanging the join (#1251, lesson d).
@@ -2769,9 +2805,17 @@ fn race_live_edits(run: usize) -> RaceCounts {
         "run {run}: every render call allocated and freed nothing"
     );
 
-    // Settle on this thread: a candidate still pending swaps in at the first block; then render
-    // the plan's latency plus one quantum (every pan ramp is at most one quantum), and the next
-    // block is the final one.
+    // Settle on this thread. A candidate still pending swaps in at the first block, which also
+    // takes any seek the feed queued for a restarted source.
+    //
+    // Then the source restarts at frame 0. The first block after the restart drops every block
+    // the old generation still queues: the ring holds no more than one render pops. It plays the
+    // restarted feed's first quantum only if the ring had room for it. Every later block plays
+    // fed PCM, because each block is fed before it renders.
+    //
+    // Then render the plan's latency plus one quantum (every pan ramp is at most one quantum),
+    // and the next block is the final one. `settle` is at least two, so the final block is at
+    // least the third after the restart.
     let mut block = rendered.load(Ordering::Acquire);
     counts.blocks = block - first_race_block;
     // SAFETY: The race is over; this thread alone uses both handles from here on.
@@ -2779,6 +2823,8 @@ fn race_live_edits(run: usize) -> RaceCounts {
         fed_render_c(session, plan, &mut feed, block);
         block += 1;
         drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+        feed.restart(session)
+            .unwrap_or_else(|failure| panic!("run {run}: {failure}"));
         let latency = resources_c(plan).latency_samples;
         let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
         for _ in 0..settle {

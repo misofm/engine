@@ -52,7 +52,7 @@ never meets an unrenderable target.
 - **Decision 14's probe.** An automation on `band-1-enabled` added to
   `fixtures/session/v1/observation-frame-shape.json` (an EQ insert, `:140-160`) passed all five
   stages of `cargo run -p session-validator -- validate`
-  (`docs/rulings/live-update-versus-rebuild-2026-10-04.md:252-269`).
+  (`docs/rulings/live-update-versus-rebuild-2026-10-04.md:263-272`).
 - **The SDK.** `resolveAutomationTarget` (`sdk/src/core/session.ts:1405-1477`) refuses a builtin
   row that is not `blockTarget` (`:1419-1424`). For an effect row it checks only the declared
   `(parameter, channel)` (`:1460-1475`). The row carries `automatable` and `automationRateName`
@@ -155,7 +155,7 @@ never meets an unrenderable target.
 6. **Commands:**
    - `cargo test --locked -p effect-compiler --features test-support`,
      `cargo test --locked -p session-validator`,
-     `cargo test --locked -p host-core --features test-support --test live_delta`,
+     `cargo test --locked -p host-core --features test-support,control-provider --test live_delta`,
      `cargo test --locked -p capi`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,
@@ -187,3 +187,116 @@ never meets an unrenderable target.
 - None. It lands before any issue that renders stored automation (the first is filed from the
   design of *Research: render stored session automation in the engine, identically on every
   platform*, #1058).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+**Delivered.**
+- D1-D3: `effect_compiler::effect_automation_diagnostics` in `crates/effect-compiler/src/prepare.rs`
+  (exported through `lib.rs`'s `pub use prepare::*`). `prepare_with_console_eligibility` appends
+  its diagnostics before the final `is_empty()` check.
+- D4: `LiveRebuild::AutomationTarget` in `crates/host-core/src/live_delta.rs`. It is the new step 4
+  of the classifier's numbered rules (the per-track step is now 5). It runs only when
+  `current.automation != next.automation`, and it shares the call's lazily loaded registry through
+  a new `load_registry` helper, which `parameter_records` uses too.
+- D5: `resolveAutomationTarget` (`sdk/src/core/session.ts`) refuses an effect row that is not
+  `automatable` or whose `automationRateName` is not `"block"`. It fails at `${path}.parameter`
+  with the builtin branch's wording, and the check runs before the channel and declaration checks.
+- D6: `effect.automation.rate` is appended to `docs/EFFECT_CONTRACT_V1.md`'s frozen list, with
+  one paragraph giving its path. The decision 14 F1 line is untouched, since root did not ask.
+
+**Deviations, all inside the authorized paths.**
+- The test double in `crates/effect-compiler/tests/native_session.rs` (`parametric-eq`) declared
+  `AutomationRate::Sample`, and `canonical.json` automates it. Under D1, four existing tests then
+  failed with an extra `effect.automation.rate`. The double now declares `Block`.
+  `retired_multiband_parameter_id_two_rejects_before_native_publication` retargets the
+  `canonical.json` insert to the multiband, whose parameter 1 (crossover) is not block-rate, so it
+  now clears `model.automation`. This follows the precedent of the console-eligibility test in the
+  same file. The spec's hazard holds only on the launch registry; it did not anticipate the test
+  registry, which carries an unprefixed `parametric-eq`.
+- Gate 1's "channel `left`": the observation fixture declares `band-1-enabled` as `both`. The test
+  redeclares it on `left` (it is per-lane) and automates `left`. Gate 2 keeps decision 14's probe
+  verbatim (`both`).
+- Gate 3 uses `eq_session` (the nine-track EQ fixture). The refused target is the `eq0` console
+  EQ's `band-1-enabled`, and the accepted one is its `band-1-gain` on `left`, as declared. A second
+  `Rig` that never receives the transaction is the bit-identity reference.
+- Gate 6's `cargo test -p host-core --features test-support --test live_delta` runs **0 tests**:
+  the file is `#![cfg(feature = "control-provider")]`. The real run is
+  `--features test-support,control-provider` (the workspace leg enables it through unification).
+
+**Mutation runs.** Each mutation was applied, run and reverted with `git checkout`.
+- M1, no call in preparation: gate 1 is red (3 tests) and gate 2 is red.
+- M2, refuse only `!automatable`: `an_automatable_sample_rate_target_is_refused` is red.
+- M2b, refuse only `rate == None`: the same test is red.
+- M3, resolve a console target among the strip's inserts:
+  `console_and_submix_automations_on_a_prepared_parameter_are_refused` is red.
+- M4, walk only the tracks: the same test is red at the submix assertion.
+- M5, report an automation whose effect the registry lacks:
+  `unavailable_factory_and_resource_caps_return_no_partial_session` is red (the hazard assertion),
+  and so is session-validator's existing `fixtures_distinguish_schema_examples_from_launch_effects`.
+- M10, run the check twice: gate 1 is red (3 tests).
+- M6, no classifier step 4: gate 4 is red, and gate 3 is red (the edit commits live).
+- M7, step 4 routes every automation change: gate 4 is red at the block-rate assertion, as are the
+  existing `model_only_edits_are_live_with_no_records` and gate 3 (no live commit).
+- M8, no SDK check, and M8b, refuse only `"sample"`: gate 5 ("refused by name") is red.
+- M9, drop `!automatable ||` and keep only `rate != Block`: **green, an equivalent mutant.**
+  `NativeEffectRegistry::new` validates descriptors, and `parameter_automation_smoothing_valid`
+  makes `Block`/`Sample` imply `automatable`. No registered descriptor can tell the two apart.
+
+**Gate 6 results.**
+- `cargo test --locked -p effect-compiler --features test-support`: 38 passed, 0 failed.
+- `cargo test --locked -p session-validator`: 19 passed, 0 failed.
+- `cargo test --locked -p host-core --features test-support --test live_delta`: 0 tests (see
+  above).
+  - With `,control-provider`: 31 passed, 0 failed.
+- `cargo test --locked -p capi`: 84 passed, 0 failed.
+- Workspace debug leg (`test-debug-a`, exact command): 1432 passed, 0 failed, 10 ignored.
+  - Also run: `test-debug-b`'s DSP and conformance leg (the conformance double declares `Sample`),
+    812 passed, 0 failed.
+- The web artifact build succeeded, and so did these SDK checks:
+  - `check-sdk-generated`: current.
+  - `check-sdk-types`: passed, after a one-time `npm ci` in `sdk/`.
+  - `check-sdk-headless`: 361 passed, 0 failed.
+  - `sdk-package.sh check`: 18 passed, gate passed.
+- Policy scripts: `check-effect-runtime-policy`, `check-host-core-policy` and
+  `check-workspace-policy` all report ok.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt --all -- --check`: clean.
+
+**Gate 7.** No fixture, generated file or digest changed. `fixtures_distinguish_schema_examples_from_launch_effects`
+still passes every launch fixture through stage 5. Only `canonical.json` stops there, with its one
+`effect.native.unavailable`.
+
+### Attempt 1 folds (implementer, 2026-10-05)
+
+The verdict was PASS. These changes fold its MINOR and NIT findings. All of them are in
+`crates/effect-compiler/tests/native_session.rs` and this spec.
+
+- **MINOR 1.** New test `automation_skips_targets_already_refused_for_another_reason`, on
+  `canonical.json`'s automated `eq` insert:
+  - with a `cid` identity, preparation returns exactly
+    `[effect.third_party.unavailable_at_launch @ $.tracks[id=vocal].effects[id=eq]]`;
+  - retargeted to the multiband, with its retired parameter 2 declared and automated, it returns
+    exactly `[effect.parameter.unknown @ $.tracks[id=vocal].effects[id=eq]]`.
+- **MINOR 2.** The hazard block in `unavailable_factory_and_resource_caps_return_no_partial_session`
+  is deleted. M5 above is corrected: session-validator's fixture test was red too.
+- **NIT 1.** The console case now also refuses the `post_insert` `limiter` slot's `lookahead`
+  (parameter 3, rate `None`).
+- **NIT 2.** Gate 6's `live_delta` command now has `--features test-support,control-provider`.
+
+**Mutation runs.** Each was applied to `prepare.rs`, run and reverted with `git checkout`.
+- M11, report the rate refusal for a third-party identity: the new test is red at its `cid` case.
+- M12, report it for a parameter ID the descriptor lacks: the new test is red at its
+  unknown-parameter case.
+- M3b, a console target takes the first slot: `console_and_submix_automations_on_a_prepared_parameter_are_refused`
+  is red at the `lookahead` assertion.
+- M5, again after the deletion: session-validator's `fixtures_distinguish_schema_examples_from_launch_effects`
+  is red. `unavailable_factory_and_resource_caps_return_no_partial_session` is red too, but only
+  because its existing empty-registry assertion reads `diagnostics[0]`, and the extra
+  `$.automation...` diagnostic sorts first.
+
+**Commands.** `cargo test --locked -p effect-compiler --features test-support`,
+`cargo clippy --locked -p effect-compiler --all-targets --all-features -- -D warnings`,
+`cargo fmt --all -- --check` and `bash scripts/check-workspace-policy.sh`: 39 passed and
+0 failed; clippy, fmt and the workspace policy are clean.

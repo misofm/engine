@@ -39,4 +39,4 @@ active lane per bank), split that row into a qualification issue first.
 
 ## Dependencies
 
-- *Measure the console strip against its baseline* (S4, #1099).
+- None open. *Measure the console strip against its baseline* (S4, #1099) is closed as completed.

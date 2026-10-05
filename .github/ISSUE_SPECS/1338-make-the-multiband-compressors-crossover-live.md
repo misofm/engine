@@ -189,7 +189,10 @@ No checked-in render digest moves: no fixture ramps the crossover, and the flat 
   (#1366).
 - *Multiband compressor: a ramp's cut moves a lane's bits in a bank* (#1069): gate 3 and the full
   differential need its per-lane segment rule.
-- *Carry live-controlled effect lanes across a plan swap* (#1280) and *Carry per-node effect
-  instances across a plan swap* (#1282): stream A's carry slices for banked and per-node multiband
-  lanes; this slice changes the payload they move, so it lands after them and its gate 4 covers the
-  new words.
+- *Carry live-controlled effect lanes across a plan swap* (#1280): stream A's carry slice for
+  banked multiband lanes.
+- *Carry per-node effect instances across a plan swap* (#1282): stream A's carry slice for
+  per-node multiband lanes.
+
+This slice changes the payload #1280 and #1282 move, so it lands after them and its gate 4 covers
+the new words.

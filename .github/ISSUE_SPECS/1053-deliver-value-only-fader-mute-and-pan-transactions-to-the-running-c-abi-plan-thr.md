@@ -100,10 +100,10 @@ effect (D15-17, #1314).
   Render applies every value it reads, because D1 refused every value the setter would refuse. **So
   no ack ever precedes a drop.** A superseded value is counted, never silently lost (D15-2).
 - **D7. Which plan gets the values.** The newest epoch: the pending candidate if there is one, else
-  the current provider (`replacement_base_report`, `control.rs:760`, uses the same rule). While a
-  warm successor catches up, a live edit is held in the control plane and written to the successor
-  at publication (D15-17; *Hold live edits during a catch-up and apply them at the adoption
-  sample*, #1356).
+  the current provider (`replacement_base_report`, `control.rs:760`, uses the same rule). A pending
+  warm successor (D15-8, round-5 amendment) is an ordinary pending candidate: the edit goes to
+  its cells and applies at its adoption (D15-17). Its retargets were written once, at preparation
+  (*Carry fader, mute and pan ramps across a plan swap*, #1277 D5), so nothing overwrites the edit.
 - **D8. The live admission.** The prospective compiled model lives beside the current one until the
   commit, and a value edit can grow the canonical JSON. The edit is admitted only if the graph bytes,
   the capi retained bytes and the largest named allocation stay within their maxima, counted as
@@ -114,8 +114,9 @@ effect (D15-17, #1314).
   changes neither the model nor the plan. #1269 P1.4 uses this invariant as its carry base.
 - **D10. What the host sees (D15-3, D15-17).** This reverses the 2026-10-04 "no new field" answer.
   - The response carries `{revision, path}`, where path is exactly one of `live`, `model_only` or
-    `rebuild` (#1313). Fallbacks (pre-roll, transition) and supersession are known only after
-    submit, so the watermark's outcome flags report them (#1314).
+    `rebuild` (#1313). A fallback (the transition, when a warm successor cannot adopt) and
+    supersession are known only after submit, so the watermark's outcome flags report them
+    (#1314).
   - The applied-revision watermark `(revision, first sample in effect, outcome flags)` is a C ABI
     query and a browser status field. It never uses the reliable event lane (#1314).
   - The host calls `miso_engine_v1_service` from a non-realtime thread; every other control call
@@ -136,8 +137,11 @@ effect (D15-17, #1314).
   LPF ride it as prepared filter targets that host-core's `InputFilterPreparer` designs on the
   control thread. The tail is bounded (D15-4): the joint SVF flush (#1328) and the engine-wide tail
   contract (#1329) give every strip a finite tail and an exact-rest bound, and #1261 and #1262
-  report it, never `Infinite`. `delay_samples` stays a rebuild (decision 14, rule 1), with a D15-9
-  transition.
+  report it, never `Infinite`. A live HPF or LPF retarget moves only through the filter's designs
+  and their mixtures (*Retarget a live input filter only through its designs and their mixtures*,
+  #1407), and every trim, fader and matrix ramp stays inside its endpoints (*Keep every trim, fader
+  and matrix ramp inside its endpoints*, #1408); both are prerequisites of #1261 and #1262.
+  `delay_samples` stays a rebuild (decision 14, rule 1), with a D15-9 transition.
 - **D14. Effects** (#1263-#1266, closed). A parameter is live when its descriptor's
   `automation_rate` is `Block`. Bypass rides the latency-preserving shunt, except for the delay and
   the multiband compressor, whose session bypass is prepared until *Give the delay a live bypass
@@ -198,7 +202,9 @@ Prerequisites owned elsewhere: *Extract the C ABI control plane into a portable 
 call* (#1309, stream B); *Session `controlSmoothing`: configurable ramp lengths for live mute,
 fader and pan changes* (#1054, stream E, after #1055); *Flush the SVF jointly so builtin and EQ
 filters reach exact rest* (#1328) and *State a bounded tail and an exact-rest bound for every node*
-(#1329), stream G; *Research: render stored session automation in the engine, identically on every
+(#1329), stream G; *Retarget a live input filter only through its designs and their mixtures*
+(#1407) and *Keep every trim, fader and matrix ramp inside its endpoints* (#1408), stream G;
+*Research: render stored session automation in the engine, identically on every
 platform* (#1058, stream K); the carry slices #1277 and #1280 (#1269, stream A). The browser
 halves are under #1269: *Admit browser live edits in the Worker through the committed model*
 (#1382), *Publish the applied-revision watermark in the browser status* (#1349), and *Make a send's

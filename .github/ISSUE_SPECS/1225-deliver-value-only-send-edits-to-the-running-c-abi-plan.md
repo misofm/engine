@@ -106,8 +106,8 @@ when the same transaction makes a structural edit that swaps the plan.
     The longest wins so that no changed field moves faster than its own row asks.
   - With no edit ramp, a row resolves to its session length from `LiveRamps::for_session(next)`,
     the send lengths that *Session `controlSmoothing`: configurable ramp lengths for live mute,
-    fader and pan changes* (#1054) defines. An explicit 0 is a step (rule R9), and a step occurs
-    only when the governing row resolves to 0.
+    fader and pan changes* (#1054) defines. An explicit 0 is a step (D15-1's recorded
+    resolution), and a step occurs only when the governing row resolves to 0.
 - **D5. Route lanes on the C ABI.** `C_ABI_LIVE_LANES` sets `routes: true`. The C ABI epoch keeps
   the `route_controls` handles beside its strip and effect producers, addressed by route ID. The
   lanes are the latest-target cells of *Hold live values in latest-target cells on both hosts*
@@ -135,11 +135,9 @@ when the same transaction makes a structural edit that swaps the plan.
     successor's model, the successor entry points that return `HostLiveControlHandles` write that
     route's record into the successor's route cell before they return. The write is infallible
     (#1347), so it adds no failure to preparation.
-  - At the swap block the carry copies the predecessor's ramp, then the successor drains its own
+  - At the swap block the carry moves the predecessor's ramp, then the successor drains its own
     cell. The record applies on the swap block's first sample, exactly where a live edit written to
     the predecessor just before the swap would apply.
-  - Copy mode writes nothing at preparation. The records are kept on the prepared successor and
-    written at publication, as #1277 D5 does for strips.
 
 ## Deliverables
 
@@ -159,7 +157,7 @@ when the same transaction makes a structural edit that swaps the plan.
 - `crates/control-plane/src/control.rs`: `commit_live` and its helpers (moved there by #1309).
 - `crates/control-plane/src/compile.rs`: `capi_resources` (moved there by #1309).
 - `C_ABI_LIVE_LANES` (D5), where it lives when this slice merges (*Prepare through an
-  adapter-supplied preparer in the control plane crate*, #1400 D3): in
+  adapter-supplied preparer in the control-plane crate*, #1400 D3): in
   `crates/control-plane/src/compile.rs` if this slice merges before #1400 (which then moves the
   edited constant to capi unchanged); beside `CapiPreparer` in `crates/capi/src/` if it merges
   after. Root rebases whichever lands second; neither order changes a value.
@@ -190,8 +188,8 @@ when the same transaction makes a structural edit that swaps the plan.
   in bulk.
 - **Delayed sends.** A send with a compensation delay keeps running while muted (`DESIGN.md` P4).
   Its settled comparison point therefore adds that delay.
-- **Carry.** #1284 owns copying the route lanes' ramp state across a plan swap. D8 only writes
-  the retarget record into the successor's cell; it does not change the copy.
+- **Carry.** #1284 owns carrying the route lanes' ramp state across a plan swap. D8 only writes
+  the retarget record into the successor's cell; it does not change that carry.
 - **Addressing.** Strips are found by ID through `strips`, and routes by ID through
   `route_controls`. Never index into the model's vectors.
 
@@ -258,8 +256,7 @@ when the same transaction makes a structural edit that swaps the plan.
    - Run 1 is the structural swap with D8's retarget.
    - Run 2 writes the same record to A just before the swap and prepares B from a base that holds
      it.
-   - Every block of the two runs is bit-identical, in move mode and in copy mode (copy after
-     block 6, then the adoption).
+   - Every block of the two runs is bit-identical.
    - `cargo test --locked -p graph -p host-core --features graph/test-support,host-core/test-support`
 
 ## Test value

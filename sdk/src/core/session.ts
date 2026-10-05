@@ -1418,7 +1418,9 @@ interface ResolvedAutomationTarget {
  * pair must already appear in that instance's params, which is exactly what the engine checks. A
  * `builtins` target has no instance, so it is resolved against the builtin parameter ABI and
  * restricted to the rows that declare `blockTarget`. The prepared input-filter rows are live
- * through the paired command path; `delay_samples` remains prepared-only and is refused here.
+ * through the paired command path; `delay_samples` remains prepared-only and is refused here. An
+ * effect target is likewise restricted to the rows that are `automatable` at the `block` rate, as
+ * the engine's preparation is (`effect.automation.rate`).
  */
 function resolveAutomationTarget(
   target: AutomationTarget,
@@ -1479,6 +1481,14 @@ function resolveAutomationTarget(
   }
   const descriptor = effectDescriptor(effectId, `${path}.slotId`);
   const row = effectParameter(descriptor, target.parameter, `${path}.parameter`);
+  // Decision 15 E1 (#1335 D5): the engine refuses an effect target that is not automatable or not
+  // block-rate (`effect.automation.rate`), so the builder refuses it too, as it does a builtin.
+  if (!row.automatable || row.automationRateName !== "block") {
+    fail(
+      `${path}.parameter`,
+      `${row.name} is prepared-only, so a span addressed at it could only ever be inert`,
+    );
+  }
   if (row.channelPolicyName === "shared" && target.channel !== "both") {
     fail(`${path}.channel`, `${row.name} is a shared parameter and is addressed as 'both'`);
   }

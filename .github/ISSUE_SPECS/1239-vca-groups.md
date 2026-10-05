@@ -148,9 +148,9 @@ and their GitHub issues are closed and verified.
 
 ## Dependencies
 
-- *Let a send follow its source strip's mute live in the browser* (#1224; batch K3 of #1196
-  delivered).
-- *Record the submix, send and VCA ruling* (#1197; the VCA ruling).
+- None open among the earlier ones: *Let a send follow its source strip's mute live in the
+  browser* (#1224; batch K3 of #1196) and *Record the submix, send and VCA ruling* (#1197; the VCA
+  ruling) are closed as completed.
 - #1247 also: *Deliver value-only fader, mute and pan transactions to the running C ABI plan through
   the live console lanes* (#1053), *Deliver value-only send edits to the running C ABI plan*
   (#1225), *Let C ABI sends follow their source strip's mute live* (#1226).

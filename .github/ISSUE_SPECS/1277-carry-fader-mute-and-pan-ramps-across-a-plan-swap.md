@@ -7,9 +7,9 @@ Slice 8 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors veri
 ## Product outcome
 
 A strip keeps its exact fader, mute and pan or matrix state through a plan swap, including a ramp
-that is in flight at the swap block. This holds in move mode and in copy mode (*Carry plan state by
-copy as well as by move*, #1322). A producer who pulls a fader while a track is added hears the ramp
-go on, not jump. A live record admitted before the swap is applied, not lost. A structural
+that is in flight at the swap block. The carry moves the state at the swap block (move mode), and
+the predecessor never renders again. A producer who pulls a fader while a track is added hears the
+ramp go on, not jump. A live record admitted before the swap is applied, not lost. A structural
 transaction that also changes a carried strip's fader, mute or pan sounds exactly like "live edit,
 then structural edit" (D15-7, carry then retarget).
 
@@ -70,14 +70,12 @@ then structural edit" (D15-7, carry then retarget).
   - A cell write cannot fail. There is no room check, and preparation gains no failure and never
     returns BACKPRESSURE for a retarget (D15-2). No ack precedes a drop: every fallible step of
     preparation runs before the writes, and the transaction commits after them.
-  - Copy mode writes nothing at preparation. The records are kept on the prepared successor.
-    *Hold live edits during a catch-up and apply them at the adoption sample* (#1356) D3 writes
-    them exactly once, at the successor's first publication that may adopt it, and skips every
-    cell a live edit committed after the successor's commit has already written: that value is
-    newer than the prepared model these records come from. The successor's cells stay undrained
-    until adoption (*Catch up a returned successor and adopt it exactly at a scheduled sample*,
-    #1355 D4), so they apply at `S` (D15-17). This slice keeps the records and exposes them; it
-    writes nothing in copy mode.
+  - The retargets are written exactly once, at preparation, before the transaction commits. Nothing
+    writes them again: not at publication, not at adoption. A live edit committed after the
+    successor's commit writes the newest candidate's cells later (#1053 D7), so a retarget, which
+    comes from the older prepared model, can never overwrite it. This holds for every successor,
+    including a warm successor that adopts at a later block `S` (#1287): its cells stay dirty until
+    its first block and apply there.
 - **D6. Restart set.** `PreparedHost` gains `restarted_strips()`: the strip IDs present in both
   plans for which at least one owner failed D4 for a prepared difference, sorted. Added strips are
   not in it. *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it,
@@ -88,17 +86,14 @@ then structural edit" (D15-7, carry then retarget).
   state: the matrix stage's settled flags and the ramp's `remaining`.
 - **D8. Move mode.** Call #1312's `apply_pending` on each predecessor stage once, so every value
   written to its cells is applied, then export the lane and import it into the successor lane.
-- **D9. Copy mode (#1322 D2, D7).** The same `apply_pending`-then-export, into the successor's
-  preallocated lane. `apply_pending` applies the cells at the boundary the predecessor's next block
-  would apply them, so none of the predecessor's bits move. The section adds its bytes to `carry_program_copy_bytes`.
-- **D10. Fused and split forms.** A lane may move between the split and the fused form only if a
+- **D9. Fused and split forms.** A lane may move between the split and the fused form only if a
   host prepares both kinds for one session. No host does. So a cross-form pair does not carry: it
   starts at rest, and the join records it in the restart set.
 
 ## Deliverables
 
-1. D7 in `crates/builtins`. D8-D9 in `crates/builtins-compiler` and `crates/graph` (the program
-   section, both modes). The inventory rows, the join (D2-D4), D5 and D6 in `crates/host-core`.
+1. D7 in `crates/builtins`. D8 in `crates/builtins-compiler` and `crates/graph` (the program
+   section). The inventory rows, the join (D2-D4), D5 and D6 in `crates/host-core`.
 2. Gap-free tests in `crates/host-core/tests/successor_swap.rs`.
 
 ## Authorized paths
@@ -140,11 +135,8 @@ then structural edit" (D15-7, carry then retarget).
 5. **Prepared change restarts.** B adds a VCA with a +3 dB offset over X. X's stage starts at rest
    at the new effective value, and `restarted_strips()` is exactly `[X]`. #1247 rewrites this gate
    when VCA changes become live.
-6. **Copy mode.** Gate 2's swap is replaced by a copy after block 6 followed at once by the
-   adoption (#1322 gate 2's shape). Every block equals the move run. A keeps rendering after the
-   copy and equals its uncopied twin.
-7. **Realtime.** The swap block and the copy call each make zero allocations and frees.
-8. Commands:
+6. **Realtime.** The swap block makes zero allocations and frees.
+7. Commands:
    - `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core --features builtins-compiler/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `cargo test --locked -p console-workload`
@@ -163,12 +155,9 @@ then structural edit" (D15-7, carry then retarget).
   keeps the old gain too. Each turns it red.
 - Gate 5: a rule that treats a VCA change as live carries X at the old gain. A restart set that
   lists added or unchanged strips fails the exact list. Either turns it red.
-- Gate 6: a copy that skips `apply_pending`, or imports into the wrong lane, turns it red. An
-  `apply_pending` that moves the predecessor's bits fails the twin.
 
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312): the cells D5 writes and the
-  `apply_pending` D8 and D9 call.
-- *Carry plan state by copy as well as by move* (#1322).
+  `apply_pending` D8 calls.
 - #1253 and #1276 are on `main`.

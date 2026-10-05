@@ -20,7 +20,7 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
 - Reserved publication: `reserve_replacement` (`:265`) takes a publication slot and a retirement
   credit; `PlanReplacementReservation::commit` (`:304`) is infallible. The unreserved `publish`
   (`:235`) and its `legacy_outstanding` counter remain for tests only
-  (`crates/engine/src/realtime/mod.rs:309-315`, `:437-470`, `:585`;
+  (`crates/engine/src/realtime/mod.rs:310-316`, `:437-471`, `:585`;
   `crates/source/src/lib.rs:3751`); with them comes the render-side deferral
   `SwapOutcome::DeferredRetirementFull` (`plan_exchange.rs:49-56`, `:384-409`).
 - The only production caller is capi's structural path (`crates/capi/src/runtime/control.rs:962`;
@@ -93,8 +93,8 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
 
 ## Non-goals
 
-- The revision word per cell (#1314). Supersession itself (#1310). Scheduled or exact adoption and
-  the return path (#1311).
+- The revision word per cell (#1314). Supersession itself (#1310). Scheduled and primed adoption
+  (#1311).
 
 ## Hazards
 

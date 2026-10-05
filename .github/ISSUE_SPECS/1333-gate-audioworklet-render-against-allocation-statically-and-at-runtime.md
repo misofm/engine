@@ -78,6 +78,11 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
     `_track_response_*_ptr`/`_capacity`/`_bytes`, `_spectrum_*_ptr`/`_capacity`/`_bytes`).
 
   #1332 makes the set the worklet's whole post-boot export set; the mechanism does not change.
+  The window spans everything `miso_engine_web_v1_render` does in a block, so later render work is
+  counted with no new wiring: a plan swap (#1381), and a warm successor's readiness check and
+  raw-frame prime (*Adopt a warm successor with a raw-frame prime at the first ready block*,
+  #1355). The worklet runs no catch-up, copy or pre-roll (D15-8 (round-5 amendment)). #1361's
+  browser gate reads this counter across a prime adoption.
 - D3. **Reading it.** New export `miso_engine_web_v1_render_allocation_count() -> u32` returns
   `RENDER_ALLOCATIONS`. It is added to every frozen export list above and the generated SDK copies
   are regenerated. The worklet answers a new port message (in `receive`, never in `process()`)

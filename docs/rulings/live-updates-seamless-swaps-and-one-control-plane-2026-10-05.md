@@ -160,33 +160,129 @@ when a dependency forces the order, and then sequence the correct solution.
 **D15-8. Latency.**
 - **Decrease:** floors (#1285). Floors and the accumulated read-ahead reset at a discontinuity the
   host declares (a stop, or a seek of every source) (#1323).
-- **Growth: a warm successor (off-thread catch-up).**
-  1. The successor is prepared with floors at the predecessor plus `P`.
-  2. At block B, render copies state into it (copy-mode carry: bounded memcpy and allocation-free
-     payload calls) and returns it through a capacity-1 queue.
-  3. The control thread (C ABI: in bounded `miso_engine_v1_service` slices, D15-17; browser: the
-     Worker) renders it forward with the FP environment pinned. It reads sources through a
-     read-only peek cursor, whose position gates the ring's release.
-  4. Once it leads render by `P`, it publishes "adopt exactly at S, else return". At S, render
-     adopts by pointer swap and moves the consumers with their read index at `S + P`.
-  5. Live edits during the window are held and apply at S. A structural edit during the window
-     supersedes the catch-up.
-  6. `ΣP` is bounded by ring headroom (`P_max`).
-- **Fallbacks, each counted and reported:** render-thread pre-roll bounded by `k_max`, then the
-  transition: the D15-9 duck-swap of the strips whose arrival grows. They apply on a deadline
-  counted in render samples, or on a non-isolated browser page. (The agreed plan also listed "a host
-  that renders nothing"; D15-17 removes it, see below.)
+- **Growth: a primed warm successor (prime adoption; round-5 amendment, below).** The successor's
+  nodes split into carried nodes (C), the nodes of the strips it restarts (R: #1324 D1's
+  `restarted_strips()`) and added nodes (N).
+  1. Submit prepares the successor with floors at `a(n) + P` on carried nodes only; restarted nodes
+     keep #1285's floors `a(n)`, added nodes have none. `Δ` is the largest arrival growth over the
+     carried nodes, and `P = q·⌈Δ/q⌉`. Its source-read offset is the predecessor's plus `P` (#1396).
+  2. Preparation checks alignment: every carried node arrives at exactly `a(n) + P`. If one is
+     late, preparation takes the first late carried node in schedule order and walks back from
+     its late inputs through restarted and added nodes, along every edge kind (route, added
+     route, sidechain; PDC takes its maximum over sidechain edges too). It restarts whole every
+     carried strip that holds that path at its lead (a route counts as its source strip), and
+     no other strip (#1324 D2). The walk always reaches a carried node, since the two compiles
+     differ only in the carried nodes' floors; reaching none is an invariant error. `Δ` is
+     recomputed and the check repeats (#1354 D2 step 6). Preparation returns
+     `WarmUnavailable::Misaligned` only when every predecessor strip that reaches the output is
+     restarted whole, and the edit takes the transition, which gives the same audio. The walk is
+     exact but not minimal: in the round-7 review's model about 5% of random sessions duck 1-4
+     more strips than the smallest exact set, recorded as known behaviour (#1354 D2 step 6). So
+     a latent insert on a bus restarts the bus's carried feeders, a kick that keys a bass
+     compressor restarts the kick when the bass gains a limiter, and every other path, the
+     output included, stays exact. If the restarts leave `Δ = 0`, the edit is an ordinary
+     rebuild that duck-swaps those strips.
+  3. Submit publishes the candidate as `Primed { not_before, lead_blocks }` (#1311).
+  4. Render checks readiness (C4 below) on the **active** plan's consumers before it claims the
+     candidate. Once ready, it claims and adopts in move mode in the same block, and fills the
+     claim lines from the predecessor's pending frames and a raw-frame prime of the next
+     `P/q` blocks of each carried source (`prime_block_at`, #1320). Nothing is rendered ahead, and
+     no state is copied.
+  5. A live edit committed while the candidate is pending is an ordinary pending-candidate edit: it
+     goes to the newest candidate's cells and applies at adoption (#1053 D7). A structural edit
+     supersedes the candidate by compare-and-swap (#1310).
+  6. `ΣP` is bounded by `P_MAX`, and the prime by `PRIME_BYTES_MAX` (#1286).
+- **Fallback, counted and reported:** the transition only, the D15-9 duck-swap of every strip whose
+  content timing moves (#1397 D2's `grown_strips`: a strip with a node whose arrival grows, or with
+  an outgoing route, send or output path whose compensation line changes length, unedited strips
+  included), closed under #1324 D1's sidechain rule over the joined strips. That set is computed
+  from the ordinary compile before the carry join and passed to preparation as
+  `SuccessorBase::forced_restart`, so each of its strips is restarted before the fader and armed
+  (#1324 D2-D3) and joins #1324's restarted strips. `S` is counted with #1324 D4's `C` (each
+  sidechain line from a ducked strip's `post_fader` or `post_pan` tap included), and the edit is
+  counted `TRANSITION_FALLBACK`. It applies when preparation returns
+  `WarmUnavailable`, or when readiness is still unmet `prime_deadline_samples` of render after
+  `not_before` (counted in render samples: one stall tolerance plus `P_MAX` plus one quantum,
+  #1358 D1). There is no render-thread pre-roll. While render waits for readiness, the
+  predecessor keeps playing exactly. A host that never queues `P + q` frames ahead gets the
+  transition, because any exact mechanism needs those future frames.
 - **No permanent latency reserve.**
 - *Recorded resolution:* "a host that renders nothing" is not a fallback trigger. D15-17 counts the
   deadline in render samples, so a paused host's edit stays pending and never falls back; D15-17
-  governs. A catch-up abandoned at a host-declared stop completes its revision as `exact`, because a
-  declared stop owes no continuity.
+  governs. *Superseded by the round-5 amendment:* "A catch-up abandoned at a host-declared stop
+  completes its revision as `exact`". Now a pending `Primed` candidate at a declared stop is
+  superseded by a plain rebuild through #1310 (#1323 D2); its revision completes `exact` or
+  `superseded`, because a declared stop owes no continuity.
+- *Recorded amendment (round 5): prime adoption.* Root, under the owner's delegation, replaces the
+  off-thread catch-up of steps 2-5 of the earlier text (in git history at `6b8bc7c96`: render
+  copied state into the successor at a block B and returned it; the control thread rendered it
+  forward to lead render by `P`; render adopted it exactly at S) with prime adoption.
+  - *Lemma.* Predecessor A has source-read offset `O`, recorded floored arrivals `a(n)` (#1285 D2)
+    and claim lines of length `λ`; successor W has floors `a(n) + P` on C, `a(n)` on R, none on N,
+    and offset `O + P`. Conditions, each exact or the edit takes the transition:
+    1. C1, alignment: `a'(n) = a(n) + P` for every carried node, checked at preparation.
+    2. C2, isolation: every edge from R or N into C carries exact `+0.0` from S until its fade
+       fires (fader and post-fader paths, ducked routes, armed fades). A sidechain edge has no gain
+       lane, so the tap decides, by #1324 D1's rule: a sidechain from an R strip's `post_input`,
+       `insert_send`, `insert_return` or `pre_fader` tap makes the consuming strip join R
+       (repeated until none joins). A track's `input` tap (raw source) and a `post_fader` or
+       `post_pan` tap (exact `+0.0` from the duck's end to the fire) keep the consumer in C. A
+       restarted submix's `input` tap (the sum of its incoming routes) keeps it in C if every line
+       into that submix's `Input` stage comes from a restarted or added strip (exact `+0.0` from
+       the duck's end to the fire, with `S` counting the sidechain line and the longest line into
+       the stage, #1324 D4, for every duck-swap), and otherwise only if that stage arrives at
+       exactly `a(n) + P`, checked with C1 (with `P = 0` for a rebuild that grows nothing, #1354
+       D2 step 4); otherwise the lines into that stage and out of it change length and the
+       consuming strip joins R.
+    3. C3, bounds: `ΣP + P ≤ P_MAX` and prime bytes `≤ PRIME_BYTES_MAX`.
+    4. C4, readiness, checked by render on the active plan before it claims: S is at or after
+       `not_before`; every source W carries has its next `P/q + 1` blocks queued and playable; no
+       command is queued and no held seek is anchored below `S + O + P + q` (#1320 D2: the window
+       `[S + O, S + O + P + q)` and an anchor in `(S + O − q, S + O)`, which applies late at
+       `S + O`).
+
+    Then:
+    1. L1, edges: a C-to-C edge keeps its length, so its line moves unchanged.
+    2. L2, claim lines: a W line of length `λ'` is filled with the last `λ'` samples of A's pending
+       frames followed by the prime, the next `P/q` consumer blocks on A's own schedule. A grown
+       line (`λ' = λ + P`, on C) then emits exactly what A's line would; a restarted line takes the
+       shifted fill; an added line has zeros only at its head.
+    3. L3, an Input-tap line from R into C grows by `P` and is filled with A's line pending, A's
+       claim pending and the prime, which yields A's content.
+    4. L4, induction: under C1-C4, for every carried node and every render sample from S up to the
+       first fade that fires upstream of it, W's state and input equal A continued without a swap.
+       State moves by move-mode carry; inputs are equal by L1-L3 and C2; banking moves no bit.
+
+    Against an uninterrupted render of the new graph, carried nodes that no restarted or added
+    node feeds are equal. Downstream of a restarted or added node no mechanism can equal it,
+    because the new chain has no history; there the contract is D15-9's fade-in and duck-swap,
+    whose references (#1288, #1324) prime adoption meets exactly.
+  - *Evidence.* The round-4 verifier's finding M6: with B1 fixed, a carried node in the successor
+    processes at each render sample exactly what the predecessor's node processes, so the
+    catch-up re-derives state that move-mode carry gives directly. A round-5 analysis (Opus 5.5,
+    extra-high effort) confirmed it with a standalone model of prime adoption (not engine code),
+    bit-exact over 60-80 blocks for #1397 gate 1's shape plus an Input-tap sidechain from the
+    restarted track into a carried compressor, and for growth, then an ordinary rebuild, then a
+    second growth. Three mutants diverge exactly at S: a zeros-first grown claim line, claim lines
+    not carried, and a sidechain line filled with zeros (the third only in the sidechain case).
+    The model is `docs/handoffs/decision-15-2026-10-05/m6/model.py` and `mutants.py`
+    (`python3 model.py`; `python3 mutants.py`); it is design evidence, not a gate.
+  - *Why it replaces the catch-up.* The catch-up computes nothing for a carried node that the
+    predecessor does not. Where it differs it is worse: its zeros-first claim-line fill leaves a
+    detector hole in a carried effect sidechained from a restarted strip's Input tap, so the
+    effect's state jumps at S; and restarted or added chains warm for `S − B` samples, a length
+    that depends on wall time, is not reproducible and does not match #1324's reference (a fresh
+    plan from S). Prime adoption removes the off-thread executor, copy-mode carry, the peek pool,
+    the return queue, held edits, catch-up supersession and render-thread pre-roll. Ring headroom is
+    `P_MAX` plus one quantum, with no deadline term.
 - *Rationale:* "history fill" is impossible, because the needed samples are future processed
-  samples. A reserve is a permanent cost. Render-thread pre-roll is a 5x-9x spike in one callback.
-  The catch-up is exact for every path, the edited one included, and render pays one bounded copy
-  (round 1, C2; round 2).
-- *Issues:* #1285, #1323, #1322, #1362 (stream A); #1287 and its slices #1320, #1321, #1353-#1361,
-  #1396, #1397 (stream C); #1311 (stream B).
+  samples, and the host already queues them as raw source frames. A reserve is a permanent cost.
+  Render-thread pre-roll is a 5x-9x spike in one callback. Prime adoption is exact on every
+  carried path, and render pays one bounded raw-frame fill (round 1, C2; round 2; round 5). An
+  edited or restarted strip takes its D15-9 transition, which no mechanism can avoid.
+- *Issues:* #1285, #1323 (stream A); #1287 and its slices #1320, #1354, #1355, #1358, #1360, #1361,
+  #1396, #1397, #1402, #1403, #1406 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
+  planned): #1321, #1322, #1353, #1356, #1357, #1359, #1362.
 
 **D15-9. Transitions for strips whose state cannot continue.**
 - **Added strip:** fades in from its first played block, over the session mute ramp (#1288).
@@ -196,7 +292,9 @@ when a dependency forces the order, and then sequence the correct solution.
 - **Removed strip:** two-phase: a ramp, then a scheduled swap. Its source retires with phase 2, not
   with the commit (#1325).
 - **Mechanisms:**
-  - a scheduled swap ("adopt no earlier than S") and exact-sample adoption (#1311);
+  - a scheduled swap ("adopt no earlier than S", #1311). *Superseded by the D15-8 round-5
+    amendment:* exact-sample adoption ("adopt exactly at S, else return") and #1311's return queue;
+    a warm successor is published `Primed` and adopts at the first ready block;
   - **CAS candidate supersession:** the control thread replaces an unadopted candidate. If render
     has already taken it, the newer candidate's carry program is re-targeted to the adopted plan. A
     held `seek_at` moves with the producer (#1310).
@@ -227,12 +325,14 @@ when a dependency forces the order, and then sequence the correct solution.
 
 **D15-10. Browser: one control plane, off the audio thread.**
 - Wasm threads with one shared `WebAssembly.Memory`. A Worker instance runs the control plane
-  (model, classifier, preparation, catch-up, retirement, disposal). The AudioWorklet instance only
+  (model, classifier, preparation, the warm-successor deadline check, retirement, disposal). The AudioWorklet instance only
   renders and swaps, and **never allocates or frees after boot**.
 - Cross-origin isolation is required for structural edits; the first-party app already sends
   COOP/COEP.
 - A non-isolated page keeps the same API and the same artifact (a local shared memory, single
-  instance). Its structural edit runs the blocking rebuild, reported and counted.
+  instance). Its structural edit runs the blocking rebuild, reported and counted. Warm latency
+  growth needs no isolation: render adopts a `Primed` successor (D15-8) on either page, so both
+  report it `exact` (#1361).
 - *Recorded resolution (single mode):* with no Worker, the one instance runs the same control plane
   in the worklet's message handler, outside `process()`. Its control allocations are counted and
   reported; the render-locked allocation count stays exactly 0 in both modes. This is the one
@@ -283,6 +383,9 @@ when a dependency forces the order, and then sequence the correct solution.
 - The ABI-growth rule is written down: a feature bit per addition, `FEATURE_MASK` is never compared
   with `==`, and the bit does not protect directly linked hosts.
 - "Held" is reported apart from "underrun".
+- After a warm adoption the source-read clock leads the render clock by `ΣP` (#1396), and a held
+  `seek_at` anchored inside a prime window waits for the adoption, then applies exactly (D15-8
+  C4).
 - Tests and tooling: commit the verifier's probe P5 (a held seek across a swap); add the
   supersession case; set a `source.id.invalid` diagnostic; fix the #1293 D4 trap; add a debug
   assertion for off-grid lateness; make the untimed reads test-only; add one `seek_at` call to
@@ -330,49 +433,65 @@ automation mask and `AUTOMATION_ENQUEUE`.
 
   Preparation stays inside submit because it can fail (budgets, ceilings). Committing only after it
   succeeds keeps the acked-batch rule: no ack before a drop. Submit never waits for render, a swap
-  or a catch-up.
+  or a warm adoption.
 - **The response** carries `{revision, path}`, where path is `live`, `model_only` or `rebuild`.
   Every committed revision is *pending* until the watermark covers it.
 - **Completion is guaranteed and observed, never awaited.**
   - The watermark is `(revision, first sample in effect, outcome flags)`. The revision is the
     highest one that is in effect together with every revision before it.
   - The outcome flags are the OR over every revision the watermark advance covered: `exact`,
-    `preroll_fallback`, `transition_fallback`, `superseded`. Saturating counters per outcome back
-    them up.
+    `transition_fallback`, `superseded`. Saturating counters per outcome back them up. A failed
+    re-preparation for the transition is counted by `transition_reprepare_refusals`, surfaced in
+    the C ABI counter snapshot (#1351). (*Superseded by the D15-8 round-5 amendment:* the
+    `preroll_fallback` flag and `catch_up_reprepare_refusals`.)
 - **The engine owns no thread, so the host drives control work.**
-  - A new C ABI entry point, `miso_engine_v1_service`, does bounded work per call: catch-up
-    slices, the deadline check, publication, and reclaiming retired plans. It takes the session
+  - A new C ABI entry point, `miso_engine_v1_service`, does bounded work per call: the
+    warm-successor deadline check (with the transition's re-preparation when it fires), publication,
+    and reclaiming retired plans. It takes the session
     handle, because the engine handle owns no session state (`crates/capi/src/abi.rs:364-369`;
     #1348).
   - The host calls it from any non-realtime thread. Every other control call also services.
   - A pending edit progresses only while the host calls control functions, the same duty as
     draining events today.
   - The browser's Worker runs the same service loop continuously.
-- **Deadline and fallback.** The catch-up deadline is counted in render samples, so a paused host
-  never triggers a fallback; its edit stays pending until render resumes. When the deadline passes,
-  the next service call publishes the successor in fallback mode: render-thread pre-roll bounded by
-  `k_max`, else the transition. The outcome flag reports it.
+- **Deadline and fallback.** The warm-successor deadline (`prime_deadline_samples`, #1358 D1) is
+  counted in render samples from the candidate's `not_before`, so a paused host never triggers a
+  fallback; its edit stays pending until render resumes. When the deadline passes, the next control
+  call withdraws the `Primed` candidate (a `Taken` result means render adopted it exactly),
+  re-prepares with the withdrawn candidate as the donor and publishes the transition (#1358, #1397).
+  `transition_fallback` reports it. If that re-preparation is refused (a defect, counted), the
+  donor is republished as it was and the next call retries, so a candidate is never held outside
+  the mailbox.
 - **Edits submitted during a pending window:**
-  - **Live:** committed at once. If a rebuild candidate is pending but not catching up, the edit
-    goes to the newest candidate's cells and applies at adoption (#1053 D7). If a catch-up is
-    running, the edit is held in the control plane, because the successor already leads render in
-    graph time and no exact replay exists; it is written to the successor's cells at publication
-    and applies at S. Its revision completes with S. The hold is bounded by the deadline.
+  - **Live:** committed at once. If a rebuild candidate is pending, the edit goes to the newest
+    candidate's cells and applies at adoption (#1053 D7). A pending warm candidate is an ordinary
+    pending candidate (#1053 D7).
+    *Superseded by the D15-8 round-5 amendment:* the hold of live edits during a catch-up (written
+    to the successor's cells at publication, #1356).
   - **Model-only:** committed at once. Its revision completes when every earlier revision has.
-  - **Structural:** CAS supersession (D15-9). The displaced candidate's revision completes as
-    `superseded`, and its content is part of the newer committed model. The catch-up restarts from
-    a new B. Held live edits are already in the committed model the newer candidate is prepared
-    from.
+  - **Structural:** CAS supersession (D15-9, #1310, including its step that returns persisting
+    producers to the running plan). The displaced candidate's revision completes as `superseded`,
+    and its content is part of the newer committed model. A displaced `Primed` candidate is
+    superseded the same way; the newer candidate is prepared, warm or not, against the plan render
+    runs.
   - **Seeks:** anchored on the source-read clock (D15-12). A held `seek_at` moves with its
     producer.
-- **A host-declared stop** turns any pending catch-up into a plain rebuild with no continuity
-  constraint, applied at the next render.
+- **A host-declared stop** supersedes a pending `Primed` candidate by a plain rebuild with no
+  continuity constraint, through #1310, applied at the next render (#1323 D2). Its revision
+  completes `exact` or `superseded`.
 - *Rationale:* a blocking submit would be a deferred shortcut (round 1, risk 6). Every host thread
   would inherit a dependency on render progress, and a paused host would block. Completion through
   the watermark keeps ack-before-drop impossible: every committed revision completes as `exact`,
   with a counted fallback, or as `superseded` into a later revision, never as nothing.
-- *Issues:* #1313, #1314, #1348, #1349 (stream B); #1360 and #1361 (stream C); the Worker in #1332
-  and #1381 (stream H).
+- *Recorded resolution (round 4, M4):* the round-4 verifier found that this point and #1287 W5
+  still described the pre-N3 mechanism (retargets written before every publication, live edits
+  held and written at publication), which an implementer could follow back into N3 (a stale
+  retarget overwriting an acked live value). The D15-8 round-5 amendment resolves it: a warm
+  successor's retargets are written once, at preparation (#1277 D5, move mode), and a live edit
+  goes to the pending candidate's cells like any other (#1053 D7), so no later write can overwrite
+  it.
+- *Issues:* #1313, #1314, #1348, #1349 (stream B); #1403, #1360 and #1361 (stream C); the Worker
+  in #1332 and #1381 (stream H).
 
 ### Earlier open questions, answered
 
@@ -389,7 +508,8 @@ where it differs; the issue bodies are rewritten to match.
   - Q5 (#1306, windows by lane depth) — answered by D15-5.
 - **#1269 (seamless swap).**
   - Q1 value edits inside a structural transaction — D15-7: carry, then retarget.
-  - Q2 latency growth during playback — D15-8: the warm successor; no reserve.
+  - Q2 latency growth during playback — D15-8: a primed warm successor (round-5 amendment); no
+    reserve.
   - Q3 fade in an added strip — D15-9: yes, over the session mute ramp.
   - Q4 a browser rebuild that blocks the audio thread — D15-10: preparation runs in a Worker.
   - Q5 a removed strip stops at the swap block — D15-9: two-phase removal.
@@ -413,6 +533,10 @@ where it differs; the issue bodies are rewritten to match.
   2026-10-04 direction on #1269 ("I've never used a DAW where adding a track would cause an audio
   dropout."), and decision 13's Q1-Q5 answers are unchanged. Decision 15 extends rule 3 (D15-13 E4)
   and delivers rule C1 (D15-11); it reverses none of the owner's own words.
+- **Stream C's own earlier specs (round-5 amendment).** Seven slices of the off-thread catch-up
+  have no role under prime adoption (D15-8, "Recorded amendment (round 5)") and close as not
+  planned: #1321, #1322, #1353, #1356, #1357, #1359 and #1362 (listed under "Issues closed by this
+  decision"). A general move-mode rule that one of them held moves into the spec that uses it.
 - **Still open:** #1057's personal-mix owner question. It blocks nothing in this decision.
 
 ### Issues closed by this decision
@@ -421,6 +545,19 @@ where it differs; the issue bodies are rewritten to match.
   effect edits across a session replacement*: not planned (D15-11).
 - #1020 *Research: can the C ABI deliver live parameter changes through the browser's live-control
   lane?*: answered by #1053's delivered slices (#1255, #1257) and D15-11 (one portable control plane, #1309).
+- Closed as not planned by the D15-8 round-5 amendment (prime adoption has no off-thread render,
+  no copy-mode carry and no catch-up):
+  - #1321 *Render a successor plan off the render thread with a pinned floating-point environment*;
+  - #1322 *Carry plan state by copy as well as by move* (copy mode has no consumer);
+  - #1353 *Keep source transfer blocks in a shared pool, immutable from publication to release*;
+  - #1356 *Hold live edits during a catch-up and apply them at the adoption sample* (#1053 D7
+    applies);
+  - #1357 *Supersede a running catch-up by a structural edit* (#1310 applies, its step 5
+    included);
+  - #1359 *Turn a pending catch-up into a plain rebuild at a host-declared stop* (absorbed by
+    #1323 D2);
+  - #1362 *Copy a per-node effect's state into a same-layout instance in one pass* (copy mode
+    only).
 
 ### Defects found while writing the specs
 
@@ -431,6 +568,29 @@ Filed under the no-shortcuts principle (stream B), outside D15-1 to D15-17:
   (`crates/capi/src/runtime/control.rs:564`).
 - #1352 *Report each configured meter handle's own meter in the C ABI meter batch*: the batch reports
   the master output peak for every configured handle (`control.rs:552`).
+
+### Root decisions after S0
+
+Made by root under the owner's no-shortcuts delegation while stream G implemented D15-4. Each
+decision lives in its issue's GitHub body (the issue's own branch carries the spec file):
+
+- **#1328** *Flush the SVF jointly so builtin and EQ filters reach exact rest*, Amendment 1
+  (A1-A6): the V8 spill gate's select classifier is corrected, not weakened; the EQ's per-frame
+  output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
+  mono depth-2 pair's `ic1` spill is eliminated (A6 chose elimination, not A3's exception path:
+  each section's dry mask is kept in state); D6 (class B) is restated by change size.
+- **#1328 A4 corrected:** the SVF joint flush has a defined rest threshold. While every input
+  sample satisfies `|x| < L* = REST_EPS / (2 · max(a2, a3))`, a section stays at rest and outputs
+  only its direct term; the worst output change is about 5.0e-10 (−186 dBFS; `L*` ≤ −210.3 dBFS,
+  EQ low shelf 10 Hz +24 dB at 96 kHz). Accepted under D15-4(a) by root under the owner's
+  delegation of math decisions: it is below the f32 rounding error of any signal above about
+  −30 dBFS through the same section. Gating the flush on `x == 0` was rejected (spill risk, no
+  measurable gain). Details: #1328 Amendment 1 A7 and `dsp-research/filters.md`.
+- **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
+  the live filter retarget law, is *Retarget a live input filter only through its designs and their
+  mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its
+  endpoints* (#1408); the effect-parameter counterpart is *Keep every effect parameter ramp inside
+  its endpoints* (#1409). #1407 and #1408 are prerequisites of #1261 and #1262 (#1053 D13).
 
 ### Relation to earlier rulings
 
@@ -452,7 +612,7 @@ Filed under the no-shortcuts principle (stream B), outside D15-1 to D15-17:
 
 ### Verification
 
-Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it three times:
+Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it eight times:
 
 - **Round 1 (whole record, about 900 anchors): FAIL**, five blockers (an ack lost on the pre-roll
   fallback, a watermark that aliased under supersession, BACKPRESSURE for a live link value, an
@@ -463,11 +623,45 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
   successor the catch-up had rendered) and ten majors. All were folded in.
 - **Round 3 (focused on the round-2 fixes, about 270 anchors): FAIL**, every round-2 finding
   resolved, one new blocker (the render pre-roll could not read an added source) and ten majors,
-  nine of them on the warm successor and the browser carry. All were folded in without a fourth
-  verification.
+  nine of them on the warm successor and the browser carry. All were folded in.
+- **Round 4 (the round-3 fold, the stream C lemma and 15 random non-C specs): FAIL**, one blocker
+  B1 in the warm-successor lemma (lead floors on every surviving node broke the equality the proof
+  needed whenever a grown path started at a surviving source), six majors M1-M6 at stream C's seams
+  (claim lines without a carry owner, a candidate returned after render claimed it, a missing
+  supersession step, the pre-N3 text in #1287 W5 and D15-17, an unpassable #1280 gate, and M6:
+  the catch-up computes nothing the predecessor does not), and majors in non-C specs. All were
+  folded in.
+- **Round 5 design analysis (M6, not a verifier round):** an extra-high-effort analysis
+  confirmed M6 with a standalone model and three mutants. Root amended D15-8 to prime adoption
+  (D15-8, "Recorded amendment (round 5)"), which also resolves B1 (floors on carried nodes only,
+  with the alignment check), M1 (claim lines carry and fill by L2 and L3, #1402), M2 (no candidate
+  is returned), M3 (a warm candidate is superseded through #1310, its step 5 included), M4 (D15-17's
+  recorded resolution) and M5 (the copy-mode gate goes with copy mode), and retires seven stream C
+  slices.
+- **Round 5 (the prime-adoption fold): PASS-WITH-FIXES**, no blocker. It confirmed M6 and found six
+  majors: an `input`-tap sidechain from a restarted submix whose `Input` stage misses `a(n) + P`
+  (M1), a C1 iteration that sent a limiter on a bus to the whole-mix transition (M2), a ring
+  headroom baseline measured against a default that #1358 grows (M3), a control-plane warm path
+  with no owner or lifecycle (M4), four unpassable gates (M5) and an over-size #1355 (M6), plus
+  minors. All were folded in before merge.
+- **Round 6: PASS-WITH-FIXES**, no blocker. Five majors: a C1 iteration that restarted feeders
+  only through a held-late `Input` stage and had no rule at the output (M1; now the walk of step
+  2), an unpassable `g < P` gate (M2), a warm growth that also removes a strip published without
+  the ramp-out (M3; now routed on #1324 D4's duck set), a refused deadline re-preparation with no
+  holder (M4; now republished, #1358 D3), and a default ring that missed quanta other than 128 and
+  pins outside its slice (M5; `p_max_samples(fs, q)`, split to #1406), plus minors. All were folded
+  in before merge.
+- **Round 7: PASS-WITH-FIXES**, no blocker. Three majors: the walk's feeder recursion (M1), the
+  #1406 pins (M2) and the `S` term for sidechain lines (M3). All were folded in.
+- **Round 8: PASS-WITH-FIXES**, no blocker. One major: the transition's grown strips fell outside
+  #1324 D4's `C` and #1397 D2's duck set for sidechain lines (M1). It was folded in, with the
+  minors.
+- **Round 9: PASS-WITH-FIXES**, no blocker. One major: the transition computed its grown strips
+  after preparation, so a grown strip that preparation carried was never restarted or armed (M1;
+  now `SuccessorBase::forced_restart`, #1397 D2 step 1). It was folded in, with the minors.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
-passed every round. Each round found new defects only in stream C (the warm successor) and its
-seams with streams B, D and H. Stream C's coordinator therefore runs a fresh design verification of
-#1287, #1320, #1321, #1353-#1361, #1396 and #1397 before the first implementation slice
-(`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).
+passed every round. Every blocker from round 2 on was in stream C (the warm successor) or its
+seams with streams B, D and H. Stream C is now #1287, #1320, #1354, #1355, #1358, #1360, #1361,
+#1396, #1397, #1402, #1403 and #1406. Its coordinator still runs one fresh design verification of those specs
+before the first implementation slice (`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).

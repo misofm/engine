@@ -9,20 +9,21 @@ Slice 12 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 An effect that renders per node in both plans, and whose prepared values are unchanged, keeps its
 exact state through a plan swap. Examples are a delay's echoes and feedback tail, a multiband
 compressor, and any insert the planner leaves unbanked in both plans. Its live state and unread live
-values come along, so no acknowledged edit is lost. There are two modes:
-- **Move mode** (an ordinary swap) costs a few words per effect, whatever the state size. A delay
-  holds two seconds per channel.
-- **Copy mode** (the warm successor of D15-8) copies the state once into the successor's
-  preallocated instance while the predecessor keeps rendering. There is no payload scratch and no
-  second pass.
+values come along, so no acknowledged edit is lost. The carry moves the instance by pointer at the
+swap block, and the predecessor never renders again. It costs a few words per effect, whatever the
+state size; a delay holds two seconds per channel. There is no payload scratch and no copy. A
+latency-growth swap (*Grow latency during playback by adopting a primed warm successor*, #1287)
+adopts in move mode at its first ready block too, so it moves the instance the same way.
 
 ## Context
 
 - A per-node effect is `NodeKind::Effect(GraphPreparedEffect)` or
   `NodeKind::LiveControlEffect(Box<LiveControlEffect>)` (`crates/graph/src/runtime.rs:1136`,
   `:1143`).
-  - `GraphPreparedEffect` (`crates/graph/src/lib.rs:881-890`) carries `id: EffectNodeId`,
-    `metadata`, `processor: Box<dyn PreparedNativeEffect>` and `native_id`.
+  - `GraphPreparedEffect` (`crates/graph/src/lib.rs:881-891`) carries `id: EffectNodeId`,
+    `metadata`, `processor: Box<dyn PreparedNativeEffect>` (`:884`), `response_snapshot_declared`
+    and `native_id`. The state lives behind the `processor` box, so swapping two boxes moves the
+    whole state by pointer.
   - `LiveControlEffect` (`runtime.rs:1184-1197`) adds its `EffectControlLane`, a span window, a
     `BypassShunt` and optional observation. Its records are applied inside `execute_op` (`:3510`).
 - The delay never banks (`NEVER_BANKED_EFFECTS`, `crates/effect-compiler/src/prepare.rs:244`), and
@@ -50,21 +51,16 @@ values come along, so no acknowledged edit is lost. There are two modes:
   (`core::mem::swap`). For a `LiveControlEffect`, also swap the `BypassShunt` (same frames and
   latency by D1). The successor's lane takes the predecessor's control state with
   `EffectControlLane::carry_from` (#1280 D2), so unread live values render in the successor. No
-  payload, no copy, no allocation.
-- **D3. Copy mode.** `PreparedNativeEffect` gains a required method, `copy_state_from(&mut self,
-  source: &dyn PreparedNativeEffect) -> Result<(), StatePayloadError>`, delivered by #1362. It
-  copies every state word from a same-type, same-layout instance into this one's existing
-  storage in one pass, and refuses anything else without writing. This slice calls it for every
-  carried per-node owner. It copies the shunt's dry, line and cursor words, and the lane's control
-  state through `carry_from` (#1280 D2, D6), which never consumes a predecessor value. The bytes
-  go into `carry_program_copy_bytes`.
-- **D4. Mixed wrappers.** If one plan has live controls on the owner and the other does not (no
+  payload, no copy, no allocation. The predecessor's plan then holds the successor's at-rest box,
+  and it retires and is reclaimed off the render thread with that plan, as today. No
+  `PreparedNativeEffect` method is added: the move needs none.
+- **D3. Mixed wrappers.** If one plan has live controls on the owner and the other does not (no
   host does this today), the owner does not carry, and the join records it in the restart set.
 
 ## Deliverables
 
-1. D1-D4 in `crates/graph` (the location table and both modes), and the inventory rows and the join
-   in `crates/host-core`.
+1. D1-D3 in `crates/graph` (the location table and the program section), and the inventory rows
+   and the join in `crates/host-core`.
 2. Gap-free tests in `crates/host-core/tests/successor_swap.rs`.
 3. A test-support counter of bytes the carry passes through the payload scratch.
 
@@ -94,13 +90,9 @@ values come along, so no acknowledged edit is lost. There are two modes:
 3. **A prepared bypass change restarts.** A committed bypass change on the delay: the join has no
    pair for it, its successor instance starts at rest, and `restarted_strips()` is exactly that
    strip.
-4. **Copy mode.** Gate 1 with a copy after block 6, followed at once by the adoption. Every block
-   equals the move run, and A, rendered on for 8 blocks after the copy, equals its uncopied twin.
-5. **Cost shape.** At 96 kHz, in move mode, the payload-bytes counter reads zero for the delay's
-   owner (it moved). In copy mode it also reads zero (`copy_state_from` uses no scratch), and the
-   delay's state size is counted in `carry_program_copy_bytes`. Both the swap block and the copy
-   call make zero allocations and frees.
-6. Commands:
+4. **Cost shape.** At 96 kHz, the payload-bytes counter reads zero for the delay's owner (it
+   moved). The swap block makes zero allocations and frees.
+5. Commands:
    - `cargo test --locked -p graph -p host-core --features graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
@@ -114,13 +106,9 @@ values come along, so no acknowledged edit is lost. There are two modes:
   sees it.
 - Gate 3: a rule that ignores the prepared bypass moves an unbypassed delay into a plan whose
   committed bypass is on. It turns red.
-- Gate 4: a copy that swaps the boxes (right for move mode) leaves the still-rendering predecessor
-  with the successor's at-rest instance. Its twin turns red.
-- Gate 5: a carry that copies a delay through the payload scratch (correct bits, about 1.5 MiB
+- Gate 4: a carry that copies a delay through the payload scratch (correct bits, about 1.5 MiB
   copied twice on the render thread) turns it red.
 
 ## Dependencies
 
 - *Carry an insert lane that moves between a bank and a per-node instance* (#1281).
-- *Copy a per-node effect's state into a same-layout instance in one pass* (#1362): D3's
-  `copy_state_from`. Gates 4 and 5 need it.

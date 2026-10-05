@@ -107,7 +107,7 @@ code on `main`:
   to linked combination) and `w_avg` (maximum to average), as `LinearRamp`s over the edit's own
   ramp (the `Link` row of *Carry an optional per-edit ramp length on live session edits*, #1394
   D3, read through `LiveRamps::resolve`, #1394 D5), or, when the edit has none, the session
-  default `LiveRamps::link_samples` (the `fader_ms` key, #1054 D3 and D4; D15-1; root ruling R9).
+  default `LiveRamps::link_samples` (the `fader_ms` key, #1054 D3 and D4; decision 15, D15-1 recorded resolution).
   While a ramp runs, the detector is `combined = max + w_avg * (avg - max)` and
   `d = own + w_link * (combined - own)`, with each effect's operation order frozen in its slice. At rest the weights are exactly 0 or 1, and the
   kernel takes today's `select` form from the derived masks, so a settled lane renders today's bits.

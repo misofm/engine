@@ -8,17 +8,17 @@ Code anchors verified on `main` at `6fb211594`.
 The engine owns no thread, so the host drives control work. A C host calls
 `miso_engine_v1_service(session)` from its control thread whenever it likes (for example once per
 UI frame), and every other session control call performs the same work first. Each call does a
-bounded amount: it reclaims retired plans, leaves any candidate render returned whole in its
-cell for the code that published it, brings provider epochs up to render, refreshes the session counters, and stages render telemetry.
-Later work (catch-up slices and the catch-up deadline check) joins the same step, so a host that
-services keeps every pending edit progressing without ever waiting on render. The browser Worker
+bounded amount: it reclaims retired plans, brings provider epochs up to render, refreshes the
+session counters, and stages render telemetry. It never takes or drops a pending candidate. The
+warm successor's deadline check joins the same step later (D7), so a host that services keeps
+every pending edit progressing without ever waiting on render. The browser Worker
 calls the same engine-side step.
 
 ## Context
 
 - Today the step exists in pieces. `synchronize_plan_epochs`
-  (`crates/capi/src/runtime/control.rs:783-826`) promotes a pending provider when render has
-  adopted its plan and reclaims retired plans (`retirer.try_reclaim`, loop at `:791-805`;
+  (`crates/capi/src/runtime/control.rs:783-824`) promotes a pending provider when render has
+  adopted its plan and reclaims retired plans (`retirer.try_reclaim`, loop at `:789-805`;
   `PlanRetirer::try_reclaim`, `crates/engine/src/realtime/plan_exchange.rs:512`).
   `collect_render_activity` (`control.rs:522`) stages the render peak and counter telemetry.
   `command` then refreshes the provider's telemetry counters from the controller's queues
@@ -27,10 +27,10 @@ calls the same engine-side step.
   latest-target cells on both hosts* (#1312, D8: `live_values_superseded`) and *Report each
   configured counter's own value in the C ABI counter snapshot* (#1351, D3: the snapshot reads
   the refreshed values).
-- *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311) adds a
-  `Returned` cell state: an `ExactlyAt` candidate render saw too late stays whole in its mailbox
-  cell until the code that published it takes it with `withdraw()` (`Withdrawal::Returned`, its
-  D3 and D6). There is no return queue, and nothing drains returns in the background.
+- *Adopt a successor plan no earlier than a scheduled sample* (#1311) lets a candidate wait in its
+  mailbox cell, `Full` and withdrawable, until a due sample (`NoEarlierThan`) or until render finds
+  it ready (`Primed`). Render adopts in the same step as it claims, so nothing is ever handed back
+  to control.
 - Which control calls run them: `command` runs both (`:848-849`); `dequeue_event` runs both
   (`:1397-1402`); `submit` (`:1506`), `seek` (`:1520`) and `seek_at` (`:1537`) run only the
   epoch synchronization. A host that renders but makes no control call never reclaims a retired
@@ -46,7 +46,7 @@ calls the same engine-side step.
 ## Decisions frozen for this slice
 
 - **D1. One step.** `SessionState::service(&mut self) -> Result<(), CommandError>` in the
-  control-plane crate runs, in order: `synchronize_plan_epochs` (it takes no returned
+  control-plane crate runs, in order: `synchronize_plan_epochs` (it never takes a pending
   candidate, D7); the counter refresh (D8); `collect_render_activity`; the counter refresh again,
   so a record that staging coalesced or dropped is counted in the same call.
   It is `pub`: it is the engine-side hook the browser Worker calls
@@ -56,7 +56,9 @@ calls the same engine-side step.
   their individual calls. No call services twice.
 - **D3. Bounded.** One call reclaims at most the retirement queue's capacity of plans and stages
   at most one render observation; it never loops on render progress and never waits. Its cost does
-  not depend on how long the host went without calling.
+  not depend on how long the host went without calling. The deadline check (D7) keeps this bound:
+  it compares two sample counts, and only a passed deadline adds one re-preparation of the
+  pending candidate's session.
 - **D4. C ABI.** `uint32_t miso_engine_v1_service(miso_engine_v1_session *session)`. Thread:
   session, serialized with the other session calls (added to the list at `miso_engine_v1.h:18-22`).
   Results: `OK`; a dead or wrong handle as every session call; an internal epoch failure as
@@ -66,19 +68,23 @@ calls the same engine-side step.
   number.
 - **D5. Duty text** in the header and `C_ABI_V1_QUALIFICATION.md`: a pending edit progresses only
   while the host makes control calls, the same duty as draining events. A host that renders but
-  never services keeps retired plans allocated, and (with #1356) holds live edits made during a
-  catch-up until its next control call; the watermark (#1314) shows it. Call `service` at least
+  never services keeps retired plans allocated, and a warm successor that misses its deadline
+  falls back only at its next control call; the watermark (#1314) shows it. Call `service` at least
   once per render-buffer period while edits are pending.
 - **D6. Acked-batch question: can an ack ever precede a drop? No.** Service commits nothing and
   acknowledges nothing, and adds no queue. It discards nothing a host was acked for: retired plans
-  are already displaced, and a returned candidate is kept (D7).
-- **D7. A returned candidate is never dropped.** Neither `synchronize_plan_epochs` nor any other
-  part of this step takes a `Returned` candidate: it stays in its cell with its plan, epoch,
-  revision word and retirement credit (#1311 D3-D4). Only the code that published it takes it,
-  with `withdraw()` (`Withdrawal::Returned`, #1311 D6): the catch-up (#1355), which the catch-up
-  slices run inside this step (#1360), and the structural path, which treats `Returned` like
-  `Withdrawn` (#1310 D1). Its revision stays committed, and the watermark (#1314) reports it when
-  render adopts it or its replacement.
+  are already displaced, and a pending candidate is kept (D7).
+- **D7. Pending candidates and the deadline check.** Neither `synchronize_plan_epochs` nor any other
+  part of this step takes a pending candidate: it stays in its cell with its plan, epoch, revision
+  word and retirement credit until render adopts it or the control plane withdraws it (#1311 D2,
+  D6). The only service work on a pending candidate is the warm successor's deadline check: when a
+  `Primed` candidate is still pending `prime_deadline_samples` of render after its `not_before`
+  (#1358 D1), the step withdraws it and publishes the transition instead (`Taken` means it was
+  adopted exactly). The check and the fallback belong to *Fall back to the transition when a warm
+  successor is not ready by its deadline* (#1358) and *Check the warm-successor deadline in
+  miso_engine_v1_service and report its outcome* (#1360); they run inside this step, after
+  `synchronize_plan_epochs`. The revision stays committed, and the watermark (#1314) reports it when
+  render adopts the candidate or its replacement.
 - **D8. Counter refresh.** The refresh moves `command`'s `set_telemetry_counters` call
   (`control.rs:850-853`) into service, so every control call runs it. It sets every counter the
   provider serves from a source outside the provider: the controller's telemetry counters today,
@@ -87,7 +93,7 @@ calls the same engine-side step.
 
 ## Deliverables
 
-1. D1-D3, D7 and D8 in the control path; D4 export, constant and bit; `abi_smoke.c` and `header_smoke.cpp`;
+1. D1-D3, D7's no-take rule and D8 in the control path; D4 export, constant and bit; `abi_smoke.c` and `header_smoke.cpp`;
    the frozen symbol list; D5 text.
 
 ## Authorized paths
@@ -100,9 +106,9 @@ calls the same engine-side step.
 
 ## Non-goals
 
-- Catch-up slices and the deadline check (*Fall back from a missed catch-up deadline: bounded
-  render-thread pre-roll, then the transition*, #1358; *Run the browser catch-up in the Worker's
-  service loop*, #1361). The browser Worker loop itself (#1381). A thread owned by the engine.
+- The warm successor's deadline check and fallback (#1358, #1360; the browser's is *Check the
+  warm-successor deadline in the browser Worker's service loop and report its outcome*, #1361).
+  The browser Worker loop itself (#1381). A thread owned by the engine.
 
 ## Objective gates
 
@@ -117,11 +123,12 @@ calls the same engine-side step.
    blocks, then call only `miso_engine_v1_source_submit_planar_f32` and then `COUNTERS_GET` for
    `TELEMETRY_DROPPED`: it reports the drops counted by the earlier submit's service step, equal to
    the controller's own count. *Red if the refresh stays in `command` only.*
-4. **A returned candidate survives service (control-plane test, `test-support`).** Publish an
-   `ExactlyAt(S)` candidate after render passed `S`, render one block (render marks it
-   `Returned`), call `service` 1,000 times with no render: the cell stays `Returned`,
-   `returned_count` is 1, and retirement credits balance. A `withdraw()` then yields
-   `Withdrawal::Returned { reason: Late }` with that candidate's plan and epoch.
+4. **A pending candidate survives service (control-plane test, `test-support`).** Publish a
+   rebuild, through a `test-support` publication hook, as `NoEarlierThan(S)` with `S` 64 blocks
+   ahead, render one block, then call `service`
+   1,000 times with no render: the candidate's cell stays `Full`, its provider stays pending, no
+   plan is disposed, and retirement credits balance. Render up to `S`: the candidate is adopted at
+   the block that starts at `S`, and the next `service` promotes its provider.
 5. **Bounded and idle-safe.** `service` on a session with nothing pending returns `OK` and changes
    no counter; 1,000 consecutive calls with no render change nothing.
 6. **ABI.** `abi_smoke.c` tests `MISO_ENGINE_V1_FEATURE_SERVICE` with `&` and calls
@@ -139,7 +146,9 @@ calls the same engine-side step.
 - Gate 2: red if a control call skips the telemetry half of the step, as `submit` does today.
 - Gate 3: red if a control call other than `command` leaves the provider's counters stale, which
   #1312 and #1351 would then report wrongly.
-- Gate 4: red if service disposes of a returned candidate (an acked revision's plan lost).
+- Gate 4: red if `synchronize_plan_epochs` treats an unadopted scheduled candidate as stale and
+  disposes of it or promotes its provider early (an acked revision's plan lost, or the control
+  plane addressing a plan render does not run).
 - Gate 5: red if the step does work that grows with idle time or mutates state with nothing pending.
 
 ## Dependencies
@@ -147,5 +156,5 @@ calls the same engine-side step.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the duty
   text's reference to the watermark.
-- *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311): the
-  `Returned` cell state that D7 and gate 4 rely on.
+- *Adopt a successor plan no earlier than a scheduled sample* (#1311): the scheduled candidate
+  that D7 and gate 4 rely on.
