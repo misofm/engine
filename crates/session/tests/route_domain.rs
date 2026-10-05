@@ -21,8 +21,11 @@ fn caps() -> CompileCaps {
     }
 }
 
+/// Writes one route value into a session model.
+type Setter = fn(&mut SessionModel, f32);
+
 /// The route fields under test: their schema path below `$.routes[0]`, and a setter.
-const FIELDS: [(&str, fn(&mut SessionModel, f32)); 5] = [
+const FIELDS: [(&str, Setter); 5] = [
     ("gain_db", |s, v| s.routes[0].gain_db = v),
     ("channel_matrix.ll", |s, v| {
         s.routes[0].channel_matrix.ll = v
