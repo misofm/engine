@@ -39,8 +39,9 @@ trailing `$`. Under this issue's rule those names fail, as a C allocator spelled
 `malloc_usable` should.
 
 **A wrong script name in #1234's non-goal.** #1234's spec says `check-web-audioworklet.sh` runs the
-analyser's self-test. The self-test runs from `scripts/test-web-audioworklet.sh:41`, which
-`.github/workflows/qualification.yml:349` runs. Coverage is intact. #1234 is closed, so its spec is
+analyser's self-test. The self-test runs from `scripts/test-web-audioworklet.sh:47`, which
+`.github/workflows/qualification.yml:356` runs (`:41` and `:349` at `0a1176b3b`; #1421 and #1429
+moved them). Coverage is intact. #1234 is closed, so its spec is
 not edited; this body records the correct wiring.
 
 ## Decisions
@@ -76,7 +77,7 @@ not edited; this body records the correct wiring.
 ## Non-goals
 
 - Any other callgraph rule, the trap allow-list or the kernel-shape gate.
-- CI wiring: `scripts/test-web-audioworklet.sh:41` already runs the self-test.
+- CI wiring: `scripts/test-web-audioworklet.sh:47` already runs the self-test.
 - `__rdl_realloc` (#1234 verdict): it is caught through its callees.
 - The duplicate `_ZN8dlmalloc4free17h0E` row (#1234 NIT 2).
 
@@ -190,3 +191,73 @@ self-test's runner (D3); `self_test()` (a1) carries D2's cases exactly.
   so the module is unchanged.
 - **Gate 5.** `bash scripts/test-web-audioworklet.sh`: exit 0. `bash scripts/check-workspace-policy.sh`:
   exit 0.
+
+### Follow-ups (stream J batch 2 follow-ups worker, Amendment 1 and the verdict's NITs)
+
+Changed only `scripts/check-web-audioworklet-callgraph.py` and this spec.
+
+- **A1.** `FORBIDDEN`'s C alternative is now `^(?!_R|_ZN).*(?:free|alloc|memalign|sbrk)`, still in
+  its own group, so the lookahead binds to it alone.
+- **A2.** `self_test()` (a1) adds the seven fail cases `posix_memalign`, `aligned_alloc`,
+  `memalign`, `sdallocx`, `rallocx`, `mi_zalloc` and `sn_rust_alloc`, and one more, `sbrk`. A2 lists
+  no case that contains `sbrk`, so without it the `sbrk` stem that A1 adds has no case that a
+  mutation dropping it turns red (measured: "drop `sbrk`" is green on A2's seven alone). The
+  worker added the row for that reason; it is an addition beyond A2's list, for the batch verifier
+  to accept or refuse.
+- **A3.** The named twin rebuilt at `b7da37f15` (code unchanged by this follow-up): shipped module
+  `46c8b035206b350470b41d7f20a4cd29341215e556511b8fb1f21bd71a610e79`, named twin
+  `57855cd540425758a327323a7c932bbe97336432c96f2243f1f17fbc82c09ee2` (the module moved since
+  attempt 1 because of the Rust slices committed after it, not this script). Over all 2741 defined
+  functions (`wasm-objdump -d` headers, every one named), A1 refuses 236, attempt 1's rule refuses
+  236 and `main`'s refuses 236; the three sets are equal. The 110 unmangled names are 108
+  `miso_engine_web_v1_*` exports, `memcmp` and `__multi3`; none contains `free`, `alloc`, `align`
+  or `sbrk`. The twin has no `_ZN` name.
+- **A4 and NIT-2.** The docstring says that `_ZN` is Itanium C++ mangling shared by Rust's legacy
+  scheme and C++ namespaced names, that the rule assumes the worklet links no C++, and that a C++
+  dependency needs the rule revisited. It no longer says that the other alternatives match every
+  Rust allocator symbol: `__rdl_alloc`, `__rdl_alloc_zeroed` and `__rdl_realloc` match none and
+  fail through their dlmalloc callees.
+- **#1421 NIT-2.** The Problem section and the non-goal cite `scripts/test-web-audioworklet.sh:47`
+  and `qualification.yml:356`.
+
+Mutations (each alone on a copy of the script, `--self-test`):
+
+| Mutation | exit | red cases |
+|---|---|---|
+| attempt 1's rule `...(?:free\|malloc\|calloc\|realloc)` (red on revert) | 1 | exactly the 8 entry-point rows (7 of A2 and `sbrk`) |
+| `main`'s `^(free\|malloc\|calloc\|realloc)$` | 1 | 8 prefixed, 8 entry-point, 4 `_count` |
+| drop the lookahead | 1 | 4 v0 accessors, legacy accessor |
+| drop `\|_ZN` | 1 | legacy accessor only |
+| drop `_R` | 1 | 4 v0 accessors only |
+| drop `.*` | 1 | bare malloc, calloc, realloc; 8 prefixed; 6 entry points (not `memalign`, `sbrk`); 3 `_count` (not `free_count`) |
+| drop `free` | 1 | bare free, dlfree, __libc_free, mi_free, tlsf_free, free_count |
+| drop `alloc` | 1 | bare malloc, calloc, realloc; mi_malloc_aligned, je_malloc, __libc_calloc, je_realloc; aligned_alloc, sdallocx, rallocx, mi_zalloc, sn_rust_alloc; 3 `_count` |
+| drop `memalign` | 1 | posix_memalign, memalign only |
+| drop `sbrk` | 1 | sbrk only |
+| ungroup the alternation | 1 | v0 accessors malloc, calloc, realloc |
+| end anchor `...sbrk)$` | 1 | mi_malloc_aligned, sdallocx, rallocx, 4 `_count` |
+| drop `\|__rust_realloc` | 1 | v0 `__rust_realloc` row only |
+| drop `\|dlmalloc` | 1 | (a), `_ZN8dlmalloc4free17h0E`, (b1), (b1b) |
+
+A2's re-check of every existing case under A1: every case keeps a catch. A1 folds `malloc`,
+`calloc` and `realloc` into `alloc`, so the bare malloc, calloc and realloc rows, the four prefixed
+rows that contain `alloc`, and the malloc, calloc and realloc `_count` rows no longer have a stem
+of their own: they share the "drop `alloc`" catch with the new `alloc` rows. None of these rows was
+the only catch of a mutation under attempt 1 either (each stem drop also reddened its prefixed and
+`_count` rows), and D2 requires them, so all stay. The unique catches are: the legacy accessor
+(drop `|_ZN`), the `memalign` pair (drop `memalign`), the `sbrk` row (drop `sbrk`) and the v0
+`__rust_realloc` row (drop `|__rust_realloc`).
+
+*Test value (new rows).* The seven A2 rows are red if the C alternative goes back to the four bare
+stems (attempt 1's rule), which admits `posix_memalign` or `sdallocx`; under that rule they and
+`sbrk` are the only red cases. The `sbrk` row is red if `sbrk` is dropped from A1's alternation,
+which nothing else catches.
+
+Gates:
+1. `python3 -B scripts/check-web-audioworklet-callgraph.py --self-test`: exit 0.
+2. and 3. The table above.
+4. `bash scripts/build-web-audioworklet.sh --named-twin N A`: exit 0 (digests under A3).
+   `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration A N/...named.wasm`:
+   exit 0. `python3 -B scripts/check-browser-expected-resources.py --artifacts A`: exit 0.
+5. `TMPDIR=<fresh> bash scripts/test-web-audioworklet.sh`: exit 0, nothing left in `TMPDIR`.
+   `bash scripts/check-workspace-policy.sh`: exit 0.
