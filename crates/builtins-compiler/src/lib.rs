@@ -866,7 +866,7 @@ pub struct TestOnlyScalarStateTrace {
     pub matrix_words: [[u32; 15]; SCALAR_STATE_TRACE_CAPACITY],
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TestOnlyInitialMatrixTrace {
     len: usize,
@@ -886,7 +886,7 @@ const EMPTY_SCALAR_STATE_TRACE: TestOnlyScalarStateTrace = TestOnlyScalarStateTr
     matrix_words: [[0; 15]; SCALAR_STATE_TRACE_CAPACITY],
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 const EMPTY_INITIAL_MATRIX_TRACE: TestOnlyInitialMatrixTrace = TestOnlyInitialMatrixTrace {
     len: 0,
     owners: [0; SCALAR_STATE_TRACE_CAPACITY],
@@ -901,7 +901,7 @@ thread_local! {
     static SCALAR_MATRIX_STATE_WITNESS: std::cell::Cell<[u32; 15]> = const { std::cell::Cell::new([0; 15]) };
     static SCALAR_STATE_TRACE: std::cell::Cell<TestOnlyScalarStateTrace> =
         const { std::cell::Cell::new(EMPTY_SCALAR_STATE_TRACE) };
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-support"))]
     static SCALAR_INITIAL_MATRIX_TRACE: std::cell::Cell<TestOnlyInitialMatrixTrace> =
         const { std::cell::Cell::new(EMPTY_INITIAL_MATRIX_TRACE) };
     static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
@@ -977,7 +977,7 @@ pub fn test_only_scalar_state_trace() -> TestOnlyScalarStateTrace {
     SCALAR_STATE_TRACE.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 fn record_initial_matrix_state(owner: u16, matrix: &MatrixBuiltins) {
     let words = builtins::test_support::scalar_matrix_words(matrix);
     SCALAR_INITIAL_MATRIX_TRACE.with(|value| {
@@ -1000,7 +1000,7 @@ fn record_initial_matrix_state(owner: u16, matrix: &MatrixBuiltins) {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 fn initial_matrix_state(owner: u16) -> Option<[u32; 15]> {
     SCALAR_INITIAL_MATRIX_TRACE.with(|value| {
         let trace = value.get();
@@ -2312,7 +2312,7 @@ impl PreparedBuiltinsSession {
             } = strip;
             #[cfg(any(test, feature = "test-support"))]
             let test_only_owner = scalar_owner_id(&graph_id);
-            #[cfg(test)]
+            #[cfg(all(test, feature = "test-support"))]
             if control.is_some() {
                 record_initial_matrix_state(test_only_owner, &matrix);
             }
@@ -6072,8 +6072,10 @@ mod tests {
         Alias,
         AliasObserved,
         Sidechain,
+        #[cfg(all(test, feature = "test-support"))]
         Nonadjacent,
         NonadjacentTrackA,
+        #[cfg(all(test, feature = "test-support"))]
         NonadjacentOutputConflict,
     }
 
@@ -6167,13 +6169,11 @@ mod tests {
         } else {
             output.clone()
         };
-        let output_track = if matches!(
-            variant,
-            BoundaryVariant::NonadjacentTrackA | BoundaryVariant::NonadjacentOutputConflict
-        ) {
-            n - 1
-        } else {
-            0
+        let output_track = match variant {
+            BoundaryVariant::NonadjacentTrackA => n - 1,
+            #[cfg(all(test, feature = "test-support"))]
+            BoundaryVariant::NonadjacentOutputConflict => n - 1,
+            _ => 0,
         };
         edges.push(GraphEdge {
             id: GraphEdgeId::TrackMain {
@@ -6938,12 +6938,12 @@ mod tests {
                 stage,
             };
             let mut schedule = Vec::new();
-            if matches!(
-                variant,
-                BoundaryVariant::Nonadjacent
-                    | BoundaryVariant::NonadjacentTrackA
-                    | BoundaryVariant::NonadjacentOutputConflict
-            ) {
+            if match variant {
+                BoundaryVariant::NonadjacentTrackA => true,
+                #[cfg(all(test, feature = "test-support"))]
+                BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
+                _ => false,
+            } {
                 for stage_kind in [
                     TrackStage::Input,
                     TrackStage::PostInputBuiltins,
@@ -6995,13 +6995,11 @@ mod tests {
             graph.dependency_levels = levels.clone();
         }
         if backend == Backend::Scalar && n >= 2 {
-            let selected_index = if matches!(
-                variant,
-                BoundaryVariant::NonadjacentTrackA | BoundaryVariant::NonadjacentOutputConflict
-            ) {
-                0
-            } else {
-                n - 1
+            let selected_index = match variant {
+                BoundaryVariant::NonadjacentTrackA => 0,
+                #[cfg(all(test, feature = "test-support"))]
+                BoundaryVariant::NonadjacentOutputConflict => 0,
+                _ => n - 1,
             };
             let fader = GraphNodeId::TrackStage {
                 track_id: StableGraphId::parse(&track_name(selected_index))
@@ -7018,12 +7016,12 @@ mod tests {
                 .iter()
                 .position(|node| node == &fader)
                 .expect("scheduled scalar fader");
-            if matches!(
-                variant,
-                BoundaryVariant::Nonadjacent
-                    | BoundaryVariant::NonadjacentTrackA
-                    | BoundaryVariant::NonadjacentOutputConflict
-            ) {
+            if match variant {
+                BoundaryVariant::NonadjacentTrackA => true,
+                #[cfg(all(test, feature = "test-support"))]
+                BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
+                _ => false,
+            } {
                 let other_index = if selected_index == 0 { n - 1 } else { 0 };
                 let other_fader = GraphNodeId::TrackStage {
                     track_id: StableGraphId::parse(&track_name(other_index))
