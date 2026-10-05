@@ -47,11 +47,15 @@ the stream-J `README.md` there, "Open for root/S0"). The gap predates #1237.
   (`crates/graph-compiler/tests/live_routes.rs`). No embedder depends on `graph`.
 - **D4. The guarantee is a compile-time one, and the test says so.** A `compile_fail` doctest on
   the newtype shows that `host_core::RouteControlRecord::new(..)` does not exist and that the
-  newtype cannot be built from graph's type by a tuple constructor. Pin the error code
-  (`compile_fail,E0599` for the missing associated function; `compile_fail,E0423` or `E0603` for the
-  private tuple constructor, whichever rustc reports), so the doctest cannot pass for another
-  reason. A second, plain doctest shows the intended path compiles, as
-  `crates/host-core/src/prepare.rs:514-523` does for `PreparedHost`.
+  newtype cannot be built from graph's type by a tuple constructor. Each `compile_fail` doctest
+  has a passing twin, by the rule of *Run doctests in CI* (#1422, D2 and Amendment 1): a plain
+  doctest identical except for exactly the one forbidden construct, reaching the same items by the
+  intended path (host-core's own builder), so a rename, a typo or an unrelated error in the shared
+  code turns the twin red. Stable rustdoc does not check `compile_fail,E....` codes (*The rustdoc
+  book*, "Unstable features", "Error numbers for compile-fail doctests"), so the fence stays
+  `compile_fail` and a comment beside it names the code rustc reports today (`E0599` for the
+  missing associated function; `E0423` or `E0603` for the private tuple constructor, whichever
+  rustc reports) as documentation only. No `RUSTC_BOOTSTRAP`.
 
 ## Authorized paths
 
@@ -86,7 +90,9 @@ the stream-J `README.md` there, "Open for root/S0"). The gap predates #1237.
    `cargo test --locked -p host-core --features control-provider,test-support --doc` passes, with
    D4's `compile_fail` doctests. Mutation (PR evidence): restore
    `pub use graph::RouteControlRecord` in place of the newtype; the missing-constructor doctest
-   turns red. Revert.
+   turns red. Revert. Per pair (PR evidence): rename an item in the shared part of both snippets,
+   and the twin turns red; delete the forbidden construct from the `compile_fail` snippet, and it
+   turns red. Revert each.
 2. **Every existing path still works.**
    - `cargo test --locked -p host-core --features control-provider,test-support`
    - `cargo test --locked -p host-web --features test-support`
