@@ -14,7 +14,7 @@ returns the same bytes, path included.
 This reverses #1053 Q3 ("not now"). D15-17 refines D15-3: the path is exactly one of these three
 values, all known at submit. Fallbacks (pre-roll, transition) and supersession are known only after
 submit, so they are reported by the watermark's outcome flags in *Publish an applied-revision
-watermark and complete edits asynchronously* (#1314). There is no `rebuild_with_transition` path.
+watermark and complete edits asynchronously* (#1314).
 
 ## Context
 
@@ -53,9 +53,12 @@ watermark and complete edits asynchronously* (#1314). There is no `rebuild_with_
   unallocated value, like every protocol enum. Rust: `pub enum EditPath { Live = 1, ModelOnly = 2,
   Rebuild = 3 }` in `crates/protocol`, exported beside `TransactionApplied`, field `edit_path`.
 - **D2. Classification (C ABI).** `rebuild` when `classify_live_delta` returns `Err(_)`. Otherwise
-  `model_only` when the delta has no strip and no effect entry, and `live` when it has at least one.
-  Add `LiveDelta::is_empty(&self) -> bool` (`strips` and `effects` both empty) in
-  `live_delta.rs` and use it; no second rule. A live delta committed while a rebuild candidate is
+  `model_only` when the delta holds no record of any kind, and `live` when it holds at least one.
+  Add `LiveDelta::is_empty(&self) -> bool` in `live_delta.rs` and use it; no second rule. Its body
+  destructures every field by name with no `..` (on `main`: `let LiveDelta { strips, effects } =
+  self; strips.is_empty() && effects.is_empty()`), so a slice that adds a field (for example
+  `routes`, *Deliver value-only send edits to the running C ABI plan*, #1225 D3) does not compile
+  until it classifies that field in `is_empty`. A live delta committed while a rebuild candidate is
   pending (its records go to the newest candidate, #1053 D7) is still `live`: no plan is prepared.
 - **D3. Path known before commit, written at commit.** `commit_prepared_structural` takes the path:
   `commit_prepared_structural(prepared, path: EditPath)`. Commit re-encodes the response into the
@@ -144,6 +147,9 @@ watermark and complete edits asynchronously* (#1314). There is no `rebuild_with_
   placeholder; the existing replay tests compare bytes of responses that had no path.
 - Gate 3: red if the decoder accepts an unallocated path value or treats field 2 as optional.
 - Gate 4: red if the protocol-only path reports `rebuild` or `live` for a controller with no plan.
+- A field added to `LiveDelta` without a term in `is_empty` (a send-only edit reported as
+  `model_only`) fails to compile; #1225's gate on a send-only edit's path is the behavioural
+  check.
 
 ## Dependencies
 

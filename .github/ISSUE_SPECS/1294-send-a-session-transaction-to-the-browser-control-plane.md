@@ -37,11 +37,13 @@ worklet only renders and swaps.
   Worker and worklet messages are internal and stay out of `shipped-host.d.ts` (its D7). *Swap and
   retire browser plans through the Worker's service loop* (#1381) puts the control plane in the
   Worker and runs the service step of *Add miso_engine_v1_service for bounded control work between
-  edits* (#1348) after every Worker message and on a one-quantum timer; in `single` mode the
-  worklet runs it after a block that adopted a successor (#1381 D6). #1381 rebinds the render-side
-  meter, observation and spectrum companions at adoption in Rust (its D3); it adds no
-  Worker-to-worklet message channel. *Admit browser live edits in the Worker through the committed
-  model* (#1382) moves live commands into the Worker over #1332's page-to-control-plane port.
+  edits* (#1348) after every Worker message and on a one-quantum timer. In `single` mode the
+  worklet's control handler runs it, never inside `process()`: after every control message, and
+  on the `miso.service.v1` tick that the main-realm host posts from its one pinned `setInterval`
+  (#1381 D6). #1381 pairs the render-side meter, observation and spectrum readers at adoption in
+  Rust (its D3). #1332 D7 creates the two ports this slice uses: the page-to-control-plane port
+  and the control-plane-to-worklet `MessageChannel` port. *Admit browser live edits in the Worker
+  through the committed model* (#1382) moves live commands into the Worker over the first.
 - The exports come from *Export transaction apply and anchored seek from the browser engine
   module* (#1293). The `replace` export is *Diff a replacement document against the committed
   model and export replace from the browser engine module* (#1386). The service and watermark
@@ -75,13 +77,15 @@ worklet only renders and swaps.
   as #1381 D6 says), the control half reads the watermark through #1381's watermark-and-counters
   export; when it advanced, it posts `miso.watermark.v1 { tag, revision, sample, outcome }` to the page. Posts coalesce to
   the latest value; when one post replaces an unsent one, its `outcome` is the OR of both, so no
-  outcome flag is lost (D15-17). `miso.status.v1` replies gain `appliedRevision`, `appliedSample`
-  and `appliedOutcome`, read from #1349's status words.
+  outcome flag is lost (D15-17). `miso.status.v1` replies already carry `appliedRevision`,
+  `appliedSample` and `appliedOutcome` from #1349's status words (#1349 D2a); this slice adds
+  none.
 - **D4. Plan shape, staged outside `process()`.** When a `rebuild` commits, the control half posts
   `miso.plan-shape.v1 { tag, revision, trackCount, submixCount, submixIds, meterHeaderPointer,
-  meterFramePointer, meterFrameCapacity }` to the render worklet on a dedicated `MessageChannel` this slice creates at boot: the main-realm
-  wrapper posts one port to the Worker and transfers the other over the worklet node's port (in
-  `single` mode, a direct call). Its message handler builds the
+  meterFramePointer, meterFrameCapacity }` to the render worklet on #1332 D7's
+  control-plane-to-worklet port; this slice opens no port of its own. In `single` mode the
+  control handler and the render worklet are one realm, so it is a direct call to the same
+  staging function. The worklet's message handler builds the
   complete view set and meter message object for that shape and stages it, keyed by `revision`. A
   newer staged set replaces an older one (a superseded candidate's set is dropped there).
   A staged set is cut over the current buffer, and a growth (#1332 D5) rebuilds it with the

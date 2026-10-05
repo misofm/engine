@@ -88,21 +88,26 @@ when the same transaction makes a structural edit that swaps the plan.
     set, and `[false; 2]` otherwise.
   - The classifier emits one route record for each live route whose target bits or `silenced`
     differ between `current` and `next`. The records go in canonical route-ID order, in a new
-    `LiveDelta::routes` list.
+    `LiveDelta::routes` list. `LiveDelta::is_empty` (#1313 D2) gains the `routes` term, so a
+    send-only edit reports `live`.
   - A domain refusal is `LiveRebuild::Domain`.
   - A gain edit on a muted route changes no target bit, so it emits nothing. The later unmute
     record carries the new gain.
-- **D4. Ramps (D15-1).**
-  - A route record whose gate changes (`silenced`, or any `follow_zeroed` lane) uses the session's
-    mute length. Any other route record uses the send-level length.
-  - Both lengths come from `LiveRamps::for_session(next)`, with the send lengths that *Session
-    `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes* (#1054)
-    defines. A live route record is a step only when the session sets a length of 0.
-  - A per-edit ramp carried by the transaction replaces the session length for that record; an
-    explicit 0 is a step (rule R9). The record reads it as `LiveRamps::resolve(row, edit_ramp)`
-    with the route's `RouteGain`, `RouteMute` or `RouteMatrix` entry, and a follow record with its
-    source strip's `Mute` entry (*Carry an optional per-edit ramp length on live session edits*,
-    #1394 D3, D5, D6).
+- **D4. Ramps (D15-1). One record per route, one governing row.** A route cell holds one target
+  and one ramp (#1347 D1), so a transaction that changes several of a route's fields emits one
+  record, whose length is one row's `LiveRamps::resolve(row, edit_ramp)` (*Carry an optional
+  per-edit ramp length on live session edits*, #1394 D5, D6):
+  - **The gate changes** (`silenced`, or any `follow_zeroed` lane): the send-mute row governs, with
+    the route's `RouteMute` entry (for a follow record in #1226, its source strip's `Mute` entry).
+    A gain or matrix change in the same record rides that ramp: the route fades in to, or out
+    from, the new target, as the unmute record of D3 does.
+  - **Otherwise:** the longest of the resolved lengths of the rows whose field changed, the
+    send-gain row with the `RouteGain` entry and the send-matrix row with the `RouteMatrix` entry.
+    The longest wins so that no changed field moves faster than its own row asks.
+  - With no edit ramp, a row resolves to its session length from `LiveRamps::for_session(next)`,
+    the send lengths that *Session `controlSmoothing`: configurable ramp lengths for live mute,
+    fader and pan changes* (#1054) defines. An explicit 0 is a step (rule R9), and a step occurs
+    only when the governing row resolves to 0.
 - **D5. Route lanes on the C ABI.** `C_ABI_LIVE_LANES` sets `routes: true`. The C ABI epoch keeps
   the `route_controls` handles beside its strip and effect producers, addressed by route ID. The
   lanes are the latest-target cells of *Hold live values in latest-target cells on both hosts*
@@ -213,9 +218,15 @@ when the same transaction makes a structural edit that swaps the plan.
      converges to the last value, and `live_values_superseded` rises by exactly 19 for that route.
    - An exact replay writes nothing.
    - A live edit made while a candidate is pending lands in the candidate.
+   - **Path of a send-only edit.** Each of the three send edits of gate 1, alone in its
+     transaction, returns a response whose decoded path is `live` (#1313), never `model_only`.
 4. **Classifier unit tests.**
    - A gain edit on a muted route emits no route record. Its unmute emits one record, which carries
      the new gain.
+   - Governing row: one transaction that unmutes a route and changes its gain, with edit ramps
+     `RouteMute` 480 and `RouteGain` 960, emits one record of length 480. One that changes gain
+     (ramp 960) and matrix (ramp 240) emits one record of length 960; with no edit ramps it takes
+     the longer of the session's send-gain and send-matrix lengths.
    - A matrix edit that lowers to the same gated target bits emits nothing.
 5. **Realtime.** Extend
    `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`
@@ -252,8 +263,12 @@ when the same transaction makes a structural edit that swaps the plan.
   or a submix strip value as live before its slice. The plan would then render something other than the committed model.
 - Gate 3 turns red if a cell is written before a later check fails, if a superseded write is lost
   without being counted, or if a route cell back-pressures.
+- Gate 3's path case turns red if `LiveDelta::is_empty` ignores `routes`, so a send-only edit is
+  reported `model_only`.
 - Gate 4 turns red if the route diff compares raw fields instead of gated targets. A redundant
   record restarts a settled ramp and moves a zero's sign (`crates/host-core/src/solo.rs:58-70`).
+  Its governing-row case turns red if a record takes the wrong row's length (a gate change on the
+  gain ramp, or the shorter of two changed rows).
 - Gate 5 turns red if the route drain or the live commit allocates on the render thread, or if a
   send edit that races a swap reaches the retiring plan.
 - Gate 7 turns red if a carried send keeps the predecessor's level after a transaction that also
@@ -270,3 +285,5 @@ when the same transaction makes a structural edit that swaps the plan.
   D4
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284), for D8
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), whose D5 is D8's pattern
+- *Report each transaction's edit path in its response* (#1313), for `LiveDelta::is_empty` and
+  gate 3's path case

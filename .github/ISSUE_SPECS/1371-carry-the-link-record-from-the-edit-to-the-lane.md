@@ -22,7 +22,7 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   `process_inner` (`crates/rack/src/lib.rs:1257`, `:1294`); per-node lanes in the graph runtime's
   `NodeKind::LiveControlEffect` arms (`crates/graph/src/runtime.rs:1527`, `:3510`).
 - *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345) replaces the
-  effect lane's queue with latest-target cells on #1312's primitive (D1 there: one bypass cell,
+  effect lane's queue with latest-target cells on #1312's primitive (#1345 D1: one bypass cell,
   parameter cells, target cells), drained in a canonical order (bypass, parameters, targets, then
   the observation FIFO; #1345 D3). A write never fails, and superseded values are counted by
   `live_values_superseded`. Decision 15, D15-2, forbids typed backpressure for a live value.
@@ -48,7 +48,8 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
 ## Decisions frozen for this slice
 
 - **D1. A link cell, not a record.** Each lane of an effect whose descriptor has `lane_link`
-  (#1368 D1) gains one latest-target cell on #1345's primitive: one `AtomicU32` word. Bits 0-23
+  (#1368 D1) gains one latest-target cell on #1312's primitive (#1312 D1: a triple buffer whose
+  slots carry their own sequence), holding one word. Bits 0-23
   hold the ramp length in samples; bits 24-31 hold the mode's wire code (`dual_mono` 1, `maximum`
   2, `average` 3, as `enum_link`, `crates/protocol/src/session_wire.rs:237-241`). A ramp fits: the
   session ramp is bounded at 1000 ms (#1054 D1) and the per-edit ramp at the session rate (#1394
@@ -58,8 +59,9 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   the observation FIFO. The stage that owns the processor reads a dirty link cell at the block
   boundary, before processing, and calls `retarget_link(track, mode, samples)`. A `false` return
   increments the lane's existing refusal counter; the classifier makes it unreachable (D4).
-  #1312's sequence rule applies unchanged: a skipped torn read stays dirty for the next block, and
-  `(s - p) / 2 - 1` superseded link words are added to `live_values_superseded`.
+  #1312's read applies unchanged (#1312 D1-D2): render reads the newest completed word in one
+  pass, never tears and never skips, and when it reads sequence `s` after `p` it adds `s - p - 1`
+  superseded link words to `live_values_superseded`.
 - **D3. Ramp length.** The word's ramp is `LiveRamps::resolve(link row, edit_ramp)` (#1394 D5),
   where `edit_ramp` is the `EditRamps` entry for the write's `Link` row (#1394 D3, D6): the
   effect's entry for an insert link change, the strip's for a console-entry override, the
@@ -169,12 +171,14 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
 
 - *Ramp a lane's detector link between modes* (#1370).
 - *Declare a strip's console link mode in the session, the wire and the SDK* (#1369).
-- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): the cell
-  primitive and drain order this slice extends.
+- *Hold live values in latest-target cells on both hosts* (#1312): the cell primitive and the
+  counter.
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): the drain
+  order this slice extends.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054): `link_samples` (`fader_ms`).
 - *Carry an optional per-edit ramp length on live session edits* (#1394): the per-edit ramp
   field, `EditRamps` and `LiveRamps::resolve`.
 - *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364).
-- *Carry console effect lanes across a plan swap* (#1279) and *Carry live-controlled effect lanes
-  across a plan swap* (#1280).
+- *Carry console effect lanes across a plan swap* (#1279).
+- *Carry live-controlled effect lanes across a plan swap* (#1280).

@@ -30,8 +30,9 @@ cells alike* (#1399).
 - **Render drains.** `drain_fader_controls` (`:1064`) and `drain_matrix_controls` (`:1108`) pop
   every record available at block entry and apply each in order (`set_fader_db`, `set_mute`,
   `set_target_smoothed`, `crates/builtins/src/lib.rs:3869`, `:3891`, `:4056`). The test-only
-  scalar processors do the same (`LiveControlMatrixProcessor` `:4316`, `LiveControlFaderProcessor`
-  `:4377`). Both stages are seam-side, so no channel-symmetry witness reads them (`:758-771`,
+  scalar processors do the same (`LiveControlMatrixProcessor`
+  `crates/builtins-compiler/src/lib.rs:4316`, `LiveControlFaderProcessor` `:4377`). Both stages
+  are seam-side, so no channel-symmetry witness reads them (`builtins-compiler/src/lib.rs:758-771`,
   `:816-823`).
 - **No record carries a sample time.** Every record popped at one block entry lasts zero samples
   except the last per address, so a FIFO and a latest-value cell differ only when two records for
@@ -75,6 +76,14 @@ cells alike* (#1399).
     skip.
   - A write that completes before a block's drain begins is applied in that block. That is D15-2
     condition 2 and the ack meaning of R1.
+  - **Peek (carry only):** `peek_unread(&self) -> Option<(words, sequence)>` returns the `middle`
+    slot's words and sequence when `middle` has `FRESH`, and `None` otherwise. It changes nothing:
+    `middle`, the front index, the last applied sequence and the dirty word stay as they were, so
+    a later read still applies the value. It is valid only once the writer is quiescent (no write
+    to this cell can start before the peek ends), because a write after the peek began may reuse
+    that slot. The plan-swap carry (*Carry live-controlled effect lanes across a plan swap*, #1280
+    D2) is its only caller; it peeks a predecessor whose cells no control write reaches once its
+    successor is published (D15-17, #1356). The reader also exposes `last_applied(&self) -> u64`.
 - **D2. One counter unit: cell values replaced unread.** `live_values_superseded` counts, per
   cell, committed values that a later write to the **same cell** replaced before render read them.
   When render reads sequence `s` after `p`, it adds `s - p - 1`. A record that writes two cells
@@ -121,7 +130,7 @@ cells alike* (#1399).
 
 ## Deliverables
 
-1. The cell module and its loom model.
+1. The cell module (with `peek_unread`) and its loom model.
 2. Fader and matrix lanes on cells in `builtins-compiler` (bank and test-only scalar processors),
    with D6's `apply_pending`.
 3. The C ABI and browser admission changes, the C ABI counter, header and docs text.
@@ -171,7 +180,9 @@ cells alike* (#1399).
    a mixed cell, applies each sequence at most once, and, once the writer's last write completed
    before a read began, that read returns it. The counter equals writes minus applies. Command:
    `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test
-   --locked --release -p engine --lib spsc_loom`.
+   --locked --release -p engine --lib spsc_loom`. A plain unit test in the same module: after
+   three writes and no read, `peek_unread` returns the third write's words and sequence, a second
+   peek returns the same, and the next read then applies that value and adds 2 to the counter.
 4. **`apply_pending` equals the drain (new builtins-compiler test).** Dirty fader, mute and matrix
    cells, then `apply_pending` and an empty-drain block, render bit-identically to a twin whose
    block drains them.
@@ -203,6 +214,8 @@ cells alike* (#1399).
 - Gate 2: a cell write moved before a fallible check, which with cells destroys an acked value.
 - Gate 3: a cell that tears, applies twice, or skips the latest completed write (the single
   sequence-word design this replaces would skip it); judged by the interleavings loom reaches.
+- Gate 3's peek case: a `peek_unread` that consumes the value (swaps `middle` or clears `FRESH`
+  or the dirty bit), so the predecessor in copy mode never applies it (#1280 D6).
 - Gate 4: a carry path that applies pending cells differently from the block drain, which #1277
   relies on.
 
@@ -211,6 +224,6 @@ cells alike* (#1399).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348): the service step
   that refreshes the counter (D8).
-- Followed by #1277 (which writes into these cells), #1345, #1346 and #1347, each on this
-  primitive and counter, and by *Report live_values_superseded in the browser status and prove
-  both hosts drain strip cells alike* (#1399).
+
+Dependents: #1277 (which writes into these cells), #1280 (which peeks them), #1345, #1346, #1347
+and #1399, each on this primitive and counter.

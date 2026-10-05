@@ -36,6 +36,14 @@ the browser's own `applied_at_sample` arithmetic.
 - *Report live_values_superseded in the browser status and prove both hosts drain strip cells
   alike* (#1399, D1) takes offset 48 for `live_values_superseded`, leaving `reserved: [u64; 3]`
   (offsets 56, 64, 72).
+- **The JS readers check the reserved words.** The worklet's `readStatus()`
+  (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:944-960`) throws unless offsets 48, 56, 64
+  and 72 read zero (`:946-949`), and its result is spread into the `miso.status.v1` reply
+  (`:1070`). The main-realm host accepts that reply only with an exact field list and validated
+  values (`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js:1013-1017`, `:1121-1128`). The
+  reply type is `MisoStatus` (`hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts:846-857`,
+  copied in `sdk/src/browser/shipped-host.d.ts:846-857`). The hermetic harness's fake status
+  reply lists the exact fields (`scripts/test-web-audioworklet.mjs:159-164`).
 - #1381 D5 adds `SessionState::watermark(&self) -> Result<PlanWatermark, WatermarkBusy>` in the
   control-plane crate: a read of #1314's `PlanWatermarkReader`, counters included.
 
@@ -52,6 +60,17 @@ the browser's own `applied_at_sample` arithmetic.
   words). The outcome flags fit one `u64` word. The flag bits are #1314's (`EXACT = 1`,
   `PREROLL_FALLBACK = 2`, `TRANSITION_FALLBACK = 4`, `SUPERSEDED = 8`). Boot writes the initial watermark
   (`(initial revision, 0, EXACT)`); `render_next` overwrites the three words when D1 is `Some`.
+- **D2a. JS readers.** Because boot writes `EXACT` at offset 72, every JS reader changes in this
+  slice, or the first status read would throw:
+  - `readStatus()` checks no reserved word any more (after #1399 it checks only 56, 64 and 72;
+    this slice removes that check) and returns `appliedRevision` (offset 56), `appliedSample` (64)
+    and `appliedOutcome` (72), each a `bigint`.
+  - The main-realm host's status field list gains the three names, and its validation requires
+    each to be a valid `u64`.
+  - `MisoStatus` in both `.d.ts` copies gains `readonly appliedRevision: bigint`,
+    `readonly appliedSample: bigint` and `readonly appliedOutcome: bigint`, marked `@internal`
+    (the SDK's `engine.apply` is the public surface, stream H).
+  - The harness's fake status reply carries the three fields.
 - **D3. Worker hook.** This slice reuses the `SessionState::watermark()` accessor that #1381 D5
   adds; it adds no accessor of its own. The Worker reads the full record through #1381's
   watermark-and-counters export; the SDK exposes it (stream H). This slice adds no wasm export:
@@ -66,6 +85,8 @@ the browser's own `applied_at_sample` arithmetic.
 1. D1 in the engine.
 2. D2 in `WebStatus`, boot and `render_next`; every layout mirror regenerated with the repository's
    generators.
+3. D2a in the worklet reader, the main-realm host's status validation, both `.d.ts` copies and
+   the hermetic harness.
 
 ## Authorized paths
 
@@ -74,6 +95,11 @@ the browser's own `applied_at_sample` arithmetic.
   this crate, so root orders this after #1381)
 - `tools/parameter-metadata/src/abi_layout.rs`, `sdk/assets/miso-engine-v1-abi-layout.json`,
   `sdk/src/generated/abi.ts`, `scripts/check-abi-layout-v1.py` and its fixture
+- `hosts/host-web/web/miso-engine-v1-audio-worklet.js` (`readStatus()` only),
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` (the status reply's field list and
+  validation only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and
+  `sdk/src/browser/shipped-host.d.ts` (`MisoStatus` only)
+- `scripts/test-web-audioworklet.mjs` (the fake status reply and D2a's case only)
 
 ## Non-goals
 
@@ -95,12 +121,19 @@ the browser's own `applied_at_sample` arithmetic.
    the watermark words 56, 64, 72, size 80); `python3 -B scripts/check-abi-layout-v1.py`
    and its self-test, `bash scripts/check-sdk-generated.sh` and the parameter-metadata `--check`
    pass, and each fails if one mirror omits a word.
-5. Commands:
+5. **The status reply carries the words.** In `scripts/test-web-audioworklet.mjs`, a worklet
+   whose fake status block holds `(r, s, EXACT)` at 56, 64 and 72 answers a status request with
+   `appliedRevision === r`, `appliedSample === s` and `appliedOutcome === 1n`, and the host
+   accepts the reply. A reply missing one of the three fields is refused by the host.
+6. Commands:
    - `cargo test --locked -p engine --features engine/realtime-audit`
    - `cargo test --locked -p control-plane --features test-support`
    - `cargo test --locked -p host-web --features host-web/test-support`
    - `bash scripts/check-web-audioworklet.sh` (with the build command in qualification.yml's
      browser job) and `bash scripts/check-cross-targets.sh`
+   - `bash scripts/test-web-audioworklet.sh`
+   - `bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts` (it requires the two
+     `.d.ts` copies to be equal) and `bash scripts/check-sdk-types.sh`
    - `bash scripts/check-workspace-policy.sh`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 
 ## Test value
@@ -111,6 +144,9 @@ the browser's own `applied_at_sample` arithmetic.
 - Gate 3: red if `render_next` writes the status words from a different advance than the one the
   record published (for example, a block late).
 - Gate 4: red if a mirror keeps the old `reserved` words or overlaps #1399's word at 48.
+- Gate 5: red if the worklet still rejects a nonzero word at 56-72 (every status read would
+  throw from boot on, since boot writes `EXACT`), or if the host's exact-field check drops or
+  refuses the new words.
 
 ## Dependencies
 

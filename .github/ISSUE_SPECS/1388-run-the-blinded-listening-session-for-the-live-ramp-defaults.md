@@ -51,7 +51,9 @@ private assignment key before reveal.
   re-render from the recorded commit.
 - **D4. Applying the result.** The only product change is the value of a key in
   `CONTROL_SMOOTHING_DEFAULT`, with the expected sample counts that tests state for the default
-  table, and the default table's text in the docs. Where the fader rule offers 35 ms or 20 ms with a
+  table, and the default table's text in the docs. A session document that says
+  `control_smoothing: { "kind": "default" }` (#1054 D1) follows the new value; one that says
+  `explicit` keeps its own. Where the fader rule offers 35 ms or 20 ms with a
   host update-rate requirement, take 35 ms: the engine does not add a host contract to keep a
   default. If the decision equals the shipped table, no product file changes.
 - **D5. Inconclusive.** If a positive control is missed, the session is inconclusive. The record is
@@ -103,7 +105,10 @@ private assignment key before reveal.
 
 ## Dependencies
 
-- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
-  (#1054), which ships the defaults this session judges.
-- *Research: default ramp lengths for live mute, fader and pan changes (cited, measured, listened)*
-  (#1055), for section 9 and any preregistration amendment.
+- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes* (#1054)
+- *Research: default ramp lengths for live mute, fader and pan changes (cited, measured, listened)* (#1055)
+- *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364)
+
+#1054 ships the defaults this session judges. #1055 gives section 9 and any preregistration
+amendment. #1364 creates `hosts/host-web/tests/control_smoothing_parity.rs` and the host-web
+resolution tests whose expected default counts D4 may update.

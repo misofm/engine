@@ -210,11 +210,12 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
   7. The C ABI runs the catch-up in bounded `miso_engine_v1_service` slices (#1348, #1360); the
      browser runs it in the Worker's service loop (#1361).
 - **Fallbacks, each counted and reported** through the watermark's outcome flags (#1314):
-  render-thread pre-roll bounded by `k_max`, then the duck-swap transition (#1324) (*Fall back from
-  a missed catch-up deadline: bounded render-thread pre-roll, then the transition*, #1358). They
-  apply on a deadline (counted in render samples, so a paused host never falls back), a host that
-  renders nothing, or a non-isolated browser page. #1286 and the browser spike (#1331) size
-  `k_max`, the deadline and `P_max`.
+  render-thread pre-roll bounded by `k_max` (*Fall back from a missed catch-up deadline: bounded
+  render-thread pre-roll, then the transition*, #1358), then the duck-swap transition of the strips
+  whose arrival grows (*Duck-swap the strips a latency growth restarts, and fall back to the
+  transition when no catch-up can finish*, #1397). They apply on a deadline counted in render
+  samples (a paused host never falls back; decision 15, D15-17) or on a non-isolated browser page.
+  #1286 derives `k_max`, the deadline and `P_max`, with the browser row from the spike (#1331).
 - **No permanent latency reserve.** A reserve is a permanent cost on every session.
 
 VST3 states that a plug-in's latency change may interrupt playback, because the host must recompute
@@ -328,11 +329,11 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 
 | Issue | Title | Stream | Depends on |
 |---|---|---|---|
-| #1300 | *Let soft-clip restore its own non-finite history* | A | none |
+| #1300 | *Let soft-clip restore its own non-finite history* | A | #1322 |
 | #1322 | *Carry plan state by copy as well as by move* | A | none |
 | #1277 | *Carry fader, mute and pan ramps across a plan swap* | A | #1312, #1322 |
 | #1279 | *Carry console effect lanes across a plan swap* | A | #1277, #1322 |
-| #1280 | *Carry live-controlled effect lanes across a plan swap* | A | #1279, #1345 |
+| #1280 | *Carry live-controlled effect lanes across a plan swap* | A | #1279, #1312, #1345 |
 | #1281 | *Carry an insert lane that moves between a bank and a per-node instance* | A | #1280 |
 | #1362 | *Copy a per-node effect's state into a same-layout instance in one pass* | A | none |
 | #1282 | *Carry per-node effect instances across a plan swap* | A | #1281, #1362 |
@@ -340,44 +341,44 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1284 | *Carry strip delay lines and live send ramps across a plan swap* | A | #1283 |
 | #1285 | *Keep every node's latency from dropping during playback* | A | #1284 |
 | #1323 | *Reset latency floors at a host-declared discontinuity* | A | #1285, #1309, #1310 |
-| #1286 | *Record the swap block's cost on the 64-track console* | A | #1284, #1321, #1322 |
+| #1286 | *Record the swap block's cost on the 64-track console* | A | #1284, #1321, #1322, #1331 |
 | #1327 | *Carry meter and effect observation state across a plan swap* | A | #1284 |
 | #1395 | *Carry spectrum capture state across a plan swap* | A | #1327, #1401 |
 | #1343 | *Let the control thread withdraw an unadopted candidate plan* | B | #1309 |
 | #1344 | *Prepare a successor across a withdrawn candidate plan* | B | #1277 |
 | #1398 | *Size the C ABI's plan capacities and resource admission for a superseding candidate* | B | #1309 |
 | #1310 | *Supersede an unadopted candidate plan by compare-and-swap* | B | #1309, #1314, #1343, #1344, #1398 |
-| #1311 | *Adopt a successor plan no earlier than a scheduled sample, with a return queue* | B | #1309, #1343 |
+| #1311 | *Adopt a successor plan no earlier than a scheduled sample, with a return queue* | B | #1309, #1314, #1343 |
 | #1348 | *Add miso_engine_v1_service for bounded control work between edits* | B | #1309, #1311, #1314 |
 | #1349 | *Publish the applied-revision watermark in the browser status* | B | #1309, #1314, #1348, #1381, #1399 |
 | #1287 | *Pre-roll a successor whose latency grows* | C | #1285 |
-| #1353 | *Keep source transfer blocks in a shared pool, immutable from publication to release* | C | #1316 |
-| #1320 | *Give the source ring a read-only peek cursor that gates release* | C | #1287, #1316, #1353 |
+| #1353 | *Keep source transfer blocks in a shared pool, immutable from publication to release* | C | #1316, #1318, #1319, #1350 |
+| #1320 | *Give the source ring a read-only peek cursor that gates release* | C | #1287, #1316, #1318, #1319, #1353 |
 | #1321 | *Render a successor plan off the render thread with a pinned floating-point environment* | C | #1287 |
-| #1354 | *Snapshot a running plan into a returned successor at a block* | C | #1285, #1286, #1287, #1311, #1320, #1322, #1327, #1395 |
-| #1355 | *Catch up a returned successor and adopt it exactly at a scheduled sample* | C | #1277, #1310, #1312, #1314, #1320, #1321, #1327, #1354, #1396 |
-| #1356 | *Hold live edits during a catch-up and apply them at the adoption sample* | C | #1277, #1309, #1312, #1314, #1345, #1346, #1347, #1355 |
-| #1357 | *Supersede a running catch-up by a structural edit* | C | #1310, #1314, #1320, #1348, #1354, #1355, #1356 |
+| #1354 | *Snapshot a running plan into a returned successor at a block* | C | #1284, #1285, #1286, #1287, #1311, #1320, #1322, #1327, #1395 |
+| #1355 | *Catch up a returned successor and adopt it exactly at a scheduled sample* | C | #1277, #1310, #1312, #1314, #1320, #1321, #1327, #1344, #1345, #1346, #1347, #1354, #1396, #1398 |
+| #1356 | *Hold live edits during a catch-up and apply them at the adoption sample* | C | #1277, #1309, #1311, #1312, #1314, #1345, #1346, #1347, #1355 |
+| #1357 | *Supersede a running catch-up by a structural edit* | C | #1310, #1314, #1320, #1344, #1348, #1354, #1355, #1356 |
 | #1358 | *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition* | C | #1286, #1311, #1314, #1331, #1355, #1356, #1396, #1397 |
-| #1359 | *Turn a pending catch-up into a plain rebuild at a host-declared stop* | C | #1310, #1323, #1355, #1357, #1396 |
+| #1359 | *Turn a pending catch-up into a plain rebuild at a host-declared stop* | C | #1310, #1323, #1344, #1355, #1357, #1396 |
 | #1360 | *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1313, #1314, #1348, #1358, #1359, #1397 |
-| #1361 | *Run the browser catch-up in the Worker's service loop* | C | #1290, #1331, #1332, #1333, #1349, #1360, #1381 |
+| #1361 | *Run the browser catch-up in the Worker's service loop* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1360, #1381 |
 | #1396 | *Give a plan a source-read clock that leads its render clock* | C | #1316, #1323 |
-| #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish* | C | #1288, #1311, #1314, #1324, #1354, #1355, #1356, #1396 |
+| #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish* | C | #1288, #1311, #1314, #1324, #1344, #1354, #1355, #1356, #1396 |
 | #1326 | *Give every browser plan live strip fader and mute lanes* | D | none |
 | #1288 | *Fade in a strip that a swap adds during playback* | D | #1054 |
 | #1325 | *Remove a strip in two phases: ramp out, then a scheduled swap* | D | #1054, #1288, #1309, #1310, #1311, #1312, #1313, #1314, #1347, #1363, #1391 |
 | #1324 | *Duck-swap a strip whose state cannot continue across a plan swap* | D | #1277, #1288, #1310, #1325, #1363, #1391 |
 | #1363 | *Ramp a route that a plan swap adds to or removes from a surviving strip* | D | #1054, #1283, #1284, #1285, #1288, #1310, #1314 |
 | #1391 | *Give every route whose tap precedes its strip's fader a live lane on every plan* | D | #1225, #1326, #1347 |
-| #1392 | *Keep an added strip's pending fade-in across a later plan swap* | D | #1277, #1288, #1322 |
+| #1392 | *Keep an added strip's pending fade-in across a later plan swap* | D | #1277, #1283, #1284, #1288, #1322, #1363 |
 | #1380 | *Ship the browser module with one imported shared memory at every instantiation site* | H | #1331, #1333, #1334 |
 | #1332 | *Run the browser control plane in a Worker and keep the AudioWorklet render-only* | H | #1057, #1331, #1333, #1334, #1380 |
 | #1387 | *Move browser source submission and seeks into the Worker* | H | #1316, #1318, #1332 |
 | #1401 | *Prepare every browser preparation branch concurrently, as a successor too, in host-core* | H | #1326 |
 | #1400 | *Prepare through an adapter-supplied preparer in the control-plane crate* | H | #1309, #1326, #1401 |
-| #1381 | *Swap and retire browser plans through the Worker's service loop* | H | #1309, #1314, #1332, #1348, #1387, #1400 |
-| #1382 | *Admit browser live edits in the Worker through the committed model* | H | #1054, #1057, #1225, #1226, #1247, #1261, #1262, #1267, #1312, #1313, #1332, #1364, #1381, #1390, #1394 |
+| #1381 | *Swap and retire browser plans through the Worker's service loop* | H | #1309, #1314, #1327, #1332, #1348, #1387, #1395, #1400 |
+| #1382 | *Admit browser live edits in the Worker through the committed model* | H | #1054, #1057, #1225, #1226, #1247, #1261, #1262, #1267, #1312, #1313, #1332, #1345, #1346, #1347, #1364, #1381, #1390, #1394 |
 | #1290 | *Replace the running browser session in the Rust host* | H | #1277, #1309, #1310, #1313, #1314, #1326, #1327, #1332, #1348, #1349, #1381, #1382, #1387, #1395, #1400, #1401 |
 | #1293 | *Export transaction apply and anchored seek from the browser engine module* | H | #1290, #1309, #1313, #1316, #1319, #1332, #1381, #1387 |
 | #1294 | *Send a session transaction to the browser control plane* | H | #1293, #1332, #1348, #1349, #1381, #1382, #1386, #1387 |

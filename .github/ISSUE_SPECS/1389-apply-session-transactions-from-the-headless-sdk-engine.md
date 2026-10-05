@@ -16,11 +16,12 @@ engine booted from the committed session and fed the same PCM from frame 0.
 ## Context
 
 - `OfflineEngine` (`sdk/src/headless/engine.ts:114`) calls the module's exports in-process through
-  `WasmBoundary` (`sdk/src/core/boundary.ts:326`). It boots with `create` (`:143`), renders with
-  `render` (`:317`), submits live records with `submitCommands` (`:321`), and switches mixes with
-  `loadSession` (`:332`), a reboot on the same instance (`WasmBoundary.reboot`, `boundary.ts:391`).
-  `liveControls()` (`:264`) hands `EngineLiveControls` the session map and the booted document
-  (`#booted`, `:119`). `sessionMap()` is at `:205`.
+  `WasmBoundary` (`sdk/src/core/boundary.ts:326`). In `sdk/src/headless/engine.ts`: it boots with
+  `create` (`engine.ts:143`), renders with `render` (`engine.ts:317`), submits live records with
+  `submitCommands` (`engine.ts:321`), and switches mixes with `loadSession` (`engine.ts:332`), a
+  reboot on the same instance (`WasmBoundary.reboot`, `boundary.ts:391`). `liveControls()`
+  (`engine.ts:264`) hands `EngineLiveControls` the session map and the booted document
+  (`#booted`, `engine.ts:119`). `sessionMap()` is at `engine.ts:205`.
 - The caller drives render: nothing renders between two `render()` calls.
 - The exports this slice calls, all on the control half:
   - `miso_engine_web_v1_edit_ptr`, `_apply`, `_edit_outcome_ptr`, `_committed_document_ptr` and

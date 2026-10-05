@@ -35,7 +35,7 @@ during its ramp-out.
 - The engine has no playhead: the frame an added stem should start at is the app's mapping. But
   #1316 makes render publish, per source, where its last seek landed (`generation`,
   `first_sample`, `source_frame`), and *Export transaction apply and anchored seek from the browser
-  engine module* (#1293, D5b) exports it. For a playing reference stem with no underrun since that
+  engine module* (#1293, D6) exports it. For a playing reference stem with no underrun since that
   report, the frame it reads at sample `A` is `source_frame + (A - first_sample)` (source rate equals
   render rate in this version, D15-12).
 - Seek contract (decision 15 D15-12, *Anchor every seek on the plan's source-read clock*, #1316):
@@ -71,7 +71,7 @@ during its ramp-out.
 - **D4. Anchor and frame.** For each added source the SDK chooses `A` = the status's next absolute
   sample plus at least the ring's prime length, rounded up to a quantum multiple. The frame comes
   from one of two options, exactly one of which is given:
-  - `alignTo: sourceId`: the SDK reads that playing source's seek report (#1293 D5b) and uses
+  - `alignTo: sourceId`: the SDK reads that playing source's seek report (#1293 D6) and uses
     `source_frame + (A - first_sample)`. A report with generation 0 (not yet rendered), a busy read
     after its bounded retries, or underrun or held frames that changed since that report's block
     reject with a typed `MisoUsageError` naming the cause; the app then uses `frameAt`.

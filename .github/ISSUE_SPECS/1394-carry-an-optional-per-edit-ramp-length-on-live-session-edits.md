@@ -33,11 +33,12 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 - **The live-value edits** (`SessionEdit`, `crates/protocol/src/model.rs`): `SetConsole` (`:204`),
   `SetTrackBuiltins` (`:233`), `SetEffectLinkMode` (`:306`), `SetTrackFader` (`:352`),
   `SetTrackMatrixOrPan` (`:358`), `SetTrackConsole` (`:368`), `SetRouteChannelMatrix` (`:397`),
-  `SetRouteGainDb` (`:402`), `SetRouteMute` (`:404`), `SetVcaFader` (`:434`). A track ID names a
+  `SetRouteGainDb` (`:402`), `SetRouteMute` (`:404`), `SetRouteFollowsMute` (`:407`),
+  `SetVcaFader` (`:434`). A track ID names a
   strip, a track or a submix (`docs/CONTROL_PROTOCOL_REGISTRY.md:77`).
 - **The wire.** Payload specs are in `crates/protocol/src/schema.rs` (for example
-  `set_track_fader`, `:1371-1379`); optional fields exist (`FieldSpec::opt`, `:181`). Encode is in
-  `crates/protocol/src/session_wire.rs:348-620`, decode at `:1202-1420`. The session-edit table is
+  `set_track_fader`, `:1371-1379`); optional fields exist (`FieldSpec::opt`, `:181`). Encode is `tx_edit_payload`
+  (`crates/protocol/src/session_wire.rs:338-623`), decode is `parse_edit` (`:1171-1422`). The session-edit table is
   `docs/CONTROL_PROTOCOL_REGISTRY.md:47`.
 - **Refusals.** `SessionEditError` (`crates/protocol/src/model.rs:497`) maps to diagnostic codes
   at `crates/protocol/src/controller.rs:3528-3537`.
@@ -78,6 +79,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   | `SetEffectLinkMode` | `Effect` | `Link` |
   | `SetConsole` | `Console` | `Link` (slot defaults) |
   | `SetRouteGainDb` / `SetRouteMute` / `SetRouteChannelMatrix` | `Route` | `RouteGain` / `RouteMute` / `RouteMatrix` |
+  | `SetRouteFollowsMute` | `Route` | `RouteMute` (a follow toggle ramps per the mute key) |
   | `SetVcaFader` | `Vca` | `VcaFader`, `VcaMute` |
 
   The last edit in the transaction that writes a `(target, row)` decides it: `Some(n)` sets the
@@ -97,7 +99,8 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 - **D6. Classifier.** `classify_live_delta(current, next, ramps, edit_ramps: &EditRamps)` looks up
   each record's `(target, row)` and passes it to `resolve`. This slice converts every record kind
   the classifier produces on `main` when it merges. A record that a VCA produces on a member strip
-  looks up its `Vca` target; a send's follow record looks up its source strip's `Mute` row. The row
+  looks up its `Vca` target; a send's follow record looks up its source strip's `Mute` row
+  when the source's mute moved, and its route's `RouteMute` row when the `follows_mute` flag moved. The row
   slices that depend on this issue (#1261, #1225, #1226, #1247, #1390, #1371, #1236) read their
   lengths through the same lookup and `resolve`. `commit_live` passes the prepared token's
   `edit_ramps()`.
@@ -152,7 +155,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 
 ## Objective gates
 
-1. **Wire** (`crates/protocol/src/session_wire/tests.rs`, new). Each D1 edit round-trips with
+1. **Wire** (new tests in the existing `crates/protocol/src/session_wire/tests.rs`). Each D1 edit round-trips with
    `ramp_samples` absent, 0 and 96000.
 2. **Recording** (`crates/protocol` model test, new). For a transaction of `SetTrackFader(a, 37)`,
    `SetTrackMatrixOrPan(a, None)`, `SetRouteGainDb(r, 0)`, `SetTrackFader(b, 5)` then
@@ -202,7 +205,8 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 
 ## Dependencies
 
-- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
-  (#1054): `LiveRamps` with `for_row`, the default table and D5's matrix precedence.
-- Depend on this issue: #1225, #1226, #1236, #1247, #1261, #1371, #1390 (the C ABI rows), #1382
-  (browser lowering), #1383 and #1385 (SDK encoding).
+- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes* (#1054)
+
+#1054 delivers `LiveRamps` with `for_row`, the default table and D5's matrix precedence. These
+issues depend on this one: #1225, #1226, #1236, #1247, #1261, #1371, #1390 (the C ABI rows), #1382
+(browser lowering), #1383 and #1385 (SDK encoding).

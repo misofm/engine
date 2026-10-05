@@ -9,7 +9,7 @@ D15-9: yes, from the strip's first played block, over the session mute ramp. No 
 
 Split (R10): this slice is the fade for one swap. Keeping an arm that has not fired yet across a
 later swap is the successor *Keep an added strip's pending fade-in across a later plan swap*
-(#1392).
+(#1392). The two merge to `main` in the same batch.
 
 ## Product outcome
 
@@ -97,7 +97,7 @@ the strip off the render thread before adoption.
   that plan is adopted re-arms the strip by D1 (its base is the plan render runs, where the strip is
   absent, #1310 D2). An arm still waiting when the adopted plan is itself succeeded is carried by
   *Keep an added strip's pending fade-in across a later plan swap* (#1392; it needs the fader lane
-  export of #1277); until then that successor starts the strip unarmed (Hazards).
+  export of #1277). This slice and #1392 merge to `main` in the same batch (Hazards).
 - **D7. Cost.** No allocation; the table is sized at preparation. With no arms, render pays one
   integer test per block. Unarmed strips are untouched.
 
@@ -132,9 +132,11 @@ the strip off the render thread before adoption.
 
 ## Hazards
 
-- Until #1392 lands, a second structural swap adopted after this plan and before
-  an arm fires (an added source anchored far ahead) starts the strip unarmed in the newer plan, so
-  it enters at full gain. #1392's second-swap gate turns that red.
+- On its own, this slice would let a second structural swap adopted after this plan and before an
+  arm fires (an added source anchored far ahead) start the strip unarmed in the newer plan, so it
+  would enter at full gain. #1392 carries the arm and its second-swap gate turns that case red.
+  Therefore this slice and #1392 merge to `main` in the same batch: root does not push this slice
+  at a batch boundary without #1392.
 
 ## Objective gates
 
@@ -187,4 +189,4 @@ the strip off the render thread before adoption.
 ## Dependencies
 
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
-  (#1054). Until it lands the session mute ramp is 0 and the fade is a step.
+  (#1054). It merges first and supplies the non-zero session mute ramp `N` the fade runs over.

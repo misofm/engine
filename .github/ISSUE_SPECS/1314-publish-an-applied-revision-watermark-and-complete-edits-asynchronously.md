@@ -62,12 +62,27 @@ awaited, and the watermark never uses the reliable event lane.
     writes the initial watermark `(initial revision, 0, EXACT)` with every counter 0.
   - The words are part of the cells, so `plan_exchange_resource_report` charges them with the
     cells. Nothing is allocated per plan, and no table is indexed by epoch.
-- **D2. Control writes.** `PlanPublisher::set_revision(revision)` loads the state word and stores
-  `revision` (`Release`) into the cell of the published candidate if there is one, else into the
-  `Active` cell. A concurrent claim does not change which cell is right: the candidate's cell
-  becomes the `Active` one. `PlanReplacementReservation::set_revision(revision)` writes the
-  reserved candidate's word before `commit`.
-  - The C ABI calls `set_revision` as the **last write** of a live or model-only commit: after
+- **D2. Control writes: the revision goes to the newest pending candidate, wherever it is.** A
+  committed revision is in effect only when the plan that carries it renders, and revisions
+  complete in order, so every revision committed while a candidate is pending belongs to that
+  candidate, never to the running plan.
+  - **Pending candidate in a cell.** `PlanPublisher::set_revision(revision)` loads the state word
+    and stores `revision` (`Release`) into the `Full` cell, if there is one. A concurrent claim
+    does not change which cell is right: the `Full` cell becomes the `Active` one. *Adopt a
+    successor plan no earlier than a scheduled sample, with a return queue* (#1311) adds the
+    `Returned` cell state after this slice and extends this rule to it (#1311 D6).
+  - **Pending candidate held by control.** A candidate the control thread holds outside the
+    mailbox carries its own word: `UnadoptedCandidate::set_revision(revision)` (a withdrawn
+    candidate, D1, and after #1311 one taken back from `Returned`), `PlanReplacementReservation::set_revision(revision)` (a reserved one,
+    written before `commit`), and the owner of any other control-held candidate writes the word it
+    will publish with (a catch-up successor: *Hold live edits during a catch-up and apply them at
+    the adoption sample*, #1356 D3; a newer candidate held while a copy is in flight: *Supersede a
+    running catch-up by a structural edit*, #1357 D1a). `set_revision` on the publisher is not
+    called while control holds a candidate.
+  - **No candidate pending.** Only then does `PlanPublisher::set_revision` store into the `Active`
+    cell. It returns which cell it wrote (`RevisionTarget::{Pending, Active}`), so the control
+    plane can debug-assert that it never writes `Active` while it records a pending candidate.
+  - The C ABI writes the revision as the **last write** of a live or model-only commit: after
     every record push, target publication and `commit_owner`.
   - For a rebuild it sets the reservation's revision before `reservation.commit()`.
 - **D3. Render reads the `Active` cell, then drains.** In `render_contiguous` and `render`, after
@@ -123,8 +138,10 @@ awaited, and the watermark never uses the reliable event lane.
   revisions stay pending until render resumes; poll the watermark, never the event lane.
 - **D8. Acked-batch question.** No queue is added. The watermark is a level: render overwrites it,
   never waits, never drops a command. An ack still precedes nothing that can be dropped, because
-  D2's store comes after the last infallible write of the commit, and a withdrawn candidate's
-  revision leaves with it (D1) instead of being reported by a cell it no longer occupies.
+  D2's store comes after the last infallible write of the commit, a withdrawn candidate's
+  revision leaves with it (D1) instead of being reported by a cell it no longer occupies, and a
+  revision committed while any candidate is pending is written to that candidate (D2), so the
+  running plan never reports it before the candidate that carries it renders.
 
 ## Deliverables
 
@@ -158,6 +175,9 @@ awaited, and the watermark never uses the reliable event lane.
 - D2's ordering is the whole correctness argument, and no deterministic test can see a
   reordering. The reviewer checks that the store is the last write of each commit path, including
   the EQ `commit_owner` loop and (after #1312) the cell writes.
+- D2's routing is the other half. Writing a revision committed while a candidate is pending (in a
+  cell, withdrawn, returned or held by a catch-up) into the `Active` cell would report it in effect
+  at the next block of the old plan; gate 8 is built to catch that.
 - Render must read only the `Active` cell (D3). Reading "the newest cell" or a cell chosen from the
   epoch would report a candidate's revision before render adopts it; gate 1 is built to catch that.
 
@@ -187,7 +207,14 @@ awaited, and the watermark never uses the reliable event lane.
    with `&`, calls the query on a live plan with a valid struct (OK) and with a wrong
    `struct_size` (`INVALID_ARGUMENT`). `header_smoke.cpp` static-asserts the size 96 and the field
    offsets. The frozen list includes the new symbol.
-8. Commands:
+8. **A revision follows a held candidate (engine unit test).** Initial plan P0 at revision 1.
+   Publish A at revision 7 and withdraw it, so control holds it. Commit a model-only revision 8:
+   it is written with `UnadoptedCandidate::set_revision`, and the publisher reports no write to
+   `Active`. Render blocks 0-2: the watermark stays `(1, 0, EXACT)`. Republish A, render block 3:
+   `(8, 3 * quantum, EXACT)`. Then publish B at revision 9 (`Full`) and commit a model-only
+   revision 10: `PlanPublisher::set_revision` reports `Pending`, and the watermark stays at 8
+   until B is adopted, then reads `(10, .., EXACT)`.
+9. Commands:
    - `cargo test --locked -p engine --features engine/realtime-audit`
    - `cargo test --locked -p capi`; `cargo test --locked -p control-plane --features test-support`
    - `bash scripts/check-realtime-policy.sh` and `bash scripts/test-realtime-policy.sh`
@@ -210,6 +237,9 @@ awaited, and the watermark never uses the reliable event lane.
   check.
 - Gate 7: red if the header, the Rust struct and the export drift apart, or the bit is missing
   from the mask.
+- Gate 8: red if a revision committed while a candidate is withdrawn or published is written to
+  the `Active` cell: the watermark would report it at block 0, while P0, which does not carry the
+  candidate's content, still renders.
 
 ## Dependencies
 

@@ -26,7 +26,11 @@ new issue specs, and a stream index.
   and adversary)".
 - **D2.** `AGENTS.md` changes: the no-shortcuts principle (product principles); decision 15's
   additions to decision 14's rules and the non-blocking submit (D15-17); the browser Worker control
-  plane, render-only worklet and nightly browser toolchain (D15-10); the supersession sentence after
+  plane, render-only worklet and nightly browser toolchain (D15-10), with the single-mode sentence
+  (D15-10 recorded resolution): on a non-isolated page the one instance runs the same control plane
+  in the worklet's message handler, outside `process()`, with its control allocations counted and
+  reported and the render-locked allocation count exactly 0 in both modes; this is the one
+  exception to "compile plans only on control/worker threads"; the supersession sentence after
   "never silently lost" (D15-2); the parallel-coordinator rule replacing the one-WIP rule (D15-0).
 - **D3.** Decision 14's ruling gains one pointer paragraph to decision 15; its 2026-10-04 text is
   kept.

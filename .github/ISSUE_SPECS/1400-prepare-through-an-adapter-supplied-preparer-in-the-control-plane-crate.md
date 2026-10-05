@@ -72,11 +72,21 @@ browser's boot already prepares through it, and its rendered bits do not change.
   selection: `LIVE_QUEUE_DEPTH` and `C_ABI_LIVE_LANES` move from the crate to capi beside it, and
   it calls the same two host-core entries. capi passes `Box::new(CapiPreparer)` to the
   constructor.
+  - Order with the two slices that edit `C_ABI_LIVE_LANES`: *Deliver value-only send edits to the
+    running C ABI plan* (#1225, `routes: true`) and *Apply value-only input trim and polarity
+    edits to the running C ABI plan* (#1261, the input lane). This slice moves the constant
+    verbatim, with whatever fields it holds when this slice merges. A slice of the two that merges
+    first edits it in `crates/control-plane/src/compile.rs`, and this slice carries that edit
+    unchanged. A slice that merges after this one edits it beside `CapiPreparer` in capi. Root
+    rebases whichever lands second; neither order changes a value.
 - **D4. The plan carries host data.** `PreparedRenderPlan` gains one field,
-  `host_attachment: Option<Box<dyn Any + Send>>`, `None` by default, with
-  `set_host_attachment(&mut self, value: Box<dyn Any + Send>)` (control side, before
-  publication) and `host_attachment_mut::<T: 'static>(&mut self) -> Option<&mut T>`. The engine
-  never reads it. It drops with the plan. Reading it from render through the plan owner is #1381's.
+  `host_attachment: Option<Box<dyn HostAttachment>>`, `None` by default. `HostAttachment` is a new
+  engine trait, `pub trait HostAttachment: Send + 'static { fn as_any_mut(&mut self) -> &mut dyn
+  Any; }`. The plan gains `set_host_attachment(&mut self, value: Box<dyn HostAttachment>)`
+  (control side, before publication) and `host_attachment_mut::<T: 'static>(&mut self) ->
+  Option<&mut T>` (a downcast through `as_any_mut`). In this slice the engine only stores it and
+  drops it with the plan. Reading it from render through the plan owner, and the swap-block hook
+  that pairs carried readers, are #1381's (its D3).
 - **D5. The browser's preparer.** `WebRuntimePreparer` in host-web holds the boot options and the
   spectrum request.
   - One inner function, `prepare_web_host(compiled, caps, options, spectrum, successor)`, holds
@@ -85,8 +95,8 @@ browser's boot already prepares through it, and its rendered bits do not change.
     `_between_render_calls` entry. It returns the host, the handles and the spectrum capture.
   - `WebRuntimePreparer::prepare` calls it, then moves `handles.meters`,
     `handles.effect_observations` and the spectrum capture into one `RenderCompanions` struct
-    (those three fields; #1381 adds its bookkeeping), and sets it on the plan with
-    `set_host_attachment`. It returns the host and the remaining handles.
+    (those three fields; #1381 adds its bookkeeping), implements `HostAttachment` for it, and
+    sets it on the plan with `set_host_attachment`. It returns the host and the remaining handles.
   - `compile_ready` calls `prepare_web_host` with `successor: None` and keeps the companions in
     `ReadyOwnership` as today. The browser renders its plan directly until #1381.
 - **D6. No behaviour change on either host.** capi keeps every result, diagnostic and byte. The

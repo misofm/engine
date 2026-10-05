@@ -77,25 +77,42 @@ the Rust host* (#1290) publishes through.
   *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325) D4 on the browser as on
   the C ABI. Feeds, messages and replies are unchanged.
 - **D3. Companions travel inside the plan.**
-  - `PreparedRenderPlan`'s `host_attachment: Option<Box<dyn Any + Send>>`, with
+  - `PreparedRenderPlan`'s `host_attachment: Option<Box<dyn HostAttachment>>`, with
     `set_host_attachment` and `host_attachment_mut`, comes from #1400 D4. The browser preparer
-    sets it at preparation, before publication. The engine never reads it.
+    sets it at preparation, before publication.
   - `RealtimePlanOwner` gains `active_attachment_mut::<T: 'static>() -> Option<&mut T>`, a
-    `downcast_mut` of the active plan's attachment. It is render-side and allocation-free.
+    downcast of the active plan's attachment. It is render-side and allocation-free.
   - The browser's attachment is #1400 D5's `RenderCompanions` struct: the meter consumers, the
     effect observation handles and the spectrum capture. This slice adds to it the per-plan meter
     and observation bookkeeping that `ReadyOwnership` holds today. The Worker prepares it with the
     plan.
+  - **Pairing hook.** `HostAttachment` gains `fn adopt_predecessor(&mut self, predecessor: &mut
+    dyn HostAttachment, carries: &[ObserverCarry]) {}` (empty default). `PreparedRenderPlan::
+    carry_from` (`crates/engine/src/realtime/plan.rs:917`) calls it after the executor hand-over
+    when both plans have an attachment, with the successor's `observer_carries()` (*Carry meter
+    and effect observation state across a plan swap*, #1327 D3). It therefore runs on the render
+    thread, in the swap block, after #1327's and #1395's sections moved the carried observers,
+    before the successor renders, and before the predecessor is committed to retirement.
+  - `RenderCompanions::adopt_predecessor` downcasts the predecessor through `as_any_mut`; another
+    type, or no carry record, pairs nothing. Otherwise it calls #1327 D3's
+    `pair_carried_meters` and `pair_carried_observations`, and *Carry spectrum capture state
+    across a plan swap* (#1395) D3's `pair_carried` for its single capture or collection. Each
+    carried reader's per-reader bookkeeping moves with it in the same swap. The delivery state
+    that belongs to the meter stream, not to one reader (`meter_generation`,
+    `meter_snapshot_generation`, the meter header and `meter_loss_count`), is copied from the
+    predecessor's companions. Every step is a swap or a scalar copy: no allocation, no drop.
+  - So after the swap block the active companions hold the readers of the observers that render.
+    Carried readers keep their sequence, and the browser's `meter_generation` does not advance
+    (#1290 gates it on a structural apply).
   - Adoption: the companions become active at the same block as their plan, because they are part
     of it. A block whose `enter_block` returned `Applied` reads the new attachment before it
-    renders. Carrying meter, observation and spectrum state from the old companions is
-    *Carry meter and effect observation state across a plan swap* (#1327).
+    renders.
   - Freeing: `enter_block` moves the displaced plan, attachment included, into the retirement
     queue. The Worker's service step reclaims it with `try_reclaim` and drops it there. A candidate
     that is never adopted returns to the control side (`cancel`, supersession #1310, withdrawal
     #1343) and drops there. Render never drops an attachment.
-  - `downcast_mut` reaches `type_id` through the vtable: one new `call_indirect` site in render's
-    closure, added to #1333 D4's pinned table with this reason.
+  - The vtable calls (`as_any_mut`, `Any::type_id`, `adopt_predecessor`) are new `call_indirect`
+    sites in render's closure, added to #1333 D4's pinned table with this reason.
 - **D4. Render.** `render_next` renders through `PlanState`'s `RealtimePlanOwner`.
 - **D5. Two new exports.** Only the control side calls them: the Worker, or in `single` mode the
   worklet's control handler. Neither is in the render-locked set.
@@ -123,8 +140,12 @@ the Rust host* (#1290) publishes through.
     render samples (D15-17).
   - `single` mode: no control work runs inside `process()`. The worklet's control handler calls
     the export after every control message. The main-realm host also posts an internal
-    `miso.service.v1` message to the worklet on a one-quantum `setInterval` (the main realm may use
-    timers; the worklet may not), and the handler services on it. This runs outside the
+    `miso.service.v1` message to the worklet, on #1332 D7's control-plane-to-worklet port, from a
+    one-quantum `setInterval`, and the handler services on it. The worklet may not use timers.
+    `check-web-audioworklet.sh` bans `setInterval` in the main-realm host today (`:512-515`); this
+    slice changes that rule to exactly one pinned `setInterval(` site in the main-realm host, the
+    single-mode service tick, cleared at dispose, with a red self-test mutation (a second site).
+    The worklet's ban is unchanged. This runs outside the
     render-locked window, and its allocations and frees count in #1332's
     `singleModeControlAllocations`.
   - The loop starts when boot succeeds and stops before dispose.
@@ -138,7 +159,8 @@ the Rust host* (#1290) publishes through.
 
 ## Deliverables
 
-1. D3's owner accessor in `crates/engine/src/realtime/plan_exchange.rs`.
+1. D3's owner accessor in `crates/engine/src/realtime/plan_exchange.rs`; D3's hook in
+   `crates/engine/src/realtime/plan.rs`; `RenderCompanions::adopt_predecessor` in host-web.
 2. D5's `SessionState::watermark()` accessor in `crates/control-plane`.
 3. D1, D2, D4-D6 in `hosts/host-web/src/lib.rs`, `hosts/host-web/src/ffi.rs`, and the control
    Worker, worklet and main-realm host scripts.
@@ -155,11 +177,15 @@ the Rust host* (#1290) publishes through.
 - `hosts/host-web/src/{lib.rs,ffi.rs,tests.rs}`, `hosts/host-web/tests/plan_exchange_threads.rs`
   (new), `hosts/host-web/Cargo.toml` (the `bench-support` dev-dependency if no earlier slice
   added it; #1400 adds the `control-plane` dependency), `hosts/host-web/web/`
-- `scripts/check-web-audioworklet.sh` (`expected_exports`, and the capability rule for the new
-  message), `scripts/check-web-audioworklet-callgraph.py` (the pinned indirect site)
+- `scripts/check-web-audioworklet.sh` (`expected_exports`, the capability rule for the new
+  message, and D6's one pinned main-realm `setInterval(` site with its self-test mutation),
+  `scripts/check-web-audioworklet-callgraph.py` (the pinned indirect sites)
+- `scripts/test-web-audioworklet.mjs` (the fake exports and the single-mode service tick)
 - `sdk/assets/miso-engine-v1-abi-layout.json`, `sdk/src/generated/abi.ts` (regenerated only)
 - These are outside stream H's ownership; root sequences them after #1309, #1314 and #1348:
   - `crates/engine/src/realtime/plan_exchange.rs`: D3's owner accessor only;
+  - `crates/engine/src/realtime/plan.rs`: D3's `adopt_predecessor` trait method and its call in
+    `carry_from` only;
   - `crates/control-plane/src/`: the `watermark()` accessor only;
   - `tools/parameter-metadata/src/abi_layout.rs` (`EXPORTS` and the record's fields),
     `scripts/check-abi-layout-v1.py` and `scripts/fixtures/abi-layout-v1-self-test.json`.
@@ -185,8 +211,11 @@ the Rust host* (#1290) publishes through.
      one observed effect and a spectrum capture. Render 6 blocks.
    - On A, call `republish_committed_for_test()`. Render 6 more blocks on B.
    - The block after publication reports `SwapOutcome::Applied`. The clock continues. Every block
-     is bit-identical to a run without the republish. A meter poll and an observation read after
-     the swap are served by the new plan's attachment.
+     is bit-identical to a run without the republish.
+   - Every observer carries (the model is unchanged), so the hook pairs every reader. A meter
+     poll, an observation read and a spectrum read after the swap are served by the new plan's
+     attachment and continue the old sequences: no sequence gap, `meter_generation` unchanged,
+     no counted meter loss, no spectrum `Failed` epoch.
    - On B, the thread-scoped counters read `allocations == 0 && frees == 0` around every render
      call.
    - The next service step on A reclaims exactly one plan. The old attachment is dropped on A
@@ -200,6 +229,8 @@ the Rust host* (#1290) publishes through.
    `check-abi-layout-v1.py` over the shipped layout) and `bash scripts/check-sdk-generated.sh
    target/ci/qualification-artifacts` pass. `python3 -B scripts/check-abi-layout-v1.py --self-test`
    passes and turns red if one list omits an export or the record omits a field.
+   `check-web-audioworklet.sh`'s self-test turns red on a second main-realm `setInterval(` site
+   and on a `setInterval` in the worklet.
 6. **C ABI unchanged.** `cargo test --locked -p capi` passes. `target/release/audit capi` reports
    0 allocations, locks and syscalls, with the same `pcm_digest` as the base (PR evidence).
 7. **Commands:**
@@ -220,13 +251,17 @@ the Rust host* (#1290) publishes through.
 ## Test value
 
 - Gate 2: turns red if the browser still renders the plan directly (no adoption), if the clock
-  restarts on adoption, if a swapped plan is served by the old companions, if the render thread
-  drops a retired plan or attachment, or if the Worker never reclaims them.
+  restarts on adoption, if a swapped plan is served by the old companions, if the hook is not
+  called or pairs nothing (the new attachment's readers would sit on producers that left with the
+  retired plan, so every meter and the spectrum stream go silent or restart), if the render
+  thread drops a retired plan or attachment, or if the Worker never reclaims them.
 - Gate 3: turns red if single mode leaks retired plans, or reclaims them inside the render
   export.
 - Gate 4: turns red if the export reads anything but #1314's record (for example the status
   words, which carry no counters), or writes for a wrong handle.
-- Gate 5 is not new: its existing self-test holds every mirror of the export list in step.
+- Gate 5: its export-list self-test is not new. The new mutation turns red if the timer rule is
+  relaxed beyond the one single-mode service tick, which would let control timers into the
+  main realm unpinned.
 - Gates 1 and 6 are not new. They hold the bits of both hosts across the move.
 
 ## Dependencies
@@ -237,3 +272,6 @@ the Rust host* (#1290) publishes through.
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400).
+- *Carry meter and effect observation state across a plan swap* (#1327): the carry record and
+  the meter and observation pairing functions.
+- *Carry spectrum capture state across a plan swap* (#1395): the spectrum pairing calls.

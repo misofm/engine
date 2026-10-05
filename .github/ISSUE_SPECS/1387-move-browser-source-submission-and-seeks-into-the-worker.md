@@ -105,6 +105,8 @@ today.
 - `sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js` and a new Worker drain module
   beside it, `sdk/src/browser/pcm-feed.ts`, `sdk/src/assets.ts`
 - `scripts/check-web-audioworklet.sh`, `scripts/check-web-audioworklet-callgraph.py`
+- `scripts/test-web-audioworklet.mjs` (the fake exports and messages for source submission and
+  seeks moving to the Worker)
 
 ## Non-goals
 

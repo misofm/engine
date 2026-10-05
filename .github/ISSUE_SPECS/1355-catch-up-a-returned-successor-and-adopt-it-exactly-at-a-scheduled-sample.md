@@ -52,6 +52,26 @@ no jump.
   - `Diverged` abandons the catch-up: the successor and its peeks are dropped on the control thread
     (each peek's drop abandons it, #1320 D3), and the edit is re-prepared under D10 as a new warm
     successor from a new B, until #1358's deadline.
+  - **Added sources read through a peek too.** A source the successor creates fresh has no
+    predecessor consumer, and its own consumer must stay unbegun until adoption: a consumer that
+    plays releases blocks, so the PCM the host was acked for from frame 0 would be gone if the
+    catch-up is re-prepared, and *Prepare a successor across a withdrawn candidate plan* (#1344) D5
+    refuses to donate such a ring. So at warm preparation the control thread, which owns the
+    unpublished successor, calls `take_peek` on the added source's producer and `arm_peek` on the
+    successor's own consumer, before that consumer begins any block (#1320 D3's thread rule: the
+    plan's owner uses its peeks). `CatchUp` keeps these peeks control-side. It lends each to its
+    entry for a `render_slice` and takes it back after, so the entry reads the peek and the
+    consumer never begins a block before adoption.
+  - Before each publication the catch-up writes into each added entry how many frames its peek has
+    read (whole blocks). At adoption render advances the consumer by that count (D6). The `CatchUp`
+    drops the then disarmed peek on the control thread once `withdraw()` reports `Taken` or the
+    service step sees the epoch adopted, which only clears `peek_outstanding`; render never drops a
+    peek. On every other ending the peek is dropped on the control thread like a carried one; its
+    abandon releases nothing, because the consumer never began.
+  - After a donation (D10; #1357 D3), the new warm successor's `CatchUp` takes over each donated
+    ring's peek, then calls `abandon` and `arm_peek` on the donated consumer, which is unbegun, so
+    its new catch-up reads from frame 0 again. A donation into an ordinary or transition candidate
+    drops the peek instead.
 - **D3. Alignment.** The catch-up starts and fills exactly as #1287's recorded proof states. Per
   that proof:
   1. A prime phase reads source frames `[B, B + P)` through the peeks into each source-claim line,
@@ -71,8 +91,11 @@ no jump.
   - `CatchUp::service(&mut self, max_blocks) -> CatchUpState` renders while the successor's clock
     is behind `render_clock() + 2 * quantum`.
   - Then, in this order, it writes the held #1277 D5 retarget records, then the held live edits
-    (#1356 D3), then the epoch's outcome word (D8), then publishes `ExactlyAt(S)` with `S` the
-    successor's next sample.
+    and their highest revision (#1356 D3), then each added entry's peeked frame count (D2), then
+    the epoch's outcome word (D8), then publishes `ExactlyAt(S)` with `S` the successor's next
+    sample.
+  - While the catch-up holds the successor, `CatchUp::set_revision(revision)` raises the revision
+    word it will be published with (#1314 D2's control-held candidate rule); #1356 calls it.
   - A returned candidate stays in its cell until the catch-up takes it with `withdraw()`
     (`Withdrawal::Returned { reason: Late }`, #1311 D6); it goes back into the loop and is
     published again later. What was written stays written and undrained (D4).
@@ -83,12 +106,16 @@ no jump.
      exchange for the consumer (#1320 D3). The predecessor is reclaimed off render, and its drop
      ends the peeks.
 
+  For each added source, it calls `advance_past_peek` on the successor's own consumer with the
+  entry's peeked frame count (D2); nothing is exchanged, and the peek stays with the `CatchUp`.
+
   Observers take the predecessor's producers under #1327 D4. A ring whose advance refuses fails the
   whole section and moves nothing; the candidate is returned, never adopted. Then render opens the
   live lanes (D4).
 - **D7. When no warm successor can be prepared.** Warm preparation adds two `WarmUnavailable`
-  reasons to #1354's: `LeadBound` when `ΣP + P > p_max`, and `PeekOutstanding` when a carried
-  ring's `take_peek` returns `None`. It never refuses a valid edit: the caller takes the transition
+  reasons to #1354's: `LeadBound` when `ΣP + P > p_max`, `PeekOutstanding` when a carried or
+  added ring's `take_peek` returns `None`, and `PeekHeadroom` when an added ring's `arm_peek`
+  returns `false` (its hold cap is 0, #1320 D4). It never refuses a valid edit: the caller takes the transition
   (*Duck-swap the strips a latency growth restarts, and fall back to the transition when no
   catch-up can finish*, #1397, split from #1358). `p_max` comes from the warm configuration;
   #1358 D2 fixes its default.
@@ -105,9 +132,16 @@ no jump.
   again (D2 here; #1358's transition; #1357 and #1359 reuse the rule):
   - it prepares against the running plan, with the displaced successor as donor (#1310 D2): the
     rings of sources the edit added are donated to the new candidate, never dropped or allocated
-    again;
-  - its model and base are the ones submit already prepared successfully, and its floors are no
-    higher, so every budget and ceiling check passes again (they are monotone in the floors);
+    again. They pass #1344 D5's check because the catch-up read them only through peeks (D2), so
+    every chunk acked since frame 0 is still in them;
+  - its model, base and lead are the ones submit already prepared successfully, and its floors are
+    no higher, so the re-prepared plan's resource row is no larger than the displaced successor's,
+    and host-core's per-plan ceilings pass again;
+  - the control plane's cross-plan admission is not run here. The warm submit already admitted the
+    re-preparation peak: the running plan plus the successor's row twice, with #1398 D4's model
+    terms (*Size the C ABI's plan capacities and resource admission for a superseding candidate*,
+    #1398 D4, wired at the warm submit by #1360 D1). The displaced successor is not released
+    first, because it is the donor;
   - if it is refused anyway, that is a defect: the displaced successor and its donated rings are
     kept, `catch_up_reprepare_refusals` (saturating) rises, a debug assertion fires, and the next
     `service` call retries. The revision stays pending and visible. It never completes as nothing.
@@ -136,10 +170,14 @@ no jump.
 - Held live edits (#1356), supersession (#1357), the deadline and fallbacks (#1358), and stop
   (#1359).
 - Control-plane and C ABI wiring (#1360), and the browser (#1361).
-- A peek on a source the edit adds: its new ring has no predecessor consumer, so it is read
-  directly. Gates 1-6 use existing sources.
+- Gates 1-6 use existing sources; gate 7 covers a source the edit adds (D2).
 
 ## Hazards
+
+- **Added-source ring depth.** An added ring's consumer releases nothing until adoption, so the
+  ring must hold every frame the catch-up reads from it (`S - B + P`). If the producer has no free
+  block, the peek answers `NotYet`, the catch-up waits, and #1358's deadline falls back. Nothing is
+  dropped.
 
 - **Size.** This is the largest stream C slice even after the #1396 split. If the prime phase (D3)
   needs a partial-render executor call, move it into its own slice before this one and report
@@ -171,9 +209,14 @@ no jump.
 6. **Realtime.** The adoption block makes zero allocations and frees on the render thread
    (`bench_support::alloc`).
 7. **Abandon.** A seek during the catch-up yields `Diverged`. The producer's admission depth returns
-   to the configured value, and the re-prepared successor (D10) reaches gate 1's equality. With an
-   edit that also adds a source, the re-prepared successor holds the same ring the displaced one
-   prepared (its producer still accepts the chunks submitted before the divergence).
+   to the configured value, and the re-prepared successor (D10) reaches gate 1's equality.
+   - With an edit that also adds a source `c`, fed from frame 0, the displaced catch-up reads `c`
+     through its peek for at least 4 blocks before the divergence. Then `c`'s consumer has not
+     begun a block, `check_donation` accepts it, and the re-prepared successor holds the same ring.
+     From its adoption `c` plays every chunk submitted before and after the divergence, from frame
+     0, as in a fresh plan fed the same PCM.
+   - The re-prepared plan's resource row is at most the displaced successor's, and no re-preparation
+     refusal is counted.
 8. Commands: those of #1354, plus `cargo test --locked -p source` and `cargo test --locked -p capi`.
 
 ## Test value
@@ -187,19 +230,26 @@ no jump.
 - Gate 5: a bound that refuses the edit changes the revision; a peek never handed back makes the
   second growth fail `PeekOutstanding`. Red.
 - Gate 7: a divergence that keeps the gate armed starves the producer; a re-preparation that
-  prepares a new ring instead of reusing the donated one loses the chunks already submitted. Red.
+  prepares a new ring instead of reusing the donated one loses the chunks already submitted; a
+  catch-up that reads the added source through its consumer releases those chunks, so the donation
+  is refused and the re-preparation never succeeds. Red.
 
 ## Dependencies
 
-- *Give a plan a source-read clock that leads its render clock* (#1396, split from this issue).
+- *Give a plan a source-read clock that leads its render clock* (#1396), split from this issue.
 - *Snapshot a running plan into a returned successor at a block* (#1354).
 - *Give the source ring a read-only peek cursor that gates release* (#1320).
 - *Render a successor plan off the render thread with a pinned floating-point environment* (#1321).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310), D2: the donor.
-- *Hold live values in latest-target cells on both hosts* (#1312), and the lane cells of
-  *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345), *Hold strip
-  input-lane values in latest-target cells* (#1346) and *Hold route-lane values in latest-target
-  cells* (#1347): the drains D4 defers.
+- *Hold live values in latest-target cells on both hosts* (#1312): a drain D4 defers.
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): a drain D4
+  defers.
+- *Hold strip input-lane values in latest-target cells* (#1346): a drain D4 defers.
+- *Hold route-lane values in latest-target cells* (#1347): a drain D4 defers.
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), D5.
 - *Carry meter and effect observation state across a plan swap* (#1327), D4.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+- *Prepare a successor across a withdrawn candidate plan* (#1344), D3 and D5: the donation D10
+  runs and its unconsumed-ring check.
+- *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398),
+  D4: the re-preparation peak the warm submit admits.

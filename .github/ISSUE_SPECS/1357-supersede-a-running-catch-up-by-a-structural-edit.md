@@ -39,10 +39,16 @@ is never interrupted.
     D6).
   - If render is copying into it right now (`Withdrawal::InFlight`, #1311 D6, #1354 D1), the
     structural submit never waits on render (decision 15, D15-17) and is never refused for it. It
-    runs D2's preparation against P0 and the committed model as usual, and D3's commit. It
-    records the in-flight successor as superseded, and holds the newer candidate control-side,
-    unpublished: the mailbox has no free cell while the in-flight one is `Returned`. The steps of
-    D3 that need the displaced successor in hand (2, 4 and 5) wait for it, as D1a says.
+    runs D2's preparation against P0 and the committed model as usual. Before the commit it checks
+    the donation with `check_donation(newer, Donor::Record(..))` (*Prepare a successor across a
+    withdrawn candidate plan*, #1344 D3): the displaced successor's `DonorRecord`, captured at its
+    preparation, stands in for the plan render is copying into. A refusal there is a refusal
+    before commit (D3). Then D3's commit, and right after it `donate_producers`: from then on
+    every submission and seek for a source the displaced successor added lands in the ring the
+    newer candidate will own (#1344 D3). It records the in-flight successor as superseded, and
+    holds the newer candidate control-side, unpublished: the mailbox has no free cell while the
+    in-flight one is `Returned`. The steps of D3 that need the displaced successor in hand (2, the
+    consumer half of 4, and 5) wait for it, as D1a says.
   - If it is published and unclaimed, the control plane withdraws it (#1310 D1).
   - If render took it, it is the base, as in #1310's *taken* case. The newer edit is then an
     ordinary rebuild, or a new catch-up if it grows latency again. The control call services
@@ -54,11 +60,19 @@ is never interrupted.
   ended takes the displaced successor with `withdraw()` (`Withdrawal::Returned { reason: Copied |
   CopyRefused }`). A copy lasts at most the rest of one render callback (#1354 D1), so the first
   service call after that callback finds it ended; an earlier call gets `InFlight` again and leaves
-  everything as it is. The service step then runs D3 steps 2, 4 and 5 for the newer candidate,
-  which are infallible moves, drops the displaced plan, and publishes it. It never prepares
-  anything again.
+  everything as it is. The service step then runs D3 step 2, `donate_consumers` (the consumer
+  half of step 4, checked before the commit), the added-source peek hand-over of #1355 D2, and
+  writes the newer candidate's revision word: the highest revision committed since the commit,
+  which #1314 D2 routed to this control-held candidate. All are infallible moves and stores. It
+  drops the displaced plan and publishes the newer candidate (step 5). It never prepares or
+  checks anything again.
   - A further structural edit before that service call supersedes the held newer candidate, which
     is control-owned (the first case above); the in-flight successor stays recorded as superseded.
+    The pending consumer half follows the producers: the newest candidate's donation from the held
+    one moves the producers again, and every pending pair it takes is re-targeted to it, checked
+    against the displaced successor's `DonorRecord` before that commit. D1a then runs
+    `donate_consumers` from the displaced successor into the newest candidate. A pending pair the
+    newest candidate does not take is a source it removed; its ring goes with the displaced plan.
   - The displaced revision completes as `superseded` (D4).
 - **D2. Prepare against P0.** In the withdrawn and in-flight cases, the newer candidate is
   prepared against the running plan P0 (#1310 D2). Its lead is `warm_lead` (#1354 D3) from P0,
@@ -68,27 +82,34 @@ is never interrupted.
   - **Peeks pass by donation.** A warm newer candidate does not call `take_peek`: the displaced
     successor still owns the rings' peeks (#1320 D3). Preparation borrows them from the donor,
     untouched and still armed. On success they move to the newer candidate in D3. On refusal they
-    stay with the displaced successor. In the in-flight case nothing is borrowed at preparation:
-    the peeks and the displaced successor's new rings stay where they are until D1a's service
-    step moves them, which is a move, never a check.
+    stay with the displaced successor. The peeks of sources the displaced successor added are
+    held control-side by its `CatchUp` (#1355 D2) and pass the same way. In the in-flight case
+    nothing in the displaced plan is borrowed at preparation: its consumers and carried peeks stay
+    where they are until D1a's service step moves them, which is a move, never a check.
 - **D3. Infallible order.** Only after every fallible check (#1310 D4):
   1. the protocol commit;
   2. `abandon` each borrowed peek (#1320 D8). A warm newer candidate keeps them: its claim's
      `arm_peek` completes the abandon and arms again at the new B (#1320 D4). An ordinary or
      transition candidate drops them, which ends them (#1320 D3);
   3. drop the hold (#1356 D4) and the displaced plan on the control thread;
-  4. donate the displaced successor's new rings (#1310 D2);
+  4. donate the displaced successor's new rings (#1310 D2, #1344 D3). They pass #1344 D5's
+     unconsumed check although the displaced catch-up rendered blocks, because it read them only
+     through peeks (#1355 D2);
   5. publish the newer candidate, `CopyAndReturn` when it is warm.
 
   On a refusal the displaced catch-up continues untouched, with its peeks still armed. In the
-  in-flight case steps 1 and 3 run in the submit, except that the displaced plan is not yet in
-  hand; D1a's service step drops it, and runs steps 2, 4 and 5.
+  in-flight case steps 1, 3 (except the displaced plan, not yet in hand) and the producer half of
+  4 run in the submit; D1a's service step drops the plan and runs step 2, the consumer half of 4,
+  and 5.
 - **D4. Completion.** The displaced revision completes with the newer one's adoption, flagged
   `SUPERSEDED` (#1314 D5).
 - **D5. Acked-batch question.** The displaced revision's content is in the newer committed model,
   and a refusal leaves the catch-up running. In the in-flight case the ack follows the commit, and
   the newer candidate is held whole, control-side, until the service step publishes it; nothing is
-  dropped while it waits. An ack can never precede a drop.
+  dropped while it waits. A source the displaced successor added is fed, from the commit on, into
+  the ring the newer candidate keeps (the producer half of the donation), so a chunk acked in that
+  window is never in the ring the displaced plan drops. Revisions committed in that window are in
+  the held candidate's word, never the running plan's. An ack can never precede a drop.
 
 ## Deliverables
 
@@ -128,7 +149,13 @@ is never interrupted.
    published. A `service` call while the hook holds gets `InFlight` and changes nothing. After the
    hook releases and the callback ends, the next `service` call publishes the newer candidate; from
    its adoption the output equals gate 1's reference, and the watermark shows gate 4's flags.
-8. Commands: those of #1356.
+8. **In flight with an added source.** As gate 7, with the displaced successor's edit adding a
+   source `c` and the newer edit keeping it. While the hook holds render, submit two chunks of `c`
+   and commit a live fader edit. After the service step publishes the newer candidate, `c` plays
+   every chunk submitted before and after the newer commit, from frame 0, as in gate 1's
+   reference fed the same PCM, and before the newer adoption the watermark never reports the
+   fader edit's revision.
+9. Commands: those of #1356.
 
 ## Test value
 
@@ -144,6 +171,10 @@ is never interrupted.
 - Gate 7: a submit that spins on the state word until the copy ends does not return while the
   hook holds render; a service step that publishes before the copy ends, or never completes the
   withdrawal, fails the reference or the flags. Red.
+- Gate 8: a submit that checks no donation before the commit, or leaves `c`'s producer pointing
+  at the newer candidate's fresh ring, loses the chunks submitted while the copy was in flight
+  (that ring goes to the displaced plan and is dropped); a revision stamped on the running plan in
+  that window is reported early. Red.
 
 ## Dependencies
 
@@ -154,3 +185,5 @@ is never interrupted.
 - *Snapshot a running plan into a returned successor at a block* (#1354).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+- *Prepare a successor across a withdrawn candidate plan* (#1344), D3 and D5: `DonorRecord` and the
+  split donation.

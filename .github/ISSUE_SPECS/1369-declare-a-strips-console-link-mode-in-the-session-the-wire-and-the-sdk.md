@@ -25,6 +25,13 @@ still binds one bank (#1368).
   `:1569`), the field table `schema::session::console_entry` (`crates/protocol/src/schema.rs:888`).
 - The SDK: `ConsoleEntrySpec` (`sdk/src/core/types.ts:209`), the accepted keys
   `CONSOLE_ENTRY_KEYS` (`sdk/src/core/session.ts:178`) and their normalisation (`:1309-1320`).
+  The SDK's canonical writer fixes a console entry's key set to `["slot", "bypass", "params"]`
+  (`sdk/src/internal/session-json.ts:127`), so `toJson()` throws on any other key.
+- The protocol corpus pins `COMPLETE_SCHEMA_HASH` (`crates/conformance/src/protocol_corpus.rs:737`)
+  with a re-pin history. The same hash is spelled in `scripts/check-protocol-wasm-parity.sh:172-173`,
+  `docs/CONTROL_PROTOCOL_CONFORMANCE.md:3` and `fuzz/corpus/complete-schema-manifest.md:10`, and the
+  registry's nested-model line lists the console entry as `1:slot,2:bypass,3*:parameter`
+  (`docs/CONTROL_PROTOCOL_REGISTRY.md:85`).
 - An unsupported mode on an insert refuses with `effect.link_mode.unsupported`
   (`crates/effect-compiler/src/prepare.rs:367-374`).
 - 23 checked-in JSON documents declare a console (`grep -rl '"pre_insert"' --include=*.json`).
@@ -34,7 +41,10 @@ still binds one bank (#1368).
 - **D1. Grammar.** Each console entry gains a **required** key `link_mode` with the closed token
   set `slot`, `dual_mono`, `maximum`, `average`. `slot` runs the slot's declared mode. The model's
   `ConsoleEntry` gains `link_mode: ConsoleLinkMode` (`Slot` or a `LinkMode`). `lower_section`
-  resolves it: `Slot` takes `slot.link_mode`, any other value overrides.
+  resolves it: `Slot` takes `slot.link_mode`, any other value overrides. Canonical key order is
+  `slot`, `bypass`, `link_mode`, `params` (as an effect orders `bypass`, `link_mode`, `params`),
+  in the Rust writer and the SDK writer alike; the visitor gives `link_mode` entry field 4
+  (`docs/SESSION_SCHEMA_V1.md:200` lists fields 1-3 today).
 - **D2. Refusal.** A resolved mode the slot's effect does not support refuses with
   `effect.link_mode.unsupported` at the entry's path
   (`$.tracks[id=..].console[slot=..].link_mode`, or the submix strip's prefix), from the same check
@@ -55,12 +65,19 @@ still binds one bank (#1368).
 ## Deliverables
 
 1. D1-D3 in `crates/session`, the schema docs and the fixtures.
-2. D4 in `crates/protocol`, and the repin of `COMPLETE_SCHEMA_HASH`
+2. D4 in `crates/protocol`, and the one re-pin of `COMPLETE_SCHEMA_HASH`
    (`crates/conformance/src/protocol_corpus.rs:737`), the single cross-target corpus owner, with
-   one doc line in its repin history naming this issue (the console entry appends `LINK_MODE`).
+   one line in its re-pin history naming this issue (the console entry appends `LINK_MODE`). The
+   same re-pin updates every other spelling of the hash: the two lines of
+   `scripts/check-protocol-wasm-parity.sh:172-173`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md:3` and
+   `fuzz/corpus/complete-schema-manifest.md` (hash and history line). The registry's console entry
+   becomes `1:slot,2:bypass,3*:parameter,4:link-mode` (`docs/CONTROL_PROTOCOL_REGISTRY.md:85`).
+   Re-pin from the value the corpus computes on `main` at merge time, never by hand-editing history.
 3. The new field in every Rust `ConsoleEntry { .. }` literal (the model adds a field, so each one
    must name it; `"slot"`/`ConsoleLinkMode::Slot` everywhere).
-4. D5 in `sdk/` with regenerated outputs, and the CLI's console-entry request parser.
+4. D5 in `sdk/` with regenerated outputs, the CLI's console-entry request parser, and the SDK
+   canonical writer's console-entry key order, which becomes `["slot", "bypass", "link_mode",
+   "params"]`, D1's order (`sdk/src/internal/session-json.ts:127`).
 5. The binding-text amendments (K3 verdict MINOR-2), in this PR:
    - `AGENTS.md` (`:31`), the console sentence: the slot's `link_mode` becomes the default a strip's
      entry may override.
@@ -77,8 +94,10 @@ still binds one bank (#1368).
   `docs/session-v1.schema.json`
 - `crates/protocol/src/schema.rs`, `crates/protocol/src/session_wire.rs`,
   `crates/protocol/src/session_wire/tests.rs`, `crates/protocol/tests/`
-- `crates/conformance/src/protocol_corpus.rs` (the console-entry literals and the
-  `COMPLETE_SCHEMA_HASH` repin only)
+- The re-pin set (deliverable 2 only): `crates/conformance/src/protocol_corpus.rs` (the
+  console-entry literals, `COMPLETE_SCHEMA_HASH` and its history), `scripts/check-protocol-wasm-parity.sh`
+  (the two pinned hash lines), `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
+  `fuzz/corpus/complete-schema-manifest.md`, `docs/CONTROL_PROTOCOL_REGISTRY.md`
 - `crates/effect-compiler/src/prepare.rs` (the console entry's path in D2's diagnostic only),
   `crates/effect-compiler/tests/` (gate 2), `crates/graph-compiler/tests/` (gate 5)
 - the new field only, in every other `ConsoleEntry { .. }` literal on `main`:
@@ -89,7 +108,8 @@ still binds one bank (#1368).
   `tools/audit/src/builtins_graph.rs`, `tools/audit/src/fixture_builtins.rs`,
   `tools/console-workload/src/lib.rs`
 - every checked-in session JSON document and embedded test session (D3's key only)
-- `sdk/src/core/types.ts`, `sdk/src/core/session.ts`, `sdk/src/cli/session-request.ts`,
+- `sdk/src/core/types.ts`, `sdk/src/core/session.ts`, `sdk/src/internal/session-json.ts`,
+  `sdk/src/cli/session-request.ts`,
   `sdk/test/`, `sdk/src/generated/`, `sdk/assets/` (generated only); stream H owns `sdk/`:
   coordinate the merge
 - `AGENTS.md`, `docs/rulings/engine-footprint-2026-09-29.md`,
@@ -122,7 +142,9 @@ still binds one bank (#1368).
    unknown token.
 7. Commands:
    - `cargo test --locked -p session -p protocol -p effect-compiler -p graph-compiler --features protocol/test-support,effect-compiler/test-support,graph/test-support`
-   - `cargo test --locked -p conformance --test conformance_corpus` (the repinned corpus hash)
+   - `cargo test --locked -p conformance --test conformance_corpus` and
+     `cargo run --locked -p conformance --example conformance_fixtures -- --check` (the re-pinned
+     corpus hash); `bash scripts/check-protocol-wasm-parity.sh` (every spelling of the hash agrees)
    - `cargo test --locked -p host-core -p capi -p host-web -p audit -p console-workload --features host-core/test-support,host-core/control-provider,host-web/test-support`
      (every `ConsoleEntry` literal still builds and passes)
    - `cargo run --locked -p session-validator -- validate <file>` on each migrated document

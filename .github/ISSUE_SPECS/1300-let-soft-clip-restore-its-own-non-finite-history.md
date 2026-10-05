@@ -9,8 +9,9 @@ refusal would leave a carried lane at rest. #1322 touches no soft-clip code; the
 
 Successor item of *Make every banked effect's state restore allocation-free* (#1278, closed). Its
 attempt-1 amendment and attempts 2 and 3 left it open as "soft-clip's two open non-finite history
-cases". It started as #1071 attempt-1 verdict MINOR-2 (`submix-verdicts/1071-attempt1.md`): "D7
-keys only on the output". The #1278 attempt-1 verdict (item 4) accepted it as a successor. The fix
+cases". It started as #1071 attempt-1 verdict MINOR-2
+(`docs/handoffs/seamless-swap-phase1-2026-10-04/1071-attempt1.md:130-141`): D7 keys only on the
+output, so a non-finite history word with a finite output is refused by the effect's own restore. The #1278 attempt-1 verdict (item 4) accepted it as a successor. The fix
 is control-plane only. No rendered bit moves.
 
 ## Problem (verified on `main` at `d2fe0555a`)
@@ -257,10 +258,11 @@ attempt-2 overshoot bound, subnormal mix steps), and it needs its own tests. See
 
 ## Dependencies
 
-- No code dependency. #1071 and #1278 are on `main`.
-- Stream order only: after *Carry plan state by copy as well as by move* (#1322). It lands before
-  *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane carries
-  (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusal.
+- *Carry plan state by copy as well as by move* (#1322)
+
+The edge is stream order only; there is no code dependency (#1071 and #1278 are on `main`). This
+issue lands before *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane
+carries (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusal.
 
 ## Standing rules for the implementer
 

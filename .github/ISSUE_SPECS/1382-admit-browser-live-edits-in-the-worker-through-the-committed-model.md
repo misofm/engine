@@ -42,9 +42,9 @@ term into effective mute, for strips and for sends that follow them.
 - **The C ABI's live path.**
   - `SessionState::command` (today `crates/capi/src/runtime/control.rs:843`) classifies a
     transaction with `classify_live_delta` (`crates/host-core/src/live_delta.rs:211`).
-  - `commit_live` (`control.rs:1065`) first compiles the prospective session
-    (`:1066-1070`), then checks everything, pushes, then commits. Compiling allocates. #1309 moves
-    both into `crates/control-plane`.
+  - It first compiles the prospective session, in `prepare_command_frame` (`control.rs:855-862`).
+    Then `commit_live` (`:1065`) reads it (`:1066-1070`), classifies, checks everything, pushes,
+    and commits. Compiling allocates. #1309 moves both into `crates/control-plane`.
   - The C ABI has no solo. *Let C ABI sends follow their source strip's mute live* (#1226) makes
     the shared commit build follow records from each strip's effective mute (own or VCA mute),
     and adds `LiveRouteState::set_follows_mute` for the browser.
@@ -96,6 +96,15 @@ term into effective mute, for strips and for sends that follow them.
   - With an overlay, a strip's effective mute is `model mute || VCA mute || solo term`. The strip
     mute records and #1226's follow records are built from that effective mute. A solo change
     with no model change goes through the same code and yields the same records.
+  - **Solo's ramp.** Solo has no session edit, so #1394's transaction field does not reach it.
+    The solo record's own length word (`smoothing_samples`, `hosts/host-web/src/lib.rs:854-868`)
+    becomes the overlay change's ramp: `SESSION_DEFAULT_RAMP` lowers to `None`, anything else
+    (0 included) to `Some`. The commit resolves it with #1394 D5's
+    `LiveRamps::resolve(<solo row>, ramp)`, and the solo row's session default is the
+    `control_smoothing` mute key, `mute_ms` (#1054 D3's table). Every strip mute and follow
+    record that the solo change produces takes that one length. A model edit in the same batch
+    keeps its own resolved ramp for the records it alone produces; a record that both change is
+    built once and takes the model edit's ramp.
   - When a transaction changes a route's `follows_mute`, the commit sets the mirror's flag with
     #1226 D7's `set_follows_mute`, in the same shadow, so a later solo change composes with the
     new flag.
@@ -131,6 +140,8 @@ term into effective mute, for strips and for sends that follow them.
 - `sdk/src/browser/shipped-host.d.ts`, `sdk/src/browser/live-controls.ts` (the reply fields
   only)
 - `scripts/check-web-audioworklet.sh`, `scripts/check-web-audioworklet-callgraph.py`
+- `scripts/test-web-audioworklet.mjs` (the fake exports and messages for admission moving to the
+  Worker)
 - Outside stream H's ownership; root sequences it after #1309 and #1226:
   `crates/control-plane/src/`, D3's overlay input and composition only.
 
@@ -151,9 +162,10 @@ term into effective mute, for strips and for sends that follow them.
    - the committed document contains the edited value;
    - after the ramp, every block is bit-identical to a plan prepared from the committed model,
      with the same solo overlay, fed the same PCM from frame 0.
-2. **Ramps carry end to end.** For fader, mute and pan: a record with an explicit ramp of 0 steps
-   at the next block; a record with an explicit ramp of 480 reaches its target after 480 samples;
-   a record with the sentinel ramps over the session's `control_smoothing` length.
+2. **Ramps carry end to end.** For fader, mute, pan and solo: a record with an explicit ramp of 0
+   steps at the next block; a record with an explicit ramp of 480 reaches its target after 480
+   samples; a record with the sentinel ramps over the session's `control_smoothing` length (for
+   solo, `mute_ms`).
 3. **The overlay.**
    - Solo, observe subscribe and the meter lease leave the revision unchanged.
    - Soloing track 2 mutes the others, and a send that follows a soloed-out strip follows it,
@@ -192,8 +204,8 @@ term into effective mute, for strips and for sends that follow them.
 
 - Gate 1: turns red if a live edit reaches the lanes without reaching the committed model (the
   defect #1291/#1292's merge existed to patch), or if a kind is lowered to the wrong field or lane.
-- Gate 2: turns red if the lowering drops a per-edit ramp, reads an explicit 0 as "default", or
-  reads the sentinel as a length.
+- Gate 2: turns red if the lowering drops a per-edit ramp, reads an explicit 0 as "default",
+  reads the sentinel as a length, or resolves solo's default from a key other than `mute_ms`.
 - Gate 3: turns red if solo or a lease advances the revision, if the shared commit ignores the
   solo term for strips or following sends, or if the overlay is lost when the plan is swapped.
 - Gate 4: turns red if any record or overlay change is written before a later check refuses.

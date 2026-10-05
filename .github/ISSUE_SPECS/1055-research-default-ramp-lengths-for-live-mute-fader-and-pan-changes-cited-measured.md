@@ -9,8 +9,8 @@ Owner ruling (2026-09-28): the defaults for the session's `controlSmoothing` set
 
 `docs/handoffs/control-smoothing-defaults/FINDINGS.md` gives a cited and measured default, with its
 `controlSmoothing` key, for every live row decision 15 ramps: fader, mute, solo, pan, raw matrix,
-input trim, polarity invert, send gain, send mute, send matrix, VCA offset, VCA mute, the effect
-bypass crossfade and the detector link glide. *Session `controlSmoothing`: configurable ramp lengths
+input trim, polarity invert, send gain, send mute, send matrix, the send's `follows_mute` toggle,
+VCA offset, VCA mute, the effect bypass crossfade and the detector link glide. *Session `controlSmoothing`: configurable ramp lengths
 for live mute, fader and pan changes* (#1054) ships that table as its defaults. This issue closes on
 that record. The blinded listening session is not part of it: *Run the blinded listening session
 for the live ramp defaults* (#1388) runs it on the shipped defaults, and its result can change only
@@ -52,6 +52,9 @@ measures and rates as questions 1 and 2.
      uses the indexed law (`IndexedRamp`, `crates/lane/src/kernels.rs:1073-1168`), not D11. Show
      that its trajectory matches D11 to within rounding for the measured lengths, so the fader,
      mute and pan results transfer. Expected keys: `faderMs`, `muteMs`, `panMs`.
+   - The send's `follows_mute` toggle: turning it on while the source is muted, or off while it is
+     muted, ramps the send between open and silent on the same live route ramp as a send mute.
+     Expected key: `muteMs`. Source check only, if the law is the send mute's.
    - VCA offset and mute: they reach render as member fader and mute records
      (`crates/host-core/src/vca.rs:1-13`). The key is the member's `faderMs` and `muteMs`. Source
      check only.
@@ -128,6 +131,8 @@ measures and rates as questions 1 and 2.
 
 ## Dependencies
 
-- None. *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
-  (#1054) and *Crossfade the bypass switch over the session ramp* (#1341) depend on this issue.
-  *Run the blinded listening session for the live ramp defaults* (#1388) follows #1054.
+None.
+
+*Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
+(#1054) and *Crossfade the bypass switch over the session ramp* (#1341) depend on this issue.
+*Run the blinded listening session for the live ramp defaults* (#1388) follows #1054.

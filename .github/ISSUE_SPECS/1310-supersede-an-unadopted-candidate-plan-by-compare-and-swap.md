@@ -29,7 +29,7 @@ successor is adopted.
 - **Base and producers.** A candidate is prepared against the newest epoch's inventory and the
   current committed model (`control.rs:907-914`, `SuccessorBase`,
   `crates/host-core/src/prepare.rs:641`). The carry program names its predecessor's plan identity
-  (`prepare.rs:1792`), so a candidate prepared against an unadopted plan cannot carry from the
+  (`prepare.rs:1296-1297`), so a candidate prepared against an unadopted plan cannot carry from the
   plan render actually runs. Persisting source producers move to the candidate after the commit
   (`adopt_persisting`, `control.rs:1019`; `crates/host-core/src/source.rs:286`).
 - **Host-fed state lives in a candidate.** From the commit on, submissions and seeks address the

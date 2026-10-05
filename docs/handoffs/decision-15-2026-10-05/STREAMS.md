@@ -40,16 +40,16 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
 | `crates/effect-contract/src/lib.rs` | J #1330 → A #1362 → G #1377 |
-| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → B #1349 → C (#1354, #1355) |
-| `crates/engine/src/realtime/plan.rs` | A #1322 → B #1343 |
+| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1354, #1355) → H #1381 → B #1349 |
+| `crates/engine/src/realtime/plan.rs` | A #1322 → B (#1343, #1344) → H #1400 → C (#1396, #1355, #1358) → H #1381 |
 | `crates/source/src/lib.rs` | B (#1318, #1316, #1350, #1319) → C (#1353, #1320) |
 | `crates/host-core/src/live_delta.rs` | B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) and I #1335 → F → G #1371 |
-| `crates/control-plane/src/*` (after #1309) | B → A #1323 → D #1325 → F → H #1381 (`RuntimePreparer`) |
+| `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → F → H #1381 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) |
 | `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → D (#1288, #1363) → G #1371 |
 | `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379 |
 | `crates/parametric-eq/src/lib.rs` | A payload (#1279, #1280) → G #1328 (rest predicates only) → G #1337 → G #1372 |
-| `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H |
+| `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases |
@@ -78,16 +78,16 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 |---|---|---|---|---|
 | 1 | #1362 | Copy a per-node effect's state into a same-layout instance in one pass | — | — |
 | 2 | #1322 | Carry plan state by copy as well as by move | — | — |
-| 3 | #1300 | Let soft-clip restore its own non-finite history | — | — |
+| 3 | #1300 | Let soft-clip restore its own non-finite history | #1322 | — |
 | 4 | #1277 | Carry fader, mute and pan ramps across a plan swap | #1322 | #1312 |
 | 5 | #1279 | Carry console effect lanes across a plan swap | #1277, #1322 | — |
-| 6 | #1280 | Carry live-controlled effect lanes across a plan swap | #1279 | #1345 |
+| 6 | #1280 | Carry live-controlled effect lanes across a plan swap | #1279 | #1312, #1345 |
 | 7 | #1281 | Carry an insert lane that moves between a bank and a per-node instance | #1280 | — |
 | 8 | #1282 | Carry per-node effect instances across a plan swap | #1281, #1362 | — |
 | 9 | #1283 | Carry compensation lines across a plan swap | #1282 | — |
 | 10 | #1284 | Carry strip delay lines and live send ramps across a plan swap | #1283 | — |
 | 11 | #1285 | Keep every node's latency from dropping during playback | #1284 | — |
-| 12 | #1286 | Record the swap block's cost on the 64-track console | #1284, #1322 | #1321 |
+| 12 | #1286 | Record the swap block's cost on the 64-track console | #1284, #1322 | #1321, #1331 |
 | 13 | #1327 | Carry meter and effect observation state across a plan swap | #1284 | — |
 | 14 | #1323 | Reset latency floors at a host-declared discontinuity | #1285 | #1309, #1310 |
 | 15 | #1395 | Carry spectrum capture state across a plan swap | #1327 | #1401 |
@@ -109,9 +109,9 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 6 | #1315 | Refuse commands that would be acknowledged with no effect | #1309 | — |
 | 7 | #1343 | Let the control thread withdraw an unadopted candidate plan | #1309 | — |
 | 8 | #1398 | Size the C ABI's plan capacities and resource admission for a superseding candidate | #1309 | — |
-| 9 | #1311 | Adopt a successor plan no earlier than a scheduled sample, with a return queue | #1309, #1343 | — |
-| 10 | #1314 | Publish an applied-revision watermark and complete edits asynchronously | #1309, #1343 | — |
-| 11 | #1310 | Supersede an unadopted candidate plan by compare-and-swap | #1309, #1314, #1343, #1344, #1398 | — |
+| 9 | #1314 | Publish an applied-revision watermark and complete edits asynchronously | #1309, #1343 | — |
+| 10 | #1310 | Supersede an unadopted candidate plan by compare-and-swap | #1309, #1314, #1343, #1344, #1398 | — |
+| 11 | #1311 | Adopt a successor plan no earlier than a scheduled sample, with a return queue | #1309, #1314, #1343 | — |
 | 12 | #1316 | Anchor every seek on the plan's source-read clock | #1314, #1318 | — |
 | 13 | #1348 | Add miso_engine_v1_service for bounded control work between edits | #1309, #1311, #1314 | — |
 | 14 | #1317 | Document the seek contract and the C ABI growth rule in the header | #1316, #1318 | — |
@@ -119,11 +119,11 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 16 | #1312 | Hold live values in latest-target cells on both hosts | #1309, #1348 | — |
 | 17 | #1319 | Test held seeks across swaps and supersession, and add a seek to audit capi | #1310, #1348 | — |
 | 18 | #1351 | Report each configured counter's own value in the C ABI counter snapshot | #1309, #1348 | — |
-| 19 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312 | — |
-| 20 | #1346 | Hold strip input-lane values in latest-target cells | #1312 | — |
-| 21 | #1347 | Hold route-lane values in latest-target cells | #1312 | — |
-| 22 | #1399 | Report live_values_superseded in the browser status and prove both hosts drain strip cells alike | #1312 | — |
-| 23 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
+| 19 | #1346 | Hold strip input-lane values in latest-target cells | #1312 | — |
+| 20 | #1347 | Hold route-lane values in latest-target cells | #1312 | — |
+| 21 | #1399 | Report live_values_superseded in the browser status and prove both hosts drain strip cells alike | #1312 | — |
+| 22 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
+| 23 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312, #1399 | — |
 | 24 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
 
 ## Stream C
@@ -136,19 +136,19 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | Order | Issue | Title | After (same stream) | After (other streams) |
 |---|---|---|---|---|
 | 1 | #1287 | Pre-roll a successor whose latency grows | — | #1285 |
-| 2 | #1353 | Keep source transfer blocks in a shared pool, immutable from publication to release | — | #1316 |
+| 2 | #1353 | Keep source transfer blocks in a shared pool, immutable from publication to release | — | #1316, #1318, #1319, #1350 |
 | 3 | #1396 | Give a plan a source-read clock that leads its render clock | — | #1316, #1323 |
 | 4 | #1321 | Render a successor plan off the render thread with a pinned floating-point environment | #1287 | — |
-| 5 | #1320 | Give the source ring a read-only peek cursor that gates release | #1287, #1353 | #1316 |
-| 6 | #1354 | Snapshot a running plan into a returned successor at a block | #1287, #1320 | #1285, #1286, #1311, #1322, #1327, #1395 |
-| 7 | #1355 | Catch up a returned successor and adopt it exactly at a scheduled sample | #1320, #1321, #1354, #1396 | #1277, #1310, #1312, #1314, #1327 |
-| 8 | #1356 | Hold live edits during a catch-up and apply them at the adoption sample | #1355 | #1277, #1309, #1312, #1314, #1345, #1346, #1347 |
-| 9 | #1357 | Supersede a running catch-up by a structural edit | #1320, #1354, #1355, #1356 | #1310, #1314, #1348 |
-| 10 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish | #1354, #1355, #1356, #1396 | #1288, #1311, #1314, #1324 |
-| 11 | #1359 | Turn a pending catch-up into a plain rebuild at a host-declared stop | #1355, #1357, #1396 | #1310, #1323 |
+| 5 | #1320 | Give the source ring a read-only peek cursor that gates release | #1287, #1353 | #1316, #1318, #1319 |
+| 6 | #1354 | Snapshot a running plan into a returned successor at a block | #1287, #1320 | #1284, #1285, #1286, #1311, #1322, #1327, #1395 |
+| 7 | #1355 | Catch up a returned successor and adopt it exactly at a scheduled sample | #1320, #1321, #1354, #1396 | #1277, #1310, #1312, #1314, #1327, #1344, #1345, #1346, #1347, #1398 |
+| 8 | #1356 | Hold live edits during a catch-up and apply them at the adoption sample | #1355 | #1277, #1309, #1311, #1312, #1314, #1345, #1346, #1347 |
+| 9 | #1357 | Supersede a running catch-up by a structural edit | #1320, #1354, #1355, #1356 | #1310, #1314, #1344, #1348 |
+| 10 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish | #1354, #1355, #1356, #1396 | #1288, #1311, #1314, #1324, #1344 |
+| 11 | #1359 | Turn a pending catch-up into a plain rebuild at a host-declared stop | #1355, #1357, #1396 | #1310, #1323, #1344 |
 | 12 | #1358 | Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition | #1355, #1356, #1396, #1397 | #1286, #1311, #1314, #1331 |
 | 13 | #1360 | Run the C ABI catch-up from miso_engine_v1_service and report its outcome | #1358, #1359, #1397 | #1286, #1309, #1313, #1314, #1348 |
-| 14 | #1361 | Run the browser catch-up in the Worker's service loop | #1360 | #1290, #1331, #1332, #1333, #1349, #1381 |
+| 14 | #1361 | Run the browser catch-up in the Worker's service loop | #1360 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
 
 ## Stream D
 
@@ -161,9 +161,9 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 |---|---|---|---|---|
 | 1 | #1288 | Fade in a strip that a swap adds during playback | — | #1054 |
 | 2 | #1326 | Give every browser plan live strip fader and mute lanes | — | — |
-| 3 | #1392 | Keep an added strip's pending fade-in across a later plan swap | #1288 | #1277, #1322 |
-| 4 | #1363 | Ramp a route that a plan swap adds to or removes from a surviving strip | #1288 | #1054, #1283, #1284, #1285, #1310, #1314 |
-| 5 | #1391 | Give every route whose tap precedes its strip's fader a live lane on every plan | #1326 | #1225, #1347 |
+| 3 | #1363 | Ramp a route that a plan swap adds to or removes from a surviving strip | #1288 | #1054, #1283, #1284, #1285, #1310, #1314 |
+| 4 | #1391 | Give every route whose tap precedes its strip's fader a live lane on every plan | #1326 | #1225, #1347 |
+| 5 | #1392 | Keep an added strip's pending fade-in across a later plan swap | #1288, #1363 | #1277, #1283, #1284, #1322 |
 | 6 | #1325 | Remove a strip in two phases: ramp out, then a scheduled swap | #1288, #1363, #1391 | #1054, #1309, #1310, #1311, #1312, #1313, #1314, #1347 |
 | 7 | #1324 | Duck-swap a strip whose state cannot continue across a plan swap | #1288, #1325, #1363, #1391 | #1277, #1310 |
 
@@ -178,11 +178,11 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 |---|---|---|---|---|
 | 1 | #1055 | Research: default ramp lengths for live mute, fader and pan changes (cited, measured, listened) | — | — |
 | 2 | #1054 | Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes | #1055 | — |
-| 3 | #1388 | Run the blinded listening session for the live ramp defaults | #1054, #1055 | — |
-| 4 | #1394 | Carry an optional per-edit ramp length on live session edits | #1054 | — |
-| 5 | #1364 | Resolve an absent live ramp to the session default on the browser and in the SDK | #1054 | #1335 |
-| 6 | #1365 | Edit control_smoothing by a session transaction, model-only | #1054 | — |
-| 7 | #1341 | Crossfade the bypass switch over the session ramp | #1054, #1055 | #1280, #1322, #1345 |
+| 3 | #1394 | Carry an optional per-edit ramp length on live session edits | #1054 | — |
+| 4 | #1364 | Resolve an absent live ramp to the session default on the browser and in the SDK | #1054 | — |
+| 5 | #1365 | Edit control_smoothing by a session transaction, model-only | #1054 | — |
+| 6 | #1341 | Crossfade the bypass switch over the session ramp | #1054, #1055 | #1280, #1322, #1345 |
+| 7 | #1388 | Run the blinded listening session for the live ramp defaults | #1054, #1055, #1364 | — |
 | 8 | #1393 | Crossfade the browser's live bypass command over the session ramp | #1341, #1364 | — |
 
 ## Stream F
@@ -194,15 +194,15 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
 |---|---|---|---|---|
-| 1 | #1225 | Deliver value-only send edits to the running C ABI plan | — | #1054, #1277, #1284, #1309, #1312, #1347, #1394 |
+| 1 | #1225 | Deliver value-only send edits to the running C ABI plan | — | #1054, #1277, #1284, #1309, #1312, #1313, #1347, #1394 |
 | 2 | #1261 | Apply value-only input trim and polarity edits to the running C ABI plan | — | #1054, #1309, #1312, #1328, #1329, #1346, #1394 |
 | 3 | #1268 | Elide a builtin input filter section again after a live disable settles it to identity | — | — |
 | 4 | #1306 | Size each effect's automation span window from the producers its plan has | — | #1058, #1304, #1309, #1345 |
 | 5 | #1390 | Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan | #1225 | #1054, #1277, #1309, #1312, #1394 |
-| 6 | #1262 | Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets | #1261, #1268 | #1328, #1329, #1346 |
+| 6 | #1262 | Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets | #1261, #1268 | #1312, #1328, #1329, #1346 |
 | 7 | #1226 | Let C ABI sends follow their source strip's mute live | #1225, #1390 | #1054, #1309, #1312, #1347, #1394 |
 | 8 | #1267 | Apply value-only submix-strip input-section and effect edits to the running C ABI plan | #1261, #1262, #1390 | #1309, #1312, #1345, #1346 |
-| 9 | #1247 | Deliver value-only VCA edits to the running C ABI plan | #1226, #1390 | #1054, #1309, #1312, #1347, #1394 |
+| 9 | #1247 | Deliver value-only VCA edits to the running C ABI plan | #1225, #1226, #1390 | #1054, #1309, #1312, #1347, #1394 |
 
 ## Stream G
 
@@ -218,16 +218,16 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 3 | #1337 | Make a parametric EQ band's enabled and kind live | — | #1279, #1280 |
 | 4 | #1366 | Prove the crossover designer total and share the SVF ramp stability check in effect-runtime | — | — |
 | 5 | #1339 | Give the delay a live bypass shunt | — | #1282, #1315, #1341 |
-| 6 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279 |
+| 6 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279, #1280 |
 | 7 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328 | — |
-| 8 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280 |
+| 8 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
 | 9 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
 | 10 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
 | 11 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
 | 12 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
-| 13 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1345, #1364, #1394 |
+| 13 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
 | 14 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 15 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280 |
+| 15 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
 | 16 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
 | 17 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
 | 18 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1279, #1280, #1345, #1394 |
@@ -255,8 +255,8 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 8 | #1380 | Ship the browser module with one imported shared memory at every instantiation site | #1331, #1333, #1334 | — |
 | 9 | #1332 | Run the browser control plane in a Worker and keep the AudioWorklet render-only | #1331, #1333, #1334, #1380 | #1057 |
 | 10 | #1387 | Move browser source submission and seeks into the Worker | #1332 | #1316, #1318 |
-| 11 | #1381 | Swap and retire browser plans through the Worker's service loop | #1332, #1387, #1400 | #1309, #1314, #1348 |
-| 12 | #1382 | Admit browser live edits in the Worker through the committed model | #1332, #1381 | #1054, #1057, #1225, #1226, #1247, #1261, #1262, #1267, #1312, #1313, #1364, #1390, #1394 |
+| 11 | #1381 | Swap and retire browser plans through the Worker's service loop | #1332, #1387, #1400 | #1309, #1314, #1327, #1348, #1395 |
+| 12 | #1382 | Admit browser live edits in the Worker through the committed model | #1332, #1381 | #1054, #1057, #1225, #1226, #1247, #1261, #1262, #1267, #1312, #1313, #1345, #1346, #1347, #1364, #1390, #1394 |
 | 13 | #1290 | Replace the running browser session in the Rust host | #1332, #1381, #1382, #1387, #1400, #1401 | #1277, #1309, #1310, #1313, #1314, #1326, #1327, #1348, #1349, #1395 |
 | 14 | #1293 | Export transaction apply and anchored seek from the browser engine module | #1290, #1332, #1381, #1387 | #1309, #1313, #1316, #1319 |
 | 15 | #1342 | Make a send's follows_mute live in the browser | #1290, #1382 | #1226, #1313, #1347 |

@@ -21,19 +21,29 @@ catch-up ends at once.
 - *Give a plan a source-read clock that leads its render clock* (#1396, split from #1355)
   sets the discontinuity successor's source-read offset to 0 (its D2), so `ΣP` resets there, and
   defines a stop without a seek (its D3): no frame is repeated or skipped.
-- A catch-up's successor is control-owned, published-unclaimed, or adopted (#1357 Context). It
+- A catch-up's successor is `Returned`, control-owned, published-unclaimed, or adopted (#1357
+  Context), or render is copying into it (`InFlight`, #1357 D1). It
   holds armed peeks (#1320) and a hold (#1356).
 
 ## Decisions frozen for this slice
 
 - **D1. A declaration ends the catch-up.** When #1323's declaration runs with a catch-up pending:
   1. It takes the successor back as #1357 D1 does.
-  2. #1323's preparation takes the displaced successor as donor (#1310 D2): the rings of sources
-     the edit added are reused, never dropped or allocated again. The peeks stay untouched with the
-     displaced successor while preparation can fail.
+  2. #1323's preparation takes the displaced successor as donor (#1310 D2, *Prepare a successor
+     across a withdrawn candidate plan*, #1344 D3): the rings of sources the edit added are reused,
+     never dropped or allocated again. They pass #1344 D5's unconsumed check although the
+     catch-up rendered blocks, because it read them only through peeks (#1355 D2). If render is
+     copying into the successor (`InFlight`), the check runs against its `DonorRecord` and the
+     donation is split exactly as #1357 D1 and D1a do. The peeks stay untouched with the displaced
+     successor while preparation can fail.
   3. After every fallible check of #1323 D4, it drops the displaced successor on the control
-     thread, which ends its peeks (#1320 D3), and drops the hold (#1356 D4).
+     thread, which ends its peeks (#1320 D3), drops the `CatchUp`'s added-source peeks (#1355 D2),
+     and drops the hold (#1356 D4).
   4. It publishes #1323's discontinuity successor for the next block.
+
+  In the `InFlight` case, dropping the displaced plan, the consumer half of the donation and the
+  publication wait for the service step that completes the withdrawal (#1357 D1a); the declaration
+  itself returns at once.
 
   This happens even when the predecessor has no raised floor, because the successor's lead counts
   as raised.
@@ -91,3 +101,4 @@ catch-up ends at once.
 - *Catch up a returned successor and adopt it exactly at a scheduled sample* (#1355).
 - *Give a plan a source-read clock that leads its render clock* (#1396).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310), D2.
+- *Prepare a successor across a withdrawn candidate plan* (#1344), D3 and D5.

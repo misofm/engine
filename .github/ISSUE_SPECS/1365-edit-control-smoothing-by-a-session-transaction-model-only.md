@@ -47,7 +47,9 @@ ordinary session transaction" holds.
 
 - **D1. Opcode.** `SetControlSmoothing = 0x0008`, appended to the root group.
   `SessionEdit::SetControlSmoothing { control_smoothing: Option<ControlSmoothing> }`. `Some` sets
-  the object; `None` clears it, so the default table applies.
+  the object; `None` clears it, so the default table applies. In canonical JSON (#1054 D1, a
+  required tagged root key) `Some` writes `{ "kind": "explicit", "mute_ms", "fader_ms", "pan_ms" }`
+  and `None` writes `{ "kind": "default" }`.
 - **D2. Wire payload.** Field 1 is an optional nested message holding `mute_ms`, `fader_ms` and
   `pan_ms` as `f32` fields 1, 2 and 3; it is absent for `None`. Decode refuses a partial message
   and any value outside #1054 D1's bounds. Prospective-session validation would refuse them anyway,
@@ -111,7 +113,8 @@ ordinary session transaction" holds.
    encode and decode to the same edit. A partial message, a negative value and 1000.5 are refused
    at decode.
 2. **Apply** (`crates/protocol` model test, new). A transaction that sets then clears the key
-   leaves the canonical JSON first with, then without, `control_smoothing`.
+   leaves the canonical JSON's `control_smoothing` first `{ "kind": "explicit", ... }`, then
+   `{ "kind": "default" }`.
 3. **Model-only on the C ABI** (`crates/capi/src/runtime/live_tests.rs`). `model_only_edits` gains
    this edit, and `model_only_edits_commit_without_a_plan_rebuild` passes for it: no new provider
    epoch, no pending plan, render bit-identical to an unedited engine.

@@ -38,7 +38,9 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
   `RouteControlRecord::new`, before any write.
 - **D3. Render.** At block entry the route op applies its cell if dirty: one retarget from the
   coefficients it is at to the cell's target over its ramp, exactly as one drained record does
-  today. A torn read leaves the bit set for the next block (#1312 D1).
+  today. Render reads the newest completed write in one pass and never skips a dirty cell (#1312
+  D1); when it reads sequence `s` after `p` it adds `s - p - 1` to `live_values_superseded`
+  (#1312 D2).
 - **D4. Browser admission.** The route band leaves the room pass and `in_flight`; a send edit is
   validated (record construction, follow-mute composition) for the whole batch before the first
   write.
@@ -99,6 +101,7 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
-- Followed by *Deliver value-only send edits to the running C ABI plan* (#1225),
-  *Let C ABI sends follow their source strip's mute live* (#1226) and *Deliver value-only VCA edits
-  to the running C ABI plan* (#1247).
+
+Dependents: *Deliver value-only send edits to the running C ABI plan* (#1225), *Let C ABI sends
+follow their source strip's mute live* (#1226) and *Deliver value-only VCA edits to the running C
+ABI plan* (#1247) write these cells.

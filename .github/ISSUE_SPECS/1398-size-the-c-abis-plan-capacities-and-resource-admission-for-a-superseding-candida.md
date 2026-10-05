@@ -10,8 +10,8 @@ call* (#1309), and this slice edits them there.
 
 A structural transaction is never refused because render has swapped plans but not yet published
 the new epoch. The C ABI's bookkeeping and resource admission hold every plan and compiled model
-that supersession (#1310) can keep alive at once: the running plan, a withdrawn candidate and its
-successor, and three compiled models. The header states the sizing rule a host's caps must meet.
+that supersession (#1310) or a catch-up's re-preparation can keep alive at once: the running plan,
+a withdrawn or displaced candidate and its successor, and three compiled models. The header states the sizing rule a host's caps must meet.
 
 ## Context
 
@@ -71,6 +71,18 @@ successor, and three compiled models. The header states the sizing rule a host's
   (`effect.resource.limit`); `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes`
   (`capi.resource.limit`). The largest-allocation check folds every held row. Before #1310 the
   held set is at most two plans, so no current admission changes.
+  - **Re-preparation peak.** A candidate that the control thread may later prepare again without
+    a submit, from the same committed model (a warm successor, whose catch-up re-prepares under
+    *Catch up a returned successor and adopt it exactly at a scheduled sample*, #1355 D10), is
+    admitted with `AdmissionPeak::WithReprepare`. Admission then also checks a second peak: the
+    running plan plus the prospective row twice (the candidate and its re-preparation, which keeps
+    the displaced candidate as its donor and is no larger, #1355 D10), with the same model terms.
+    Every other held candidate is dropped before a re-preparation can run, so it is not in that
+    peak. Both peaks must fit, or the submit is refused before commit with the cap's diagnostic.
+    `service` then runs no cross-plan admission. The default, `AdmissionPeak::Single`, is today's
+    check; *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* (#1360) D1
+    passes `WithReprepare` for a warm candidate. Releasing the displaced plan's row before re-preparing
+    is not an option: the displaced plan is the donor of the rings it holds.
 - **D5. Sizing rule and reference limits.** The header states it: each cap above must be at least
   three times one plan's row, and the graph cap also covers three compiled models. The repository's
   reference limits must admit three plans of their sessions: `audit_limits`
@@ -110,9 +122,13 @@ successor, and three compiled models. The header states the sizing rule a host's
 2. **Admission sums every held row (new control-plane unit test).** Three held rows and three
    models, with each cap in D4 one byte below the sum in turn, refuse with that cap's diagnostic;
    at the sum they pass. With one held row the result equals today's for the same inputs.
-3. **Reference limits.** `./target/release/audit capi` and the two capi integration tests pass
+3. **Re-preparation peak (new control-plane unit test).** One running row `R` and a prospective
+   row `C` admitted with `WithReprepare`: with each D4 cap set to `R + 2C - 1` the submit is
+   refused with that cap's diagnostic, at `R + 2C` it passes; with `Single`, `R + C` passes. With a
+   withdrawn candidate also held, both peaks are checked and the larger one decides.
+4. **Reference limits.** `./target/release/audit capi` and the two capi integration tests pass
    with their limits (raised only if needed, D5).
-4. Commands:
+5. Commands:
    - `cargo test --locked -p capi`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
@@ -127,6 +143,9 @@ successor, and three compiled models. The header states the sizing rule a host's
   rewritten, not added: their old `Backpressure` assertions are the superseded ones.
 - Gate 2: an admission that forgets a held plan or model (a missing third term) passes one byte
   over the cap.
+- Gate 3: an admission that checks a warm candidate only against the plans held at submit admits a
+  catch-up whose re-preparation (three plans) exceeds the caller's caps, so `service` would retry a
+  refused re-preparation forever.
 
 ## Dependencies
 

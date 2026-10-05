@@ -33,8 +33,18 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 
 - **D1. Where a live edit goes.**
   - While a catch-up is running (from the `CopyAndReturn` publication until adoption or abandon),
-    `commit_live` writes neither to the predecessor nor to the successor. It writes into the
-    catch-up's **hold**, after the same validation.
+    `commit_live` never writes to the predecessor.
+  - Until the catch-up's first `ExactlyAt` publication (D3), it writes into the catch-up's
+    **hold**, after the same validation. After that publication it writes into the successor's
+    cells directly, wherever the successor is (published, `Returned`, or taken back by the
+    catch-up); those writes too wait for adoption (#1355 D4).
+  - **Revision.** Every revision committed while the catch-up runs, live or model-only, belongs to
+    the successor, never to the running plan (*Publish an applied-revision watermark and complete
+    edits asynchronously*, #1314 D2). Before the first publication it raises the hold's
+    `revision`. After it, it goes to the successor's word by #1314 D2's routing: its cell's word
+    while it is published or `Returned` (`PlanPublisher::set_revision`, #1311 D6), the word
+    `CatchUp::set_revision` keeps while the catch-up holds it. The `Active` cell's word is never
+    written while a catch-up is pending.
   - A pending rebuild that is not catching up keeps today's rule (#1053 D7): the newest
     candidate's cells.
 - **D2. The hold.** It is allocated when the warm successor is prepared, from the successor's own
@@ -48,7 +58,9 @@ effect from S. The running plan's output is not changed by them, so the catch-up
   order:
   1. the #1277 D5 retarget records;
   2. then the hold's written cells, in their canonical order;
-  3. then the epoch's outcome word (#1355 D8), then it publishes.
+  3. then the hold's `revision` into the successor's revision word, if it is higher than the word
+     (#1314 D2's control-held candidate rule);
+  4. then the epoch's outcome word (#1355 D8), then it publishes.
 
   A returned candidate keeps what was written, undrained until adoption (#1355 D4). Edits committed
   after that write go into the successor's cells directly; they too wait for adoption.
@@ -59,7 +71,8 @@ effect from S. The running plan's output is not changed by them, so the catch-up
   this successor instead (exact adoption, a pre-roll), the hold has been written into it (D3)
   before publication, so nothing is dropped.
 - **D5. Completion.** A held revision completes with S, with the outcome of the catch-up that
-  adopts it (#1314 D5).
+  adopts it (#1314 D5). Because its revision is only ever in the successor's word (D1, D3), the
+  watermark cannot report it on a block of the running plan before S.
 - **D6. Acked-batch question.** Every fallible check runs before the commit, and the hold cannot be
   full. A held edit reaches the successor before any publication that may adopt it (D3), or the
   committed model of a re-prepared candidate (D4). An ack can never precede a drop.
@@ -92,9 +105,15 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 3. **Latest wins.** Two fader commits during the window apply as the second alone at S.
    `live_values_superseded` rises by 1.
 4. **Watermark.** The held revision's watermark advance reports `first_sample == S` and `EXACT`.
-5. **Retarget order.** A successor whose join retargets a carried strip, with a held mute on the
+5. **No early watermark.** In gate 1's setup, commit a live fader edit (revision `r`) and then a
+   model-only edit (`r + 1`) during the catch-up, before the first publication, and a live mute
+   edit (`r + 2`) after it, then force one return (render skips `S`; #1355 gate 3). Render the
+   predecessor until the adoption at `S'`: on every block before `S'` the watermark stays at the
+   revision it showed before the catch-up began, and the adoption block reports
+   `(r + 2, S', EXACT)`.
+6. **Retarget order.** A successor whose join retargets a carried strip, with a held mute on the
    same strip, ends at the held value (the hold is written after the retargets).
-6. Commands:
+7. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `cargo test --locked -p capi`
@@ -107,7 +126,10 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 - Gate 2: a hold kept as a bounded list refuses part of the burst with `BACKPRESSURE`. Red.
 - Gate 3: a hold kept as a FIFO for cells applies the first value at S. Red.
 - Gate 4: completion reported at publication, not at S, gives the wrong sample. Red.
-- Gate 5: the hold written before the retargets lets the join's value win over the user's. Red.
+- Gate 5: a revision written to the `Active` cell whenever no candidate sits in a cell (the
+  successor is control-held before publication and after a return) reports `r` at the next block
+  of the predecessor, before `S'`. Red.
+- Gate 6: the hold written before the retargets lets the join's value win over the user's. Red.
 
 ## Dependencies
 
@@ -119,3 +141,5 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), D5.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+- *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311), D6:
+  the revision of a `Returned` cell.

@@ -34,9 +34,13 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
   per key and `for_row(row)`. *Carry an optional per-edit ramp length on live session edits*
   (#1394) adds `LiveRamps::resolve(row, edit_ramp)` and the transaction field. #1054's D3 maps
   each row to a key: fader, trim, send gain and VCA offset use `fader`; mute, solo, polarity, send
-  mute and VCA mute use `mute`; pan, matrix and send matrix use `pan`. #1054 also teaches the key to the JSON schema
-  (`docs/session-v1.schema.json`) and to the SDK's canonical writer
-  (`sdk/src/internal/session-json.ts:13-29`, `:50-65`), so `SessionBuilder.toJson()` can write it.
+  mute, send `follows_mute` and VCA mute use `mute`; pan, matrix and send matrix use `pan`. #1054
+  D5 sets the precedence for a strip's pan or matrix record: the strip's model
+  `smoothing_samples` (`MatrixOrPan`, `crates/session/src/model.rs:655-677`) if non-zero, else
+  `pan_samples`. #1054 makes `control_smoothing` a required tagged root key (`default` or
+  `explicit`), teaches it to the JSON schema (`docs/session-v1.schema.json`) and to the SDK's
+  canonical writer (`sdk/src/internal/session-json.ts:13-29`, `:50-65`), and has the builder write
+  `{ "kind": "default" }`.
 - **The authoring request.** The CLI's strict request decoder lists the root keys it accepts
   (`sdk/src/cli/session-request.ts:504`) and builds through `session()` (`:508-513`). Without a
   `controlSmoothing` key there, a request cannot author the setting.
@@ -57,6 +61,10 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
     with the live controls. That is control-thread work, done once.
   - For the ramped kinds, admission replaces a sentinel with the field that #1054 D3 names, before
     the kind's own checks.
+  - For a strip's pan and matrix kinds, the replacement follows #1054 D5's precedence: the strip's
+    `smoothing_samples` in the session host-web prepared, if non-zero, else `pan_samples`. Host-web
+    keeps those per-strip windows beside `LiveRamps`, computed on the control thread whenever it
+    prepares a session. Send matrix records take `pan_samples`.
   - Every other word value passes through unchanged. A finite length the SDK sends is still
     honoured.
   - The kinds with no ramp keep their rules. A sentinel on input filters or bypass is `MALFORMED`,
@@ -67,8 +75,9 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
   - `trackEdit`'s default stays 0 for the kinds that carry no ramp.
   - `runtimeSmoothing` (effect parameters) is unchanged.
 - **D4. Builder.** `SessionOptions.controlSmoothing?: { muteMs, faderMs, panMs }` emits
-  `control_smoothing: { mute_ms, fader_ms, pan_ms }`. It checks #1054 D1's bounds with the
-  builder's existing finite and range helpers. Omitted, the key is omitted.
+  `control_smoothing: { kind: "explicit", mute_ms, fader_ms, pan_ms }`. It checks #1054 D1's
+  bounds with the builder's existing finite and range helpers. Omitted, the builder writes
+  `{ kind: "default" }` as #1054 left it; the key is never omitted (V1 has no optional fields).
 - **D5. Acked-batch question.** No queue, admission order or ack changes. Resolution is a pure
   rewrite of one word before the existing checks.
 
@@ -121,18 +130,21 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 1. **Resolution** (`hosts/host-web/src/tests.rs`, new). For each of the 12 ramped kinds, a record
    with the sentinel is admitted with the D3-mapped length at 48 kHz: 960 for fader, trim, send
    gain and VCA offset, 480 for the mute rows, and 960 for the pan rows. A record with 37 keeps 37.
-   A session with all keys at 0 resolves to 0. A sentinel on input filters or bypass is
-   `MALFORMED`.
+   A session with all keys at 0 resolves to 0. On a strip whose session pan says
+   `smoothing_samples: 96`, a pan and a matrix sentinel resolve to 96; a send matrix sentinel
+   still resolves to 960. A sentinel on input filters or bypass is `MALFORMED`.
 2. **SDK** (`sdk/test/live-controls-evals.mjs`, new).
    - Every ramped builder method writes `0xFFFFFFFF` at offset 16 when no length is given, and the
      given value otherwise.
    - `smoothingSamples: 4294967295` throws.
    - `builder-evals.mjs`: `controlSmoothing` round-trips into the model and through `toJson()`
-     to the canonical bytes the Rust writer gives, and 1000.5 throws. A strict request with
+     to the canonical bytes the Rust writer gives (`explicit`), an omitted one writes
+     `{ "kind": "default" }`, and 1000.5 throws. A strict request with
      `controlSmoothing` builds the same session; one with an unknown key inside it is refused at
      `$.controlSmoothing`.
 3. **Parity** (`hosts/host-web/tests/control_smoothing_parity.rs`, new).
-   - One session with two tracks, at each launch rate: 44.1, 48, 88.2 and 96 kHz.
+   - One session with two tracks, at each launch rate: 44.1, 48, 88.2 and 96 kHz. One track's pan
+     has `smoothing_samples: 0`, the other's a non-zero value.
    - A scripted sequence with no per-edit length: a fader move, a mute, an unmute and a pan move
      at fixed blocks.
    - The browser (native host-web, edits as commands) and the C ABI (`capi`, edits as
@@ -156,7 +168,8 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 ## Test value
 
 - Gate 1 turns red if a kind skips resolution, if the row map is wrong (for example polarity on
-  the fader key), or if a finite length is overwritten.
+  the fader key), if a pan record ignores the strip's own window (#1054 D5), or if a finite length
+  is overwritten.
 - Gate 2 turns red if the SDK still writes 0 for an absent length, or lets the sentinel through as
   a length.
 - Gate 3 turns red if the two hosts compute different lengths (rounding, rate or row map) or
@@ -164,7 +177,7 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 
 ## Dependencies
 
-- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
-  (#1054).
-- *Refuse automation on effect parameters that are not block-rate* (#1335) edits
-  `sdk/src/core/session.ts` too. Land after it, or rebase.
+- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes* (#1054)
+
+*Refuse automation on effect parameters that are not block-rate* (#1335) edits
+`sdk/src/core/session.ts` too. Land after it, or rebase.

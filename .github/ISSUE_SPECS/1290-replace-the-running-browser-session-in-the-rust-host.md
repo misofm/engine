@@ -126,14 +126,16 @@ and SDK are the rewritten slices #1293-#1297.
 - **D7. Observation.** Meter and effect observation state of unchanged owners carry across the
   swap as *Carry meter and effect observation state across a plan swap* (#1327) specifies, and
   spectrum capture state as *Carry spectrum capture state across a plan swap* (#1395) specifies
-  (D15-14). The meter lease carries.
+  (D15-14). Their readers live in the plan's attachment, and #1381 D3's hook pairs them in the
+  swap block. This slice calls no adoption or pairing function of its own. The meter lease
+  carries. Gate 7 holds the browser-visible result.
 
 ## Deliverables
 
 1. D1-D6 in `hosts/host-web/src/lib.rs`: the control half's `apply` with the browser's
    successor preparation, publication, and the `blockingRebuilds` increment.
 2. Native tests in `hosts/host-web/src/tests.rs`, and the integration test binary
-   `hosts/host-web/tests/structural_apply_realtime.rs` (gate 7).
+   `hosts/host-web/tests/structural_apply_realtime.rs` (gate 8).
 
 ## Authorized paths
 
@@ -153,6 +155,14 @@ and SDK are the rewritten slices #1293-#1297.
 - No transitions of its own. Fade-in, duck-swap and two-phase removal come from #1288, #1324 and
   #1325.
 - No warm-successor catch-up: *Run the browser catch-up in the Worker's service loop* (#1361).
+
+## Hazards
+
+- **The browser folds meters as one group.** It publishes a meter frame only when every strip's
+  snapshot has the same window sequence and bounds (`hosts/host-web/src/lib.rs:3485-3500`). An
+  added strip's meter stays on the carried meters' grid only through #1327 D6. Gate 7 checks it
+  with an added track; a red gate here for that reason is a #1327 defect, not a reason to reset
+  the meter stream.
 
 ## Objective gates
 
@@ -185,19 +195,26 @@ and SDK are the rewritten slices #1293-#1297.
 5. **Each preparation branch.** Gate 1 passes with a single spectrum capture and with a spectrum
    collection configured.
 6. **Companions.** A prepared companion bound before the apply is refused after it.
-7. **Realtime.** Integration test binary `hosts/host-web/tests/structural_apply_realtime.rs`.
+7. **Meters and spectrum continue.** In gate 1's script, with one meter per strip and a single
+   continuous spectrum capture on A's track 3, poll the browser host's meter delivery and
+   spectrum read after every block. Across the structural apply and its adoption block, `meter_generation` does not advance, the meter header
+   reports no reset, every carried strip's meter continues its window sequence with no counted
+   loss, the added track's meter joins the published frame from the adoption block's window on,
+   and the spectrum read returns no `Failed` epoch and no sequence gap.
+8. **Realtime.** Integration test binary `hosts/host-web/tests/structural_apply_realtime.rs`.
    Decision 15 rules that host-web's native allocation-count gates live in an integration binary,
    never in `src/tests.rs`, which already registers a `#[global_allocator]`. It links
    `bench_support::alloc`, calls `assert_installed()` first, and runs the scripts of gates 1, 2
    and 4 through the test-support halves (#1381). The render thread's thread-scoped counters read
    `allocations == 0 && frees == 0` around every render call, after warm-up. Every retired plan
    is dropped on the control thread.
-8. **Single mode.** Gate 1 driven on one thread (apply between render calls, as the message
+9. **Single mode.** Gate 1 driven on one thread (apply between render calls, as the message
    handler runs it) gives the same blocks and the same response. `blockingRebuilds` is exactly 1.
-   On the browsers' non-isolated leg, `singleModeControlAllocations` grows across the apply and
-   `miso_engine_web_v1_render_allocation_count` stays 0.
-9. **Commands:**
-   - `cargo test --locked -p host-web --features host-web/test-support` (runs gate 7's binary)
+   The browser legs of single mode (`singleModeControlAllocations` growing across the apply, the
+   render-locked count staying 0) are *Qualify a structural browser edit in real browsers*
+   (#1295)'s, not this slice's.
+10. **Commands:**
+   - `cargo test --locked -p host-web --features host-web/test-support` (runs gate 8's binary)
    - `bash scripts/check-web-audioworklet.sh`
    - `bash scripts/test-web-audioworklet.sh`
    - the browser legs: `npm run qualify -- --artifacts ... --sdk-root ... --browser <b> --check-matrix --self-test-mutations`
@@ -216,9 +233,13 @@ and SDK are the rewritten slices #1293-#1297.
 - Gate 4: turns red if a pending candidate still causes BACKPRESSURE, or if a displaced revision
   never completes.
 - Gate 6: turns red if a companion addressed by an old strip index reaches the new plan.
-- Gate 7: turns red if the render half drops a retired plan, or allocates on adoption.
-- Gate 8: turns red if single mode takes a different code path that diverges in bits, or if its
-  rebuild or its allocations are not counted.
+- Gate 7: turns red if a structural apply restarts the browser's meter or spectrum stream: a
+  reader left on the retired plan's producer, delivery state not carried with the companions, or
+  a carry that misses an unchanged strip after the added track shifts every index. No host-core
+  test sees the browser's delivery state.
+- Gate 8: turns red if the render half drops a retired plan, or allocates on adoption.
+- Gate 9: turns red if single mode takes a different code path that diverges in bits, or if its
+  rebuild is not counted.
 - Superseded tests: none. The old body's tests were never written.
 
 ## Dependencies

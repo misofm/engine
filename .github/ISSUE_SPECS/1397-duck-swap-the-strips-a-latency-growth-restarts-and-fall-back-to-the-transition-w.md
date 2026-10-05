@@ -63,15 +63,21 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
   Steps:
   1. If a catch-up candidate is published, control takes it with `withdraw()`. `Withdrawn` or
      `Returned { .. }` gives it back whole; `Taken` means render adopted it, and the fallback ends
-     with nothing to do. The catch-up's successor and peeks are then dropped on the control thread
-     (each peek's drop ends it, #1320 D3), and the hold is dropped (#1356 D4).
+     with nothing to do. The catch-up's successor is kept, untouched, as the donor.
   2. The committed model is prepared again as an ordinary successor: #1285 floors, no lead, the
-     predecessor's source-read offset (#1396 D2). Inside `service` this follows #1355 D10. At
+     predecessor's source-read offset (#1396 D2). Inside `service` this follows #1355 D10: the
+     displaced successor is the donor (*Prepare a successor across a withdrawn candidate plan*,
+     #1344 D3), its added rings pass the unconsumed check because the catch-up read them only
+     through peeks (#1355 D2), and the cross-plan admission is the one the warm submit ran. At
      submit it is ordinary preparation, whose failure returns the error before commit.
-  3. The strips whose arrival at any surviving node grows over the predecessor (the same
+  3. Only after that preparation succeeds: the donation is applied, then the displaced successor
+     and its peeks are dropped on the control thread (each peek's drop ends it, #1320 D3), the
+     `CatchUp`'s added-source peeks are dropped (#1355 D2), and the hold is dropped (#1356 D4). On
+     a refusal inside `service`, all of them are kept (#1355 D10).
+  4. The strips whose arrival at any surviving node grows over the predecessor (the same
      comparison as #1354 D3's `Δ`, kept per strip) join #1324's duck set. A new host-core
      function `grown_strips(predecessor, successor)` returns them, sorted by ID.
-  4. It is published as #1324 D4 publishes, with one `S`. Before publication,
+  5. It is published as #1324 D4 publishes, with one `S`. Before publication,
      `set_outcome(epoch, TRANSITION_FALLBACK)` (#1355 D8), so the adoption advances the watermark
      with that flag and adds the covered revisions to `transition_fallback_count` (#1314 D5).
 - **D3. Path.** The response path of a transition edit is `rebuild` (one of the three values
@@ -121,7 +127,9 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
 4. **Transition from service.** On a running catch-up, a direct `fall_back_to_transition` call
    with the injected refusal counts `catch_up_reprepare_refusals`, keeps the revision pending and
    the displaced candidate held, and completes the revision on the next `service` call with
-   `TRANSITION_FALLBACK`.
+   `TRANSITION_FALLBACK`. With an edit that also adds a source `c` the catch-up has read through
+   its peek, the transition candidate holds the displaced successor's `c` ring and plays every
+   chunk submitted since frame 0.
 5. **Adopted before the fallback.** If render adopted the catch-up candidate before
    `fall_back_to_transition` runs (`withdraw()` yields `Taken`), the call publishes nothing and
    the revision completes `EXACT`.
@@ -140,7 +148,8 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
 - Gate 2: a `not_before` computed without the in-flight quantum copies one block early. Red.
 - Gate 3: a bound that refuses the edit, a transition that reports `EXACT`, or a duck set without
   the grown strips steps the output. Red.
-- Gate 4: a refused re-preparation that drops the revision completes it as nothing. Red.
+- Gate 4: a refused re-preparation that drops the revision completes it as nothing; a fallback
+  that drops the displaced successor before preparing loses `c`'s acked chunks. Red.
 - Gate 5: a fallback that ignores `Taken` publishes a second swap over an adopted plan. Red.
 
 ## Dependencies
@@ -153,3 +162,4 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
 - *Duck-swap a strip whose state cannot continue across a plan swap* (#1324).
 - *Fade in a strip that a swap adds during playback* (#1288).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+- *Prepare a successor across a withdrawn candidate plan* (#1344), D3 and D5.

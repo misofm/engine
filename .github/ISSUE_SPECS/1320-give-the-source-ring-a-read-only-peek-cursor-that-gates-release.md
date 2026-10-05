@@ -60,7 +60,10 @@ armed, and nothing extra while none is.
     (#1358) and at adoption (#1355). Its operations are loads, stores and lent slices: no
     allocation, free, lock or syscall. So they meet render's rules on either thread. Two threads
     never use one peek at once.
-- **D4. Arming, on render, at a block boundary.** `PcmSourceConsumer::arm_peek(&mut self) -> bool`
+- **D4. Arming, by the consumer's owner, at a block boundary.** The owner is render for a consumer
+  in a running plan, or the control thread for a consumer of an unpublished successor that has not
+  begun any block (#1355 D2's added sources); such a consumer arms at its generation's first
+  published block. `PcmSourceConsumer::arm_peek(&mut self) -> bool`
   records the sequence and source frame of the next block it will play, and its active
   generation. It then stores `Armed` (`Release`). If the state is `Abandoned`, it first completes
   the abandon exactly as `begin_block` would (D8), so a catch-up abandoned in one service call can

@@ -83,6 +83,7 @@ Superseded values are counted by #1312's `live_values_superseded`.
   crates; sequenced by the coordinator).
 - `crates/control-plane/src/`, `crates/capi/` (header prose, tests).
 - `hosts/host-web/src/lib.rs`, `hosts/host-web/src/tests.rs` (effect band; stream H's files).
+- `hosts/host-web/tests/strip_cells_cross_host.rs` (gate 5's extension of #1399's test).
 - `docs/C_ABI_V1_QUALIFICATION.md`.
 
 ## Non-goals
@@ -92,9 +93,11 @@ Superseded values are counted by #1312's `live_values_superseded`.
 
 ## Objective gates
 
-1. **Many edits, one block (new capi test).** Paused host: 40 edits of one compressor parameter,
-   then 40 of one EQ band gain, each `RESULT_OK`; one render equals a twin that made only the last
-   of each; `LIVE_VALUES_SUPERSEDED` grows by 78.
+1. **Many edits, one block (new capi test).** Paused host: 40 edits that change only the left
+   channel of a compressor's threshold (a `PerLane` parameter, so one `Left` cell), then 40 edits
+   of one EQ band's gain on both channels (a `Both` target, so two cells), each `RESULT_OK`; one
+   render equals a twin that made only the last of each; `LIVE_VALUES_SUPERSEDED` grows by
+   `39 + 2 × 39 = 117` in #1312 D2's per-cell unit.
 2. **Bypass ahead of parameters (new capi test).** One transaction lifts a bypass and changes a
    parameter: the block renders as the twin's rebuild of the committed model.
 3. **Window bound (new effect-contract test).** For every launch effect descriptor, the live
@@ -102,8 +105,10 @@ Superseded values are counted by #1312's `live_values_superseded`.
    cells than capacity defers the excess one block and applies it then.
 4. **Symmetry (keep green, no change):** the #1004 tests on a both-channel `PerLane` edit keep a
    mono bank collapsed; a one-channel edit still clears `LIVE`.
-5. **Both hosts agree (extend #1312's cross-host test):** two parameter edits and one EQ gain edit
-   between two blocks, through both admissions: bit-identical PCM.
+5. **Both hosts agree (extend the cross-host test of *Report live_values_superseded in the browser
+   status and prove both hosts drain strip cells alike*, #1399 gate 2,
+   `hosts/host-web/tests/strip_cells_cross_host.rs`):** two parameter edits and one EQ gain edit
+   between two blocks, through both admissions: bit-identical PCM and equal counters.
 6. **Superseded tests.** Delete `an_effect_edit_larger_than_its_queue_rebuilds`,
    `a_full_effect_lane_refuses_before_anything_changes`,
    `an_eq_edit_designing_more_targets_than_its_queue_rebuilds` and
@@ -130,6 +135,8 @@ Superseded values are counted by #1312's `live_values_superseded`.
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
+- *Report live_values_superseded in the browser status and prove both hosts drain strip cells
+  alike* (#1399): the cross-host test gate 5 extends.
 
 Dependent: *Carry live-controlled effect lanes across a plan swap* (#1280) carries the cells this
 issue creates, so it lands after this issue and edits `crates/effect-contract/src/live.rs` after it.

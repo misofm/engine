@@ -120,7 +120,7 @@ the reported tail.
    `output_tail` exactly 1,000 samples longer than without it (D2a: the delay is a term of the
    existing `Input` node with `PeakGain` 0 dB, so no node count and no `A_i` changes), and an
    impulse at `N - 1` is still non-zero at the output at `N + 999`.
-4. Commands: the `test-debug-a` workspace command from `.github/workflows/qualification.yml`;
+6. Commands: the `test-debug-a` workspace command from `.github/workflows/qualification.yml`;
    `bash scripts/check-graph-determinism.sh`; `bash scripts/check-effect-contract.sh`;
    `cargo build --locked --release -p audit && ./target/release/audit capi`;
    `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`.

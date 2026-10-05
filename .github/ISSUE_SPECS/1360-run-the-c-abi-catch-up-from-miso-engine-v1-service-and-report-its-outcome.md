@@ -33,7 +33,9 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 
 - **D1. Classify.** The control plane's rebuild path calls `host_core::warm_lead` (#1354 D3), the
   only computation of the lead `P`.
-  - With `P > 0` and an off-thread host, the candidate is prepared warm (#1354 D3) and published
+  - With `P > 0` and an off-thread host, the candidate's admission uses
+    `AdmissionPeak::WithReprepare` (#1398 D4), so a later re-preparation inside `service` (#1355
+    D10) never exceeds the caller's caps; the candidate is prepared warm (#1354 D3) and published
     `CopyAndReturn`; when it also restarts strips, it is composed with their duck as *Duck-swap
     the strips a latency growth restarts, and fall back to the transition when no catch-up can
     finish* (#1397) D1 states.

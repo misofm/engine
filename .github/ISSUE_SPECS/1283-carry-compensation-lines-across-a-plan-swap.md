@@ -36,8 +36,14 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
   retarget.
   - A re-pointed route keeps its route ID but gets a new source or destination. Its line does not
     carry: the new route's line starts at rest. Its source strip does **not** go into the restart
-    set. #1363 D1(b) and D4 keep the old route as a fading route whose line carries from the
-    predecessor's, and fade the new route in.
+    set. #1363 D1(b) and D4 keep the old route as a fading route under its own graph ID and fade
+    the new route in.
+  - The lookup is by successor edge ID, so *Ramp a route that a plan swap adds to or removes from a
+    surviving strip* (#1363 D4) can extend it with an alias: a fading route's edge carries from the
+    predecessor's edge of the original route ID, and a predecessor line named by an alias carries
+    only into the alias (the successor's edge under the original ID then starts at rest, even with
+    unchanged endpoints). This slice's lookup maps each successor edge to the predecessor edge
+    it reads, which is the same ID here; #1363 D4 supplies the alias entries.
   - An effect owner that restarts (#1279 D1) does not stop the lines around it from carrying.
 - **D2. Equal length, move mode.** Swap the two rings and the cursor.
 - **D3. Equal length, copy mode.** Copy both rings and the cursor into the successor's
@@ -75,7 +81,7 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 
 - No change to how PDC computes delays. No floors (#1285) and no catch-up (#1287).
 - No strip or submix input delay lines, and no live send ramps (#1284).
-- No route-level ramp for a re-pointed route, and no fading-route line mapping (#1363).
+- No route-level ramp for a re-pointed route, and no fading-route line alias (#1363 D4).
 
 ## Objective gates
 

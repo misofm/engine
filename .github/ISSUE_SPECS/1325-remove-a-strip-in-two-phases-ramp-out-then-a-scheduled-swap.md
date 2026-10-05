@@ -10,7 +10,8 @@ session mute ramp and only then leaves the plan. Today its contribution stops de
 block (#1269 P4), which is a click. Its sends fade with it, the ones that tap before its fader
 included. The removed strip's source keeps playing until it is gone, so the fade is made of real
 audio, not of underrun zeros. A transaction that restores the strip during the fade brings it back
-with a fade-in; it never leaves it muted. This slice also builds the shared "ramp on the
+with a fade-in; it never leaves it muted, and the PCM the host already gave the strip's source
+keeps playing. This slice also builds the shared "ramp on the
 predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 
 ## Context
@@ -47,7 +48,8 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 ## Decisions frozen for this slice
 
 - **D1. Which strips.** Every strip (track or submix) whose ID is in the displaced plan's committed
-  model and absent from the transaction's model.
+  model and absent from the transaction's model, except a strip already in the running plan's duck
+  overlay (D6). The same exception holds for every route D2 would write.
 - **D2. Phase 1, the ramp.** After the transaction's fallible steps and before it is acknowledged,
   the control plane writes, with `ramp = N = LiveRamps::for_session(next model).mute_samples`:
   - for each removed strip, a mute of both channels into the displaced plan's strip lane (its
@@ -61,17 +63,21 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   and need no write.
 - **D3. Phase 2, the scheduled swap.** The successor is published to adopt no earlier than
   `S = ceil_q(p + q + N + C)` (#1311), where `q` is the quantum, `ceil_q` rounds up to a multiple
-  of it, and `C` is the largest `compensation_delay` of a route out of a removed strip in the
-  displaced plan (0 if none). Proof: the writes precede the read of `p`, so render drains them no
-  later than the block that starts at `p + q`; every ramp ends by `p + q + N`, and every route line
+  of it, and `C` is the largest `compensation_delay`, in the displaced plan, of a route out of any
+  strip this transaction ducks: a removed strip, or a duck-swapped one (#1324 D4) (0 if none).
+  Proof: the writes precede the read of `p`, so render drains them no later than the block that
+  starts at `p + q`; every ramp ends by `p + q + N`, and every route line
   has emptied its last nonzero frame by `p + q + N + C <= S`. Between then and `S` the strip and
   its routes contribute exact `+0.0`. A paused host keeps `S` valid: render resumes at `p`.
-- **D4. The source retires with phase 2.** Until the successor is adopted, `submit`, `seek` and
-  `seek_at` for a source absent from the newest committed session but present in the plan that
+- **D4. The source retires with phase 2, unless restored.** Until the successor is adopted,
+  `submit`, `seek` and `seek_at` for a source absent from the newest committed session but present in the plan that
   still renders go to that plan's producer. From the adoption on they are refused with
   `source.id.unknown`, as today. Its ring and producer retire with the displaced plan through the
   existing retirement path; PCM queued past `S` is discarded with it (documented, as today). The host
-  learns the adoption from the watermark (#1314) and stops feeding then.
+  learns the adoption from the watermark (#1314) and stops feeding then. The producer stays in the
+  running plan's source control set, which the control plane keeps in that plan's epoch; the duck
+  overlay (D6) lists the source. A transaction that restores the source in phase 1 takes over its
+  producer and ring instead (D6).
 - **D5. Reporting.** The response path is `rebuild` (#1313). The revision completes when render
   adopts at `S`: the watermark (#1314) reports first sample `S` with `EXACT` (or `SUPERSEDED` when
   #1310 displaces it) and counts it in `exact_count`. A planned D15-9 transition is the designed
@@ -80,9 +86,15 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 - **D6. Supersession and restore: the duck overlay.** The phase-1 writes are records pushed to the
   displaced plan, so they are part of its base (D15-7, P1.4).
   - The control plane keeps them in the displaced plan's epoch as a **duck overlay**: the strips and
-    routes written, and `S`. It lives as long as the epoch and is dropped when the epoch retires.
-    A newer transaction's own D2 writes go to the same running plan and join the same overlay,
-    with `S` the maximum.
+    routes written, the removed sources still feeding that plan (D4), and `S`. It lives as long as
+    the epoch and is dropped when the epoch retires.
+  - **No second write.** A newer transaction during phase 1 writes a ramped mute only for strips and
+    routes not already in the overlay; those join it. A strip or route already in it is skipped:
+    it is ramping to, or settled at, `+0.0`, and a second write would reach `retarget`
+    (`crates/builtins/src/lib.rs:2731-2750`), which resets `remaining` to `N` and recomputes the
+    step from the part-ducked level, so the ramp would end after the `S` already scheduled. The
+    overlay's `S` becomes the maximum of its own and the `S` D3 gives the new writes; with no new
+    write it stays unchanged.
   - Every later preparation against that epoch uses `SuccessorBase::committed` = the epoch's kept
     model (#1310 D3) with the overlay applied: each overlay strip's channels muted and each overlay
     route muted. That is exactly what the plan's cells hold.
@@ -94,28 +106,45 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
     and #1363 D1 (c) arms its routes that tap before the fader. A restore therefore brings the
     strip back with the session fade-in from `S`, after the duck; it never stays muted, and it
     never steps from a part-ducked level.
+  - **A restored source keeps its ring.** A source in the overlay that the newer candidate keeps
+    with the same declaration and ring configuration as in the running plan carries from the
+    running plan like a persisting source: the candidate's base inventory is `A.carried_base`
+    (#1310 D2) plus the running plan's source row for it, so preparation makes it vacant and its
+    carry program moves the running plan's consumer (ring, generation, read position, held seek)
+    in at adoption (`adopt_sources`, `crates/source/src/lib.rs:1851`). Before the commit the
+    control plane checks that the overlay's producer is present in the epoch's set; after the
+    commit it moves it into the candidate's set (`SourceControlSet::adopt_persisting`,
+    `crates/host-core/src/source.rs:286`) before publication, beside #1310 D5's producer moves.
+    Every submit acked for it in phase 1 is in that ring, so no ack precedes a drop. A restored
+    source with a different declaration or ring configuration is a new source with a fresh ring;
+    the old one retires at adoption as D4 says. If a later transaction in the same phase 1 removes
+    the source again, the control plane moves its producer from the withdrawn candidate's set back
+    to the epoch's set (it never left the overlay), so D4's routing holds.
   - In the taken case (render already adopted the older candidate) the base is that plan, the
     overlay is gone with the retired epoch, and a restored strip is an added strip (#1288).
 - **D7. Shared step.** The order in the control plane is: validate and classify; prepare the
   successor (fallible; any arming happens inside preparation, #1288, #1324); then the pure
   host-core function
-  `plan_strip_transition(base: &SuccessorBase, next: &SessionModel, successor: &PreparedHost) -> StripTransition`;
-  then the publication reservation; commit; the D2 writes; read `p`; publish with
-  `NoEarlierThan(S)`. `StripTransition` holds the strips and routes to duck, `N`, `C` and the
-  overlay entry. It reads the prepared successor because a duck set can depend on what preparation
-  restarted: *Duck-swap a strip whose state cannot continue across a plan swap* (#1324 D4) adds
+  `plan_strip_transition(base: &SuccessorBase, overlay: &DuckOverlay, next: &SessionModel, successor: &PreparedHost) -> StripTransition`
+  (an empty `DuckOverlay` outside phase 1); then the publication reservation and D6's producer
+  check; commit; D6's producer moves; the D2 writes; read `p`; publish with `NoEarlierThan(S)`.
+  `StripTransition` holds the strips and routes to duck (the overlay's excluded, D6), `N`, `C`
+  and the overlay entry. It reads the prepared successor because a duck set can depend on what
+  preparation restarted: *Duck-swap a strip whose state cannot continue across a plan swap* (#1324 D4) adds
   `successor.restarted_strips()` to the removed strips here. It returns no arm set; arming is a
   preparation step. One transaction that both removes and adds strips uses one `S`; added strips
   fade in by #1288.
 - **D8. Realtime and the acked-batch question.** Render work is the existing mute ramp and one
   not-before comparison at block entry (#1311). Every fallible step (preparation, publication and
   retirement credit, D15-17) runs before the cell writes and the commit, and a cell write cannot
-  fail, so no ack precedes a drop.
+    fail, so no ack precedes a drop. The restored source's producer check runs before the commit and
+  its move after it cannot fail (D6).
 
 ## Deliverables
 
-1. `crates/host-core/src/transition.rs` with D7, exported from `crates/host-core/src/lib.rs`; in
-   `crates/host-core/src/prepare.rs`, the overlay strips passed to #1288's arm entry point (D6).
+1. `crates/host-core/src/transition.rs` with D7 and `DuckOverlay`, exported from `crates/host-core/src/lib.rs`; in
+   `crates/host-core/src/prepare.rs`, the overlay strips passed to #1288's arm entry point and the
+   overlay's restored source rows added to the base inventory (D6).
 2. The control plane's structural arm, the duck overlay and source routing (D2-D6), in the files
    #1309 creates.
 3. The header paragraph (`miso_engine_v1.h:85-94`) and `docs/C_ABI_V1_QUALIFICATION.md` state the
@@ -126,7 +155,7 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 ## Authorized paths
 
 - `crates/host-core/src/transition.rs` (new), `crates/host-core/src/lib.rs`,
-  `crates/host-core/src/prepare.rs` (D6's arm call only)
+  `crates/host-core/src/prepare.rs` (D6's arm call and restored source rows only)
 - the control-plane crate's structural transaction and source-routing files that #1309 creates
   (stream B owns them; root sequences the merge)
 - `crates/capi/include/miso_engine_v1.h` (comments only; #1317 edits the same header)
@@ -158,13 +187,17 @@ two render calls, so the ramp starts at `p`).
    the ramp plays (gate 1's bit-identity holds). The first submit after the adoption returns
    `MISO_ENGINE_V1_INVALID_ARGUMENT` with `source.id.unknown`.
 3. **Supersession inherits S.** During phase 1 a second transaction adds track C: it returns OK
-   (no BACKPRESSURE), the adoption happens at or after `S`, and gate 1's blocks up to `S` are
-   unchanged.
+   (no BACKPRESSURE), and gate 1's blocks up to `S` are unchanged bit for bit. B is in the overlay,
+   so the second transaction writes no mute for B or its send: the adoption is at exactly gate 1's
+   `S` (the watermark's first sample), not at a later `S` computed from the second commit.
 4. **A restore during phase 1 fades back in.** In gate 1, at block `k + 4` (mid-ramp) a second
    transaction restores B exactly as it was. It returns OK. Every block up to `S` equals gate 1's
    reference. From `S` on, every block equals a fresh plan of the restored session fed the same
    source frames, with B muted and live-unmuted with `N` at `S`. From `S + N` on, B's output is the
    unducked reference's.
+   (b) The same with B's source fed one block ahead only, as in gate 2. Every submit for it before
+   and after the restore returns OK, none is refused, and from `S` on B plays the frames submitted
+   for those blocks (the bit-identity above holds with the same source frames).
 5. **Realtime.** On the render thread, every block from `k + 1` through the adoption block makes
    zero allocations and frees (`bench_support::alloc` thread-scoped counters, statics warmed).
 6. Commands:
@@ -184,10 +217,13 @@ two render calls, so the ramp starts at `p`).
   `S`), or a pre-fader send left unducked (R's input steps at `S`), turns it red.
 - Gate 2: a source that retires with the commit makes the ramp play underrun zeros and refuses the
   phase-1 submits; it turns red.
-- Gate 3: a superseding candidate that drops the inherited `S` swaps mid-ramp; it turns red.
+- Gate 3: a superseding candidate that drops the inherited `S` swaps mid-ramp; a second write to
+  an overlay strip restarts B's ramp at the second commit and moves `S` later. Either turns it red.
 - Gate 4: a base that omits the overlay (the restored strip carries its ducked fader and stays
   muted), a restore that does not inherit `S` (B restarts from a part-ducked level, a step), or one
-  that does not arm B (it enters at full gain) turns it red.
+  that does not arm B (it enters at full gain) turns it red. Gate 4(b): a restored source given a
+  fresh ring (its acked phase-1 PCM dropped, B plays underrun zeros from `S`) or a producer left in
+  the retiring plan's set (submits refused or lost) turns it red.
 - Gate 5: a schedule check or cell drain that allocates on the render thread turns it red.
 
 ## Dependencies

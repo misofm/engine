@@ -36,8 +36,8 @@ never leaves it muted.
 - The shared step: *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325) writes
   ramped mutes into the displaced plan's strip lanes and pre-fader route lanes, reads
   `p = render_sample` (`crates/capi/src/runtime/plan.rs:10`, `:236`) and schedules the successor
-  at `S = ceil_q(p + q + N + C)`. Its host-core function `plan_strip_transition(base, next,
-  successor)` runs after preparation and reads the prepared successor (#1325 D7); it returns the
+  at `S = ceil_q(p + q + N + C)`. Its host-core function `plan_strip_transition(base, overlay,
+  next, successor)` runs after preparation and reads the prepared successor (#1325 D7); it returns the
   duck set, never an arm set. This issue extends the duck set; arming happens in preparation.
 - A route from a tap before the fader (`input`, `post_input`, `insert_send`, `insert_return`,
   `pre_fader`; `SendTap`, `crates/session/src/model.rs:856-871`) bypasses the fader, so a fader
@@ -68,8 +68,12 @@ never leaves it muted.
   (#1288 D3), so for a playing source the fade starts at the first block at or after `S + D`.
 - **D4. Duck.** This issue extends #1325 D7's `plan_strip_transition`: the duck set is the removed
   strips plus `successor.restarted_strips()`, and the duck routes are every route from those strips
-  whose tap precedes the fader. The control plane writes their ramped mutes and schedules `S`
-  exactly as #1325 D2-D3, in the same transaction, with one `S`.
+  whose tap precedes the fader, minus every strip and route already in the running plan's duck
+  overlay (#1325 D6: a second ramped mute would reset the running ramp to `N` from its part-ducked
+  level and end it after the scheduled `S`). The control plane writes their ramped mutes and
+  schedules `S` exactly as #1325 D2-D3, in the same transaction, with one `S`; #1325 D3's `C`
+  covers every route out of a duck-swapped strip as well as out of a removed one, since a restarted
+  pre-fader route's line must empty before `S`.
 - **D5. Edits during the window.**
   - A live edit to a ducked strip goes to the newest candidate's cells and applies at adoption
     (D15-17). A mute disarms the strip (#1288 D2), so the user's mute wins; a fader edit sets the
@@ -148,11 +152,18 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
 5. **Pre-fader send ducks with the strip.** Gate 1(a)-(b) with B also holding a `pre_fader` send
    into submix R, and R's output observed: up to `S` it equals a reference that live-mutes B and the
    send at the same point; from `S` it equals the fresh successor plan with B and the send muted
-   and live-unmuted with `N` at the fire block. Bit-identical.
+   and live-unmuted with `N` at the fire block. Bit-identical. R also takes a track through a
+   true-peak limiter insert, so the send's line into R has a compensation delay of 300 samples or
+   more, `C`; the watermark's first sample is `S = ceil_q(p + q + N + C)`.
 6. **A revert during the duck fades back in.** In gate 1, at block `k + 4` a second transaction
    removes the compressor again. It returns OK. Up to `S` every block equals gate 1(a)'s
    reference; from `S` every block equals a fresh plan of the reverted session with B muted and
-   live-unmuted with `N` at `S`; from `S + N` on, B's output equals the unducked reference.
+   live-unmuted with `N` at `S`; from `S + N` on, B's output equals the unducked reference. B is
+   in the duck overlay, so the revert writes no second mute: the adoption is at exactly gate 1's
+   `S`.
+   (b) Gate 5's session (B's `pre_fader` send into R with its compensation delay `C`): the revert
+   at `k + 4` likewise leaves R's output up to `S` equal to gate 5's reference, and the adoption
+   is at gate 5's `S`, which counts `C`.
 7. **Realtime.** As #1325's realtime gate, over the fade blocks too.
 8. Commands:
    - `cargo test --locked -p capi --test strip_transitions`
@@ -173,9 +184,13 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
 - Gate 3: a re-pointed send that still ducks its source strip (R8) turns its last clause red.
 - Gate 4: a partial carry upstream of a restarted owner (the hole in D2) turns it red.
 - Gate 5: a pre-fader send carried across the duck-swap (it keeps sending through the dip, then
-  steps when the restarted chain behind it emits) or left unarmed turns it red.
+  steps when the restarted chain behind it emits) or left unarmed turns it red, and so does an `S`
+  without the send's `C` (the line's last ducked frames cut at `S`).
 - Gate 6: a supersession whose base omits the overlay (the strip carries its ducked fader and stays
-  muted) or does not arm the restored strip (it enters at full gain) turns it red.
+  muted) or does not arm the restored strip (it enters at full gain) turns it red. A revert that
+  writes a second mute to the ducked strip or its send (the ramp restarts at `k + 4`, the blocks
+  before `S` differ and `S` moves) turns it red. Gate 6(b): a `C` that counts only removed strips'
+  routes (the send's line cut at `S`) turns it red.
 
 ## Dependencies
 

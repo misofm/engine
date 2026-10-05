@@ -20,10 +20,15 @@ hosts, so the two admissions and drains cannot drift apart.
   - `status_fields` in `tools/parameter-metadata/src/abi_layout.rs:330-345` (`"reserved"`,
     `"u64[4]"`), which generates `sdk/src/generated/abi.ts`
     (`bash scripts/check-sdk-generated.sh` compares it);
-  - the worklet's status reader, `hosts/host-web/web/miso-engine-v1-audio-worklet.js:945-959`,
-    which throws unless offsets 48, 56, 64 and 72 are zero;
-  - the status type, `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts:856` and its
-    shipped copy `sdk/src/browser/shipped-host.d.ts:856`.
+  - the worklet's status reader, `readStatus()`
+    (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:944-960`), which throws unless offsets
+    48, 56, 64 and 72 are zero (`:946-949`); its result is spread into the `miso.status.v1` reply
+    (`:1070`);
+  - the main-realm host's status reply check, an exact field list and value validation
+    (`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js:1013-1017`, `:1121-1128`);
+  - the status type `MisoStatus`, `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts:846-857`,
+    and its shipped copy `sdk/src/browser/shipped-host.d.ts:846-857`;
+  - the hermetic harness's fake status reply (`scripts/test-web-audioworklet.mjs:159-164`).
 - #1312 adds the cells, the session counter (one `Arc<AtomicU64>`, D2's per-cell unit: a `Both`
   record counts in each channel cell, so 40 `Both` edits before one block add 78), the C ABI's
   `CounterId::LiveValuesSuperseded` (D8) and the browser admission on cells (D7).
@@ -34,9 +39,10 @@ hosts, so the two admissions and drains cannot drift apart.
 
 - **D1. Status layout.** `WebStatus` gains `live_values_superseded: u64` at offset 48, and
   `reserved` becomes `[u64; 3]` at offsets 56, 64, 72. The size stays 80. Every mirror in Context
-  follows: `status_fields` lists the new field and `u64[3]`, the worklet reader checks only 56, 64
-  and 72 and returns `liveValuesSuperseded`, and both `.d.ts` copies gain
-  `readonly liveValuesSuperseded: bigint`. *Publish the applied-revision watermark in the browser
+  follows: `status_fields` lists the new field and `u64[3]`; the worklet reader checks only 56, 64
+  and 72 and returns `liveValuesSuperseded` (a `bigint`); the host's status field list gains it
+  and validates it as a `u64`; both `.d.ts` copies gain `readonly liveValuesSuperseded: bigint`;
+  and the harness's fake status reply carries it. *Publish the applied-revision watermark in the browser
   status* (#1349) then takes the three remaining words.
 - **D2. Value.** Written at each status refresh from the session counter (a load), so it is never
   behind the last rendered block. No feature bit: an in-place V1 status field (decision 15,
@@ -45,8 +51,8 @@ hosts, so the two admissions and drains cannot drift apart.
 ## Deliverables
 
 1. D1-D2 in `hosts/host-web/src/lib.rs` and the mirrors; regenerated SDK files.
-2. Gate 1 in `hosts/host-web/src/tests.rs`; gate 2 in a new
-   `hosts/host-web/tests/strip_cells_cross_host.rs`.
+2. Gate 1 in `hosts/host-web/src/tests.rs`; gate 3 in `scripts/test-web-audioworklet.mjs`; gate 2
+   in a new `hosts/host-web/tests/strip_cells_cross_host.rs`.
 
 ## Authorized paths
 
@@ -55,8 +61,10 @@ hosts, so the two admissions and drains cannot drift apart.
   (`control-plane` as a dev-dependency).
 - `tools/parameter-metadata/src/abi_layout.rs` (`status_fields` only),
   `sdk/src/generated/abi.ts` (regenerated), `hosts/host-web/web/miso-engine-v1-audio-worklet.js`
-  (the status reader only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`,
-  `sdk/src/browser/shipped-host.d.ts`.
+  (the status reader only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` (the status
+  reply's field list and validation only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+  and `sdk/src/browser/shipped-host.d.ts` (`MisoStatus` only).
+- `scripts/test-web-audioworklet.mjs` (the fake status reply and gate 3's case only).
 
 ## Non-goals
 
@@ -75,21 +83,25 @@ hosts, so the two admissions and drains cannot drift apart.
    `SESSION_TRANSACTION_APPLY` and once through host-web's command admission, each followed by 8
    blocks. The PCM is bit-identical and the two counters are equal (3: each fader channel cell and
    the matrix cell replaced once).
-3. Commands:
+3. **The status reply carries the word.** In `scripts/test-web-audioworklet.mjs`, a worklet whose
+   fake status block holds a nonzero word at 48 answers a status request with that
+   `liveValuesSuperseded`, and the host accepts the reply; a reply without the field is refused.
+4. Commands:
    - `cargo test --locked -p host-web --features test-support`
    - the SDK job's `bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts` and
      `bash scripts/check-sdk-types.sh`, after building the artifacts as `qualification.yml` does
-   - `bash scripts/check-web-audioworklet.sh` and the browser legs of `qualification.yml`'s
-     `browser` job
+   - `bash scripts/check-web-audioworklet.sh`, `bash scripts/test-web-audioworklet.sh`, and the
+     browser legs of `qualification.yml`'s `browser` job
    - `bash scripts/check-workspace-policy.sh`, `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 
 ## Test value
 
-- Gate 1: a status word at the wrong offset, never written, or a worklet reader that still
-  rejects a nonzero word 48.
+- Gate 1: a status word at the wrong offset or never written.
 - Gate 2: the two hosts draining differently (order, `Both` folding), which breaks #1054's
   cross-host bit-identity for two edits in one block.
+- Gate 3: a worklet reader that still rejects a nonzero word 48 (every status read would throw
+  after the first superseded value), or a host check that refuses or drops the new field.
 
 ## Dependencies
 

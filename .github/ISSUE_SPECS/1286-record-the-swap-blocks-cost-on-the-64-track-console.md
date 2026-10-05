@@ -173,8 +173,11 @@ Deferred) earns a brief.
 
 ## Dependencies
 
-- *Carry strip delay lines and live send ramps across a plan swap* (#1284): every state family
-  carries in both modes, so the measured carry is the real one.
-- *Carry plan state by copy as well as by move* (#1322).
-- *Render a successor plan off the render thread with a pinned floating-point environment* (#1321):
-  phase 3 renders on the real off-thread renderer.
+- *Carry strip delay lines and live send ramps across a plan swap* (#1284)
+- *Carry plan state by copy as well as by move* (#1322)
+- *Render a successor plan off the render thread with a pinned floating-point environment* (#1321)
+- *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331)
+
+#1284 makes every state family carry in both modes, so the measured carry is the real one.
+Phase 3 renders on #1321's real off-thread renderer. D3's browser row takes the slowest engine's
+headroom `h` from #1331 D7.

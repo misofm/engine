@@ -57,15 +57,35 @@ changed or added owners start fresh.
   Nothing in them is a live value, so there is no retarget. A non-carried owner starts fresh and
   is not a strip restart: it changes no audio.
 - **D2. Move mode.** At the swap block, swap each carried observer's whole state between the plans,
-  its producer included. The host's existing reader is therefore still
-  connected to the observer that renders on. The successor's fresh observer goes to the retiring
-  predecessor.
-  The observer location table records each observer's owner kind and key, not its handle, so
-  #1395 adds the spectrum kind without changing the section.
-- **D3. Control side.** Host-core gives one adoption call per kind, after
-  `SourceControlSet::adopt_persisting`. Each call swaps the reader of every carried owner between
-  the successor's handles and the predecessor's, and returns the count. The host calls them right
-  after the transaction commits, as it does for sources.
+  its producer included. A reader that already holds the carried producer's consumer therefore
+  stays connected to the observer that renders on. The successor's fresh observer goes to the
+  retiring predecessor.
+  - The observer location table records each observer's owner kind and key, not its handle, so
+    #1395 adds the spectrum kind without changing the section.
+  - Within one kind, the table's entries are in the order of that kind's reader vector in
+    `HostLiveControlHandles` (`meters`, `effect_observations`), so an entry's index is its
+    reader's index.
+- **D3. Carry record and reader pairing, at the swap block.** No reader is swapped on the control
+  side: a commit runs before adoption, and a candidate it names can be superseded (#1310) and
+  never adopted.
+  - The successor's table holds a preallocated carry record, one slot per entry. D2's section
+    writes it in the swap block: for each carried entry, `ObserverCarry { kind, successor,
+    predecessor }` (the two entry indices). The record is allocation-free and written once, since
+    a plan is adopted at most once.
+  - The engine gets the record type and one accessor: `ObserverCarry` and `ObserverKind`
+    (`Meter`, `Observation`; #1395 adds `Spectrum`) in `crates/engine/src/realtime/plan.rs`, a
+    `PreparedPlanExecutor::observer_carries(&self) -> &[ObserverCarry]` method whose default is
+    empty, and `PreparedRenderPlan::observer_carries()`. The graph executor (`impl PreparedPlanExecutor for
+    GraphExecutor`, `crates/graph/src/lib.rs:3124`) returns its table's record.
+  - host-core gives two pairing functions, `pair_carried_meters(successor: &mut [MeterConsumer],
+    predecessor: &mut [MeterConsumer], carries: &[ObserverCarry])` and
+    `pair_carried_observations` (same shape, over the observation handles). For each record of
+    its kind, it swaps `successor[s]` with `predecessor[p]`. It is allocation-free, drops nothing,
+    and may run on the render thread.
+  - A host whose readers live inside the plan calls them in the swap block, from the plan's host
+    attachment hook. The browser is that host: *Swap and retire browser plans through the
+    Worker's service loop* (#1381) D3. After the call the successor's reader vectors hold the
+    carried consumers, and the retiring predecessor holds the fresh ones.
 - **D4. Copy mode belongs to #1287.** In a warm successor the observers render `[B, S + P)` during
   the catch-up, which overlaps windows the predecessor publishes. How they continue depends on the
   clock *Pre-roll a successor whose latency grows* (#1287) gives the successor at adoption. So #1287
@@ -77,20 +97,32 @@ changed or added owners start fresh.
 
   This slice's program sections are move-mode only. #1287 must not adopt a warm successor whose
   observers it does not carry.
-- **D5. Both hosts.** Everything is in host-core, graph, rack, builtins and effect-contract.
-  - The browser gets it with no browser code of its own once it replaces plans through the shared
-    control plane: *Run the browser control plane in a Worker and keep the AudioWorklet
-    render-only* (#1332), then *Replace the running browser session in the Rust host* (#1290). #1290
-    calls D3's adoption calls, and its gate asserts that `meter_generation` does not advance across
-    a replacement that carries every meter.
+- **D5. Both hosts.** Everything is in engine (the record type and accessor only), host-core,
+  graph, rack, builtins and effect-contract.
+  - The browser's readers live in its plan's host attachment. #1381 D3 calls D3's pairing
+    functions from the attachment hook in the swap block, so the browser has no other carry code.
+    *Replace the running browser session in the Rust host* (#1290) gates the result: the browser's
+    `meter_generation` does not advance across a structural apply that carries every meter.
   - The C ABI has nothing to carry (Context).
+- **D6. A fresh meter joins the carried window grid.** A host that folds meters as one group
+  needs every meter's windows to match: the browser requires equal `window_sequence`,
+  `start_sample`, `end_sample` and `frames` across the group (`hosts/host-web/src/lib.rs:3485-3500`).
+  A fresh `MeterAccumulator` opens its first window at its first observation (`start: None`,
+  `crates/builtins/src/lib.rs:4558`), so an added strip's meter would sit off the grid forever.
+  So, in the swap block, a fresh meter (no carry record) whose `MeterConfig` equals a carried
+  meter's takes the open window position of the first such carried meter (lowest successor entry
+  index): its `start`, `frames` and `sequence`, with its lanes and cumulative counters at zero.
+  That is exactly what it would hold had it observed silence since the window opened, and the
+  strip did not exist before adoption. With no carried meter of that config, it starts as today.
+  It is a scalar copy in the move section: no allocation.
 
 ## Deliverables
 
 1. D2 in `crates/builtins` (`MeterAccumulator` swap), `crates/builtins-compiler` (`MeterObserver`),
    `crates/effect-contract/src/live.rs` (`ObservationLane`), `crates/rack` and `crates/graph` (the
    observer location table and the program section).
-2. D1 and D3 in `crates/host-core/src/prepare.rs`.
+2. D1 and D3's pairing functions in `crates/host-core/src/prepare.rs`. D3's record type, the
+   executor method and the plan accessor in `crates/engine/src/realtime/plan.rs`.
 3. Tests in `crates/host-core/tests/successor_swap.rs`, through the browser's preparation entry
    points (`prepare_host_runtime_with_selected_meters_between_render_calls`,
    `crates/host-core/src/prepare.rs:1051`, and, for the observation taps,
@@ -103,10 +135,13 @@ changed or added owners start fresh.
 - `crates/graph/src/lib.rs`, `crates/graph/src/runtime.rs`
 - `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`,
   `crates/host-core/tests/support/successor.rs`
+- Outside stream A's ownership; root sequences it: `crates/engine/src/realtime/plan.rs`
+  (`ObserverCarry`, `ObserverKind`, the executor method and the plan accessor only).
 
 ## Non-goals
 
-- No copy mode (D4). No browser code (#1290). No change to meter or spectrum kernels.
+- No copy mode (D4). No browser code: the attachment hook is #1381, the browser gate #1290. No
+  change to meter or spectrum kernels.
 - No spectrum carry (#1395).
 
 ## Objective gates
@@ -115,30 +150,43 @@ changed or added owners start fresh.
    several blocks long, so a window is open at the swap. B adds a muted track whose ID sorts first.
    Read through A's consumers before and after the swap. The snapshot sequence has no gap, keeps
    `reset_generation`, has `cumulative_discontinuities` 0, and every snapshot equals the reference
-   (a fresh B with the same meters, fed from frame 0) field by field.
+   (a fresh B with the same meters, fed from frame 0) field by field. The added muted track's
+   meter shares the carried meters' window boundaries and sequence numbers from its first
+   snapshot, and each of its snapshots equals the reference's.
 2. **A changed meter starts fresh.** B changes one meter's window length. That meter's successor
    reader starts a new sequence, and every other meter carries as in gate 1.
-3. **Observation taps.** With a live-controlled compressor insert and its gain-reduction tap armed,
+3. **Pairing follows the record.** In gate 1's script, after the swap block, call
+   `pair_carried_meters` and `pair_carried_observations` on the successor's and predecessor's
+   handle vectors with the successor's `observer_carries()`. Every carried strip's snapshots then
+   continue through the successor's vector at that strip's new index, as in gate 1. The added
+   track's meters have no record, and their successor readers receive the fresh observers'
+   snapshots.
+4. **Observation taps.** With a live-controlled compressor insert and its gain-reduction tap armed,
    the tap's readings continue across the swap, equal to the reference. A compressor that restarts
    (its threshold changed, prepared on a lane without live controls) starts its tap fresh.
-4. **Realtime.** The swap block makes zero allocations and frees.
-5. Commands:
-   - `cargo test --locked -p builtins -p builtins-compiler -p effect-contract -p rack -p graph -p host-core --features builtins-compiler/test-support,rack/test-support,graph/test-support,host-core/test-support`
+5. **Realtime.** The swap block and the two pairing calls make zero allocations and frees,
+   measured with `bench_support::alloc`'s thread-scoped counters after warm-up.
+6. Commands:
+   - `cargo test --locked -p engine -p builtins -p builtins-compiler -p effect-contract -p rack -p graph -p host-core --features builtins-compiler/test-support,rack/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit && bash scripts/trace-graph-audit.sh target/release/audit`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 
 ## Test value
 
-- Gate 1 turns red on any of four defects:
+- Gate 1 turns red on any of five defects:
   - a carry that copies the window but keeps the successor's producer leaves the host's reader on a
     dead queue;
   - a meter keyed by handle index instead of `(strip, tap)` reads the wrong strip after the lane
     shift;
   - a window restarted at the swap shows a counted discontinuity;
-  - a lost open window shows a sequence gap.
+  - a lost open window shows a sequence gap;
+  - a fresh meter that opens its window at adoption (D6 missing) is off the group's grid, so its
+    sequence and boundaries differ from the reference's.
 - Gate 2: a rule that ignores the configuration carries a window of the wrong length. It turns red.
-- Gate 3: observation state that does not follow its effect owner restarts the tap on an unchanged
+- Gate 3: a pairing that swaps by position instead of by the record's two indices puts a reader
+  on the wrong strip's producer once the added track shifts every index. It turns red.
+- Gate 4: observation state that does not follow its effect owner restarts the tap on an unchanged
   effect. It turns red.
 
 ## Dependencies

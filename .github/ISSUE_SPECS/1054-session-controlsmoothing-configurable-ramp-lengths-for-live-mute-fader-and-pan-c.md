@@ -5,9 +5,9 @@ Code anchors verified on `main` at `6fb211594`.
 
 ## Product outcome
 
-A session may carry `control_smoothing`: mute, fader and pan ramp lengths in milliseconds. A live
-record ramps over the session's length for its row, or over the researched default table when the
-session omits the setting. An explicit 0 in the session stays legal: it is the hard switch that
+Every session carries `control_smoothing`: either `default` or its own mute, fader and pan ramp
+lengths in milliseconds. A live record ramps over the session's length for its row, or over the
+researched default table when the session says `default`. An explicit 0 in the session stays legal: it is the hard switch that
 sample-exact edits and bit-comparison tests use. In this slice the C ABI's live fader, mute and
 pan/matrix edits start to ramp; today they step. Decision 14's F7 (the ramp half) is closed for the
 C ABI rows that are live today, and every later live row reads the same table. The optional
@@ -39,12 +39,18 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
   (`crates/session/src/model.rs:655-680`); `Submix::unity` writes 0 (`:749`). The prepared window
   is read only by `set_target` (`crates/builtins/src/lib.rs:2999-3006`), which no production path
   calls; live matrix records bring their own (`set_target_over`, `:3008`).
-- **Schema.** Root keys are explicit and ordered (`docs/SESSION_SCHEMA_V1.md:35-40`); the JSON
-  schema lists them (`docs/session-v1.schema.json:7`). The SDK's canonical writer has its own root
+- **Schema.** Root keys are required, explicit and ordered, and every field is explicit
+  (`docs/SESSION_SCHEMA_V1.md:35-40`); V1 has no optional fields (`:210`). A tagged value spells a
+  "nothing set" choice explicitly, as `"sidechain": { "kind": "none" }` does (`:40`). A key added
+  later is required too, so an older document without it is `schema.missing_field`
+  (`delay_samples`, `crates/session/src/parse.rs:1061-1063`). The JSON schema lists the root keys
+  (`docs/session-v1.schema.json:7`). The SDK's canonical writer has its own root
   key list and float key set (`sdk/src/internal/session-json.ts:13-29`, `:50-65`), and is checked
   against the Rust-generated writer corpus
   (`fixtures/session-canonical/v1/canonical-writer-corpus.json`, from
-  `crates/session/src/canonical.rs:505-523`). Visitor root field IDs are at
+  `crates/session/src/canonical.rs:505-523`). Its tagged objects take their key order from
+  `taggedOrder` (`sdk/src/internal/session-json.ts:91`). The SDK builder emits the root model in
+  `sdk/src/core/session.ts:1645-1662`. Visitor root field IDs are at
   `crates/session/src/visit.rs:88`; field 8 is retired (`:110`).
 - **Pinned text.** `docs/C_ABI_V1_QUALIFICATION.md:265-267` ("steps until #1054");
   `crates/host-core/tests/live_delta.rs:39-42` (`STEP`) and
@@ -55,13 +61,28 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 
 ## Decisions frozen for this slice
 
-- **D1. Schema.** One optional root object, `control_smoothing` (SDK `controlSmoothing`), in
-  canonical order after `vcas` and before `outputs`. When present it requires exactly `mute_ms`,
-  `fader_ms` and `pan_ms`, each an `f32` with `0 <= ms <= 1000`; unknown keys are refused; out of
-  range is `NumericOutOfSchemaRange` at `$.control_smoothing.<key>`. Canonical JSON omits it when
-  absent and writes all three keys when present (`-0.0` stays `-0.0`). The model field is
-  `SessionModel::control_smoothing: Option<ControlSmoothing>`; the visitor walks it as root field
-  17 (fields 1, 2, 3 in key order). The JSON schema and the SDK canonical writer learn the key.
+- **D1. Schema.** One **required** tagged root object, `control_smoothing` (SDK
+  `controlSmoothing`), in canonical order after `vcas` and before `outputs`, consistent with "V1
+  has no optional fields" (`docs/SESSION_SCHEMA_V1.md:210`):
+  - `{ "kind": "default" }`: the session uses the researched default table (D2). No other key.
+  - `{ "kind": "explicit", "mute_ms": .., "fader_ms": .., "pan_ms": .. }`: all three required, in
+    that order, each an `f32` with `0 <= ms <= 1000`.
+  - A missing root key is `schema.missing_field`; an unknown kind or key is refused; out of range is
+    `NumericOutOfSchemaRange` at `$.control_smoothing.<key>`. Canonical JSON always writes the key
+    (`-0.0` stays `-0.0`).
+  - The model field is `SessionModel::control_smoothing: Option<ControlSmoothing>`: `None` is
+    `default`, `Some` is `explicit`. The visitor walks it as root field 17 (kind 1, then
+    `mute_ms` 2, `fader_ms` 3, `pan_ms` 4 for `explicit`).
+  - The JSON schema, the SDK canonical writer (`taggedOrder`) and the SDK builder learn the key. The
+    builder writes `{ "kind": "default" }` until #1364 D4 lets an author set lengths.
+  - Why tagged and not three values written out: the owner's decision 1 makes the lengths an
+    optional setting with one documented default table, and #1388's listening result may change
+    the defaults. A document that says `default` follows the table; one that wrote numbers keeps
+    them. The tag keeps both explicit without an optional field.
+- **D1a. Migration.** A one-off rewrite adds `"control_smoothing": { "kind": "default" }` at its
+  canonical place in every checked-in session document, fixture and embedded test session. Nothing
+  else in any document moves. `default` resolves to the same lengths an absent setting would, so
+  every render digest stays; a digest of session-document bytes moves by this one key only.
 - **D2. Default table and rounding**, in `crates/session`. `CONTROL_SMOOTHING_DEFAULT` holds
   #1055's section 9 values. `SessionModel::control_smoothing_samples(&self) ->
   ControlSmoothingSamples { mute, fader, pan }` applies
@@ -73,7 +94,7 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
   | key | rows |
   |---|---|
   | `fader_ms` | fader dB, input trim, send gain, VCA offset, detector link glide (#1371) |
-  | `mute_ms` | mute, solo, polarity invert, send mute, VCA mute, effect bypass crossfade (#1341) |
+  | `mute_ms` | mute, solo, polarity invert, send mute, send `follows_mute` toggle, VCA mute, effect bypass crossfade (#1341) |
   | `pan_ms` | pan, matrix, send matrix |
 
 - **D4. `LiveRamps`.** It gains `pan_samples` and `link_samples`; `for_session(model)` fills all
@@ -100,9 +121,11 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 
 ## Deliverables
 
-1. D1 and D2 in `crates/session`, with `docs/SESSION_SCHEMA_V1.md` (key, bounds, default table,
-   rounding, D3's table), `docs/session-v1.schema.json`, one writer-corpus document with the key,
-   and the SDK canonical writer's root and float keys.
+1. D1 and D2 in `crates/session`, with `docs/SESSION_SCHEMA_V1.md` (the root key list at `:35-38`,
+   the tagged grammar, bounds, default table, rounding, D3's table), `docs/session-v1.schema.json`,
+   the writer corpus regenerated (every document gains `default`; one document carries `explicit`),
+   the SDK canonical writer's root key, tagged order and float keys, and the SDK builder's
+   `{ "kind": "default" }` emit. D1a's migration lands in its own commit.
 2. Every `SessionModel { .. }` struct literal outside `crates/session` gains
    `control_smoothing: None` (mechanical; about 98 sites in tests and helpers).
 3. D4 and D5 in `crates/host-core/src/live_delta.rs`. The `commit_live` call
@@ -117,7 +140,10 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 
 - `crates/session/src/{model,parse,validate,canonical,visit,lib}.rs`, `crates/session/tests/`,
   `docs/SESSION_SCHEMA_V1.md`, `docs/session-v1.schema.json`,
-  `fixtures/session-canonical/v1/canonical-writer-corpus.json`, `sdk/src/internal/session-json.ts`
+  `fixtures/session-canonical/v1/canonical-writer-corpus.json`, `sdk/src/internal/session-json.ts`,
+  `sdk/src/core/session.ts` (the root model emit only; #1364 D4 adds authoring), `sdk/test/`
+- Every checked-in session JSON document and embedded test session (D1a's key only), and each
+  digest of session-document bytes that the key moves (gate 7)
 - `crates/host-core/src/live_delta.rs` (stream B owns it), `crates/host-core/tests/live_delta.rs`
 - `crates/capi/src/runtime/live_tests.rs` (tests only), `docs/C_ABI_V1_QUALIFICATION.md`
 - Struct-literal additions only (deliverable 2), in any file that builds a `SessionModel`
@@ -144,17 +170,22 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
   already adds the smoothing). Do not weaken a comparison.
 - `docs/handoffs/control-smoothing-defaults/` is research evidence. Do not edit it.
 - Land it in the order of the deliverables, with a local checkpoint after each compiles.
+- *Declare a strip's console link mode in the session, the wire and the SDK* (#1369) also migrates
+  every document. Whichever merges second reruns its own one-off rewrite on `main`; never merge the
+  two migrations by hand.
 
 ## Objective gates
 
-1. **Schema** (`crates/session/tests/`). Accept the object, with 0, `-0.0` and 1000. Refuse, each at
-   its path: a negative value, 1000.001, a missing key, an unknown key, a non-object. Omitted and
-   present sessions round-trip through canonical JSON to identical bytes. The writer corpus
+1. **Schema** (`crates/session/tests/`). Accept `default`, and `explicit` with 0, `-0.0` and 1000.
+   Refuse, each at its path: a missing root key (`schema.missing_field`), a negative value,
+   1000.001, a missing length in `explicit`, a length in `default`, an unknown kind, an unknown
+   key, a non-object. `default` and `explicit` sessions round-trip through canonical JSON to
+   identical bytes. The writer corpus
    regenerates with the new document, and the SDK writer reproduces it (`builder-evals.mjs`
    corpus loop, run by `check-sdk-headless.sh`).
 2. **Rounding** (`crates/session` unit test). 441/480/882/960 for 10 ms and 882/960/1764/1920 for
    20 ms at the four launch rates; 221 for 5 ms at 44.1 kHz (a tie); 0 for `-0.0`; an omitted
-   object gives the default table.
+   `default` gives the default table.
 3. **Classifier** (`crates/host-core/tests/live_delta.rs`, rewritten test). At 48 kHz with the
    default table: a fader, a mute and a pan change give `FaderDb` 960, `Mute` 480, matrix 960 (96
    when the model says 96). With `mute_ms` 5, `fader_ms` 15 and `pan_ms` 25: 720, 240, 1200.
@@ -178,14 +209,18 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
      `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
-7. **Other digests.** No session or render digest should move: preparation is unchanged and no
-   fixture declares the key. Any that moves is listed with its reason and re-pinned on its own,
-   never in bulk (decision 15, risk 4).
+7. **Migration and digests.** `git diff` of the D1a commit adds only the one key; every migrated
+   document passes `cargo run --locked -p session-validator -- validate <file>`. No render digest
+   moves: preparation is unchanged and `default` gives the lengths of today's absent setting. A
+   digest of session-document bytes moves by the key; each is listed with its file and the reason
+   "D1a adds the required `control_smoothing` key" and re-pinned on its own, never in bulk
+   (decision 15, risk 4). Any other digest that moves is a defect.
 
 ## Test value
 
-- Gate 1 turns red if the parser defaults a missing key, accepts a value over 1000, or the Rust or
-  SDK writer drops or invents the object. No test covers the key today.
+- Gate 1 turns red if the parser defaults a missing key, accepts a value over 1000, confuses the
+  two kinds, or the Rust or SDK writer drops, reorders or invents the object. No test covers the
+  key today.
 - Gate 2 turns red if the rounding truncates, rounds half to even or converts in `f32` (each gives
   220 at 5 ms and 44.1 kHz).
 - Gate 3 turns red if the classifier keeps a pan window of 0, ignores the session for one row, or
@@ -196,8 +231,7 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 
 ## Dependencies
 
-- *Research: default ramp lengths for live mute, fader and pan changes (cited, measured, listened)*
-  (#1055), closed with `FINDINGS.md` section 9 (D2's values and D3's table).
+- *Research: default ramp lengths for live mute, fader and pan changes (cited, measured, listened)* (#1055)
 
-Dependent: *Carry an optional per-edit ramp length on live session edits* (#1394) depends on this
-issue.
+#1055 closes with `FINDINGS.md` section 9 (D2's values and D3's table). *Carry an optional
+per-edit ramp length on live session edits* (#1394) depends on this issue.

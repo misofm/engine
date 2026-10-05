@@ -67,8 +67,9 @@ effect (D15-17, #1314).
   render plane holds would change (D9). A transaction that rewrites identical values is live with
   zero records and still advances the revision and emits `SESSION_COMMITTED`.
 - **D2. The timing contract.** An edit is admitted all or nothing. Render converges to the
-  committed value no later than the first block whose render begins after the submit returns
-  (D15-2). It is heard up to `latency_samples` later, because the compensation delays are downstream
+  committed value no later than the first block whose render begins after the submit returns, or,
+  while a successor is pending, at its adoption, which the watermark reports (D15-2 as refined by
+  D15-17). It is heard up to `latency_samples` later, because the compensation delays are downstream
   of the fader. It is never lost. #444's block-atomic batch claim is declined knowingly.
 - **D3. Every live value ramps (D15-1).** A record with no ramp length uses the session's
   researched `controlSmoothing` default (#1055, then #1054); an explicit 0 stays legal. #1054 covers
@@ -82,7 +83,8 @@ effect (D15-17, #1314).
   is superseded only by a later commit before the same drain; every fallible check runs before the
   first cell write; an exact `live_values_superseded` counter. Each cell holds its target words and
   ramp as one unit, with a per-lane dirty mask and a canonical drain order (fader before mute).
-  Multi-word cells use a sequence word that render reads once and never spins on. Automation,
+  Each cell is #1312's triple buffer: render reads the newest completed write in one pass, never
+  tears, never skips and never spins. Automation,
   Observe records, structural edits and time-stamped records stay FIFO. A paused host therefore
   never gets `BACKPRESSURE` for a live value. The ack bytes are unchanged.
 - **D5. The lanes on the C ABI.** The core attaches every strip's fader and matrix lanes (#1254,
@@ -111,8 +113,9 @@ effect (D15-17, #1314).
   since. A rebuild prepares from the committed model. `SessionSnapshotGet` returns it. A refused edit
   changes neither the model nor the plan. #1269 P1.4 uses this invariant as its carry base.
 - **D10. What the host sees (D15-3, D15-17).** This reverses the 2026-10-04 "no new field" answer.
-  - The response carries `{revision, path}`, where path is `live`, `model_only` or `rebuild`, plus
-    `rebuild_with_transition` for a counted fallback (#1313).
+  - The response carries `{revision, path}`, where path is exactly one of `live`, `model_only` or
+    `rebuild` (#1313). Fallbacks (pre-roll, transition) and supersession are known only after
+    submit, so the watermark's outcome flags report them (#1314).
   - The applied-revision watermark `(revision, first sample in effect, outcome flags)` is a C ABI
     query and a browser status field. It never uses the reliable event lane (#1314).
   - The host calls `miso_engine_v1_service` from a non-realtime thread; every other control call
@@ -170,24 +173,24 @@ governs. Stream F is C ABI live completeness, built on cells.
 | Issue | Title | Stream | Depends on |
 |---|---|---|---|
 | #1312 | *Hold live values in latest-target cells on both hosts* | B | #1309, #1348 |
-| #1345 | *Hold effect parameter, bypass and EQ-target values in latest-target cells* | B | #1312 |
+| #1345 | *Hold effect parameter, bypass and EQ-target values in latest-target cells* | B | #1312, #1399 |
 | #1346 | *Hold strip input-lane values in latest-target cells* | B | #1312 |
 | #1347 | *Hold route-lane values in latest-target cells* | B | #1312 |
 | #1399 | *Report live_values_superseded in the browser status and prove both hosts drain strip cells alike* | B | #1312 |
 | #1313 | *Report each transaction's edit path in its response* | B | #1309 |
 | #1314 | *Publish an applied-revision watermark and complete edits asynchronously* | B | #1309, #1343 |
-| #1364 | *Resolve an absent live ramp to the session default on the browser and in the SDK* | E | #1054, #1335 |
+| #1364 | *Resolve an absent live ramp to the session default on the browser and in the SDK* | E | #1054 |
 | #1365 | *Edit control_smoothing by a session transaction, model-only* | E | #1054 |
 | #1393 | *Crossfade the browser's live bypass command over the session ramp* | E | #1341, #1364 |
-| #1388 | *Run the blinded listening session for the live ramp defaults* | E | #1054, #1055 |
+| #1388 | *Run the blinded listening session for the live ramp defaults* | E | #1054, #1055, #1364 |
 | #1394 | *Carry an optional per-edit ramp length on live session edits* | E | #1054 |
 | #1268 | *Elide a builtin input filter section again after a live disable settles it to identity* | F | none |
 | #1261 | *Apply value-only input trim and polarity edits to the running C ABI plan* | F | #1054, #1309, #1312, #1328, #1329, #1346, #1394 |
-| #1262 | *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets* | F | #1261, #1268, #1328, #1329, #1346 |
-| #1225 | *Deliver value-only send edits to the running C ABI plan* | F | #1054, #1277, #1284, #1309, #1312, #1347, #1394 |
+| #1262 | *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets* | F | #1261, #1268, #1312, #1328, #1329, #1346 |
+| #1225 | *Deliver value-only send edits to the running C ABI plan* | F | #1054, #1277, #1284, #1309, #1312, #1313, #1347, #1394 |
 | #1390 | *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* | F | #1054, #1225, #1277, #1309, #1312, #1394 |
 | #1226 | *Let C ABI sends follow their source strip's mute live* | F | #1054, #1225, #1309, #1312, #1347, #1390, #1394 |
-| #1247 | *Deliver value-only VCA edits to the running C ABI plan* | F | #1054, #1226, #1309, #1312, #1347, #1390, #1394 |
+| #1247 | *Deliver value-only VCA edits to the running C ABI plan* | F | #1054, #1225, #1226, #1309, #1312, #1347, #1390, #1394 |
 | #1267 | *Apply value-only submix-strip input-section and effect edits to the running C ABI plan* | F | #1261, #1262, #1309, #1312, #1345, #1346, #1390 |
 | #1306 | *Size each effect's automation span window from the producers its plan has* | F | #1058, #1304, #1309, #1345 |
 

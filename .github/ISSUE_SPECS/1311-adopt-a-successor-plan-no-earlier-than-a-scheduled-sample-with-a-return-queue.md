@@ -9,8 +9,9 @@ The plan exchange can hold a published candidate until a chosen render sample. A
 published "no earlier than S" is adopted at the first block that starts at or after S. One
 published "exactly at S" is adopted at the block that starts at S. If render first sees it later,
 render hands it back to the control thread instead of adopting it late: the candidate stays in its
-mailbox cell, marked `Returned` with a reason, until its owner takes it. That cell is the return
-queue, of capacity 1. Until it is due, a candidate stays withdrawable, so a later structural edit
+mailbox cell, marked `Returned` with a reason, until its owner takes it. The title's "return queue"
+is this in-place return and nothing more: the cell holds at most one returned candidate, no
+separate queue exists, and nothing drains returns in the background (D6). Until it is due, a candidate stays withdrawable, so a later structural edit
 can still supersede it. Duck-swap and two-phase removal (stream D) schedule swaps with this, and
 the warm successor (stream C) uses exact adoption and the return path.
 
@@ -37,8 +38,15 @@ the warm successor (stream C) uses exact adoption and the return path.
   ExactlyAt(u64)}` is fixed when the control thread reserves a replacement and stored in the cell
   beside the plan, with the due sample. Both are written before the cell is marked `Full`. `Next`
   is today's behaviour; every existing caller passes it.
+  - The mode and the due sample are two atomics of the cell (`AtomicU8` and `AtomicU64`), outside
+    the `UnsafeCell` that holds the plan payload. Control stores them (`Relaxed`) before the
+    state word's `Release` that marks the cell `Full`. Render loads them before it claims (D2),
+    while control may withdraw and republish into the same cell, so they are never fields of the
+    payload: a plain read of the payload before the claim would race with that republish.
 - **D2. Render reads the due sample before it claims.** Render loads the state word (`Acquire`),
-  then the `Full` cell's mode and due sample. It claims (#1343's one compare-and-swap, generation
+  then the `Full` cell's mode and due sample from their atomics (D1; `Relaxed` suffices, because
+  the claim below re-checks the generation). It touches the payload only after the claim
+  succeeds. It claims (#1343's one compare-and-swap, generation
   included) only when the block's start is at or past the due sample. If control withdrew and
   republished between the two loads, the generation changed and the claim fails. Render then does
   nothing this block and looks again next block. Render never spins and never claims a candidate
@@ -92,6 +100,12 @@ the warm successor (stream C) uses exact adoption and the return path.
     `Withdrawn`: the plan render runs is still the predecessor (#1310 D1).
   - The control plane threads `PlanAdoption::Next` through its publication. A `Next` candidate is
     never returned, by D3's construction.
+  - **The revision of a returned candidate.** #1314 D2 sends every revision committed while a
+    candidate is pending to that candidate. This issue extends `PlanPublisher::set_revision` to a
+    `Returned` cell: it stores into that cell's revision word (an atomic, so a store during
+    `Copying` is safe) and reports `RevisionTarget::Pending`. Render never claims a `Returned`
+    cell, so the revision waits for the candidate's republication and adoption; it is never
+    written into the `Active` cell while a candidate is returned.
 - **D7. Acked-batch question: can an ack ever precede a drop? No.** Scheduling changes when a
   candidate is adopted, never whether its content survives. An unclaimed candidate stays in its
   cell, withdrawable (D2). A claimed one is adopted. A late one stays in its cell, `Returned`, until
@@ -137,7 +151,11 @@ the warm successor (stream C) uses exact adoption and the return path.
    - `ExactlyAt(S)` published after render passed S is returned: `returned_count` 1, the
      predecessor keeps rendering, `withdraw` yields `Returned { reason: Late }` with the epoch and
      plan ID intact, and before that `withdraw` nothing new can be published.
-   - After the returned candidate is taken, a `Next` republish of it is adopted at the next block.
+   - While the candidate is `Returned`, a model-only revision committed through
+     `PlanPublisher::set_revision` lands in the returned cell (`RevisionTarget::Pending`): the
+     watermark (#1314) does not advance while the predecessor keeps rendering.
+   - After the returned candidate is taken, a `Next` republish of it is adopted at the next block,
+     and that block's watermark advance covers the revision committed while it was returned.
    - A `NoEarlierThan` candidate withdrawn before S is never adopted.
    - `ExactlyAt` off the grid is refused at reservation.
    - Retirement credits balance after each case (reserve, return, take, drop or republish).
@@ -165,6 +183,9 @@ the warm successor (stream C) uses exact adoption and the return path.
 - Gate 1, `ExactlyAt` late: a candidate adopted late (breaking the warm successor's exact catch-up),
   dropped instead of returned, or reported as `Taken` (which would make supersession build against
   a plan render does not run).
+- Gate 1, revision while returned: a `set_revision` that falls back to the `Active` cell for a
+  `Returned` candidate reports the revision in effect while the predecessor, which lacks it, still
+  renders.
 - Gate 1, withdrawn before S: render claiming an undue candidate, which would make a scheduled
   candidate impossible to supersede.
 - Gate 2: an ordering bug between claim, return and withdraw that only some interleavings expose.
@@ -174,3 +195,5 @@ the warm successor (stream C) uses exact adoption and the return path.
 - *Let the control thread withdraw an unadopted candidate plan* (#1343). This slice follows it in
   `spsc.rs` and `plan_exchange.rs`, and both precede stream C's edits there.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for D6.
+- *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the cell's
+  revision word and the routing rule D6 extends to `Returned`.

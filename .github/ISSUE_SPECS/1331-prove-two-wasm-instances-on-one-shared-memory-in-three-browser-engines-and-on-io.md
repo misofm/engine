@@ -39,8 +39,10 @@ render-only* (#1332).
 - The first-party app sends `Cross-Origin-Embedder-Policy: require-corp` and
   `Cross-Origin-Opener-Policy: same-origin` (app repo `public/_headers:18-19`). Its isolation audit
   says iOS Safari was never checked (app repo `docs/mixer/isolation-audit.md:295-297`).
-- Round-1 C4 and round-2 Q-C4 of `/home/bl/misofm/submix-verdicts/PLAN-2026-10-05-adversary-*`
-  record scratch probes in Chromium 151, Firefox 153 and WebKit 26.5. They are not reproducible
+- Round-1 C4 and round-2 Q-C4 of the decision-15 plan review
+  (`docs/handoffs/decision-15-2026-10-05/PLAN-2026-10-05-adversary-round1.md:296-302` and
+  `PLAN-2026-10-05-adversary-round2.md:75-81`) record scratch probes in Chromium 151, Firefox 153
+  and WebKit 26.5. They are not reproducible
   from the repo and did not run on iOS or run the repo's parity gates.
 - Parity gates in the repo: G5 (`scripts/run-wasm-gates.sh`, `cargo test --locked --release -p
   wasm-gates --features math/lane`), the native/simd128 session digest

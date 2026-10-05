@@ -95,7 +95,18 @@ mode, how many control allocations ran in the worklet.
      unchanged.
   4. A new export, `miso_engine_web_v1_host_release(handle) -> u64`, moves the booted host out of
      the Worker's handle table into a transfer token (a raw pointer to a heap box). This is a move:
-     nothing is dropped. The token also carries the three staging references that boot allocated
+     nothing is dropped. Move semantics, exactly:
+     - `LIVE_HOST` (`hosts/host-web/src/ffi.rs:504`, today `RefCell<Option<LiveHost>>`) becomes
+       `RefCell<Option<Box<LiveHost>>>`. Boot boxes the host once, in the Worker.
+     - `host_release` takes the box out with `Option::take()` and returns `Box::into_raw`. No
+       allocation, no free: the token is the same box.
+     - `host_adopt` rebuilds the box with `Box::from_raw` and stores it only into a slot that
+       holds `None`, by matching on the `borrow_mut()` slot. A slot that already holds a host
+       refuses with `RESULT_WRONG_STATE` and leaves the token unconsumed. It never assigns or
+       `replace`s over a `Some`, which would run the old host's drop glue.
+     - The staging references are `Copy` and go into `Cell<Option<&'static _>>` slots, so
+       setting them drops nothing.
+     - One box travels Worker, worklet, Worker. Only the Worker's dispose frees it. The token also carries the three staging references that boot allocated
      (#1333 D5: `&'static` references, `Copy`), so the worklet never allocates a staging.
   5. The Worker also reserves the worklet instance's stack and TLS block through
      `miso_engine_web_v1_instance_reserve() -> u32`, which follows the recipe that #1331 recorded.
@@ -160,7 +171,10 @@ mode, how many control allocations ran in the worklet.
   - `host_adopt` and `host_release` each get the full call-graph gate (no allocator, no
     deallocator, no drop glue), like `meter_poll`.
   - JS capability rules:
-    - main realm: exactly one pinned `new Worker(` site, which constructs the control Worker;
+    - main realm: exactly one pinned `new Worker(` site, which constructs the control Worker
+      (today's ban, `check-web-audioworklet.sh:512-515`, becomes this pin; the single-mode
+      service tick's one pinned `setInterval(` is *Swap and retire browser plans through the
+      Worker's service loop* (#1381) D6's rule change, not this slice's);
     - worklet: still no `Worker(`, `setTimeout`, `setInterval`, `WebSocket` or `memory.grow`,
       and no `Atomics.wait` anywhere;
     - control Worker: no `fetch(`, `WebSocket` or `memory.grow`.
@@ -192,6 +206,8 @@ mode, how many control allocations ran in the worklet.
 - `sdk/src/browser/engine.ts`, `sdk/src/browser/shipped-host.d.ts`, `sdk/` packaging of the new
   artifact file
 - `scripts/check-web-audioworklet.sh`, `scripts/check-web-audioworklet-callgraph.py`
+- `scripts/test-web-audioworklet.mjs` (the fake exports and messages for the mode, the token
+  hand-off and growth)
 - The frozen export lists that #1293 names, for the four new exports only:
   `tools/parameter-metadata/src/abi_layout.rs` (`EXPORTS`), `scripts/check-abi-layout-v1.py`, and
   the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`.
@@ -238,7 +254,10 @@ mode, how many control allocations ran in the worklet.
    spectrum, then releases. Thread 1 adopts and disposes. It asserts:
    - thread 2's thread-scoped counters read `allocations == 0 && frees == 0` from adopt to
      release;
-   - thread 1's frees are greater than 0.
+   - thread 1's frees are greater than 0;
+   - on thread 2, adopting a second booted host's token into the occupied slot returns
+     `RESULT_WRONG_STATE`, frees nothing, and the first host
+     still renders.
 4. **Growth is not a fault.** On the isolated leg, the qualification harness grows the shared
    memory from the Worker by one page after `host_adopt` (a qualification-only message). On the
    non-isolated leg, the same message grows it from the worklet's control handler. On both legs,

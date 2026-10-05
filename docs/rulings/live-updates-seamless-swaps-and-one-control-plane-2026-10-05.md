@@ -65,8 +65,8 @@ when a dependency forces the order, and then sequence the correct solution.
   "session default"), input trim and polarity, sends (gain, mute, matrix), VCA offset and mute.
 - SDK defaults stop being 0 (decision 14 F7, SDK half).
 - *Recorded resolution:* a live edit carries an optional per-edit ramp length end to end, through
-  the one edit API (absent means the session default, an explicit 0 stays legal). #1054 owns the
-  field, #1364 resolves an absent length, #1382 carries it from browser records. The bypass
+  the one edit API (absent means the session default, an explicit 0 stays legal). #1394 owns the
+  field (#1054 owns the session key and defaults), #1364 resolves an absent length, #1382 carries it from browser records. The bypass
   crossfade alone always uses the session mute ramp (#1341). Default values come from #1055's
   cited and measured research; #1388 runs the blinded listening session, and a listening result
   changes only the default values.

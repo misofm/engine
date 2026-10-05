@@ -50,9 +50,9 @@ fade in with it. Every other path stays bit-identical. D15-9 covers added, edite
     their source strip's mute live* (#1226) and *Make a send's follows_mute live in the browser*
     (#1342) make those changes live. A value change on a route with a live lane that the classifier
     accepts is carried and retargeted instead (#1284, #1225 D8) and takes no entry here. Either form
-    is the old route removed (D4, a fading copy under a graph ID no model contains, at its
-    predecessor values) plus the new route added (D3, at its successor values), both over `N`, so a
-    prepared value change glides instead of stepping at `S`. Its source strip is never ducked:
+    is the old route removed (D4, a fading copy at its predecessor values that takes over the
+    predecessor's line) plus the new route added (D3, at its successor values, its line at rest),
+    both over `N`, so a prepared value change glides instead of stepping at `S`. Its source strip is never ducked:
     *Carry compensation lines across a plan swap* (#1283) and *Carry strip delay lines and live send
     ramps across a plan swap* (#1284) no longer put it in the restart set (stream A changes them).
   - (c) **Sends that bypass an armed fader.** Every route out of a strip whose fader the successor
@@ -74,16 +74,31 @@ fade in with it. Every other path stays bit-identical. D15-9 covers added, edite
   way; the arm is route-op state, not a lane record. Once *Give every route whose tap precedes its
   strip's fader a live lane on every plan* (#1391) lands, every route of case (c) is such a route.
 - **D3. Added route.** Prepared settled at `[+0.0; 4]`, muted. Its fire retargets the ramp to the
-  route's prepared gated coefficients (`mute = false`) over `N`. Its delay is the latency from its
+  route's prepared gated coefficients (`mute = false`) over `N`. Its compensation line starts at
+  rest, also in case (b) with unchanged endpoints, where #1283 D1 alone would carry the warm line
+  under the shared route ID: D4's alias gives that line to the fading copy, never to both. Its
+  delay is the latency from its
   source strip's input to its tap (0 for a route of case (a) or (b) from a surviving strip, whose
   tap is already warm) plus its `compensation_delay`, so the fade starts at the first block boundary
   at or after the moment the signal leaves the line at rest. Its claim is its source strip's claim
   in case (c), else `None`. Like every entry of #1288's table it fires no earlier than adoption.
 - **D4. Removed route.** The successor is compiled from the committed model plus each removed route
   at its predecessor values (a "fading route"; the committed model and snapshots never contain it).
-  Its compensation line carries as any line does (#1283), so the signal continues. It is prepared at
-  its predecessor coefficients, and its fire, at the adoption block (delay 0), retargets to
-  `[+0.0; 4]`, `mute = true` over `N`.
+  Its graph ID is one no model contains, derived on the control thread from the route ID and the
+  removing revision, and recorded in its inventory row (D5) so later successors reuse it.
+  - **Line alias.** At the swap that creates it, the fading route's edges have no predecessor edge
+    of their own ID, so #1283 D1 would start their lines at rest: `compensation_delay` samples of
+    silence at `S`, then a cut. This issue therefore adds an alias to #1283's line lookup: each
+    edge of the fading route carries from the predecessor's edge of the same kind
+    (`GraphEdgeId::RouteSource` / `RouteDestination`, `crates/graph/src/lib.rs:306-311`) for the
+    original route ID, under #1283 D1's same-endpoints rule (the fading route has the predecessor's
+    endpoints, so it always holds). A predecessor line named by an alias carries only into the
+    alias: the successor's edge under the original route ID starts at rest (D3), even when its
+    endpoints are unchanged. At later swaps the fading route's edges exist under its own ID in
+    both plans and carry by #1283 D1 without an alias.
+  - So the signal continues: the predecessor's pending line content plays out under the fading
+    route. It is prepared at its predecessor coefficients, and its fire, at the adoption block
+    (delay 0), retargets to `[+0.0; 4]`, `mute = true` over `N`.
 - **D5. Retiring a fading route.** The inventory lists each fading route with the revision that
   removed it. A later successor omits it when the watermark (#1314) shows that revision in effect
   at `S_r` and `render_sample >= S_r + N`; otherwise it keeps it, with its ramp state carried as a
@@ -133,14 +148,23 @@ between render calls.
 4. **Re-pointed send (R8).** Track A sends `post_fader` to submix B; a transaction re-points that
    route (same ID) to submix C. B's input equals gate 2's fade-out, C's input equals gate 1's
    fade-in, and A's own output to the master equals a run with no transaction, bit for bit (A is
-   not ducked). The same with the tap changed from `post_fader` to `pre_fader` instead.
+   not ducked). The same with the tap changed from `post_fader` to `pre_fader` instead. Both cases
+   are run a second time with a track through a true-peak limiter into B and into C, so A's old
+   edge into B and its new edge into C each carry a compensation delay (`C_B`, `C_C` > 0): from `S`
+   B's input from A first plays the predecessor's `C_B` pending samples of A (not zeros) under the
+   fading ramp, and C's input from A is exact zeros until the block at or after `S + C_C`, then
+   gate 1's fade-in.
 5. **Prepared send value change (D1 (b) (2)).** Prepared without route lanes (as the C ABI
    prepares before #1225): track A sends `post_fader` into submix B at `gain_db = -12`; a
    structural transaction adds a muted track and also sets that send to `gain_db = 0`. B's input
    from A equals a reference plan compiled through D4's fading-route path with both routes, the old
    one (-12 dB) live-muted with `N` at `S` and the new one (0 dB) muted at start and live-unmuted
    with `N` at `S`: bit-identical in every block. The same with the send's `follows_mute` changed
-   from `false` to `true` while A is muted. With route lanes and #1225's classifier the gain edit
+   from `false` to `true` while A is muted. The gain case is run again with a track through a
+   true-peak limiter into B, so the send's edge carries a compensation delay `C > 0`: from `S` the
+   old copy's output first plays the predecessor's `C` pending samples of A at -12 dB under its
+   fade-out, and the new route contributes exact zeros until the block at or after `S + C`. With
+   route lanes and #1225's classifier the gain edit
    instead carries and retargets: no fading copy is prepared.
 6. **Pre-fader send of an added strip.** A transaction adds track T with a `pre_fader` send into
    submix R. R's input from T equals a fresh plan of the successor session with that route muted at
@@ -164,6 +188,9 @@ between render calls.
   mid-ramp as a step) turns it red.
 - Gate 2: a removal that drops the route at `S`, or a fading route whose line does not carry, turns
   it red.
+- Gates 4 and 5 with compensation: a fading copy whose line starts at rest (no alias: a
+  `C`-sample hole at `S`), or a same-endpoint new route that keeps the warm line (the pending
+  audio played twice, once at each value) turns them red.
 - Gate 3: a transition that touches other routes or folds a ramp into a neighbour turns it red.
 - Gate 4: a re-point treated as a value change (a step at both destinations) or one that ducks
   the source strip turns it red.
@@ -178,7 +205,7 @@ between render calls.
 - *Fade in a strip that a swap adds during playback* (#1288).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310) (base model of case (c)
   restores).
-- *Carry compensation lines across a plan swap* (#1283).
+- *Carry compensation lines across a plan swap* (#1283) (the line lookup D4's alias extends).
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284).
 - *Keep every node's latency from dropping during playback* (#1285).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

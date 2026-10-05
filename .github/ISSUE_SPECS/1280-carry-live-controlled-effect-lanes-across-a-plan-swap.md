@@ -31,8 +31,10 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   - #1345 D1 gives each lane one cell per `(parameter_index, channel)` of a block-rate parameter,
     one bypass cell, and for the EQ one cell per `(target slot, channel)`. Observe records stay in a
     small FIFO (#1345 D2).
-  - #1312 D1-D2 give each cell a sequence word. Render keeps the last sequence it applied, and adds
-    the values replaced unread to `live_values_superseded`.
+  - #1312 D1-D2 make each cell a triple buffer whose slots carry a sequence. Render keeps the last
+    sequence it applied (`p`); reading sequence `s` adds `s - p - 1` to `live_values_superseded`.
+    #1312 D1 also gives the reader `peek_unread`, which returns the newest unread words and their
+    sequence without consuming them, valid once the writer is quiescent.
   - The control plane writes only the newest plan's cells (D15-17), and holds live edits from a
     `CopyAndReturn` publication until adoption (*Hold live edits during a catch-up and apply them
     at the adoption sample*, #1356). So no control write reaches a predecessor's cells once its
@@ -53,9 +55,11 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   predecessor: &EffectControlLane)` takes the predecessor by shared reference and writes only the
   successor lane:
   - it copies the applied live `bypass` flag and the live symmetry terms;
-  - for every predecessor cell with an unread value (sequence differs from its last applied), it
-    reads the value with #1312's render read and stores it in the successor lane's render-owned
-    **carried slot** for that cell, with its unread count `n = (s - p) / 2`;
+  - for every predecessor cell where `peek_unread` (#1312 D1) returns `Some((words, s))`, it stores
+    the words in the successor lane's render-owned **carried slot** for that cell, with the unread
+    count `n = s - p`, where `p` is the predecessor cell's last applied sequence. The writer is
+    quiescent: no control write reaches a predecessor's cells once its successor is published;
+  - it consumes nothing: the predecessor's cells stay unread, which D6 needs;
   - it writes no cell, so the control thread stays each cell's only writer.
 
   At the successor's first drain, each cell with a carried slot resolves in #1345 D3's order:
@@ -162,5 +166,6 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
 ## Dependencies
 
 - *Carry console effect lanes across a plan swap* (#1279).
+- *Hold live values in latest-target cells on both hosts* (#1312): `peek_unread`, which D2 reads.
 - *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): this slice
   carries the cells #1345 creates, so #1345 lands first.
