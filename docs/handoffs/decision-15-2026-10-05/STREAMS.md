@@ -52,7 +52,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 |---|---|
 | `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1406) → F |
 | `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → B (#1315, #1345) → G (#1339, #1340, #1377, #1378); F #1306 after B #1345, either order with G, the second rebases |
-| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
+| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1418 (two region markers around `drain_controls`) and J #1420 (the test module only) in any order, the later slice rebases |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
 | `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 |
 | `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349 |
@@ -64,7 +64,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) → C #1360 |
 | `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371 |
-| `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379 |
+| `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases |
 | `crates/parametric-eq/src/lib.rs` | A payload (#1279, #1280) → G #1328 (rest predicates only) → G #1337 → G #1372 |
 | `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381 |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
@@ -73,7 +73,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only) |
 | `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit |
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
-| `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases |
+| `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
 | `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry |
 
@@ -316,6 +316,13 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 10 | #1303 | Route the builtins fader domain checks through checked_fader_gain | — | #1277, #1312 |
 | 11 | #1304 | Tighten the four-lane reference graph ceilings from measured AArch64 rows | — | — |
 | 12 | #1237 | Bound route gain and matrix values | — | — |
+| 13 | #1415 | Spell the route gain and matrix domain once, in the session model | — | — |
+| 14 | #1416 | Let only host-core build the live route records that hosts push | — | — |
+| 15 | #1417 | Refuse a C allocator name anywhere in an unmangled worklet symbol | — | — |
+| 16 | #1418 | Require every loop around a realtime drain to drain a different queue on each pass | — | — |
+| 17 | #1419 | Use the shared StopOnDrop in the C ABI plan-swap race test | — | — |
+| 18 | #1420 | Make the nonadjacent split-pair harness's track choices observable to its tests | — | — |
+| 19 | #1421 | Remove both temporary directories the web AudioWorklet test script creates | — | — |
 
 ## Stream K
 
