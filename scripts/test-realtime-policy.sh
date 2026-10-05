@@ -77,6 +77,17 @@ create_fixture() {
         '            self.pending = Some(candidate);' \
         '        }' \
         '    }' \
+        '    fn retire_one(&mut self) {' \
+        '        for lane in 0..self.lanes {' \
+        '            self.clear(lane);' \
+        '        }' \
+        '        {' \
+        '            let Ok(retired) = self.retirement.try_pop() else {' \
+        '                return;' \
+        '            };' \
+        '            self.retire(retired);' \
+        '        }' \
+        '    }' \
         '}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/plan_exchange.rs"
@@ -217,6 +228,11 @@ create_fixture() {
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn input_process() {}' \
+        'fn input_lane_states() -> [[u8; 4]; 2] {' \
+        '    let gains: [u8; 4] = core::array::from_fn(|lane| lane as u8);' \
+        '    let trims: [u8; 4] = std::array::from_fn(|lane| lane as u8);' \
+        '    [gains, trims]' \
+        '}' \
         '// REALTIME_POLICY_END' \
         '// REALTIME_POLICY_BEGIN' \
         'fn input_process_mono() {}' \
@@ -668,10 +684,196 @@ mutate_loop_expression() {
         '    last' \
         '}'
 }
+# #1302 attempt 2: rustfmt opens the block of a wrapped header on a line of its own or on the
+# header's last line. Each shape below hides its loop from a walk that takes the first
+# lower-indented line as the block's opener.
+mutate_wrapped_while_body() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl LaneDrain {' \
+        '    fn drain_matrix_controls(&mut self) {' \
+        '        while self' \
+        '            .control_lane_consumer_for_this_strip' \
+        '            .has_pending_records_for_the_current_block()' \
+        '            && self.enabled' \
+        '        {' \
+        '            let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            self.apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# Its first line, `for _ in 0..available`, is bounded; the whole wrapped header adds the ring's
+# capacity to the entry count.
+mutate_wrapped_for_bound() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl LaneDrain {' \
+        '    fn drain_matrix_controls(&mut self) {' \
+        '        let available = self' \
+        '            .control_lane_consumer_for_this_strip' \
+        '            .available_at_entry();' \
+        '        for _ in 0..available' \
+        '            + self' \
+        '                .control_lane_consumer_for_this_strip' \
+        '                .capacity_of_the_ring_in_records_total()' \
+        '        {' \
+        '            let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            self.apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+mutate_wrapped_outer_while() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl LaneDrain {' \
+        '    fn drain_matrix_controls(&mut self) {' \
+        '        while self' \
+        '            .control_lane_consumer_for_this_strip' \
+        '            .has_pending_records_for_the_current_block()' \
+        '            && self.enabled' \
+        '        {' \
+        '            let available = self' \
+        '                .control_lane_consumer_for_this_strip' \
+        '                .available_at_entry();' \
+        '            for _ in 0..available {' \
+        '                let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {' \
+        '                    break;' \
+        '                };' \
+        '                self.apply(record);' \
+        '            }' \
+        '        }' \
+        '    }' \
+        '}'
+}
+mutate_paren_led_header() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl LaneDrain {' \
+        '    fn drain_matrix_controls(&mut self) {' \
+        '        for _ in 0..usize::from(' \
+        '            self.control_lane_consumer_for_this_strip' \
+        '                .capacity_of_the_ring_in_records(),' \
+        '        ) {' \
+        '            let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            self.apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+mutate_continuation_led_header() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl LaneDrain {' \
+        '    fn drain_matrix_controls(&mut self) {' \
+        '        for _ in [' \
+        '            self.first_lane_consumer_count,' \
+        '            self.second_lane_consumer_count,' \
+        '            self.third_lane_consumer_count,' \
+        '        ]' \
+        '        .into_iter()' \
+        '        .take(64)' \
+        '        {' \
+        '            let Ok(record) = self.control_lane_consumer_for_this_strip.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            self.apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# A plain `use core::iter::from_fn;` outside the region leaves only the bare call inside it.
+mutate_bare_from_fn() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    from_fn(|| control.try_pop().ok()).for_each(apply);' \
+        '}'
+}
+# `available_at_entry` inside a longer identifier is not an entry count, in a binding or a header.
+mutate_entry_name_in_binding() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let not_available_at_entry_cap = control.capacity();' \
+        '    for _ in 0..not_available_at_entry_cap {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_entry_name_in_header() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    for _ in 0..control.not_available_at_entry_cap() {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# A closed `{}` body ends the header: the next line's `available_at_entry` does not bound the
+# 64 pops of this one.
+mutate_header_past_closed_body() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    for _ in 0..[(); 64].map(|()| control.try_pop()).len() {}' \
+        '    if control.available_at_entry() != 0 {' \
+        '        apply(control.peek());' \
+        '    }' \
+        '}'
+}
+# `core::array::from_fn` stays allowed, but it runs its closure a constant number of times: a pop
+# inside it is a constant-bound drain.
+mutate_array_from_fn_pop() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let records: [Result<Record, Empty>; 4] = core::array::from_fn(|_| control.try_pop());' \
+        '    records.into_iter().flatten().for_each(apply);' \
+        '}'
+}
+# A `let` pattern rebinding the count after its entry binding is the nearest binding.
+mutate_pattern_rebound_count() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, limit: Option<usize>) {' \
+        '    let available = control.available_at_entry();' \
+        '    let Some(available) = limit else {' \
+        '        return;' \
+        '    };' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# A parenthesised open range is still open: the outer `for` re-drains without bound.
+mutate_paren_open_range_outer() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    for _ in (0..) {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
 for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_not_at_entry \
     second_loop_in_bounded_region loop_inside_bounded_for from_fn repeat_with \
     bounded_drain_inside_outer_loop count_from_another_function shadowed_count reassigned_count \
-    while_without_decrement while_decrement_not_first labelled_loop loop_expression; do
+    while_without_decrement while_decrement_not_first labelled_loop loop_expression \
+    wrapped_while_body wrapped_for_bound wrapped_outer_while paren_led_header \
+    continuation_led_header bare_from_fn entry_name_in_binding entry_name_in_header \
+    header_past_closed_body array_from_fn_pop pattern_rebound_count \
+    paren_open_range_outer; do
     expect_failure "drain-${drain_case//_/-}" "$drain_class" "mutate_$drain_case"
 done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and

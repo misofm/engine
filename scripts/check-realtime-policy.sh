@@ -79,8 +79,11 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 # #1253, #1302: a render-thread drain pops at most the records present at block entry. A loop
 # that pops until the queue is empty keeps popping whatever a concurrent producer publishes while
 # it runs (the C ABI prepares with `Concurrent` delivery) -- data-dependent, unbounded render
-# work. What this gate proves, per marked region, reading rustfmt's layout (four-space indents, a
-# wrapped loop header's `{` ending its last line; `cargo fmt --all -- --check` is required):
+# work. What this gate proves, per marked region, reading rustfmt's layout (four-space indents;
+# a wrapped header's block opens on its last line, as `) {`, `] {` or `}) {`, or on a lone `{` at
+# the opener's indentation, possibly after `.method()`, `)`, `]` or `where` lines at that
+# indentation, while a lone `{` after a statement is a bare block; `cargo fmt --all -- --check`
+# is required):
 #   - every `try_pop` that sits in a loop (the `fn try_pop` definition never does) has an
 #     innermost loop bounded by a count taken from `available_at_entry`: `for _ in 0..<count> {`,
 #     `for _ in 0..<expr naming available_at_entry> {`, or `while <count> != 0 {` (or `> 0 {`)
@@ -89,18 +92,24 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 #     `available_at_entry`, or a plain one-step alias `let [mut] <count> = <entry count>;`, with no
 #     other assignment to it between the binding and the loop, nor inside a `while` body;
 #   - every loop enclosing that innermost loop, up to the enclosing `fn`, is a `for .. in` over
-#     something other than an open range: a `while` or `loop` around a bounded drain re-drains
-#     without bound;
+#     something other than an open range (`0..`, `(0..)`): a `while`, `loop` or open-range `for`
+#     around a bounded drain re-drains without bound;
 #   - a line with `while`, `loop` or `for .. in` anywhere in its code is a loop opener, and only
 #     one that starts the line (after an optional `'label:`) can be bounded, so a one-line
-#     `while let Ok(..) = ..try_pop() {` body or a `let x = loop {` is refused;
-#   - `iter::from_fn`, `iter::repeat_with` and `iter::successors` are refused outright: they run a
-#     pop in a loop without a loop keyword.
-# It is not a Rust parser. Recursion, a pop inside a closure handed to some other repeating
-# adapter, a `use` that renames an iterator constructor, a count inflated by arithmetic inside its
-# own `available_at_entry` statement, and a count mutated through a `&mut` borrow stay outside it.
-gate_scan_forbidden 'marked realtime unbounded try_pop drain (bound it with available_at_entry)' \
-    '(^|[^[:alnum:]_])iter::(from_fn|repeat_with|successors)([^[:alnum:]_]|$)' '' "$scratch_file" || exit $?
+#     `while let Ok(..) = ..try_pop() {` body or a `let x = loop {` is refused; a block that opens
+#     on a wrapped header's last line belongs to the header's opener, so wrapping a loop header
+#     neither hides the loop nor its unbounded condition;
+#   - `from_fn`, `repeat_with` and `successors` are refused outright, path-qualified or bare
+#     (`core::array::from_fn` and `std::array::from_fn` excepted): they run a pop in a loop without
+#     a loop keyword. `array::from_fn` is a loop opener that is never bounded (it runs its closure
+#     a constant number of times), so a pop inside it is refused.
+# It is not a Rust parser. These stay outside it: recursion; a pop inside a closure handed to some
+# other repeating adapter (`map_while` over `iter::repeat` or an open range, for example); a pop
+# in a helper method or a local closure that a loop calls; a loop enclosing the drain outside the
+# marked region (the rule is per region); a `use` that renames an iterator constructor; a count
+# inflated by arithmetic inside its own `available_at_entry` statement; a count rebound by an
+# `if let`/`while let` pattern, a closure parameter or a match arm (a `let` pattern binding it is
+# its nearest binding); and a count mutated through a `&mut` borrow.
 if [[ -n "$marked_files" ]]; then
     mapfile -t marked_list <<<"$marked_files"
     if drain_hits="$(awk -v q="'" '
@@ -111,17 +120,35 @@ if [[ -n "$marked_files" ]]; then
         function label() { return q "[A-Za-z_][A-Za-z0-9_]*: *" }
         function unlabel(s) { s = trim(s); sub("^" label(), "", s); return s }
         # A loop keyword anywhere on the line makes it a loop opener; only an opener that starts
-        # its line (after an optional label) can have a bounded header.
-        function isloop(s) { return s ~ word("while") || s ~ word("loop") || s ~ word("for [^{}]* in") }
+        # its line (after an optional label) can have a bounded header. `array::from_fn` runs its
+        # closure a constant number of times, so it opens a loop that is never bounded.
+        function isloop(s) { return s ~ word("while") || s ~ word("loop") || s ~ word("for [^{}]* in") || s ~ word("array::from_fn") }
         function isfn(s) { return trim(s) ~ /^(pub(\([a-z: ]+\))? +)?((const|async|unsafe|default|extern( +"[^"]*")?) +)*fn +[A-Za-z_]/ }
+        # The line that opens the block starting on line `k`. A block that opens on a lone `{` or
+        # on a line led by `.`, `)`, `]` or `}` (the last line of a wrapped header) belongs to the
+        # nearest earlier line at the same indentation that is not such a continuation (nor
+        # `where`); deeper lines are the header wrapped arguments. A lone `{` after a statement
+        # closed by `;` or `}` is a bare block and opens itself.
+        function opener(k,  j, s) {
+            s = trim(c[k])
+            if (s != "{" && s !~ /^[]).}]/) return k
+            for (j = k - 1; j >= 1; j--) {
+                if (c[j] ~ /^ *$/ || ind(c[j]) > ind(c[k])) continue
+                if (ind(c[j]) < ind(c[k]) || c[j] ~ /[;}]$/) return k
+                s = trim(c[j])
+                if (s == "where" || s ~ /^[]).}]/) continue
+                return j
+            }
+            return k
+        }
         # The scope chain of line `from`: walking back, a line indented less than every line seen
-        # so far opens a block enclosing `from`. Fills chain[1..chain_n], innermost first, up to
-        # and including the enclosing function line.
+        # so far opens a block enclosing `from`, and `opener` resolves it to the line heading that
+        # block. Fills chain[1..chain_n], innermost first, up to and including the function line.
         function enclosing(from,  k, m) {
             chain_n = 0; m = ind(c[from])
             for (k = from - 1; k >= 1; k--) {
                 if (c[k] ~ /^ *$/ || ind(c[k]) >= m) continue
-                m = ind(c[k]); chain[++chain_n] = k
+                m = ind(c[k]); k = opener(k); chain[++chain_n] = k
                 if (isfn(c[k])) return
             }
         }
@@ -142,15 +169,16 @@ if [[ -n "$marked_files" ]]; then
             b = 0; m = ind(c[before])
             for (k = before - 1; k >= 1 && !b; k--) {
                 if (c[k] ~ /^ *$/ || ind(c[k]) > m) continue
-                if (ind(c[k]) < m) { m = ind(c[k]); if (isfn(c[k])) return 0; continue }
-                if (trim(c[k]) ~ ("^let +(mut +)?" x "( *:[^=]*)? *=([^=]|$)")) b = k
+                if (ind(c[k]) < m) { m = ind(c[k]); k = opener(k); if (isfn(c[k])) return 0; continue }
+                # A `let` whose pattern binds `x` (`let Some(x) = ..`, `let (a, x) = ..`) rebinds it.
+                if (trim(c[k]) ~ ("^let +([^=]*[^A-Za-z0-9_=])?" x "([^A-Za-z0-9_=][^=]*)?=([^=]|$)")) b = k
             }
             if (!b) return 0
             for (j = b + 1; j < before; j++) if (assigns(x, c[j])) return 0
             st = ""
             for (j = b; j <= n; j++) { st = st " " trim(c[j]); if (c[j] ~ /;$/) break }
             gsub(/ +/, " ", st); sub(/^ /, "", st)
-            if (st ~ /available_at_entry/) return 1
+            if (st ~ word("available_at_entry")) return 1
             if (st ~ ("^let (mut )?" x "( ?:[^=]*)? = [A-Za-z_][A-Za-z0-9_]*;$")) {
                 sub(/^.*= /, "", st); sub(/;$/, "", st); return counted(st, b, depth + 1)
             }
@@ -158,7 +186,7 @@ if [[ -n "$marked_files" ]]; then
         }
         function bounded(l,  h, x, j, first) {
             h = header(l)
-            if (h ~ /^for [^{}]* in 0\.\.[^{}]*available_at_entry[^{}]* \{$/) return 1
+            if (h ~ /^for [^{}]* in 0\.\.([^{}]*[^A-Za-z0-9_{}])?available_at_entry([^A-Za-z0-9_{}][^{}]*)? \{$/) return 1
             if (h ~ /^for [^{}]* in 0\.\.[A-Za-z_][A-Za-z0-9_]* \{$/) {
                 x = h; sub(/^.* in 0\.\./, "", x); sub(/ \{$/, "", x); return counted(x, l, 0)
             }
@@ -176,15 +204,17 @@ if [[ -n "$marked_files" ]]; then
             }
             return 0
         }
-        function check(  i, k, l, ok) {
+        function check(  i, k, l, ok, s) {
             for (i = 1; i <= n; i++) {
+                s = c[i]; gsub(/(core|std)::array::from_fn/, " ", s)
+                if (s ~ word("(from_fn|repeat_with|successors)")) { print FILENAME ":" ln[i] ":" c[i]; continue }
                 if (c[i] !~ word("try_pop")) continue
                 enclosing(i); l = 0; ok = 1
                 if (isloop(c[i])) { l = i; ok = bounded(i) }
                 for (k = 1; k <= chain_n; k++) {
                     if (!isloop(c[chain[k]])) continue
                     if (!l) { l = chain[k]; ok = bounded(l) }
-                    else if (header(chain[k]) !~ /^for [^{}]* in [^{}]* \{$/ || header(chain[k]) ~ /\.\. \{$/) ok = 0
+                    else if (header(chain[k]) !~ /^for [^{}]* in [^{}]* \{$/ || header(chain[k]) ~ /\.\.\)* \{$/) ok = 0
                 }
                 if (!ok) print FILENAME ":" ln[i] ":" c[i]
             }

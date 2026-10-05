@@ -366,3 +366,74 @@ M12c). `drain-bound-0/1` red if the pass's awk status is swallowed (counter-muta
 **Gate 4.** `bash scripts/check-workspace-policy.sh` -> `workspace policy: ok`;
 `bash scripts/test-workspace-policy.sh` -> `workspace policy mutation tests: ok`. `shellcheck` is
 not installed on this host: not run.
+
+### Attempt 2 (implementer, 2026-10-05)
+
+Answers verdict `1302-attempt1.md` (FAIL). Same two scripts; no Rust source; floors unchanged.
+
+**Changed in `scripts/check-realtime-policy.sh`.**
+- *J1-1 (MAJOR).* New `opener(k)`: a block that opens on a lone `{`, or on a line led by `)`, `]`,
+  `}` or `.` (the last line of a wrapped header: `) {`, `] {`, `}) {`, `} else {`), belongs to the
+  nearest earlier line at the same indentation that is not itself such a continuation nor `where`.
+  A lone `{` after a statement ending in `;` or `}` is a bare block and opens itself. `enclosing()`
+  records the resolved opener in the chain, and the binding scope walk of `counted()` resolves it
+  too (so a `where` fn's lone `{` stops at the `fn`). The comment now states rustfmt's layout
+  correctly.
+- *J1-2.* The D3 scan moves into the awk pass (comments stripped, same class, same checked awk
+  status) and refuses `from_fn`, `repeat_with` and `successors` as words, path-qualified or bare;
+  `core::array::from_fn` and `std::array::from_fn` are excepted. Deviation from D3's "one
+  `gate_scan_forbidden`": a bare call cannot be told from `core::array::from_fn` without a
+  lookbehind, which `rg`'s default engine lacks. Added: `array::from_fn` is a loop opener that is
+  never bounded (it runs its closure a constant number of times), so the exception cannot carry a
+  constant-count pop.
+- *J1-3.* The comment's limits now name a pop in a helper method or local closure a loop calls,
+  and a loop enclosing the drain outside the marked region.
+- *J1-4.* `available_at_entry` is matched as a word in the binding statement and in the
+  `for .. in 0..<expr>` header.
+- *J1-5.* A `let` whose pattern binds the count (`let Some(available) = ..`) is its nearest binding;
+  `if let`, closure and match-arm rebinding stay listed limits.
+- *J1-6.* `header-past-closed-body` defends `[^{}]*`.
+- *J1-7 (part).* `for _ in (0..) {` counts as an open range in the enclosing-loop check (the
+  comment's claim said "open range"; adv `b03` passed). Adapter chains (`map_while` over
+  `iter::repeat`/open ranges) stay a listed limit.
+
+**Gates.** Gate 1: `realtime policy: ok (89 marked regions in 25 files)`. Gate 2:
+`realtime policy mutation tests: ok`. Both under gawk 5.2.1, mawk 1.3.4 and busybox awk 1.36.1.
+Gate 4: `workspace policy: ok`, `workspace policy mutation tests: ok`; `shellcheck` not installed,
+not run. Every new fixture shape is `rustfmt --edition 2024 --check` clean. Real sites (debug copy,
+not committed, identical under all three awks): `builtins-compiler/src/lib.rs:1076` -> `1075`,
+`:1120` -> `1119` (`for _ in 0..available {`); `effect-contract/src/live.rs:366` ->
+`364: while remaining != 0 {`; `plan_exchange.rs:377` and `spsc.rs:440` -> no loop;
+`graph/src/runtime.rs:900` -> `899: for _ in 0..available {`. The verifier's adversarial shapes:
+a01, a02, a17, a05, a13, a14 are now refused; a06, a07, a08, a12, b02 pass as listed limits; a09,
+a10, a16, b01 pass correctly; b03 is refused.
+
+**Test value (scratch mutants of the gate run through a copy of the self-test that reports every
+drain case and the valid/empty-bodies runs; base copy: no red).**
+
+| Mutant of the gate | Red |
+|---|---|
+| A lone `{` not resolved to its opener (attempt 1's J1-1) | `wrapped-while-body`, `wrapped-for-bound`, `wrapped-outer-while`, `continuation-led-header` |
+| B only a lone `{` resolved, not a `)`/`]`/`}`-led last header line | `paren-led-header` only |
+| C a lone `{` resolved without skipping `.method()`/`)`/`]` header lines (the verifier's prototype) | `continuation-led-header` only |
+| D only the innermost block's opener resolved | `wrapped-outer-while` only |
+| H a header judged by its opener line alone | `wrapped-for-bound` only |
+| J D3 refuses only `iter::`-qualified constructors (attempt 1) | `bare-from-fn` only |
+| K `available_at_entry` a substring in the binding | `entry-name-in-binding` only |
+| L `available_at_entry` a substring in the header | `entry-name-in-header`, `entry-name-in-binding` |
+| M `.*` for `[^{}]*` in the header form | `header-past-closed-body` only |
+| N `array::from_fn` not a loop opener | `array-from-fn-pop` only |
+| O only `let [mut] <count> =` is a binding (attempt 1) | `pattern-rebound-count` only |
+| P a lone `{` after a `;`/`}` statement resolved to an earlier line | valid fixture (bare block after a `for` in `plan_exchange.rs`) |
+| Q no `core::array::from_fn`/`std::array::from_fn` exception | valid fixture (input fixture's lane arrays) |
+| R `(0..)` not an open range | `paren-open-range-outer` only |
+
+Per case: `wrapped-while-body` (the verifier's a01) is red on A, the J1-1 defect itself; A also
+reds three other cases, each of which has its own sole catch below. `wrapped-for-bound` is red if
+a wrapped header is judged by its first line (H: `for _ in 0..available` hides `+ capacity`).
+`wrapped-outer-while` is red if enclosing blocks' wrapped headers go unresolved (D).
+`paren-led-header` is red if `) {` is not resolved (B). `continuation-led-header` is red if the
+resolution stops at a `.take(64)` line (C). `bare-from-fn` red on J, `entry-name-in-binding` on K,
+`entry-name-in-header` on L, `header-past-closed-body` on M, `array-from-fn-pop` on N,
+`pattern-rebound-count` on O, `paren-open-range-outer` on R; the two valid-fixture additions red on
+P and Q. Each case is green with the mutant reverted.
