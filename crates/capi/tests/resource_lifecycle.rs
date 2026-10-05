@@ -2312,6 +2312,34 @@ impl ConstantFeed {
         }
         Ok(())
     }
+
+    /// Seeks the source to frame 0 under the next generation and feeds it from there, as a host
+    /// re-anchors a source that fell behind the render clock (#1404).
+    ///
+    /// The seek must be accepted: the caller has rendered a block since any earlier seek, which
+    /// emptied the source's one-slot command queue.
+    ///
+    /// # Safety
+    ///
+    /// `session` must be live and used by this thread alone for the call.
+    unsafe fn restart(&mut self, session: *mut Session) -> Result<(), String> {
+        let id = b"fixture-source";
+        self.generation += 1;
+        // SAFETY: As the caller guarantees.
+        let code = unsafe {
+            miso_engine_v1_source_seek(session, id.as_ptr(), id.len() as u64, self.generation, 0)
+        };
+        if code != RESULT_OK {
+            // SAFETY: As the caller guarantees.
+            let error = unsafe { last_error_c(session) };
+            return Err(format!(
+                "restart seek: {code} {}",
+                String::from_utf8_lossy(&error)
+            ));
+        }
+        self.fed = 0;
+        Ok(())
+    }
 }
 
 /// Feeds the source and renders one block on this thread; returns the block's planar PCM.
@@ -2326,7 +2354,19 @@ unsafe fn fed_render_c(
     block: u64,
 ) -> Vec<f32> {
     // SAFETY: As the caller guarantees.
-    unsafe { feed.fill(session) }.unwrap_or_else(|failure| panic!("{failure}"));
+    unsafe {
+        feed.fill(session)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        render_c(plan, block)
+    }
+}
+
+/// Renders one block on this thread without feeding the source; returns the block's planar PCM.
+///
+/// # Safety
+///
+/// `plan` must be live and used by this thread alone for the call.
+unsafe fn render_c(plan: *mut Plan, block: u64) -> Vec<f32> {
     let mut pcm = vec![f32::NAN; QUANTUM * 2];
     let output = PlanarOutput {
         struct_size: PLANAR_OUTPUT_SIZE,
@@ -2386,6 +2426,12 @@ fn race_session() -> String {
 
 /// The largest pan smoothing the race edits use: one quantum (D1).
 const RACE_MAX_SMOOTHING: u32 = QUANTUM as u32;
+
+/// Blocks the settle renders unfed before it restarts the source (#1404): eight times the
+/// eight-quantum ring of `limits().source_ring_frames`. A fed block catches a source that is
+/// behind up by at most its ring less one block, so without the restart the settle's few fed
+/// blocks would leave the final block silent.
+const RACE_SOURCE_LAG_BLOCKS: u64 = 64;
 
 /// The control thread's edit sequence: a live fader, pan or mute edit on each of the nine tracks
 /// in turn, and every eighth edit a structural one that renders identically (D2: a new content
@@ -2645,6 +2691,13 @@ impl RaceControl<'_> {
 /// thread resumes. Without the pause the render thread drains the lanes faster than this thread
 /// fills them, and no retry would ever run.
 ///
+/// The render thread never waits for PCM, so the source falls behind the render clock by however
+/// many blocks the render thread outran this thread's feed. The source stays on the render clock:
+/// it renders `+0.0` for a block it has no PCM for, and it discards PCM that arrives for a block
+/// already rendered. So the settle after the race first puts the source further behind than its
+/// ring holds, and then restarts it ([`ConstantFeed::restart`]). The final block then plays fed PCM
+/// however far behind the race left the source (#1404).
+///
 /// The render thread never asserts: it records a refused block and stops. Every wait on this
 /// thread has a deadline, and `StopOnDrop` stops the render thread however this thread leaves the
 /// scope, so a failure on either side ends the run instead of hanging the join (#1251, lesson d).
@@ -2763,9 +2816,18 @@ fn race_live_edits(run: usize) -> RaceCounts {
         "run {run}: every render call allocated and freed nothing"
     );
 
-    // Settle on this thread: a candidate still pending swaps in at the first block; then render
-    // the plan's latency plus one quantum (every pan ramp is at most one quantum), and the next
-    // block is the final one.
+    // Settle on this thread. A candidate still pending swaps in at the first block, which also
+    // takes any seek the feed queued for a restarted source.
+    //
+    // Then the source restarts from the worst state the race can leave it in: behind the render
+    // clock by more than its ring holds, with the ring full of PCM for blocks already rendered.
+    // The first block after the restart may play nothing, since the seek drops that PCM and the
+    // full ring left no room for the restarted feed. Every later block plays fed PCM: the first
+    // freed the ring, and each block is fed before it renders.
+    //
+    // Then render the plan's latency plus one quantum (every pan ramp is at most one quantum),
+    // and the next block is the final one. `settle` is at least two, so the final block is at
+    // least the third after the restart.
     let mut block = rendered.load(Ordering::Acquire);
     counts.blocks = block - first_race_block;
     // SAFETY: The race is over; this thread alone uses both handles from here on.
@@ -2773,6 +2835,14 @@ fn race_live_edits(run: usize) -> RaceCounts {
         fed_render_c(session, plan, &mut feed, block);
         block += 1;
         drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+        for _ in 0..RACE_SOURCE_LAG_BLOCKS {
+            render_c(plan, block);
+            block += 1;
+        }
+        feed.fill(session)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        feed.restart(session)
+            .unwrap_or_else(|failure| panic!("run {run}: {failure}"));
         let latency = resources_c(plan).latency_samples;
         let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
         for _ in 0..settle {
