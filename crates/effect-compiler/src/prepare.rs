@@ -1,17 +1,18 @@
 use core::num::NonZeroUsize;
 use effect_contract::{
-    EffectControlLane, EffectControlRecord, EffectDescriptor, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane, ParameterChannel,
-    ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
-    RegistryError, expected_prepared_metadata,
+    AutomationRate, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectQuality,
+    InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane,
+    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedEffectMetadata, PreparedNativeEffect, PreparedPorts,
+    PreparedSidechainPort, RegistryError, expected_prepared_metadata,
 };
 use engine::realtime::{
     ObservationReader, Producer, QueueFull, QueueGeneration, bounded_spsc, observation_slot,
 };
 use session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
-    ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
+    ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, RackName, SessionModel,
+    SidechainDeclaration,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -296,6 +297,80 @@ pub fn prepare_native_session_effects_with_console_eligibility(
     prepare_with_console_eligibility(session, registry, caps, console_eligible)
 }
 
+/// Refuses every stored automation whose effect target the plan keeps prepared (decision 15 E1,
+/// #1335 D1, D2).
+///
+/// An automation whose rack is `inserts` or `console` is accepted only when the target instance is
+/// a native effect whose descriptor parameter with that ID is `automatable` and has
+/// [`AutomationRate::Block`]. Anything else is one `effect.automation.rate` diagnostic at
+/// `$.automation[id=<automation id>].target.parameter_id`. A `Sample` parameter has no rendering
+/// contract yet, so it is refused too.
+///
+/// - An `inserts` target is the target strip's insert whose `id` is the target's `effect_id`.
+/// - A `console` target's identity is the session console slot whose `slot` is the `effect_id`,
+///   never the strip's entry, which carries no identity.
+/// - A `builtins` target is not an effect and is not checked here.
+///
+/// Skipped, because each has its own diagnostic elsewhere and must not be reported twice: a target
+/// strip or instance the session does not declare (session validation), a third-party identity
+/// (`effect.third_party.unavailable_at_launch`), an effect the registry lacks
+/// (`effect.native.unavailable`) and a parameter ID the descriptor lacks
+/// (`effect.parameter.unknown`, since session validation makes the target one of the instance's
+/// declared `params`).
+///
+/// Control plane only: it allocates its result.
+#[must_use]
+pub fn effect_automation_diagnostics(
+    model: &SessionModel,
+    registry: &NativeEffectRegistry,
+) -> Vec<EffectDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for automation in &model.automation {
+        let target = &automation.target;
+        let Some(strip) = model.strips().find(|strip| strip.id == &target.entity_id) else {
+            continue;
+        };
+        let identity = match target.rack {
+            RackName::Inserts => strip
+                .inserts
+                .effects
+                .iter()
+                .find(|effect| effect.id == target.effect_id)
+                .map(|effect| &effect.identity),
+            RackName::Console => model
+                .console
+                .slots()
+                .find(|slot| slot.slot == target.effect_id)
+                .map(|slot| &slot.identity),
+            RackName::Builtins => None,
+        };
+        let Some(EffectIdentity::Native { effect_id }) = identity else {
+            continue;
+        };
+        let Some(factory) = registry.get_ascii(effect_id.as_str()) else {
+            continue;
+        };
+        let Some(parameter) = factory
+            .descriptor()
+            .parameters
+            .iter()
+            .find(|parameter| parameter.id.0 == target.parameter_id)
+        else {
+            continue;
+        };
+        if !parameter.automatable || parameter.automation_rate != AutomationRate::Block {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.automation.rate",
+                path: format!(
+                    "$.automation[id={}].target.parameter_id",
+                    automation.id.as_str()
+                ),
+            });
+        }
+    }
+    diagnostics
+}
+
 /// The one preparation behind both entries: the console slots whose native identity is not in
 /// `console_eligible` are refused, and everything else is prepared.
 fn prepare_with_console_eligibility(
@@ -523,6 +598,9 @@ fn prepare_with_console_eligibility(
             }
         }
     }
+    // Decision 15 E1 (#1335 D3): an effect automation whose target the plan keeps prepared is
+    // refused here, so every host and `session-validator` stage 5 refuse it.
+    diagnostics.extend(effect_automation_diagnostics(model, registry));
     if diagnostics.is_empty() {
         entries.sort_by(|a, b| {
             (&a.track_id, a.rack, &a.effect_id).cmp(&(&b.track_id, b.rack, &b.effect_id))

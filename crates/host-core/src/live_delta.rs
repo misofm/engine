@@ -20,7 +20,8 @@ use crate::control_preparation::{
 use builtins::{BuiltinLaneSelector, checked_fader_gain};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, lower_matrix_or_pan};
 use effect_compiler::{
-    LiveEffectAddress, launch_native_effect_registry, lowers_session_bypass, resolve_initial_values,
+    LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
+    lowers_session_bypass, resolve_initial_values,
 };
 use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, NativeEffectRegistry,
@@ -138,6 +139,11 @@ pub enum LiveRebuild {
     /// Its running plan holds the bypass in its prepared state, not on its lane, so a live record
     /// would be acked and never heard (decision 14 F4, #1266 D1).
     PreparedBypass,
+    /// The stored automation changes and `next` automates an effect parameter that the plan keeps
+    /// prepared ([`effect_automation_diagnostics`] is not empty, decision 15 E1, #1335 D4). The
+    /// rebuild's preparation refuses it with `effect.automation.rate`; the classifier only
+    /// routes, so the refusal has one author and no live commit can ack it first.
+    AutomationTarget,
 }
 
 /// Classifies the delta from `current` to `next` as live records or a rebuild (#1053 D1).
@@ -157,7 +163,12 @@ pub enum LiveRebuild {
 ///    (a submix strip's bypass stays structural, #1053 G1). Bytes,
 ///    never `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit
 ///    from `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
-/// 4. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
+/// 4. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
+///    [`effect_automation_diagnostics`] refuses one of `next`'s automations: one whose `inserts`
+///    or `console` target parameter is not automatable or whose `automation_rate` is not `Block`
+///    (decision 15 E1, #1335 D4). An unchanged automation table is never re-checked: it was
+///    prepared. An accepted change stays live with no records, as #1260 D2 made it.
+/// 5. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
 ///    [`checked_fader_gain`] or a pan/matrix does not lower through [`lower_matrix_or_pan`] (the
 ///    single authorities the render-side setters use); [`LiveRebuild::FollowedMute`] if a lane's
 ///    mute changes and a `follows_mute` route in `next` sends from the track; otherwise the
@@ -179,7 +190,8 @@ pub enum LiveRebuild {
 ///    refusal is [`LiveRebuild::Domain`].
 ///
 /// The session ID, the two profile IDs and the stored automation are model-only: no prepared plan
-/// reads them (#1260), so a delta that changes only them is live with no records. Masking
+/// reads them (#1260), so a delta that changes only them is live with no records, once step 4 has
+/// accepted the automation's targets. Masking
 /// `automation` is correct only while no host renders stored automation: the first issue that
 /// renders it (#1058) must remove it from the mask, or an automation edit would commit without
 /// reaching the running plan.
@@ -199,8 +211,9 @@ pub enum LiveRebuild {
 ///
 /// # Allocation
 ///
-/// Control thread only. The masked clone, the two canonical JSON strings and, when an effect's
-/// `params` differ, the lowered racks, the launch registry, the resolved values and an EQ's target
+/// Control thread only. The masked clone, the two canonical JSON strings, when the automation
+/// changes the launch registry and the automation diagnostics, and, when an effect's `params`
+/// differ, the lowered racks, the launch registry, the resolved values and an EQ's target
 /// designer are allocated and freed on every call, on the control-plane precedent of #369 (the
 /// protocol already compiles a whole session per edit). Nothing it allocates is retained apart
 /// from the returned entries.
@@ -263,8 +276,15 @@ pub fn classify_live_delta<'a>(
     }
     drop(masked);
 
-    let mut delta = LiveDelta::default();
     let mut registry = None;
+    if current.automation != next.automation {
+        let registry = load_registry(&mut registry)?;
+        if !effect_automation_diagnostics(next, registry).is_empty() {
+            return Err(LiveRebuild::AutomationTarget);
+        }
+    }
+
+    let mut delta = LiveDelta::default();
     for (before, after) in current.tracks.iter().zip(&next.tracks) {
         let gains_before = fader_gains(&before.fader)?;
         let gains_after = fader_gains(&after.fader)?;
@@ -418,12 +438,7 @@ fn parameter_records(
     let EffectIdentity::Native { effect_id } = &after.identity else {
         return Err(LiveRebuild::Structure);
     };
-    let registry = match registry {
-        Some(registry) => registry,
-        None => {
-            registry.insert(launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?)
-        }
-    };
+    let registry = load_registry(registry)?;
     let factory = registry
         .get_shared_ascii(effect_id.as_str())
         .ok_or(LiveRebuild::Structure)?;
@@ -456,6 +471,19 @@ fn parameter_records(
     let seeds: Vec<f32> = values_before.iter().map(|value| value.value).collect();
     let targets = design_targets(factory, sample_rate_hz, &seeds, &records)?;
     Ok((records, Some(targets)))
+}
+
+/// The launch registry, loaded on first use and reused for the rest of the call.
+fn load_registry(
+    registry: &mut Option<NativeEffectRegistry>,
+) -> Result<&NativeEffectRegistry, LiveRebuild> {
+    match registry {
+        Some(registry) => Ok(registry),
+        None => {
+            Ok(registry
+                .insert(launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?))
+        }
+    }
 }
 
 /// Designs a target-capable instance's targets with [`EqTargetPreparer`], from its pre-commit
