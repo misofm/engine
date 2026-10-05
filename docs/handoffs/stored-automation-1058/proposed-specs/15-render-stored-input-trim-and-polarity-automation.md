@@ -102,7 +102,7 @@ through the one shared rule of draft 10.
 - `crates/host-core/src/prepare.rs`, `crates/host-core/src/live_delta.rs`,
   `crates/host-core/tests/{live_delta.rs,symmetry_witness.rs}`
 - `crates/capi/src/runtime/live_tests.rs`
-- `hosts/host-web/src/tests.rs`, `hosts/host-web/tests/input_automation_realtime.rs` (new)
+- `hosts/host-web/src/tests.rs`, `crates/host-core/tests/input_automation_realtime.rs` (new)
 
 ## Non-goals
 
@@ -141,8 +141,11 @@ through the one shared rule of draft 10.
    lane gives no record; a static polarity change on that lane gives its record. In the browser,
    a live trim edit through the Worker's apply on the automated lane replies `model_only` and
    moves no bit, and a live polarity edit there replies `live`.
-8. **Realtime.** `hosts/host-web/tests/input_automation_realtime.rs` (new integration binary; links
-   `bench_support::alloc`, calls `assert_installed()` first): `allocations == 0 && frees == 0`
+8. **Realtime.** `crates/host-core/tests/input_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
+   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
+   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
+   `assert_installed()` first). It drives the script through host-core's shared commit and render
+   session, the code the browser Worker and the C ABI both run: `allocations == 0 && frees == 0`
    around every render call after warm-up; `cargo build --locked --release -p audit -p capi &&
    ./target/release/audit capi` reports all violation counts 0.
 9. **Commands:**

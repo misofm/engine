@@ -31,7 +31,10 @@ retarget while the lane is muted or a mute ramp is in flight. Nothing feeds oper
   `gain_mute_ramp_block` (`:159-202`). The ramp kernel advances each lane by its own additions and
   assigns the target exactly on the last frame, so partition and cohort invariance hold by
   construction (`:180-183`). A settled lane in the ramp kernel multiplies by its exact target, as
-  the settled kernel does (`crates/builtins/src/lib.rs:2649-2652`).
+  the settled kernel does (`crates/builtins/src/lib.rs:2649-2652`). *Keep every trim, fader and
+  matrix ramp inside its endpoints* (#1408, its site 1) changes `gain_mute_ramp_block`'s last-step
+  law; it is a per-sample rule inside the kernel, so each lane still advances by its own additions
+  and a split still moves no bit for the same events.
 - **Three users of the stage.** `BuiltinFaderBank` at Simd4 and Simd8
   (`crates/builtins/src/lib.rs:3777-3783`, `:3808-3968`), and `FaderMuteRampBuiltins`, the same
   stage at `f32` (`:4163-4233`), which is the scalar track and the scalar oracle.

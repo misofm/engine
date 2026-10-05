@@ -103,6 +103,11 @@ in batch R1, so `main` never holds the types with no caller.
 ## Authorized paths
 
 - `crates/source/src/lib.rs`, `crates/source/tests/`
+- `crates/host-core/src/source.rs` (the `FrameOutOfRange` arm of `SourceControlError::diagnostic`,
+  `:78-104`, only: that match has no wildcard and `SourceSeekError` is not `#[non_exhaustive]`,
+  `crates/source/src/lib.rs:381-393`, so host-core does not compile without it) and
+  `crates/host-core/tests/source_diagnostics.rs` (its `variant_index` and `TABLE`, `:27`,
+  `:176-198`, gain the new row)
 
 ## Non-goals
 

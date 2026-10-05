@@ -45,9 +45,17 @@ and never renumbered.
   `:2557`.
 - **The audit corpus** builds `TransportSetRequest { state, position: None }`
   (`tools/audit/src/protocol.rs:206`), so D2 changes that literal too.
-- **Every user.** `git grep` on `c63f5f37d` for `TransportSetRequest`, `TransportSnapshot`,
-  `TransportStateEvent`, `transport_position` and `TRANSPORT_SET` (outside `docs/handoffs/` and
-  `.github/`) finds them only in `crates/protocol/`, `crates/host-core/src/control_provider.rs`,
+- **The reliable event slot.** The `TRANSPORT_STATE` event's queued payload carries the position:
+  `ReliablePayload::TransportState { event_sequence, state, position, effective_sample,
+  origin_request_id }` (`crates/protocol/src/queue.rs:323-335`) and its constructor
+  `ReliableSlot::transport_state(revision, event_sequence, state, position, effective_sample,
+  origin_request_id)` (`:395-417`). `crates/protocol/src/controller.rs` builds it (`:3040`) and
+  reads it (`:2688`, `:3398`); `crates/protocol/src/controller/tests.rs:3206` and `:3416` call the
+  constructor.
+- **Every user.** `git grep` on `423b9d4a1` (code equal to `6ee64f484`) for `TransportSetRequest`,
+  `TransportSnapshot`, `TransportStateEvent`, `ReliablePayload::TransportState`,
+  `transport_state(`, `transport_position`, `TRANSPORT_SET` and `TRANSPORT_STATE` (outside
+  `docs/handoffs/` and `.github/`) finds them only in `crates/protocol/`, `crates/host-core/src/control_provider.rs`,
   `crates/capi/src/runtime/tests.rs`, `crates/conformance/src/protocol_corpus.rs` and
   `tools/audit/src/protocol.rs`; the fuzz manifest names the position in prose
   (`fuzz/corpus/complete-schema-manifest.md:7`).
@@ -58,7 +66,9 @@ and never renumbered.
   retired-field specs read through `schema_spec_retiring`, so a peer that sends one is refused in
   either flag form. The remaining field IDs keep their numbers.
 - **D2. Types.** `TransportSetRequest`, `TransportSnapshot` and `TransportStateEvent` lose
-  `position`; the provider trait's `transport_get` and `transport_set` keep their shape without it;
+  `position`; `ReliablePayload::TransportState` and `ReliableSlot::transport_state` lose it too
+  (`crates/protocol/src/queue.rs:323-335`, `:395-417`), and the controller stops passing
+  `snapshot.position`; the provider trait's `transport_get` and `transport_set` keep their shape without it;
   host-core's provider and `MockProvider` lose `transport_position`.
 - **D3. Re-pins**, each with the reason "draft 25 retires the stored transport position":
   `COMPLETE_SCHEMA_HASH` and its history line, the wasm-parity self-test strings, the fuzz manifest,
@@ -78,7 +88,8 @@ and never renumbered.
 
 ## Authorized paths
 
-- `crates/protocol/**` (not `queue.rs`)
+- `crates/protocol/**`; in `crates/protocol/src/queue.rs` only the `TransportState` reliable
+  payload and its `transport_state` constructor (`:323-335`, `:395-417`)
 - `crates/host-core/src/control_provider.rs`
 - `crates/capi/src/runtime/tests.rs` (#1309 D8 keeps the C ABI tests in capi)
 - `crates/conformance/src/protocol_corpus.rs`, `crates/conformance/tests/conformance_corpus.rs`

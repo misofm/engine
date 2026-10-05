@@ -25,8 +25,8 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
   executor calls the source set at block entry (`crates/graph/src/lib.rs:3254-3256`), where draft 04b
   advances the timeline.
 - **What draft 09a leaves.** Each automated lane has a cell program (draft 07) with its `a(n)`, its
-  grid and its jump-length key (the `fader` word of draft 12's plan cell), an offsets cell when a
-  VCA reaches it, and its event state in the fader bank stage. It starts at its prepared value, the
+  grid and its jump-length key (the `fader` word of draft 12's plan cell), an offsets cell (the lane's
+  VCA offset sum `S`, `+0.0` when no VCA reaches it; draft 09a D1), and its event state in the fader bank stage. It starts at its prepared value, the
   curve at node time `-a(n)`, which is the entry's first `start_value`.
 - **What draft 12 leaves.** The graph reads the plan's jump-length cell once at block entry and holds
   its three words for the block; no stage reads them yet.
@@ -54,7 +54,7 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
   5. runs `process_with` (draft 08 D3). The fused fader-and-matrix path is taken only when no
      fader or matrix lane moves in the block.
   A gain the conversion refuses is unreachable (draft 02 bounds the curve to the fader domain and
-  `vca_effective_db` clamps); it keeps the current target, adds one to a render counter and fails a
+  `vca_compose_db` clamps, draft 09a D6); it keeps the current target, adds one to a render counter and fails a
   `debug_assert`.
 - **D2. First blocks.** A fresh plan starts every automated lane at its prepared value (draft 09a
   D2), so its first block emits no `Set`. A lane a successor adds or restarts takes a `Set` at its
@@ -86,6 +86,8 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
   (gate 4 on the C ABI)
 - `docs/SESSION_SCHEMA_V1.md`, `docs/REALTIME_MEMORY.md`, `crates/session/src/validate.rs`
   (comments only)
+- `crates/source/src/lib.rs` (the source driver's `timeline_block` reader only: draft 04b D8 adds
+  only `timeline_at` and leaves the render-side block reader to this slice)
 
 ## Non-goals
 

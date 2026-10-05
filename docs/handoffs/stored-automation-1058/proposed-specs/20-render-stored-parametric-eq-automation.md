@@ -64,7 +64,10 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
     cell takes its curve value at the completion sample `τ + 64`; every other value of the section
     comes from the group cell; other sections keep their current semantic values;
   - it marks the section's values as changed and calls the EQ factory's `prepare_targets`, the
-    same code the control plane runs, into a stack array of `MAXIMUM_TARGETS` targets;
+    same code the control plane runs, into a target buffer the stage allocates at bind, sized from the
+    factory's `maximum_targets()` (`crates/effect-contract/src/prepared_target.rs:67`), so render
+    never allocates. `MAXIMUM_TARGETS` (`crates/parametric-eq/src/control.rs:24`) is private, and
+    rack may not depend on parametric-eq (`scripts/check-rack-policy.sh:23`);
   - it applies the section's target for that channel with `apply_prepared_target_lane` (bank) or
     `apply_prepared_target` (per node), which starts the 64-sample ramp.
 
@@ -81,8 +84,12 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
   #1345's designed target cell. #1345 is not amended: it lands first, and this slice adds the
   meaning for a section kind that exists only from this slice on.
 - **D5. The classifier.**
-  - The EQ's automation rows leave the mask, which is then empty: the mask line
-    (`crates/host-core/src/live_delta.rs:236`) and its rustdoc (`:181-185`) go.
+  - The EQ's automation rows join `automation_row_renders` (draft 10 D1), which is then true for
+    every row. The masked JSON comparison keeps copying `current.automation`
+    (`crates/host-core/src/live_delta.rs:236`, the line draft 10 D1 keeps), so that comparison never
+    sees an automation difference, and draft 10 D1's step after step 4 returns
+    `LiveRebuild::Automation` for every automation edit. The rustdoc (`:181-185`, as draft 10 D1
+    rewrote it) says that every row renders.
   - An EQ automation edit is `LiveRebuild::Automation`. Its cells carry by address and its group
     cells by #1280's cell carry (draft 19 D3-D6).
   - A static edit of an automated EQ value gives no record (draft 19 D2, now for the EQ too).
@@ -91,9 +98,24 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
   - With the mask empty, every automation edit is a rebuild, so the separate
     `LiveRebuild::AutomationTarget` routing that #1335 D4 adds and draft 02 D5 extends is deleted: an
     automation edit with a refusable entry returns `LiveRebuild::Automation`, and the rebuild's
-    preparation refuses it with the same diagnostic. The cases that pin `AutomationTarget` are rewritten to
-    expect `Automation`: draft 02's gate 7, draft 10's gate 1 and #1335's gate 4. Draft 03a's gate 3
-    asserts the refusal itself, which stays.
+    preparation refuses it with the same diagnostic.
+  - **Earlier gates this slice turns red, rewritten here in place** (AGENTS.md: a change that
+    supersedes a test rewrites it in the same PR):
+    - the cases that pin `AutomationTarget` expect `Automation`: draft 02's gate 7, draft 10's
+      gate 1, and #1335's gate 4, whose test
+      `an_automation_on_a_prepared_effect_parameter_needs_a_rebuild`
+      (`crates/host-core/tests/live_delta.rs` on `main`) also has its second half, the block-rate
+      `band-1-gain` that "stays live with no records", rewritten to `Err(LiveRebuild::Automation)`;
+    - draft 19's gate 1 case "an EQ automation change stays live with no records" expects
+      `Err(LiveRebuild::Automation)`;
+    - #1335's gate 3, the band-gain half of
+      `an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack`
+      (`crates/capi/src/runtime/live_tests.rs` on `main`, the "a block-rate target commits live: one
+      revision, no candidate" assertion with `pending == 0`): the accepted edit now takes the
+      rebuild path, so the test asserts one pending candidate, then completion `exact` and one
+      revision after it, with the rendered blocks bit-identical to a twin prepared from the edited
+      session.
+    Draft 03a's gate 3 asserts the refusal itself, which stays.
 - **D6. One rule, both hosts.** D4 and D5 live in the shared classifier, so a browser EQ edit meets
   them through #1382's Worker commit, as drafts 14b and 16b do for the pan and matrix group and the
   input filter pair. No host has its own admission for automated sections.

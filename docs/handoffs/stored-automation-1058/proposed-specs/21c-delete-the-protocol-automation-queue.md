@@ -106,6 +106,8 @@ never holds a queue that nothing calls.
 - `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   `docs/CONTROL_PROTOCOL_SIZING.md`, `docs/REALTIME_MEMORY.md`
 - `docs/C_ABI_V1_QUALIFICATION.md` (the retained-byte rows that included the queue; Hazards)
+- `crates/capi/src/runtime/tests.rs` (only a use of `protocol::AutomationRecord` that drafts 21a
+  and 21b leave, such as `:1915` and `:2370` on `6ee64f484`)
 
 ## Non-goals
 

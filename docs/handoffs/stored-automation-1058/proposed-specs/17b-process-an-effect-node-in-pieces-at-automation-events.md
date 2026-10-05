@@ -129,6 +129,8 @@ ramp in flight blocks the skip (`crates/compressor/src/lib.rs:568`;
 - `crates/graph/src/runtime.rs` (effect node kinds, their construction and the effect arms of
   `execute_op` only), `crates/graph/Cargo.toml`, `crates/graph/tests/` (one new file).
 - `scripts/check-rack-policy.sh`, `scripts/test-rack-policy.sh` (D9 only).
+- `Cargo.lock` (the new rack and graph edges; `--locked` fails without it). Graph's `automation`
+  edge and its policy pins come from draft 13b, in batch R2 before this batch.
 
 ## Non-goals
 

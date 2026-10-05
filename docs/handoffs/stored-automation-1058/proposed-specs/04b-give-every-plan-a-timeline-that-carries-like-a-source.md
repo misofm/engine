@@ -64,7 +64,8 @@ drafts 06a and 06b, and the first reader draft 09b. All are in batch R1.
   block entry, before the sources, with the source-read sample it passes the sources (#1396).
 - **D2. The producer.** `SourceControlSet` owns one `TimelineProducer` beside the source producers,
   and `adopt_persisting` moves it like a persisting source's producer. `FrameOutOfRange` maps to
-  `source.seek.frame_out_of_range` in `SourceControlError::diagnostic`. Host-core gains no public
+  `source.seek.frame_out_of_range` in `SourceControlError::diagnostic`; draft 04a adds that arm,
+  because host-core does not compile without it. Host-core gains no public
   timeline seek here; draft 05 adds the session seek.
 - **D3. Carry on a rebuild.** A successor carries the timeline exactly as an unchanged source, on
   every successor (it never changes):
@@ -132,6 +133,13 @@ drafts 06a and 06b, and the first reader draft 09b. All are in batch R1.
 - the seek report's files as #1316 leaves them (the timeline row only)
 - Tests that pin a source overhead or carry-program byte count that D7 or D3 moves (re-pin each
   with its reason, never in bulk)
+- `crates/host-core/src/lib.rs` (a `test-support` re-export of `graph::test_only_timeline_at`
+  only: host-web has no `graph` dependency, `hosts/host-web/Cargo.toml:25-33`, so its tests read
+  the timeline through host-core) and `crates/host-core/Cargo.toml` (its `test-support` feature,
+  `:16`, gains `graph/test-support`), `Cargo.lock`
+- `hosts/host-web/tests/browser-v1/expected.json` (`resourceCeilings`) and
+  `hosts/host-web/tests/retained_ceilings.rs`, only if D7's bytes cross the browser's
+  `sourceOverheadBytes` ceiling (re-pin with the reason)
 
 ## Non-goals
 

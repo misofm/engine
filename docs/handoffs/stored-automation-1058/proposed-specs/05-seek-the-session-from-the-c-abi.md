@@ -43,14 +43,19 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 - **Feature bits.** The last bit on `6ee64f484` is `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32);
   the mask is 63 (`crates/capi/include/miso_engine_v1.h:136-142`; `crates/capi/src/abi.rs:53-71`).
   #1316 and #1323 each add a bit; D15-12's growth rule gives this slice the next free bit when it
-  merges. `scripts/check-capi-abi.sh` holds the frozen exported symbol set (`:204-210`).
+  merges. `scripts/check-capi-abi.sh` holds the frozen exported symbol set (`:192-208`).
 - **Header text.** "Sources across a structural transaction" (`miso_engine_v1.h:85-94`) and
   "Starting an added stem in time" (`:96-108`). *Document the seek contract and the C ABI growth
   rule in the header* (#1317) rewrites the seek text; this slice adds the timeline and the
   session seek to that text (D5).
 - **The audit.** `audit capi` renders 100,000 calls with one structural transaction outside the
   render scope (`tools/audit/src/capi.rs:460-540`) and prints a `pcm_digest` that no gate pins
-  (`.github/workflows/qualification.yml:759-779` checks only its shape).
+  (`.github/workflows/qualification.yml:759-779` checks only its shape). *Test held seeks across
+  swaps and supersession, and add a seek to audit capi* (#1319, in this slice's closure through
+  draft 04b and #1320) adds, right after the structural transaction,
+  `miso_engine_v1_source_seek_at(session, "fixture-source", 2, A, A)` with `A = 4 * QUANTUM_FRAMES`
+  and one generation-2 quantum from frame `A`, both asserted `RESULT_OK`; call 4's audited render
+  applies that seek (#1319 D4).
 
 ## Decisions frozen for this slice
 
@@ -92,7 +97,8 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   `miso_engine_v1_last_error`. One feature bit, `MISO_ENGINE_V1_FEATURE_SESSION_SEEK`, covers both
   symbols: the next free bit when this merges, never a reused one; code, tests and the smoke
   programs name it by its symbol. The mask grows to match; the frozen symbol list grows by two.
-- **D5. Header text.** A paragraph after "Starting an added stem in time": the timeline is the
+- **D5. Header text.** One more topic paragraph in #1317 D1's sequence of seek paragraphs (which
+  replaces "Starting an added stem in time"), placed right after its `seek_at` paragraph: the timeline is the
   session's playhead; it starts at 0 and advances one quantum per render; stored automation follows
   it (#1058). `miso_engine_v1_session_seek` moves it and every source in one step, all or nothing;
   each source goes to `min(timeline_sample, its frames)`; the host then submits generation `g`
@@ -100,9 +106,14 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   per-source seek leaves the timeline where it is. A seek of every source is a declared
   discontinuity: the host calls `miso_engine_v1_declare_discontinuity` (#1323 D1) first.
   `docs/C_ABI_V1_QUALIFICATION.md` gains the same text beside the #1275 paragraph (`:106-122`).
-- **D6. The audit.** `audit capi` makes one session seek, outside the render scope, after the
-  structural transaction, and submits one generation-2 quantum from the seek frame. Its violation
-  counts stay 0. Its `pcm_digest` moves (the seek changes the audio); no gate pins it.
+- **D6. The audit.** #1319 D4's anchored source seek, its generation-2 quantum and its `RESULT_OK`
+  assertions stay as they are. After call 4's audited render has applied that seek (so no seek is
+  pending in any slot), still outside every render scope, `audit capi` calls
+  `miso_engine_v1_declare_discontinuity` (#1323 D1), then
+  `miso_engine_v1_session_seek(session, 3, B)` with `B = 8 * QUANTUM_FRAMES`, and submits one
+  generation-3 quantum of `fixture-source` from frame `B`. It asserts that each call returns
+  `RESULT_OK`. Its violation counts stay 0. Its `pcm_digest` moves (the seek changes the audio); no
+  gate pins it.
 - **D7. The acked-batch question.** The call checks every slot before it pushes any (D1), and only
   the control thread pushes, so it is acknowledged only when every consumer holds the seek. A held
   anchored seek moves with its consumer across a swap. No ack can precede a drop.
@@ -127,6 +138,9 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 - `scripts/check-capi-abi.sh` (the frozen symbol list only)
 - `tools/audit/src/capi.rs` (D6 only)
 - `docs/C_ABI_V1_QUALIFICATION.md`
+- `crates/capi/Cargo.toml` (the `graph` dev-dependency gains `features = ["test-support"]`, so
+  gate 1 can call `graph::test_only_timeline_at`; today it is a plain dev-dependency,
+  `crates/capi/Cargo.toml:25-27`), `Cargo.lock`
 
 ## Non-goals
 
@@ -204,7 +218,9 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 - *Document the seek contract and the C ABI growth rule in the header* (#1317): this slice adds
   the session seek to the text #1317 writes.
 - *Reset latency floors at a host-declared discontinuity* (#1323), which adds
-  `miso_engine_v1_declare_discontinuity`, named by D5's sentence.
+  `miso_engine_v1_declare_discontinuity`, named by D5's sentence and called by D6.
+- *Test held seeks across swaps and supersession, and add a seek to audit capi* (#1319): D6 builds
+  on its audit seek (also in the closure through draft 04b).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309): the file that
   holds `SessionState`. It lands before batch P1.
 - Batch: R1. Draft 06a *Seek the timeline and every source from the browser module export and the

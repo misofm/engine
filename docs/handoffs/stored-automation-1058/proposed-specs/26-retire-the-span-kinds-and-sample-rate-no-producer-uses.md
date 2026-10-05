@@ -66,7 +66,9 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
   keep only `Point` spans; a test that exists only for a retired kind is deleted, and the delay's
   malformed-span test uses a `Point` with a malformed field instead. Each test fixture that
   declares `Sample` (Context) declares `Block`. The policy manifest's `fn automation_segment_value(`
-  row leaves with the function.
+  row leaves with the function. The independent metadata gate's rate table
+  (`scripts/check-parameter-metadata-v1.py:30`, `RATES = {1: "sample", 2: "block", 3: "none"}`,
+  read at `:477`) loses its `1: "sample"` entry, so that gate also refuses the retired rate.
 - **D3. Re-pins**, with the reason "draft 26 retires the span kinds and the sample rate": any
   conformance corpus row or digest that carries a retired value, and `COMPLETE_SCHEMA_HASH` only if
   a corpus frame carries `ParameterAutomationRate` value 1. `retired_code_rows` gains a row for
@@ -92,7 +94,8 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
 - `scripts/check-effect-runtime-policy.sh` (the `automation_segment_value` manifest row only)
 - `crates/protocol/src/message_wire.rs`, `crates/protocol/src/message_wire/tests.rs`
 - `crates/host-core/src/control_provider.rs` (the rate mapping only)
-- `tools/parameter-metadata/src/lib.rs` (the rate name only)
+- `tools/parameter-metadata/src/lib.rs` (the rate name only),
+  `scripts/check-parameter-metadata-v1.py` (the `RATES` entry at `:30` only)
 - `crates/conformance/src/{effect.rs,randomized.rs,protocol_corpus.rs}`,
   `crates/conformance/tests/effect_contract.rs`
 - `crates/delay/src/lib.rs` (the malformed-span test only), and each effect test support module
@@ -130,6 +133,8 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
    - `bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts` after
      `bash scripts/build-web-audioworklet.sh`, `bash scripts/check-workspace-policy.sh`
    - `bash scripts/check-effect-runtime-policy.sh`, `bash scripts/test-effect-runtime-policy.sh`
+   - `python3 -B scripts/check-parameter-metadata-v1.py --self-test` (also run by
+     `scripts/test-web-audioworklet.sh:205`)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

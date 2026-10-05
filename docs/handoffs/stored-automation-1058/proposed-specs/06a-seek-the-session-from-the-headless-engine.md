@@ -87,6 +87,8 @@ export in draft 06b.
 - `scripts/check-web-audioworklet.sh` (export list only), `scripts/check-abi-layout-v1.py`,
   `scripts/fixtures/abi-layout-v1-self-test.json`, `scripts/test-web-audioworklet.mjs` (the mock
   export only), `tools/parameter-metadata/src/abi_layout.rs`
+- No new path for gate 1: `hosts/host-web/src/tests.rs` reads the timeline through draft 04b's
+  host-core re-export (host-web has no `graph` dependency).
 
 ## Non-goals
 
@@ -116,7 +118,9 @@ export in draft 06b.
    One full source slot returns `RESULT_BACKPRESSURE` and nothing changes.
 2. **Headless** (`sdk/test/capability-evals.mjs`, new case beside the seek case at `:162`). After
    `seek(4096n)` and one quantum per source at the returned generation, the next render reads frame
-   4,096 from a source and the timeline reads 4,096 in the same block. A second `seek` without
+   4,096 from a source. The SDK has no timeline reader and no stored automation renders before
+   draft 09b, so this case does not observe the timeline; gate 1 does, through the same export
+   (draft 04b's reader, re-exported by host-core). A second `seek` without
    options uses the next generation. A stale explicit generation returns the typed refusal.
 3. **Mirrors.** Each mirror list contains the export, and the checkers fail if one omits it.
 3a. **Role and pending candidate** (`hosts/host-web/src/tests.rs`, new). Each of the two exports,
@@ -144,7 +148,8 @@ export in draft 06b.
 - Gate 1 turns red if the browser export seeks consumers in different blocks (for example through
   `prepare_source_seek` for the sources only), seeks with logic of its own, or pushes before every
   slot is checked.
-- Gate 2 turns red if the headless SDK picks a stale generation or does not seek the timeline.
+- Gate 2 turns red if the headless SDK picks a stale generation or does not call the session seek
+  export.
 - Gate 3 turns red if a mirror lets the SDK call a name the module lacks.
 - Gate 3a turns red if the export runs on the render half, or if the browser seeks the running
   plan's producers instead of the newest committed session's while a candidate waits.

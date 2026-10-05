@@ -23,9 +23,10 @@ refused before the call reads anything else, so no session is created.
 - **Its readers today.** `all_limits_nonzero` requires it nonzero
   (`crates/capi/src/runtime/compile.rs:482-508`, term at `:483`); `protocol_queue_config` makes it
   the protocol's `per_block_automation_density` (`:130-133`); `prepare_caps` passes it to effect
-  preparation (`:528`). #1306 D3 removes the preparation read and keeps the density read "until
-  slice 22 reserves the field" (amendment to #1306 D3); draft 21c D4 removes the density read. After
-  both, `all_limits_nonzero` is its only reader: a validated value nothing uses.
+  preparation (`:528`). Draft 21c D4 (batch P1) removes the density read before #1306 lands, and
+  #1306 D3 (as amended: "capi keeps S until slice 22 reserves the field") removes the preparation
+  read. After both, S has no role and `all_limits_nonzero` is its only reader: a validated value
+  nothing uses.
 - **The reserved-field rule.** `limits_are_valid` (`compile.rs:510-515`) requires `reserved0 == 0`
   and `reserved == [0; 2]`; `miso_engine_v1_compile_session` returns
   `MISO_ENGINE_V1_INVALID_ARGUMENT` on failure before it reads the document or writes diagnostics
@@ -65,6 +66,13 @@ refused before the call reads anything else, so no session is created.
   the queue), and that a library older than this slice refuses a zero word with
   `RESULT_INVALID_ARGUMENT` while a caller written before it must now pass zero. `:346` drops "S =
   128".
+- **D5a. The test #1306 gate 2 committed goes.** #1306 gate 2 adds a test in
+  `crates/capi/tests/resource_lifecycle.rs` that compiles the reference session at S = 128 and at
+  S = 4,096 and asserts equal graph rows. After D2 a nonzero word is `INVALID_ARGUMENT`, so that
+  test turns red and its claim (the window does not follow S) has no subject. This slice deletes it
+  in the same change (AGENTS.md: a change that supersedes a test deletes it in the same PR); gate 1,
+  which refuses a nonzero `reserved1`, replaces it. #1306 gate 2's host-core and
+  effect-compiler unit tests do not read S and stay.
 - **D5. No feature bit.** The change removes a role; D15-12's rule is for additions. A directly
   linked caller and the library move in lockstep, as every prelaunch V1 amendment requires.
 
@@ -79,7 +87,8 @@ refused before the call reads anything else, so no session is created.
 - `crates/capi/include/miso_engine_v1.h`, `crates/capi/src/{abi,ffi}.rs`,
   `crates/capi/src/runtime/` and `crates/control-plane/src/` (where #1309, which lands before
   batch P1, moves the control code)
-- `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs` (literals only)
+- `crates/capi/tests/plan_swap_race.rs` (literals only), `crates/capi/tests/resource_lifecycle.rs`
+  (literals, and D5a's deletion of #1306 gate 2's S test)
 - `tools/audit/src/capi.rs` (the literal only)
 - `docs/C_ABI_V1_QUALIFICATION.md`
 

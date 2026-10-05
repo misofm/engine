@@ -103,7 +103,7 @@ refused with `builtin.filter.order`, with nothing changed.
   `crates/host-core/tests/live_delta.rs`
 - `crates/control-plane/src/` (the group-cell write)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `hosts/host-web/tests/filter_automation_realtime.rs` (new)
+  `crates/host-core/tests/filter_automation_realtime.rs` (new)
 - `docs/BUILTINS_AND_METERING_V1.md`
 
 ## Non-goals
@@ -126,7 +126,9 @@ refused with `builtin.filter.order`, with nothing changed.
    under a static LPF: at every event the stage's target words equal `prepare_input_filter_section`
    of the curve value at `τ + 64`, bit for bit.
 3. **Bounded designs** (builtins-compiler unit test, new). Over a block of 128 and one of 100, with a
-   moving HPF and a moving LPF, the design count (`FILTER_DESIGN_CALLS`) is at most D4's bound.
+   moving HPF and a moving LPF, the design count is at most D4's bound. The count is the `test-support` counter draft 16a adds
+   (`FILTER_DESIGN_CALLS` itself is `#[cfg(test)]` and private to builtins,
+   `crates/builtins/src/lib.rs:723-724`, so no other crate can read it).
 4. **Tail.** A strip with HPF automation and no live lane reports `input_section_live_bound(rate)`;
    #1329's gates pass unchanged.
 5. **Group cell, both hosts** (`crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
@@ -140,8 +142,11 @@ refused with `builtin.filter.order`, with nothing changed.
    `Err(LiveRebuild::Automation)`; a static change of the automated HPF gives no record; gate 5's
    edit gives one group-cell write and no `PreparedFilter` record; gate 6's gives `Domain`; an
    `lpf_hz` rewrite from `1000.0` to the same bits gives nothing.
-8. **Realtime.** `hosts/host-web/tests/filter_automation_realtime.rs` (new integration binary; links
-   `bench_support::alloc`, calls `assert_installed()` first): `allocations == 0 && frees == 0`
+8. **Realtime.** `crates/host-core/tests/filter_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
+   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
+   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
+   `assert_installed()` first). It drives the script through host-core's shared commit and render
+   session, the code the browser Worker and the C ABI both run: `allocations == 0 && frees == 0`
    around every render call after warm-up; `cargo build --locked --release -p audit -p capi &&
    ./target/release/audit capi` reports all violation counts 0.
 9. **Commands:**

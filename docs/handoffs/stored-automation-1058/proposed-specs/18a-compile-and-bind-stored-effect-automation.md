@@ -143,6 +143,10 @@ and 09b give it to the fader stage.
 - `crates/rack/src/lib.rs` (only if draft 17b's constructor needs the binding's shape).
 - `crates/builtins-compiler/src/lib.rs` (D7's `DESIGNED` term only).
 - `crates/capi/src/runtime/` tests, `crates/capi/tests/resource_lifecycle.rs` (D8's oracle).
+- `crates/effect-compiler/Cargo.toml` (a normal `automation` dependency, for D5's
+  `EffectAutomationProgram` field), `Cargo.lock`, and `scripts/check-effect-runtime-policy.sh`
+  (`expected_compiler`, `:12`, which pins effect-compiler's exact dependency list; `automation`
+  joins it). host-core's `automation` edge comes from draft 09a; graph's from draft 13b.
 
 ## Non-goals
 

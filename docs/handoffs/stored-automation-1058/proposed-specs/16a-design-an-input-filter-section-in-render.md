@@ -53,7 +53,10 @@ same batch, so `main` never holds it with no caller. No rendered bit moves.
 - **D3. A refused design** keeps the current target and adds one to the input bank's
   `automation_designs_refused` count, which a readback reports.
 - **D4. Work.** One operation is one `math::tan`, the design arithmetic and two `math::sqrt`, scalar
-  `f64`, with no allocation (README A1.7). Draft 16b bounds the operations per block.
+  `f64`, with no allocation (README A1.7). Draft 16b bounds the operations per block. For that
+  bound's gate, builtins exposes the design count behind its `test-support` feature (a public
+  reader of the count `FILTER_DESIGN_CALLS` keeps, `crates/builtins/src/lib.rs:723-724`), so a
+  builtins-compiler test can read it.
 
 ## Deliverables
 

@@ -94,6 +94,8 @@ already in flight keeps the length it started with.
 - `docs/SESSION_SCHEMA_V1.md` (D7's sentence only)
 - Tests that pin a plan byte row the cell moves (re-pin each with the reason "the jump-length cell,
   draft 12 D1", never in bulk)
+- `crates/capi/Cargo.toml` (the `graph` dev-dependency's `test-support` feature, as draft 05 adds
+  it; only if draft 05 has not landed), `Cargo.lock`
 
 ## Non-goals
 

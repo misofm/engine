@@ -149,6 +149,9 @@ the manifest `fuzz/corpus/complete-schema-manifest.md:10`, the record
 - `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   `docs/CONTROL_PROTOCOL_SIZING.md`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
   `docs/CONTROL_PROVIDER_BOUNDARY.md`, `docs/C_ABI_V1_QUALIFICATION.md`
+- `crates/capi/src/runtime/live_tests.rs` (only the `AutomationEnqueue` block of
+  `a_live_edit_emits_the_commit_events_of_a_rebuild`, `:1379-1407`, which builds the deleted
+  command and payload)
 
 ## Non-goals
 

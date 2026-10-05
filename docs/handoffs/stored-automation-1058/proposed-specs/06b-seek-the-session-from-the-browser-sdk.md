@@ -97,11 +97,15 @@ ring stalls. No suspended-context requirement is added.
     object has used for a session seek, starting above 1 (every source and the timeline start at
     1). A caller that also seeks sources by itself passes its own. A stale one is refused with
     `source.generation.stale` and nothing changes.
-  - It calls `host.seekSession` once. Only after the reply is OK does it call
-    `producer.seek(frame, generation)` on each producer, in order. A producer clamps the frame to
+  - Before it posts anything, it refuses a `frame` above `Number.MAX_SAFE_INTEGER` with a typed
+    `RangeError` (nothing changes). It calls `host.seekSession` once with the `bigint` frame. Only
+    after the reply is OK does it call `producer.seek(Number(frame), generation)` on each producer,
+    in order: the SDK converts the frame, because the pump takes a `number` frame
+    (`hosts/host-web/web/stem-store/index.d.ts:206`; `pcm-pump.js:210-211` validates it) and a
+    `bigint` generation (its own counter is a `bigint`, `pcm-pump.js:212`). A producer clamps the frame to
     its own region, as the pump does today. On a refusal it repositions nothing and rejects with
     the typed result.
-  - `SessionSeekProducer` is `{ seek(frame: bigint, generation: bigint): void | Promise<void> }`.
+  - `SessionSeekProducer` is `{ seek(frame: number, generation: bigint): void | Promise<void> }`.
     `CanonicalPcmPump.seek(frame, generation?)` implements it: with a generation it uses that one
     (it must be above the pump's own), without one it keeps today's increment.
 - **D4. The acked-batch question: can an ack ever precede a drop? No.** The export is all or
@@ -169,6 +173,8 @@ ring stalls. No suspended-context requirement is added.
 3. **Browser engine order** (`sdk/test/browser-evals.mjs`, new case). With a fake host and two
    recording producers: the producers are called after the OK reply, with the returned generation.
    On a refused reply neither is called. A second `seek` without options uses the next generation.
+   The producers receive the frame as a `number`. A frame of `2n ** 53n` rejects with a
+   `RangeError` and the fake host receives no message.
 4. **Pump generation** (`sdk/test/browser-pcm-evals.mjs`, new case). `CanonicalPcmPump.seek(frame,
    g)` writes `g` into every ring's seek words with each stem's clamped frame. A `g` not above its
    own generation is refused.

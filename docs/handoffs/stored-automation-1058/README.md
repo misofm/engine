@@ -2,7 +2,7 @@
 
 Issue: *Research: render stored session automation in the engine, identically on every platform*
 (#1058), stream K of decision 15
-(`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-16). Attempt 3.
+(`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-16). Attempt 4.
 
 **Commit.** Every `path:line` in this note and in its drafts was read on `6ee64f484`. That commit
 adds only the #1057 note to `main` at `8be19c86e`, so every code anchor is also an anchor on `main`
@@ -11,7 +11,9 @@ at `8be19c86e`. Attempt 2 runs on `45c5a1819`, which changes only documents afte
 so every code anchor, the new ones of attempt 2 included, reads the same on both. Attempt 3 runs on
 `c63f5f37d`, which also changes only documents after `6ee64f484` (`git diff --name-only 6ee64f484
 c63f5f37d` lists only `docs/handoffs/` and `.github/ISSUE_SPECS/`), so the same holds for it and for
-the anchors attempt 3 adds. `main` has moved since (finding F15). The spec's own anchors were written on an earlier `main`; each one was read
+the anchors attempt 3 adds. Attempt 4 runs on `423b9d4a1`; `git diff --stat 6ee64f484 423b9d4a1 --
+crates hosts sdk tools scripts` is empty, so the same holds for the anchors attempt 4 adds. `main`
+has moved since (finding F15). The spec's own anchors were written on an earlier `main`; each one was read
 again (section "Spec anchors, checked again").
 
 **Authority.** The owner ruled that the core engine renders a producer's automation from the
@@ -20,11 +22,11 @@ Decision 15 binds every choice here to the no-shortcuts principle
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md:26-28`). A1 and
 A3-A11 are design decisions for the implementing issues. A2 is an owner question with a
 recommendation. A second owner question (send automation) is in "Owner questions". Points that
-touch a decided item are in "Findings for the coordinator". Two of them ask root to decide before
-slices are filed: F1 (filter designs in render; slices 16a, 16b and 20 wait for it) and F16 (the
-VCA offsets cell's layout, which decides whether adding or removing a VCA stays live on a session
-with stored fader automation; slices 09a and 11 wait for it). No other point reopens a decided
-item.
+touch a decided item are in "Findings for the coordinator". F1 asks root to decide before slices are
+filed (filter designs in render; slices 16a, 16b and 20 wait for it). F16 (the VCA offsets cell's
+layout) is decided by root: it sums the VCA offsets first, a class B change to #1242's order that
+root rules under the standing summation-order ruling, so every VCA edit stays live on a session
+with stored fader automation (slices 09a and 11). No other point reopens a decided item.
 
 **Review.** In attempt 1 two fresh internal verifiers reviewed the drafts (FAIL, then
 PASS-WITH-FIXES), and the attempt-1 adversarial verdict returned FAIL (one major, seven minors,
@@ -213,19 +215,19 @@ seven nits). Every finding of all three is folded in (section "Verification").
   of its bank's lanes and applies each event between the pieces. The kernels are the existing ones;
   they advance each lane by its own additions, so a split moves no bit for the same events
   (`crates/lane/src/kernels/builtins.rs:180-183`).
-- **Fader** (id 5): the event value `v` (dB) becomes `vca_effective_db(v, offsets)`
-  (`crates/session/src/vca.rs:19-34`), then the fader's own `db_gain`
-  (`crates/builtins/src/lib.rs:5356-5358`). `vca_effective_db` adds the member first, then each
-  offset in order (`effective_strip_faders` passes the reaching VCAs in ascending VCA-ID order,
-  `crates/session/src/vca.rs:96-120`), so an automated lane keeps its VCA offsets in a multi-word
-  cell that the control plane writes on a VCA edit. Its layout is root's decision (finding F16).
-  The recommended layout has one word per session VCA in VCA-ID order, `+0.0` where the VCA does
-  not reach the lane: adding `+0.0` changes an `f64` sum only from `-0.0` to `+0.0`, and
-  `db_gain(±0) = 1` exactly, so the gain has the bits of the reach-only composition. A flat curve
-  at `v` renders the bits of a plan prepared with static `v`, whatever the number of VCAs. A ride
-  and a membership change are live cell writes; only adding or removing a VCA changes the word
-  count, so on a session with stored fader automation it is a seamless carried rebuild (decision 14
-  rule 1; slices 09a and 11).
+- **Fader** (id 5): the event value `v` (dB) is composed with the lane's VCA offsets, then goes
+  through the fader's own `db_gain` (`crates/builtins/src/lib.rs:5356-5358`). Today
+  `vca_effective_db` (`crates/session/src/vca.rs:19-34`) adds the member first, then each offset in
+  ascending VCA-ID order (`:96-120`), so a precomputed sum of the offsets can give other bits, and
+  each cell layout that keeps that order either narrows #1247's live set or is sized by a host cap.
+  Root decided the layout (finding F16): the composition sums the offsets first, on the static
+  path too: `clamp(f64(v) + S, -144, 24)` rounded once to
+  `f32`, `S` the `f64` sum of the reaching offsets in ascending VCA-ID order. Each automated fader
+  lane then has a cell of three words (`S` and a ramp word) that the control plane writes on any VCA
+  edit; a lane no VCA reaches holds `S = +0.0`, which keeps the gain bits (`db_gain(±0) = 1`). A
+  flat curve at `v` renders the bits of a plan prepared with static `v`, whatever the number of
+  VCAs, and every VCA edit, adding or removing a VCA included, is a live cell write (slices 09a and
+  11).
 - **Mute** (id 6): the lane's stage mute is `curve || vca_mute || solo_mute`; the last two are
   control-plane terms in the strip's mute cell (`crates/host-core/src/solo.rs:255-263` composes them
   today; after #1382 the shared commit composes the browser's solo overlay, #1382 D3). A mute event ramps over the session mute length, as a live mute does
@@ -648,15 +650,15 @@ automation; #1306 lands in their batch.** The table, batches and dependencies ar
 | Event state (cursor, current target, ramp end, held grid, seek boundary, lane address, flags) | 48 | per automated cell |
 | Cell program header (segment slice, `G`, `L`, jump-length key, completion kind, flags) | 32 | per automated cell |
 | Group cell (pan positions, a filter pair's cutoffs, or an EQ band's values) | 32 | per target group with an automated cell |
-| VCA offsets cell (F16's recommended layout) | `12·V + 12` plus the cell's fixed words (#1312's three slots of one `f32` per session VCA and one ramp word) | per automated fader lane in a session with `V ≥ 1` VCAs (`V` at most 256 in the browser, `maximum_vcas` on the C ABI) |
+| VCA offsets cell (layout 4 of F16, root's decision) | 36 plus the cell's fixed words (#1312's three slots of three words: `S` as one `f64` and one ramp word) | per automated fader lane, whatever the session's VCA count |
 | Follow state of a route lane: #1347's cell of seven words (transform, route mute, `follows_mute`, two mute terms) in #1312's three slots | 84 plus the cell's fixed words | per route into a submix whose source mute is automated |
 | Timeline history | `16·K`, `K = ⌈A_max/q⌉ + 1` | per plan |
 | Effect window | #1306's per-span bank term (`8,944 + 360·S` per eight-lane bank, `4,560 + 200·S` per four-lane bank) | `S` includes A7 |
 
-- **Formula.** `M = Σ_cells (80 + 32·n_c) + 32·groups + 12·(V + 1)·F + 84·follow_routes + 16·K + window
-  bytes`, plus the fixed words of each cell, where `F` is the number of automated fader lanes and
-  `V` the session's VCA count (F16's recommended layout). No
-  term reads a duration. `n_c` is bounded by the document: `Σ n_c ≤ document_bytes / 99`.
+- **Formula.** `M = Σ_cells (80 + 32·n_c) + 32·groups + 36·F + 84·follow_routes + 16·K + window
+  bytes`, plus the fixed words of each cell, where `F` is the number of automated fader lanes
+  (F16's layout 4); a lane with no VCA is charged too, since its cell exists for a later VCA edit.
+  No term reads a duration. `n_c` is bounded by the document: `Σ n_c ≤ document_bytes / 99`.
 - **Plans in flight.** Each plan owns its program. Up to three plans coexist during a supersession
   (D15-9), so the peak is three programs; the same caps that refuse a third plan refuse it (#1398).
   Shared programs were rejected: a shared reference count is machinery a later change must maintain,
@@ -718,15 +720,15 @@ Each row lists the slice's direct dependencies; a draft's own Dependencies secti
 | 03c | `proposed-specs/03c-author-submix-automation-targets-in-the-sdk.md` | Author submix automation targets in the SDK and enginectl | — | R3 |
 | 04a | `proposed-specs/04a-build-the-timeline-consumer-and-producer.md` | Build the timeline consumer and producer in the source crate | ordering: #1316, #1318, #1320 | R1 |
 | 04b | `proposed-specs/04b-give-every-plan-a-timeline-that-carries-like-a-source.md` | Give every plan a timeline that carries like a source | 04a, #1285, #1316, #1320, #1323, #1396 | R1 |
-| 05 | `proposed-specs/05-seek-the-session-from-the-c-abi.md` | Seek the timeline and every source in one C ABI call | 04b, #1317, #1323 | R1 |
+| 05 | `proposed-specs/05-seek-the-session-from-the-c-abi.md` | Seek the timeline and every source in one C ABI call | 04b, #1309, #1317, #1319, #1323 | R1 |
 | 06a | `proposed-specs/06a-seek-the-session-from-the-headless-engine.md` | Seek the timeline and every source from the browser module export and the headless SDK | 05, #1293 | R1 |
 | 06b | `proposed-specs/06b-seek-the-session-from-the-browser-sdk.md` | Seek the timeline and every source from the browser SDK and the PCM feed | 06a, #1332, #1387, #1294 | R1 |
 | 07 | `proposed-specs/07-compile-stored-automation-into-per-cell-events.md` | Compile stored automation into per-cell events in node time | 01 | R1 |
 | 08 | `proposed-specs/08-apply-timed-operations-inside-a-block-on-the-fader-stage.md` | Apply timed operations inside a block on the strip fader stage | — | R1 |
-| 09a | `proposed-specs/09a-prepare-stored-fader-automation.md` | Prepare stored fader automation and render it flat | 01, 02, 07, 08, 12, #1054, #1285, #1309, #1312, #1382, finding F16 decided; one push with 09b, 10, 11 | R1 |
+| 09a | `proposed-specs/09a-prepare-stored-fader-automation.md` | Prepare stored fader automation and render it flat | 01, 02, 07, 08, 12, #1054, #1285, #1309, #1312, #1382, one push with 09b, 10, 11 | R1 |
 | 09b | `proposed-specs/09b-render-moving-stored-fader-automation.md` | Render moving stored fader automation, seeks and latency | 09a, 04b, 05, 06a; one push with 09a, 10, 11 | R1 |
 | 10 | `proposed-specs/10-classify-and-carry-fader-automation-edits.md` | Classify fader automation edits as carried rebuilds | 09b, #1277, #1313, #1314, #1335; one push with 09a, 09b, 11 | R1 |
-| 11 | `proposed-specs/11-compose-vca-offsets-with-stored-fader-automation.md` | Compose VCA offsets with stored fader automation | 09a, 10, 12, finding F16 decided; one push with 09a, 09b, 10 | R1 |
+| 11 | `proposed-specs/11-compose-vca-offsets-with-stored-fader-automation.md` | Compose VCA offsets with stored fader automation | 09a, 10, 12, one push with 09a, 09b, 10 | R1 |
 | 12 | `proposed-specs/12-hold-the-automation-jump-lengths-in-a-cell.md` | Hold the automation jump lengths in a plan cell | #1054, #1312, #1365, #1382 | R1 |
 | 13a | `proposed-specs/13a-render-stored-mute-automation.md` | Render stored mute automation on the strip | 10, 12; one push with 13b and 13c | R2 |
 | 13b | `proposed-specs/13b-follow-an-automated-mute-on-following-sends-in-render.md` | Follow an automated mute on following sends in render | 13a, 12, #1284, #1347 | R2 |
@@ -772,8 +774,9 @@ so `main` never holds code that nothing calls):
 
 **No placeholder and no cycle.**
 
-- **No slice edits code that an earlier slice or spec deletes or moves.** Attempt 3 checked this
-  mechanically: for every draft, its transitive dependency closure (draft and spec Dependencies,
+- **No slice edits code that an earlier slice or spec deletes or moves.** This is the result of
+  two checks, and it is only as complete as they are. Attempt 3 checked it mechanically: for
+  every draft, its transitive dependency closure (draft and spec Dependencies,
   plus the batch order: #1309 before P1, #1382 before R1), and every deletion or move in each spec
   of that closure, against the draft's Context, Decisions, Deliverables, paths and gates. The
   closure reaches 70 specs. Each definite finding is fixed in the draft:
@@ -793,7 +796,31 @@ so `main` never holds code that nothing calls):
     closure moves.
   Context anchors that describe today's code (the capi files #1309 moves, the record rings #1312
   and #1346 replace) stay as anchors of `6ee64f484`; F15 asks root to re-check them at filing.
-  #1382 deletes the browser's own admission (#1382 D5), and no slice edits `admit_commands` or adds
+  The attempt-3 verdict found two conflicts that check missed, and attempt 4 fixed both and
+  re-checked each against the text it touches:
+  - 05 D6 now builds on #1319 D4's `audit capi` seek (in 05's closure through 04b and #1320, and
+    now a direct dependency): #1319's anchored generation-2 source seek and its `RESULT_OK`
+    assertions stay; 05's session seek runs at generation 3 after call 4's render has applied
+    #1319's seek, so no slot holds a pending seek. Checked against #1319 D4 and against 05 D1, D3
+    and D4 (generation rule, results, the unanchored entry point).
+  - 20 D5 keeps the copy line of the masked comparison (`live_delta.rs:236`) that 10 D1 keeps, and
+    adds the EQ rows to 10 D1's `automation_row_renders`, so 10 D1's step still returns
+    `LiveRebuild::Automation` for every automation edit. Checked against 10 D1 and against 20's own
+    D5 and gates.
+  Attempt 4 did not re-run the mechanical check over all 41 drafts; it checked these two pairs and
+  the superseded gates below.
+- **Earlier gates that a later slice turns red.** Each later slice names the gate and rewrites or
+  deletes it in its own change, inside its own paths (AGENTS.md: a change that supersedes a test
+  deletes it in the same PR):
+  - 13a D2 rewrites draft 10 gate 1's mute (row 6) case to `Err(LiveRebuild::Automation)`;
+  - 20 D5 rewrites draft 02 gate 7, draft 10 gate 1, both halves of #1335 gate 4, draft 19 gate 1's
+    EQ case and the band-gain half of #1335 gate 3 (now a rebuild with one pending candidate);
+  - 22 D5a deletes #1306 gate 2's `resource_lifecycle.rs` test at S = 128 and S = 4,096, which a
+    reserved word makes `INVALID_ARGUMENT`;
+  - 09a D6 rewrites #1242's pinned order test (`crates/session/tests/vca_composition.rs:79-82`).
+  Attempt 4 found these from the attempt-3 verdict and from 09a's own change; it did not search
+  every later slice for others.
+- **Other deletions.** #1382 deletes the browser's own admission (#1382 D5), and no slice edits `admit_commands` or adds
   a browser reason. Slices 21a-21c delete the protocol queue; no slice reads it. A building block
   (04a, 14a, 16a) lands in the batch of its first user (07 lands with 02, its first user).
 - **No interim rule on `main`.** The group-cell write lands with the slice that renders the group
@@ -994,49 +1021,74 @@ small cost and keeps the output fold.
   Root re-checks the anchors of each draft when it files it, and treats #1335 as landed. Attempt 2
   re-read its new anchors on `45c5a1819`, whose code equals `6ee64f484`'s.
 
-- **F16. The VCA offsets cell's layout. Root decides; slices 09a and 11 wait for the ruling.**
-  - **Why root.** D15-6 makes VCA membership live on the C ABI because "a membership change needs
-    no new render memory" (#1247 header,
+- **F16. The VCA offsets cell's layout. Decided by root: layout 4, the offsets sum first.**
+  - **The problem.** D15-6 makes VCA membership live on the C ABI because "a membership change
+    needs no new render memory" (#1247 header,
     `.github/ISSUE_SPECS/1247-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md:8-10`), and
     #1247's product outcome lists, as live: ride or mute a VCA, add or remove a VCA, change a VCA's
-    members (`:16-21`). A lane with stored fader automation composes its VCA offsets in render at
-    each event, because one precomputed sum is not bit-exact (`crates/session/tests/vca_composition.rs:81`).
-    So render needs the offsets in a cell, and every exact layout makes some VCA edit need new
-    memory on such a lane. Decision 14 rule 1 then makes that edit a rebuild, seamless and carried,
-    completing `exact`. Each layout below narrows #1247's live set differently, and the third keeps
-    it whole at a memory cost, so root rules.
-  - **Bit-exactness of all three.** Each cell holds the reaching offsets in ascending VCA-ID order,
-    the order `effective_strip_faders` passes (`crates/session/src/vca.rs:96-120`). Layout 2 adds
-    `+0.0` words: in `f64`, `s + (+0.0) == s` except that `-0.0` becomes `+0.0`, the clamp then
-    changes nothing for a value in the fader domain, and `db_gain(±0) = 1` exactly. So all three
-    give the gain bits of the static composition (draft 09a D1 states the argument and its gate 1
-    tests it).
-
-    | Layout | Memory per automated fader lane | Live | Rebuild (seamless, carried, `exact`) |
-    |---|---|---|---|
-    | 1. One word per **reaching** VCA (attempt 2) | `12·v`, `v` the VCAs that reach the lane | a ride; a membership change that keeps the lane's reach | any change of the lane's reach: a membership edit, a VCA added or removed |
-    | 2. One word per **session** VCA, `+0.0` where it does not reach (recommended) | `12·V`, `V` the session's VCA count | a ride; every membership change, nested VCAs included | adding or removing a VCA, on a session with at least one automated fader lane |
-    | 3. Sized for the host's VCA cap: a count word and up to `V_cap` reaching offsets | `12·V_cap + 12`: 3,084 bytes in the browser (`V_cap = 256`), `12·maximum_vcas + 12` on the C ABI | everything #1247 lists | nothing |
-
-    Each figure is three #1312 slots of 4 bytes per word, plus the ramp word (12 bytes, draft 11 D4)
-    and the cell's fixed words, charged to the
-    plan as builtin bank payload (draft 09a D4), and up to three plans hold it during a
-    supersession. Render adds one `f64` per word it reads per event: `V` for layout 2, the reach for
-    layouts 1 and 3.
-  - **Recommendation: layout 2.** It keeps every ride and every membership change live, which is
-    the F9 point D15-6 decides ("VCA membership live on the C ABI"). Its memory follows the
-    session's own VCA count, not a cap the session may never use. The one rebuild, adding or
-    removing a VCA on a session with stored fader automation, is a seamless carried swap that
-    completes `exact` (D15-7, D15-17), so a listener hears no difference; only the path code and the
-    preparation time differ. Layout 3 removes that rebuild at about 3 KB per automated fader lane in
-    the browser for every session, for an edit a session makes rarely. Layout 1 rebuilds on any
-    membership change of a reached lane, which is the edit D15-6 names.
-  - **What root's ruling changes.** Slices 09a (D1, D4 and gate 1) and 11 (D2, D4, D5 and gate 4)
-    are written for layout 2 and list "finding F16 decided" as a dependency. Under layout 1, the cell
-    has one word per reaching VCA, a lane no VCA reaches has no cell, and 11 D4's rebuild case
-    becomes "any change of the lane's reach". Under layout 3, the cell has a count word and
-    `V_cap` words, and 11 D4 has no rebuild case. Root records the chosen layout, and the narrowing of
-    #1247's live set it implies (none for layout 3), in the decision-15 record.
+    members (`:16-21`). A lane with stored fader automation composes its fader value with its VCA
+    offsets in render at each event, so render keeps the offsets, or their sum, in a cell that the
+    control plane writes on a VCA edit. With #1242's order (the member's own value first, then each
+    reaching offset in ascending VCA-ID order, `crates/session/src/vca.rs:19-34`, `:96-120`), a
+    precomputed sum of the offsets can give other bits (`crates/session/tests/vca_composition.rs:81`),
+    so the cell would have to hold each offset, and every such layout either narrows #1247's live
+    set or is sized by a host cap.
+  - **The decision (root's ruling).** The composition becomes `clamp(f64(member) + S, -144, 24)`,
+    rounded once to `f32`, where `S` is the `f64` sum of the reaching offsets in ascending VCA-ID
+    order, starting from the first offset. With an empty reach the member is returned unchanged, as
+    today. The static path (`vca_effective_db`, so `effective_strip_faders`, #1247's classifier row,
+    host-core's live VCA state and builtins lowering, which all call it) uses the same rule, so a
+    cell that holds `S` gives the static bits by construction. Each automated fader lane, in every
+    session, has a cell of three words (`S` as one `f64`, one ramp word): 36 bytes in #1312's three
+    slots, whatever the VCA count, plus the cell's fixed words. A lane no VCA reaches holds
+    `S = +0.0`: in `f64`, `v + (+0.0) == v` except that `-0.0` becomes `+0.0`, the clamp changes
+    nothing for a curve value in the fader domain (draft 02), and `db_gain(±0) = 1` exactly, so the
+    gain has the static bits. Every VCA edit, adding and removing a VCA included, is one live cell
+    write; nothing rebuilds and no cap sizes the cell. Render adds one `f64` per event.
+  - **Authority.** Root ruled it under the owner's standing summation-order ruling (memory
+    `summation-order-ruling.md`): the class B order change measurably helps, because it keeps
+    D15-6's whole live set at a fixed 36 bytes per lane. The memory's text names a measured speed-up
+    as the ground; this change is for liveness and fixed memory, so root's reading of the ruling is
+    recorded here for owner review.
+  - **The amendment to #1242's order.** It is a class B change to shipped, pinned bits:
+    - the order is documented at `docs/SESSION_SCHEMA_V1.md:80` ("its own value first, then the
+      reaching VCAs' offsets in ascending VCA ID"), implemented at `crates/session/src/vca.rs:19-34`
+      and pinned at `crates/session/tests/vca_composition.rs:79-82` (line 81,
+      `vca_effective_db(24.0, [-24.0, 1e-30]) == 1e-30`, gives `0.0` in the new order);
+    - decision 13 (a) does not fix the order: the offset "adds to each member's own fader"
+      (`docs/rulings/submix-strips-sends-and-vca-2026-10-02.md:114-115`), and the module doc already
+      spells the rule `clamp(own_db + sum(offsets), -144, 24)` (`crates/session/src/vca.rs:5`);
+    - **slice 09a makes the change** (draft 09a D6): the two functions in `vca.rs`, the sentence at
+      `SESSION_SCHEMA_V1.md:80`, and the pinned test rewritten in the same change (draft 09a
+      gate 6), so no test pins the old order after it lands;
+    - **which bits move.** Each term is in `[-144, 24]` (`crates/session/src/validate.rs:584` for a
+      VCA offset; a member's fader likewise). With `k` terms, every partial sum is exact in `f64`
+      when each nonzero term is at least `k·2^-20` dB in size (about `2e-6` dB for two terms,
+      `2.5e-4` dB for 257), so both orders give the same `f64` sum and the same bits. Bits move only
+      when the terms are many orders of magnitude apart, such as the pinned `1e-30` case. Today only
+      static sessions render, so only their bits can move; stored automation renders nothing today.
+  - **Rejected alternatives** (each keeps #1242's order; each figure is three #1312 slots of 4
+    bytes per word, the ramp word included):
+    - *Layout 1, one word per reaching VCA* (`12·v + 12` bytes): rejected, because any change of a
+      lane's reach (a membership edit, a VCA added or removed) needs new memory and so rebuilds,
+      which narrows D15-6's live set.
+    - *Layout 2, one word per session VCA, `+0.0` where it does not reach* (`12·V + 12` bytes):
+      rejected, because adding or removing a VCA changes every cell's word count and so rebuilds on
+      a session with stored fader automation, which narrows D15-6's live set.
+    - *Layout 3, a count word and room for the host's VCA cap* (`12·V_cap + 24` bytes on every
+      automated lane): rejected, because a host cap, not the session, sizes render memory. On the C
+      ABI `V_cap` is `maximum_vcas`, and `maximum_vcas == 0` means `maximum_tracks`
+      (`crates/capi/src/runtime/compile.rs:517-541`; header `crates/capi/include/miso_engine_v1.h:191-194`;
+      the capi test limits pass 0, `crates/capi/src/ffi.rs:1338`), so on a host that keeps the
+      default the figure is `12·maximum_tracks + 24` with no bound of its own; preparation refuses a
+      session over the cap (`crates/host-core/src/prepare.rs:1162-1170`). In the browser host-core's
+      cap is `u64::MAX` (`hosts/host-web/src/lib.rs:6594`); the bound is the compiled
+      `MAXIMUM_BROWSER_VCAS = 256` (`:89`), which boot enforces (`browser_vca_shape`,
+      `:6398-6400`), so the figure is `12·256 + 24 = 3,096` bytes per automated lane in every
+      session.
+  - **The drafts.** Slices 09a and 11 are written for layout 4 and wait for no ruling. Root records
+    the decision, with its authority, in the decision-15 record; it narrows nothing in #1247's live
+    set.
 
 - **F17. GitHub #1306 is closed, but its spec is open.** The body of commit `6b8bc7c96` contains
   "Fix #1306/#1058 …", which GitHub reads as a closing keyword. The attempt-2 verdict reports that
@@ -1046,8 +1098,9 @@ small cost and keeps the output fold.
   GitHub #1306.
 
 - **F18. Two dependency specs are not on this branch.** Draft 16a depends on *Retarget a live input
-  filter only through its designs and their mixtures* (#1407), and drafts 14a and 15 cite *Keep
-  every trim, fader and matrix ramp inside its endpoints* (#1408). Their specs exist only on
+  filter only through its designs and their mixtures* (#1407), and drafts 08, 14a and 15 cite *Keep
+  every trim, fader and matrix ramp inside its endpoints* (#1408; draft 08 for its site 1, the fader
+  and mute ramp kernel `gain_mute_ramp_block`). Their specs exist only on
   `codex/d15-stream-g` (`5cfc1fb6d`), not on `c63f5f37d`. Attempt 3 read #1407 there: its D5
   keeps `InputStage::apply_prepared_filter` as the one retarget entry and changes only its rules,
   so 16a's call through it stays valid. Root merges stream G's specs before it files 16a.
@@ -1142,6 +1195,50 @@ returned **FAIL**: one major, three minors, five nits. Each is folded in:
   edit keeps its meaning under every option; A1.4 states the completion sample `τ` for `L = 0`; the
   "Acyclic" wording is corrected; the hot-file hazards of 19 and 20 name `hosts/host-web/src/tests.rs`;
   F17 asks root to reopen GitHub #1306.
+
+**Attempt 4.** The attempt-3 adversarial verdict (`/home/bl/misofm/submix-verdicts/1058-attempt3.md`)
+returned **FAIL**: one major, three minors, nine nits. Each is folded in:
+
+- **MA1** (F16 incomplete, false premise): the sentence "every exact layout makes some VCA edit
+  need new memory" is gone. F16 now holds layout 4 (the offsets sum first, `S` in one `f64`, 36
+  bytes per automated lane whatever the VCA count, every VCA edit a live write), which root adopted
+  under the standing summation-order ruling (F16 records the authority and that the memory's text
+  names a measured speed-up). Layouts 1-3 are rejected alternatives with one line each. Layout 3's
+  sizing is corrected on both hosts (`maximum_vcas == 0` means `maximum_tracks` on the C ABI; the
+  browser bound is the compiled `MAXIMUM_BROWSER_VCAS`, enforced at boot; 3,096 bytes). Drafts 09a
+  and 11 are written for layout 4 and wait for no ruling; 09a D6 makes the order change and
+  rewrites the pinned test in the same change. The memory formula charges `36·F`, which is right
+  for a lane with no VCA, since its cell exists.
+- **m1**: draft 25 authorizes the `TransportState` reliable payload and constructor in `queue.rs`
+  and widens its grep; draft 02 authorizes the builtins policy script's dependency list. A fresh
+  sub-agent (Opus 5.5, extra-high effort; read-only, no build) then checked every other draft's
+  gates against the policy scripts and its authorized paths, and each finding is fixed in the
+  draft: 04a (the host-core diagnostic arm and its table, since `SourceSeekError` is exhaustive),
+  04b (host-core's test re-export of the timeline reader, the browser ceilings), 05 and 12 (capi's
+  `graph` dev-dependency with `test-support`; 05's symbol-list anchor), 06a (gate 2 no longer
+  claims a timeline read the SDK cannot make), 07 (`g6_full_corpus_ftz.rs`'s row count), 09a
+  (host-core's `automation` edge), 09b (the source driver's block reader), 11, 13a, 13b, 14b, 15
+  and 16b (the allocation gates move to `crates/host-core/tests/`, since
+  `scripts/check-bench-policy.sh:257-280` bans `bench-support` in any `hosts/` manifest), 13b
+  (graph's `automation` edge and the graph policy pins), 16a and 16b (a `test-support` reader of
+  the filter design count), 17b (`Cargo.lock`), 18a (effect-compiler's `automation` edge and its
+  policy pin), 20 (the EQ target buffer is sized at bind from `maximum_targets()`, since
+  `MAXIMUM_TARGETS` is private and rack may not depend on the EQ), 21a and 21c (capi tests that
+  name the deleted protocol types), and 24a (gate 1 moves to the bench test; `bench` gains `capi`
+  and `session-validator`, and `tools/bench/src/console.rs` joins the approved unsafe owners, with
+  the dependency-union and unsafe-owner pins and their self-tests authorized). Not checked without a
+  build: new iOS `memset_pattern16` call sites (`scripts/lib/aarch64-known-defects.py`) and new
+  trap owners in the worklet call graph.
+- **m2**: draft 05 D6 builds on #1319 D4 (a generation-3 session seek after #1319's seek has
+  applied); draft 20 D5 keeps 10 D1's copy line and adds the EQ rows to `automation_row_renders`.
+  The "No placeholder and no cycle" claim now states what each attempt checked.
+- **m3**: 13a, 20 and 22 name and rewrite or delete the earlier gates they turn red (list in "No
+  placeholder and no cycle").
+- **Nits**: row 05 lists #1309 and #1319; 21b's stray fragment is gone; 06b's producer takes a
+  `number` frame and the SDK converts; 05 D5 places its paragraph in #1317 D1's sequence; 07 D3's
+  `value_at` takes a segment table; 26 removes the retired rate from
+  `scripts/check-parameter-metadata-v1.py`; 22's Context matches the #1306 rows; draft 08 cites
+  #1408 and F18 says so; the memory formula is fixed (MA1).
 
 ## Spec anchors, checked again
 

@@ -94,7 +94,7 @@ that write the send's cell are draft 13c's.
 ## Authorized paths
 
 - `crates/host-core/src/prepare.rs` (the route lanes, the cell seed and the carry join),
-  `crates/host-core/tests/route_mute.rs` (new)
+  `crates/host-core/tests/route_mute.rs` (exists; new cases)
 - `crates/graph-compiler/src/ids.rs` (only to make `route_values`, `:309-322`, public or to expose
   a public wrapper for it), `crates/graph-compiler/src/pdc.rs` (only to export `a(tap)`, if #1285's
   inventory does not already give it)
@@ -102,7 +102,12 @@ that write the send's cell are draft 13c's.
   op only; stream A's files, sequenced by root), `crates/lane/src/kernels.rs` (a range entry only,
   if the split needs one)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `hosts/host-web/tests/follow_automation_realtime.rs` (new)
+  `crates/host-core/tests/follow_automation_realtime.rs` (new)
+- `crates/graph/Cargo.toml` (a normal `automation` dependency: the route op runs draft 07's
+  cursors in graph, and graph cannot reach them through builtins-compiler,
+  `scripts/check-builtins-policy.sh:21`), `Cargo.lock`, `scripts/check-graph-policy.sh` (the
+  pinned graph dependency list, `:19-22`) and `scripts/test-graph-policy.sh` (its fixture list,
+  `:7-13`), each gaining `automation` only. This slice is the first to add the edge.
 
 ## Non-goals
 
@@ -126,7 +131,7 @@ that write the send's cell are draft 13c's.
    `both` with steps 0, 1, 0, at samples that are not grid samples. From the end of each mute ramp
    (plus the send's compensation delay), the output is bit-identical to a plan prepared with the same
    static mute, fed the same PCM. With live controls off in the browser too.
-2. **Same timeline sample, same length** (`crates/host-core/tests/route_mute.rs`, new). With a
+2. **Same timeline sample, same length** (`crates/host-core/tests/route_mute.rs`, new cases). With a
    latent insert of `L = 64` before the fader and an `input` tap: the send's route ramp starts `L`
    render samples before the strip's mute ramp, with the same length, so both act on the same
    timeline sample; with a `post_fader` tap both start on the same render sample. At quanta 128 and
@@ -136,8 +141,11 @@ that write the send's cell are draft 13c's.
    second part's entry, bit for bit.
 4. **Carry** (`crates/host-core/tests/route_mute.rs`). A rebuild that adds an automated mute to `t`
    keeps the send's ramp state by route ID; the swap block allocates and frees nothing.
-5. **Realtime.** `hosts/host-web/tests/follow_automation_realtime.rs` (new integration binary, links
-   `bench_support::alloc`, calls `assert_installed()` first) runs gate 1's browser script:
+5. **Realtime.** `crates/host-core/tests/follow_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
+   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
+   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
+   `assert_installed()` first). It drives the script through host-core's shared commit and render
+   session, the code the browser Worker and the C ABI both run. For gate 1's script:
    `allocations == 0 && frees == 0` around every render call after warm-up.
    `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` reports all
    violation counts 0.

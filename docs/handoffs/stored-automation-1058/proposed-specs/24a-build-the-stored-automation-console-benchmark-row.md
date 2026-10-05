@@ -85,7 +85,10 @@ is descriptive: no threshold, no tuning.
   compiles each arm with `miso_engine_v1_compile_session` and the reference limits, submits the
   fixture's source PCM before every block (outside the clock), and times
   `miso_engine_v1_render_f32_planar` alone, one call per arm per observation, arms alternated.
-  `bench` gains `capi` as a dependency. Every arm hashes its output outside the clock.
+  `bench` gains `capi` and `session-validator` as dependencies. The C ABI entry points are
+  `unsafe extern "C"` (`crates/capi/src/ffi.rs:311`, `:426`, `:807`), so `tools/bench/src/console.rs`
+  becomes an approved unsafe owner beside `tools/audit/src/capi.rs`, with the same
+  justification: it calls the C ABI as a host does. Every arm hashes its output outside the clock.
 - **D3. In-run statements.** Asserted before the record is printed: `flat`'s digest equals
   `none`'s (class A: a flat curve emits no event and renders the static value, A1.4 "change
   only"); `moving`'s differs from `flat`'s; zero allocations, locks and syscalls inside the clock
@@ -113,12 +116,22 @@ is descriptive: no threshold, no tuning.
 ## Authorized paths
 
 - `tools/console-workload/src/stored_automation.rs`, `tools/console-workload/src/lib.rs` (the
-  module line), `tools/console-workload/tests/stored_automation.rs`
+  module line)
 - `tools/bench/src/console.rs`, `tools/bench/Cargo.toml`, `Cargo.lock`
 - `scripts/console-benchmark-record-validator.jq`, `scripts/console-benchmark-validator.jq`,
   `scripts/console-benchmark-record-lib.jq`, `scripts/test-console-benchmark.sh`
 - `scripts/operator/run-console-benchmark.sh`, `scripts/operator/preflight-console-benchmark.sh`
   (the record count only)
+- `scripts/check-conformance-boundaries.sh` (the pinned `tools/bench` dependency union,
+  `:220-224`) and `scripts/test-conformance-boundaries.sh` (its fixture manifest, `:24-40`): `capi`
+  and `session-validator` join, only
+- `scripts/check-bench-policy.sh` (the approved unsafe owners under `tools/`, `:219-233`) and
+  `scripts/check-realtime-policy.sh` (the unsafe ownership allowlist, `:29`):
+  `tools/bench/src/console.rs` joins each, only, and their self-tests
+  `scripts/test-bench-policy.sh` (the owner list of the `unsafe-owner-grep-error` case, `:499`)
+  and `scripts/test-realtime-policy.sh` (its unsafe-owner fixtures), only where they list the
+  owners; `docs/REALTIME_DEPENDENCY_POLICY.md` ("Unsafe-code
+  ownership", the reason for that file)
 
 ## Non-goals
 
@@ -143,7 +156,8 @@ is descriptive: no threshold, no tuning.
 
 ## Objective gates
 
-1. **Premises** (`tools/console-workload/tests/stored_automation.rs`, new). The three documents
+1. **Premises** (`tools/bench/src/console.rs` test, new: `console-workload` depends on neither
+   `capi` nor `session-validator`, and `bench` gains both). The three documents
    pass all five `session-validator` stages; every automated value equals its lane's static value
    at timeline 0; each family moving alone changes the C ABI digest.
 2. **Record and validator** (`tools/bench/src/console.rs` test, new, on a short run as the mixing

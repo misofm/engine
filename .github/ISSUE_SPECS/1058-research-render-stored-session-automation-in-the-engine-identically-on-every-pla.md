@@ -84,9 +84,9 @@ the note's heading for each. No product code change.
 
 ## Decision record
 
-The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 3; anchors checked on
-`6ee64f484`, whose code equals `45c5a1819`'s and `c63f5f37d`'s; every finding of the attempt-1 and
-attempt-2 verdicts folded in). One
+The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 4; anchors checked on
+`6ee64f484`, whose code equals `45c5a1819`'s, `c63f5f37d`'s and `423b9d4a1`'s; every finding of the
+attempt-1 to attempt-3 verdicts folded in). One
 line per answer:
 
 - **A1** ([Design](../../docs/handoffs/stored-automation-1058/README.md#a1-design)): the control
@@ -103,8 +103,9 @@ line per answer:
   enough; it gains the hold rule, one entry per lane, the pan or matrix form, 64 samples between
   jumps, unit, domain, shape and filter-order rules, and jump ramps from `control_smoothing`.
 - **A4** ([Cost](../../docs/handoffs/stored-automation-1058/README.md#a4-cost)): `80 + 32·n` bytes per
-  automated cell, owned by the plan, independent of song length (plus a VCA offsets cell per
-  automated fader lane whose layout root decides, finding F16); CPU per block at most
+  automated cell, owned by the plan, independent of song length (plus a VCA offsets cell of
+  36 bytes per automated fader lane, whatever the VCA count: root's decision F16 sums the reaching
+  offsets first, a class B change to #1242's order that slice 09a makes); CPU per block at most
   `2⌈q/64⌉ + 3` events per cell times per-row operation counts.
 - **A5** ([Bit-identity](../../docs/handoffs/stored-automation-1058/README.md#a5-bit-identity)): the
   same session and host operations give the same bits on every target (scalar `f64` through
@@ -210,3 +211,27 @@ three minors, five nits). No product code changed and no benchmark ran. Per find
 The plan stays forty-one slices in twenty-six steps and seven batches; draft 02 now depends on draft
 07 (both R1). Gate 3 deviates as in attempt 1. Gates run: `bash scripts/check-workspace-policy.sh`
 and `bash scripts/check-dsp-research.sh`.
+
+**Attempt 4** (stream K research worker). The attempt-3 adversarial verdict returned FAIL (one major,
+three minors, nine nits). No product code changed and no benchmark ran. Per finding:
+
+- **MA1**: F16's false premise is removed. Root ruled layout 4 during this attempt, under the
+  standing summation-order ruling: the reaching VCA offsets sum first in ascending VCA-ID order,
+  then the member is added and clamped, on the static path too; 36 bytes per automated fader lane
+  at any VCA count; every VCA edit, adding and removing a VCA included, is a live write. F16
+  records the authority (and that the memory's text names a measured speed-up), the amendment to
+  #1242's order (`docs/SESSION_SCHEMA_V1.md:80`, `crates/session/tests/vca_composition.rs:79-82`),
+  which slice 09a makes with the pinned test rewritten in the same change, the bit-move bound, and
+  layouts 1-3 as rejected alternatives. Layout 3's sizing is corrected on both hosts. Drafts 09a
+  and 11 are written for layout 4 and wait for no ruling. The memory formula is `36·F`.
+- **m1**: draft 25 authorizes the `TransportState` payload in `queue.rs`; draft 02 the builtins
+  policy pin. A fresh read-only sub-agent checked every draft's gates against the policy scripts
+  and its paths; each finding is fixed in its draft (README "Verification", attempt 4).
+- **m2**: draft 05 D6 builds on #1319 D4 (a generation-3 session seek); draft 20 D5 keeps 10 D1's
+  copy line. The README's no-conflict claim states what each attempt checked.
+- **m3**: 13a, 20 and 22 rewrite or delete the earlier gates they turn red.
+- **Nits**: all nine (README "Verification", attempt 4).
+
+The plan stays forty-one slices in twenty-six steps and seven batches. Gate 3 deviates as in
+attempt 1. Gates run: `bash scripts/check-workspace-policy.sh` and
+`bash scripts/check-dsp-research.sh`.

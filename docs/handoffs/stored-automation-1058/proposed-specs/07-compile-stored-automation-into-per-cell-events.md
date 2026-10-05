@@ -75,7 +75,11 @@ it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first
     `control_smoothing` edit reaches the next jump with no rebuild (draft 12).
   - `CellState`: cursor, current target bits, the node time at which the ramp in flight on the
     lane completes, a held flag, and the last seek boundary. At most 48 bytes (a `const` assertion).
-- **D3. `value_at(t: i64) -> f32`.** The hold rule over the segment containing `t`. Inside a
+- **D3. `value_at(segments: &[Segment], t: i64) -> f32`.** A free function of the crate that takes
+  only a segment table, never a `CellProgram`: render calls it with a program's segment slice, and
+  draft 02 calls it with a table it builds from one session entry (`Segment` per
+  `AutomationSegment`, the same fields), so preparation's check and render read one law. The hold
+  rule over the segment containing `t`. Inside a
   `linear` or `exponential` segment, `x = (t - t0) as f64 / (t1 - t0) as f64` (both differences are
   exact below `2^53`); `linear` is `v0 + (v1 - v0)·x` in `f64`; `exponential` is
   `v0·math::pow(v1/v0, x)` in `f64`. One rounding to `f32` at the end. No lane math, no platform
@@ -142,7 +146,10 @@ it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first
 - `crates/automation/` (new)
 - `Cargo.toml` (workspace member and dependency), `Cargo.lock`
 - `tools/wasm-gate-corpus/src/lib.rs`, `tools/wasm-gate-corpus/Cargo.toml` (one appended case
-  block), `tools/wasm-gates/tests/g5_native_corpus.rs` (the layout check for the appended block)
+  block), `tools/wasm-gates/tests/g5_native_corpus.rs` (the layout check for the appended block),
+  `tools/wasm-gates/tests/g6_full_corpus_ftz.rs` (its `expected_rows`, `:188-192`, counts only math
+  and delay cases as width-independent, `tools/wasm-gate-corpus/src/lib.rs:527-529`; the new
+  scalar block joins that count)
 - `scripts/check-realtime-policy.sh` (the two floors only)
 
 ## Non-goals

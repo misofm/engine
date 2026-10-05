@@ -56,7 +56,11 @@ mute are drafts 13b and 13c.
   - The classifier's row list (draft 10 D1) gains row 6: a mute automation edit is a carried
     rebuild (draft 10 D2 carries mute cells by the same address scheme). A static mute edit on an
     automated lane gives no record (draft 10 D3); a browser live mute edit on it reaches that rule
-    through the Worker's apply (#1382) and replies `model_only`.
+    through the Worker's apply (#1382) and replies `model_only`. This turns red draft 10's gate 1
+    case "A mute (row 6) entry change gives `Ok` with no records"
+    (`crates/host-core/tests/live_delta.rs`); this slice rewrites that case in place to expect
+    `Err(LiveRebuild::Automation)` (AGENTS.md: a change that supersedes a test rewrites it in the
+    same PR), and gate 4 below holds the new rule.
   - For an automated mute lane, the shared commit's mute composition (#1247's VCA mute, #1382 D3's
     solo overlay) writes the strip mute cell's `terms` instead of emitting a `Mute` record, and only
     when the terms' bits change. On the C ABI the overlay is absent, so `terms` is the VCA mute;
@@ -78,7 +82,7 @@ mute are drafts 13b and 13c.
 - `crates/host-core/src/{prepare.rs,live_delta.rs,solo.rs}`, `crates/host-core/tests/live_delta.rs`
 - `crates/control-plane/src/` (the overlay composition's terms write)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `hosts/host-web/tests/mute_automation_realtime.rs` (new)
+  `crates/host-core/tests/mute_automation_realtime.rs` (new)
 
 ## Non-goals
 
@@ -110,8 +114,11 @@ mute are drafts 13b and 13c.
    other, non-automated lane it gives its `Mute` record; a VCA mute of `t` gives one terms write and
    no `Mute` record for the automated lane. Browser: a live mute edit through the Worker's apply on the automated lane replies
    `model_only` and moves no bit.
-5. **Realtime.** `hosts/host-web/tests/mute_automation_realtime.rs` (new integration binary, links
-   `bench_support::alloc`, calls `assert_installed()` first) runs gate 1's browser script:
+5. **Realtime.** `crates/host-core/tests/mute_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
+   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
+   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
+   `assert_installed()` first). It drives the script through host-core's shared commit and render
+   session, the code the browser Worker and the C ABI both run. For gate 1's script:
    `allocations == 0 && frees == 0` around every render call after warm-up.
    `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` reports all
    violation counts 0.

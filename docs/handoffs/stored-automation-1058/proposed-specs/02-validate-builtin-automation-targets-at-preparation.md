@@ -91,7 +91,8 @@ that would cross a curve with the same code. Nothing renders the table yet.
     a hold on both sides). A side that is a constant `0` ("off") on the sub-interval leaves it
     unchecked; D1 keeps every `linear` and `exponential` piece away from `0`.
   - **Order.** On each sub-interval where both sides are enabled, with values evaluated at `a` and
-    at `b` by draft 07's `value_at` (D3 there, A1.4's law; a constant is its `f32` value):
+    at `b` by draft 07's `automation::value_at(&segments, t)` over a `Segment` table built from
+    the entry's segments (D3 there, A1.4's law; a constant is its `f32` value):
     - both constant: `H < L` in `f32`, the static rule;
     - both `linear`, or both `exponential`: `L > H·(1 + 2^-22)` at `a` and at `b`;
     - otherwise: `min(L(a), L(b)) > max(H(a), H(b))·(1 + 2^-22)`.
@@ -140,6 +141,9 @@ that would cross a curve with the same code. Nothing renders the table yet.
 - `crates/builtins-compiler/src/lib.rs` (the two functions, their exports and their call only),
   `crates/builtins-compiler/Cargo.toml` (the `automation` dependency only), `Cargo.lock`,
   `crates/builtins-compiler/tests/builtin_automation_targets.rs`
+- `scripts/check-builtins-policy.sh` (only `expected_compiler`, `:17`, which pins builtins-compiler's
+  exact dependency list, sorted by `gate_toml_dependencies`, `scripts/lib/gate.sh:162-196`:
+  `automation` joins it first)
 - `crates/host-core/src/live_delta.rs` (D5 only; stream B owns it, root sequences the merge),
   `crates/host-core/tests/live_delta.rs`, `crates/capi/src/runtime/live_tests.rs` (tests only)
 - `tools/session-validator/tests/validate.rs`
