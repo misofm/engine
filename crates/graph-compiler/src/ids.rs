@@ -306,18 +306,13 @@ pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTra
     })
 }
 
-/// A route's gain domain in dB, inclusive (issue #1237 D2). The session validator refuses the
-/// same domain (`validate_routes`); `tests/route_coefficients.rs` holds the two to the same
-/// boundaries.
-const ROUTE_GAIN_DB_MINIMUM: f32 = -144.0;
-const ROUTE_GAIN_DB_MAXIMUM: f32 = 24.0;
-/// A route's matrix coefficient domain is `[-1, 1]`, inclusive (issue #1237 D2).
-const ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM: f32 = 1.0;
-
 /// The unfolded transform of a route whose values are in domain: the gain in
 /// `[-144, 24]` dB and every coefficient in `[-1, 1]` (issue #1237 D2), then `route_transform`'s
 /// checks. It backs [`route_coefficients`] and the compiler's lowering, so both refuse exactly the
-/// same values and the transform is derived once.
+/// same values and the transform is derived once. The domain is the session model's constants
+/// ([`session::ROUTE_GAIN_DB_MINIMUM`], [`session::ROUTE_GAIN_DB_MAXIMUM`],
+/// [`session::ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`]), which the session validator's
+/// `validate_routes` also reads, so the two paths cannot spell different domains.
 ///
 /// Inside that domain no fold can overflow: the largest product is `db_to_gain(24) * 1`, about
 /// `15.85`. A product can still be subnormal (a coefficient below about `1.9e-31` at -144 dB);
@@ -327,9 +322,11 @@ pub(crate) fn route_values(
     matrix: [f32; 4],
 ) -> Result<RouteTransform, RouteValueError> {
     // `contains` is false for NaN, so a non-finite value is refused here too.
-    let in_domain = (ROUTE_GAIN_DB_MINIMUM..=ROUTE_GAIN_DB_MAXIMUM).contains(&gain_db)
+    let in_domain = (session::ROUTE_GAIN_DB_MINIMUM..=session::ROUTE_GAIN_DB_MAXIMUM)
+        .contains(&gain_db)
         && matrix.iter().all(|coefficient| {
-            (-ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM..=ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM)
+            (-session::ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM
+                ..=session::ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM)
                 .contains(coefficient)
         });
     if !in_domain {
