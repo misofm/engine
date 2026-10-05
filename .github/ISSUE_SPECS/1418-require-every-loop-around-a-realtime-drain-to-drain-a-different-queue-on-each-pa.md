@@ -254,3 +254,161 @@ the receiver rebound by a struct `let`, by a closure parameter, by a `match` arm
   `pos`). The spec's fixture would not have caught this bug, because no valid `if let` case
   exists.
 - I did not meet any other unmarked render-thread `try_pop`. I did not survey for them.
+
+### Attempt 2 (implementer, 2026-10-05)
+
+Answers the attempt-1 verdict (`/home/bl/misofm/submix-verdicts/1418-attempt1.md`: FAIL, MAJOR-1,
+MINOR-1 to MINOR-3, NIT-1 to NIT-3) and root's rulings for this attempt.
+
+**What changed.**
+- **MAJOR-1: index form narrowed to D1's governing clause.** This is a clarification that
+  implements D1's governing clause ("accepted only if the queue drained changes with that loop's
+  pass"), not a spec amendment. D1's index bullet ("indexed by exactly one identifier the loop's
+  pattern binds") is now read as: the index is the one identifier that takes a different value on
+  each pass, and the base is the same on every pass. In `scripts/check-realtime-policy.sh`:
+  - `classify` records `lidx[f]`, the identifier that takes a new value on each pass: the lone
+    (non-`mut`) pattern of a `0..<bound>` loop (all three range branches), the parameter of an
+    `array::from_fn` closure, or the index slot of a trailing `.enumerate()` with pattern
+    `(<ident>, ..)` (`enumidx`; not over `& mut ..`, which may be an infinite iterator). The index
+    form accepts only `x == lidx`, still rebound by no `let`, header, macro or item in the loop.
+    So `for &lane in order`, `for &lane in &self.order`, `for (_, &lane) in ..enumerate()`,
+    `for lane in &mut lanes` and `for mut lane in 0..2 { lane = 0; .. }` no longer select.
+  - A new check, `uses`, proves the base (and, for the same reason, a pattern-bound queue) stays
+    in place. Each selection step is now a candidate; when the loop closes, every mention in its
+    body of the root of each spelling the walk read must lie in a binding or header the walk read
+    (less the `else` block of a `let .. else`), or read that spelling, then only fields and plain
+    indexes, as the receiver of `available_at_entry`, `try_pop` or `map_or(0, ..)`. Only then is
+    `sel[f, g]` set; a loop still open at the region end never selects. This refuses
+    `controls.swap(0, 1)`, `controls = &mut all[0..]`, a `let controls = ..` rebinding, and also a
+    hole the verdict did not list but D1's clause covers: a pattern-bound element moved through a
+    spare (`if lane == 1 { mem::swap(control, spare) } <drain> if lane == 0 { mem::swap(control, spare) }`
+    drains lane 0's queue again in lane 1). The over-refusal is any other use of those names in
+    the loop (`self.apply(..)` beside `self.controls[lane]`); no real drain has one.
+  - After an index step, the next loop out must select the **base** (`NXT`), not the collection
+    the indexing loop iterates. Otherwise `for bank in .. { for (lane, _) in bank.order.iter().enumerate() { controls[lane] .. } }`
+    passes and drains `controls` once per bank. A side effect: NIT-3's
+    `for bank in &mut self.banks { for lane in 0..N { bank.controls[lane] .. } }` is now accepted,
+    correctly.
+  - Clauses removed as redundant (each is subsumed, so no case can make its removal red):
+    `binder(b, ..) == ""` (M4) and the `mut` exclusion in `patbound` (M9), because any rebinding,
+    reassignment or macro use of a base or pattern-bound name is a mention `uses` refuses (the
+    `mut` exclusion still exists for `lidx`, where an assignment to the index is not a mention of
+    a checked name); `x != b` (M5), because `x == lidx` puts `x` in the pattern; and
+    `lpat !~ tw(b)` (M13), because a base the pattern binds is already the first (pattern-root)
+    form and selects correctly (each pass has a different base). `patbound` is gone.
+  - `resolve` refuses a chain of more than 64 rebindings (wrapper over `resolve1`). That keeps the
+    walk bounded even if a later edit lets a step see its own offset again: the attempt-1
+    self-match bug (M17) now fails in 0.8 s with a clean refusal, where before it ran out of
+    memory.
+  - Comment: the headline, the bullets the verdict quoted at `:120` and `:135-136` (now the index
+    bullet and the "collections are taken at their word" sentence), and the `&mut` iterator note
+    at `:156-158` now state what the gate checks.
+- **MINOR-3: headline.** D6 asks the headline to state the bound the rule proves. The rule proves
+  "each drain pops at most the records its queue held when its count was read, and each drain
+  reads a given queue at most once per block", so the headline now says that. A sequential
+  double drain of one queue is **not** refused, and the comment lists it under "These stay
+  outside it". Reason: two different spellings can name one queue (`self.control` and a `let`
+  alias, a helper), so a spelling-based refusal would be unsound, and the spec's Non-goals already
+  leave pops in helpers outside. The Hazards line "must be written as one counted drain, not as
+  an outer loop" concerns outer loops only. Each sequential drain is bounded by its own count, so
+  the total stays finite. If root wants D6 read as a per-block bound, that is a new issue.
+- **MINOR-1 and root ruling 2 (`drain_controls`-shaped region).** The valid fixture's
+  `drain_controls`-shaped region caught no mutant that `drain_fader_records` did not, and no
+  distinct mutant was found for it (the real `begin_block` call is a helper call, outside the
+  per-region rule). Choice: **removed**, as a root-authorized deviation from D4. Its region slot
+  (needed for the 90-region floor) now holds the MINOR-1 valid case
+  `drain_optional_controls` (`for control in controls.iter_mut() { if let Some(control) = control.as_mut() { <drain> } }`),
+  which no other case reaches. `drain_fader_records` keeps the `let .. else` shape of the real
+  `drain_controls`.
+- **Valid fixture additions** (`crates/builtins/src/lib.rs`, region 1): `drain_gained_lanes` (the
+  index slot of `.enumerate()` over another collection), `drain_bank_lanes` (a range over each
+  bank's lanes; the bank loop selects the index base `bank.controls`) and `drain_even_lanes` (an
+  `if` whose condition names the index, around `let control = &mut controls[lane]`).
+- **Expected failures added** (all in `drain_matrix_controls`): `outer-index-table` (shape 1),
+  `outer-index-table-field` (shape 2), `outer-enumerated-index-table` (shape 3/5),
+  `outer-borrowed-index-cycle` (shape 4), `outer-borrowed-enumerated-cycle`,
+  `outer-index-base-swapped` (shape 5), `outer-index-base-reassigned` (shape 6),
+  `outer-index-base-rebound` (M4's base rebound, by a `let` the walk cannot read),
+  `outer-element-swapped-with-spare`, `outer-element-moved-in-let-else`, `outer-index-rebound`,
+  `outer-index-rebound-by-macro` (M8), `outer-index-shadowed-by-block-const` (M11),
+  `outer-index-reassigned` (`for mut lane`) and `outer-loop-around-unselected-base`.
+
+**Gates.**
+1. `bash scripts/check-realtime-policy.sh` prints `realtime policy: ok (90 marked regions in 25 files)`
+   with `awk` resolving (via a `PATH` shim directory) to gawk 5.2.1 (0.63 s), mawk 1.3.4 (0.59 s)
+   and busybox awk (1.85 s).
+2. `bash scripts/test-realtime-policy.sh` prints `realtime policy mutation tests: ok` under the
+   same three awks.
+3. Red on revert, with a listing copy of the new test script (unexpected passes listed instead of
+   exiting; a case counts as passing when the gate output names no
+   `crates/builtins-compiler/src/lib.rs` line, so the three existing cases that mutate other
+   files, `drain-while-without-decrement`, `drain-while-decrement-not-first` and
+   `drain-open-tail-last-file`, are listing artifacts and are red in the real script):
+   - `main`'s gate (`da878bd49^`) passes every D4 case (`drain-outer-usize-max`, `-capacity`,
+     `-unit-array-parameter`, `-borrowed-open-range`, `-index-expression`, `-counted-loop`,
+     `drain-same-queue-lane-pairs`) and every attempt-2 case listed above.
+   - Attempt 1's gate (`da878bd49`) passes `drain-outer-index-table`, `-index-table-field`,
+     `-enumerated-index-table`, `-borrowed-index-cycle`, `-borrowed-enumerated-cycle`,
+     `-index-base-swapped`, `-index-base-reassigned`, `-element-swapped-with-spare`,
+     `-element-moved-in-let-else` and `-loop-around-unselected-base`, and fails the new valid
+     fixture (`drain_bank_lanes`). It refuses `-index-base-rebound`, `-index-rebound`,
+     `-index-rebound-by-macro`, `-index-shadowed-by-block-const` and `-index-reassigned`.
+4. Mutations, each applied alone to the new gate (red, then reverted green; the real tree passes
+   under each except M3):
+   - Spec M1, any identifier inside the index (`[[] " ident "[^]]* []]`): only
+     `drain-outer-index-expression` passes.
+   - Spec M2, a receiver with no binding in the loop is accepted (`return 1` for `r == ""`): the
+     valid fixture fails (`crates/builtins/src/lib.rs:90`, because the pattern-root form now
+     takes `bank.controls[lane]` and stops the walk). Listed with the valid check skipped:
+     `drain-outer-usize-max`, `-capacity`, `-unit-array-parameter`, `-borrowed-open-range`,
+     `-counted-loop`, `drain-same-queue-lane-pairs` and the index cases pass.
+   - Spec M3, the `let` step dropped (`if (r ~ /^L/) return 0`): the valid fixture fails at
+     builtins-compiler `:10` and builtins `:44`, `:103`, `:116`; the real tree fails at
+     `crates/builtins-compiler/src/lib.rs:475` (`drain_controls`), `:1078` and `:1122`.
+   - A: the index accepts any non-`mut` pattern identifier (the attempt-1 rule): exactly
+     `-index-table`, `-index-table-field`, `-enumerated-index-table`, `-borrowed-index-cycle` and
+     `-borrowed-enumerated-cycle` pass.
+   - B: `uses` always true: exactly `-index-base-swapped`, `-index-base-reassigned`,
+     `-index-base-rebound`, `-element-swapped-with-spare`, `-element-moved-in-let-else` pass.
+   - C: the `else` block counted as part of the binding (`e = e`): only
+     `-element-moved-in-let-else` passes.
+   - D: after an index step the next receiver is the iterated collection: the valid fixture fails
+     (`crates/builtins/src/lib.rs:90`, `drain_bank_lanes`). D2, the same only when the loop
+     iterates a collection: only `-loop-around-unselected-base` passes.
+   - E: `binder(x)` dropped from the index form: exactly `-index-rebound`,
+     `-index-rebound-by-macro`, `-index-shadowed-by-block-const` pass.
+   - F (verdict M8): `macro_named` dropped from `binder`: only `-index-rebound-by-macro` passes.
+   - G (verdict M11): `item(x)` dropped from `binder`: only `-index-shadowed-by-block-const`
+     passes.
+   - H (verdict M9, now on `lidx`): `lidx` accepts `mut <ident>` for `0..<bound>`: only
+     `-index-reassigned` passes.
+   - I (verdict M14): a pure `if` header counted as a binding: the valid fixture fails at
+     `crates/builtins/src/lib.rs:116` (`drain_even_lanes`).
+   - K (verdict M6): every `if let` header refused: the valid fixture fails at builtins-compiler
+     `:29` (`drain_optional_controls`).
+   - M17 (verdict): the self-match bug reintroduced (`if (hstart[h] >= pos) continue` removed):
+     the valid fixture fails at builtins-compiler `:29` in 0.76 s (the 64-link cap). With the cap
+     also removed, gawk exits with `cannot allocate memory` after 28 s under `ulimit -v 4000000`.
+   - L: `enumidx` disabled: the valid fixture fails at builtins `:103` (`drain_gained_lanes`).
+     L2, `enumidx` takes the last slot: the same.
+   - N: the `WS`/`WR` restore after a failed pattern-root try removed: only
+     `-index-base-rebound` passes.
+   - P: `enumidx` over `& mut ..` allowed: only `-borrowed-enumerated-cycle` passes.
+5. `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+**Root ruling 3, run time (NIT-1).** The real tree takes 0.63 s (gawk), 0.59 s (mawk) and 1.85 s
+(busybox), well under the 10 s threshold, so no action. The growth stays superlinear in
+synthetic input: a 1000-line loop body with 3000 mentions of the queue **before** its count read
+took 43 s (gawk), 31 s (mawk) and more than 300 s (busybox); the same mentions after the read
+took 0.5 s, 0.3 s and 1.0 s; a chain of 100 `let Some(control) = control.as_mut() else` (refused
+at 64 links) took 5.6 s, 3.8 s and 41 s. The cost is `macro_named`'s backward scan per mention
+per `binder` call; computing macro spans once per region is the follow-up if a real region ever
+approaches it.
+
+**Notes for root.**
+- `uses` widens D1's check from the index base to every name the walk reads (the
+  `mem::swap(control, spare)` hole is in the pattern-root form too). It is the same governing
+  clause; no real drain is refused.
+- #1426 (the pop's receiver is the counted queue) is not done here.
+- Files touched: `scripts/check-realtime-policy.sh`, `scripts/test-realtime-policy.sh` and this
+  spec. `crates/builtins-compiler/src/lib.rs` is unchanged from attempt 1.

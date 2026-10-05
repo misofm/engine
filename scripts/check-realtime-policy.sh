@@ -77,10 +77,11 @@ fi
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?
 
-# #1253, #1302, #1418: every render-thread pop runs at most once per record counted at block entry
-# by `available_at_entry`, per queue: a loop around a drain must drain a different queue on each
-# pass, so no queue is drained twice in one block. A loop that pops until the
-# queue is empty keeps popping whatever a concurrent producer publishes while it runs (the C ABI
+# #1253, #1302, #1418: every render-thread drain pops at most the records its queue held when its
+# `available_at_entry` count was read, and each drain reads a given queue at most once per block:
+# every loop around a drain must drain a different queue on each pass. Two drains of one queue in
+# sequence each pop at most their own count; that is outside this rule (see below). A loop that
+# pops until the queue is empty keeps popping whatever a concurrent producer publishes while it runs (the C ABI
 # prepares with `Concurrent` delivery) -- data-dependent, unbounded render work. The pass below
 # reads each marked region as tokens, not lines, so layout plays no part: comments and string,
 # byte-string, C-string, raw-string (any number of `#`) and character literals are blanked, a
@@ -110,39 +111,52 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 #     parameter of the enclosing `fn` that nothing names before the loop and no `static`,
 #     `const` or `use` in the region names (each optionally `.enumerate()`d or `.zip(..)`ped),
 #     or the closure of `core::array::from_fn`;
-#   - and every such loop selects the queue (#1418): finite is not small, so a loop around a
-#     drain that re-reads its count (`0..usize::MAX`, `0..control.capacity()`, `&mut` of an
-#     open range, a `[(); usize::MAX]` parameter) would pop until the queue is empty. Walking
-#     outward from the count's receiver (`<path>` in `<path>.available_at_entry()`), each loop
-#     passes only if, in the loop's body before the receiver is read, the receiver is
-#       - a root bound by the loop's pattern (`for control in ..`, `for (lane, control) in ..`,
-#         the parameter of an `array::from_fn` closure), then only fields and plain indexes;
-#       - an invariant base indexed by exactly one identifier the pattern binds
-#         (`controls[lane]`, `self.controls[lane]`; not `controls[lane % 2]`, not
-#         `controls[0]`), the base named by no binding inside the loop nor by the pattern; or
+#   - and every such loop drains a different queue on each pass (#1418): finite is not small, so
+#     a loop around a drain that re-reads its count (`0..usize::MAX`, `0..control.capacity()`,
+#     `&mut` of an open range, a `[(); usize::MAX]` parameter) would pop until the queue is
+#     empty. Walking outward from the count's receiver (`<path>` in
+#     `<path>.available_at_entry()`), each loop passes only if, in the loop's body before the
+#     receiver is read, the receiver is
+#       - a root bound by the loop's pattern (`for control in ..`, `for (lane, control) in ..`),
+#         then only fields and plain indexes;
+#       - a base indexed by exactly the identifier that takes a different value on each pass:
+#         the lone pattern of a `0..<bound>` loop, the index slot of a trailing `.enumerate()`
+#         (not over `&mut` of an iterator) or the parameter of an `array::from_fn` closure
+#         (`controls[lane]`, `self.controls[lane]`; not `controls[lane % 2]`, not `controls[0]`,
+#         not an index read from a table, `for &lane in order`, which can repeat), that
+#         identifier rebound by no `let`, header, macro or item in the loop and not `mut`; or
 #       - a root whose nearest binding in scope is `let <root> = ..`, `let Some(<root>) = ..
 #         else {..}` or `if let Some(<root>) = ..` (`Ok` too) from `&`/`&mut` of a form above or
 #         from such a root, alone or followed by `.as_mut()`/`.as_ref()`
-#         (`let Some(control) = control.as_mut() else { continue; };`).
-#     A loop between the drain and an outer loop is walked the same way from its iterable
-#     (`for bank in &mut self.banks { for control in &mut bank.controls { .. } }`); a range or an
-#     `array::from_fn` there names no queue and refuses every loop outside it. A pattern that
-#     binds nothing (`_`, `()`) never selects. Any binding of the name the walk cannot read is
-#     refused: a `mut` binding (it may be reassigned), a struct or tuple pattern, a closure,
-#     `match` arm or other block header naming it (an `if` condition without `let`, `|` or `=>`
-#     binds nothing), a macro call naming it (but `debug_assert!`), and a `static`, `const` or
-#     `use` that can name it. Collections are taken at their word: iterating `&mut <fields>`
-#     yields distinct elements and an SPSC consumer is not `Clone`, so each element, or one
-#     index of an unchanged collection, is a different queue; the gate does not prove that a
-#     collection holds each queue once (shared handles behind a method call are refused only
-#     because a method call ends the receiver forms). A drain that must read one queue twice in
-#     a block is one counted drain, not an outer loop;
+#         (`let Some(control) = control.as_mut() else { continue; };`), at most 64 links deep.
+#     And the loop's body leaves the queue in place: every mention there of the root of a
+#     spelling the walk read (`control`, `controls`, `self`) is in a binding or header the walk
+#     read (less the `else` block of a `let .. else`), or reads that spelling, then fields and
+#     plain indexes, as the receiver of `available_at_entry`, `try_pop` or `map_or(0, ..)`. So a
+#     base changed between passes (`controls.swap(0, 1)`, `controls = ..`, a `let controls`) or
+#     a queue moved out of its slot (`mem::swap(control, spare)`) is refused, as is any other use
+#     (`self.apply(..)` beside `self.controls[lane]`; a known over-refusal).
+#     The next loop out is walked the same way from what the loop's pass selects: the collection
+#     it iterates when the receiver is its pattern (`for bank in &mut self.banks { for control
+#     in &mut bank.controls { .. } }`), or the base it indexes (`for bank in &mut self.banks {
+#     for lane in 0..N { bank.controls[lane] .. } }`); a range or `array::from_fn` pattern
+#     names no collection and refuses every loop outside it. A pattern that binds nothing (`_`,
+#     `()`) never selects. A binding of the name the walk cannot read is refused: a struct or
+#     tuple pattern, a closure, `match` arm or other block header naming it (an `if` condition
+#     without `let`, `|` or `=>` binds nothing), a macro call naming it (but `debug_assert!`),
+#     and a `static`, `const` or `use` that can name it. Collections are taken at their word:
+#     iterating `&mut <fields>` yields distinct elements and an SPSC consumer is not `Clone`, so
+#     each element is a different queue, as is each index of a base the loop leaves in place;
+#     the gate does not prove that a collection holds each queue once (shared handles behind a
+#     method call are refused only because a method call ends the receiver forms). A drain that
+#     must read one queue twice in a block is one counted drain, not an outer loop;
 #   - a `try_pop` in the header of a loop (its condition, iterator or pattern, a block nested
 #     there included) is refused: it runs once per iteration;
 #   - `from_fn`, `repeat_with` and `successors` are refused outright, path-qualified or bare
 #     (`core::array::from_fn` and `std::array::from_fn` excepted): they run a pop in a loop without
 #     a loop keyword. A pop directly in an `array::from_fn` closure is refused (a constant count);
-#   - a region still open where its file ends (markers out of order) is checked as it stands, and
+#   - a region still open where its file ends (markers out of order) is checked as it stands (a
+#     loop still open there selects no queue), and
 #     a region that ends inside a literal or a block comment is refused.
 # A header ends early only where Rust must start a new statement or item. After a closed block
 # that is: an identifier other than `as`, `else` or `in`, a label or an attribute; or a `{`, when
@@ -154,12 +168,17 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 # `.iter_mut()`, `.enumerate()`, `.zip(..)`, `.as_mut()`, `.as_ref()` and `debug_assert!` (a
 # local macro or method of the same name could differ), and `&<fields>` and `&mut <fields>` as
 # collections (`&mut` of an iterator held in a field or local, such as
-# `let mut rounds = 0_u32..; for _ in &mut rounds`, is infinite; the queue-selection walk refuses
-# it around a drain, since its pattern selects no queue).
+# `let mut rounds = 0_u32..; for _ in &mut rounds`, can be infinite; around a drain the
+# queue-selection walk accepts it only when its pattern binds the queue itself, whose `&mut`
+# elements are distinct and run out, never by an index, and refuses `for lane in &mut lanes`).
 # These stay outside it: recursion; a pop in a helper function, through a function value, or in
 # a closure that a loop calls or that is handed to a repeating adapter (`map_while` over
 # `iter::repeat`, `for_each`, a renaming `use` of an iterator constructor); a loop around the
-# drain outside the marked region (the rule is per region); and a macro that expands to a loop.
+# drain outside the marked region (the rule is per region); a macro that expands to a loop; and
+# two drains of one queue in sequence, outside any loop that selects it, or in one pass of such a
+# loop (`let a = c.available_at_entry(); for _ in 0..a {..} let b = c.available_at_entry(); ..`):
+# each is bounded by its own count, so the total stays finite, but the second count is not read
+# at block entry. Two spellings can name one queue, so the gate cannot refuse this soundly.
 # It refuses these bounded drains (known over-refusals; restructure the drain to pass): a count
 # read other than as the left operand of a comparison before its loop (`0 == available`,
 # `apply(available)`, `available as u32`), a count capped other than by `.min(..)`
@@ -312,7 +331,7 @@ if [[ -n "$marked_files" ]]; then
         function classify(f, H,   x, pat, ident, num, fields, path, adapt) {
             sub(/^(# (! )?\[[^]]*\] )*/, "", H)
             isl[f] = H ~ tw("loop") || H ~ tw("while") || H ~ /(^| )for( | .* )in( |$)/ || H ~ tw("from_fn")
-            inner[f] = 0; outer[f] = 0; wid[f] = ""; lpat[f] = ""; itrecv[f] = ""
+            inner[f] = 0; outer[f] = 0; wid[f] = ""; lpat[f] = ""; itrecv[f] = ""; lidx[f] = ""
             if (!isl[f]) return
             ident = "[A-Za-z_][A-Za-z0-9_]*"; num = "[0-9][0-9_]*(u8|u16|u32|u64|usize)?"
             pat = "( [A-Za-z0-9_(),&]+)+"
@@ -323,87 +342,143 @@ if [[ -n "$marked_files" ]]; then
             x = H; if (gsub(/ in( |$)/, " ", x) > 1) return
             if (H ~ /^for .* in /) { x = H; sub(/^for /, "", x); sub(/ in .*$/, "", x); lpat[f] = x }
             if (H ~ /(^| )array : : from_fn \( [|][^|]*[|]$/ && H !~ /(^| )(loop|while|for)( |$)/) {
-                x = H; sub(/ ?[|]$/, "", x); sub(/^.*[|]/, "", x); lpat[f] = x
-                outer[f] = 1
+                x = H; sub(/ ?[|]$/, "", x); sub(/^.*[|]/, "", x); lpat[f] = trim(x)
+                outer[f] = 1; if (lpat[f] ~ ("^" ident "$")) lidx[f] = lpat[f]
             } else if (H ~ ("^for" pat " in 0 \\. \\. " path " \\. available_at_entry \\( \\)$")) {
-                inner[f] = 1; outer[f] = 1
+                inner[f] = 1; outer[f] = 1; if (lpat[f] ~ ("^" ident "$")) lidx[f] = lpat[f]
                 x = H; sub(/^.* in 0 \. \. /, "", x); sub(/ \. available_at_entry \( \)$/, "", x)
                 selwalk(f, x, hstart[f])
             } else if (H ~ ("^for" pat " in 0 \\. \\. " ident "$")) {
+                if (lpat[f] ~ ("^" ident "$")) lidx[f] = lpat[f]
                 x = H; sub(/.* /, "", x); inner[f] = counted(x, hstart[f], hstart[f], hopen[f] - 1, 0); outer[f] = 1
                 if (inner[f]) selwalk(f, crecv, cpos)
             } else if (H ~ ("^for" pat " in 0 \\. \\. (" num "|" path ")$")) {
-                outer[f] = 1
+                outer[f] = 1; if (lpat[f] ~ ("^" ident "$")) lidx[f] = lpat[f]
             } else if (H ~ ("^for" pat " in (& (mut )?" fields "|" fields " \\. (iter|iter_mut) \\( \\))" adapt "$")) {
-                outer[f] = 1
+                outer[f] = 1; enumidx(f, H)
                 # The collection the loop walks: its leading fields, less a method that follows.
                 x = H; sub(/^.* in /, "", x); sub(/^& (mut )?/, "", x); match(x, "^" fields)
                 itrecv[f] = substr(x, 1, RLENGTH); if (substr(x, RLENGTH + 1, 2) == " (") sub(/ \. [^ ]*$/, "", itrecv[f])
             } else if (H ~ ("^for" pat " in " ident adapt "$")) {
-                x = H; sub(/.* in /, "", x); sub(/ .*/, "", x); outer[f] = slice(x, f); itrecv[f] = x
+                x = H; sub(/.* in /, "", x); sub(/ .*/, "", x); outer[f] = slice(x, f); itrecv[f] = x; enumidx(f, H)
             } else if (H ~ ("^while " ident " (! =|>) 0$")) {
                 x = H; sub(/^while /, "", x); sub(/ .*/, "", x)
                 if (counted(x, hstart[f], hstart[f], hopen[f] - 1, 0)) { wid[f] = x; selwalk(f, crecv, cpos) }
             }
         }
+        # The index slot of a loop whose iterable ends in `.enumerate()`, when the pattern is
+        # `(<ident>, ..)`: like a `0..<bound>` pattern or an `array::from_fn` parameter, it takes
+        # a different value on each pass. Not over `&mut` of an iterator, which may never end.
+        function enumidx(f, H,   x) {
+            if (H !~ / \. enumerate \( \)$/ || H ~ / in & mut /) return
+            x = lpat[f]; if (x !~ /^\( [A-Za-z_][A-Za-z0-9_]* , /) return
+            sub(/^\( /, "", x); sub(/ .*/, "", x); lidx[f] = x
+        }
         # #1418: which loops around the bounded drain `f` select the queue it reads. `R` is the
-        # receiver of the count, read at offset `u`. Walking outward over the enclosing frames, each
-        # loop `g` must select the current receiver (`selects`); the next loop out then selects
-        # the collection `g` iterates, read at the header of `g`. A range or `from_fn` loop names no
-        # collection, so every loop outside it is refused. `sel[f, g]` records each pass.
-        function selwalk(f, R, u,   k, g, cur, pos, kp) {
-            cur = R; pos = u; kp = D + 1
+        # receiver of the count, read at offset `u`. Walking outward over the enclosing frames,
+        # each loop `g` must select the current receiver (`selects`), which also names what the
+        # next loop out must select (`NXT`): the collection `g` iterates when the receiver is the
+        # pattern of `g`, or the base when it is the base indexed by the index of `g`. A range or
+        # `from_fn` pattern names no collection, so every loop outside it is refused. Each step
+        # is only a candidate: when `g` closes, `uses` must find every mention, in the body of
+        # `g`, of the names the step read harmless, and only then is `sel[f, g]` set. A loop
+        # still open at the region end never selects.
+        function selwalk(f, R, u,   k, g, cur, pos, kp, hs, he) {
+            cur = R; pos = u; kp = D + 1; hs = 0
             for (k = D; k >= 1; k--) {
                 g = fid[k]; if (!isl[g]) continue
-                if (cur == "" || pos <= hopen[g] || !selects(cur, k, kp, pos)) return
-                sel[f, g] = 1
-                cur = itrecv[g]; pos = hstart[g]; kp = k
+                if (cur == "" || pos <= hopen[g]) return
+                WS = ""; WR = ""; NXT = ""
+                # The header of the loop just walked names the receiver once, and runs once.
+                if (hs) WR = hs " " he
+                if (!selects(cur, k, kp, pos)) return
+                pn++; pf[pn] = f; pws[pn] = WS; pwr[pn] = WR; plist[g] = plist[g] " " pn
+                cur = NXT; pos = hstart[g]; kp = k; hs = hstart[g]; he = hopen[g] - 1
             }
         }
         # Whether the receiver `cur`, read at offset `pos` in the body of the loop at stack depth
-        # `kg` (frames `kg`..`kp - 1` enclose the read), changes with each pass of the loop: a root that
-        # `resolve`s to the pattern, then only fields and plain indexes; or a base that nothing in
-        # the loop binds, indexed by exactly one identifier the pattern binds, then only fields.
-        function selects(cur, kg, kp, pos,   x, b, ident, num) {
+        # `kg` (frames `kg`..`kp - 1` enclose the read), changes with each pass of the loop: a
+        # root that `resolve`s to the pattern, then only fields and plain indexes; or a base
+        # indexed by exactly the identifier that takes a new value on each pass (`lidx`: the
+        # lone pattern of a `0..<bound>` loop, the index slot of `.enumerate()` or an
+        # `array::from_fn` parameter) and rebound by nothing in the loop, then only fields. That
+        # the base is the same on every pass is checked by `uses`, at the close (a base the
+        # pattern binds is the first form). Each spelling read goes to `WS`, for `uses`.
+        function selects(cur, kg, kp, pos,   x, ident, num, ws, wr) {
             ident = "[A-Za-z_][A-Za-z0-9_]*"; num = "[0-9][0-9_]*(u8|u16|u32|u64|usize)?"
             if (cur ~ ("^" ident "( \\. " ident "| [[] (" ident "|" num ") []])*$")) {
-                x = cur; sub(/ .*/, "", x)
+                x = cur; sub(/ .*/, "", x); ws = WS; wr = WR; WS = WS "\034" cur
                 if (resolve(x, kg, kp, pos)) return 1
+                WS = ws; WR = wr
             }
             if (cur ~ ("^" ident "( \\. " ident ")* [[] " ident " []]( \\. " ident ")*$")) {
-                b = cur; sub(/ .*/, "", b)
                 x = cur; sub(/^[^[]*[[] /, "", x); sub(/ .*/, "", x)
-                return x != b && binder(x, kg, kp, pos) == "" && patbound(x, kg) && binder(b, kg, kp, pos) == "" && lpat[fid[kg]] !~ tw(b)
+                NXT = cur; sub(/ [[].*$/, "", NXT); WS = WS "\034" NXT
+                return x == lidx[fid[kg]] && binder(x, kg, kp, pos) == ""
             }
             return 0
         }
-        # Whether the loop at depth `kg` binds `x` in its pattern, without `mut` (a mutable binding
-        # may be reassigned before the read).
-        function patbound(x, kg,   p) {
-            p = lpat[fid[kg]]
-            return p ~ tw(x) && p !~ ("(^| )mut " x "( |$)")
-        }
         # Whether `x`, read at `pos` in the loop at depth `kg`, names a queue selected by the
         # loop: its nearest binding inside the loop body is an accepted `let`, `let .. else` or
-        # `if let` from a selected form, or, with no binding there, the pattern of the loop binds it.
-        function resolve(x, kg, kp, pos,   r, t, at, k, rhs, ident) {
+        # `if let` from a selected form, or, with no binding there, the pattern of the loop binds
+        # it (`mut` too: reassigning it is a mention `uses` refuses). The text of each binding
+        # read, less the `else` block of a `let .. else`, goes to `WR`.
+        # A chain of more than 64 rebindings is refused: no drain needs one, and the cap bounds
+        # the walk (each link rescans the loop body) even if a later edit lets a step look at its
+        # own offset again.
+        function resolve(x, kg, kp, pos,   v) {
+            if (rdepth >= 64) return 0
+            rdepth++; v = resolve1(x, kg, kp, pos); rdepth--
+            return v
+        }
+        function resolve1(x, kg, kp, pos,   r, t, at, e, k, rhs, ident) {
             ident = "[A-Za-z_][A-Za-z0-9_]*"
             r = binder(x, kg, kp, pos)
             if (r == "?") return 0
-            if (r == "") return patbound(x, kg)
+            if (r == "") { NXT = itrecv[fid[kg]]; return lpat[fid[kg]] ~ tw(x) }
             k = substr(r, 2) + 0
-            if (r ~ /^L/) { t = st_top[k]; at = st_start[k] }
-            else { t = hdr[fid[k]]; at = hstart[fid[k]]; if (t !~ /^if let /) return 0; sub(/^if /, "", t) }
+            if (r ~ /^L/) { t = st_top[k]; at = st_start[k]; e = st_end[k] }
+            else { t = hdr[fid[k]]; at = hstart[fid[k]]; e = hopen[fid[k]] - 1; if (t !~ /^if let /) return 0; sub(/^if /, "", t) }
             sub(/^(# (! )?\[[^]]*\] )*/, "", t)
             if (t ~ ("^let " x "( : [^=]*)? = ")) {
                 rhs = t; sub(/^[^=]*= /, "", rhs)
             } else if (t ~ ("^let (Some|Ok) \\( " x " \\) = ")) {
                 rhs = t; sub(/^[^=]*= /, "", rhs)
-                if (r ~ /^L/ && !sub(/ else \{\}$/, "", rhs)) return 0
+                if (r ~ /^L/) {
+                    if (!sub(/ else \{\}$/, "", rhs)) return 0
+                    if (!match(substr(F, at, e - at + 1), /[^A-Za-z0-9_]else[^A-Za-z0-9_]/)) return 0
+                    e = at + RSTART - 1
+                }
             } else return 0
+            WR = WR " " at " " e
             if (rhs ~ /^& (mut )?/) { sub(/^& (mut )?/, "", rhs); return selects(rhs, kg, kp, at) }
-            if (rhs ~ ("^" ident "( \\. as_(mut|ref) \\( \\))?$")) { sub(/ .*/, "", rhs); return resolve(rhs, kg, kp, at) }
+            if (rhs ~ ("^" ident "( \\. as_(mut|ref) \\( \\))?$")) { sub(/ .*/, "", rhs); WS = WS "\034" rhs; return resolve(rhs, kg, kp, at) }
             return 0
+        }
+        # Whether the loop body `from`..`to` leaves the candidate step `p` sound: every mention
+        # of the root of each spelling the step read (`pws`) lies in a binding or header the step
+        # read (`pwr`), or reads that spelling, then only fields and plain indexes, as the
+        # receiver of `available_at_entry`, `try_pop` or `map_or(0, ..)`. Any other mention may
+        # move, swap, reassign or rebind the queue or its collection between passes
+        # (`controls.swap(0, 1)`, `controls = ..`, `mem::swap(control, spare)`), so it refuses.
+        function uses(p, from, to,   m, i, sp, r, a, pat, j, ch, s, nr, rg, ok) {
+            m = split(pws[p], sp, "\034"); nr = split(pwr[p], rg, " ")
+            for (i = 1; i <= m; i++) {
+                if (sp[i] == "") continue
+                r = sp[i]; sub(/ .*/, "", r); s = sp[i]; gsub(/ /, "", s); pat = ""
+                for (j = 1; j <= length(s); j++) { ch = substr(s, j, 1); pat = pat (ch ~ /[A-Za-z0-9_]/ ? ch : "[" ch "]") }
+                pat = "^" pat "([.][A-Za-z_][A-Za-z0-9_]*|[[][A-Za-z0-9_]+[]])*([.]as_(mut|ref)[(][)])?[.](available_at_entry[(]|try_pop[(]|map_or[(]0,)"
+                a = from
+                while (a <= to && match(substr(F, a, to - a + 1), "(^|[^A-Za-z0-9_])" r "([^A-Za-z0-9_]|$)")) {
+                    a += RSTART - 1; if (substr(F, a, length(r)) != r) a++
+                    ok = 0
+                    for (j = 1; j < nr; j += 2) if (a >= rg[j] + 0 && a <= rg[j + 1] + 0) ok = 1
+                    if (!ok) { s = substr(F, a, 400); gsub(/ /, "", s); ok = s ~ pat }
+                    if (!ok) return 0
+                    a += length(r)
+                }
+            }
+            return 1
         }
         # The nearest binding of `x` in the body of the loop at depth `kg` before offset `pos`:
         # "" for none, "L<n>" for the `let` statement `n`, "H<k>" for the header of the enclosing
@@ -496,7 +571,7 @@ if [[ -n "$marked_files" ]]; then
             if (last ~ /^(as|break|continue|in|let|mut|ref|return|static|dyn|yield|box)$/) return 0
             return last ~ /^([A-Za-z0-9_]+|[])?"])$/
         }
-        function closeblock(at,   f, body, x, w, j) {
+        function closeblock(at,   f, body, x, w, j, m, k) {
             # A `}` that closes a block opened before the region ends the scope of every `let` the
             # region made at its outermost level.
             if (D == 0) { onstack[fid[0]] = 0; fid[0] = -(++zc); onstack[fid[0]] = 1; reset(at + 1); return }
@@ -504,6 +579,12 @@ if [[ -n "$marked_files" ]]; then
             if (wid[f] != "") {
                 x = wid[f]; body = substr(F, hopen[f] + 1, at - hopen[f] - 1)
                 if (match(body, ("^ *" x " *-= *1 *;"))) inner[f] = outer[f] = mentions(x, hopen[f] + RLENGTH + 1, at - 1) == 0
+            }
+            # A candidate selection by this loop holds only if its body leaves the queue in place.
+            if (plist[f] != "") {
+                m = split(plist[f], pl, " ")
+                for (k = 1; k <= m; k++) if (uses(pl[k], hopen[f] + 1, at - 1)) sel[pf[pl[k]], f] = 1
+                plist[f] = ""
             }
             onstack[f] = 0; D--
             tok("{}")
@@ -567,7 +648,7 @@ if [[ -n "$marked_files" ]]; then
                 }
                 if (!ok) hit(pline[i])
             }
-            delete sel
+            delete sel; delete plist; delete pf; delete pws; delete pwr; pn = 0
             for (k = -zc; k <= nf; k++) { delete onstack[k] }
             for (i = 1; i <= np; i++) delete bad[i]
             delete seen_line
