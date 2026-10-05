@@ -780,9 +780,17 @@ impl RouteGate {
 /// op and a fold lane from it, and a live producer pushes what it returns, so the bits a plan binds
 /// and the bits a live change sends cannot differ. A silencing gate returns `[+0.0; 4]`; otherwise
 /// each product is `gain * coefficient` in that operand order, unfused, with the column of a
-/// follow-zeroed source lane replaced by `+0.0`.
+/// follow-zeroed source lane replaced by `+0.0`. A product that is subnormal, of either sign, is
+/// flushed to `+0.0` (issue #1237 D3): inside the route domain (`[-144, 24]` dB, coefficients in
+/// `[-1, 1]`) a coefficient below about `1.9e-31` at -144 dB folds to one, and a subnormal
+/// constant would only cost the render multiply its slow path for an inaudible contribution.
 #[must_use]
 pub const fn gated_route_coefficients(transform: &RouteTransform, gate: RouteGate) -> [f32; 4] {
+    /// `gain * coefficient`, a subnormal result flushed to `+0.0`.
+    const fn fold(gain: f32, coefficient: f32) -> f32 {
+        let product = gain * coefficient;
+        if product.is_subnormal() { 0.0 } else { product }
+    }
     if gate.silences() {
         return [0.0; 4];
     }
@@ -791,22 +799,22 @@ pub const fn gated_route_coefficients(transform: &RouteTransform, gate: RouteGat
         if left_zeroed {
             0.0
         } else {
-            transform.gain * transform.ll
+            fold(transform.gain, transform.ll)
         },
         if right_zeroed {
             0.0
         } else {
-            transform.gain * transform.lr
+            fold(transform.gain, transform.lr)
         },
         if left_zeroed {
             0.0
         } else {
-            transform.gain * transform.rl
+            fold(transform.gain, transform.rl)
         },
         if right_zeroed {
             0.0
         } else {
-            transform.gain * transform.rr
+            fold(transform.gain, transform.rr)
         },
     ]
 }
@@ -1004,12 +1012,7 @@ pub struct RouteQueueFull {
 
 impl GraphRouteControlProducer {
     /// How many records the queue can accept now.
-    ///
-    /// Always inlined (issue #1222): the browser's command-submit closure is held to
-    /// `check-web-audioworklet-callgraph.py`'s allocation rule, which reads function *names*, and
-    /// an out-of-line function named `free` is indistinguishable there from the allocator's.
     #[must_use]
-    #[inline(always)]
     pub fn free(&self) -> usize {
         self.producer.available_capacity()
     }

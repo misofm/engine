@@ -76,7 +76,10 @@ target it.
   `destination` is `{"kind":"submix_input","submix_id"}` or `{"kind":"output_input","output_id"}`.
   A routed sidechain's `source` has the same two shapes. The retired `submix_output` source is
   `schema.invalid_enum`.
-- A route `channel_matrix` has `ll`, `lr`, `rl`, `rr` and no smoothing field.
+- A route `channel_matrix` has `ll`, `lr`, `rl`, `rr` and no smoothing field. A route's `gain_db`
+  lies in `[-144, 24]` dB and each coefficient in `[-1, 1]`, inclusive; a finite value outside is
+  `numeric.out_of_schema_range` at its own path (a non-finite one is `numeric.non_finite`). A folded
+  `gain * coefficient` that is subnormal is applied as `+0.0`.
 - A route has exactly `id`, `source`, `destination`, `channel_matrix`, `gain_db`, `mute`,
   `follows_mute`, every key required. `mute` is the send's on/off switch; a muted route stays in the
   graph and contributes silence. `follows_mute: true` makes a send follow its source strip's lane
