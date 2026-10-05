@@ -250,7 +250,7 @@ readers for #1411 by named exception.
 ## Stream G
 
 - **Coordinator scope:** DSP contracts: SVF joint flush, engine-wide tail and exact-rest bounds, live gate/EQ/multiband parameters, live bypass shunts, per-strip and multiband link mode.
-- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows and soft clip overshoot tests it supersedes, the effect corpus pins and the #1301 amendment note (#1409), `ramp_path_within` and its docs in `crates/effect-runtime/src/state_payload.rs`, the effect crates' restore validators' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid` and `ulp_at`) with their payload-refusal unit tests and gate-1 rows (`crates/compressor/tests/payload.rs`, `crates/gate-expander/tests/state.rs`, `crates/multiband-compressor/tests/product.rs`, `crates/transient-shaper/tests/contract.rs`, `crates/soft-clip/tests/state_roundtrip.rs`) and `crates/delay/tests/MUTATIONS.md` M18 and M19 (#1411; stream A's payload code and the effect owners'), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329), `crates/graph-compiler` extent (#1379), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
+- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows and soft clip overshoot tests it supersedes, the effect corpus pins and the #1301 amendment note (#1409), `ramp_path_within` and its docs in `crates/effect-runtime/src/state_payload.rs`, the effect crates' restore validators' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid` and `ulp_at`) with their payload-refusal unit tests and gate-1 rows (`crates/compressor/tests/payload.rs`, `crates/gate-expander/tests/state.rs`, `crates/multiband-compressor/tests/product.rs`, `crates/transient-shaper/tests/contract.rs`, `crates/soft-clip/tests/state_roundtrip.rs`) and `crates/delay/tests/MUTATIONS.md` M18 and M19 (#1411; stream A's payload code and the effect owners'), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329; its tail unit tests, #1433), `crates/graph-compiler` extent (#1379), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
 - **Depends on:** A's carry slice for each effect crate (#1279, #1280, #1282); #1069 for the multiband; E #1054 for #1371.
 - **Parallel-safe with:** A (coordinate on effect crates), B, E, J.
 
@@ -268,21 +268,22 @@ readers for #1411 by named exception.
 | 10 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
 | 11 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
 | 12 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
-| 13 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
-| 14 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
-| 15 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
-| 16 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
-| 17 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
-| 18 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 19 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 20 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 21 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
-| 22 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 23 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 24 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
-| 25 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
-| 26 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
-| 27 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 13 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
+| 14 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
+| 15 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
+| 16 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
+| 17 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
+| 18 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
+| 19 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 20 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
+| 21 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 22 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
+| 23 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
+| 24 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 25 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
+| 26 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
+| 27 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
+| 28 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
 
 ## Stream H
 
