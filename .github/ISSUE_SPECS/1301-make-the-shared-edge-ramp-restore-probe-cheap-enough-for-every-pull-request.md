@@ -230,3 +230,54 @@ catches, which gate 1 shows once against its full walk; no caller test changes.
 - A test that greps source or prose is refused.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer)
+
+**Change.** `crates/conformance/src/randomized.rs` only. `overshooting_start` returns
+`Option<(f32, u32)>` (start, first out-of-domain step `k`, D2). New private
+`edge_restore_positions(samples, first_out, row, every_sample) -> Vec<u64>` (D4) builds `P` of D1,
+sorted and deduplicated, members outside `0..n` dropped (`checked_sub` for `k - 2`, `k - 1`,
+`n - 2`, `n - 1`), or `0..n` when `every_sample`. `edge_ramp_restore_violations` reads
+`dsp_reference::randomized::overridden()` once (D3), enumerates the quality rows, renders every
+sample as before and skips the snapshot, twin and restore at samples not in `P` (binary search).
+Violation text, the two exported signatures and the six callers are unchanged (D6); the doc
+comment states D1 and D3. New `#[cfg(test)] mod tests` with
+`edge_restore_positions_keep_the_reach_critical_samples` (D5).
+
+**Gate 1 (reach; host 32 cores, load average 22-26).** Each mutation applied, the crate's probe run
+per-PR (no variable) and full (`MISO_ENGINE_RANDOMIZED_SCALE=1`), "its own snapshot is refused"
+lines extracted and compared with `cmp`, then reverted:
+
+| Mutation | Per-PR refusals | Full refusals | Lists identical | Green after revert |
+| --- | --- | --- | --- | --- |
+| Delay M18 | 24 | 24 | yes | yes |
+| Gate strict current | 32 | 32 | yes | yes |
+| Limiter 4-ulp budget | 4 | 4 | yes | yes |
+
+Under M18 the per-PR run took 9.18 s and the full run 70.44 s (debug).
+
+D5 test value: a narrowed window (or dropped sample 0) in `edge_restore_positions` keeps every
+effect test green today, since no effect is defective, but silently loses the M18, gate and
+limiter catches per pull request. Mutation: window changed to `k ..= k + 1` -> red
+(`n 64, k 34, row 0: 33 missing from [0, 16, 32, 34, 35, 48, 62, 63]`); reverted -> green.
+
+**Gate 2 (cost, debug, built with `--no-run` first, one run each; load average about 26 on 32
+cores).** Delay probe `finished in` 14.95 s (before: 72.45 s). This is inside the 15 s ceiling but
+with almost no margin under this load (the same build under M18, which stops each edge at its
+refusal, took 9.18 s; the spec's prototype measured 9.65 s on a quieter host). The stride was not
+tuned. Others: true-peak-limiter 0.07 s, multiband-compressor 0.16 s, compressor 0.04 s,
+gate-expander 0.03 s, transient-shaper 0.01 s. The CI numbers (`test-debug-b`, `aarch64-debug`)
+await the PR's qualification run; this attempt does not push.
+
+**Gate 3.** `cargo test --locked -p conformance -p delay -p compressor -p gate-expander
+-p true-peak-limiter -p transient-shaper -p multiband-compressor` (debug): exit 0, 77 test
+binaries ok. `MISO_ENGINE_RANDOMIZED_SCALE=100 cargo test --locked --release -p delay -p compressor
+-p gate-expander -p true-peak-limiter -p transient-shaper -p multiband-compressor --test
+randomized`: exit 0, six binaries ok. The delay's probe alone in that shape `finished in` 4.86 s
+(the full walk; the spec measured 4.44 s for it).
+
+**Gate 4.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`, `scripts/check-workspace-policy.sh`,
+`scripts/test-workspace-policy.sh`, `scripts/check-conformance-boundaries.sh`: all pass.
