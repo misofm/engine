@@ -41,8 +41,9 @@ calls them M1/B1, M3/B3, M5/B5 and M7/B7):
   `NonadjacentOutputConflict` (`graph::test_only_selected_split_fader()`, `:8063-8073`), while the
   harness's arm names track 0 as the selected track. `NonadjacentTrackA`'s arm (0) agrees with what
   `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate` expects
-  production to select (t00, `:7904-7912`), and the default arm (`n - 1`) agrees with the #916
-  test's first fixture (`Nonadjacent`, t01).
+  production to select (t00, `:7904-7912`). The default arm (`n - 1`) agrees with the #916
+  test's first fixture (`Nonadjacent`, t01) only: production's choice for `Nonadjacent` depends on
+  the meter, not on the variant (Amendment 1).
 - **M5.** No test reads which track feeds the `Output` for `NonadjacentTrackA`. Since #916 the
   `Output` is dedicated storage, so the output track may no longer affect any outcome.
 
@@ -57,13 +58,16 @@ calls them M1/B1, M3/B3, M5/B5 and M7/B7):
   for the first fixture (`Nonadjacent`) and t01's for the second (`NonadjacentOutputConflict`).
   Name the tracks by literal ID, not through `output_track`, so the assertion does not restate the
   harness.
-- **D3. `selected_index` is the track production selects (M3, M7).** Where the harness prepares a
-  paired graph and `graph::test_only_selected_split_fader()` is `Some`, assert that it is
-  `selected_index`'s `PostFader`. Then fix the `NonadjacentOutputConflict` arm to the track the
-  #916 test asserts (t01, `n - 1`), which removes that arm (the default gives `n - 1`). If the
-  witness is not reliable inside the harness (for example, not reset between the paired and the
-  reference preparation), assert it in each test that uses a nonadjacent variant instead, and say
-  so in the Evidence.
+- **D3. `selected_index` is the track production selects (M3, M7; Amendment 1).** Both
+  per-variant `selected_index` arms go. If production exposes its selection, or the thread-local
+  witness `graph::test_only_selected_split_fader()` records it, the harness reads `selected_index`
+  from that observation instead of re-deriving it. Only if no such observation exists does the
+  harness re-derive it from production's meter rule (`Nonadjacent` selects t00 unless t00's
+  post-fader is metered, `post_fader_observed && meter_track == 0`, and then t01;
+  `NonadjacentOutputConflict` selects t01, `n - 1`), and then a mutant of that production rule
+  must turn the harness's test red (record it in gate 1's table). Where the harness prepares a
+  paired graph and the witness is `Some`, assert that it is `selected_index`'s `PostFader`. The
+  witness is reliable inside the harness (Hazards), so the per-test fallback does not apply.
 - **D4. The `NonadjacentTrackA` output track (M5).** Find a test whose outcome depends on it. If
   there is one, make it assert the output track by literal ID as D2 does. If there is none, delete
   the arm under D1.
@@ -87,8 +91,10 @@ calls them M1/B1, M3/B3, M5/B5 and M7/B7):
 
 - `crates/builtins-compiler/src/lib.rs` is a hot file (`STREAMS.md`). This issue edits its test
   module only; the slice that lands second rebases.
-- `PAIR_WITNESS_LOCK` serialises the witness tests. Any new witness read must hold it, as the
-  existing ones do.
+- `PAIR_WITNESS_LOCK` serialises the witness tests. The harness cannot take it itself: its callers
+  already hold it, and the lock is not re-entrant. The witness is thread-local and
+  `graph::build_sequential` resets it on every build (`crates/graph/src/runtime.rs:5723`), so the
+  harness's read is race-free under the caller's lock. Record this in the Evidence.
 - A deleted arm can change a fixture's track choice, so a render comparison can move. Each test
   compares a paired graph with its separate-owner twin built from the same variant, so both move
   together; a test that compares against a pinned value is a stop-and-report.
@@ -121,7 +127,20 @@ calls them M1/B1, M3/B3, M5/B5 and M7/B7):
 ## Evidence
 
 - Gate 1's table: per mutant, the failing tests or the arm's deletion and reason.
-- Where D3's assertion lives (harness or tests), and why.
+- Where D3's assertion lives (harness or tests), and why; whether `selected_index` is read from an
+  observation or re-derived (D3), and if re-derived, the production-rule mutant and its red test.
+- The `PAIR_WITNESS_LOCK` note (Hazards).
+
+## Amendment 1 (root, 2026-10-05)
+
+Attempt 1 stopped before committing: D3 as written (fix the `NonadjacentOutputConflict` arm and
+keep the default `n - 1` for `Nonadjacent`) makes two tests red,
+`actual_scalar_nonadjacent_schedule_selects_the_split_owner` and
+`actual_scalar_nonadjacent_intervening_observer_error_completes_and_retries`, because production
+selects t00 for an unmetered `Nonadjacent` graph. Root ruled option A: `selected_index` comes from
+production (observed where possible, else the production meter rule with a mutant that turns the
+harness red), and both per-variant arms go. D2, D4 and D5 are unchanged. The stopped run consumed
+no verdict; the next implementation is attempt 1.
 
 ## Dependencies
 
