@@ -189,3 +189,39 @@ every number is uncontrolled and descriptive. Scratch builds and probes stay in
   max 5.560-14.975 ms on the 64-track documents; the post is 0.020-0.045 ms (p50).
 - Gates: `bash scripts/check-workspace-policy.sh` ok; `bash scripts/check-dsp-research.sh` ok (it
   checks the DSP research corpus, which this issue does not change).
+
+**Attempt 2** (answers the attempt-1 verdict: 3 MAJOR, 8 MINOR, 5 NIT). Anchors still on
+`8be19c86e`, the new ones included. No new build or timing; every number comes from the attempt-1
+evidence in `/tmp/claude-1002/w1057/evidence/`.
+
+- MAJOR-1: new section 8.4 and F12. Only render writes an observation tap's arm state, in both
+  modes: the `Observe` record carries an arm tag from the control plane; `ObservationLane::arm`
+  writes `armed`, `arm_sample` and `arm_tag` into the tap's observation slot in the drain; host-web's
+  `observation_armed` and `observation_arm_samples` are deleted. The SDK's `appliedAtSample` on
+  subscriptions becomes `armed(): Promise<bigint>`, resolved from the reported tag. New proposed
+  issue P7; amendments of #1381 D3 and #1382.
+- MAJOR-2: section 5.4 decomposes the apply: three whole canonical writes per value-only edit
+  (one in the compile, two in the classifier, `live_delta.rs:228`, `:257-263`), about 97 % of the
+  phase run; #1305 excludes the comparison (its non-goal). P2 becomes P2a (edit-bounded typed
+  classification, canonical comparison kept only as test oracle), P2b (canonical text at the first
+  snapshot of a revision, exact incremental length, resumable writer) and P2c (replay entry
+  staged in place). The single-mode budget gate moves to #1382's single-mode leg. Section 4.3
+  decides the single-mode snapshot: written in entity slices across handler calls and service
+  ticks.
+- MAJOR-3: section 3.4 never merges two calls that write the same address, so every acked value
+  is committed and every supersession is a later commit counted by `live_values_superseded`; the
+  W1 row of section 1.3 states it; P6 gains the gate.
+- MINORs: section 5.5 lists every command (scratch tree, proxy edit, module builds, twiggy and
+  grouping, native example builds and runs, Chromium probe); the uncited second `probe_phases`
+  run is removed, not re-run. Option C states the field-level diff and setters it needs, and the
+  snapshot claim names P3. Section 3.3 defines the `monitor` encoding; 3.4 states the cuts (edit
+  count, frame bytes, repeated address, `apply`/`replaceSession`/`snapshot` barrier). F2/P4: the
+  browser adapter passes only `SESSION_TRANSACTION_APPLY`, so no `transport_state` or
+  `automation_canceled` event exists there. F11 and section 3.1: single-mode calls stay pending
+  while the context is suspended. Section 5.4 limit (6): service tick and source drain not
+  measured. Section 3.4 gives the browser's `ControlLimits` rule and values; section 2.1 states how
+  replace enters the controller (typed entry, no frame, no replay entry; amends #1386).
+- NITs: commit count and `prepare.rs` +597/-39; "a track" (a submix is solo-safe); the telemetry
+  lease mention removed; worst-case latency includes resends; "approximate size", stable
+  non-atomic build, not the nightly atomics artifact.
+- Gate: `bash scripts/check-workspace-policy.sh` ok.
