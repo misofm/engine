@@ -1955,8 +1955,9 @@ struct CollapseTally {
 
 /// Render `sessions[0]`, then swap to `sessions[1]`, `sessions[0]`, ... every `swap_every`
 /// blocks, each successor prepared from its predecessor and adopting it, for `blocks` blocks of
-/// `quantum` frames (the shape is `[quantum, blocks, swap_every]`). `writes` go to whichever plan renders their block next. `forced_dual` forces
-/// every plan's mono collapse off: the class-A oracle.
+/// `quantum` frames (the shape is `[quantum, blocks, swap_every]`). `writes` go to whichever plan
+/// renders their block next. `forced_dual` forces every plan's mono collapse off: the class-A
+/// oracle.
 fn swapping_run(
     sessions: [&Session; 2],
     feed: &Feed,
@@ -2165,7 +2166,10 @@ fn a_collapsed_chain_renders_the_forced_dual_bits(backend: Backend) {
         planes: [plane(0), plane(1)],
     };
     let mut reached = CollapseTally::default();
-    for seed in 0..3_u64 {
+    // Seeds 0, 7 and 9 are each red on the channel-1 rule-3 predicate (attempt-1 semantics) at
+    // both widths, first diverging at blocks 61, 56 and 52; seeds 1 and 2 were red at four lanes
+    // only.
+    for seed in [0_u64, 7, 9] {
         let writes = random_filter_writes(seed, RUN_BLOCKS, SWAP_EVERY);
         let (dual, _) = swapping_run(
             [&a, &b],

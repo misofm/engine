@@ -955,3 +955,282 @@ fn every_reachable_recursion_word_stays_inside_the_hull_of_the_designs() {
         );
     }
 }
+
+// ---- #1407 follow-up: the owner's leading countdown, per lane, at every width ------------
+
+/// One section's ramp record as the A3 law defines it, for the oracle of gate 8.
+#[derive(Clone, Copy)]
+struct RampOracle {
+    current: [f32; 6],
+    target: [f32; 6],
+    step: [f32; 6],
+    remaining: u32,
+}
+
+impl RampOracle {
+    fn at_rest(words: [u32; 7]) -> Self {
+        let current =
+            [words[0], words[1], words[2], words[4], words[5], words[6]].map(f32::from_bits);
+        Self {
+            current,
+            target: current,
+            step: [0.0; 6],
+            remaining: 0,
+        }
+    }
+
+    /// Rules 1 and 4 of the live retarget law; gate 8 draws only design-to-design retargets, so
+    /// rules 2 and 3 never apply (asserted).
+    fn retarget(&mut self, target: [f32; 6]) {
+        let identity = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0].map(f32::to_bits);
+        assert_ne!(target.map(f32::to_bits), identity);
+        assert_ne!(self.current.map(f32::to_bits), identity);
+        if self.remaining != 0 && self.target.map(f32::to_bits) == target.map(f32::to_bits) {
+            return;
+        }
+        let mut changed = false;
+        for ((step, current), target) in self.step.iter_mut().zip(self.current).zip(target) {
+            if current.to_bits() == target.to_bits() {
+                *step = 0.0;
+            } else {
+                *step = (target - current) * (1.0 / 64.0);
+                changed = true;
+            }
+        }
+        self.target = target;
+        self.remaining = if changed { 64 } else { 0 };
+    }
+
+    /// One frame of the A3 law: the first four words step from the current word, every later
+    /// word is `target - step * remaining`, a recursion word whose step is `+0.0` holds, and the
+    /// last frame snaps to the target.
+    fn frame(&mut self) {
+        if self.remaining == 0 {
+            return;
+        }
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.current = self.target;
+            return;
+        }
+        let leading = self.remaining >= 64 - 4;
+        for index in 0..6 {
+            if index < 3 && self.step[index] == 0.0 {
+                continue;
+            }
+            self.current[index] = if leading {
+                self.current[index] + self.step[index]
+            } else {
+                self.target[index] - self.step[index] * self.remaining as f32
+            };
+        }
+    }
+
+    fn words(&self) -> [u32; 6] {
+        self.current.map(f32::to_bits)
+    }
+}
+
+/// What gate 8 renders: a bank through its dual or its collapsed body, or one scalar chain.
+enum RampSubject {
+    Bank {
+        bank: Box<BuiltinInputBank>,
+        mono: bool,
+    },
+    Scalar(Box<InputBuiltins>),
+}
+
+impl RampSubject {
+    fn lanes(&self) -> usize {
+        match self {
+            Self::Bank { bank, .. } => bank.active_lanes(),
+            Self::Scalar(_) => 1,
+        }
+    }
+
+    fn apply(&mut self, lane: usize, target: PreparedInputFilterTarget) {
+        match self {
+            Self::Bank { bank, .. } => bank.apply_prepared_filter(lane, target).expect("target"),
+            Self::Scalar(input) => input.apply_prepared_filter(target).expect("target"),
+        }
+    }
+
+    fn render(&mut self, frames: usize, at: u64) {
+        match self {
+            Self::Bank { bank, mono } => {
+                let lanes = bank.width().lanes() as usize;
+                let mut left = vec![0.25_f32; frames * lanes];
+                if *mono {
+                    bank.process_mono(&mut left, frames as u32);
+                } else {
+                    let mut right = vec![-0.25_f32; frames * lanes];
+                    bank.process(&mut left, &mut right, frames as u32);
+                }
+            }
+            Self::Scalar(input) => {
+                let mut left = vec![0.25_f32; frames];
+                let mut right = vec![-0.25_f32; frames];
+                input.process(DualMonoBlock::new(&mut left, &mut right, at).expect("block"));
+            }
+        }
+    }
+
+    /// `[channel * 2 + section]` sections of one lane.
+    fn words(&self, lane: usize) -> [[u32; 7]; 4] {
+        match self {
+            Self::Bank { bank, .. } => builtins::test_support::bank_section_words(bank, lane),
+            Self::Scalar(input) => builtins::test_support::input_section_words(input),
+        }
+    }
+}
+
+/// Gate 8 (#1407 verdict MINOR 1): the owner's per-lane leading countdown
+/// (`InputStage::load_filter_leading`) gives every lane of every width exactly four stepped
+/// words, through the dual body and the collapsed one. Each lane is retargeted design to design
+/// on its own staggered schedule, re-sends and restarts included, so the lanes of one bank are
+/// out of phase; blocks of 1 to 16 frames put block ends on every ramp frame, the four leading
+/// ones among them. After every block, every current word of every lane, channel and section
+/// must equal, bit for bit, an oracle of the A3 law ([`RampOracle::frame`]).
+///
+/// A floor off by one (three stepped words, so the proven `1.419e-5` no longer holds) or one
+/// countdown shared by the bank (an out-of-phase lane steps from the target from its first word,
+/// `P = 6.10e-5`, above the stability margin) moves a word at rounding level, and only this gate
+/// sees it: gate 7 builds its own countdown and gate 3 checks frame 0 alone.
+#[test]
+fn every_lane_steps_exactly_four_words_from_its_own_countdown() {
+    let mut subjects: Vec<(String, u32, RampSubject)> = Vec::new();
+    for rate in [44_100_u32, 48_000] {
+        let parameters = |lane: usize| {
+            let channel = builtins::ChannelParameters {
+                polarity_invert: false,
+                trim_db: 0.0,
+                hpf_hz: 30.0 + 17.0 * lane as f32,
+                lpf_hz: 6_000.0 + 701.0 * lane as f32,
+                fader_db: 0.0,
+                muted: false,
+            };
+            BuiltinParameters {
+                left: channel,
+                right: channel,
+                matrix: builtins::Matrix2x2::IDENTITY,
+                smoothing_samples: 0,
+            }
+        };
+        let chain = |lane: usize| {
+            BuiltinChain::new(rate, parameters(lane))
+                .expect("prepared")
+                .into_input_builtins()
+        };
+        for width in effect_contract::BankWidth::ALL {
+            for mono in [false, true] {
+                let lanes = width.lanes() as usize;
+                let bank =
+                    BuiltinInputBank::new(width.backend(), *width, (0..lanes).map(chain).collect())
+                        .expect("bank");
+                assert!(bank.supports_mono_collapse());
+                let name = format!(
+                    "{width:?} {}",
+                    if mono { "process_mono" } else { "process" }
+                );
+                subjects.push((
+                    name,
+                    rate,
+                    RampSubject::Bank {
+                        bank: Box::new(bank),
+                        mono,
+                    },
+                ));
+            }
+        }
+        subjects.push((
+            "scalar".to_owned(),
+            rate,
+            RampSubject::Scalar(Box::new(chain(0))),
+        ));
+    }
+    const HPF_HZ: [f32; 6] = [20.0, 45.0, 80.0, 160.0, 400.0, 700.0];
+    const LPF_HZ: [f32; 6] = [800.0, 2_000.0, 5_000.0, 9_000.0, 15_000.0, 18_000.0];
+    const BLOCKS: [usize; 9] = [1, 1, 2, 3, 4, 5, 7, 9, 16];
+    for (name, rate, mut subject) in subjects {
+        let mono = matches!(subject, RampSubject::Bank { mono: true, .. });
+        let lanes = subject.lanes();
+        let mut oracle: Vec<[RampOracle; 4]> = (0..lanes)
+            .map(|lane| subject.words(lane).map(RampOracle::at_rest))
+            .collect();
+        let mut random = SplitMix(u64::from(rate) ^ ((lanes as u64) << 32) ^ u64::from(mono));
+        let mut at = 0_u64;
+        let mut leading_frames_seen = 0_usize;
+        for block in 0..400 {
+            for (lane, lane_oracle) in oracle.iter_mut().enumerate() {
+                // Lane `lane` retargets on its own schedule: about one block in five, never in
+                // step with its neighbours.
+                if !random.next().is_multiple_of(5) {
+                    continue;
+                }
+                let section = (random.next() % 2) as usize;
+                let hz = if section == 0 {
+                    HPF_HZ[(random.next() % 6) as usize]
+                } else {
+                    LPF_HZ[(random.next() % 6) as usize]
+                };
+                // The collapsed body is only ever handed a symmetric bank.
+                let lanes_selector = match (mono, random.next() % 4) {
+                    (false, 0) => BuiltinLaneSelector::Left,
+                    (false, 1) => BuiltinLaneSelector::Right,
+                    _ => BuiltinLaneSelector::Both,
+                };
+                let target = PreparedInputFilterTarget {
+                    lanes: lanes_selector,
+                    ..design(rate, section, hz)
+                };
+                subject.apply(lane, target);
+                for channel in 0..2 {
+                    let covered = match lanes_selector {
+                        BuiltinLaneSelector::Left => channel == 0,
+                        BuiltinLaneSelector::Right => channel == 1,
+                        BuiltinLaneSelector::Both => true,
+                    };
+                    if covered {
+                        lane_oracle[channel * 2 + section].retarget(target.coefficients);
+                    }
+                }
+            }
+            let frames = BLOCKS[(random.next() % BLOCKS.len() as u64) as usize];
+            subject.render(frames, at);
+            at += frames as u64;
+            for (lane, lane_oracle) in oracle.iter_mut().enumerate() {
+                let words = subject.words(lane);
+                for (index, section) in lane_oracle.iter_mut().enumerate() {
+                    for _ in 0..frames {
+                        section.frame();
+                    }
+                    if (60..64).contains(&section.remaining) {
+                        leading_frames_seen += 1;
+                    }
+                    let got = [
+                        words[index][0],
+                        words[index][1],
+                        words[index][2],
+                        words[index][4],
+                        words[index][5],
+                        words[index][6],
+                    ];
+                    assert_eq!(
+                        got,
+                        section.words(),
+                        "{name} at {rate} Hz, block {block} ({frames} frames): lane {lane} \
+                         channel {} section {} (countdown {})",
+                        index / 2,
+                        index % 2,
+                        section.remaining,
+                    );
+                }
+            }
+        }
+        // The schedule must end blocks inside the leading window, or the gate proves nothing.
+        assert!(
+            leading_frames_seen >= 4 * lanes,
+            "{name} at {rate} Hz: {leading_frames_seen} block ends in a leading window"
+        );
+    }
+}

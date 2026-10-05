@@ -38,10 +38,11 @@ rounding allowance `E` of the convex hull of the designs its history used, compo
 word is within `rho_j` of its ramp's exact mixture (`j h + (j/64)|t - c| u` for the four stepped
 words, `(1 - j/64)|t - c|(2u + u^2) + h` after them, `u = 2^-24`, `h` the word's half-ulp:
 `2^-25` for `c1` and `a3`, `2^-26` for `a2`), and a restart carries `(1 - j/64)` of its start
-word's error, so at block size `q` the allowance is the contraction's fixed point
-`E = max over j >= q of (64/j) rho_j` (and the interior-word maximum over it). At block sizes 1 to
-4 it is the floor `E = 64 h + u D` (`D = (1, 0.3, 1)`, the words' ranges): `(1.967e-6, 9.715e-7,
-1.967e-6)`. Because `A(w)` is affine in the words and `||.||_V` is convex,
+word's error. So at block size `q` a restart word is off the hull by at most the contraction's
+fixed point `E_start = max over q <= j <= 63 of (64/j) rho_j`, and any word by at most
+`E = max over 1 <= j <= 63 of (1 - j/64) E_start + rho_j`. At block sizes 1 to 4 this is the floor
+`E = 64 h + u D` (`D = (1, 0.3, 1)`, the words' ranges): `(1.967e-6, 9.716e-7, 1.967e-6)`.
+Because `A(w)` is affine in the words and `||.||_V` is convex,
 `||A(w)||_V <= q_design + 2 sup ||[[e1, e2], [-e2, e3]]||_V` over `|e_i| <= E_i`, which is
 `q_design + 1.419e-5` at every launch rate and block size (smaller from block size 5); with the
 maximum-cutoff design (`q - 1 = -5.213e-5` at 44.1/88.2 kHz, `-5.241e-5` at 48/96 kHz) every

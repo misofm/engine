@@ -188,16 +188,18 @@ Where this amendment and the frozen decisions above differ, this amendment holds
   the four stepped words (`fl(w + s)`) and `rho_j = (1 - j/64)|t - c|(2u + u^2) + h` after them
   (`fl(t - fl(s * (64 - j)))`); `u = 2^-24`; `h` is the word's half-ulp, `2^-25` for `c1` and `a3`
   (never above `1`), `2^-26` for `a2` (never above `1/(2 + sqrt(2))`). Every word lies between its
-  ramp's start and target (rounding is monotone and the stored step undershoots the distance), so
-  `|t - c|` is at most the word's range over every design, `D = (1, 0.3, 1)`. A restart from a word
-  `e` off the hull carries `(1 - j/64) e` of it (the contraction), so with restarts at least `q`
-  frames apart a restart word is off by at most `E_start = max over q <= j <= 63 of (64/j) rho_j`
-  and any word by at most `E = max over j of (1 - j/64) E_start + rho_j`; a freeze, a rule-3 jump
+  ramp's start and target: `64 s = fl(t - c)` is within a half-ulp of `t - c` (it may round past
+  it), but a stepped word is at most four steps from the start and a later word at most 59 steps
+  from the target, and rounding is monotone. So `|t - c|` is at most the word's range over every
+  design, `D = (1, 0.3, 1)`. A restart from a word `e` off the hull carries `(1 - j/64) e` of it
+  (the contraction), so with restarts at least `q` frames apart a restart word is off by at most
+  `E_start = max over q <= j <= 63 of (64/j) rho_j` and any word by at most
+  `E = max over j of (1 - j/64) E_start + rho_j`; a freeze, a rule-3 jump
   and the snap add nothing. At `q = 1..4` this is the floor `E = 64 h + u D =
   (1.967e-6, 9.716e-7, 1.967e-6)`, which any 64-update law has (64 restarts' final roundings at
   contraction `63/64`). The norm it can add, `P = 2 sup ||[[e1, e2], [-e2, e3]]||_V` over
   `|e_i| <= E_i` (attained at a vertex of the box, the norm being convex), is `1.419e-5` at
-  `q <= 4`, `3.95e-6` at `q = 16` and `1.16e-6` at `q = 63`. So every reachable word has
+  `q <= 4`, `3.85e-6` at `q = 16` and `1.18e-6` at `q = 63`. So every reachable word has
   `||A(w)||_V <= q_design + 1.419e-5`; with the maximum-cutoff design, the largest norm
   (`q - 1 = -5.213e-5` at 44.1/88.2 kHz, `-5.241e-5` at 48/96 kHz), `||A(w)||_V <= 1 - 3.79e-5` at
   every rate, `3.79e-5` of margin before #1329 D3's kernel inflation `8.63e-7`. The same argument
@@ -207,8 +209,9 @@ Where this amendment and the frozen decisions above differ, this amendment holds
   over its history's largest design is `0` on log-uniform and endpoint histories and `2.62e-7`
   (44.1/88.2 kHz), `1.96e-7` (48/96 kHz) on close-retarget chains at the maximum cutoff; the
   accumulated law reaches `2.569e-6` on the verifier's close-retarget probe, which this law brings
-  to `2.62e-7` (`1.13e-7` with every word from the target). For a design, `||A(d)||_V` equals the spectral radius only to within
-  `1.97e-8` (44.1/88.2 kHz) and `3.94e-8` (48/96 kHz) at the maximum cutoff, because the `f32` words are not exactly `k = sqrt(2)`-consistent; the bound uses
+  to `2.62e-7` (`1.13e-7` with every word from the target). For a design, `||A(d)||_V` equals the
+  spectral radius only to within `1.97e-8` (44.1/88.2 kHz) and `3.94e-8` (48/96 kHz) at the
+  maximum cutoff, because the `f32` words are not exactly `k = sqrt(2)`-consistent; the bound uses
   the norm. No subnormal recursion word is reachable (gate 4 asserts it; the pre-#1407 chains reach
   `0x00000020`).
 - **Latency and tail:** latency 0, unchanged. A disable's filtered contribution reaches weight 0 at
@@ -536,7 +539,7 @@ settled design (HPF 1 kHz, LPF 1 kHz, LPF 15 Hz; every launch rate; two-sine inp
 | 88.2 kHz | `-5.2133e-5` | `1.97e-8` | `1.4188e-5` | `-3.7945e-5` | `0` / `0` / `2.622e-7` |
 | 96 kHz | `-5.2411e-5` | `3.94e-8` | `1.4188e-5` | `-3.8223e-5` | `0` / `0` / `1.964e-7` |
 
-`P(q)`: `1.419e-5` (q <= 4), `3.95e-6` (16), `1.16e-6` (63). Debug runs 48 kHz at quanta
+`P(q)`: `1.419e-5` (q <= 4), `3.85e-6` (16), `1.18e-6` (63). Debug runs 48 kHz at quanta
 {1, 2, 7, 63}.
 
 **Rendered bits that move (before = `ad96a6327`, after = this attempt; one-off comparison with the
@@ -599,3 +602,57 @@ coordinator's follow-up issue; no listening run (spec: none required); AArch64 t
 CI-only. The proof's scope excludes test-support state injection (`set_lane_state_words` restoring
 non-zero integrators onto an identity section makes rule 4 ramp from the identity, as gate 3's
 second case does on purpose).
+
+### Follow-up (verdict MINOR 1 and NITs)
+
+Attempt 2's verdict was PASS with one MINOR and five NITs. This follow-up changes tests,
+test-support and prose only. No render code changes, so no rendered bit moves.
+
+- **MINOR 1, gate 8**
+  (`filter_liveness::every_lane_steps_exactly_four_words_from_its_own_countdown`). It renders full
+  `Simd4` and `Simd8` banks (`BankWidth::ALL`) through `process` and through `process_mono`, and one
+  scalar chain, at 44.1 and 48 kHz. Each lane gets design-to-design retargets, re-sends and restarts
+  on its own seeded schedule (about one block in five per lane, with `Left`/`Right`/`Both` on the
+  dual path and `Both` on the collapsed one), so the lanes of a bank are out of phase. Blocks are 1
+  to 16 frames. After every block, every current word of every lane, channel and section must equal
+  an oracle of the A3 law: four words `current + step`, then `target - step * remaining`, a
+  `+0.0`-step recursion word held, and the snap at the end. Each subject must also end blocks inside
+  a leading window at least `4 x lanes` times (measured: 62 to 856). The new test-support reader
+  `test_support::bank_section_words` is `input_section_words` for one bank lane.
+- **Mutation evidence (gate 8)**, each applied, run on the whole `builtins` crate in debug and in
+  release, then reverted:
+  - LF1 (floor `64 - 4 + 1`, three stepped words): only gate 8 is red, debug and release. It is red
+    on every subject, the scalar chain included.
+  - LF2 (every lane takes lane 0's countdown): only gate 8 is red, debug and release. It is red on
+    every bank subject (both widths, both bodies, both rates). The scalar chain stays green, because
+    it has one lane.
+  - Test value: a leading window off by one word, or one countdown shared across a bank, moves a
+    ramp word at rounding level. Gate 8 is the only test that sees it, because gate 7 builds its own
+    countdown and gate 3 checks frame 0 alone.
+- **Gate 6 seeds.** The committed seeds are now `0, 7, 9` (were `0, 1, 2`). On C1 (the rule-3
+  predicate reads channel 1 while collapsed), in debug, each of them is red at both widths. The
+  first differing blocks are 61, 56 and 52, the same at `Simd4` and `Simd8`. Seeds 1 and 2 were red
+  at `Simd4` only. A per-seed probe over seeds 0, 3, 5, 7 and 9 found all five red at both widths,
+  which agrees with the verifier's 16-seed release probe. The three earliest-diverging seeds were
+  kept, so the run time stays the same. The committed gate is red at both widths on C1 and green
+  without it.
+- **NIT 2.** `P(16)` and `P(63)` are now `3.85e-6` and `1.18e-6` (closed form: `3.8457e-6`,
+  `1.1820e-6`), in the DSP evidence and in the attempt-2 record.
+- **NIT 3.** The sentence about steps that "undershoot" is replaced. `64 s = fl(t - c)` may round
+  past `t - c`, but a stepped word is at most four steps from its start and a later word at most
+  59 steps from its target, and rounding is monotone. So every word lies between its start and its
+  target.
+- **NIT 4.** The ruling now states `E_start` and `E` separately, as the spec does, and rounds the
+  `a2` floor to `9.716e-7` (`16.3 u = 9.7156e-7`).
+- **NIT 5.** The `InputStage::collapsed` doc and the `swapping_run` doc are rewrapped to 100
+  columns, and so are the spec's design-norm lines.
+
+Gates (x86-64-v3, final tree):
+- `cargo test --locked -p builtins --features test-support`: pass (129 passed).
+- The same with `--release`: pass (129 passed). The gate-4 per-rate table is unchanged.
+- `cargo test --locked -p host-core --features test-support --test successor_swap`: pass (34
+  passed).
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, plain and with
+  `builtins/test-support,lane/test-support,host-core/test-support`: clean.
+- `cargo fmt --all -- --check`: clean.
+- `scripts/check-workspace-policy.sh`: ok.

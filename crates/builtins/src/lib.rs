@@ -973,9 +973,10 @@ pub(crate) struct InputStage<L: Lane> {
     /// elision plan. The lane export and `channels_agree` also read channel `1`'s integrators, and
     /// neither is reached collapsed: a carry disengages first (`disengage_for_carry`), and the M3
     /// proof is asked only of a chain rendering dual. A dual block after a collapsed one without
-    /// the disengage copy is a debug assertion in [`InputStage::process`]. The coefficient, target, step and countdown records need
-    /// no such redirection, because `process_mono` mirrors them onto channel `1` at the bottom of
-    /// every collapsed block, so at a drain they are what the dual run would hold.
+    /// the disengage copy is a debug assertion in [`InputStage::process`]. The coefficient,
+    /// target, step and countdown records need no such redirection, because `process_mono`
+    /// mirrors them onto channel `1` at the bottom of every collapsed block, so at a drain they
+    /// are what the dual run would hold.
     ///
     /// One byte beside `ramping` and `symmetry`, in padding the struct already had: no sealed
     /// size moves.
@@ -5552,6 +5553,18 @@ pub mod test_support {
     #[must_use]
     pub fn input_section_words(input: &InputBuiltins) -> [[u32; 7]; 4] {
         let track = input.stage.lane_track(0);
+        [
+            track.left.hpf.words(),
+            track.left.lpf.words(),
+            track.right.hpf.words(),
+            track.right.lpf.words(),
+        ]
+    }
+
+    /// [`input_section_words`] for one lane of a bank.
+    #[must_use]
+    pub fn bank_section_words(bank: &BuiltinInputBank, lane: usize) -> [[u32; 7]; 4] {
+        let track = per_width!(InputStageKernel(stage) in &bank.stage => stage.lane_track(lane));
         [
             track.left.hpf.words(),
             track.left.lpf.words(),
