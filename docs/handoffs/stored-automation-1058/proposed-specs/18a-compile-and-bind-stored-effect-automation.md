@@ -155,9 +155,13 @@ and 09b give it to the fader stage.
 
 ## Hazards
 
-- **Same batch.** This slice renders effect automation; draft 19 makes an edit of it reach a
-  running plan, and draft 18b completes the seek and the browser. All merge in batch R3, so `main`
-  never renders automation that an edit or a seek cannot reach.
+- **One push with draft 18b, draft 19 and #1306** (README "Must-land-together groups"). This
+  slice renders effect automation; draft 18b completes the seek and the browser; draft 19 makes an
+  automation edit reach a running plan and stops a live record on an automated cell. Amended #1306
+  sizes the window without an automated cell's live term (README A7), so before draft 19 a live
+  record on such a cell can make a piece hold one span more than the window holds, and
+  `Staged.dropped > 0` drops an acknowledged edit. The four merge in one push, so `main` never
+  holds that state.
 - **#1306's live term.** If #1306 lands counting every `Block` cell as live, an instance with a
   live lane gets `live + stored` above its cell count: correct, but larger. Root applies the
   amendment row before #1306 lands.
@@ -227,10 +231,12 @@ Batch R3. Direct dependencies:
 - Draft 10 *Classify fader automation edits as carried rebuilds* (the per-row mask this batch
   extends).
 - Draft 17b *Process an effect node in pieces at automation events* (same batch).
-- *Size each effect's automation span window from the producers its plan has* (#1306), same batch.
+- *Size each effect's automation span window from the producers its plan has* (#1306), in the same
+  push.
 - *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345).
 
 Draft 07, drafts 09a and 09b (node time and `a(n)`), *Keep every node's latency from dropping
 during playback* (#1285) and *Refuse automation on effect parameters that are not block-rate*
 (#1335) arrive through drafts 03a, 10 and 17b. Draft 18b *Render stored effect parameter
-automation across seeks and on both hosts* depends on this draft and lands in the same push.
+automation across seeks and on both hosts* and draft 19 *Classify and carry effect automation
+edits* depend on this draft and land in the same push.

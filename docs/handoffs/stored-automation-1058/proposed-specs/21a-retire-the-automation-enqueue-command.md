@@ -141,7 +141,7 @@ the manifest `fuzz/corpus/complete-schema-manifest.md:10`, the record
 
 - `crates/protocol/**` (not `queue.rs`)
 - `crates/host-core/src/control_provider.rs` (the `parameter_descriptor` hook and its test)
-- `crates/capi/src/runtime/tests.rs`, or its `crates/control-plane/` successor after #1309
+- `crates/capi/src/runtime/tests.rs` (#1309 D8 keeps the C ABI tests in capi)
 - `crates/conformance/src/protocol_corpus.rs`, `crates/conformance/tests/conformance_corpus.rs`
 - `tools/audit/src/protocol.rs` (the wire leg and success line), `scripts/run-protocol-allocation-audit.sh`
   (the success line), `scripts/check-protocol-wasm-parity.sh` (the self-test hash strings)

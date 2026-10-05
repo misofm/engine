@@ -12,7 +12,8 @@ and renders identically on both hosts and at any quantum. Where a session seek r
 node, each automated cell stages one `Point` to the curve at the seek target, and the grid resumes
 from the new node time. The browser host renders the same automation as the C ABI. The same
 session renders the same bits at quantum 128 and at quantum 100. The contract and schema docs say
-which spans render. This slice and draft 18a land in batch R3, in one push.
+which spans render. This slice, draft 18a, draft 19 and #1306 land in batch R3, in one push
+(README "Must-land-together groups").
 
 ## Context
 

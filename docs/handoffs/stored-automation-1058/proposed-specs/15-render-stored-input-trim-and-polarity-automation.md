@@ -41,9 +41,10 @@ through the one shared rule of draft 10.
   plan* (#1261) emits `TrimDb` and `PolarityInvert` records, and *Hold strip input-lane values in
   latest-target cells* (#1346) holds them in cells.
 - **Jump lengths** (#1054 D3): `fader_ms` for trim, `mute_ms` for polarity (draft 12's words).
-- **Browser kinds.** `COMMAND_TRIM_DB = 10`, `COMMAND_POLARITY_INVERT = 11`
+- **Browser edits.** Today `COMMAND_TRIM_DB = 10` and `COMMAND_POLARITY_INVERT = 11`
   (`hosts/host-web/src/lib.rs:882`, `:891`). After *Admit browser live edits in the Worker through
-  the committed model* (#1382) both are lowered to transactions and meet the shared classifier.
+  the committed model* (#1382) every browser live edit reaches the shared commit through the
+  Worker's apply and meets the shared classifier.
 - *Keep every trim, fader and matrix ramp inside its endpoints* (#1408) changes the trim ramp's
   per-sample law; it does not change where events go.
 
@@ -81,7 +82,7 @@ through the one shared rule of draft 10.
 - **D5. Edits.** The classifier's row list (draft 10 D1) gains rows 1 and 2: their automation edits
   are carried rebuilds. A static trim edit on an automated trim lane, or a static polarity edit on
   an automated polarity lane, gives no record (draft 10 D3), on both hosts: a browser
-  `COMMAND_TRIM_DB` or `COMMAND_POLARITY_INVERT` is lowered to that edit (#1382 D2) and replies
+  live trim or polarity edit reaches that rule through the Worker's apply (#1382) and replies
   `model_only`.
 - **D6. The acked-batch question: can an ack ever precede a drop? No.** Curve events come from the
   plan; an edit of an automated row gives no record or rebuilds; nothing is queued.
@@ -138,8 +139,8 @@ through the one shared rule of draft 10.
 7. **Edits** (`crates/host-core/tests/live_delta.rs`, new; browser in `hosts/host-web/src/tests.rs`).
    A trim entry change gives `Err(LiveRebuild::Automation)`; a static trim change on an automated
    lane gives no record; a static polarity change on that lane gives its record. In the browser,
-   `COMMAND_TRIM_DB` on the automated lane replies `model_only` and moves no bit, and
-   `COMMAND_POLARITY_INVERT` there replies `live`.
+   a live trim edit through the Worker's apply on the automated lane replies `model_only` and
+   moves no bit, and a live polarity edit there replies `live`.
 8. **Realtime.** `hosts/host-web/tests/input_automation_realtime.rs` (new integration binary; links
    `bench_support::alloc`, calls `assert_installed()` first): `allocations == 0 && frees == 0`
    around every render call after warm-up; `cargo build --locked --release -p audit -p capi &&

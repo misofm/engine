@@ -34,10 +34,11 @@ group-cell write on both hosts: it moves that cell and never overwrites the auto
 - **The cell.** *Hold live values in latest-target cells on both hosts* (#1312) D3: one matrix cell
   of five words (four coefficients, ramp), written by `TrackControlProducer::producer`
   (`crates/builtins-compiler/src/lib.rs:254-270`).
-- **Browser kinds.** `COMMAND_PAN = 1` sets both pan positions; `COMMAND_MATRIX = 2` all four
-  coefficients (`hosts/host-web/src/lib.rs:827`, `:829`). After *Admit browser live edits in the
-  Worker through the committed model* (#1382) both are lowered to transactions and meet the shared
-  classifier, as a C ABI transaction does.
+- **Browser edits.** Today `COMMAND_PAN = 1` sets both pan positions and `COMMAND_MATRIX = 2` all
+  four coefficients (`hosts/host-web/src/lib.rs:827`, `:829`). After *Admit browser live edits in
+  the Worker through the committed model* (#1382) every browser live edit reaches the shared
+  commit through the Worker's apply and meets the shared classifier, as a C ABI transaction does,
+  whatever form the browser uses to send it.
 
 ## Decisions frozen for this slice
 
@@ -65,12 +66,15 @@ group-cell write on both hosts: it moves that cell and never overwrites the auto
     a carried rebuild; cells carry by draft 10's address.
   - A static edit of an automated pan position or coefficient gives no record (draft 10 D3).
   - A static edit of a cell the session does not automate, in a group that has an automated cell,
-    writes the group cell (the two pan positions or the four coefficients, with the ramp word from
-    #1054 D5's rule) instead of a matrix record. The group cell is the live slot that decision 14
+    writes the group cell (the two pan positions or the four coefficients, with the ramp word
+    `LiveRamps::resolve(Matrix, the edit's own ramp)`, *Carry an optional per-edit ramp length on
+    live session edits*, #1394 D5, which keeps #1054 D5's matrix precedence when the edit carries
+    none) instead of a matrix record. The group cell is the live slot that decision 14
     rule 2 asks for, so the path is `live`. An edit that leaves the cell's bits unchanged gives
     nothing.
-  - A browser `COMMAND_PAN` or `COMMAND_MATRIX` on such a strip sets every cell of the group. Its
-    lowered transaction meets the two rules above cell by cell: the automated cells' values commit
+  - A browser live edit that sets every cell of the group (both pan positions, or all four
+    coefficients) reaches the shared commit through the Worker's apply and meets the two rules
+    above cell by cell: the automated cells' values commit
     as fallback values, and the other cells go to the group cell.
 - **D3. Mono collapse.** The matrix stage is seam-side (Context), so pan and matrix automation,
   symmetric or not, never declines a track's collapse. (README A1.5's collapse rule applies to the
@@ -118,7 +122,7 @@ group-cell write on both hosts: it moves that cell and never overwrites the auto
    grid sample starts its ramp exactly there; with `control_smoothing` explicit `pan_ms` 0 it is an
    exact step.
 5. **Group cell, both hosts** (`crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-   new). Left position automated; a transaction (C ABI) and a `COMMAND_PAN` (browser) move the
+   new). Left position automated; a transaction (C ABI) and a browser live pan edit through the Worker's apply move the
    static `right` position: path `live`, the same provider epoch; the left columns (`ll`, `rl`) keep
    their curve values at every completion sample; after the ramp, the output equals a plan
    prepared with the new `right` and the same automation. The matrix form: `ll` automated, a

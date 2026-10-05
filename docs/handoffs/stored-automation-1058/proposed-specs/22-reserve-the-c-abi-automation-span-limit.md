@@ -77,7 +77,8 @@ refused before the call reads anything else, so no session is created.
 ## Authorized paths
 
 - `crates/capi/include/miso_engine_v1.h`, `crates/capi/src/{abi,ffi}.rs`,
-  `crates/capi/src/runtime/` (or their `crates/control-plane/src/` successors)
+  `crates/capi/src/runtime/` and `crates/control-plane/src/` (where #1309, which lands before
+  batch P1, moves the control code)
 - `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs` (literals only)
 - `tools/audit/src/capi.rs` (the literal only)
 - `docs/C_ABI_V1_QUALIFICATION.md`

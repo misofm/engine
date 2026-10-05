@@ -67,19 +67,32 @@ admission path remains that could write a live record onto an automated lane.
   - grid period 64, grid ramp 64, completion `End`; jump-length key `Word(Fader)` (draft 07 D2):
     each jump reads the `fader` word of draft 12's plan cell for its block, so the program stores
     no jump length; no `no_restart`;
-  - **the offsets cell.** For a lane that at least one VCA reaches, preparation builds draft 11's
-    offsets cell directly: a #1312 latest-target cell whose word count is set at construction
-    (here, at preparation, and never resized). This slice adds that constructor to #1312's cell
-    module: the word count is an argument, all three slots are allocated by the constructor and
-    never resized, and the write and read rules of #1312 D1 are unchanged. The cell has one `f32`
-    word per reaching VCA, seeded with the reaching VCAs' offsets in the order `effective_strip_faders` adds them (ascending VCA-ID order,
-    `crates/session/src/vca.rs:96-120`). A value `v` becomes the gain
-    `checked_fader_gain(vca_effective_db(v, offsets))`, the same composition preparation bakes,
-    with `offsets` the cell's newest slot. No static copy of the offsets is kept in the program, so
-    one source holds them; draft 11 adds only the live VCA move that rewrites the cell. A single
-    precomputed offset sum is not used: it can round differently when two or more VCAs reach a
-    strip. A lane no VCA reaches has no offsets cell, and render calls `vca_effective_db(v, [])`,
-    which returns `v` bit for bit.
+  - **the offsets cell** (the layout of README finding F16, which root decides before this slice
+    is filed; this text is written for F16's recommended layout). In a session that declares at
+    least one VCA, preparation builds draft 11's offsets cell directly for every automated fader
+    lane: a #1312 latest-target cell whose word count is set at construction (here, at
+    preparation, and never resized). This slice adds that constructor to #1312's cell module: the
+    word count is an argument, all three slots are allocated by the constructor and never resized,
+    and the write and read rules of #1312 D1 are unchanged. The cell has one `f32` word per
+    **session** VCA, in ascending VCA-ID order, and one `u32` ramp word that draft 11 writes (the
+    length of the jump a VCA edit asks for; seeded with the session's fader length, #1054). The word of a VCA that reaches the lane is that
+    VCA's offset for the lane's channel; the word of a VCA that does not reach it is `+0.0`. A
+    value `v` becomes the gain `checked_fader_gain(vca_effective_db(v, offsets))`, with `offsets`
+    every word of the cell's newest slot. In a session with no VCA the lane has no offsets cell,
+    and render calls `vca_effective_db(v, [])`, which returns `v` bit for bit. No static copy of
+    the offsets is kept in the program, so one source holds them; draft 11 adds only the live VCA
+    edit that rewrites the cell. A single precomputed offset sum is not used: it can round
+    differently when two or more VCAs reach a strip.
+  - **Why the `+0.0` words keep the bits.** `effective_strip_faders` passes the reaching offsets in
+    ascending VCA-ID order (`crates/session/src/vca.rs:96-120`), so the cell's words are that
+    sequence with `+0.0` inserted. In `f64`, `s + (+0.0) == s` for every `s` except `-0.0`, which
+    becomes `+0.0`. So the cell's sum equals the reach-only sum, except that a zero sum may change
+    sign. The same holds when no VCA reaches the lane: `vca_effective_db` then returns `v`
+    unclamped, and `v` lies in `[-144, 24]` (draft 02), so the clamp of the cell's sum changes
+    nothing else. `db_gain(+0.0)` and `db_gain(-0.0)` are both exactly 1 (`math::pow(10, ±0) = 1`),
+    so the gain has the bits of the static composition in every case. Draft 07's "change only"
+    compares the curve value, before the offsets, and draft 11 D3 compares the composed gain, never
+    the dB sum, so a sign of zero never causes a retarget.
   - **Where the event state lives.** Each cell's event state (draft 07's `CellState`) lives in the
     fader bank stage beside the lane's ramp state, keyed by the cell's stable address (strip, row
     5, channel). So the stage's carry program (*Carry fader, mute and pan ramps across a plan
@@ -103,7 +116,7 @@ admission path remains that could write a live record onto an automated lane.
   HPF, LPF and strip effects (drafts 15, 16a-16b, 18a-18b). Nothing is added to
   `track_mono_source`.
 - **D4. Bytes.** Each fader program's bytes (builder report, draft 07 D5) and each offsets cell's
-  bytes (three slots of 4 bytes per reaching VCA, plus the cell's fixed words) are charged as builtin
+  bytes (three slots of 4 bytes per session VCA, plus the cell's fixed words) are charged as builtin
   bank payload through `checked_add_builtin_banks`, so they reach `builtin_bank_bytes`,
   `graph_incremental_plan_bytes` and `graph_session_plus_plan_bytes`, the caller's
   `maximum_graph_session_plus_plan_bytes` and the C ABI's replacement peak. This row is more exact
@@ -143,13 +156,15 @@ admission path remains that could write a live record onto an automated lane.
 
 ## Hazards
 
-- **Batch R1, one push with draft 09b.** Alone, this slice starts a moving curve at its prepared
-  value and holds it there. Draft 09b renders the motion; both merge in one push, so `main` never
-  holds this state.
+- **Batch R1, one push with drafts 09b, 10 and 11** (README "Must-land-together groups"). Alone,
+  this slice starts a moving curve at its prepared value and holds it there; draft 09b renders the
+  motion, draft 10 stops a live fader edit from fighting the curve, and draft 11 makes a VCA ride
+  heard on an automated member. The four merge in one push, so `main` never holds a partial state.
 - **Host-core is stream A's file** (`crates/host-core/src/prepare.rs`); root orders the merge after
   #1285 and #1312.
-- **Bit-identity with VCAs.** D1's ordered offsets cell is the decision; draft 11's live move
-  rewrites the whole slot in the same order, so it keeps the same property.
+- **Bit-identity with VCAs.** D1's ordered offsets cell, one word per session VCA, is the
+  decision; draft 11's live edit rewrites the whole slot in the same order, so it keeps the same
+  property.
 
 ## Objective gates
 
@@ -158,7 +173,9 @@ admission path remains that could write a live record onto an automated lane.
    to `v`) on one track renders, bit for bit, the session with static `fader_db` `-7.25` and no
    automation, for 64 blocks, on the C ABI and on the browser host. The same with a `both` entry on
    a track one VCA reaches with an offset of `+3` dB, and on a track three VCAs reach, with offsets
-   chosen so that their `f64` sum is inexact.
+   chosen so that their `f64` sum is inexact. The same in a session with two VCAs, for a track that
+   neither reaches and whose flat value is `-0.0` dB, and for a track that only the second VCA
+   reaches (a `+0.0` word before its offset).
 2. **Bytes.** The same session with and without one automated fader lane: `builtin_bank_bytes`,
    `graph_incremental_plan_bytes` and `graph_session_plus_plan_bytes` each differ by the builder's
    byte report for that program, and a `maximum_graph_session_plus_plan_bytes` one byte below the
@@ -188,8 +205,9 @@ admission path remains that could write a live record onto an automated lane.
 
 ## Test value
 
-- Gate 1 turns red if VCA offsets are composed in another order or as one sum, or if either host
-  converts dB differently.
+- Gate 1 turns red if VCA offsets are composed in another order or as one sum, if a `+0.0` word of
+  a VCA that does not reach the lane changes the gain bits, or if either host converts dB
+  differently.
 - Gate 2 turns red if the program's or the offsets cell's bytes escape the caller's graph cap or the
   replacement peak.
 - Gate 3 turns red if fader automation declines the collapse, which costs a plane per track for no
@@ -216,4 +234,7 @@ admission path remains that could write a live record onto an automated lane.
   edit goes through the shared commit before any host renders stored automation. #1382 brings the
   shared classifier rows of #1225, #1226, #1247, #1261, #1262 and #1390 and the cells of #1345,
   #1346 and #1347, which the later drafts build on.
-- Batch: R1, in one push with draft 09b *Render moving stored fader automation, seeks and latency*.
+- README finding F16 decided by root: the offsets cell's layout (D1, D4).
+- Batch: R1, in one push with drafts 09b *Render moving stored fader automation, seeks and
+  latency*, 10 *Classify fader automation edits as carried rebuilds* and 11 *Compose VCA offsets
+  with stored fader automation*.

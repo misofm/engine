@@ -91,7 +91,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
     a hold on both sides). A side that is a constant `0` ("off") on the sub-interval leaves it
     unchecked; D1 keeps every `linear` and `exponential` piece away from `0`.
   - **Order.** On each sub-interval where both sides are enabled, with values evaluated at `a` and
-    at `b` by A1.4's law (scalar `f64` through `crates/math`; a constant is its `f32` value):
+    at `b` by draft 07's `value_at` (D3 there, A1.4's law; a constant is its `f32` value):
     - both constant: `H < L` in `f32`, the static rule;
     - both `linear`, or both `exponential`: `L > H·(1 + 2^-22)` at `a` and at `b`;
     - otherwise: `min(L(a), L(b)) > max(H(a), H(b))·(1 + 2^-22)`.
@@ -138,6 +138,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
 ## Authorized paths
 
 - `crates/builtins-compiler/src/lib.rs` (the two functions, their exports and their call only),
+  `crates/builtins-compiler/Cargo.toml` (the `automation` dependency only), `Cargo.lock`,
   `crates/builtins-compiler/tests/builtin_automation_targets.rs`
 - `crates/host-core/src/live_delta.rs` (D5 only; stream B owns it, root sequences the merge),
   `crates/host-core/tests/live_delta.rs`, `crates/capi/src/runtime/live_tests.rs` (tests only)
@@ -161,10 +162,9 @@ that would cross a curve with the same code. Nothing renders the table yet.
   value, never a reason to relax D1.
 - **`-0.0`.** `BooleanExact` refuses the bits of `-0.0` (`contains`, `crates/builtins/src/lib.rs:303-305`);
   a mute segment authored with `-0.0` is refused, as a static mute of `-0.0` already is.
-- **Evaluation code.** D2 needs A1.4's value at two samples. Until the evaluator crate (slice 07)
-  exists, D2 evaluates the two formulas itself in `f64` through `crates/math`; slice 07 replaces
-  that with a call to its evaluator in the same change that adds the crate, so one law exists.
-  The check needs only ordering, and its `2^-22` margin dwarfs any `f64` evaluation error.
+- **Evaluation code.** D2 needs A1.4's value at two samples. It calls the evaluator crate of
+  draft 07 (`automation::value_at`), which lands first, so one law exists from the start. The check
+  needs only ordering, and its `2^-22` margin dwarfs any `f64` evaluation error.
 
 ## Objective gates
 
@@ -230,6 +230,8 @@ that would cross a curve with the same code. Nothing renders the table yet.
 
 - Draft 01 *Validate stored automation lanes in the session crate and state the hold rule* (the
   hold rule, the migrated fixture, the strip-kind rule).
+- Draft 07 *Compile stored automation into per-cell events in node time*: `value_at`, the one
+  evaluation law D2 calls.
 - *Refuse automation on effect parameters that are not block-rate* (#1335): D5 uses its
   `LiveRebuild::AutomationTarget` route, which is on `main` at `0c19119d0`.
 - Batch: R1.

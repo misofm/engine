@@ -99,8 +99,8 @@ never holds a queue that nothing calls.
 ## Authorized paths
 
 - `crates/protocol/**`
-- `crates/capi/src/runtime/{compile,control}.rs`, or their `crates/control-plane/src/` successors
-  after #1309
+- `crates/control-plane/src/`, the files that hold capi's compile and control code after #1309
+  (which lands before batch P1; `crates/capi/src/runtime/{compile,control}.rs` on `6ee64f484`)
 - `crates/conformance/src/protocol_corpus.rs` (retired rows only)
 - `tools/audit/src/protocol.rs` (the queue configuration)
 - `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROTOCOL_SEMANTICS.md`,

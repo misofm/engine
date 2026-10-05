@@ -62,9 +62,12 @@ already in flight keeps the length it started with.
   #1053 D7, as every live write does.
 - **D4. Swaps.** A successor is prepared from the committed model, which holds the edit, so its cell
   starts with the new lengths. Nothing carries.
-- **D5. The browser.** Preparation fills the cell. The browser edits `control_smoothing` through
-  the shared commit in its Worker (*Admit browser live edits in the Worker through the committed
-  model*, #1382, which lands before draft 09a), so D3 is one rule on both hosts.
+- **D5. The browser.** Preparation fills the cell, through the same host-core preparation on both
+  hosts. D3 lives in the shared classifier, which the browser's Worker commit calls after *Admit
+  browser live edits in the Worker through the committed model* (#1382). So a browser transaction
+  that edits `control_smoothing` meets the same rule as the C ABI's, from when the browser's apply
+  export (*Export transaction apply and anchored seek from the browser engine module*, #1293, before
+  draft 06a in batch R1) can carry one. This slice adds no browser path and no browser gate.
 - **D6. #1365.** D3 is the `live` classification of #1365's `control_smoothing` edit. This slice
   depends on #1365, which lands first, and changes the classifier code #1365 adds; #1365 is not
   amended.

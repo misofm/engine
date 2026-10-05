@@ -45,7 +45,8 @@ Batch R4.
 `design_targets`, `crates/host-core/src/live_delta.rs:463-502`). #1345 D1 holds them in one
 12-word target cell per `(section, channel)`. The browser took EQ edits as prepared submissions
 (`hosts/host-web/src/lib.rs:5076-5100`); after *Admit browser live edits in the Worker through the
-committed model* (#1382) they are lowered to transactions and meet the shared classifier.
+committed model* (#1382) they reach the shared commit through the Worker's apply and meet the shared
+classifier.
 
 **The render closure gate.** `scripts/check-web-audioworklet.sh` requires the render export's
 call closure to reach no allocator and own no trap outside one documented site (`:389-421`), and
@@ -90,8 +91,9 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
   - With the mask empty, every automation edit is a rebuild, so the separate
     `LiveRebuild::AutomationTarget` routing that #1335 D4 adds and draft 02 D5 extends is deleted: an
     automation edit with a refusable entry returns `LiveRebuild::Automation`, and the rebuild's
-    preparation refuses it with the same diagnostic. The classifier cases of drafts 10 and 03a
-    that pin `AutomationTarget` are rewritten to expect `Automation`.
+    preparation refuses it with the same diagnostic. The cases that pin `AutomationTarget` are rewritten to
+    expect `Automation`: draft 02's gate 7, draft 10's gate 1 and #1335's gate 4. Draft 03a's gate 3
+    asserts the refusal itself, which stays.
 - **D6. One rule, both hosts.** D4 and D5 live in the shared classifier, so a browser EQ edit meets
   them through #1382's Worker commit, as drafts 14b and 16b do for the pan and matrix group and the
   input filter pair. No host has its own admission for automated sections.
@@ -115,7 +117,10 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
    cell programs in `crates/host-core/src/prepare.rs`.
 2. D4-D5 in `crates/host-core/src/live_delta.rs` and the cell writer.
 3. D8's text.
-4. The tests below.
+4. Delete the `model_only_edits` cases that draft 10 moved to an EQ band-gain entry
+   (`crates/host-core/tests/live_delta.rs` and `crates/capi/src/runtime/live_tests.rs`): with the
+   mask empty, no automation edit is `model_only`, and the rebuild cases of drafts 10 and 19 and of this slice cover the path.
+5. The tests below.
 
 ## Authorized paths
 
@@ -146,7 +151,7 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
 - **Cost.** A moving section designs once per 64 samples per channel and lane (A4's table). Gate 6
   bounds the count; drafts 24a and 24b time it.
 - **Hot files.** `crates/host-core/src/live_delta.rs` (stream B), the stages (stream A),
-  `hosts/host-web/src/lib.rs` (stream H). Root sequences the merge.
+  `hosts/host-web/src/tests.rs` (stream H). Root sequences the merge.
 
 ## Objective gates
 

@@ -17,7 +17,8 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 ## Context
 
 - **Per-source seeks today.** `SessionState::seek` and `seek_at`
-  (`crates/capi/src/runtime/control.rs:1514-1543`) synchronize the plan epochs, then seek one
+  (`crates/capi/src/runtime/control.rs:1514-1543` on `6ee64f484`; in `crates/control-plane` after
+  #1309) synchronize the plan epochs, then seek one
   producer of the newest committed session (`newest_providers`, `:1486-1490`): the pending
   candidate's producers while a swap waits, else the running plan's. The shared FFI body
   `source_seek_entry` (`crates/capi/src/ffi.rs:574-624`) checks the handle and the source ID, calls
@@ -33,10 +34,12 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 - **Why all or nothing is possible.** Each consumer's command queue has one slot. Only the control
   thread pushes and render only pops, so the room a check sees cannot shrink before the push.
   Draft 04a D1 gives every producer `check_seek` (every rule except the push) and `try_seek`.
-- **The browser has no access to capi.** `hosts/host-web` calls `host-core` directly; the C ABI
-  control plane is capi code until *Extract the C ABI control plane into a portable crate both hosts
-  call* (#1309) moves it to `crates/control-plane`, which does not exist on `6ee64f484`. The one
-  function both hosts call (D1) is therefore in `host-core`, the crate both hosts already share.
+- **The shared control plane.** *Extract the C ABI control plane into a portable crate both hosts
+  call* (#1309) moves capi's `SessionState` (today `crates/capi/src/runtime/control.rs`) into
+  `crates/control-plane`, and lands before batch P1, so before this slice. After *Swap and retire
+  browser plans through the Worker's service loop* (#1381) D2, the browser's source entry points
+  call `SessionState`'s source routing too. So both hosts call one wrapper,
+  `SessionState::session_seek`, over D1's function in `host-core`'s `SourceControlSet`.
 - **Feature bits.** The last bit on `6ee64f484` is `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32);
   the mask is 63 (`crates/capi/include/miso_engine_v1.h:136-142`; `crates/capi/src/abi.rs:53-71`).
   #1316 and #1323 each add a bit; D15-12's growth rule gives this slice the next free bit when it
@@ -67,10 +70,8 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
      already report as internal (`SourceControlError::is_internal`, `:115-119`), with a
      `debug_assert`.
   The C ABI's `SessionState::session_seek` synchronizes the epochs and calls it on
-  `newest_providers_mut().sources`, exactly as `seek` does. The browser export (draft 06a) calls the
-  same function. The function lives in host-core's `SourceControlSet`; *Extract the C ABI control
-  plane into a portable crate both hosts call* (#1309) moves only the wrapper, with the rest of
-  `SessionState`. So this slice may merge before or after #1309 with no change to D1.
+  `newest_providers_mut().sources`, exactly as `seek` does. `SessionState` is in
+  `crates/control-plane` (#1309). The browser export (draft 06a) calls the same wrapper.
 - **D2. Which consumers.** The timeline and every source of the newest committed session: while a
   structural transaction's candidate waits for its swap, that is the candidate's set, whose
   persisting producers feed the rings the running plan renders (#1273 D3). A source the candidate
@@ -109,7 +110,8 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 ## Deliverables
 
 1. D1 in `crates/host-core/src/source.rs`, with unit tests.
-2. D4 in `crates/capi/src/ffi.rs`, `crates/capi/src/abi.rs`, `crates/capi/src/runtime/control.rs`;
+2. D4 in `crates/capi/src/ffi.rs`, `crates/capi/src/abi.rs`, and the `session_seek` wrapper in
+   `crates/control-plane/src/` (the file that holds `SessionState` after #1309);
    the header prototypes, constants and D5's text; `crates/capi/tests/c/abi_smoke.c`,
    `crates/capi/tests/c/header_smoke.cpp`; the frozen symbol list.
 3. D5 in `docs/C_ABI_V1_QUALIFICATION.md`; D6 in `tools/audit/src/capi.rs`.
@@ -119,9 +121,8 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 
 - `crates/host-core/src/source.rs` (`seek_session` and its unit tests)
 - `crates/capi/include/miso_engine_v1.h`, `crates/capi/src/ffi.rs`, `crates/capi/src/abi.rs`,
-  `crates/capi/src/lib.rs` (exports), the file that holds `SessionState` (the
-  `session_seek` wrapper only; `crates/capi/src/runtime/control.rs` on `6ee64f484`, which #1309
-  moves to `crates/control-plane/src/`), `crates/capi/src/runtime/tests.rs`,
+  `crates/capi/src/lib.rs` (exports), the file in `crates/control-plane/src/` that holds
+  `SessionState` after #1309 (the `session_seek` wrapper only), `crates/capi/src/runtime/tests.rs`,
   `crates/capi/tests/c/abi_smoke.c`, `crates/capi/tests/c/header_smoke.cpp`
 - `scripts/check-capi-abi.sh` (the frozen symbol list only)
 - `tools/audit/src/capi.rs` (D6 only)
@@ -204,6 +205,7 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   the session seek to the text #1317 writes.
 - *Reset latency floors at a host-declared discontinuity* (#1323), which adds
   `miso_engine_v1_declare_discontinuity`, named by D5's sentence.
-- Batch: R1. #1309 is not a dependency: D1's function stays in host-core in either merge order,
-  and #1309 moves only its wrapper. Draft 06a *Seek the timeline and every source from the browser
-  module export and the headless SDK* calls D1's function.
+- *Extract the C ABI control plane into a portable crate both hosts call* (#1309): the file that
+  holds `SessionState`. It lands before batch P1.
+- Batch: R1. Draft 06a *Seek the timeline and every source from the browser module export and the
+  headless SDK* calls the same wrapper.

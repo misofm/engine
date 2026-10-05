@@ -55,8 +55,8 @@ mute are drafts 13b and 13c.
 - **D2. Edits, one rule on both hosts.**
   - The classifier's row list (draft 10 D1) gains row 6: a mute automation edit is a carried
     rebuild (draft 10 D2 carries mute cells by the same address scheme). A static mute edit on an
-    automated lane gives no record (draft 10 D3); a browser mute command on it is lowered to that
-    edit (#1382 D2) and replies `model_only`.
+    automated lane gives no record (draft 10 D3); a browser live mute edit on it reaches that rule
+    through the Worker's apply (#1382) and replies `model_only`.
   - For an automated mute lane, the shared commit's mute composition (#1247's VCA mute, #1382 D3's
     solo overlay) writes the strip mute cell's `terms` instead of emitting a `Mute` record, and only
     when the terms' bits change. On the C ABI the overlay is absent, so `terms` is the VCA mute;
@@ -108,7 +108,7 @@ mute are drafts 13b and 13c.
 4. **Edits** (`crates/host-core/tests/live_delta.rs`, new). A mute entry change gives
    `Err(LiveRebuild::Automation)`; a static mute change on an automated lane gives no record; on the
    other, non-automated lane it gives its `Mute` record; a VCA mute of `t` gives one terms write and
-   no `Mute` record for the automated lane. Browser: a kind-4 command on the automated lane replies
+   no `Mute` record for the automated lane. Browser: a live mute edit through the Worker's apply on the automated lane replies
    `model_only` and moves no bit.
 5. **Realtime.** `hosts/host-web/tests/mute_automation_realtime.rs` (new integration binary, links
    `bench_support::alloc`, calls `assert_installed()` first) runs gate 1's browser script:

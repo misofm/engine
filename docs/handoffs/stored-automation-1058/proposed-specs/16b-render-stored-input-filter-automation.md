@@ -27,8 +27,9 @@ refused with `builtin.filter.order`, with nothing changed.
   `InputFilterPreparer` (`crates/host-core/src/control_preparation.rs:197-291`) and writes them to
   the strip's input cells (*Hold strip input-lane values in latest-target cells*, #1346 D1: one filter
   cell per `(section, channel)`, the pair and six coefficient words). After *Admit browser live
-  edits in the Worker through the committed model* (#1382), the browser's `COMMAND_INPUT_FILTERS`
-  (`hosts/host-web/src/lib.rs:893`) is lowered to a transaction and takes the same path.
+  edits in the Worker through the committed model* (#1382), a browser live filter edit (today
+  `COMMAND_INPUT_FILTERS`, `hosts/host-web/src/lib.rs:893`) reaches the shared commit through the
+  Worker's apply and takes the same path.
 - **The order check.** Draft 02 D2's `input_filter_order_diagnostics(model)` checks a lane's curves
   against each other or a static value, with the `2^-22` margin, and reads only the model, so it
   can check a candidate model (draft 02 D2, "For a later live edit").
@@ -76,8 +77,8 @@ refused with `builtin.filter.order`, with nothing changed.
     committed. Otherwise the commit writes the group cell (D2), path `live`: the group cell is the
     live slot that decision 14 rule 2 asks for. An edit whose normalized value
     (`validate_input_filter_pair`) leaves the cell's bits unchanged gives nothing.
-  - A browser `COMMAND_INPUT_FILTERS` sets the whole pair. Its lowered transaction meets the two
-    rules above: the automated filter's value commits as a fallback, and the other filter goes to
+  - A browser live edit that sets the whole pair reaches the shared commit through the Worker's
+    apply and meets the two rules above: the automated filter's value commits as a fallback, and the other filter goes to
     the group cell after the order check.
   - #1262 is not amended: this slice adds the automated-pair branch to the classifier path #1262
     builds.
@@ -130,7 +131,7 @@ refused with `builtin.filter.order`, with nothing changed.
    #1329's gates pass unchanged.
 5. **Group cell, both hosts** (`crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
    new). HPF ride from 100 to 900 Hz on `both`, static LPF 1,000 Hz. A transaction (C ABI) and a
-   `COMMAND_INPUT_FILTERS` (browser) set LPF 2,000 Hz: path `live`, the same provider epoch; after
+   browser live filter edit through the Worker's apply set LPF 2,000 Hz: path `live`, the same provider epoch; after
    its ramp the output equals a plan prepared with LPF 2,000 Hz and the same ride.
 6. **Crossing refused** (same files). An edit that sets LPF 500 Hz is refused with
    `builtin.filter.order` (on the C ABI `MISO_ENGINE_V1_COMPILE_REJECTED`); the revision and the

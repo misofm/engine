@@ -100,10 +100,11 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
 
 ## Hazards
 
-- **Batch R1 only.** Until draft 10 is in, a rebuild for another reason sets each automated lane
-  exactly at adoption (D2), and until draft 10 is in, a live fader edit on an automated lane, on
-  either host, retargets it until the next event. They merge in the same batch, so `main` never holds this
-  state.
+- **One push with drafts 09a, 10 and 11** (README "Must-land-together groups"). Until draft 10 is
+  in, a rebuild for another reason sets each automated lane exactly at adoption (D2), and a live
+  fader edit on an automated lane, on either host, retargets it until the next event. Until draft
+  11 is in, an acknowledged VCA ride on an automated member is not heard. The four merge in one
+  push, so `main` never holds these states.
 - **The chain call is shared.** `process_timed` defaults to `process`, so every other builtin bank
   is untouched; only the fader bank processor and the scalar track override it.
 - **No silence skip.** A lane with an event in the block takes the ramping path; a flat curve emits
@@ -173,5 +174,5 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
 - Draft 05 *Seek the timeline and every source in one C ABI call* and draft 06a *Seek the timeline
   and every source from the browser module export and the headless SDK* (the session seek on each
   host).
-- Batch: R1, in one push with draft 09a, and in the same batch as draft 10 *Classify fader
-  automation edits as carried rebuilds*.
+- Batch: R1, in one push with drafts 09a, 10 *Classify fader automation edits as carried
+  rebuilds* and 11 *Compose VCA offsets with stored fader automation*.

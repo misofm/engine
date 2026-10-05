@@ -13,7 +13,7 @@ offset order: grid retargets on a fixed node-time grid, jumps at discontinuities
 at a seek. Every value is computed in scalar `f64` through `crates/math` and rounded once to `f32`,
 so the same table and the same mapping give the same events, bit for bit, on x86-64, AArch64 and
 wasm, at any quantum, wherever a seek lands. It allocates nothing after its builder. No stage uses
-it yet; drafts 09a and 09b are its first users.
+it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first users.
 
 ## Context
 
@@ -217,7 +217,8 @@ it yet; drafts 09a and 09b are its first users.
 ## Dependencies
 
 - Draft 01 *Validate stored automation lanes in the session crate and state the hold rule*.
-- Batch: R1, with drafts 09a *Prepare stored fader automation and render it flat* and 09b *Render
+- Batch: R1, with draft 02 *Validate builtin automation targets against their rows at
+  preparation* and drafts 09a *Prepare stored fader automation and render it flat* and 09b *Render
   moving stored fader automation, seeks and latency*, its first users. The key names the words of
   draft 12's plan cell, but this crate reads no cell: the caller passes the words, so draft 12 is
   not a dependency.

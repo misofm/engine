@@ -11,8 +11,7 @@ The control protocol no longer stores a playhead that nothing plays. `TRANSPORT_
 transport state; its position field is retired and refused in either flag form. The transport
 snapshot and the `TRANSPORT_STATE` event carry the state and the effective sample, with no position.
 The engine has one playhead: the host moves it with source seeks today and with the session seek
-of drafts 05 and 06a later, and reads where each seek applied in the seek report (*Anchor every
-seek on the plan's source-read clock*, #1316). Every retired field is refused, never reallocated
+of drafts 05 and 06a later. Every retired field is refused, never reallocated
 and never renumbered.
 
 ## Context
@@ -42,7 +41,16 @@ and never renumbered.
 - **Corpus rows:** `command.transport_set` (`protocol_corpus.rs:827`), `response.transport_get`
   (`:935`), `response.transport_set` (`:943`), `event.transport_state` (`:1065`).
 - **Tests that set a position:** `crates/protocol/src/controller/tests.rs:2421`,
-  `crates/host-core/src/control_provider.rs:910`, `crates/capi/src/runtime/tests.rs:1900`, `:2403`.
+  `crates/host-core/src/control_provider.rs:910`, `crates/capi/src/runtime/tests.rs:1900`, `:2403`,
+  `:2557`.
+- **The audit corpus** builds `TransportSetRequest { state, position: None }`
+  (`tools/audit/src/protocol.rs:206`), so D2 changes that literal too.
+- **Every user.** `git grep` on `c63f5f37d` for `TransportSetRequest`, `TransportSnapshot`,
+  `TransportStateEvent`, `transport_position` and `TRANSPORT_SET` (outside `docs/handoffs/` and
+  `.github/`) finds them only in `crates/protocol/`, `crates/host-core/src/control_provider.rs`,
+  `crates/capi/src/runtime/tests.rs`, `crates/conformance/src/protocol_corpus.rs` and
+  `tools/audit/src/protocol.rs`; the fuzz manifest names the position in prose
+  (`fuzz/corpus/complete-schema-manifest.md:7`).
 
 ## Decisions frozen for this slice
 
@@ -59,7 +67,7 @@ and never renumbered.
 - **D4. Docs.** The registry rows for `0008`, the snapshot and the event lose the position and list
   the retired fields with this slice as the reason. `docs/CONTROL_PROVIDER_BOUNDARY.md:5` says
   transport is an absolute state and effective sample, and that the playhead is moved by host
-  seeks and read from the seek report.
+  seeks, not by the transport.
 - **D5. The acked-batch question: can an ack ever precede a drop?** No. A set with a position is
   refused at decode, before any change.
 
@@ -72,8 +80,9 @@ and never renumbered.
 
 - `crates/protocol/**` (not `queue.rs`)
 - `crates/host-core/src/control_provider.rs`
-- `crates/capi/src/runtime/tests.rs`, or its `crates/control-plane/` successor after #1309
+- `crates/capi/src/runtime/tests.rs` (#1309 D8 keeps the C ABI tests in capi)
 - `crates/conformance/src/protocol_corpus.rs`, `crates/conformance/tests/conformance_corpus.rs`
+- `tools/audit/src/protocol.rs` (the `TransportSetRequest` literal only)
 - `scripts/check-protocol-wasm-parity.sh` (the self-test hash strings),
   `fuzz/corpus/complete-schema-manifest.md`
 - `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROVIDER_BOUNDARY.md`,

@@ -84,8 +84,9 @@ the note's heading for each. No product code change.
 
 ## Decision record
 
-The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 2; anchors checked on
-`6ee64f484`, whose code equals `45c5a1819`'s; every finding of the attempt-1 verdict folded in). One
+The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 3; anchors checked on
+`6ee64f484`, whose code equals `45c5a1819`'s and `c63f5f37d`'s; every finding of the attempt-1 and
+attempt-2 verdicts folded in). One
 line per answer:
 
 - **A1** ([Design](../../docs/handoffs/stored-automation-1058/README.md#a1-design)): the control
@@ -102,7 +103,8 @@ line per answer:
   enough; it gains the hold rule, one entry per lane, the pan or matrix form, 64 samples between
   jumps, unit, domain, shape and filter-order rules, and jump ramps from `control_smoothing`.
 - **A4** ([Cost](../../docs/handoffs/stored-automation-1058/README.md#a4-cost)): `80 + 32·n` bytes per
-  automated cell, owned by the plan, independent of song length; CPU per block at most
+  automated cell, owned by the plan, independent of song length (plus a VCA offsets cell per
+  automated fader lane whose layout root decides, finding F16); CPU per block at most
   `2⌈q/64⌉ + 3` events per cell times per-row operation counts.
 - **A5** ([Bit-identity](../../docs/handoffs/stored-automation-1058/README.md#a5-bit-identity)): the
   same session and host operations give the same bits on every target (scalar `f64` through
@@ -176,3 +178,35 @@ seven minors, seven nits). No product code changed and no benchmark ran. Per fin
 The plan is now forty-one slices in twenty-six steps and seven batches (P1, R1, R2, R3, R4, P2, Q).
 Gate 3 deviates as in attempt 1. Gates run: `bash scripts/check-workspace-policy.sh` and
 `bash scripts/check-dsp-research.sh`.
+
+**Attempt 3** (stream K research worker). The attempt-2 adversarial verdict returned FAIL (one major,
+three minors, five nits). No product code changed and no benchmark ran. Per finding:
+
+- **MA1**: draft 06b is rewritten for *Move browser source submission and seeks into the Worker*
+  (#1387): the session seek goes to the control half by #1387's routing, the handler records the
+  accepted generation, and the MSB1 drain reads it in the realm #1387 D5 runs it; gates cover
+  `worker` and `single` mode; #1387, #1332 and #1294 are dependencies. A sub-agent checked "no
+  slice edits code that an earlier slice deletes" mechanically for all 41 drafts against each
+  closure (70 specs). Its definite findings are fixed: 06a (lifecycle refusal, the
+  `SessionState` wrapper, a pending-candidate gate), 05 (wrapper in `crates/control-plane`), 14b
+  and 11 (ramp words through `LiveRamps::resolve`), 02 (calls draft 07's evaluator and depends on
+  it), 10 and 20 (superseded test cases), #1306 (amendment rows for S's old role), and stale paths
+  in 10, 12, 13c, 21a-21c, 22 and 25.
+- **m1**: the middle layout of the VCA offsets cell is bit-exact and keeps every membership change
+  live, but adding or removing a VCA still rebuilds on a session with stored fader automation, which
+  #1247 lists as live. So finding F16 is a root decision with three layouts and costs (recommended:
+  the middle one); drafts 09a and 11 are written for it and depend on the ruling; the note's
+  Authority line is corrected.
+- **m2**: must-land-together groups 09a-09b-10-11, 13a-13c, #1306-18a-18b-19 and 21a-21c, each
+  with its reason.
+- **m3**: drafts 25 and 26 list every file a `git grep` finds, the audit tool and the policy pin
+  included.
+- **Nits**: browser gates name "a browser live edit through the Worker's apply" (compatible with the
+  #1057 note's F4); A2 keeps the static edit's meaning under every option; A1.4 gives `τ` for
+  `L = 0`; the "Acyclic" wording; the hot-file hazards of 19 and 20; F17 asks root to reopen GitHub
+  #1306 (closed by a keyword in `6b8bc7c96`'s message while its spec is open).
+- **New finding** F18: the specs of #1407 and #1408 exist only on `codex/d15-stream-g`.
+
+The plan stays forty-one slices in twenty-six steps and seven batches; draft 02 now depends on draft
+07 (both R1). Gate 3 deviates as in attempt 1. Gates run: `bash scripts/check-workspace-policy.sh`
+and `bash scripts/check-dsp-research.sh`.

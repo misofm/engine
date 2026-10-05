@@ -36,7 +36,8 @@ the curve. Solo and VCA mutes compose with the curve for the send as for the str
 ## Decisions frozen for this slice
 
 - **D1. Route edits write the cell.** For a route of draft 13b D1, the shared classifier emits one
-  route-cell write instead of #1225's folded route record and #1226's follow record. It carries the
+  route-cell write instead of the route records that #1225 and #1226 emit for that route (#1226 adds no record type
+  of its own, #1226 D3). It carries the
   open transform from `route_values` (`crates/graph-compiler/src/ids.rs:309-322`), the route
   `mute`, `follows_mute` and `terms`, and the ramp from #1226 D5's rule. It writes only when a word's
   bits change. The path is `live`.

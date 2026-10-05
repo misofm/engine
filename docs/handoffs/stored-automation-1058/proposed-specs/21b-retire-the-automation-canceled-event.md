@@ -91,7 +91,7 @@ This is the second of three slices that retire the command, all in batch P1 (one
 
 - `crates/protocol/**` (in `queue.rs`, only the event's reliable payload and constructor)
 - `crates/host-core/src/control_provider.rs` (the `record_canceled_automation` hook and its test)
-- `crates/capi/src/runtime/{tests,live_tests}.rs`, or their `crates/control-plane/` successors
+- `crates/capi/src/runtime/{tests,live_tests}.rs` (#1309 D8 keeps the C ABI tests in capi)
   after #1309
 - `crates/conformance/src/protocol_corpus.rs`, `crates/conformance/tests/conformance_corpus.rs`
 - `scripts/check-protocol-wasm-parity.sh` (the self-test hash strings),

@@ -12,8 +12,8 @@ the shared commit, and hears the new curve from the swap block on, with no gap a
 every effect keeps its state, every unchanged curve keeps its place, a changed curve takes one
 jump at the swap block, and a removed curve ramps to the static value. The revision completes
 `exact` at adoption. A static value edit on an automated effect parameter is stored and not heard,
-and commits as `model_only`, on both hosts: a browser live effect parameter command on an
-automated cell is lowered to that edit by the Worker's commit (#1382) and replies `model_only`. The
+and commits as `model_only`, on both hosts: a browser live effect parameter edit on an
+automated cell reaches that rule through the Worker's apply (#1382) and replies `model_only`. The
 EQ's rows stay masked until draft 20.
 
 ## Context
@@ -41,8 +41,9 @@ EQ's rows stay masked until draft 20.
   controls attached in both plans or in neither".
 
 **The browser.** After *Admit browser live edits in the Worker through the committed model*
-(#1382), an effect parameter command (kind 5, `COMMAND_EFFECT_PARAM`, `hosts/host-web/src/lib.rs:835`)
-is lowered to a session transaction and meets the shared classifier, as a C ABI transaction does.
+(#1382), a browser live effect parameter edit (today `COMMAND_EFFECT_PARAM`,
+`hosts/host-web/src/lib.rs:835`) reaches the shared commit through the Worker's apply and meets the
+shared classifier, as a C ABI transaction does.
 
 **What drafts 18a and 18b give.** Each automated cell has a stable address `(strip ID, rack, effect ID,
 parameter_index, channel)`, a compiled program and an event state (cursor, current target, ramp
@@ -138,7 +139,7 @@ rebuild whose cells restart, and carry without classification is never reached.
   capacity (#1306 D2), which changes `EffectProgramKey` for its bank-mates. D6 makes that a carry,
   not a restart; gate 4 holds it.
 - **Hot files.** `crates/host-core/src/live_delta.rs` (stream B), `crates/graph/src/lib.rs` and
-  the stages (stream A), `hosts/host-web/src/lib.rs` (stream H). Root sequences the merge.
+  the stages (stream A), `hosts/host-web/src/tests.rs` (stream H). Root sequences the merge.
 
 ## Objective gates
 
@@ -161,8 +162,9 @@ rebuild whose cells restart, and carry without classification is never reached.
    adoption). Removing the entry stages one release `Point` with the static value.
 5. **Static edit.** A static `params` edit on an automated cell commits `model_only`, the plan is
    not replaced, and the next blocks equal an engine that never received it.
-6. **Browser** (`hosts/host-web/src/tests.rs`, new): a kind-5 command on an automated cell replies
-   `model_only` and moves no bit; the same command on a non-automated cell of the same instance
+6. **Browser** (`hosts/host-web/src/tests.rs`, new): a live effect parameter edit through the Worker's
+   apply on an automated cell replies `model_only` and moves no bit; the same edit on a
+   non-automated cell of the same instance
    replies `live`.
 7. **Allocation.** `crates/graph/tests/rt11_swap_carry_alloc.rs` gains a swap with carried and
    released cells: 0 allocations and 0 frees in the swap block and the 1,000 blocks after it
@@ -196,7 +198,9 @@ rebuild whose cells restart, and carry without classification is never reached.
 
 ## Dependencies
 
-Batch R3. Direct dependencies:
+Batch R3, in one push with drafts 18a and 18b and #1306 (README "Must-land-together groups"):
+amended #1306 sizes each window without an automated cell's live term, and this slice's D2 stops
+the live record that would otherwise overflow it. Direct dependencies:
 
 - Draft 18b *Render stored effect parameter automation across seeks and on both hosts*.
 - *Carry console effect lanes across a plan swap* (#1279): the carry D6 extends.

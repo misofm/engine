@@ -37,6 +37,17 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
   (`crates/conformance/src/randomized.rs:1770-1780`), and
   `crates/conformance/tests/effect_contract.rs:25`, `:161-163` tests `automation_segment_value`.
   `crates/delay/src/lib.rs:2605-2625` builds a `Linear` span in a malformed-span test.
+- **Other test fixtures that declare `Sample`:** `crates/effect-contract/src/step.rs:927` (in its
+  `#[cfg(test)]` module, `:908`), `crates/effect-compiler/tests/native_session.rs:34`,
+  `crates/protocol/src/controller/tests.rs:490` and
+  `crates/conformance/tests/conformance_corpus.rs:81`.
+- **A policy pin.** `scripts/check-effect-runtime-policy.sh:61` pins `fn automation_segment_value(`
+  at count 1 in its duplicated-helper manifest.
+- **Every user.** `git grep` on `c63f5f37d` for `AutomationRate::Sample`,
+  `ParameterAutomationRate::Sample`, `AutomationSpanKind::{Step, Linear, Exponential}` and
+  `automation_segment_value` (outside `docs/handoffs/` and `.github/`) finds them only in the files
+  this Context names, in `crates/effect-contract/tests/response_analysis.rs`,
+  `crates/protocol/src/message_wire/tests.rs` and in `docs/EFFECT_CONTRACT_V1.md:151-152`.
 - **The protocol value.** `ParameterAutomationRate::Sample = 1`
   (`crates/protocol/src/message_wire.rs:244`, parsed at `:3039`); the registry lists "automation
   sample/block/none `1..3`" (`docs/CONTROL_PROTOCOL_REGISTRY.md:13`).
@@ -53,7 +64,9 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
   `Point`; the descriptor check accepts only `Block` for an automatable parameter; host-core's and
   the metadata tool's mappings lose `Sample`. The conformance reference mock and the generator
   keep only `Point` spans; a test that exists only for a retired kind is deleted, and the delay's
-  malformed-span test uses a `Point` with a malformed field instead.
+  malformed-span test uses a `Point` with a malformed field instead. Each test fixture that
+  declares `Sample` (Context) declares `Block`. The policy manifest's `fn automation_segment_value(`
+  row leaves with the function.
 - **D3. Re-pins**, with the reason "draft 26 retires the span kinds and the sample rate": any
   conformance corpus row or digest that carries a retired value, and `COMPLETE_SCHEMA_HASH` only if
   a corpus frame carries `ParameterAutomationRate` value 1. `retired_code_rows` gains a row for
@@ -71,7 +84,12 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
 
 ## Authorized paths
 
-- `crates/effect-contract/src/lib.rs`, `crates/effect-contract/tests/`
+- `crates/effect-contract/src/lib.rs`, `crates/effect-contract/src/step.rs` (its test module's
+  fixture only), `crates/effect-contract/tests/`
+- `crates/effect-compiler/tests/native_session.rs` (the fixture's rate only)
+- `crates/protocol/src/controller/tests.rs` (the fixture's rate only)
+- `crates/conformance/tests/conformance_corpus.rs`
+- `scripts/check-effect-runtime-policy.sh` (the `automation_segment_value` manifest row only)
 - `crates/protocol/src/message_wire.rs`, `crates/protocol/src/message_wire/tests.rs`
 - `crates/host-core/src/control_provider.rs` (the rate mapping only)
 - `tools/parameter-metadata/src/lib.rs` (the rate name only)
@@ -103,13 +121,15 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
    session-validator`, then `./target/release/audit capi` shows the same `pcm_digest` as base (PR
    evidence) and zero allocations, locks and syscalls.
 4. **Commands:**
-   - `cargo test --locked -p effect-contract`, `cargo test --locked -p conformance`,
+   - `cargo test --locked -p effect-contract`, `cargo test --locked -p effect-compiler`,
+     `cargo test --locked -p conformance`,
      `cargo test --locked -p protocol --features test-support`,
      `cargo test --locked -p host-core --features test-support`, `cargo test --locked -p delay`
    - the workspace debug leg (`test-debug-a`) and the DSP leg (`test-debug-b`) in
      `.github/workflows/qualification.yml`
    - `bash scripts/check-sdk-generated.sh target/ci/qualification-artifacts` after
      `bash scripts/build-web-audioworklet.sh`, `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-effect-runtime-policy.sh`, `bash scripts/test-effect-runtime-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

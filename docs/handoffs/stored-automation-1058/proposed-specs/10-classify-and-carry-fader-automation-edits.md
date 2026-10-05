@@ -13,8 +13,8 @@ ABI directly, the browser in its Worker (#1382, which lands before draft 09a). T
 carries, the fader lane continues from the value it has, and the revision completes `exact` at
 adoption. The response reports `rebuild`. A transaction that changes only the static fader value
 of a lane the session automates commits as `model_only`: that value is the lane's fallback, and no
-plan renders it while the automation exists. A browser live fader command on such a lane is
-lowered to that same transaction (#1382 D2) and meets the same rule: the reply reports
+plan renders it while the automation exists. A browser live fader edit on such a lane reaches
+the same shared commit through the Worker's apply (#1382) and meets the same rule: the reply reports
 `model_only`, and the curve keeps playing. This is one permanent rule in the shared commit, for
 both hosts (README A2). Every other automation row stays model-only and inert
 until its own rendering slice.
@@ -94,12 +94,15 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
     records are unchanged. A transaction that changes only such a value yields an empty delta and
     commits `model_only` (#1313 D2); D2's release cell reads the value when the automation goes.
   - **One rule, both hosts.** The rule lives in the shared classifier, which both hosts' commits
-    call (#1309; #1382 D2 for the browser). No host refuses such an edit and no host has its own
+    call (#1309; the Worker's apply, #1382, for the browser). No host refuses such an edit and no host has its own
     admission for automated lanes. README A2 and finding F9 give why `model_only` is not
     "acknowledged with no effect" in #1315's sense: the edit sets the committed document's fallback
     value, the response names the path, and the value is rendered when the automation goes.
-- **D4. Docs.** The header sentence (`miso_engine_v1.h:41-43`), `CONTROL_PROTOCOL_SEMANTICS.md:15`
-  and `C_ABI_V1_QUALIFICATION.md:268-274` say: a fader automation edit rebuilds and carries; a
+- **D4. Docs.** The sentences that say automation edits are model-only, in the text that P1
+  (draft 21a D5) and *Report each transaction's edit path in its response* (#1313, which rewrites
+  the header paragraph) leave in the C ABI header, `CONTROL_PROTOCOL_SEMANTICS.md` and
+  `C_ABI_V1_QUALIFICATION.md` (on `6ee64f484`: `miso_engine_v1.h:41-43`,
+  `CONTROL_PROTOCOL_SEMANTICS.md:15`, `C_ABI_V1_QUALIFICATION.md:268-274`), say: a fader automation edit rebuilds and carries; a
   static fader edit on an automated lane is model-only; the other rows stay model-only until they
   render.
 - **D5. The acked-batch question: can an ack ever precede a drop? No.** A rebuild acks only after
@@ -134,8 +137,9 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
 ## Hazards
 
 - **Superseded cases.** The "automation upsert" and removal cases named in Context now rebuild.
-  Move them to a mute `step` entry (row 6 stays masked until draft 13a). Each later slice that
-  unmasks that row moves them again; draft 20 deletes them.
+  This slice moves them to a parametric EQ band-gain entry, a valid `Block` target whose row stays
+  masked until draft 20, the last row to leave the mask. So no slice between 10 and 20 touches
+  them, and draft 20, after which every automation edit is a rebuild, deletes them.
 - **Order of the two automation checks.** Draft 02 D5 routes a refusable builtin entry to
   `LiveRebuild::AutomationTarget`. D1's check runs after it, so a refusable fader entry keeps that
   variant and its refusal; gate 1 holds the order.
@@ -163,9 +167,9 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
    a fresh plan of the new session (static fader) from the same timeline sample.
 5. **Static edit, both hosts** (same file; `hosts/host-web/src/tests.rs`, new). A `left_db` change
    on the automated lane: path `model_only`, the same epoch, every block bit-identical to the
-   uninterrupted render. In the browser, a live fader command (kind 3) on the automated lane,
-   lowered by the Worker's commit, replies `path: "model_only"` with the revision advanced by 1,
-   and every block is bit-identical to the uninterrupted render; the same command on the other
+   uninterrupted render. In the browser, a live fader edit on the automated lane, through the
+   Worker's apply, replies `path: "model_only"` with the revision advanced by 1,
+   and every block is bit-identical to the uninterrupted render; the same edit on the other
    lane replies `live`.
 6. **Realtime.** The swap block allocates and frees nothing (`bench_support::alloc` thread counters
    in `crates/host-core/tests/successor_swap.rs`, statics warmed).
@@ -208,5 +212,7 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314), for `EXACT`.
 - *Refuse automation on effect parameters that are not block-rate* (#1335): its step 4 and
   `LiveRebuild::AutomationTarget`.
-- Batch: R1, with drafts 09a and 09b. *Admit browser live edits in the Worker through the
-  committed model* (#1382) arrives through draft 09a.
+- Batch: R1, in one push with drafts 09a, 09b and 11 (README "Must-land-together groups"): D3 drops
+  the `FaderDb` that a VCA ride gives an automated member, and draft 11 adds the offsets-cell write
+  that makes the ride heard. *Admit browser live edits in the Worker through the committed model*
+  (#1382) arrives through draft 09a.

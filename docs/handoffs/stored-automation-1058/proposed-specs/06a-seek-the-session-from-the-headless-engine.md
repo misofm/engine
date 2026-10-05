@@ -27,8 +27,10 @@ export in draft 06b.
   retire browser plans through the Worker's service loop* (#1381) moves the set into the Worker's
   `SessionState`. Both arrive through #1293, a dependency.
 - **Draft 05's function.** `SourceControlSet::seek_session(generation, timeline_sample, anchor)`
-  in host-core checks the timeline and every source producer, then pushes to all of them. The C ABI
-  calls it; this slice makes the browser call the same function.
+  in host-core checks the timeline and every source producer, then pushes to all of them.
+  `SessionState::session_seek` in `crates/control-plane` wraps it, as `seek` wraps the source seek.
+  The C ABI calls the wrapper; this slice makes the browser call the same wrapper, as #1381 D2 makes
+  it call `SessionState`'s other source routing.
 - **Headless.** `OfflineEngine.seekSource` (`sdk/src/headless/engine.ts:299-305`; class at `:114`)
   calls `WasmBoundary.seekSource`, which calls the export directly
   (`sdk/src/core/boundary.ts:1082-1107`). The existing headless seek eval is at
@@ -45,13 +47,15 @@ export in draft 06b.
 ## Decisions frozen for this slice
 
 - **D1. The export.** `miso_engine_web_v1_session_seek(handle, generation: u64, frame: u64) -> u32`.
-  It calls draft 05's `SourceControlSet::seek_session(generation, frame, None)` on the browser
-  session's `SourceControlSet`, the one the source seek export uses (in the Worker's `SessionState`
-  after #1381, on the thread #1387's routing picks), and maps an
-  error through `source_result`. It does **not** call `prepare_source_seek`: every consumer
+  It calls draft 05's `SessionState::session_seek` (draft 05 D1's wrapper, which synchronizes the
+  epochs and calls `SourceControlSet::seek_session(generation, frame, None)` on the newest
+  providers), the source routing every browser source entry point uses after #1381 D2, on the
+  control half #1387 D2 picks (the Worker in `worker` mode, the worklet's control handler in
+  `single` mode). It maps an error through `source_result`. It does **not** call `prepare_source_seek`: every consumer
   observes the seek through its command queue at the next block, the timeline included, so all of
-  them change in one block. Outside `STATE_READY` it returns `RESULT_WRONG_STATE` as
-  `seek_source` does. Beside it, `miso_engine_web_v1_session_seek_at(handle, generation: u64,
+  them change in one block. On an instance that holds no control half it refuses with
+  `RESULT_REFUSED_LIFECYCLE` and changes nothing, the rule #1293 D1 sets for every control-half
+  export. Beside it, `miso_engine_web_v1_session_seek_at(handle, generation: u64,
   frame: u64, anchor: u64) -> u32` passes `Some(anchor)`, with #1293's anchor rules, so a browser
   host loops or starts the session in exact time (README A1.2).
 - **D2. Headless `seek`.** `OfflineEngine.seek(frame: bigint, options?: { generation?: bigint }):
@@ -91,8 +95,6 @@ export in draft 06b.
 - Any change to the routing of *Move browser source submission and seeks into the Worker* (#1387),
   which lands first (through #1293): the session seek takes the thread the source seek takes.
 - Any change to the per-source seek's semantics.
-- A browser plan swap: the browser has no successor path yet (*Replace the running browser session
-  in the Rust host*, #1290); the timeline's browser carry follows from draft 04b when it lands.
 
 ## Hazards
 
@@ -117,6 +119,12 @@ export in draft 06b.
    4,096 from a source and the timeline reads 4,096 in the same block. A second `seek` without
    options uses the next generation. A stale explicit generation returns the typed refusal.
 3. **Mirrors.** Each mirror list contains the export, and the checkers fail if one omits it.
+3a. **Role and pending candidate** (`hosts/host-web/src/tests.rs`, new). Each of the two exports,
+   called on an instance without a control half, returns `RESULT_REFUSED_LIFECYCLE` and changes
+   nothing (as #1293 gate 5). Commit a structural transaction that adds a source through
+   `miso_engine_web_v1_apply` (#1293), then call the session seek before the swap: at the swap
+   block the carried source, the added source and the timeline all read the seek's frame (draft 05
+   gate 4, on the browser).
 4. **No rendered bit moves** for a session that never calls the new export: the browser legs of the
    `browser` job in `.github/workflows/qualification.yml` pass with unchanged digests.
 5. **Commands:**
@@ -138,6 +146,8 @@ export in draft 06b.
   slot is checked.
 - Gate 2 turns red if the headless SDK picks a stale generation or does not seek the timeline.
 - Gate 3 turns red if a mirror lets the SDK call a name the module lacks.
+- Gate 3a turns red if the export runs on the render half, or if the browser seeks the running
+  plan's producers instead of the newest committed session's while a candidate waits.
 
 ## Dependencies
 
