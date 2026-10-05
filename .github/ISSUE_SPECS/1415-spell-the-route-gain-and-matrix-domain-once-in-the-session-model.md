@@ -85,7 +85,9 @@ session model already publishes a domain constant that other crates read:
    - `cargo test --locked -p graph-compiler`
    - `cargo test --locked -p host-core --features control-provider,test-support`
    - `cargo test --locked -p host-web --features test-support`
-   - `cargo test --locked -p graph-compiler --test graph_fixture -- --check`
+   - `cargo run --locked -p graph-compiler --bin graph_fixture -- --check` (root correction,
+     2026-10-05: `graph_fixture` is a binary, `crates/graph-compiler/src/bin/graph_fixture.rs`, not a
+     test target; the original spelling `cargo test ... --test graph_fixture` cannot run)
    - `bash scripts/check-graph-determinism.sh`
 3. **Workspace.** `cargo fmt --all -- --check`;
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
