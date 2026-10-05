@@ -274,7 +274,7 @@ pub(crate) fn swapped_run(
         ..
     } = b_prepared;
     publisher
-        .reserve_replacement(plan)
+        .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
         .unwrap_or_else(|_| panic!("reserve the successor"))
         .commit();
     for block in SWAP_BLOCK..BLOCKS {

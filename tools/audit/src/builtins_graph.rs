@@ -405,7 +405,7 @@ fn traced_refused_range(
         let plan = candidate
             .take()
             .expect("the refused candidate is control-owned");
-        match publisher.reserve_replacement(plan) {
+        match publisher.reserve_replacement(plan, engine::realtime::PlanAdoption::Next) {
             Err(PlanReplacementReservationError::RetirementFull(returned)) => {
                 candidate = Some(returned);
                 refused += 1;
@@ -910,7 +910,9 @@ mod tests {
             assert_applied(&render(&mut owner, &mut output, 0), PLAN_B, 1);
             // A holds the only retirement credit, so C is refused on the control side and stays
             // control-owned; render keeps B.
-            let refused = match publisher.reserve_replacement(refused) {
+            let refused = match publisher
+                .reserve_replacement(refused, engine::realtime::PlanAdoption::Next)
+            {
                 Err(PlanReplacementReservationError::RetirementFull(refused)) => refused,
                 _ => panic!("C must be refused while A awaits retirement"),
             };

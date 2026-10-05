@@ -1095,7 +1095,10 @@ where
                 if !self.pending_providers.is_empty() {
                     return Err(CommandError::Backpressure);
                 }
-                let reservation = match self.publisher.reserve_replacement(candidate_plan.take()) {
+                let reservation = match self
+                    .publisher
+                    .reserve_replacement(candidate_plan.take(), PlanAdoption::Next)
+                {
                     Ok(reservation) => reservation,
                     Err(error) => {
                         let returned = match error {

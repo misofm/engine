@@ -176,3 +176,110 @@ this, and the warm successor (stream C) publishes `Primed`.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for D6.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the cell's
   revision word and the routing rule D6 relies on.
+
+## Attempt record
+
+### Attempt 1 (implementer, Opus 5.5, branch `codex/d15-stream-b` on `899db1be7`)
+
+**What changed.**
+
+- `spsc.rs`: `PlanAdoption::{Next, NoEarlierThan(u64), Primed { not_before, lead_blocks }}` and
+  its claim rule `PlanAdoption::admits(block_start, prime_ready)`. Each mailbox cell gains three
+  atomics outside the payload (`AtomicU8` kind, `AtomicU64` due sample, `AtomicU32` lead), new
+  invariant I8. The writer stores them `Relaxed` into the `Empty` cell through
+  `MailboxPermit::write_adoption`, before the `Release` CAS that marks the cell `Full`. Render
+  loads them `Relaxed` through `MailboxReader::scheduled(observation)` after its `Acquire`
+  observation and before its claim. `MailboxWithdrawal::Withdrawn` now carries the schedule as
+  well as the revision word (`Withdrawn(T, u64, PlanAdoption)`); #1314's revision semantics are
+  unchanged.
+- `plan.rs`: `PreparedPlanExecutor::prime_ready(&self, block_start, lead_blocks) -> bool`, which
+  defaults to `false`, and the `PreparedRenderPlan::prime_ready` forwarder, which returns `false`
+  without an executor.
+- `plan_exchange.rs`: `reserve_replacement(plan, adoption)`. `publish(plan)` publishes `Next`.
+  The reservation and `UnadoptedCandidate` keep `adoption()`, and `republish` writes the
+  candidate's own schedule back. `enter_block(block_start)` uses this order: observe, then
+  `scheduled`, then `admits` (asks the **running** plan's `prime_ready` only for a due `Primed`
+  candidate), then the retirement reservation, then the one claim CAS. `render` passes
+  `time.absolute_sample`. `render_contiguous` passes the running plan's clock, which is the only
+  start a contiguous block can have. A call at another sample renders nothing, so it also
+  schedules nothing.
+- `mod.rs`: exports `PlanAdoption`; the gate-1 tests (`tests::scheduled_adoption`).
+- `crates/control-plane/src/{lib.rs,control.rs}`: D6. The structural publication passes
+  `PlanAdoption::Next`.
+
+**Deviation (authorized paths).** D6's signature change `reserve_replacement(plan, adoption)` breaks
+six callers outside the authorized paths, and gate 4 and gate 5 must compile them. Each caller
+got only the mechanical argument `engine::realtime::PlanAdoption::Next`, with no other edit:
+`tools/audit/src/{builtins_graph.rs,graph.rs,realtime.rs}`,
+`crates/graph/tests/rt11_swap_carry_alloc.rs`, `crates/host-core/tests/successor_swap.rs` and
+`crates/host-core/tests/support/successor.rs`.
+
+**D7: can an ack ever precede a drop? No.** Render claims only after `admits` returns `true` (an
+unadmitted candidate stays `Full`; the unit test `an_unready_primed_candidate_waits_published_until_ready`
+checks the cell state, and mutation M13 below shows that a claim-then-hold design turns it red).
+A claim adopts in the same `enter_block` (no held, returned or partial state exists in the code).
+A stale schedule or readiness read loses its claim on the generation (loom L1). Nothing in render
+drops a candidate: `Withdrawal::Taken` is reached only through the claim CAS that adopts.
+
+**Gates.**
+
+1. Engine unit tests (`cargo test -p engine --lib realtime`): 7 new tests in
+   `realtime::tests::scheduled_adoption`, all pass.
+2. Loom (`CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test
+   --locked --release -p engine --lib spsc_loom`): 8 passed (3 new), about 23 s.
+3. Realtime: `target/release/audit capi`: 100000 calls, allocations 0, deallocations 0, locks 0,
+   syscalls 0, `total_violations` 0. `check-realtime-policy.sh` and `test-realtime-policy.sh` ok.
+4. `Next` regression: `cargo test --locked -p capi` ok (all binaries green). `-p control-plane
+   --features test-support` ok (the crate has 0 tests of its own). `host-core ... --test
+   successor_swap` 32 passed. `graph ... --test rt11_swap_carry_alloc` 1 passed. `-p engine --features
+   realtime-audit` ok (lib 55 passed).
+5. Workspace: `cargo fmt --all -- --check` ok. `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` ok.
+   `scripts/check-cross-targets.sh` PASS. Worklet chain (engine code is browser-compiled):
+   `build-web-audioworklet.sh --named-twin` ok (shipped module `412df408...`),
+   `check-web-audioworklet.sh` ok, `check-browser-expected-resources.py --artifacts` ok,
+   `test-web-audioworklet.sh` ok, V8 spill gate ok. `scripts/check-workspace-policy.sh` ok.
+   `scripts/check-realtime-policy.sh` ok (93 regions in 26 files; the new regions are `PlanAdoption`'s
+   claim rule and the cell-schedule load and store). `scripts/test-realtime-policy.sh` ok.
+
+**Mutation runs.** For each run, the named defect was applied to the attempt-1 tree and the
+listed tests went red. With the defect reverted, every test is green.
+
+| # | Defect | Red tests |
+|---|---|---|
+| M1 | `NoEarlierThan` ignores its due sample | `no_earlier_than_adopts_at_the_first_block_at_or_past_its_sample`, `render_schedules_by_the_hosts_time_not_the_plan_clock`, `a_no_earlier_than_candidate_withdrawn_before_its_sample_is_never_adopted` |
+| M2 | `render` schedules by the plan clock, not `time.absolute_sample` | `render_schedules_by_the_hosts_time_not_the_plan_clock` |
+| M3 | `Primed` ignores `not_before` | `a_ready_primed_candidate_adopts_at_not_before`, `an_unready_primed_candidate_waits_published_until_ready`, `a_withdrawn_primed_candidate_republishes_with_its_schedule` |
+| M4 | hook gets lead 0 | the same three |
+| M5 | hook gets `not_before` as the block start | `an_unready_primed_candidate_waits_published_until_ready` |
+| M6 | `Primed` ignores readiness | `a_ready_primed_...`, `an_unready_primed_...`, `a_withdrawn_primed_...`, `a_plan_without_a_readiness_check_never_adopts_a_primed_candidate` |
+| M7 | hook also asked on the candidate (claimed plan) | `a_ready_primed_candidate_adopts_at_not_before`, `no_earlier_than_adopts_...` |
+| M8 | `republish` drops the kind (publishes `Next`) | `a_withdrawn_primed_candidate_republishes_with_its_schedule` |
+| M9 | withdrawal returns `Next` instead of the cell's schedule | `a_withdrawn_primed_...`, `a_no_earlier_than_candidate_withdrawn_...`, `a_plan_without_a_readiness_check_...` |
+| M10 | default `prime_ready` returns `true` | `a_plan_without_a_readiness_check_never_adopts_a_primed_candidate` |
+| M11 | forwarder returns `true` without an executor | `a_plan_without_a_readiness_check_never_adopts_a_primed_candidate` |
+| M12 | `Next` asks the readiness hook | `no_earlier_than_adopts_at_the_first_block_at_or_past_its_sample` |
+| M13 | the hazard's design: claim an unadmitted candidate and hold it in render | all 7 new unit tests, including the withdraw-before-S test (`Taken` instead of `Withdrawn`) and the unready test (cell no longer `Full`) |
+| L1 | no generation in the word (`advanced()` keeps the word) | loom `..._readiness_of_one_publication_never_claims_another`, `..._due_check_of_one_publication_never_claims_another` (none of the existing loom tests turns red) |
+| L2 | render reads readiness before its observation (ordering bug, applied to the model's render step) | loom `..._readiness_of_one_publication_never_claims_another` |
+| L3 | `Primed` ignores readiness | loom `..._readiness_of_one_publication_...`, `..._an_unready_candidate_stays_withdrawable` |
+
+**Test value (one sentence each).**
+
+- `no_earlier_than_adopts_...`: a swap applied at the first block regardless of S, or a `Next` or
+  `NoEarlierThan` candidate that asks the readiness hook (M1, M12).
+- `render_schedules_by_the_hosts_time_...`: a due check against the plan clock instead of the
+  host's explicit time (M2).
+- `a_ready_primed_...`: a hook called before `not_before`, called on the candidate, or called with
+  the wrong lead (M3, M4, M7).
+- `an_unready_primed_...`: a claim that ignores readiness, or that is asked with the wrong block
+  start, or a candidate claimed early and held (M5, M6, M13).
+- `a_withdrawn_primed_...`: a withdrawal or republish that drops the kind or the `not_before`
+  (M8, M9).
+- `a_no_earlier_than_candidate_withdrawn_...`: a not-yet-due candidate that render already holds,
+  so withdrawal reports `Taken` (M13, M1).
+- `a_plan_without_a_readiness_check_...`: a default or executor-less readiness of `true` (M10,
+  M11).
+- Loom models: an ordering or generation bug between the readiness or due read, the claim and
+  the withdraw-and-republish, which only some interleavings expose (L1, L2, L3).
+
+**Open items.** None in scope. #1355 implements the graph plan's `prime_ready` and the prime.

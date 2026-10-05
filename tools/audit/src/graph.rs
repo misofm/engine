@@ -118,7 +118,10 @@ pub(crate) fn main() {
 
     // Refused reservation: plan 6 fills the one-plan retirement queue, so the control side
     // refuses plan 8 and render keeps rendering plan 7.
-    let candidate = match publisher.reserve_replacement(prepared_graph(8, None)) {
+    let candidate = match publisher.reserve_replacement(
+        prepared_graph(8, None),
+        engine::realtime::PlanAdoption::Next,
+    ) {
         Err(PlanReplacementReservationError::RetirementFull(candidate)) => candidate,
         _ => panic!("a reservation must be refused while the retirement queue is full"),
     };

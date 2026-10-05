@@ -109,7 +109,7 @@ fn run_round(blocks: u64, trace_markers: bool) -> RoundEvidence {
 
     for block in 1..blocks - 2 {
         let candidate = third_plan.take().expect("third plan is control-owned");
-        match publisher.reserve_replacement(candidate) {
+        match publisher.reserve_replacement(candidate, engine::realtime::PlanAdoption::Next) {
             Err(PlanReplacementReservationError::RetirementFull(returned)) => {
                 third_plan = Some(returned);
                 reservations_refused += 1;

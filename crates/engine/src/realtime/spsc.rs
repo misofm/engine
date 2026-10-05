@@ -8,7 +8,7 @@
 #![allow(unsafe_code)]
 
 use core::{alloc::Layout, cell::Cell, marker::PhantomData, mem::MaybeUninit, num::NonZeroUsize};
-use sync::{Arc, AtomicU64, AtomicUsize, Ordering, UnsafeCell};
+use sync::{Arc, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, UnsafeCell};
 
 /// The concurrency primitives the ring is built from.
 ///
@@ -19,7 +19,7 @@ use sync::{Arc, AtomicU64, AtomicUsize, Ordering, UnsafeCell};
 #[cfg(not(loom))]
 mod sync {
     pub(super) use core::cell::UnsafeCell;
-    pub(super) use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    pub(super) use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     pub(super) use std::sync::Arc;
 
     /// Exclusive access to a slot's storage, spelled the way loom's `UnsafeCell` spells it.
@@ -38,7 +38,7 @@ mod sync {
 mod sync {
     pub(super) use loom::cell::UnsafeCell;
     pub(super) use loom::sync::Arc;
-    pub(super) use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    pub(super) use loom::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
     pub(super) fn with_mut<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*mut T) -> R) -> R {
         cell.with_mut(body)
@@ -491,6 +491,14 @@ impl<T: Send + 'static> Consumer<T> {
 //   cell is right: the `Full` cell becomes the `Active` one. The reader loads only the `Active`
 //   cell's word, whose index it learned from its own last claim. A withdrawal takes the cell's
 //   word with its payload, so a cell the writer emptied never reports a revision.
+// - I8 (#1311 D1, D2). Each cell has an adoption schedule beside its payload: a kind, a due sample
+//   and a prime lead, three atomics outside the payload. Only the writer stores them, into the
+//   `Empty` cell before the `Release` that marks it `Full`. The reader loads a `Full` cell's
+//   schedule after its `Acquire` load of the word and before it claims, and claims only if the
+//   schedule admits the block ([`PlanAdoption::admits`]). A schedule load that belongs to another
+//   publication (the writer withdrew and republished in between) goes with a word of an older
+//   generation, so the claim fails (I3, I6): a stale schedule or a stale readiness answer can
+//   only make render skip a block, never claim a candidate that is not due or not ready.
 // ---------------------------------------------------------------------------------------------
 
 const CELL_EMPTY: u64 = 0;
@@ -501,6 +509,83 @@ const CELL_STATE_BITS: u32 = 2;
 const MAILBOX_GENERATION_ONE: u64 = 1 << (2 * CELL_STATE_BITS);
 /// Cell 0 `Active`, cell 1 `Empty`, generation 0.
 const MAILBOX_INITIAL_WORD: u64 = CELL_ACTIVE;
+
+const ADOPTION_NEXT: u8 = 0;
+const ADOPTION_NO_EARLIER_THAN: u8 = 1;
+const ADOPTION_PRIMED: u8 = 2;
+
+/// When render may adopt a published candidate (#1311 D1), fixed when the control thread
+/// reserves it and kept across withdrawal and republication.
+///
+/// **The claim rule (D2, D5).** At each block entry render loads the mailbox word, then the
+/// `Full` cell's schedule, and claims the candidate only if [`Self::admits`] the block that is
+/// about to render; a claimed candidate is adopted in that same block, before it renders (D4).
+/// A candidate that is not admitted stays `Full` and withdrawable; render looks again at the next
+/// block and never waits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanAdoption {
+    /// Adopt at the first block after publication.
+    Next,
+    /// Adopt at the first block whose start is at or past this absolute sample. Any sample is
+    /// accepted; one between block starts adopts at the next block start after it.
+    NoEarlierThan(u64),
+    /// Adopt at the first block whose start is at or past `not_before` and at which the running
+    /// plan reports itself ready for a prime of `lead_blocks` blocks
+    /// ([`super::PreparedPlanExecutor::prime_ready`]); a plan that cannot answer never adopts it.
+    Primed {
+        /// The earliest block start that may adopt the candidate.
+        not_before: u64,
+        /// The prime the adopting block runs, in blocks.
+        lead_blocks: u32,
+    },
+}
+
+// REALTIME_POLICY_BEGIN
+impl PlanAdoption {
+    /// Whether a block starting at `block_start` may claim a candidate with this schedule.
+    ///
+    /// `prime_ready` is asked only for a `Primed` candidate whose `not_before` the block has
+    /// reached, with the block start and the lead; it is the running plan's readiness hook.
+    #[inline]
+    pub(crate) fn admits(
+        self,
+        block_start: u64,
+        prime_ready: impl FnOnce(u64, u32) -> bool,
+    ) -> bool {
+        match self {
+            Self::Next => true,
+            Self::NoEarlierThan(due) => block_start >= due,
+            Self::Primed {
+                not_before,
+                lead_blocks,
+            } => block_start >= not_before && prime_ready(block_start, lead_blocks),
+        }
+    }
+
+    const fn encode(self) -> (u8, u64, u32) {
+        match self {
+            Self::Next => (ADOPTION_NEXT, 0, 0),
+            Self::NoEarlierThan(due) => (ADOPTION_NO_EARLIER_THAN, due, 0),
+            Self::Primed {
+                not_before,
+                lead_blocks,
+            } => (ADOPTION_PRIMED, not_before, lead_blocks),
+        }
+    }
+
+    /// The writer stores only the three kinds `encode` produces.
+    const fn decode(kind: u8, due: u64, lead_blocks: u32) -> Self {
+        match kind {
+            ADOPTION_NEXT => Self::Next,
+            ADOPTION_NO_EARLIER_THAN => Self::NoEarlierThan(due),
+            _ => Self::Primed {
+                not_before: due,
+                lead_blocks,
+            },
+        }
+    }
+}
+// REALTIME_POLICY_END
 
 /// One snapshot of the mailbox state word.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -559,7 +644,36 @@ struct Mailbox<T> {
     cells: [UnsafeCell<Option<T>>; 2],
     /// Each cell's revision word (I7), indexed as `cells`.
     revisions: [AtomicU64; 2],
+    /// Each cell's adoption schedule (I8), indexed as `cells`: the kind, the due sample
+    /// (`NoEarlierThan`'s sample or `Primed`'s `not_before`) and `Primed`'s lead.
+    adoption_kinds: [AtomicU8; 2],
+    due_samples: [AtomicU64; 2],
+    lead_blocks: [AtomicU32; 2],
 }
+
+// REALTIME_POLICY_BEGIN
+impl<T> Mailbox<T> {
+    /// Store `cell`'s schedule (I8). `Relaxed`: the writer's next `Release` on the word publishes
+    /// it.
+    fn store_adoption(&self, cell: usize, adoption: PlanAdoption) {
+        let (kind, due, lead) = adoption.encode();
+        self.adoption_kinds[cell].store(kind, Ordering::Relaxed);
+        self.due_samples[cell].store(due, Ordering::Relaxed);
+        self.lead_blocks[cell].store(lead, Ordering::Relaxed);
+    }
+
+    /// Load `cell`'s schedule (I8), `Relaxed`: the caller's `Acquire` load of the word that found
+    /// the cell `Full` makes that publication's stores visible, and a later store can only belong
+    /// to a publication of a newer generation, which a claim built on that word cannot win.
+    fn load_adoption(&self, cell: usize) -> PlanAdoption {
+        PlanAdoption::decode(
+            self.adoption_kinds[cell].load(Ordering::Relaxed),
+            self.due_samples[cell].load(Ordering::Relaxed),
+            self.lead_blocks[cell].load(Ordering::Relaxed),
+        )
+    }
+}
+// REALTIME_POLICY_END
 
 // SAFETY: the cells are accessed only under the ownership rules I1-I6 above, which the state
 // word's acquire/release transitions enforce; `T: Send` lets a payload cross threads.
@@ -613,8 +727,8 @@ pub(crate) struct MailboxInvariantBroken<T>(pub(crate) T);
 /// The result of [`MailboxWriter::withdraw`].
 pub(crate) enum MailboxWithdrawal<T> {
     /// The cell was `Full`; the writer marked it `Empty` and moved the value out, with the cell's
-    /// revision word (I7).
-    Withdrawn(T, u64),
+    /// revision word (I7) and its adoption schedule (I8).
+    Withdrawn(T, u64, PlanAdoption),
     /// The reader's claim won: the value is the reader's, and that cannot change.
     Taken,
     /// Nothing was published since the last claim the writer learned of or the last withdrawal.
@@ -634,6 +748,9 @@ pub(crate) fn plan_mailbox<T: Send + 'static>() -> (MailboxWriter<T>, MailboxRea
         word: AtomicU64::new(MAILBOX_INITIAL_WORD),
         cells: [UnsafeCell::new(None), UnsafeCell::new(None)],
         revisions: [AtomicU64::new(0), AtomicU64::new(0)],
+        adoption_kinds: [AtomicU8::new(ADOPTION_NEXT), AtomicU8::new(ADOPTION_NEXT)],
+        due_samples: [AtomicU64::new(0), AtomicU64::new(0)],
+        lead_blocks: [AtomicU32::new(0), AtomicU32::new(0)],
     });
     (
         MailboxWriter {
@@ -697,8 +814,10 @@ impl<T: Send + 'static> MailboxWriter<T> {
                     sync::with_mut(&self.shared.cells[cell], |slot| unsafe { (*slot).take() });
                 // I7: only this writer stores a cell's word, so its own last store is the value.
                 let revision = self.shared.revisions[cell].load(Ordering::Relaxed);
+                // I8: likewise, only this writer stores the schedule.
+                let adoption = self.shared.load_adoption(cell);
                 match value {
-                    Some(value) => MailboxWithdrawal::Withdrawn(value, revision),
+                    Some(value) => MailboxWithdrawal::Withdrawn(value, revision, adoption),
                     // A `Full` cell always holds its payload: the writer stores it before the
                     // `Release` that marks the cell `Full`.
                     None => panic!("plan mailbox invariant broken: a Full cell held no payload"),
@@ -748,6 +867,13 @@ impl<T: Send + 'static> MailboxPermit<'_, T> {
     /// is not `Active`, and [`Self::commit`]'s `Release` publishes this store with the payload.
     pub(crate) fn write_revision(&self, revision: u64) {
         self.writer.shared.revisions[self.cell].store(revision, Ordering::Relaxed);
+    }
+
+    /// Store the adoption schedule of the held `Empty` cell (I8). The reader loads a cell's
+    /// schedule only after a load of the word that found it `Full`, and [`Self::commit`]'s
+    /// `Release` publishes this store with the payload.
+    pub(crate) fn write_adoption(&self, adoption: PlanAdoption) {
+        self.writer.shared.store_adoption(self.cell, adoption);
     }
 
     /// Write `value` into the held `Empty` cell, then mark it `Full` with one `Release`
@@ -818,6 +944,15 @@ impl<T: Send + 'static> MailboxReader<T> {
         Some(MailboxObservation { word, full })
     }
 
+    /// The observed `Full` cell's adoption schedule (I8): three `Relaxed` loads, after the
+    /// observation's `Acquire` and before any claim. It may belong to a later publication than the
+    /// observation's if the writer withdrew and republished in between; the claim built on the
+    /// observation then fails on the generation, so the reader acts on it only through a claim.
+    #[inline]
+    pub(crate) fn scheduled(&self, observed: MailboxObservation) -> PlanAdoption {
+        self.shared.load_adoption(observed.full)
+    }
+
     /// Claim the observed `Full` cell with exactly one compare-and-swap of the whole word: the
     /// `Full` cell becomes `Active` and the previously `Active` cell `Empty`. That transition is
     /// the adoption decision. On success the value is moved out of its cell; on failure (the
@@ -859,12 +994,12 @@ impl<T: Send + 'static> MailboxReader<T> {
 #[cfg(all(test, loom))]
 mod loom_tests {
     use super::{
-        MailboxReader, MailboxWithdrawal, MailboxWriter, QueueGeneration, bounded_spsc,
-        plan_mailbox,
+        MailboxReader, MailboxWithdrawal, MailboxWriter, PlanAdoption, QueueGeneration,
+        bounded_spsc, plan_mailbox,
     };
     use core::num::NonZeroUsize;
     use loom::sync::Arc;
-    use loom::sync::atomic::{AtomicUsize, Ordering};
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// #84 phase B: the model is the **real** ring, instantiated on loom's atomics and cells by
     /// the `sync` shim at the top of this module. Three items through a two-slot queue force one
@@ -961,7 +1096,7 @@ mod loom_tests {
             let outcome = writer.withdraw();
             let (adopted, reader) = render.join().expect("render");
             match outcome {
-                MailboxWithdrawal::Withdrawn(value, _) => {
+                MailboxWithdrawal::Withdrawn(value, _, _) => {
                     assert_eq!(value.id, 1);
                     assert!(adopted.is_empty(), "adopted and withdrawn both");
                 }
@@ -993,7 +1128,7 @@ mod loom_tests {
             publish(&mut writer, candidate(1, &drops));
             let first = writer.withdraw();
             let withdrawn_first = matches!(first, MailboxWithdrawal::Withdrawn(..));
-            if let MailboxWithdrawal::Withdrawn(value, _) = first {
+            if let MailboxWithdrawal::Withdrawn(value, _, _) = first {
                 assert_eq!(value.id, 1);
                 publish(&mut writer, value);
             }
@@ -1015,7 +1150,7 @@ mod loom_tests {
                 assert_eq!(adopted, [1, 2], "B adopts only after A");
             }
             match last {
-                MailboxWithdrawal::Withdrawn(value, _) => {
+                MailboxWithdrawal::Withdrawn(value, _, _) => {
                     assert!(!adopted.contains(&value.id), "adopted and withdrawn both");
                     let expected = if published_second { 2 } else { 1 };
                     assert_eq!(value.id, expected);
@@ -1124,6 +1259,161 @@ mod loom_tests {
             assert_eq!(reader.active_revision(), 8);
             drop((writer, reader));
             assert_eq!(drops.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    /// One #1311 race: control publishes A with its schedule and readiness flag, withdraws it,
+    /// and if it came back publishes B into the same cell with another schedule and flag, then
+    /// withdraws again. `*_claimable` says whether render's blocks (at 0 and 2) may ever claim it.
+    struct ScheduleRace {
+        first: PlanAdoption,
+        first_ready: bool,
+        first_claimable: bool,
+        second: PlanAdoption,
+        second_ready: bool,
+        second_claimable: bool,
+    }
+
+    /// Render's scheduled blocks: per block one load of the word, the `Full` cell's schedule
+    /// (I8), the readiness flag only through [`PlanAdoption::admits`] (a `Primed` candidate whose
+    /// `not_before` the block reached), and a claim only if admitted. At most one CAS per block.
+    fn render_scheduled_blocks(
+        reader: &mut MailboxReader<Candidate>,
+        starts: &[u64],
+        ready: &AtomicBool,
+    ) -> Vec<usize> {
+        let mut adopted = Vec::new();
+        for &start in starts {
+            let before = reader.claim_attempts();
+            if let Some(observed) = reader.observe() {
+                let admitted = reader
+                    .scheduled(observed)
+                    .admits(start, |_, _| ready.load(Ordering::Relaxed));
+                if admitted {
+                    if let Some(value) = reader.claim(observed) {
+                        adopted.push(value.id);
+                    }
+                }
+            }
+            assert!(reader.claim_attempts() - before <= 1, "one CAS per block");
+        }
+        adopted
+    }
+
+    fn run_schedule_race(race: &ScheduleRace) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(AtomicBool::new(false));
+        let (mut writer, mut reader) = plan_mailbox::<Candidate>();
+        let render_ready = Arc::clone(&ready);
+        let render = loom::thread::spawn(move || {
+            let adopted = render_scheduled_blocks(&mut reader, &[0, 2], &render_ready);
+            (adopted, reader)
+        });
+        // The flag stands for #1355's per-ring `prime_required` atomics: stored before the
+        // `Release` that publishes the candidate it belongs to.
+        ready.store(race.first_ready, Ordering::Relaxed);
+        let permit = writer.try_reserve().expect("an Empty cell");
+        permit.write_adoption(race.first);
+        assert!(permit.commit(candidate(1, &drops)).is_ok());
+        let mut created = 1;
+        let first = writer.withdraw();
+        let first_taken = matches!(first, MailboxWithdrawal::Taken);
+        let mut last = None;
+        if let MailboxWithdrawal::Withdrawn(value, _, adoption) = first {
+            assert_eq!((value.id, adoption), (1, race.first), "A came back whole");
+            drop(value);
+            ready.store(race.second_ready, Ordering::Relaxed);
+            let permit = writer.try_reserve().expect("the cell A left");
+            permit.write_adoption(race.second);
+            assert!(permit.commit(candidate(2, &drops)).is_ok());
+            created += 1;
+            last = Some(writer.withdraw());
+        }
+        let (adopted, reader) = render.join().expect("render");
+
+        assert!(adopted.len() <= 1, "adopted {adopted:?}");
+        assert!(race.first_claimable || !adopted.contains(&1), "claimed A");
+        assert!(race.second_claimable || !adopted.contains(&2), "claimed B");
+        assert_eq!(
+            first_taken,
+            adopted == [1],
+            "A is Taken exactly when adopted"
+        );
+        match last {
+            Some(MailboxWithdrawal::Withdrawn(value, _, adoption)) => {
+                assert_eq!((value.id, adoption), (2, race.second), "B came back whole");
+                assert!(!adopted.contains(&2), "B adopted and withdrawn both");
+            }
+            Some(MailboxWithdrawal::Taken) => assert_eq!(adopted, [2]),
+            Some(MailboxWithdrawal::Nothing) => panic!("a publication is never Nothing"),
+            None => {}
+        }
+        drop((writer, reader));
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            created,
+            "each value ends exactly once"
+        );
+    }
+
+    /// #1311 gate 2, readiness: A is `Primed` and ready, B is `Primed` and not ready. Render may
+    /// read A's word and A's `true` flag, then lose the claim to control's withdrawal and B's
+    /// publication; a flag read for A never lets render claim B.
+    #[test]
+    fn spsc_loom_plan_mailbox_readiness_of_one_publication_never_claims_another() {
+        loom::model(|| {
+            run_schedule_race(&ScheduleRace {
+                first: PlanAdoption::Primed {
+                    not_before: 0,
+                    lead_blocks: 1,
+                },
+                first_ready: true,
+                first_claimable: true,
+                second: PlanAdoption::Primed {
+                    not_before: 0,
+                    lead_blocks: 2,
+                },
+                second_ready: false,
+                second_claimable: false,
+            });
+        });
+    }
+
+    /// #1311 gate 2, due sample: A is `Next`, B is due at 100, past render's blocks. Render may
+    /// read A's kind, then lose the claim to B's publication; B is never claimed early.
+    #[test]
+    fn spsc_loom_plan_mailbox_due_check_of_one_publication_never_claims_another() {
+        loom::model(|| {
+            run_schedule_race(&ScheduleRace {
+                first: PlanAdoption::Next,
+                first_ready: false,
+                first_claimable: true,
+                second: PlanAdoption::NoEarlierThan(100),
+                second_ready: false,
+                second_claimable: false,
+            });
+        });
+    }
+
+    /// #1311 gate 2, the reverse: A is `Primed` and unready, then B is `Primed`, ready and due.
+    /// A is never claimed, so control always takes it back, and B is adopted at most once.
+    #[test]
+    fn spsc_loom_plan_mailbox_an_unready_candidate_stays_withdrawable() {
+        loom::model(|| {
+            run_schedule_race(&ScheduleRace {
+                first: PlanAdoption::Primed {
+                    not_before: 0,
+                    lead_blocks: 1,
+                },
+                first_ready: false,
+                first_claimable: false,
+                second: PlanAdoption::Primed {
+                    not_before: 2,
+                    lead_blocks: 1,
+                },
+                second_ready: true,
+                second_claimable: true,
+            });
         });
     }
 }
@@ -1360,7 +1650,7 @@ mod tests {
         let (mut writer, mut reader) = plan_mailbox::<u32>();
         assert!(writer.try_reserve().expect("empty").commit(1).is_ok());
         let observed = reader.observe().expect("full");
-        let MailboxWithdrawal::Withdrawn(value, _) = writer.withdraw() else {
+        let MailboxWithdrawal::Withdrawn(value, _, _) = writer.withdraw() else {
             panic!("an unclaimed candidate is withdrawn")
         };
         assert!(writer.try_reserve().expect("empty").commit(value).is_ok());

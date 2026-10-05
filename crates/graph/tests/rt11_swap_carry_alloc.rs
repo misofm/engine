@@ -251,7 +251,7 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
         assert_eq!(block(&mut owner).0, [0.75; 2]);
     }
     publisher
-        .reserve_replacement(successor)
+        .reserve_replacement(successor, engine::realtime::PlanAdoption::Next)
         .expect("reserve")
         .commit();
     let mark = current_thread_counters();

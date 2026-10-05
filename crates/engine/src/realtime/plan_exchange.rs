@@ -19,10 +19,18 @@
 //! block renders a newer one; the control thread routes each committed revision to the newest
 //! pending candidate, wherever it is ([`PlanPublisher::set_revision`],
 //! [`PlanReplacementReservation::set_revision`], [`UnadoptedCandidate::set_revision`]).
+//!
+//! Every candidate is reserved with a [`PlanAdoption`] (#1311): adopt at the next block, no
+//! earlier than a scheduled sample, or no earlier than a sample and only once the running plan
+//! is ready for a prime. Render decides before it claims: it loads the mailbox word, then the
+//! `Full` cell's schedule, asks the running plan's readiness hook for a due `Primed` candidate,
+//! and claims only if the block is admitted. A candidate is therefore either unclaimed and
+//! withdrawable, or claimed and adopted in the same block; nothing is handed back from render.
 
 use super::spsc::{
-    MailboxPermit, MailboxReader, MailboxWithdrawal, MailboxWriter, bounded_spsc_internal,
-    bounded_spsc_retained_payload, plan_mailbox, plan_mailbox_retained_bytes,
+    MailboxPermit, MailboxReader, MailboxWithdrawal, MailboxWriter, PlanAdoption,
+    bounded_spsc_internal, bounded_spsc_retained_payload, plan_mailbox,
+    plan_mailbox_retained_bytes,
 };
 use super::watermark::{
     CandidateOutcome, PlanWatermarkReader, WatermarkWriter, plan_watermark,
@@ -86,8 +94,9 @@ pub enum RevisionTarget {
 /// Result of one render-entry swap decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SwapOutcome {
-    /// No candidate was claimed at this boundary: none was published, or control withdrew it
-    /// after render's load (render looks again at the next block).
+    /// No candidate was claimed at this boundary: none was published, the published one's
+    /// [`PlanAdoption`] does not admit this block yet, or control withdrew it after render's load
+    /// (render looks again at the next block).
     None,
     /// One complete replacement plan became active before rendering.
     Applied,
@@ -235,10 +244,11 @@ pub struct PlanReplacementReservation<'a> {
     revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
+    adoption: PlanAdoption,
 }
 
 /// A published candidate the control thread took back before render claimed it: whole,
-/// unrendered, with its epoch and its retirement credit. Republish it with
+/// unrendered, with its epoch, its retirement credit and its [`PlanAdoption`]. Republish it with
 /// [`PlanPublisher::republish`], or drop it on the control thread, which returns its credit.
 #[must_use]
 pub struct UnadoptedCandidate {
@@ -248,6 +258,7 @@ pub struct UnadoptedCandidate {
     revision: u64,
     superseded: u64,
     outcome: CandidateOutcome,
+    adoption: PlanAdoption,
 }
 
 impl UnadoptedCandidate {
@@ -288,6 +299,12 @@ impl UnadoptedCandidate {
         self.epoch
     }
 
+    /// When the candidate may be adopted; republication keeps it (#1311 D1).
+    #[must_use]
+    pub const fn adoption(&self) -> PlanAdoption {
+        self.adoption
+    }
+
     /// Control-plane ID of the candidate plan.
     #[must_use]
     pub fn plan_id(&self) -> u64 {
@@ -315,6 +332,7 @@ impl fmt::Debug for UnadoptedCandidate {
             .debug_struct("UnadoptedCandidate")
             .field("epoch", &self.epoch)
             .field("plan_id", &self.plan_id())
+            .field("adoption", &self.adoption)
             .finish_non_exhaustive()
     }
 }
@@ -411,22 +429,29 @@ pub fn plan_exchange_at_revision(
     ))
 }
 
-/// Publish into the held `Empty` cell, with `revision` in its revision word. Its compare-and-swap
-/// cannot fail (the mailbox's I5): the permit proves no cell was `Full`, and only this publisher
-/// publishes.
-fn publish_into(permit: MailboxPermit<'_, PublishedPlan>, item: PublishedPlan, revision: u64) {
+/// Publish into the held `Empty` cell, with `revision` in its revision word and `adoption` in its
+/// schedule. Its compare-and-swap cannot fail (the mailbox's I5): the permit proves no cell was
+/// `Full`, and only this publisher publishes.
+fn publish_into(
+    permit: MailboxPermit<'_, PublishedPlan>,
+    item: PublishedPlan,
+    revision: u64,
+    adoption: PlanAdoption,
+) {
     permit.write_revision(revision);
+    permit.write_adoption(adoption);
     if permit.commit(item).is_err() {
         panic!("plan mailbox invariant broken: render changed the word while no cell was Full");
     }
 }
 
 impl PlanPublisher {
-    /// Reserve, then commit, an exact-envelope candidate; the epoch is consumed only on success.
-    /// It fails `Full` while a published candidate is unclaimed or no retirement credit is free.
+    /// Reserve, then commit, an exact-envelope candidate for adoption at the next block
+    /// ([`PlanAdoption::Next`]); the epoch is consumed only on success. It fails `Full` while a
+    /// published candidate is unclaimed or no retirement credit is free.
     #[allow(clippy::result_large_err)] // Ownership-preserving backpressure is the public contract.
     pub fn publish(&mut self, plan: PreparedRenderPlan) -> Result<PlanEpoch, PublishError> {
-        match self.reserve_replacement(plan) {
+        match self.reserve_replacement(plan, PlanAdoption::Next) {
             Ok(reservation) => Ok(reservation.commit()),
             Err(
                 PlanReplacementReservationError::PublicationFull(plan)
@@ -444,10 +469,15 @@ impl PlanPublisher {
     /// Reserve the mailbox's `Empty` cell and the eventual displaced-plan retirement before any
     /// caller-owned state becomes visible.  A valid reservation's
     /// [`PlanReplacementReservation::commit`] is non-fallible and publishes exactly once.
+    ///
+    /// `adoption` fixes when render may adopt the candidate (#1311 D1): render claims it at the
+    /// first block that [`PlanAdoption`] admits, and until then it stays published and
+    /// withdrawable.
     #[allow(clippy::result_large_err)] // Every failure returns the complete candidate.
     pub fn reserve_replacement(
         &mut self,
         plan: PreparedRenderPlan,
+        adoption: PlanAdoption,
     ) -> Result<PlanReplacementReservation<'_>, PlanReplacementReservationError> {
         if plan.envelope() != self.envelope {
             return Err(PlanReplacementReservationError::Incompatible(plan));
@@ -473,6 +503,7 @@ impl PlanPublisher {
             revision,
             superseded: 0,
             outcome: CandidateOutcome::Exact,
+            adoption,
         })
     }
 
@@ -511,6 +542,7 @@ impl PlanPublisher {
                     outcome,
                 },
                 revision,
+                adoption,
             ) => Withdrawal::Withdrawn(UnadoptedCandidate {
                 epoch,
                 plan,
@@ -518,13 +550,15 @@ impl PlanPublisher {
                 revision,
                 superseded,
                 outcome,
+                adoption,
             }),
             MailboxWithdrawal::Taken => Withdrawal::Taken,
             MailboxWithdrawal::Nothing => Withdrawal::Nothing,
         }
     }
 
-    /// Publish a withdrawn candidate again, with its own epoch and retirement credit.
+    /// Publish a withdrawn candidate again, with its own epoch, retirement credit and
+    /// [`PlanAdoption`] (#1311 D1).
     ///
     /// It cannot fail: the candidate holds the newest epoch this publisher issued, so nothing was
     /// published after its withdrawal and the mailbox has an `Empty` cell.
@@ -558,6 +592,7 @@ impl PlanPublisher {
                 outcome: candidate.outcome,
             },
             candidate.revision,
+            candidate.adoption,
         );
         epoch
     }
@@ -580,6 +615,12 @@ impl PlanReplacementReservation<'_> {
     #[must_use]
     pub const fn epoch(&self) -> PlanEpoch {
         self.epoch
+    }
+
+    /// When the candidate may be adopted, fixed at reservation (#1311 D1).
+    #[must_use]
+    pub const fn adoption(&self) -> PlanAdoption {
+        self.adoption
     }
 
     /// Set the newest committed revision whose content the candidate carries (#1314 D2), before
@@ -614,6 +655,7 @@ impl PlanReplacementReservation<'_> {
             revision,
             superseded,
             outcome,
+            adoption,
         } = self;
         *next_epoch = epoch.0 + 1;
         *newest_revision = revision;
@@ -627,6 +669,7 @@ impl PlanReplacementReservation<'_> {
                 outcome,
             },
             revision,
+            adoption,
         );
         epoch
     }
@@ -661,13 +704,31 @@ impl RealtimePlanOwner {
     pub const fn carry_mismatch_count(&self) -> u64 {
         self.carry_mismatched
     }
-    /// The block-boundary adoption decision: one `Acquire` load, and only if a cell is `Full`,
-    /// one compare-and-swap that claims it. A lost claim (control withdrew the candidate after
-    /// the load) does nothing; render looks again at the next block and never retries here.
-    fn enter_block(&mut self) -> (SwapOutcome, CarryOutcome) {
+    /// The block-boundary adoption decision for the block that starts at `block_start`: one
+    /// `Acquire` load and, only if a cell is `Full`, the claim rule (#1311 D2), then one
+    /// compare-and-swap that claims it.
+    ///
+    /// Render decides before it claims: it loads the `Full` cell's [`PlanAdoption`], and for a
+    /// `Primed` candidate whose `not_before` the block has reached asks the **running** plan's
+    /// readiness hook. It claims only if the schedule admits the block, so a candidate that is
+    /// not due or not ready stays published and withdrawable. A claimed candidate is adopted here,
+    /// before the block renders (D4). A lost claim (control withdrew the candidate after the load,
+    /// perhaps republishing another one whose schedule or readiness render read) does nothing;
+    /// render looks again at the next block and never retries here.
+    fn enter_block(&mut self, block_start: u64) -> (SwapOutcome, CarryOutcome) {
         let Some(observed) = self.publication.observe() else {
             return (SwapOutcome::None, CarryOutcome::NotRequested);
         };
+        let running = &self.active.1;
+        let admitted = self
+            .publication
+            .scheduled(observed)
+            .admits(block_start, |start, lead_blocks| {
+                running.prime_ready(start, lead_blocks)
+            });
+        if !admitted {
+            return (SwapOutcome::None, CarryOutcome::NotRequested);
+        }
         // Every published candidate holds a retirement credit, so the retirement queue has room
         // for the plan it displaces. The room is taken before the claim, so a claimed candidate
         // is always adopted; were the room ever missing, nothing is claimed and the candidate
@@ -725,7 +786,10 @@ impl RealtimePlanOwner {
         absolute_sample: u64,
     ) -> Result<RealtimeRenderReport, RenderError> {
         super::audit::in_render_scope(|| {
-            let (swap, carry) = self.enter_block();
+            // The block can only start where the running plan's clock stands, which an adopted
+            // plan continues; a call at any other sample renders nothing, so it schedules nothing.
+            let block_start = self.active.1.next_absolute_sample();
+            let (swap, carry) = self.enter_block(block_start);
             let active_epoch = self.active.0;
             let expected = self.active.1.next_absolute_sample();
             if absolute_sample != expected {
@@ -753,7 +817,8 @@ impl RealtimePlanOwner {
         time: RenderTime,
     ) -> Result<RealtimeRenderReport, RenderError> {
         super::audit::in_render_scope(|| {
-            let (swap, carry) = self.enter_block();
+            // The host's explicit time, not the plan's own clock, is the block's start.
+            let (swap, carry) = self.enter_block(time.absolute_sample);
             let active_epoch = self.active.0;
             // #1314 D3: after the adoption decision and before any drain.
             let revision = self.publication.active_revision();
