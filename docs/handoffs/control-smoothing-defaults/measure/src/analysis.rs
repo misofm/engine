@@ -74,7 +74,7 @@ fn threshold_in_quiet(f: f64) -> f64 {
 }
 
 /// In-place iterative radix-2 complex FFT (forward, unnormalised).
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     cos: Vec<f64>,
     sin: Vec<f64>,
@@ -82,7 +82,7 @@ struct Fft {
 }
 
 impl Fft {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         assert!(n.is_power_of_two());
         let bits = n.trailing_zeros();
         let reverse = (0..n)
@@ -102,7 +102,7 @@ impl Fft {
         }
     }
 
-    fn forward(&self, re: &mut [f64], im: &mut [f64]) {
+    pub(crate) fn forward(&self, re: &mut [f64], im: &mut [f64]) {
         let n = self.n;
         for i in 0..n {
             let j = self.reverse[i];

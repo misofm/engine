@@ -17,6 +17,7 @@ mod effects;
 mod live_rows;
 mod material;
 mod measure;
+mod split;
 mod stimuli;
 mod strip;
 mod wav;

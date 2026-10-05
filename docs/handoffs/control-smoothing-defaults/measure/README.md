@@ -36,7 +36,9 @@ python3 summarise.py                                                          # 
 
 `measure` writes the seven files of sections 5-6 and `live` the four of section 9; neither touches
 the other's files. `--rates 48000` narrows either to one rate for a quick look. To check
-reproduction, run a command twice into two scratch directories and `cmp` each file.
+reproduction, run a command twice into two scratch directories and `cmp` each file. `stimuli`
+writes the listening conditions at 48 kHz (`src/stimuli.rs`), including block P's polarity flips
+and their band split (`src/split.rs`; `../listening/PREREGISTRATION.md`, Amendment 1), and no CSV.
 
 `Cargo.lock` was seeded from the workspace lock so `--offline` resolves the same crate versions.
 

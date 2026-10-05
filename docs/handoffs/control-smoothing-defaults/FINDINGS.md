@@ -256,10 +256,11 @@ on bass (10 and 20 ms against 40 ms at 30 and 60 Hz, and a fast flick); responsi
 anonymous 32-hex tokens, balanced interval schedule, a private mode-0600 key committed by hash,
 positive controls, exact one-sided binomial tests, decision rules in `PREREGISTRATION.md`). Stimuli
 come from the engine's own ramps (`control_smoothing_measure stimuli`); `listening.py self-test`
-passes including tamper detection. The owner runs `prepare`, then `run --block M|F|R`, then
+passes including tamper detection. The owner runs `prepare`, then `run --block M|F|R|P`, then
 `reveal` (`listening/README.md`). **No human has listened; there is no listening result.**
 The defaults are the measured ones; #1388 runs this preregistered session on them, and a listening
-result changes values only (D15-1). Section 9 adds no contrast, for the reasons in 9.6.
+result changes values only (D15-1). Amendment 1 (2026-10-05, before any trial; root's ruling on
+#1055) adds block P, 36 polarity trials that change no value (9.6).
 
 ## 7. Verified and not verified
 
@@ -658,9 +659,10 @@ the margin the bound's limit needs: even 18 dB worse than the emulation (0.1 ms 
 under it out of band, where a 10 ms glide (CTR margin 10.8-12.3 dB) would pass it by 5.7-7.2 dB,
 close to a 5 ms mute's click.
 
-### 9.6 Listening (D3): no new contrast
+### 9.6 Listening (D3): block P for polarity (Amendment 1), no other contrast
 
-No contrast is added to `listening/PREREGISTRATION.md`, and the packet is unchanged:
+Root's ruling of 2026-10-05 on #1055 adds polarity trials to `listening/PREREGISTRATION.md` as
+Amendment 1 (block P, 36 trials, made before any trial); no other contrast is added:
 
 - **Polarity.** The factor of two comes from section 1's criterion, not from a listening question.
   On the four click measures (OOB, CTR and HF splatter, by which section 1 set `muteMs`, and worst
@@ -672,8 +674,10 @@ No contrast is added to `listening/PREREGISTRATION.md`, and the packet is unchan
   its dip; its sign changes with length and no single factor equalises it (9.2), so a contrast
   could not set the factor by it either. A listening result changes values only (D15-1) and the
   factor is a rule, so a polarity contrast's only possible decision would move `muteMs` for
-  polarity's sake, which the M block decides on the mute itself. Whether the dip is heard as a dip
-  is a question about the kernel, not a value (9.7).
+  polarity's sake, which the M block decides on the mute itself. Block P therefore changes no
+  value: it asks whether the shipped 20 ms flip is heard, and as its in-band dip or its
+  out-of-band click (the change split at the measures' 1.5 kHz edge), and records the answer as a
+  finding for root (Amendment 1, 9.7).
 - **Bypass crossfade.** Its click is at most the mute's at the same length for every representative
   setting (9.4): the M block bounds it.
 - **Link glide.** At the defaults its bound sits 16.8 dB or more under the 10 ms mute's on every
@@ -685,8 +689,9 @@ No contrast is added to `listening/PREREGISTRATION.md`, and the packet is unchan
 **Objective, on this tree:** every law and anchor in 9.1; the trim's bit identity with the fader;
 the route law's agreement with D11; the polarity factor on the click measures; the bypass and link
 clicks of the emulations. **Awaits #1388:** only the values of `muteMs`, `faderMs` and `panMs`
-(sections 1 and 6). Every row follows its key's value, the polarity row as twice `muteMs`; no row
-awaits a listening result of its own.
+(sections 1 and 6), and block P's finding on the polarity flip, which moves no value (9.6). Every
+row follows its key's value, the polarity row as twice `muteMs`; no row's value awaits a listening
+result of its own.
 
 Verified: the four section-9 CSVs reproduce byte for byte over two four-rate runs (attempt 2 adds
 the 40 ms rows to `polarity_click.csv`; with them removed the file is attempt 1's byte for byte, and
@@ -713,9 +718,10 @@ Not verified:
   nothing was measured; #1341 says its law covers them with no further edit once they land;
 - whether a polarity flip's dip through zero (at the default 20 ms: 10 ms below -6 dB, 2 ms below
   -20 dB, silent at the midpoint; 9.2) is heard as a dip on an exposed sustained note. The click
-  measures do not assess it, and #1388 cannot act on it (its outcomes are values; the factor is a
-  rule). A through-zero law that does not dip is a kernel change, outside this issue (non-goals);
-  the check belongs with a polarity-kernel successor, which root decides whether to open;
+  measures do not assess it. Amendment 1's block P now asks it in #1388's session (preregistered
+  trials on the flip, its dip and its click); its outcome is a finding for root, not a value (the
+  factor is a rule). A through-zero law that does not dip is a kernel change, outside this issue
+  (non-goals); root decides on a polarity-kernel successor with block P's finding;
 - effect settings beyond the representative ones (the click scales with the step); a transient
   shaper switched during a kick's attack;
 - banked, AArch64 or wasm renders (per-lane, unfused kernels, so they should match).
