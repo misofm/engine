@@ -62,8 +62,12 @@ where it sits in the listing:
   the shape.
 * **Streams** `s`: vector stores to non-stack memory per iteration. The last section of each
   stream writes its frame back, so there is one per stream.
-* **Select-free**: no `vpor`/`vorps`/blend. The dry-mask kernels' bitselect needs one; the flush
-  does not.
+* **Select-free**: no select. A blend is one; an `or` is one unless both its inputs are lane masks
+  the loop itself computed (compares, and bitwise ops over such masks alone). The dry-mask
+  kernels' bitselect ors two data words, `x & m` and `y & ~m`, so it is a select; the joint flush's
+  two `(|n| < FLUSH_EPS) | rest` ors combine compare masks and are not (issue #1328, which
+  replaced "no `vpor`/`vorps` at all"). An `or` the rule cannot see through counts as a select,
+  so a doubtful loop reads as masked and a held row fails closed (`selects`).
 
 * **After the pairs** (the tails only): `interleave` runs the depth-2 passes and then the depth-1
   tail, so the tail is reachable from a pair loop. The ramp path's per-section `svf_block` loop
@@ -166,7 +170,14 @@ LOOPS = (
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
 )
 STEP_SHAPE = {"vmulps": 7, "vaddps": 9, "vsubps": 2}
-SELECT_OPS = frozenset({"vpor", "vorps", "vpblendvb", "vblendvps", "vpternlogd", "vpternlogq"})
+# A blend is a select whatever its inputs. An `or` is one unless it only combines masks (below).
+BLENDS = frozenset({"vpblendvb", "vblendvps", "vpternlogd", "vpternlogq"})
+ORS = frozenset({"vpor", "vorps"})
+# Lane masks: a compare writes all-ones or all-zero bits per lane, and a bitwise op over masks
+# alone writes another. A register move carries a mask along.
+MASK_COMPARES = re.compile(r"^v?(cmp\w*p[sd]|pcmp(eq|gt)[bwdq])$")
+MASK_LOGIC = frozenset({"vpand", "vandps", "vpandn", "vandnps", "vpor", "vorps", "vpxor", "vxorps"})
+REGISTER_MOVES = frozenset({"vmovaps", "vmovapd", "vmovups", "vmovdqa", "vmovdqu"})
 VECTOR_MOVES = frozenset({"vmovdqu", "vmovups", "vmovaps", "vmovapd"})
 
 LINE = re.compile(r"^0x[0-9a-f]+\s+([0-9a-f]+)\s+[0-9a-f]+\s+(.*?)\s*$")
@@ -548,6 +559,40 @@ def recurrent_slots(blocks: dict[int, Block], header: int, body: set[int]) -> se
     return found
 
 
+def selects(code: list[Instruction]) -> int:
+    """The selects in one loop's code: every blend, and every `or` that is not a mask combine.
+
+    An `or` is a mask combine when each of its inputs is a register that holds a lane mask written
+    earlier in the same loop body: a compare's result, or a bitwise op over such masks alone (the
+    joint flush's `(|n| < FLUSH_EPS) | rest`, issue #1328). A dry-mask bitselect's `or` takes two
+    *data* words, `x & m` and `y & ~m`, so it is a select. Anything this cannot see through -- a
+    memory operand, a mask computed outside the loop or carried around its back edge, a mask
+    spilled and reloaded -- counts as a select, so a doubtful loop reads as masked and a held row
+    fails closed rather than passing. The rule never reads a data `or` as a combine: an `or` of
+    two lane masks is itself a lane mask and selects nothing."""
+    masks: set[str] = set()
+    found = 0
+    for instruction in code:
+        op, operands = instruction.op, instruction.operands
+        written, read = data_flow(instruction)
+        from_memory = any("[" in operand for operand in operands[1:])
+        sources_are_masks = bool(read) and not from_memory and all(r in masks for r in read)
+        if op in BLENDS or (op in ORS and not sources_are_masks):
+            found += 1
+        if MASK_COMPARES.match(op):
+            is_mask = True
+        elif op in MASK_LOGIC or op in REGISTER_MOVES:
+            is_mask = sources_are_masks
+        else:
+            is_mask = False
+        for location in written:
+            if is_mask:
+                masks.add(location)
+            else:
+                masks.discard(location)
+    return found
+
+
 def analyse(listing: str) -> list[Loop]:
     instructions, tables = parse_listing(listing)
     blocks = build_blocks(instructions, tables)
@@ -574,7 +619,7 @@ def analyse(listing: str) -> list[Loop]:
             and (memory := MEMORY.search(instruction.operands[0])) is not None
             and STACK_SLOT.match(memory[1]) is None
         )
-        select_free = not any(ops[op] for op in SELECT_OPS)
+        select_free = selects(code) == 0
         carried = sorted(live_across(blocks, header, body) | recurrent_slots(blocks, header, body))
         reaches, pending = set(body), list(body)
         while pending:
@@ -829,6 +874,15 @@ def svf_step(stream: str) -> list[str]:
 
 def self_test() -> int:
     tail = svf_step("rax") + svf_step("rsi")
+    # `flush_pair` as V8 12.4 lowers it from the shipped module: `abs` by `vandps` with a constant,
+    # four ordered compares, the rest `and`, two mask `or`s and two `andnot`s.
+    flush_pair = [
+        "vandps xmm12,xmm3,[r10]", "vandps xmm13,xmm0,[r10]",
+        "vcmpps xmm1,xmm12,xmm10, (lt)", "vcmpps xmm11,xmm13,xmm10, (lt)",
+        "vcmpps xmm13,xmm13,xmm14, (lt)", "vpand xmm11,xmm11,xmm1", "vpor xmm13,xmm11,xmm13",
+        "vandnps xmm0,xmm13,xmm0", "vcmpps xmm12,xmm12,xmm14, (lt)", "vpor xmm11,xmm11,xmm12",
+        "vandnps xmm3,xmm11,xmm3",
+    ]
     carried = ["vmovups xmm0,[rbp-0xc0]", *tail, "vmovups [rbp-0xc0],xmm5"]
     # A rotated loop: entered in the middle, so the back edge's store comes first in the listing.
     rotated = synthetic(
@@ -874,6 +928,20 @@ def self_test() -> int:
         # The dry-mask kernels' bitselect.
         ("masked", synthetic([*tail, "vpand xmm1,xmm1,xmm3", "vpandn xmm3,xmm3,xmm4",
                               "vpor xmm1,xmm1,xmm3"]), (2, 2, [], False)),
+        # The joint flush (issue #1328), as V8 lowers it: its two `or`s combine compare masks
+        # only, so the loop is select-free.
+        ("flush pair", synthetic([*tail, *flush_pair]), (2, 2, [], True)),
+        # The same loop with a dry-mask bitselect beside it is still masked.
+        ("flush pair, masked", synthetic([*tail, *flush_pair, "vpand xmm1,xmm1,xmm3",
+                                          "vpandn xmm3,xmm3,xmm4", "vpor xmm1,xmm1,xmm3"]),
+         (2, 2, [], False)),
+        # An `or` of a compare mask and a data word selects.
+        ("mask or data", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
+                                    "vpor xmm1,xmm1,xmm4"]), (2, 2, [], False)),
+        # A mask the loop did not compute (here, a register set before the loop) is not seen
+        # through: the `or` counts as a select, so a held row fails closed.
+        ("outside mask", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
+                                    "vpor xmm1,xmm1,xmm9"]), (2, 2, [], False)),
         # A ramped section's six coefficient increments.
         ("ramped", synthetic(svf_step("rax") + ["vaddps xmm5,xmm5,xmm6"] * 6), (None, 1, [], True)),
         # An out-of-line stack guard that spills around its call.
