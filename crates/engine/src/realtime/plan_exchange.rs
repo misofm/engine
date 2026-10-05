@@ -438,9 +438,7 @@ fn publish_into(
     revision: u64,
     adoption: PlanAdoption,
 ) {
-    permit.write_revision(revision);
-    permit.write_adoption(adoption);
-    if permit.commit(item).is_err() {
+    if permit.commit(item, revision, adoption).is_err() {
         panic!("plan mailbox invariant broken: render changed the word while no cell was Full");
     }
 }

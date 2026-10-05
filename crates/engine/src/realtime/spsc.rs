@@ -872,27 +872,27 @@ impl<T: Send + 'static> MailboxWriter<T> {
 }
 
 impl<T: Send + 'static> MailboxPermit<'_, T> {
-    /// Store the revision word of the held `Empty` cell (I7). The reader never loads a cell that
-    /// is not `Active`, and [`Self::commit`]'s `Release` publishes this store with the payload.
-    pub(crate) fn write_revision(&self, revision: u64) {
-        self.writer.shared.revisions[self.cell].store(revision, Ordering::Relaxed);
-    }
-
-    /// Store the adoption schedule of the held `Empty` cell (I8). The reader loads a cell's
-    /// schedule only after a load of the word that found it `Full`, and [`Self::commit`]'s
-    /// `Release` publishes this store with the payload.
-    pub(crate) fn write_adoption(&self, adoption: PlanAdoption) {
-        self.writer.shared.store_adoption(self.cell, adoption);
-    }
-
-    /// Write `value` into the held `Empty` cell, then mark it `Full` with one `Release`
-    /// compare-and-swap.
+    /// Write `value`, its revision word (I7) and its adoption schedule (I8) into the held
+    /// `Empty` cell, then mark it `Full` with one `Release` compare-and-swap.
+    ///
+    /// The revision and the schedule are arguments, not optional prior stores, so every
+    /// publication writes both: a cell never carries an earlier publication's revision or
+    /// schedule into a new one. The reader loads a cell's revision only while it is `Active` and
+    /// its schedule only after a load of the word that found it `Full`, and this compare-and-swap's
+    /// `Release` publishes the stores with the payload.
     ///
     /// No cell was `Full` at reservation and only this writer publishes, so the reader cannot
     /// have changed the word since (I5) and the compare-and-swap cannot fail. A failure is a
     /// broken invariant: the value is taken back and returned, never retried.
-    pub(crate) fn commit(self, value: T) -> Result<(), MailboxInvariantBroken<T>> {
+    pub(crate) fn commit(
+        self,
+        value: T,
+        revision: u64,
+        adoption: PlanAdoption,
+    ) -> Result<(), MailboxInvariantBroken<T>> {
         let shared = &*self.writer.shared;
+        shared.revisions[self.cell].store(revision, Ordering::Relaxed);
+        shared.store_adoption(self.cell, adoption);
         // SAFETY: the cell is `Empty`, so the writer owns its payload (I4); the reader touches a
         // cell's payload only after its claim of a `Full` cell, and this cell is not `Full`.
         let previous = sync::with_mut(&shared.cells[self.cell], |slot| unsafe {
@@ -1070,7 +1070,10 @@ mod loom_tests {
         let permit = writer
             .try_reserve()
             .expect("an Empty cell while none is Full");
-        assert!(permit.commit(value).is_ok(), "publication cannot fail (I5)");
+        assert!(
+            permit.commit(value, 0, PlanAdoption::Next).is_ok(),
+            "publication cannot fail (I5)"
+        );
     }
 
     /// Render's blocks: one load per block and, only if a cell is `Full`, one claim. Returns the
@@ -1109,8 +1112,11 @@ mod loom_tests {
                 (adopted, revision, reader)
             });
             let permit = writer.try_reserve().expect("an Empty cell");
-            permit.write_revision(7);
-            assert!(permit.commit(candidate(1, &drops)).is_ok());
+            assert!(
+                permit
+                    .commit(candidate(1, &drops), 7, PlanAdoption::Next)
+                    .is_ok()
+            );
             let outcome = writer.withdraw();
             let (adopted, revision, reader) = render.join().expect("render");
             match outcome {
@@ -1159,7 +1165,11 @@ mod loom_tests {
             let published_second = match writer.try_reserve() {
                 Some(permit) => {
                     created += 1;
-                    assert!(permit.commit(candidate(2, &drops)).is_ok());
+                    assert!(
+                        permit
+                            .commit(candidate(2, &drops), 0, PlanAdoption::Next)
+                            .is_ok()
+                    );
                     true
                 }
                 None => false,
@@ -1221,7 +1231,11 @@ mod loom_tests {
             for id in 1..=3 {
                 loop {
                     if let Some(permit) = writer.try_reserve() {
-                        assert!(permit.commit(candidate(id, &drops)).is_ok());
+                        assert!(
+                            permit
+                                .commit(candidate(id, &drops), 0, PlanAdoption::Next)
+                                .is_ok()
+                        );
                         break;
                     }
                     loom::thread::yield_now();
@@ -1261,8 +1275,11 @@ mod loom_tests {
                 (adopted, revision, seen, reader)
             });
             let permit = writer.try_reserve().expect("an Empty cell");
-            permit.write_revision(7);
-            assert!(permit.commit(candidate(1, &drops)).is_ok());
+            assert!(
+                permit
+                    .commit(candidate(1, &drops), 7, PlanAdoption::Next)
+                    .is_ok()
+            );
             record.store(1, Ordering::Relaxed);
             let _target = writer.store_revision(8);
             let (adopted, revision, seen, mut reader) = render.join().expect("render");
@@ -1336,8 +1353,7 @@ mod loom_tests {
         // `Release` that publishes the candidate it belongs to.
         ready.store(race.first_ready, Ordering::Relaxed);
         let permit = writer.try_reserve().expect("an Empty cell");
-        permit.write_adoption(race.first);
-        assert!(permit.commit(candidate(1, &drops)).is_ok());
+        assert!(permit.commit(candidate(1, &drops), 0, race.first).is_ok());
         let mut created = 1;
         let first = writer.withdraw();
         let first_taken = matches!(first, MailboxWithdrawal::Taken);
@@ -1347,8 +1363,7 @@ mod loom_tests {
             drop(value);
             ready.store(race.second_ready, Ordering::Relaxed);
             let permit = writer.try_reserve().expect("the cell A left");
-            permit.write_adoption(race.second);
-            assert!(permit.commit(candidate(2, &drops)).is_ok());
+            assert!(permit.commit(candidate(2, &drops), 0, race.second).is_ok());
             created += 1;
             last = Some(writer.withdraw());
         }
@@ -1669,16 +1684,64 @@ mod tests {
     /// the two words apart. A fresh load then claims the republished value.
     #[test]
     fn stale_claim_after_withdraw_and_republish_fails_on_the_generation() {
-        use super::{MailboxWithdrawal, plan_mailbox};
+        use super::{MailboxWithdrawal, PlanAdoption, plan_mailbox};
         let (mut writer, mut reader) = plan_mailbox::<u32>();
-        assert!(writer.try_reserve().expect("empty").commit(1).is_ok());
+        assert!(
+            writer
+                .try_reserve()
+                .expect("empty")
+                .commit(1, 0, PlanAdoption::Next)
+                .is_ok()
+        );
         let observed = reader.observe().expect("full");
         let MailboxWithdrawal::Withdrawn(value, _, _) = writer.withdraw() else {
             panic!("an unclaimed candidate is withdrawn")
         };
-        assert!(writer.try_reserve().expect("empty").commit(value).is_ok());
+        assert!(
+            writer
+                .try_reserve()
+                .expect("empty")
+                .commit(value, 0, PlanAdoption::Next)
+                .is_ok()
+        );
         assert!(reader.claim(observed).is_none(), "a stale claim must fail");
         let observed = reader.observe().expect("full again");
         assert_eq!(reader.claim(observed), Some(1));
+    }
+
+    /// #1311 N4: a publication carries its own revision word and schedule. Candidate A is
+    /// published `Primed` with revision 5 and withdrawn; candidate B then reuses the same cell with
+    /// `Next` and revision 0 (a host that numbers no revisions). Render must see B's schedule and,
+    /// after claiming it, B's revision, never the values A left in the cell.
+    #[test]
+    fn republication_into_a_reused_cell_never_inherits_its_schedule_or_revision() {
+        use super::{MailboxWithdrawal, PlanAdoption, plan_mailbox};
+        let primed = PlanAdoption::Primed {
+            not_before: 96,
+            lead_blocks: 2,
+        };
+        let (mut writer, mut reader) = plan_mailbox::<u32>();
+        assert!(
+            writer
+                .try_reserve()
+                .expect("empty")
+                .commit(1, 5, primed)
+                .is_ok()
+        );
+        let MailboxWithdrawal::Withdrawn(value, revision, adoption) = writer.withdraw() else {
+            panic!("an unclaimed candidate is withdrawn")
+        };
+        assert_eq!((value, revision, adoption), (1, 5, primed));
+        assert!(
+            writer
+                .try_reserve()
+                .expect("the cell A left")
+                .commit(2, 0, PlanAdoption::Next)
+                .is_ok()
+        );
+        let observed = reader.observe().expect("B is Full");
+        assert_eq!(reader.scheduled(observed), PlanAdoption::Next);
+        assert_eq!(reader.claim(observed), Some(2));
+        assert_eq!(reader.active_revision(), 0);
     }
 }

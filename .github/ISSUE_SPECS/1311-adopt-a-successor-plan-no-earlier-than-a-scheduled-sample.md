@@ -351,3 +351,26 @@ PASS; `check-workspace-policy.sh` ok; worklet chain (named twin build, `check-we
 --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
 `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`, V8 spill) all rc 0, shipped module
 `412df408...d850`, unchanged.
+
+### Batch follow-up 2: N4 (2026-10-05)
+
+- **N4.** `MailboxPermit::commit(value, revision, adoption)` now takes the revision word (I7) and
+  the schedule (I8) as arguments and stores both before its `Release` CAS. `write_revision` and
+  `write_adoption` are gone, so no publication can skip a store and inherit what an earlier
+  publication left in the cell. This supersedes the attempt-1 description above of the schedule
+  being stored "through `MailboxPermit::write_adoption`"; the ordering argument is unchanged.
+  `publish_into` passes both through; the loom and unit tests pass them explicitly.
+- Test: `realtime::spsc::tests::republication_into_a_reused_cell_never_inherits_its_schedule_or_revision`.
+  A is published `Primed { not_before: 96, lead_blocks: 2 }` with revision 5 and withdrawn. B reuses
+  the same cell with `Next` and revision 0 (the revision of a host that numbers no revisions).
+  Render must see `Next`, claim B, and then read revision 0.
+  Mutation 1 (commit stores the schedule only when it is not `Next`, so a default schedule inherits
+  the cell's old one): only this test is red (54 passed, 1 failed). Reverted: green.
+  Mutation 2 (commit stores the revision only when it is not 0): only this test is red (54 passed,
+  1 failed). Reverted: green. A blunter mutation (commit never stores the schedule) also turns ten
+  `scheduled_adoption` tests red.
+- Test value: a publication whose default schedule (`Next`) or default revision (0) falls back to
+  the value an earlier publication left in the reused cell. No other test reuses a cell after a
+  non-default value and then publishes the default.
+- Gates: `cargo test --locked -p engine` green; loom (`spsc_loom`) 8 passed. The batch-end gate
+  list is in the commit message of the batch follow-up commits.
