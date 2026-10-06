@@ -39,19 +39,34 @@ gated figure.
   today on the AudioWorklet thread at processor construction; stream H's *Run the browser control
   plane in a Worker and keep the AudioWorklet render-only* (#1332) moves browser preparation off the
   AudioWorklet thread.
-  *(Amended by #1329 Amendment 5, root ruling A.)* Preparation computes a design bound only for a
+  ~~*(Amended by #1329 Amendment 5, root ruling A.)* Preparation computes a design bound only for a
   strip without a live input lane: a live strip reports the live bound, computed once per
   preparation (0.04 ms). The browser prepares every strip with a live input lane
   (`HostLiveLanes::ALL`), so it computes no design bound at all; its boot cost is back to the
   pre-#1329 figures (#1329 attempt 5's `rebuild-round` record). The worst case above therefore
   lands on the C ABI's control thread, which prepares strips without a live input lane
   (`HostLiveLanes::FADER_AND_MATRIX` plus effect lanes); that is the platform this issue's budget
-  binds.
+  binds.~~ *(Superseded by root ruling R2 below: its premise was false for an audio-only browser
+  boot.)*
+  *(Root ruling R2.)* Preparation computes a design bound only for a strip without a live input
+  lane; a live strip reports the live bound, computed once per preparation (0.04 ms native).
+  `HostLiveLanes::ALL` attaches an input lane only to a strip that has a control request
+  (`crates/host-core/src/prepare.rs`), and the browser makes control requests only when its live
+  control command queue is non-zero (`hosts/host-web/src/lib.rs`). So:
+  - a browser boot **with live controls** bounds no design: every strip reports the live bound;
+  - an **audio-only** browser boot, the SDK default (`liveControls?.commandQueueRecords ?? 0` in
+    `sdk/src/core/abi.ts`), attaches no input lane and bounds every distinct design, on the
+    AudioWorklet thread today and on a Worker after #1332;
+  - the C ABI bounds every distinct design on its caller's control thread.
+  This issue's budget binds **both hosts**.
 
 ## Decisions to make in this slice (root approves before implementation)
 
 - **D1. The budget.** A stated worst-case control-thread cost per preparation (for example per
   distinct design and per session), measured on the CI runner, with the platform it binds.
+  *(Root ruling R2:)* it binds both hosts: the C ABI's control thread and the browser's
+  preparation thread (the AudioWorklet thread until #1332, a Worker after it), for an audio-only
+  browser boot.
 - **D2. The cache.** Where it lives (engine instance, control-plane crate), its key (#1329's design
   key plus the flush law, which depends only on the rate), its bound on entries and memory, and its
   eviction. The cache is control-side only; render never reads it (#1329 R5).
@@ -73,6 +88,11 @@ gated figure.
    the cheaper certified bound) at the measured worst case.
 3. Every reported bound is bit-identical with and without the cache (`tail_contract`'s gates stay
    green).
+4. *(Root ruling R2.)* **The audio-only browser boot.** The repository's rebuild-cost proxy
+   (`scripts/web-mixing-automation-benchmark.mjs rebuild-round`) run with no live controls
+   (`COMMAND_QUEUE_RECORDS = 0`, the SDK default) is recorded on the 9-track and 64-track
+   documents beside R2's baseline table, and its design-bound cost is within D1's budget; a
+   rebuild of an unchanged session adds nothing over the pre-#1329 boot (gate 1).
 
 ## Root rulings
 
@@ -82,6 +102,43 @@ Made by the decision-15 root coordinator under the owner's no-shortcuts delegati
 the measured worst case (#1329 attempt 4: 7-8.8 ms per distinct near-top design; about 9.6 minutes
 extrapolated for 65,537 distinct near-top designs per rebuild) against D1's stated budget, not only
 typical sessions. Gate 2 is amended to say so.
+
+### R2 (2026-10-06): the budget binds both hosts, including the audio-only browser boot
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), correcting #1329 Amendment 5's root ruling A after #1329
+attempt 5's verdict (`/home/bl/misofm/submix-verdicts/1329-attempt5.md`, m1). Ruling A's premise
+("in the browser every strip is live") was wrong. A browser boot with live controls attaches an
+input lane to every strip and bounds no design; an audio-only browser boot (the SDK default)
+bounds every distinct design on the AudioWorklet thread until #1332 moves preparation to a Worker;
+the C ABI bounds every distinct design on its control thread. D1's budget binds both hosts, and
+gate 4 adds the audio-only browser boot. "Where preparation runs" is restated above.
+
+The verifier's measurement (one `rebuild-round` invocation, two rounds; Node v22.23.2,
+`--no-liftoff`, `taskset -c 7`, 25 boots per document, every boot audible; the audio-only rows use
+a copy of the script with `COMMAND_QUEUE_RECORDS = 0`). Boot p50 in ms, round 1 / round 2:
+
+| boot | module | 9-track EQ | 64-track console | 64-track app shape | 64-track sends |
+|---|---|---|---|---|---|
+| live controls | pre-#1329 `10a3c816…` | 2.15 / 2.16 | 20.31 / 20.36 | 19.75 / 19.92 | 33.86 / 34.04 |
+| live controls | #1329 attempt 5 `ec1d2f66…` | 2.21 / 2.25 | 20.20 / 20.48 | 19.69 / 19.88 | 33.60 / 34.18 |
+| live controls | attempt 5 with the 48 kHz live bound as a constant (measurement only, `ad09489c…`) | 2.15 / 2.13 | 20.11 / 20.19 | 19.62 / 19.71 | 34.14 / 34.00 |
+| **audio-only** | pre-#1329 `10a3c816…` | 2.01 / 2.00 | 19.13 / 19.13 | 18.63 / 18.57 | 32.60 / 31.26 |
+| **audio-only** | #1329 attempt 5 `ec1d2f66…` | **2.24 / 2.24** | **34.66 / 34.68** | **34.17 / 34.23** | **46.61 / 46.61** |
+
+So an audio-only 64-track browser boot costs about +15.5 ms (+81 %; console 19.13 -> 34.66 ms p50)
+today. These design bounds are not waste: they are the bounds the non-live strips report and graph
+lowering reads (#1329 D4, D7). On the SDK default path the browser can hold the AudioWorklet thread
+for the full worst case above (about 0.7 s estimated for 64 distinct near-top designs) until #1332
+lands.
+
+**The live bound's own cost (verdict NIT).** The live bound costs about 0.07 ms per live-control
+browser boot: the 9-track document boots in 2.21 / 2.25 ms against 2.15 / 2.16 ms pre-#1329, and a
+variant that returns the 48 kHz live bound as a constant boots like pre-#1329 (2.15 / 2.13 ms;
+module size 3,053,689 B against 3,053,802 B, so size is not the cause). Every live-control boot
+pays it; at 64 tracks it is inside the noise. The work is not waste (every live strip reports that
+bound), but it depends only on the rate, of which there are four launch rates, so this issue's
+cache, or a per-rate table checked by a test, removes it.
 
 ## Non-goals
 

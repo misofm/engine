@@ -372,7 +372,9 @@ Made by the decision-15 root coordinator under the owner's no-shortcuts delegati
 (`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(b). Attempt 4 failed
 adversarial review (`/home/bl/misofm/submix-verdicts/1329-attempt4.md`): one MAJOR finding (MJ1,
 preparation computes every strip's design bound and discards it for a strip whose input lane is
-live, about +75 % per 64-track browser boot, where every strip is live), three MINOR findings
+live, about +75 % per 64-track browser boot, where every strip is live *(corrected by Follow-up
+C: true only of a browser boot with live controls; an audio-only browser boot attaches no input
+lane)*), three MINOR findings
 (m1 the seal check's live-strip rule untested; m2 the shared-designs test blind to the right
 channel; m3 one false test-value line), five NITs and items ROOT-A to ROOT-F. Attempt 5 is the
 last permitted attempt; its scope is exactly the list below, and nothing in `crates/math` or the
@@ -386,8 +388,11 @@ certified figures moves. D7, the authorized paths and the test value are amended
   `scripts/web-mixing-automation-benchmark.mjs rebuild-round MODULE 1` and `2` (the #1289
   rebuild-cost proxy) for the head module against pre-#1329 `0725a8949`'s, with the target within
   noise of pre-#1329.
-- **Root ruling A.** The browser computes no design bound; #1457's worst case is the C ABI's
-  control thread. #1457's "Where preparation runs" is amended to say so.
+- ~~**Root ruling A.** The browser computes no design bound; #1457's worst case is the C ABI's
+  control thread. #1457's "Where preparation runs" is amended to say so.~~ *(Corrected by
+  Follow-up C's root correction below: a browser boot with live controls computes no design bound,
+  but an audio-only browser boot, the SDK default, bounds every distinct design, and #1457's
+  budget binds both hosts.)*
 - **m1.** A builtins-compiler unit test forges a live strip's entry to its design bound in both
   `tails` and `seal.tails` and expects `builtin.prepared.tail_set` from `validate_for_session`;
   red when the seal check skips its live rule.
@@ -609,10 +614,11 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   section); no other gate drives peaks below `P*`.
 - ~~Gate 7: a bound that grows past the configured tail cap turns red before a plan is refused at
   preparation.~~ *(Superseded: restated by Amendment 4, R3, below.)*
-- ~~Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
-  eigenvector bound applies) breaks the restated D15-4 figures, and an unsound one (a dropped A9
-  term) falls below the measured real rest.~~ *(Superseded for the lower side: restated by
-  Amendment 4, R3, below; the upper side's claim stands.)*
+- Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
+  eigenvector bound applies) breaks the restated D15-4 figures, ~~and an unsound one (a dropped A9
+  term) falls below the measured real rest.~~ *(The struck lower side is superseded: restated by
+  Amendment 4, R3, below; the upper side's claim stands. Follow-up C narrowed the strike to the
+  lower side.)*
 - *(Amendment 4, R3: restated after attempt 4.)* On the real kernel the crude cascade's slack
   (live `T_decay` about 905k against a last output above `P eps` near 438k; `R` 1.26M against a
   rest near 0.98M) absorbs an omitted rounding, ramp, stall or A9 term, so gate 2's real-kernel
@@ -644,8 +650,10 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   cannot see a `6e-9` error in `q`.
 - *(Amendment 4.)* `each_strip_is_bounded_by_its_own_design_when_designs_are_shared`: a design key
   that omits a term (the trim magnitude or a section's words) hands one strip another design's
-  bound when a session repeats designs. *(Amendment 5, m2:)* including either channel: a key that drops the
-  right channel hands the strip that differs only there the first strip's bound.
+  bound when a session repeats designs. *(Amendment 5, m2, completed by Follow-up C:)* including
+  either channel: a key that drops the right channel hands the strip that differs only there the
+  first strip's bound (C3), and a key that drops the left channel does the same to the strip that
+  differs only in its left channel (M5).
 - *(Amendment 5, MJ1.)* builtins-compiler
   `design_bounds_are_computed_only_for_strips_without_a_live_input_lane`: a preparation that
   computes a live strip's design bound (attempt 4's, the browser's wasted boot cost) counts six
@@ -1263,3 +1271,64 @@ chain (`build-web-audioworklet.sh --named-twin` into recreated empty directories
 `test-web-audioworklet.sh`); `run-wasm-gates.sh --without-v8-spill --without-native`. The shipped
 module at `590201615` is `ec1d2f66…a58cddfb` (3,053,802 B); this record commit moves no source
 line, and the final digest is recorded at the batch boundary (root ruling D). AArch64 is CI-only.
+
+### Follow-up C (verdict follow-ups and root correction)
+
+Attempt 5 PASSED (`/home/bl/misofm/submix-verdicts/1329-attempt5.md`; `590201615`, `fadc45df0`)
+with two MINOR findings, three NITs and items ROOT-1 to ROOT-4. This follow-up folds them on
+`codex/d15-stream-g`. It is not an attempt.
+
+**Root correction of Amendment 5's ruling A (2026-10-06, binding).** Made by the decision-15 root
+coordinator under the owner's no-shortcuts delegation (`no-shortcuts-correctness-first`), in the
+context of decision 15 D15-4(b). Ruling A's premise was wrong. A browser boot **with live
+controls** attaches an input lane to every strip and bounds no design (each strip reports the live
+bound). An **audio-only** browser boot (the SDK default: `commandQueueRecords ?? 0`, so no control
+requests and no input lanes) bounds every distinct design on the AudioWorklet thread until stream
+H's #1332 moves preparation to a Worker. The C ABI bounds every distinct design on its control
+thread. #1457's budget binds both hosts, and its gates include the audio-only browser boot
+(measured +15.5 ms, +81 %, per 64-track boot today: console 19.13 -> 34.66 ms p50; the verifier's
+table is in #1457's root ruling R2). Ruling A and the MJ1 summary above are marked as corrected,
+not rewritten.
+
+- **m1 / ROOT-1.** #1457: "Where preparation runs" restated (the Amendment 5 paragraph struck,
+  the Worker-after-#1332 statement restored), D1 binds both hosts, gate 4 adds the audio-only
+  browser boot, and root ruling R2 records the correction and the verifier's table. The comment
+  in `crates/builtins-compiler/src/lib.rs` above the design-bound computation now says that a
+  browser boot with live controls computes none, and that an audio-only browser boot and the C
+  ABI bound every distinct design.
+- **m2 / ROOT-2.** `each_strip_is_bounded_by_its_own_design_when_designs_are_shared` gains a
+  seventh strip that differs from the first only in its left HPF (10 Hz), with
+  `assert_ne!(own[6], own[0])`. Mutation evidence (release, `cargo test --locked --release -p
+  builtins --features builtins/test-support --test tail_contract -- --include-ignored
+  each_strip_is_bounded`), each mutant applied to `input_bound_key` in
+  `crates/builtins/src/tail.rs` and reverted:
+
+  | mutant | result |
+  |---|---|
+  | none (shipped key) | GREEN |
+  | M5, key drops the left channel (`[lanes[1], lanes[1]]`) | RED: `input_section_bounds` hands the seventh (left-only) strip the first strip's bound (`T_decay` 192 against 19,051) |
+  | C3, key drops the right channel (`[lanes[0], lanes[0]]`) | RED: the sixth (right-only) strip gets the first strip's bound |
+  | revert | GREEN |
+
+  The test-value line "including either channel" is now true and is restated above.
+- **NIT, ROOT-3 (live bound's boot cost).** Recorded in #1457's R2: about 0.07 ms per live-control
+  browser boot (9-track 2.21 / 2.25 against 2.15 / 2.16 ms; a variant with the bound as a constant
+  boots like pre-#1329); a per-rate table or #1457's cache removes it.
+- **NIT, gate 3 strike-through.** Only the lower-side sentence is struck; the upper-side claim is
+  visible.
+- **NIT, effect-floor citation.** `docs/rulings/effect-floor-accounting.md` also names the
+  control-plane read of `enabled` in the response-snapshot builder
+  (`InputStage::copy_response_snapshot_lane`, `crates/builtins/src/lib.rs`). A citation update,
+  not a ruling change.
+- **ROOT-4** (final module digest and the GitHub bodies of #1329 and #1457) stays with the batch
+  boundary.
+
+No audio bit moved and nothing was re-pinned: the only code changes are one comment and one test
+strip.
+
+**Gates run (all green):** `cargo fmt --all -- --check`; release `cargo test --locked --release -p
+builtins --features builtins/test-support --test tail_contract -- --include-ignored` (9 passed,
+7.0 s); `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; debug `cargo test --locked
+-p builtins-compiler` and `-p builtins` (both with `builtins/test-support`; 195 passed, 0 failed);
+`check-workspace-policy.sh`; `check-lane-policy.sh`.

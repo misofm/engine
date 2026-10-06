@@ -3570,7 +3570,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     // allocates transient storage, which phase two's retained-allocation account must not see. A
     // live input lane's bound depends only on the rate, so it is computed once for the session.
     // Amendment 5 (MJ1): a strip whose input lane is live reports the live bound, so no design
-    // bound is computed for it; the browser, whose every strip is live, computes none.
+    // bound is computed for it, so a browser boot with live controls computes none. An audio-only
+    // browser boot (the SDK default) and the C ABI attach no input lane and bound every distinct
+    // design (#1329 follow-up C; the cost is #1457's).
     let input_lane_live = |track_id: &str| {
         control_capacity
             .get(track_id)

@@ -472,8 +472,11 @@ section's content was believed to be workload-dependent. It is not:
   the render path. The frame body is an unconditional `for section in 0..2`;
 * `enabled` is read only on the control plane: when this was written, in `InputBuiltins::tail()`;
   since #1329 removed that method, in the input section's certified bound
-  (`builtins::tail::fixed_input_bound`) and the filter-response reports (`filter_response.rs`).
-  *(Citation update, #1329 Amendment 5, root ruling E; the ruling is unchanged.)*
+  (`builtins::tail::fixed_input_bound`), the filter-response reports (`filter_response.rs`) and
+  the response-snapshot builder (`InputStage::copy_response_snapshot_lane` in
+  `crates/builtins/src/lib.rs`), all control plane.
+  *(Citation update, #1329 Amendment 5, root ruling E, completed by #1329 follow-up C; the ruling
+  is unchanged.)*
 
 So the section count is fixed at **two per channel** by the prepared type `[[SvfCoef<L>; 2]; 2]`,
 and the *enabled* count changes only the values in the coefficient registers. The floor is stated
