@@ -8,8 +8,9 @@
 //! word between its value at rest and its target. The same window rendered as one block must give
 //! the same ramp words, output and final snapshot. The multiband compressor refreshes its ratio,
 //! attack and release coefficients once per segment, by its frozen design (`tests/identity.rs`,
-//! `partition_control_trajectory_preserves_ramp_positions`), so for those moves the partition half
-//! compares the ramp words only. A bank of the native width, with the move on its last lane and
+//! `partition_control_trajectory_preserves_ramp_positions`). On the high band's ratio and attack
+//! moves that refresh makes the one-frame and one-block outputs differ, so for those two moves the
+//! partition half compares the ramp words only; every other move compares everything. A bank of the native width, with the move on its last lane and
 //! every other lane resting at the defaults, must render the moving lane and hold its ramp words
 //! bit for bit as the scalar instance does (D4: each lane clamps toward its own target).
 //!
@@ -52,16 +53,18 @@ struct Move {
     start: f32,
     target: f32,
     /// Whether the move's output and whole snapshot are partition-invariant. A word that feeds a
-    /// coefficient the effect refreshes once per segment (the multiband compressor's ratio, attack
-    /// and release) is not, by that effect's frozen design; there only the ramp words are compared.
+    /// coefficient the effect refreshes once per segment is not always, by that effect's frozen
+    /// design (the multiband compressor's high ratio and high attack moves); there only the ramp
+    /// words are compared.
     whole: bool,
 }
 
 /// Frames rendered per move: the 64-sample window and a few settled frames after it.
 const FRAMES: usize = 72;
 
-/// The preparation request: the first quality row, quantum 128, the first supported link mode,
-/// the sidechain connected when `connected` and the effect has one.
+/// The preparation request: the 48 kHz quality row (`qualities[1]`, the rate the moves were
+/// scanned at), quantum 128, the dual-mono link mode, the sidechain connected when `connected` and
+/// the effect has one.
 fn request<'a>(
     factory: &dyn NativeEffectFactory,
     values: &'a [InitialParameterValue],
@@ -69,6 +72,7 @@ fn request<'a>(
 ) -> PrepareEffectRequest<'a> {
     let descriptor = factory.descriptor();
     let quality = descriptor.qualities[1];
+    assert_eq!(quality.sample_rate, 48_000, "the moves are 48 kHz moves");
     let sidechain = descriptor
         .ports
         .iter()
@@ -494,19 +498,19 @@ const MOVES: [Move; 10] = [
         word: WORDS[1],
         start: f32::from_bits(0x3f800021),
         target: 1.0,
-        whole: false,
+        whole: true,
     },
     Move {
         word: WORDS[2],
         start: f32::from_bits(0x3dccccee),
         target: 0.1,
-        whole: false,
+        whole: true,
     },
     Move {
         word: WORDS[3],
         start: f32::from_bits(0x459c3fdf),
         target: 5000.0,
-        whole: false,
+        whole: true,
     },
     Move {
         word: WORDS[4],
@@ -536,7 +540,7 @@ const MOVES: [Move; 10] = [
         word: WORDS[8],
         start: f32::from_bits(0x459c3fdf),
         target: 5000.0,
-        whole: false,
+        whole: true,
     },
     Move {
         word: WORDS[9],

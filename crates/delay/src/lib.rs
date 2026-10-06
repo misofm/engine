@@ -2784,9 +2784,9 @@ mod tests {
     /// rewrites one word of the left feedback ramp of a mid-ramp snapshot: a non-finite step, a
     /// `remaining` past the 64-sample ramp, and a settled ramp that still carries a step. (A finite
     /// step of any size no longer leaves the domain: the clamped ramp stays between its restored
-    /// `current` and its target, issue #1409 D2.) Each must be refused with the effect unchanged. Red
-    /// when `read_carried_ramp` drops its `ramp_path_inside` clause, which every other delay test
-    /// survives.
+    /// `current` and its target, issue #1409 D2.) Each must be refused with the effect unchanged.
+    /// Red when `read_carried_ramp` drops its `ramp_path_inside` clause, which every other delay
+    /// test survives.
     #[test]
     fn a_carried_ramp_is_refused_unless_its_whole_path_is_valid() {
         let values = initial_values();

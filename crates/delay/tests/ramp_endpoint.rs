@@ -4,10 +4,11 @@
 //! feedback, damping coefficient `g` and mix, and the shared cross feedback. Each word has one
 //! in-domain move, found by the issue's scan over the parameter's domain edges (for a designed
 //! word, over parameter pairs whose words are 33 to 4096 ulps apart), whose word the unclamped D11
-//! law (`current + step` before the snap) took past its target. The move is rendered in one-frame
-//! blocks; after each, the effect's own state snapshot must hold every ramp word between its value
-//! at rest and its target. The same window rendered as one block must give the same ramp words,
-//! output and final snapshot.
+//! law (`current + step` before the snap) took past its target. Every move runs at the 1 ms delay
+//! time, so the taps carry signal inside the ramp window and every word reaches the ring. The move
+//! is rendered in one-frame blocks; after each, the effect's own state snapshot must hold every
+//! ramp word between its value at rest and its target. The same window rendered as one block must
+//! give the same ramp words, output and final snapshot.
 //!
 //! Test value: a render site left on (or reverted to) the unclamped update passes its target on its
 //! move; the partition half catches a site clamped in one block shape only. Mutation evidence is in
@@ -47,16 +48,18 @@ struct Move {
     start: f32,
     target: f32,
     /// Whether the move's output and whole snapshot are partition-invariant. A word that feeds a
-    /// coefficient the effect refreshes once per segment (the multiband compressor's ratio, attack
-    /// and release) is not, by that effect's frozen design; there only the ramp words are compared.
+    /// coefficient the effect refreshes once per segment is not always, by that effect's frozen
+    /// design (the multiband compressor's high ratio and high attack moves); there only the ramp
+    /// words are compared.
     whole: bool,
 }
 
 /// Frames rendered per move: the 64-sample window and a few settled frames after it.
 const FRAMES: usize = 72;
 
-/// The preparation request: the first quality row, quantum 128, the first supported link mode,
-/// the sidechain connected when `connected` and the effect has one.
+/// The preparation request: the 48 kHz quality row (`qualities[1]`, the rate the moves were
+/// scanned at), quantum 128, the dual-mono link mode, the sidechain connected when `connected` and
+/// the effect has one.
 fn request<'a>(
     factory: &dyn NativeEffectFactory,
     values: &'a [InitialParameterValue],
@@ -64,6 +67,7 @@ fn request<'a>(
 ) -> PrepareEffectRequest<'a> {
     let descriptor = factory.descriptor();
     let quality = descriptor.qualities[1];
+    assert_eq!(quality.sample_rate, 48_000, "the moves are 48 kHz moves");
     let sidechain = descriptor
         .ports
         .iter()
@@ -147,7 +151,14 @@ fn ramps(payload: &Payload, ramp: RampWord) -> Vec<(f32, f32, f32, u32)> {
         .collect()
 }
 
-/// The descriptor defaults, with `parameter` at `value` on every channel.
+/// The delay time (parameter 0) every move starts at: its 1 ms minimum, 48 samples at 48 kHz. The
+/// taps then carry signal from frame 48, inside the 64-sample ramp, so feedback, damping `g` and
+/// cross feedback reach the output and the ring while they move. At the 250 ms default the taps
+/// stay silent for the whole window, and only the mix word could reach the output.
+const DELAY_TIME_MS: f32 = 1.0;
+
+/// The descriptor defaults, with the delay time at [`DELAY_TIME_MS`] and `parameter` at `value`,
+/// on every channel.
 fn values_with(
     factory: &dyn NativeEffectFactory,
     parameter: u32,
@@ -155,6 +166,9 @@ fn values_with(
 ) -> Vec<InitialParameterValue> {
     default_initial_values(factory.descriptor())
         .map(|mut initial| {
+            if initial.parameter_index == 0 {
+                initial.value = DELAY_TIME_MS;
+            }
             if initial.parameter_index == parameter {
                 initial.value = value;
             }

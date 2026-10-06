@@ -53,16 +53,18 @@ struct Move {
     start: f32,
     target: f32,
     /// Whether the move's output and whole snapshot are partition-invariant. A word that feeds a
-    /// coefficient the effect refreshes once per segment (the multiband compressor's ratio, attack
-    /// and release) is not, by that effect's frozen design; there only the ramp words are compared.
+    /// coefficient the effect refreshes once per segment is not always, by that effect's frozen
+    /// design (the multiband compressor's high ratio and high attack moves); there only the ramp
+    /// words are compared.
     whole: bool,
 }
 
 /// Frames rendered per move: the 64-sample window and a few settled frames after it.
 const FRAMES: usize = 72;
 
-/// The preparation request: the first quality row, quantum 128, the first supported link mode,
-/// the sidechain connected when `connected` and the effect has one.
+/// The preparation request: the 48 kHz quality row (`qualities[1]`, the rate the moves were
+/// scanned at), quantum 128, the dual-mono link mode, the sidechain connected when `connected` and
+/// the effect has one.
 fn request<'a>(
     factory: &dyn NativeEffectFactory,
     values: &'a [InitialParameterValue],
@@ -70,6 +72,7 @@ fn request<'a>(
 ) -> PrepareEffectRequest<'a> {
     let descriptor = factory.descriptor();
     let quality = descriptor.qualities[1];
+    assert_eq!(quality.sample_rate, 48_000, "the moves are 48 kHz moves");
     let sidechain = descriptor
         .ports
         .iter()

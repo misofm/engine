@@ -256,6 +256,11 @@ through the clamp #1408 adds for the builtins.
 - Pin data only: the digest tables of D7 and their `.in` files,
   `tools/wasm-gate-corpus/src/lane_digests.in`
 - `docs/EFFECT_CONTRACT_V1.md` (the smoothing paragraph), this spec
+- Root-authorized in attempt 2 (the #1411 verifier's MINOR 1), doc comments only: the
+  `the_effects_own_edge_ramp_snapshots_restore` docs in
+  `crates/{delay,compressor,gate-expander,multiband-compressor,true-peak-limiter,transient-shaper}/tests/randomized.rs`,
+  and the `EffectDifferential::edge_ramp_restore_violations` doc in
+  `crates/conformance/src/randomized.rs`
 
 `crates/lane`, `crates/effect-runtime` and the effects' parameter code are stream G's column; the
 `ParameterSmoother` arm (stream J's `crates/effect-contract`), the payload refusal rows and soft
@@ -475,11 +480,13 @@ ceiling edge designs the same limit word for every start the scan reached (dista
 is at -24 dB. Every other parameter had moves at both edges; the table uses one per word, avoiding
 subnormal starts.
 
-Deviation, for the verifier: for the multiband compressor's ratio, attack and release moves the
-partition half compares the ramp words only, not the output and whole snapshot. That effect
-refreshes those coefficients once per segment by its frozen design (`tests/identity.rs`,
-`partition_control_trajectory_preserves_ramp_positions`), so one-frame and one-block renders of
-such a move differ in output whatever the ramp law. Threshold and makeup moves compare everything.
+Deviation, for the verifier (corrected in attempt 2): for the multiband compressor's high ratio
+and high attack moves only, the partition half compares the ramp words only, not the output and
+whole snapshot. That effect refreshes its ratio, attack and release coefficients once per segment
+by its frozen design (`tests/identity.rs`, `partition_control_trajectory_preserves_ramp_positions`),
+and on those two moves the refresh makes the one-frame and one-block outputs differ (left output)
+whatever the ramp law. Every other move, low ratio, low attack, low release and high release
+included, compares output and whole snapshot.
 
 **Mutation evidence** (each applied alone, the named tests run, reverted; all green after revert):
 
@@ -542,3 +549,84 @@ to zero, as expected; #1411's gate 3 restores a catch per probe in the same pull
 headroom and #1301's three catches are zero; both are #1411's, which ships in the same pull
 request. The #1411 spec already covers soft clip's `ramp_current_valid`/`ulp_at` (its site 8 and
 D3), so it was not edited.
+
+### Attempt 2 (implementer, 2026-10-06)
+
+Tests and docs only. No production code changed: the `src` edits below are doc comments (and one
+doc moved above its `#[derive]`); `git diff -U0 -- crates/*/src` shows no non-comment line.
+
+**MAJOR 1, the delay's gate-2 test now reaches site 7 for every word.** At the 250 ms default
+delay time the taps were silent for the whole 72-frame window, so feedback, damping `g` and cross
+feedback never reached the output or the ring. `values_with` now also sets the delay time
+(parameter 0) to its 1 ms minimum (`DELAY_TIME_MS`, 48 samples at 48 kHz), so the taps carry
+signal from frame 48, inside the 64-sample ramp. The test is green unmutated. Per-word site-7
+mutants, each applied alone to `delay_chunk` (`x = ramp_word::<RAMPING>(x, w)` back to
+`x = x + w.1`), `cargo test -p delay --test ramp_endpoint`, then reverted:
+
+| Mutant (site 7 word) | Result |
+| --- | --- |
+| left damping `g` (`gain_left`) | red: damping coefficient, the final snapshot depends on the partition |
+| left feedback (`feedback_left`) | red: feedback, the final snapshot depends on the partition |
+| right damping `g` (`gain_right`) | red: damping coefficient, the final snapshot depends on the partition |
+| right feedback (`feedback_right`) | red: feedback, the final snapshot depends on the partition |
+| cross position (`position`) | red: cross feedback, the final snapshot depends on the partition |
+| all reverted | green |
+
+Each is red at the partition half's final-snapshot comparison, which covers the ring; with the
+250 ms default all five were green in every delay suite (verdict MAJOR 1).
+
+**MINOR 1, multiband `whole`.** `whole: true` is restored on low ratio, low attack, low release and
+high release; the four pass the full output-and-snapshot comparison. High ratio and high attack
+keep `whole: false`; set to `true` each is red on `left output`. The deviation sentence above and
+the harness `Move::whole` doc (all seven copies) and the multiband module doc now name those two
+moves only.
+
+**#1411 MINOR 1 (root-authorized path addition, recorded under Authorized paths).** The seven
+probe docs no longer say that the effect's iterated `current + step` rounds past the edge or that
+the fix for a red probe is to admit it. Each caller doc (`crates/{delay,compressor,gate-expander,
+multiband-compressor,true-peak-limiter,transient-shaper}/tests/randomized.rs`) now says: since
+#1409 every ramp word stays between its start and its target, so the strict restore (#1411) admits
+each snapshot; the probe is red when a render site leaves a ramp word outside its endpoints at
+render (a missing or reverted #1409 clamp) or when the restore refuses a valid in-range snapshot;
+the fix is that clamp or that validation, never a restore slack. The conformance probe doc
+(`EffectDifferential::edge_ramp_restore_violations`) says the same, and states that the probe uses
+the unclamped walk only to pick the moves and the `k - 2 ..= k` positions.
+
+**NITs.**
+- Rewrapped to 100 columns: the `IndexedRamp` doc (`crates/lane/src/kernels.rs`), the multiband
+  `store_segment` and flat-path (`run_segment`) docs, and the delay unit test doc
+  (`a_carried_ramp_is_refused_unless_its_whole_path_is_valid`); the two early line ends (compressor
+  `advance_where`, multiband `flat_path_is_identity`) are joined.
+- The multiband `Segment` doc now sits above its `#[derive(Clone, Copy)]`.
+- The harness `request` doc (seven copies) now says the 48 kHz quality row (`qualities[1]`, the
+  rate the moves were scanned at) and the dual-mono link mode, and the code asserts
+  `quality.sample_rate == 48_000`.
+- **Soft clip settled cost (D5 hazard), one descriptive measurement, not tuned.** A scratch,
+  uncommitted release bench: a native-width bank (AVX2, 8 lanes) of default-valued soft clips,
+  settled, 40,000 blocks of 128 frames, one warmup and two measured rounds, one invocation per tree.
+  Parent of attempt 1 (`c58c4e55f`, plain additions): 80.88 / 81.38 / 80.87 ns per bank frame.
+  This attempt's tree (the `if ramping` branch): 78.27 / 78.22 / 78.19 ns. No cost is visible at
+  this resolution; the difference is within run-to-run and tree-to-tree noise (the two trees also
+  differ by #1411 and #1328's follow-up), so it is no speedup claim.
+
+**Gates.**
+- The spec's debug command (gate 6, first line): pass (169 result lines, 0 failed), including the
+  six probes `the_effects_own_edge_ramp_snapshots_restore`.
+- `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`: pass
+  (`g5_native_digests_match_pins` ok, no pin moved).
+- Release run of the touched targets: `--test ramp_endpoint` for the seven effects and
+  `effect-runtime` (gate 1 at 100,000, 6.0 s): pass; the six probes in `--release`: pass.
+- `conformance_fixtures -- --check`: pass.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`:
+  pass.
+- No browser-compiled code changed (doc comments only in `src`), so the worklet chain was not
+  rerun.
+
+**Open items.**
+- Gate 1's 100,000-ramp size runs in no CI job: `effect-runtime` is in no release job, so per-PR
+  CI runs only the 4,000-ramp debug prefix (which checks its own reach). The full size passed by
+  hand (`cargo test --release -p effect-runtime --test ramp_endpoint`, 6.0 s, verdict). Adding a
+  release run is a workflow change outside this issue's paths; root decides.
+- The verdict's MINOR 2 (soft clip line clause) is #1411's and its verifier confirmed it covered.
+- Verdict NIT 5's shared harness (one helper instead of seven copies) and NIT 7 (a wasm effect-ramp
+  corpus case) stay optional follow-ups.
