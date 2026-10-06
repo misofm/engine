@@ -124,9 +124,9 @@ both mixes, `||c||_V* = sqrt(2) / sqrt(1 + t)`, `t = g (g + sqrt(2))`.
 
 ## D5: a live input lane
 
-`builtins::input_section_live_bound` / `math::tail::envelope_cascade`. The same kernel
-propagation, from per-section suprema over every word a live history can load
-(`input_section_live_envelope`):
+`builtins::input_section_live_bound` / `math::tail::live_cascade`, from per-section suprema
+over every word a live history can load and where those words lie as poles
+(`input_section_live_envelope`, which returns both):
 
 * **Recursion words.** Under #1407 every word is a design, the identity at rest, or within the
   allowance `E = 64 h + u D` (`h = (u/2, u/4, u/2)`, `D = (1, 0.3, 1)`, at block size 1, its
@@ -144,19 +144,91 @@ propagation, from per-section suprema over every word a live history can load
   (a mix ramp toward or from the identity scales the row by its weight) and
   `|fl(sqrt(2)) - sqrt(2)|` for the HPF band mix.
 * **Trim.** `g_t <= fl(10^(24/20))`: a trim ramp stays inside its endpoints (#1408).
-* **Before `N`.** Each section's state lies in its invariant ball `B_k = (input_k V_k + F) /
-  (1 - rho_ramp)` with `V_1 = g_t P` and `V_{k+1} = output_state_k B_k + output_input_k V_k`: the
-  LPF's input is the HPF's output ball, not `g_t P` (Amendment 2, F2, the crude-but-sound
-  cascade; #1433 may tighten it).
-* **After `N`.** 64 frames under `rho_ramp` (a ramp in flight), then `rho_settled`. `T_decay` is
-  the first frame from which the relative output bound is below `eps / 2` for good; `P*` comes
-  from the absolute stall through the cascade (about `1.7e-3`: the HPF's stall amplified by the
-  LPF's ball); rest is section by section as above, each adding `N_SILENCE`.
+* **The cascade.** #1329 bounded the LPF's input by the HPF's universal output ball, about
+  `7.7e4 g_t P`, and certified `R(+24 dBFS)` about 1.26M against a real rest of 983,374. #1433
+  replaced that step with the frequency-aware analysis below, which keeps the trim, the
+  envelope, the rate inflation, the reset-aware reasoning and the sequential rest (HPF first,
+  each section adding `N_SILENCE`).
 
-Per rate (44.1 / 48 / 88.2 / 96 kHz): `T_decay` 904,785 / 899,524 / 904,795 / 899,533; `T_rest`
-1,081,764 / 1,075,575 / 1,085,641 / 1,079,792; `peak_plus_24_dbfs` 1,264,736 / 1,257,840 /
-1,268,585 / 1,262,029; `any_sanitized_input` 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156. These
-are the module's computed outputs, recorded as evidence; nothing pins them.
+### #1433: the frequency-aware cascade
+
+Notation: `s` the HPF's state, `sigma` the LPF's, `x` the HPF's input (`|x| <= G = g_t P`), `y`
+the HPF's output, `E = ||s||_V`, `F` the per-step flush perturbation, `eps = 10^(-144/20)`.
+
+* **Poles.** For any words `w = (c1, a2, a3)`, `R A(w) R^-1 = (Re p) I + (Im p) J + kappa K0`
+  exactly, with `Re p = 1 - c1 - a3`, `Im p = 2 sqrt(2) a2 - c1 + a3`,
+  `kappa = c1 - a3 - sqrt(2) a2`, `J = [[0, -1], [1, 0]]`, `K0 = [[-1, 1], [1, 1]]`. The matrices
+  `a I + b J` are the complex numbers (`||a I + b J||_2 = |a + i b|`, `J^2 = -I`) and
+  `||kappa K0||_2 = sqrt(2) |kappa|`, so `||A||_V <= |p| + sqrt(2)|kappa|` and the same for
+  `I + A`, `I - A` and (with `2 |p| sqrt(2)|kappa| + 2 kappa^2` added) `A^2 - I`. An exact
+  Butterworth design has `kappa = 0` and its pole, the bilinear image of the analog ray
+  `g e^(i 3 pi / 4)`, on the circle `|p + i| = sqrt(2)` through `1`, `-1` and `(sqrt(2) - 1) i`;
+  at `Re p = x` its convex hull spans `Im p` in `[0, h(x)]`, `h(x) = sqrt(2 - x^2) - 1`, so there
+  `|p| <= sqrt(x^2 + h^2)` (largest where `|x|` is), `|1 + p| <= sqrt((1 + x)^2 + h^2)`
+  (increasing in `x`) and `|1 - p| <= sqrt((1 - x)^2 + h^2)` (decreasing). A reachable word is a
+  hull point moved by the box `E + h` (a settled word, an `f32` design, by `h`), which moves
+  `Re p` by at most `eta = e1 + e3`, `|p|` by `sqrt(eta^2 + (2 sqrt(2) e2 + eta)^2)` and `kappa`
+  by `e1 + e3 + sqrt(2) e2`. The designs' `Re p` lies in `[Re p(g_max), Re p(g_min)]`
+  (`Re p = (1 - g^2) / (1 + sqrt(2) g + g^2)`, falling in `g`), padded by `1e-12`.
+* **Zones.** `[low - eta, high + eta]` is cut into zones, widths from `1e-6` at each end growing by
+  `1.5` up to `0.02`, meeting at `Re p = 0`. A zone's constants take the hull bounds over its range
+  widened by `eta` (by `h`'s image for the settled ones): `rho_k >= ||A|| + mu_state` (capped by
+  `rho_ramp`), `q_k >= ||I + A||`, `beta_k >= ||b|| + mu_input` (`b = (I - A) e2`, capped by the
+  envelope's input), and settled `r_k`, `q_k^s`, `q_k'^s >= ||A^2 - I||`.
+* **Moves.** From one frame to the next a word holds (rule 2), takes one ramp step toward a
+  design (#1407: `fl(t - c) / 64` from a reachable start `c`, `c1` and `a3` each within a few
+  `f32` roundings of it), or is replaced with zero state (rule 3, a completed disable, a reset,
+  the mono collapse's channel copy, which carries state and words together). So `Re p` moves by at
+  most `(high - low + 2 eta) / 64 + 32 u`: zones that close are neighbours.
+* **`Phi`, the state by zone.** The least solution of `Phi_k >= rho_i Phi_i + beta_i` over every
+  neighbour `i` of `k` (itself included), per unit of `G` and of `F`. By induction over frames,
+  `E <= Phi_k G + Phi_k^F F` whenever the HPF's word lies in zone `k` (a reset only lowers it).
+  Near the top `Phi` is #1329's ball, `input / (1 - rho_ramp)`; away from it the state a slow
+  pole built decays on the way.
+* **`Psi`, the potential.** The least solution of `Psi_k >= q_k [k not direct] + rho_k Psi_i`
+  over every neighbour `i` (zones at `Re p >= 0` are *direct*). With
+  `E' <= rho_k E + beta_k |x| + F`, each frame satisfies
+  `q_k E [k not direct] <= Psi_k E - Psi_k' E' + Psi_k' (beta_k |x| + F)`: the HPF's output mass
+  telescopes against its state. A direct zone is charged `q_k Phi_k` per frame instead (there
+  `Psi` would be about `2 / (1 - rho_low)`, the frequency-blind LPF's view of a near-DC output).
+* **Before `N` and the window.** The HPF's output is `y = 1/2 (m1, m2)(I + A) s + d x` up to
+  rounding (`c = 1/2 (m1, m2)(I + A)` exactly: `v1 = (s1 + s1') / 2`, `v2 = (s2 + s2') / 2`), so
+  `|y| <= 1/2 |m| q_k E + delta |x| + omega E + F` (`|m|` the mix row's supremum over
+  `theta (-k, -1)` and its ramp allowance, `omega` the output rounding over every word). The LPF's
+  state is at most `iota sum_j W_j |y_j| + F sum_j W_j`, `W_j` powers of `rho_ramp`; the LPF's
+  resets only drop terms. Abel summation with the non-decreasing weights `W_j` bounds the
+  telescoped part by `V = sup Psi Phi`, so
+  `sigma <= iota (1/2 |m| (V + K + K_L) + D + Omega) + F_sum`, the charges `K`
+  (`kappa = sup Psi' beta` per unit `G`, `sup Psi` per unit `F`), the direct zones `K_L`, the
+  feedthrough `D`, the rounding `Omega` and the LPF's own flush `F_sum` each a sum weighted by
+  `W`, propagated frame by frame through the 65-frame window `N ..= N + 64` with zero input.
+* **Settled.** From `N + 64` every word is fixed. With `b = (I - B) e2` exactly,
+  `tau = sigma - e2 y_prev` obeys `tau' = B (tau - e2 (y - y_prev)) + rounding`, so the LPF is
+  driven by the HPF's output *change*, `c (A - I) s = 1/2 (m1, m2)(A^2 - I) s`, small at both ends
+  of the domain (`|1 - p^2| <= 2 sqrt(2) (1 - |p|)` near `+-1`). Per zone group the HPF's design
+  can settle in (consecutive zones in one quarter octave of `1 - r`, the largest of each term: it
+  covers each member), the non-negative system on `(tau, H, X, 1)`:
+  `tau' = rho tau + (rho c_d + mu c_y + mu_x c_y r) H + a_F F`, `H' = r H + F`,
+  `X' = max(rho, r) X`, with `|y| <= c_y H + F`, `|y - y_prev| <= c_d H + (gamma + 2 + omega) F`,
+  `sigma <= tau + c_y H + F + X + 2 (c_y H_stall + F)`. `X` is the joint flush's one-off term:
+  the HPF's flush makes one output change `|y|`, and an LPF flush restarts `tau` at `|y|` (only the
+  last restart counts), each at most `max(rho, r)^m c_y H_0 + c_y H_stall + F`.
+* **Tail, stall, rest.** `T_decay`: the window's outputs and each group's output bound (no flush)
+  until below `eps / 2` for good (a frame from which the propagation is componentwise falling,
+  then a bisection). `P*`: the flush's part of the output bound from `T_decay` on (each group's
+  fixed point plus its decaying start) over `eps / 2`; the pre-`N` charges are amplified by
+  `sup Psi` but have decayed by `T_decay`. Rest per group: the HPF's state below `REST_EPS` per
+  word plus `N_SILENCE`, then the LPF from its bound at that frame plus `N_SILENCE`; the largest
+  over the groups and the HPF at the identity.
+
+Per rate (44.1 / 48 / 88.2 / 96 kHz): `T_decay` 704,010 / 699,952 / 704,018 / 699,960; `T_rest`
+the same (`R(P*)` 693,189 / 689,433 / 697,084 / 694,069 lies below `T_decay`; `P*` about
+`1.2e-7`); `peak_plus_24_dbfs` 1,067,207 / 1,061,497 / 1,071,057 / 1,065,688;
+`any_sanitized_input` 2,384,997 / 2,372,008 / 2,388,800 / 2,376,147. The real kernel's exact rest
+of the top pair under an alternating +24 dBFS input through +24 dB is 983,374 / 978,319 / 983,374 /
+978,319, so the certified `R` is 8.5 % to 8.9 % above it. These are the module's computed outputs,
+recorded as evidence; nothing pins them. The bound costs about 0.2 ms per preparation (146 zones,
+about 60 groups).
 
 ## Numerical limits
 
@@ -180,11 +252,19 @@ are the module's computed outputs, recorded as evidence; nothing pins them.
   two roundings before the product with it (`(1 - u64)^3 (1 + 4 u64) >= 1`). The radius's growth
   term passes through three (a sum, a product, the outer addition); its relative shortfall of at
   most `10 u64^2` is absorbed by the margin of `8 u64 ||R||` above.
-* The `1 + 2^-30` step inflation compounds: over the live bound's 0.9M-frame decay it is a factor
-  of about `1 + 8.4e-4`, which lengthens the stated values by a few tens of frames (the live
-  `T_decay` is 17 frames above an independent frame-by-frame recomputation without it, every
-  rest 14 to 42 frames above; `tail_contract` checks the difference stays within 0.01 % plus 64
-  frames). It only ever lengthens a bound.
+* The `1 + 2^-30` step inflation compounds: it lengthens the stated values by a few tens of frames
+  (the live `T_decay` is 18 to 19 frames above an independent recomputation without it, every
+  rest 17 to 43 frames above, both in plain `f64` (`tail_contract`) and in 60-digit decimal
+  arithmetic (#1433's evidence); `tail_contract` checks the difference stays within 0.01 % plus
+  64 frames). It only ever lengthens a bound.
+* #1433's zone constants are short non-cancelling evaluations (`h(x)` in the form
+  `(1 - x)(1 + x) / (sqrt(2 - x^2) + 1)`, `1 + x` exact near `-1`) inflated by `1 + 2^-30`.
+  `Phi` and `Psi` are iterated upward from each zone's own fixed point with a relative margin of
+  `2^-40`, every update multiplied by `1 + 4 u64`, until no value changes; every stated inequality
+  is then checked again on the computed values. Powers of a settled system are formed by
+  squaring, each product inflated by `1 + 2^-30`; a computed output below the limit bounds the
+  exact one, which bounds every later one once the system is componentwise falling, so the
+  bisection needs no monotonicity of computed values.
 * The longest horizon evaluated is `2^26` frames; a bound beyond it is not stated (`Infinite`, no
   rest bound). No launch-rate design comes near it.
 * Every section must contract with its rounding (`q + mu_state < 1`); every flush stall must be
@@ -204,11 +284,14 @@ reference resets with it. The bounds cap the state at the `V`-norm of finite `f3
 `crates/builtins/tests/tail_contract.rs`: gate 1(a) against an independent `f64` brute force to
 4,000,000 samples; 1(b) over 165,000 designs per section and the kernel's own ramp words; 1(c) and 2
 on the real kernel; 1(c)'s identity for the live bound; the live envelope's terms and the live
-figures against an independent frame-by-frame recomputation of this derivation (the real kernel
-cannot see an omitted rounding, ramp, stall or A9 term at the live bound: the crude cascade's
-slack absorbs each); 3 and 7 on the figures. `math::tail`'s unit test checks the operator norm
+figures against an independent recomputation of this derivation (#1433's: pole domain, zones,
+`Phi`, `Psi`, the window frame by frame and the settled phase in closed form; the real kernel
+cannot see an omitted rounding, stall or charge at the live bound, about 8.5 % above its rest);
+#1433's gates: every scanned design and real-kernel ramp word inside its zone's constants and the
+per-frame pole step, and the certified `peak_plus_24_dbfs` within `[R_meas, 1.15 R_meas]` of the
+real kernel's exact rest; 3 and 7 on the figures. `math::tail`'s unit test checks the operator norm
 against 60-digit references. The required CI job `test-release` runs `tail_contract` at release
-scale. The measurements are in the #1329 spec's attempt record.
+scale. The measurements are in the #1329 and #1433 specs' attempt records.
 
 ## Citations
 

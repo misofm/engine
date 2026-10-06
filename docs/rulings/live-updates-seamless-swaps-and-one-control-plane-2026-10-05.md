@@ -147,10 +147,12 @@ when a dependency forces the order, and then sequence the correct solution.
 - *Rationale:* exact zero was provably never reached at the top of the cutoff domain, and the EQ
   had a second trap (round 1, B4.3; round 2, "Bits moved"). With the fix, exact rest is reached
   within a stated bound, so silence skipping can rely on it. For the input section with a live
-  input lane the certified bounds, each including `2·N_SILENCE`, are about 1.27M samples at
-  +24 dBFS and 2.59M for any sanitized input (44.1 / 48 / 88.2 / 96 kHz: 1,264,736 / 1,257,840 /
-  1,268,585 / 1,262,029 and 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156; #1329 Amendment 3,
-  which supersedes the earlier ≤1.0M and Amendment 2's 1.19M / 2.5M). #1433 may tighten them.
+  input lane the certified bounds, each including `2·N_SILENCE`, are about 1.07M samples at
+  +24 dBFS and 2.39M for any sanitized input (44.1 / 48 / 88.2 / 96 kHz: 1,067,207 / 1,061,497 /
+  1,071,057 / 1,065,688 and 2,384,997 / 2,372,008 / 2,388,800 / 2,376,147; #1433's
+  frequency-aware cascade bound, 8.5-8.9 % above the real kernel's rest of the top pair; it
+  supersedes #1329 Amendment 3's 1.26M / 2.58M, the earlier ≤1.0M and Amendment 2's 1.19M /
+  2.5M).
 - *Recorded resolution:* with f32 rounding and ramps in flight the smallest `T` is not computable
   exactly, so each node reports a certified upper bound on it, checked against a brute-force
   recompute.
