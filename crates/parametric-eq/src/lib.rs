@@ -658,7 +658,6 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         quality: Quality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
             common_bytes: STATE_SIZES.common as u32,
             left_bytes: STATE_SIZES.left as u32,
@@ -666,6 +665,20 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         },
         scratch_fixed_bytes: 0,
         scratch_bytes_per_frame: REST_PLANE_BYTES_PER_FRAME,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1372 derives the bounds from the designer.
+fn tail_and_rest(
+    _sample_rate: u32,
+    _quality: effect_contract::EffectQuality,
+) -> effect_contract::EffectTailBound {
+    effect_contract::EffectTailBound {
+        tail: TailSamples::Infinite,
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
     }
 }
 
@@ -686,6 +699,7 @@ pub static PARAMETRIC_EQ_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &EQ_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 

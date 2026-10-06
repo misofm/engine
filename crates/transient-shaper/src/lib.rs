@@ -149,7 +149,6 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: LANE_STATE_BYTES,
@@ -160,6 +159,17 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         // therefore the Issue-082 effect identity, so it belongs to #95 and not here.
         scratch_fixed_bytes: 24,
         scratch_bytes_per_frame: 0,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::EffectTailBound {
+    effect_contract::EffectTailBound {
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
     }
 }
 
@@ -183,6 +193,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &TRANSIENT_SHAPER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 

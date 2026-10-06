@@ -90,8 +90,21 @@ the control thread at preparation and never pinned:
 
 Gain-only parts (trim, polarity, fader, mute, matrix) state `0` for all three. An absolute output
 floor in place of the exact-zero branch is refused (Amendment 3, G2): it would make the tail a
-fixed-level one, which #1328's A8 and A9 removed. Each native effect's bounds are its own slice
-(#1372-#1376), carried in its prepared metadata by #1377; until then an effect reports `Infinite`.
+fixed-level one, which #1328's A8 and A9 removed.
+
+A native effect states its three values in one place, its descriptor's
+`tail_and_rest(sample_rate, quality) -> EffectTailBound { tail, tail_every_peak, rest }` (#1377).
+It runs on the control thread, takes no parameter values (each bound holds over the whole
+parameter domain at that rate), and render never calls it. `QualityDescriptor` carries no tail.
+`expected_prepared_metadata`, the sole conforming metadata, copies the three values into
+`PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the program key carries them too, so
+cohorts with different bounds never share a bank. `effect-compiler` refuses a prepared effect whose
+metadata differs in any of them (`effect.metadata.mismatch`), and the conformance harness compares
+each prepared instance with the function itself (`metadata.tail_bound`). `rest` is a `RestBound`:
+`Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
+effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
+`tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and
+`Unstated`. #1378 retires `Unstated` and `Infinite` in both tail fields.
 The builtin input section's derivation is `docs/derivations/1329-input-section-tail-and-rest.md`.
 
 ## Parameters and automation

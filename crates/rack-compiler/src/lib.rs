@@ -457,6 +457,8 @@ mod tests {
             ports: PreparedPorts { sidechain },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,

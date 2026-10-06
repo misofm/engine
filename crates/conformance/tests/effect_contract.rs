@@ -212,6 +212,7 @@ fn every_faulty_mock_is_detected() {
         ),
         (FaultKind::StickyReset, Some("reset.snapshot_differs")),
         (FaultKind::BypassDelayMismatch, Some("latency.bypass_delay")),
+        (FaultKind::UndeclaredRestBound, Some("metadata.tail_bound")),
     ] {
         let report = run_effect_conformance(
             &DualAccumulatorDelayFactory::faulty(fault),
