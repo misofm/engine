@@ -193,7 +193,7 @@ fn run<L: Lane, const W: usize>(case: usize, out: &mut [u32]) {
             &mut rest,
             L::splat(lane::silence_frames(CORPUS_RATE.0) as f32),
         );
-        channel.process_block(&mut block, FRAMES, &rest);
+        channel.process_block(&mut block, FRAMES, &rest[..]);
         for frame in 0..FRAMES {
             for offset in 0..W {
                 lanes[group * W + offset][frame] = block[frame * W + offset];

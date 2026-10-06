@@ -63,7 +63,10 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # joint SVF flush and the EQ's dry masks held in channel state, and its amendment A9 two more
 # (builtins 186 -> 71, parametric-eq 122 -> 88), as the check asked: the builtin input chain now
 # loads its bodies' vector constants from its prepared coefficients (`InputChainConstants`) and the
-# EQ reads its rest thresholds from memory, in place of splatted compares.
+# EQ reads its rest thresholds from memory, in place of splatted compares. Its follow-up lowered
+# one more (parametric-eq 88 -> 48), as the check asked: the EQ's cascades run in two forms per
+# block (armed and unarmed) and carry `lane::FLUSH_EPS` as a word from the prepared EQ
+# (`ArmedRest`, `UnarmedRest`) instead of splatting it in each kernel instantiation.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "builtins": ("1018", 71),
     "compressor": ("1018", 970),
@@ -71,7 +74,7 @@ IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "graph": ("1018", 10),
     "host-core": ("1018", 4),
     "multiband-compressor": ("1018", 566),
-    "parametric-eq": ("1018", 88),
+    "parametric-eq": ("1018", 48),
     "soft-clip": ("1018", 22),
     "transient-shaper": ("1018", 268),
     "true-peak-limiter": ("1018", 104),

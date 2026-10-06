@@ -830,12 +830,12 @@ fn check_cascade<L: Lane>(width: &str, signal: Signal, lanes: &[Vec<f32>]) {
         });
     for channel in 0..2 {
         for section in 0..CASCADE_SECTIONS {
-            svf_block::<L>(
+            svf_block::<L, &[f32]>(
                 &mut reference[channel],
                 FRAMES,
                 &coefficients[channel][section],
                 &mut reference_state[channel][section],
-                &planes[channel],
+                &planes[channel][..],
             );
         }
     }
@@ -892,7 +892,7 @@ fn run_cascade<L: Lane, const DEPTH: usize>(
             core::array::from_fn(|k| state[0][base + k]),
             core::array::from_fn(|k| state[1][base + k]),
         ];
-        svf_cascade_interleaved::<L, 2, DEPTH>(
+        svf_cascade_interleaved::<L, &[f32], 2, DEPTH>(
             [&mut left[0], &mut right[0]],
             FRAMES,
             &pass_coefficients,
@@ -1060,8 +1060,10 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                 let mut oracle_state = initial;
                 let mut skew_state = initial;
                 // One silence counter per stream across the blocks, one frame short of arming at
-                // the start (issue #1328, amendment A9), so the thresholds change inside blocks and
-                // a section that read frame `i`'s threshold instead of frame `i - k`'s is caught.
+                // the start (issue #1328, amendment A9), so the thresholds change inside blocks.
+                // These signals rarely leave a state in the joint band on an arming frame, so a
+                // section that read frame `i`'s threshold instead of frame `i - k`'s is caught by
+                // `g2_skewed_cascade_arms_each_section_on_its_own_frame`, not here.
                 let mut silence: [L; S] = [L::splat(N_SILENCE - 1.0); S];
                 for block in 0..SKEW_BLOCKS {
                     let span = frames * L::WIDTH;
@@ -1099,7 +1101,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                             .each_mut()
                             .map(|b| &mut b[SKEW_GUARD..SKEW_GUARD + span]);
                         if masked {
-                            svf_cascade_interleaved_with_dry_masks::<L, S, D>(
+                            svf_cascade_interleaved_with_dry_masks::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1108,7 +1110,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                                 rest,
                             );
                         } else {
-                            svf_cascade_interleaved::<L, S, D>(
+                            svf_cascade_interleaved::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1122,7 +1124,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                             .each_mut()
                             .map(|b| &mut b[SKEW_GUARD..SKEW_GUARD + span]);
                         if masked {
-                            svf_cascade_skewed_with_dry_masks::<L, S, D>(
+                            svf_cascade_skewed_with_dry_masks::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1131,7 +1133,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                                 rest,
                             );
                         } else {
-                            svf_cascade_skewed::<L, S, D>(
+                            svf_cascade_skewed::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1176,6 +1178,127 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Issue #1328 (#1328 attempt 5's verifier, m3, mutant MK): the skewed cascade arms each section on
+/// that section's own frame. In iteration `i` section `k` runs frame `i - k`, so it must read frame
+/// `i - k`'s rest threshold; reading frame `i`'s arms section `k` `k` frames early.
+///
+/// The skew gate above cannot see that: its signals never leave a section's state in the joint band
+/// on an arming frame. Here every section of every stream starts in the band (both words below
+/// `REST_EPS`, above `FLUSH_EPS`), the input is exactly zero, and the stream's counter arms on frame
+/// `arming` of a 16-frame block, for every `arming` the block holds. The skewed cascade, plain and
+/// with dry masks, must equal the interleaved cascade in every output and state word, and the rule
+/// must have fired (every state word `+0.0` at the end), at one and two streams and depths two and
+/// three.
+#[test]
+fn g2_skewed_cascade_arms_each_section_on_its_own_frame() {
+    let _canonical = CanonicalFpEnv::enter();
+    lane::each_lane!(|L| {
+        let width = core::any::type_name::<L>();
+        check_skew_arming::<L, 1, 2>(width);
+        check_skew_arming::<L, 2, 2>(width);
+        check_skew_arming::<L, 1, 3>(width);
+        check_skew_arming::<L, 2, 3>(width);
+    });
+}
+
+fn check_skew_arming<L: Lane, const S: usize, const D: usize>(width: &str) {
+    use lane::kernels::{
+        SvfCoef, svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks,
+        svf_cascade_skewed, svf_cascade_skewed_with_dry_masks,
+    };
+    const FRAMES: usize = 16;
+    let coefficients: [[SvfCoef<L>; D]; S] = core::array::from_fn(|stream| {
+        core::array::from_fn(|section| cascade_coefficients(stream * 4 + section))
+    });
+    // Section 0 of the second stream dry on every lane, so the masked kernels select too.
+    let masks: [[L::Mask; D]; S] = core::array::from_fn(|stream| {
+        core::array::from_fn(|section| {
+            L::splat(f32::from(u8::from(stream == 1 && section == 0))).eq(L::splat(1.0))
+        })
+    });
+    for arming in 0..FRAMES {
+        for masked in [false, true] {
+            let label =
+                format!("G2 skew arming {width} S={S} D={D} masked={masked} frame {arming}");
+            let span = FRAMES * L::WIDTH;
+            let input = vec![0.0_f32; span];
+            let plane = {
+                let mut plane = vec![0.0_f32; span];
+                // Frame `f` counts `run + f + 1`, so the window is reached on frame `arming`.
+                let mut run = L::splat(N_SILENCE - 1.0 - arming as f32);
+                silence_block::<L>(&input, FRAMES, &mut run, &mut plane, L::splat(N_SILENCE));
+                plane
+            };
+            let initial: [[SvfState<L>; D]; S] = core::array::from_fn(|stream| {
+                core::array::from_fn(|section| SvfState {
+                    ic1: L::splat(5.0e-15 / (1 + stream + section) as f32),
+                    ic2: L::splat(-4.0e-15 / (1 + section) as f32),
+                })
+            });
+            let rest: [&[f32]; S] = [plane.as_slice(); S];
+            let mut oracle: [Vec<f32>; S] = core::array::from_fn(|_| input.clone());
+            let mut skewed: [Vec<f32>; S] = core::array::from_fn(|_| input.clone());
+            let (mut oracle_state, mut skew_state) = (initial, initial);
+            if masked {
+                svf_cascade_interleaved_with_dry_masks::<L, &[f32], S, D>(
+                    oracle.each_mut().map(Vec::as_mut_slice),
+                    FRAMES,
+                    &coefficients,
+                    &mut oracle_state,
+                    &masks,
+                    rest,
+                );
+                svf_cascade_skewed_with_dry_masks::<L, &[f32], S, D>(
+                    skewed.each_mut().map(Vec::as_mut_slice),
+                    FRAMES,
+                    &coefficients,
+                    &mut skew_state,
+                    &masks,
+                    rest,
+                );
+            } else {
+                svf_cascade_interleaved::<L, &[f32], S, D>(
+                    oracle.each_mut().map(Vec::as_mut_slice),
+                    FRAMES,
+                    &coefficients,
+                    &mut oracle_state,
+                    rest,
+                );
+                svf_cascade_skewed::<L, &[f32], S, D>(
+                    skewed.each_mut().map(Vec::as_mut_slice),
+                    FRAMES,
+                    &coefficients,
+                    &mut skew_state,
+                    rest,
+                );
+            }
+            for stream in 0..S {
+                assert_eq!(
+                    block_bits(&skewed[stream]),
+                    block_bits(&oracle[stream]),
+                    "{label}: stream {stream}'s output"
+                );
+                for section in 0..D {
+                    let (want, got) = (oracle_state[stream][section], skew_state[stream][section]);
+                    assert_eq!(
+                        [bits::<L>(got.ic1), bits::<L>(got.ic2)],
+                        [bits::<L>(want.ic1), bits::<L>(want.ic2)],
+                        "{label}: stream {stream}, section {section}'s state"
+                    );
+                    assert!(
+                        bits::<L>(want.ic1)
+                            .iter()
+                            .chain(&bits::<L>(want.ic2))
+                            .all(|word| *word == 0),
+                        "{label}: the joint flush fires in the block (stream {stream}, section \
+                         {section})"
+                    );
                 }
             }
         }
@@ -1320,7 +1443,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                         let mut bounded = fresh;
                         let io = oracle.each_mut().map(Vec::as_mut_slice);
                         if masked {
-                            svf_cascade_interleaved_with_dry_masks::<L, S, D>(
+                            svf_cascade_interleaved_with_dry_masks::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1329,7 +1452,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 rest,
                             );
                         } else {
-                            svf_cascade_interleaved::<L, S, D>(
+                            svf_cascade_interleaved::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1339,7 +1462,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                         }
                         let io = bounded.each_mut().map(Vec::as_mut_slice);
                         let verdict = if masked {
-                            svf_cascade_interleaved_with_dry_masks_bounded::<L, S, D>(
+                            svf_cascade_interleaved_with_dry_masks_bounded::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,
@@ -1349,7 +1472,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 limit,
                             )
                         } else {
-                            svf_cascade_interleaved_bounded::<L, S, D>(
+                            svf_cascade_interleaved_bounded::<L, &[f32], S, D>(
                                 io,
                                 frames,
                                 &coefficients,

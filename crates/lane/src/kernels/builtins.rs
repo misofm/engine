@@ -16,8 +16,8 @@
 //! chain they replace (master plan D3: fusion exists only where `fma` is written).
 
 use crate::Lane;
-use crate::kernels::{SvfCoef, SvfState, silence_skip_block, svf_step_when};
-use crate::{REST_EPS, silence_armable, silence_step_hoisted};
+use crate::kernels::{SvfCoef, SvfState, silence_skip_block, svf_state_held, svf_step_when};
+use crate::{REST_EPS, silence_armable_holding, silence_step_hoisted};
 
 /// Magnitude at or above which a sample is treated as non-finite by the D7 boundary policy.
 ///
@@ -507,6 +507,16 @@ pub fn matrix2x2_ramp_block<L: Lane>(
     r.current = current;
 }
 
+/// `true` when one channel of an input chain needs the armed form of its body for a block of
+/// `frames` (issue #1328): some lane whose silence counter `run` can arm within the block holds a
+/// non-zero integrator word in either section ([`silence_armable_holding`], which proves the
+/// unarmed form gives the same bits otherwise). A padding lane, or a track whose input has been
+/// silent since its tail rested, therefore leaves the bank on the unarmed form.
+#[inline(always)]
+fn channel_arms<L: Lane>(run: L, frames: usize, armed_after: L, state: &[SvfState<L>; 2]) -> bool {
+    silence_armable_holding(run, frames, armed_after, svf_state_held(*state))
+}
+
 /// The prepared coefficients of one dual-mono input chain, for [`input_chain_block`].
 #[derive(Clone, Copy)]
 pub struct InputChainCoef<L: Lane> {
@@ -634,9 +644,10 @@ pub fn input_chain_block<L: Lane>(
     c: &InputChainCoef<L>,
     s: &mut InputChainState<L>,
 ) -> InputChainReport<L> {
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
-    if silence_armable(s.silence[0], frames, c.silence)
-        || silence_armable(s.silence[1], frames, c.silence)
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
+    if channel_arms(s.silence[0], frames, c.silence, &s.section[0])
+        || channel_arms(s.silence[1], frames, c.silence, &s.section[1])
     {
         input_chain_block_body::<L>(true, left, right, frames, c, s)
     } else {
@@ -792,9 +803,10 @@ pub fn input_chain_ramp_block<L: Lane>(
     s: &mut InputChainState<L>,
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
-    if silence_armable(s.silence[0], frames, c.silence)
-        || silence_armable(s.silence[1], frames, c.silence)
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
+    if channel_arms(s.silence[0], frames, c.silence, &s.section[0])
+        || channel_arms(s.silence[1], frames, c.silence, &s.section[1])
     {
         input_chain_ramp_block_body::<L>(true, left, right, frames, c, s, r)
     } else {
@@ -908,8 +920,9 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     s: &mut InputChainState<L>,
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
-    if silence_armable(s.silence[0], frames, c.silence) {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
+    if channel_arms(s.silence[0], frames, c.silence, &s.section[0]) {
         input_chain_ramp_block_mono_body::<L>(true, io, frames, c, s, r)
     } else {
         silence_skip_block(io, frames, &mut s.silence[0]);
@@ -1017,9 +1030,10 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     filter_remaining: &mut [[L; 2]; 2],
     filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
-    if silence_armable(s.silence[0], frames, c.silence)
-        || silence_armable(s.silence[1], frames, c.silence)
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
+    if channel_arms(s.silence[0], frames, c.silence, &s.section[0])
+        || channel_arms(s.silence[1], frames, c.silence, &s.section[1])
     {
         input_chain_ramp_block_filter_body::<L>(
             true,
@@ -1275,8 +1289,9 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     filter_remaining: &mut [[L; 2]; 2],
     filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
-    if silence_armable(s.silence[0], frames, c.silence) {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
+    if channel_arms(s.silence[0], frames, c.silence, &s.section[0]) {
         input_chain_ramp_block_filter_mono_body::<L>(
             true,
             io,
@@ -1799,9 +1814,10 @@ fn dispatch_mixed_channel<L: Lane>(
 ) -> (L, L::Mask) {
     #[cfg(test)]
     MIXED_PLAN_SELECTIONS.with(|count| count.set(count.get() + 1));
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
     let frames = io.len() / L::WIDTH;
-    if silence_armable(*silence, frames, armed_after) {
+    if channel_arms(*silence, frames, armed_after, state) {
         dispatch_mixed_shape::<L>(
             true,
             io,
@@ -1990,8 +2006,9 @@ pub fn input_chain_block_mono<L: Lane>(
     c: &InputChainCoef<L>,
     s: &mut InputChainState<L>,
 ) -> InputChainReport<L> {
-    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
-    if silence_armable(s.silence[0], frames, c.silence) {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
+    // ([`channel_arms`]).
+    if channel_arms(s.silence[0], frames, c.silence, &s.section[0]) {
         input_chain_block_mono_body::<L>(true, io, frames, c, s)
     } else {
         silence_skip_block(io, frames, &mut s.silence[0]);

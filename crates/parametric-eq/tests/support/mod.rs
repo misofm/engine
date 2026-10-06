@@ -223,7 +223,8 @@ pub fn request_at_rate<'a>(
         // number and not a contract change.
         limits: PrepareEffectLimits {
             maximum_total_state_bytes: 1_024,
-            maximum_scratch_bytes: 1,
+            // The two rest planes' declared scratch at this quantum (issue #1328).
+            maximum_scratch_bytes: 128 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
             maximum_automation_spans_per_block: 48,
         },
     }

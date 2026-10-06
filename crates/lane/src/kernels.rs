@@ -32,6 +32,147 @@ pub use builtins::ramp_toward;
 
 use crate::{FLUSH_EPS, Lane, flush, flush_pair_with, flush_with, silence_step};
 
+/// Where an SVF kernel reads its per-frame rest thresholds from (issue #1328): an effect channel's
+/// **rest plane** (`&[f32]` or [`ArmedRest`], written by [`silence_block`]), or none
+/// ([`UnarmedRest`]).
+///
+/// With a plane a kernel runs [`svf_step`]: one threshold load per frame (per stream-frame in the
+/// cascades) and [`crate::flush_pair`]'s joint term. Without one it runs [`svf_step_when`]`(false,
+/// ..)`: the two per-word [`flush`]es, no load and no joint term. The two forms are the same bits
+/// on a block whose thresholds are all `+0.0`, because `flush_pair(n1, n2, +0.0)` is
+/// `(flush(n1), flush(n2))`: no magnitude and no NaN compares below `+0.0`. The caller chooses the
+/// form once per block ([`crate::silence_armable_holding`]), so live audio pays the per-word law's
+/// cost and nothing for the rule.
+///
+/// The choice is a type, so each instantiation of a kernel holds one form's frame loop and nothing
+/// else; a caller that runs both forms instantiates its block body twice. Such a caller passes
+/// [`FLUSH_EPS`] as a word it loaded ([`ArmedRest`], [`UnarmedRest`]) rather than letting each
+/// instantiation splat it: on Apple targets each materialised splat constant is a
+/// `memset_pattern16` call (known defect #1018, whose per-crate ceilings `check-cross-targets.sh`
+/// holds).
+pub trait RestThresholds<L: Lane>: Copy {
+    /// The rest plane, or `None` when every threshold is `+0.0` and none is read.
+    fn plane(&self) -> Option<&[f32]>;
+    /// The thresholds from word `base` on: a segment of a block that starts at frame
+    /// `base / L::WIDTH`.
+    #[must_use]
+    fn skip(self, base: usize) -> Self;
+    /// [`FLUSH_EPS`] on every lane, for the per-word law: a splatted constant by default, the
+    /// carried word for [`ArmedRest`] and [`UnarmedRest`].
+    #[inline(always)]
+    fn flush_eps(&self) -> L {
+        L::splat(FLUSH_EPS)
+    }
+}
+
+impl<L: Lane> RestThresholds<L> for &[f32] {
+    #[inline(always)]
+    fn plane(&self) -> Option<&[f32]> {
+        Some(self)
+    }
+
+    #[inline(always)]
+    fn skip(self, base: usize) -> Self {
+        &self[base..]
+    }
+}
+
+/// The rest plane of a block in which some lane may arm (issue #1328), with [`FLUSH_EPS`] carried
+/// as a word ([`RestThresholds::flush_eps`]). `flush_eps` must be [`FLUSH_EPS`] on every lane.
+#[derive(Clone, Copy)]
+pub struct ArmedRest<'a, L: Lane> {
+    /// The block's rest plane ([`silence_block`]).
+    pub plane: &'a [f32],
+    /// [`FLUSH_EPS`] on every lane.
+    pub flush_eps: L,
+}
+
+impl<L: Lane> RestThresholds<L> for ArmedRest<'_, L> {
+    #[inline(always)]
+    fn plane(&self) -> Option<&[f32]> {
+        Some(self.plane)
+    }
+
+    #[inline(always)]
+    fn skip(self, base: usize) -> Self {
+        Self {
+            plane: &self.plane[base..],
+            ..self
+        }
+    }
+
+    #[inline(always)]
+    fn flush_eps(&self) -> L {
+        self.flush_eps
+    }
+}
+
+/// The rest thresholds of a block in which no lane's joint flush can act (issue #1328): every
+/// threshold is `+0.0`, nothing is loaded, and each SVF step runs the per-word law alone, with
+/// [`FLUSH_EPS`] carried as a word as in [`ArmedRest`]. `flush_eps` must be [`FLUSH_EPS`] on
+/// every lane.
+#[derive(Clone, Copy)]
+pub struct UnarmedRest<L: Lane> {
+    /// [`FLUSH_EPS`] on every lane.
+    pub flush_eps: L,
+}
+
+impl<L: Lane> RestThresholds<L> for UnarmedRest<L> {
+    #[inline(always)]
+    fn plane(&self) -> Option<&[f32]> {
+        None
+    }
+
+    #[inline(always)]
+    fn skip(self, _base: usize) -> Self {
+        self
+    }
+
+    #[inline(always)]
+    fn flush_eps(&self) -> L {
+        self.flush_eps
+    }
+}
+
+/// The rest planes of `S` streams for one kernel call: all armed or all unarmed (the caller arms
+/// a whole block).
+#[inline(always)]
+fn stream_planes<L: Lane, R: RestThresholds<L>, const S: usize>(
+    rest: &[R; S],
+) -> Option<[&[f32]; S]> {
+    let first = rest[0].plane()?;
+    debug_assert!(rest.iter().all(|plane| plane.plane().is_some()));
+    Some(core::array::from_fn(|stream| {
+        rest[stream].plane().unwrap_or(first)
+    }))
+}
+
+/// One frame's thresholds in a loop of form `ARMED`: loaded from the plane when armed, `+0.0`
+/// (never read by the unarmed step) otherwise.
+#[inline(always)]
+fn threshold_at<L: Lane, const ARMED: bool>(plane: &[f32], base: usize) -> L {
+    if ARMED {
+        L::load(&plane[base..base + L::WIDTH])
+    } else {
+        L::zero()
+    }
+}
+
+/// The lanes on which some word of `states` is neither `+0.0` nor `-0.0`; a NaN word counts
+/// (issue #1328, [`crate::silence_armable_holding`]'s `holding`).
+///
+/// The unsigned maximum of the magnitudes' bits ([`Lane::max_u32`]) is zero exactly when every
+/// magnitude is `+0.0`, and a NaN magnitude sorts above every other, so one compare at the end
+/// decides the lane: two `abs` and two `max_u32` per state, then one `eq` and one `not`.
+#[inline(always)]
+pub fn svf_state_held<L: Lane>(states: impl IntoIterator<Item = SvfState<L>>) -> L::Mask {
+    let mut held = L::zero();
+    for state in states {
+        held = held.max_u32(state.ic1.abs()).max_u32(state.ic2.abs());
+    }
+    L::mask_not(held.eq(L::zero()))
+}
+
 /// Coefficients of one TPT state-variable filter, one set per lane.
 ///
 /// Amendment A1 (measured in #87): the stored damping coefficient is `c1 = t / (1 + t)` with
@@ -141,23 +282,38 @@ impl<L: Lane> Default for SvfCoefStep<L> {
 /// [`svf_step`], which is the only copy of them: this kernel, [`svf_block_ramped`] and the fused
 /// chain kernels of [`builtins`] all call it, so the numeric contract has one home.
 #[inline(always)]
-pub fn svf_block<L: Lane>(
+pub fn svf_block<L: Lane, R: RestThresholds<L>>(
     io: &mut [f32],
     frames: usize,
     c: &SvfCoef<L>,
     s: &mut SvfState<L>,
-    rest: &[f32],
+    rest: R,
 ) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let rest = &rest[..io.len()];
+    let flush_eps = rest.flush_eps();
+    match rest.plane() {
+        Some(plane) => svf_block_form::<L, true>(io, c, s, plane, flush_eps),
+        None => svf_block_form::<L, false>(io, c, s, &[], flush_eps),
+    }
+}
+
+/// [`svf_block`]'s frame loop in one form ([`RestThresholds`]): `ARMED` selects the joint flush
+/// and the threshold load, so each form is its own loop with no per-frame branch.
+#[inline(always)]
+fn svf_block_form<L: Lane, const ARMED: bool>(
+    io: &mut [f32],
+    c: &SvfCoef<L>,
+    s: &mut SvfState<L>,
+    rest: &[f32],
+    flush_eps: L,
+) {
+    let rest = if ARMED { &rest[..io.len()] } else { rest };
     let mut state = *s;
     let nc1 = c.c1.neg();
-    for (frame, threshold) in io
-        .chunks_exact_mut(L::WIDTH)
-        .zip(rest.chunks_exact(L::WIDTH))
-    {
+    for (index, frame) in io.chunks_exact_mut(L::WIDTH).enumerate() {
         let v0 = L::load(frame);
-        let (v1, v2) = svf_step(v0, nc1, c.a2, c.a3, L::load(threshold), &mut state);
+        let threshold = threshold_at::<L, ARMED>(rest, index * L::WIDTH);
+        let (v1, v2) = svf_step_when(ARMED, flush_eps, v0, nc1, c.a2, c.a3, threshold, &mut state);
         let y = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
         y.store(frame);
     }
@@ -279,12 +435,12 @@ pub fn silence_advance<L: Lane>(run: &mut L, frames: usize) {
 /// Aliasing is unrepresentable: the blocks arrive as `&mut`, and the coefficient and state sets
 /// are owned arrays.
 #[inline(always)]
-pub fn svf_cascade_interleaved<L: Lane, const S: usize, const D: usize>(
+pub fn svf_cascade_interleaved<L: Lane, R: RestThresholds<L>, const S: usize, const D: usize>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
 ) {
     svf_cascade_interleaved_impl(io, frames, c, s, rest, UnmaskedOutput, &mut Unobserved);
 }
@@ -302,13 +458,18 @@ pub fn svf_cascade_interleaved<L: Lane, const S: usize, const D: usize>(
 /// combinators. The array shape is fixed by the prepared cascade, and this function adds no
 /// render-time allocation or scratch storage.
 #[inline(always)]
-pub fn svf_cascade_interleaved_with_dry_masks<L: Lane, const S: usize, const D: usize>(
+pub fn svf_cascade_interleaved_with_dry_masks<
+    L: Lane,
+    R: RestThresholds<L>,
+    const S: usize,
+    const D: usize,
+>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
     dry_masks: &[[L::Mask; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
 ) {
     svf_cascade_interleaved_impl(
         io,
@@ -366,12 +527,12 @@ pub fn svf_cascade_interleaved_with_dry_masks<L: Lane, const S: usize, const D: 
 /// and `s[t][k]` the coefficients and integrators of section `k` of stream `t` in cascade order.
 /// No allocation, no scratch beyond `S * D` carried vectors, no `unsafe`.
 #[inline(always)]
-pub fn svf_cascade_skewed<L: Lane, const S: usize, const D: usize>(
+pub fn svf_cascade_skewed<L: Lane, R: RestThresholds<L>, const S: usize, const D: usize>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
 ) {
     svf_cascade_skewed_impl(io, frames, c, s, rest, UnmaskedOutput);
 }
@@ -384,13 +545,18 @@ pub fn svf_cascade_skewed<L: Lane, const S: usize, const D: usize>(
 /// [`svf_cascade_interleaved_with_dry_masks`]; the recurrence and its state updates are the
 /// unmasked kernel's, so a dry lane keeps its state evolution. Same bits as that kernel.
 #[inline(always)]
-pub fn svf_cascade_skewed_with_dry_masks<L: Lane, const S: usize, const D: usize>(
+pub fn svf_cascade_skewed_with_dry_masks<
+    L: Lane,
+    R: RestThresholds<L>,
+    const S: usize,
+    const D: usize,
+>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
     dry_masks: &[[L::Mask; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
 ) {
     svf_cascade_skewed_impl(
         io,
@@ -435,12 +601,17 @@ pub fn svf_cascade_skewed_with_dry_masks<L: Lane, const S: usize, const D: usize
 /// `true`, which is the scan's answer on an empty block.
 #[inline(always)]
 #[must_use]
-pub fn svf_cascade_interleaved_bounded<L: Lane, const S: usize, const D: usize>(
+pub fn svf_cascade_interleaved_bounded<
+    L: Lane,
+    R: RestThresholds<L>,
+    const S: usize,
+    const D: usize,
+>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
     limit: f32,
 ) -> [bool; S] {
     let mut bound = StoreBound::<L, S>::new(limit);
@@ -453,13 +624,18 @@ pub fn svf_cascade_interleaved_bounded<L: Lane, const S: usize, const D: usize>(
 /// The judged word is the one stored: after the last section's dry selection.
 #[inline(always)]
 #[must_use]
-pub fn svf_cascade_interleaved_with_dry_masks_bounded<L: Lane, const S: usize, const D: usize>(
+pub fn svf_cascade_interleaved_with_dry_masks_bounded<
+    L: Lane,
+    R: RestThresholds<L>,
+    const S: usize,
+    const D: usize,
+>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
     dry_masks: &[[L::Mask; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
     limit: f32,
 ) -> [bool; S] {
     let mut bound = StoreBound::<L, S>::new(limit);
@@ -477,24 +653,68 @@ pub fn svf_cascade_interleaved_with_dry_masks_bounded<L: Lane, const S: usize, c
 
 /// Shared skewed body. `M` is monomorphized exactly as in [`svf_cascade_interleaved_impl`].
 #[inline(always)]
-fn svf_cascade_skewed_impl<L: Lane, const S: usize, const D: usize, M: SvfOutput<L>>(
+fn svf_cascade_skewed_impl<
+    L: Lane,
+    R: RestThresholds<L>,
+    const S: usize,
+    const D: usize,
+    M: SvfOutput<L>,
+>(
     io: [&mut [f32]; S],
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
-    rest: [&[f32]; S],
+    rest: [R; S],
     output: M,
 ) {
     if frames < D {
         svf_cascade_interleaved_impl(io, frames, c, s, rest, output, &mut Unobserved);
         return;
     }
+    let flush_eps = rest[0].flush_eps();
+    match stream_planes(&rest) {
+        None => {
+            svf_cascade_skewed_form::<L, S, D, M, false>(
+                io,
+                frames,
+                c,
+                s,
+                [&[]; S],
+                output,
+                flush_eps,
+            );
+        }
+        Some(planes) => {
+            svf_cascade_skewed_form::<L, S, D, M, true>(
+                io, frames, c, s, planes, output, flush_eps,
+            );
+        }
+    }
+}
+
+/// [`svf_cascade_skewed_impl`]'s schedule in one form ([`RestThresholds`]).
+#[inline(always)]
+fn svf_cascade_skewed_form<
+    L: Lane,
+    const S: usize,
+    const D: usize,
+    M: SvfOutput<L>,
+    const ARMED: bool,
+>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+    rest: [&[f32]; S],
+    output: M,
+    flush_eps: L,
+) {
     let width = L::WIDTH;
     let span = frames * width;
     debug_assert!(io.iter().all(|block| block.len() == span));
     // Truncating once, outside the loops, as the interleaved body does.
     let io = io.map(|block| &mut block[..span]);
-    let rest = rest.map(|plane| &plane[..span]);
+    let rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
     let mut state = *s;
     let nc1: [[L; D]; S] =
         core::array::from_fn(|stream| core::array::from_fn(|section| c[stream][section].c1.neg()));
@@ -515,12 +735,14 @@ fn svf_cascade_skewed_impl<L: Lane, const S: usize, const D: usize, M: SvfOutput
             let coefficients = &c[stream][section];
             // Frame `i - section`'s threshold: the effect input's, as every section of that frame
             // reads it in the interleaved body.
-            let (v1, v2) = svf_step(
+            let (v1, v2) = svf_step_when(
+                ARMED,
+                flush_eps,
                 x,
                 nc1[stream][section],
                 coefficients.a2,
                 coefficients.a3,
-                L::load(&rest[stream][base..base + width]),
+                threshold_at::<L, ARMED>(rest[stream], base),
                 &mut state[stream][section],
             );
             let wet = coefficients
@@ -658,6 +880,7 @@ impl<L: Lane, const S: usize> StoreObserver<L> for StoreBound<L, S> {
 #[inline(always)]
 fn svf_cascade_interleaved_impl<
     L: Lane,
+    R: RestThresholds<L>,
     const S: usize,
     const D: usize,
     M: SvfOutput<L>,
@@ -667,17 +890,55 @@ fn svf_cascade_interleaved_impl<
     frames: usize,
     c: &[[SvfCoef<L>; D]; S],
     s: &mut [[SvfState<L>; D]; S],
+    rest: [R; S],
+    output: M,
+    observer: &mut O,
+) {
+    let flush_eps = rest[0].flush_eps();
+    match stream_planes(&rest) {
+        None => svf_cascade_interleaved_form::<L, S, D, M, O, false>(
+            io,
+            frames,
+            c,
+            s,
+            [&[]; S],
+            output,
+            observer,
+            flush_eps,
+        ),
+        Some(planes) => svf_cascade_interleaved_form::<L, S, D, M, O, true>(
+            io, frames, c, s, planes, output, observer, flush_eps,
+        ),
+    }
+}
+
+/// [`svf_cascade_interleaved_impl`]'s frame loop in one form ([`RestThresholds`]).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn svf_cascade_interleaved_form<
+    L: Lane,
+    const S: usize,
+    const D: usize,
+    M: SvfOutput<L>,
+    O: StoreObserver<L>,
+    const ARMED: bool,
+>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
     rest: [&[f32]; S],
     output: M,
     observer: &mut O,
+    flush_eps: L,
 ) {
     let width = L::WIDTH;
     let span = frames * width;
     debug_assert!(io.iter().all(|block| block.len() == span));
     // Truncating once, outside the loop, is what lets the frame indexing below carry no per-frame
-    // bounds branch: every stream then has exactly `span` samples.
+    // bounds branch: every stream then has exactly `span` samples, and so has every armed plane.
     let io = io.map(|block| &mut block[..span]);
-    let rest = rest.map(|plane| &plane[..span]);
+    let rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
     let mut state = *s;
     let nc1: [[L; D]; S] =
         core::array::from_fn(|stream| core::array::from_fn(|section| c[stream][section].c1.neg()));
@@ -687,10 +948,12 @@ fn svf_cascade_interleaved_impl<
             let slot = &mut io[stream][base..base + width];
             let mut x = L::load(slot);
             // One threshold per stream and frame, read by every section of the frame.
-            let threshold = L::load(&rest[stream][base..base + width]);
+            let threshold = threshold_at::<L, ARMED>(rest[stream], base);
             for section in 0..D {
                 let coefficients = &c[stream][section];
-                let (v1, v2) = svf_step(
+                let (v1, v2) = svf_step_when(
+                    ARMED,
+                    flush_eps,
                     x,
                     nc1[stream][section],
                     coefficients.a2,
@@ -821,14 +1084,14 @@ pub fn svf_step_when<L: Lane>(
 /// boundaries; with `ramp_frames = 0` no addition happens at all and the result is bit-identical to
 /// [`svf_block`].
 #[inline(always)]
-pub fn svf_block_ramped<L: Lane>(
+pub fn svf_block_ramped<L: Lane, R: RestThresholds<L>>(
     io: &mut [f32],
     frames: usize,
     c: &mut SvfCoef<L>,
     step: &SvfCoefStep<L>,
     ramp_frames: usize,
     s: &mut SvfState<L>,
-    rest: &[f32],
+    rest: R,
 ) {
     svf_block_ramped_impl(io, frames, c, step, ramp_frames, s, rest, UnmaskedOutput);
 }
@@ -841,14 +1104,14 @@ pub fn svf_block_ramped<L: Lane>(
 /// each segment. `ramp_frames = 0` is the stationary masked section case.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-pub fn svf_block_ramped_with_dry_mask<L: Lane>(
+pub fn svf_block_ramped_with_dry_mask<L: Lane, R: RestThresholds<L>>(
     io: &mut [f32],
     frames: usize,
     c: &mut SvfCoef<L>,
     step: &SvfCoefStep<L>,
     ramp_frames: usize,
     s: &mut SvfState<L>,
-    rest: &[f32],
+    rest: R,
     dry_mask: L::Mask,
 ) {
     svf_block_ramped_impl(
@@ -867,27 +1130,62 @@ pub fn svf_block_ramped_with_dry_mask<L: Lane>(
 /// arithmetic and the additive entrypoint adds only one output selection per frame.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn svf_block_ramped_impl<L: Lane, M: SvfOutput<L>>(
+fn svf_block_ramped_impl<L: Lane, R: RestThresholds<L>, M: SvfOutput<L>>(
     io: &mut [f32],
     frames: usize,
     c: &mut SvfCoef<L>,
     step: &SvfCoefStep<L>,
     ramp_frames: usize,
     s: &mut SvfState<L>,
-    rest: &[f32],
+    rest: R,
     output: M,
 ) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let rest = &rest[..io.len()];
+    let flush_eps = rest.flush_eps();
+    match rest.plane() {
+        Some(plane) => svf_block_ramped_form::<L, M, true>(
+            io,
+            c,
+            step,
+            ramp_frames,
+            s,
+            plane,
+            output,
+            flush_eps,
+        ),
+        None => svf_block_ramped_form::<L, M, false>(
+            io,
+            c,
+            step,
+            ramp_frames,
+            s,
+            &[],
+            output,
+            flush_eps,
+        ),
+    }
+}
+
+/// [`svf_block_ramped_impl`]'s frame loop in one form ([`RestThresholds`]).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn svf_block_ramped_form<L: Lane, M: SvfOutput<L>, const ARMED: bool>(
+    io: &mut [f32],
+    c: &mut SvfCoef<L>,
+    step: &SvfCoefStep<L>,
+    ramp_frames: usize,
+    s: &mut SvfState<L>,
+    rest: &[f32],
+    output: M,
+    flush_eps: L,
+) {
+    let rest = if ARMED { &rest[..io.len()] } else { rest };
     let mut state = *s;
-    for (index, (frame, threshold)) in io
-        .chunks_exact_mut(L::WIDTH)
-        .zip(rest.chunks_exact(L::WIDTH))
-        .enumerate()
-    {
+    for (index, frame) in io.chunks_exact_mut(L::WIDTH).enumerate() {
         let nc1 = c.c1.neg();
         let v0 = L::load(frame);
-        let (v1, v2) = svf_step(v0, nc1, c.a2, c.a3, L::load(threshold), &mut state);
+        let threshold = threshold_at::<L, ARMED>(rest, index * L::WIDTH);
+        let (v1, v2) = svf_step_when(ARMED, flush_eps, v0, nc1, c.a2, c.a3, threshold, &mut state);
         let wet = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
         let y = output.choose(v0, wet, 0, 0);
         y.store(frame);

@@ -1449,7 +1449,7 @@ fn model_conformance(frames: usize) {
             svf_input.len(),
             &coefficients,
             &mut state,
-            &rest,
+            &rest[..],
         );
         let mut fused_model = SvfF32::new(design);
         let mut unfused_model = SvfF32::new(design);

@@ -253,6 +253,13 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// tokens of the `estimate` row and no other byte -- reproduces the compiler's new hash below;
 /// reversing the three tokens in the compiled text hashes back to the #964 pin `957e97ca...7640e42`.
 ///
+/// Issue #1328's follow-up declares the EQ's two rest planes as scratch (8 bytes per frame per
+/// prepared lane, `parametric_eq::REST_PLANE_BYTES_PER_FRAME`), which the estimate charges in
+/// `declared_effect_bytes`: nine instances at a 128-frame quantum add exactly 9,216 bytes.
+/// `declared_effect_bytes` 8,496 -> 17,712 and both plan-byte totals 150,631 -> 159,847, the same
+/// three tokens of the `estimate` row and no other byte; reversing them in the compiled text hashes
+/// back to the A9 pin `bb250287...7b10d8b3`.
+///
 /// The structural off-delay gate above still proves that no zero-length delay node or ring was
 /// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
 /// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
@@ -269,7 +276,7 @@ fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
 /// the numbered #805 and #807 specs preserve their subsequent state-size derivations, and the
 /// #964 spec the builtin-tail re-pin.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "bb25028730eb702d827953f28534f549eadf6b09c04e84bccdd2a80ffbfc40bf";
+    "bf2dfd6c4282e2f4b0c3902becb038751de9f3a0be5e39ba1e6235ad7b10d8b3";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]

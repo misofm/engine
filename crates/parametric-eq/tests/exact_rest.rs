@@ -479,3 +479,127 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
         );
     }
 }
+
+/// Issue #1328 (the root's cost ruling, (a) and (b)): a block runs the cascades' armed form when
+/// some lane of **either** channel can arm within it and holds a non-zero integrator word in **any**
+/// section, and the unarmed form otherwise. One channel's one section is put in the joint band
+/// (`(1e-15, -1e-15)`, a pair the identity section holds on a zero input) with that channel's
+/// counter one frame short of its window, while the other channel's input is live and its counter
+/// fresh: the first block must clear exactly that pair, for each channel and each of the six
+/// sections. Red if the block's form is decided from one channel, or from a subset of the sections'
+/// words, or never armed.
+#[test]
+fn the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band() {
+    use effect_contract::StatePayloadInput;
+    use support::{SILENCE_WORD, WORDS_PER_BAND};
+    const N_SILENCE_96K: f32 = 8_192.0;
+    let configured = values();
+    for silent in 0..2 {
+        for section in 0..6 {
+            let mut effect = ParametricEqFactory
+                .prepare(request_at_rate(&configured, false, RATE))
+                .expect("the EQ prepares");
+            let mut payload = snapshot(effect.as_ref());
+            let target = if silent == 0 {
+                &mut payload.1
+            } else {
+                &mut payload.2
+            };
+            // Byte offset of the section's first integrator word.
+            let at = WORDS_PER_BAND * section * 4;
+            target[at..at + 4].copy_from_slice(&1.0e-15_f32.to_bits().to_le_bytes());
+            target[at + 4..at + 8].copy_from_slice(&(-1.0e-15_f32).to_bits().to_le_bytes());
+            target[SILENCE_WORD * 4..SILENCE_WORD * 4 + 4]
+                .copy_from_slice(&(N_SILENCE_96K - 1.0).to_bits().to_le_bytes());
+            let sizes = effect.metadata().state_sizes;
+            effect
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                        .expect("input"),
+                )
+                .expect("the payload restores");
+            let mut planes = [[0.25_f32; FRAMES]; 2];
+            planes[silent] = [0.0; FRAMES];
+            let [left, right] = &mut planes;
+            effect.process(
+                EffectProcessBlock::new(left, right, None, 0, &[], FRAMES as u32).expect("block"),
+            );
+            let (_, left_state, right_state) = snapshot(effect.as_ref());
+            let state = if silent == 0 {
+                &left_state
+            } else {
+                &right_state
+            };
+            assert_eq!(
+                [
+                    support::word(state, WORDS_PER_BAND * section),
+                    support::word(state, WORDS_PER_BAND * section + 1),
+                ],
+                [0, 0],
+                "channel {silent}, section {section}: the armed block clears the band pair"
+            );
+        }
+    }
+}
+
+/// Issue #1328 (the root's cost ruling, (b)): a block longer than the silence window must arm a
+/// lane that starts it at rest. The unarmed form is exact for a lane at rest only when the window
+/// reaches back to the block's first frame; inside a longer block a lane can take a sample, rest's
+/// opposite, and then a whole window of zeros. Prepared with an 8,192-frame quantum at 48 kHz
+/// (window 4,096), a tiny impulse through a +24 dB 10 Hz low shelf, rendered as one block, must
+/// give the bits the same input gives in 128-frame blocks, where the joint flush clears the tail
+/// on frame 4,096. Red if the decision drops the block-length term.
+#[test]
+fn a_block_longer_than_the_window_renders_as_its_quantum_sized_parts() {
+    const QUANTUM: u32 = 8_192;
+    let configured = single_section_values(EqBandKind::LowShelf, 10.0, 24.0, FRAC_1_SQRT_2, 1.0);
+    let render = |block: usize| {
+        let mut request = request_at_rate(&configured, false, 48_000);
+        request.quantum = QUANTUM;
+        request.limits.maximum_scratch_bytes =
+            u64::from(QUANTUM) * parametric_eq::REST_PLANE_BYTES_PER_FRAME;
+        let mut effect = ParametricEqFactory
+            .prepare(request)
+            .expect("the EQ prepares");
+        let mut left = vec![0.0_f32; QUANTUM as usize];
+        left[0] = 1.0e-12;
+        let mut right = left.clone();
+        for (index, (left, right)) in left
+            .chunks_mut(block)
+            .zip(right.chunks_mut(block))
+            .enumerate()
+        {
+            effect.process(
+                EffectProcessBlock::new(
+                    left,
+                    right,
+                    None,
+                    (index * block) as u64,
+                    &[],
+                    block as u32,
+                )
+                .expect("block"),
+            );
+        }
+        (left, snapshot(effect.as_ref()))
+    };
+    let (whole, whole_state) = render(QUANTUM as usize);
+    let (parts, parts_state) = render(FRAMES);
+    assert_eq!(
+        band_word(&parts_state.1, 0, 0) | band_word(&parts_state.1, 0, 1),
+        0,
+        "the tail is in the joint band when the window ends, and is cleared"
+    );
+    assert!(
+        whole
+            .iter()
+            .zip(&parts)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "one 8,192-frame block renders the bits of its 128-frame parts"
+    );
+    assert!(
+        whole_state == parts_state,
+        "one 8,192-frame block leaves the state of its 128-frame parts"
+    );
+}

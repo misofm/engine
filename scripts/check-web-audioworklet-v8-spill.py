@@ -189,16 +189,29 @@ class Row:
     held: bool = True
     after: str | None = None  # the label of a row whose loops this loop must be reachable from
     masked: bool = False  # the row's loop carries the dry-mask selects (not select-free)
+    armed: bool = False  # the row's loop is the armed form (the joint flush's `vpmaxud`)
 
 
 PAIR = "depth-2 pair, select-free"
+ARMED_PAIR = "armed depth-2 pair, select-free"
 LOOPS = (
     Row("dual", "depth-1 tail, select-free", streams=2, steps=2, after=PAIR),
     Row("dual", PAIR, streams=2, steps=4, held=False),
     Row("mono", PAIR, streams=1, steps=2),
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
     Row("mono", "depth-2 pair, masked", streams=1, steps=2, masked=True),
+    Row("dual", "armed depth-1 tail, select-free", streams=2, steps=2, held=False,
+        after=ARMED_PAIR, armed=True),
+    Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True),
+    Row("mono", ARMED_PAIR, streams=1, steps=2, held=False, armed=True),
+    Row("mono", "armed depth-1 tail, select-free", streams=1, steps=1, held=False,
+        after=ARMED_PAIR, armed=True),
+    Row("mono", "armed depth-2 pair, masked", streams=1, steps=2, held=False, masked=True,
+        armed=True),
 )
+# The armed form's joint flush: `max_u32` of the two magnitudes, one `i32x4.max_u` per SVF step,
+# which V8 lowers to `vpmaxud`. Nothing else in the EQ's loops uses it.
+ARMED_OP = "vpmaxud"
 STEP_SHAPE = {"vmulps": 7, "vaddps": 9, "vsubps": 2}
 # A blend is a select whatever its inputs. An `or` is one unless it only combines masks (below).
 BLENDS = frozenset({"vpblendvb", "vblendvps", "vpternlogd", "vpternlogq"})
@@ -254,6 +267,7 @@ class Loop:
     streams: int
     select_free: bool
     carried: list[str]
+    armed: bool
 
 
 # -------------------------------------------------------------------------------------------------
@@ -659,7 +673,7 @@ def analyse(listing: str) -> list[Loop]:
                     pending.append(child)
         result.append(
             Loop(code, len(body), frozenset(reaches), frozenset(body), ops, steps, streams,
-                 select_free, carried)
+                 select_free, carried, ops[ARMED_OP] > 0)
         )
     return result
 
@@ -669,6 +683,7 @@ def describe(loop: Loop) -> str:
     return (
         f"{len(loop.instructions)} instructions in {loop.blocks} blocks, {shape}, "
         f"{loop.streams} streams, {'select-free' if loop.select_free else 'masked'}, "
+        f"{'armed' if loop.armed else 'unarmed'}, "
         f"vmulps={loop.ops['vmulps']} vaddps={loop.ops['vaddps']} vsubps={loop.ops['vsubps']}"
     )
 
@@ -680,7 +695,7 @@ def shaped(loops: list[Loop], row: Row, rows: tuple[Row, ...]) -> list[Loop]:
         loop
         for loop in loops
         if loop.select_free != row.masked and loop.steps == row.steps
-        and loop.streams == row.streams
+        and loop.streams == row.streams and loop.armed == row.armed
     ]
     if row.after is not None:
         (before,) = [r for r in rows if r.function == row.function and r.label == row.after]
@@ -689,6 +704,7 @@ def shaped(loops: list[Loop], row: Row, rows: tuple[Row, ...]) -> list[Loop]:
             loop
             for loop in loops
             if loop.steps == before.steps and loop.streams == before.streams
+            and loop.armed == before.armed
         ]
         matched = [
             loop
@@ -1030,12 +1046,35 @@ def self_test() -> int:
             masked_row = (Row("t", "masked", streams=2, steps=2, masked=True),)
             for listing in (carried + select, tail + select, tail):
                 verdicts.append(check_function("t", synthetic(listing), masked_row))
+            # Two forms (issue #1328): the cascades run unarmed on live audio and armed, with the
+            # joint flush's `vpmaxud`, only near silence, so each shape appears twice. A row holds
+            # the loop of its own form, anchored on the pair of its own form: clean in both forms
+            # passes, and a slot carried by the armed tail fails its row. (A form-blind row sees
+            # two tails here and fails closed.)
+            maxud = ["vpmaxud xmm5,xmm5,xmm6"]
+            forms = ["movl rax,0x40", "cmpl rdi,0x0", "jz <+ARMED>", "PAIR:", *tail,
+                     "subl rax,0x1", "jnz <+PAIR>", "TAIL:", *svf_step("rsi"), "subl rcx,0x1",
+                     "jnz <+TAIL>", "retl", "ARMED:", *tail, *maxud * 2, "subl rax,0x1",
+                     "jnz <+ARMED>", "ATAIL:", *svf_step("rsi"), *maxud, "subl rcx,0x1",
+                     "jnz <+ATAIL>", "retl"]
+            form_rows = (Row("t", "pair", streams=2, steps=2, held=False),
+                         Row("t", "tail", streams=1, steps=1, after="pair"),
+                         Row("t", "armed pair", streams=2, steps=2, held=False, armed=True),
+                         Row("t", "armed tail", streams=1, steps=1, after="armed pair",
+                             armed=True))
+            verdicts.append(check_function("t", assemble(forms), form_rows))
+            armed_carry = list(forms)
+            at = armed_carry.index("ATAIL:") + 1
+            armed_carry[at:at] = ["vmovups xmm0,[rbp-0xc0]"]
+            at = armed_carry.index("jnz <+ATAIL>") - 1
+            armed_carry[at:at] = ["vmovups [rbp-0xc0],xmm5"]
+            verdicts.append(check_function("t", assemble(armed_carry), form_rows))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    if verdicts != [1, 0, 1, 0, 0, 0, 1, 1, 0, 1]:
+    want = [1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1]
+    if verdicts != want:
         failures += 1
-        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 0, 1, 1, 0, 1]",
-              file=sys.stderr)
+        print(f"self-test FAIL verdicts: {verdicts}, want {want}", file=sys.stderr)
     if failures:
         return 1
     print(f"V8 spill gate self-test: {len(cases) + len(verdicts)} cases ok")

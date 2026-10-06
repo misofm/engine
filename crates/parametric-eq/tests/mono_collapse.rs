@@ -567,3 +567,71 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter() {
         );
     }
 }
+
+/// Issue #1328 (the root's cost ruling): the collapsed body arms its joint flush on the blocks the
+/// dual body does. Every lane's band one holds a pair in the joint band, `(1e-15, -1e-15)`, on both
+/// channels, with the counter one frame short of the 48 kHz window; one collapsed block of zeros
+/// must clear the pair on every lane. Red if the collapsed render never takes the armed form, or
+/// decides it from anything but its one channel's counter and state.
+#[test]
+fn the_collapsed_body_arms_its_joint_flush() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let mut bank = bind(width, backend, lanes);
+    let sizes = bank.metadata().program_key.state_sizes;
+    let band_one = support::WORDS_PER_BAND * 4;
+    let snapshot = |bank: &dyn PreparedNativeEffectBank, lane: usize| {
+        let mut common = vec![0_u8; support::COMMON_BYTES];
+        let mut left = vec![0_u8; support::LANE_BYTES];
+        let mut right = vec![0_u8; support::LANE_BYTES];
+        bank.snapshot_track_state_payload(
+            lane as u32,
+            effect_contract::StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
+                .expect("state output"),
+        )
+        .expect("snapshot");
+        (common, left, right)
+    };
+    for lane in 0..lanes {
+        let (common, mut left, mut right) = snapshot(bank.as_ref(), lane);
+        for channel in [&mut left, &mut right] {
+            channel[band_one..band_one + 4].copy_from_slice(&1.0e-15_f32.to_bits().to_le_bytes());
+            channel[band_one + 4..band_one + 8]
+                .copy_from_slice(&(-1.0e-15_f32).to_bits().to_le_bytes());
+            let at = support::SILENCE_WORD * 4;
+            channel[at..at + 4].copy_from_slice(&4_095.0_f32.to_bits().to_le_bytes());
+        }
+        bank.restore_track_state_payload(
+            lane as u32,
+            1,
+            effect_contract::StatePayloadInput::new(&common, &left, &right, sizes)
+                .expect("state input"),
+        )
+        .expect("the payload restores");
+    }
+    let mut left = vec![0.0_f32; FRAMES * lanes];
+    let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
+    run_block(
+        bank.as_mut(),
+        &mut left,
+        &mut stale,
+        width,
+        0,
+        0,
+        false,
+        true,
+    );
+    for lane in 0..lanes {
+        let (_, left, _) = snapshot(bank.as_ref(), lane);
+        assert_eq!(
+            [
+                support::word(&left, support::WORDS_PER_BAND),
+                support::word(&left, support::WORDS_PER_BAND + 1)
+            ],
+            [0, 0],
+            "lane {lane}: the collapsed block arms and clears band one's pair"
+        );
+    }
+}

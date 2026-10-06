@@ -2294,7 +2294,14 @@ fn bind_eligibility(
             varied[member].sample_rate = row.sample_rate;
             varied[member].quality = row.quality;
         }
-        3 => varied[member].quantum = if shape.quantum == 128 { 64 } else { 128 },
+        3 => {
+            let quantum = if shape.quantum == 128 { 64 } else { 128 };
+            varied[member].quantum = quantum;
+            // A legal member of another program: its limits admit its own quantum's scratch, as
+            // every other member's admit theirs (an effect with per-frame scratch, the EQ's rest
+            // planes since issue #1328, would otherwise be refused for the limit, not declined).
+            varied[member].limits = limits(Shape { quantum, ..shape });
+        }
         4 => match shape.ports.sidechain {
             PreparedSidechainPort::Connected { id, required } if !required => {
                 varied[member].ports.sidechain =

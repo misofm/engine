@@ -57,10 +57,10 @@ use effect_runtime::state_payload as payload;
 use effect_runtime::svf::{NORM_TOLERANCE, RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
-    SvfCoef, SvfCoefStep, SvfState, silence_advance, silence_block, silence_skip_block, svf_block,
-    svf_block_ramped, svf_block_ramped_with_dry_mask, svf_cascade_interleaved_bounded,
-    svf_cascade_interleaved_with_dry_masks_bounded, svf_cascade_skewed,
-    svf_cascade_skewed_with_dry_masks,
+    ArmedRest, RestThresholds, SvfCoef, SvfCoefStep, SvfState, UnarmedRest, silence_advance,
+    silence_block, silence_skip_block, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
+    svf_cascade_interleaved_bounded, svf_cascade_interleaved_with_dry_masks_bounded,
+    svf_cascade_skewed, svf_cascade_skewed_with_dry_masks, svf_state_held,
 };
 use lane::{Backend, Lane};
 
@@ -665,9 +665,15 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
             right_bytes: STATE_SIZES.right as u32,
         },
         scratch_fixed_bytes: 0,
-        scratch_bytes_per_frame: 0,
+        scratch_bytes_per_frame: REST_PLANE_BYTES_PER_FRAME,
     }
 }
+
+/// The EQ's scratch per frame of the prepared quantum, per lane: its two rest planes (issue #1328),
+/// one `f32` threshold word per lane per frame for each channel. A prepared EQ of `W` lanes
+/// allocates `2 * quantum * W * 4` bytes for them at preparation (`PreparedParametricEq::rest`),
+/// which is `W` times what one prepared lane declares, `quantum * REST_PLANE_BYTES_PER_FRAME`.
+pub const REST_PLANE_BYTES_PER_FRAME: u64 = 2 * core::mem::size_of::<f32>() as u64;
 
 /// Authoritative static V1 effect metadata.
 pub static PARAMETRIC_EQ_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
@@ -1563,7 +1569,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// small enough that the inliner began outlining this body into a second one, and a second
     /// kernel reads to that gate as a kernel that moved, not as the ramp fallback it is.
     #[inline(always)]
-    fn process_block(&mut self, io: &mut [f32], frames: usize, rest: &[f32]) {
+    fn process_block<R: RestThresholds<L>>(&mut self, io: &mut [f32], frames: usize, rest: R) {
         for section in 0..EQ_SECTION_COUNT {
             self.process_section(section, io, frames, rest);
         }
@@ -1578,7 +1584,13 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// `rest` is this channel's rest plane for the block ([`silence_block`], issue #1328 amendment
     /// A9): every segment reads the thresholds of its own frames from it.
     #[inline(always)]
-    fn process_section(&mut self, section: usize, io: &mut [f32], frames: usize, rest: &[f32]) {
+    fn process_section<R: RestThresholds<L>>(
+        &mut self,
+        section: usize,
+        io: &mut [f32],
+        frames: usize,
+        rest: R,
+    ) {
         let mut position = 0;
         let mut snapped = false;
         while position < frames {
@@ -1597,10 +1609,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let dry_mask = self.dry_mask(section);
             let slot = &mut self.sections[section];
             let block = &mut io[position * W..(position + length) * W];
-            let plane = &rest[position * W..(position + length) * W];
+            let plane = rest.skip(position * W);
             if ramping {
                 if section == HPF_SECTION || section == LPF_SECTION {
-                    svf_block_ramped_with_dry_mask::<L>(
+                    svf_block_ramped_with_dry_mask::<L, R>(
                         block,
                         length,
                         &mut slot.coef,
@@ -1611,7 +1623,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                         dry_mask,
                     );
                 } else {
-                    svf_block_ramped::<L>(
+                    svf_block_ramped::<L, R>(
                         block,
                         length,
                         &mut slot.coef,
@@ -1623,7 +1635,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 }
             } else {
                 if section == HPF_SECTION || section == LPF_SECTION {
-                    svf_block_ramped_with_dry_mask::<L>(
+                    svf_block_ramped_with_dry_mask::<L, R>(
                         block,
                         length,
                         &mut slot.coef,
@@ -1634,7 +1646,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                         dry_mask,
                     );
                 } else {
-                    svf_block::<L>(block, length, &slot.coef, &mut slot.state, plane);
+                    svf_block::<L, R>(block, length, &slot.coef, &mut slot.state, plane);
                 }
             }
             for track in 0..W {
@@ -1824,13 +1836,13 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 ///
 /// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
-fn process_channels<L: Lane, const W: usize>(
+fn process_channels<L: Lane, R: RestThresholds<L>, const W: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
     left: &mut [f32],
     right: &mut [f32],
     frames: usize,
     stationary: bool,
-    rest: [&[f32]; 2],
+    rest: [R; 2],
 ) -> Option<[bool; 2]> {
     if !stationary {
         #[cfg(test)]
@@ -1854,7 +1866,7 @@ fn process_channels<L: Lane, const W: usize>(
     // The kept (live) sections run in passes of the effective stationary depth of two on every
     // backend, and an odd count ends in one depth-one pass: #976 removed the identity padding
     // section that used to make the count even.
-    interleave::<L, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections, rest)
+    interleave::<L, R, W, EFFECTIVE_CASCADE_DEPTH>(channels, left, right, frames, sections, rest)
 }
 
 /// [`process_channels`] over one plane: the collapsed track's live channel.
@@ -1881,12 +1893,12 @@ fn process_channels<L: Lane, const W: usize>(
 ///
 /// The folded §4.4 verdict is [`process_channels`]', one plane of it.
 #[inline(always)]
-fn process_channels_mono<L: Lane, const W: usize>(
+fn process_channels_mono<L: Lane, R: RestThresholds<L>, const W: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
     stationary: bool,
-    rest: &[f32],
+    rest: R,
 ) -> Option<bool> {
     if !stationary {
         #[cfg(test)]
@@ -1904,7 +1916,7 @@ fn process_channels_mono<L: Lane, const W: usize>(
     }
     debug_assert!(channel.identity_flags_agree());
     let sections = cascade_sections_mono::<L, W>(channel, io, frames);
-    interleave_mono::<L, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections, rest)
+    interleave_mono::<L, R, W, EFFECTIVE_CASCADE_DEPTH>(channel, io, frames, sections, rest)
 }
 
 /// [`cascade_sections`] over one channel. Every leg is [`cascade_sections`]'s, gated on the one
@@ -1965,12 +1977,12 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
 ///
 /// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
-fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
+fn interleave_mono<L: Lane, R: RestThresholds<L>, const W: usize, const DEPTH: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
     sections: ([usize; EQ_SECTION_COUNT], usize),
-    rest: &[f32],
+    rest: R,
 ) -> Option<bool> {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
@@ -1990,7 +2002,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         let mut state: [[SvfState<L>; DEPTH]; 1] =
             [core::array::from_fn(|k| channel.sections[at[k]].state)];
         if admitted {
-            svf_cascade_skewed::<L, 1, DEPTH>(
+            svf_cascade_skewed::<L, R, 1, DEPTH>(
                 [&mut *io],
                 frames,
                 &coefficients,
@@ -2001,7 +2013,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
             #[cfg(any(test, feature = "test-support"))]
             count_masked_pair_pass();
             let dry_masks: [[L::Mask; DEPTH]; 1] = [core::array::from_fn(|k| channel.dry[at[k]])];
-            svf_cascade_skewed_with_dry_masks::<L, 1, DEPTH>(
+            svf_cascade_skewed_with_dry_masks::<L, R, 1, DEPTH>(
                 [&mut *io],
                 frames,
                 &coefficients,
@@ -2022,7 +2034,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         // #976's rule, unchanged by #977: see `interleave`.
         let dry_masks: [[L::Mask; 1]; 1] = [[channel.dry[at]]];
         let [verdict] = if L::mask_any(dry_masks[0][0]) {
-            svf_cascade_interleaved_with_dry_masks_bounded::<L, 1, 1>(
+            svf_cascade_interleaved_with_dry_masks_bounded::<L, R, 1, 1>(
                 [&mut *io],
                 frames,
                 &coefficients,
@@ -2034,7 +2046,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         } else {
             #[cfg(any(test, feature = "test-support"))]
             count_select_free_tail_pass();
-            svf_cascade_interleaved_bounded::<L, 1, 1>(
+            svf_cascade_interleaved_bounded::<L, R, 1, 1>(
                 [&mut *io],
                 frames,
                 &coefficients,
@@ -2570,13 +2582,13 @@ fn cascade_sections<L: Lane, const W: usize>(
 ///
 /// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
-fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+fn interleave<L: Lane, R: RestThresholds<L>, const W: usize, const DEPTH: usize>(
     channels: (&mut Channel<L, W>, &mut Channel<L, W>),
     left: &mut [f32],
     right: &mut [f32],
     frames: usize,
     sections: ([usize; EQ_SECTION_COUNT], usize),
-    rest: [&[f32]; 2],
+    rest: [R; 2],
 ) -> Option<[bool; 2]> {
     debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
@@ -2600,7 +2612,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             core::array::from_fn(|k| channels.1.sections[at[k]].state),
         ];
         if admitted {
-            svf_cascade_skewed::<L, 2, DEPTH>(
+            svf_cascade_skewed::<L, R, 2, DEPTH>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
@@ -2614,7 +2626,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
                 core::array::from_fn(|k| channels.0.dry[at[k]]),
                 core::array::from_fn(|k| channels.1.dry[at[k]]),
             ];
-            svf_cascade_skewed_with_dry_masks::<L, 2, DEPTH>(
+            svf_cascade_skewed_with_dry_masks::<L, R, 2, DEPTH>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
@@ -2646,7 +2658,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
         // tail is not made select-free as well.
         let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry[at]], [channels.1.dry[at]]];
         let verdict = if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
-            svf_cascade_interleaved_with_dry_masks_bounded::<L, 2, 1>(
+            svf_cascade_interleaved_with_dry_masks_bounded::<L, R, 2, 1>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
@@ -2658,7 +2670,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
         } else {
             #[cfg(any(test, feature = "test-support"))]
             count_select_free_tail_pass();
-            svf_cascade_interleaved_bounded::<L, 2, 1>(
+            svf_cascade_interleaved_bounded::<L, R, 2, 1>(
                 [&mut *left, &mut *right],
                 frames,
                 &coefficients,
@@ -2961,11 +2973,16 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// live values would push the dual depth-one tail's block-limit flag into a stack slot
     /// (measured in V8, attempt 5); the scalar `process`, whose block length its caller states,
     /// renders a longer block as consecutive quantum-sized blocks.
+    ///
+    /// They are scratch: the EQ declares them in its descriptor ([`REST_PLANE_BYTES_PER_FRAME`],
+    /// issue #1328). A block on which no lane needs the joint rule ([`Channel::arms`]) writes and
+    /// reads neither: it runs the cascades' unarmed form ([`RestThresholds`]).
     rest: [Box<[f32]>; 2],
-    /// A rest plane of `+0.0` words, one quantum long, never written: the plane a channel reads on
-    /// a block in which none of its lanes' silence counters can arm ([`lane::silence_armable`]),
-    /// whose counters then advance without a frame loop of thresholds (issue #1328, A9).
-    unarmed: Box<[f32]>,
+    /// [`lane::FLUSH_EPS`] on every lane, carried as a word for the cascades' per-word flush
+    /// ([`ArmedRest`], [`UnarmedRest`]): a splatted constant in each kernel form would be a `memset_pattern16`
+    /// call on Apple targets (known defect #1018), and the EQ's kernels run in two forms (issue
+    /// #1328).
+    flush_eps: L,
 }
 
 /// `true` when the silence counter `run` of every lane has reached `N_SILENCE - 1`: on an
@@ -2975,25 +2992,20 @@ fn silence_armed_throughout<L: Lane>(run: L, armed_after: L) -> bool {
     !L::mask_any(L::mask_not(run.ge(armed_after.sub(L::splat(1.0)))))
 }
 
-/// One channel's rest plane for one block (issue #1328, amendment A9): `plane`, written by
-/// [`silence_block`], when some lane's counter can arm in the block; otherwise `unarmed` (all
-/// `+0.0`, the thresholds `silence_block` would have written) with the counter advanced by
-/// [`silence_skip_block`]. The counter ends the same either way.
-#[inline(always)]
-fn rest_plane<'a, L: Lane>(
-    input: &[f32],
-    frames: usize,
-    run: &mut L,
-    plane: &'a mut [f32],
-    unarmed: &'a [f32],
-    armed_after: L,
-) -> &'a [f32] {
-    if lane::silence_armable(*run, frames, armed_after) {
-        silence_block::<L>(input, frames, run, plane, armed_after);
-        plane
-    } else {
-        silence_skip_block::<L>(input, frames, run);
-        unarmed
+impl<L: Lane, const W: usize> Channel<L, W> {
+    /// `true` when this channel needs the joint rule's arithmetic on a block of `frames` (issue
+    /// #1328): some lane whose silence counter can arm within the block holds a non-zero integrator
+    /// word in some section ([`lane::silence_armable_holding`], which proves that otherwise the
+    /// unarmed form of every section gives the same bits). A padding lane, or a track whose input
+    /// has been silent since its tail rested, therefore leaves the bank on the unarmed form.
+    #[inline(always)]
+    fn arms(&self, frames: usize, armed_after: L) -> bool {
+        lane::silence_armable_holding(
+            self.silence,
+            frames,
+            armed_after,
+            svf_state_held(self.sections.iter().map(|section| section.state)),
+        )
     }
 }
 
@@ -3118,34 +3130,52 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             self.left.state_bits(&mut before_left);
             self.right.state_bits(&mut before_right);
         }
-        // Issue #1328, amendment A9: the rest planes come from the EQ's input before any section
-        // runs, then the cascade reads them. A channel none of whose counters can arm this block
-        // reads the unarmed plane, and its counter advances without writing one.
-        let [rest_left, rest_right] = &mut self.rest;
-        let rest_left = rest_plane::<L>(
-            left,
-            frames,
-            &mut self.left.silence,
-            &mut rest_left[..words],
-            &self.unarmed[..words],
-            armed_after,
-        );
-        let rest_right = rest_plane::<L>(
-            right,
-            frames,
-            &mut self.right.silence,
-            &mut rest_right[..words],
-            &self.unarmed[..words],
-            armed_after,
-        );
-        let within = process_channels(
-            (&mut self.left, &mut self.right),
-            left,
-            right,
-            frames,
-            stationary,
-            [rest_left, rest_right],
-        );
+        // Issue #1328: on a block where some lane of either channel needs the joint rule
+        // ([`Channel::arms`]), both channels' rest planes come from the EQ's input before any
+        // section runs, and the cascade reads them. Every other block -- every block of live audio
+        // -- runs the cascade's unarmed form, which reads no plane and is the same bits, and the
+        // counters advance without a frame loop of thresholds.
+        let armed_block =
+            self.left.arms(frames, armed_after) || self.right.arms(frames, armed_after);
+        let flush_eps = self.flush_eps;
+        let within = if armed_block {
+            let [rest_left, rest_right] = &mut self.rest;
+            silence_block::<L>(
+                left,
+                frames,
+                &mut self.left.silence,
+                &mut rest_left[..words],
+                armed_after,
+            );
+            silence_block::<L>(
+                right,
+                frames,
+                &mut self.right.silence,
+                &mut rest_right[..words],
+                armed_after,
+            );
+            let rest = [&rest_left[..words], &rest_right[..words]]
+                .map(|plane| ArmedRest { plane, flush_eps });
+            process_channels(
+                (&mut self.left, &mut self.right),
+                left,
+                right,
+                frames,
+                stationary,
+                rest,
+            )
+        } else {
+            silence_skip_block::<L>(left, frames, &mut self.left.silence);
+            silence_skip_block::<L>(right, frames, &mut self.right.silence);
+            process_channels(
+                (&mut self.left, &mut self.right),
+                left,
+                right,
+                frames,
+                stationary,
+                [UnarmedRest { flush_eps }; 2],
+            )
+        };
         for (index, (channel, block)) in
             [(&mut self.left, &mut *left), (&mut self.right, &mut *right)]
                 .into_iter()
@@ -3205,15 +3235,18 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if quiet {
             self.left.state_bits(&mut before_left);
         }
-        let rest = rest_plane::<L>(
-            left,
-            frames,
-            &mut self.left.silence,
-            &mut self.rest[0][..words],
-            &self.unarmed[..words],
-            armed_after,
-        );
-        let within = process_channels_mono(&mut self.left, left, frames, stationary, rest);
+        // As in `render`: the armed form only on a block where some lane needs the joint rule.
+        let flush_eps = self.flush_eps;
+        let within = if self.left.arms(frames, armed_after) {
+            let plane = &mut self.rest[0][..words];
+            silence_block::<L>(left, frames, &mut self.left.silence, plane, armed_after);
+            let rest = ArmedRest { plane, flush_eps };
+            process_channels_mono(&mut self.left, left, frames, stationary, rest)
+        } else {
+            silence_skip_block::<L>(left, frames, &mut self.left.silence);
+            let rest = UnarmedRest { flush_eps };
+            process_channels_mono(&mut self.left, left, frames, stationary, rest)
+        };
         if !within.unwrap_or_else(|| check_block::<L>(left)) {
             let mask = self.left.recover_failed_lanes(left);
             for (lane, failed) in failures[0].iter_mut().enumerate().take(W) {
@@ -3447,7 +3480,7 @@ fn prepare_width<L: Lane, const W: usize>(
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
         ],
-        unarmed: vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
+        flush_eps: L::splat(lane::FLUSH_EPS),
     })
 }
 
@@ -4062,7 +4095,7 @@ fn process_channels_from_input<L: Lane, const W: usize>(
         right,
         frames,
         stationary,
-        [&rest_left, &rest_right],
+        [&rest_left[..], &rest_right[..]],
     )
 }
 
@@ -4075,7 +4108,7 @@ fn process_channels_mono_from_input<L: Lane, const W: usize>(
     stationary: bool,
 ) -> Option<bool> {
     let rest = test_rest_plane::<L>(io, frames, &mut channel.silence);
-    process_channels_mono(channel, io, frames, stationary, &rest)
+    process_channels_mono(channel, io, frames, stationary, &rest[..])
 }
 
 #[cfg(test)]
@@ -4164,7 +4197,7 @@ mod interleave_identity {
         // (issue #1328, amendment A9), from a fresh counter, as a fresh channel's.
         let rest = super::test_rest_plane::<L>(io, frames, &mut L::zero());
         for section in sections {
-            svf_block::<L>(io, frames, &section.coef, &mut section.state, &rest);
+            svf_block::<L, &[f32]>(io, frames, &section.coef, &mut section.state, &rest);
         }
     }
 
@@ -4180,7 +4213,7 @@ mod interleave_identity {
         for (index, section) in sections.iter_mut().enumerate() {
             if index == 1 {
                 let ramp = RAMP_SAMPLES as usize;
-                lane::kernels::svf_block_ramped::<L>(
+                lane::kernels::svf_block_ramped::<L, &[f32]>(
                     &mut io[..ramp * W],
                     ramp,
                     &mut section.coef,
@@ -4191,7 +4224,7 @@ mod interleave_identity {
                 );
                 section.coef = section.target;
                 section.step = Default::default();
-                lane::kernels::svf_block::<L>(
+                lane::kernels::svf_block::<L, &[f32]>(
                     &mut io[ramp * W..frames * W],
                     frames - ramp,
                     &section.coef,
@@ -4199,7 +4232,13 @@ mod interleave_identity {
                     &rest[ramp * W..frames * W],
                 );
             } else {
-                lane::kernels::svf_block::<L>(io, frames, &section.coef, &mut section.state, &rest);
+                lane::kernels::svf_block::<L, &[f32]>(
+                    io,
+                    frames,
+                    &section.coef,
+                    &mut section.state,
+                    &rest,
+                );
             }
         }
     }
@@ -5926,7 +5965,7 @@ mod elision {
                 // The list the gate refuses to hand out: an all-identity cascade elides to zero
                 // sections, so the elided arm writes nothing at all.
                 let rest = vec![0.0_f32; FRAMES * NATIVE];
-                super::interleave::<Native, NATIVE, 2>(
+                super::interleave::<Native, &[f32], NATIVE, 2>(
                     (&mut left_channel, &mut right_channel),
                     &mut left,
                     &mut right,
@@ -6562,10 +6601,61 @@ mod target_application {
             initial_values: values,
             limits: effect_contract::PrepareEffectLimits {
                 maximum_total_state_bytes: 1_024,
-                maximum_scratch_bytes: 1,
+                // The two rest planes' declared scratch at this quantum (issue #1328).
+                maximum_scratch_bytes: 128 * REST_PLANE_BYTES_PER_FRAME,
                 maximum_automation_spans_per_block: 48,
             },
         }
+    }
+
+    /// Issue #1328 (m6): the rest planes a prepared EQ allocates are exactly the scratch its
+    /// descriptor declares, `quantum * REST_PLANE_BYTES_PER_FRAME` for each of its `W` lanes, at
+    /// every width and quantum, and a host that admits one byte less is refused. Red if the planes
+    /// grow (a third plane, a plane per section, a plane sized by something other than the
+    /// quantum) or shrink without the declaration following, or if the declaration returns to 0.
+    #[test]
+    fn the_rest_planes_are_the_scratch_the_descriptor_declares() {
+        fn run<L: Lane, const W: usize>(width: BankWidth) {
+            let values: Vec<_> =
+                effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
+            for quantum in [1_u32, 128, 1_000] {
+                let mut admitted = request(&values);
+                admitted.quantum = quantum;
+                admitted.limits.maximum_scratch_bytes = u64::MAX;
+                let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, admitted)
+                    .expect("an unlimited scratch budget admits the EQ");
+                let requests = vec![admitted; W];
+                let prepared =
+                    prepare_width::<L, W>(metadata, width, &requests, &[true; W]).expect("prepare");
+                let allocated: u64 = prepared
+                    .rest
+                    .iter()
+                    .map(|plane| (plane.len() * core::mem::size_of::<f32>()) as u64)
+                    .sum();
+                assert_eq!(
+                    allocated,
+                    W as u64 * metadata.scratch_bytes,
+                    "width {W}, quantum {quantum}: the rest planes are the declared scratch"
+                );
+                assert_eq!(
+                    metadata.scratch_bytes,
+                    u64::from(quantum) * REST_PLANE_BYTES_PER_FRAME
+                );
+                let mut short = admitted;
+                short.limits.maximum_scratch_bytes = metadata.scratch_bytes - 1;
+                assert_eq!(
+                    expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, short)
+                        .err()
+                        .map(|error| error.code),
+                    Some("effect.resource.limit"),
+                    "quantum {quantum}: a host that admits less scratch than the planes is refused"
+                );
+            }
+        }
+        run::<f32, 1>(BankWidth::Four);
+        run::<lane::Simd4, 4>(BankWidth::Four);
+        #[cfg(target_feature = "avx2")]
+        run::<lane::Simd8, 8>(BankWidth::Eight);
     }
 
     #[test]

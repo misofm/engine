@@ -300,6 +300,39 @@ pub fn silence_armable<L: Lane>(run: L, frames: usize, armed_after: L) -> bool {
     L::mask_any(run.ge(armed_after.sub(L::splat(frames as f32))))
 }
 
+/// [`silence_armable`] refined by the effect channel's state (issue #1328, the root's cost ruling
+/// after attempt 5): `true` when some lane whose counter can arm within the block also **holds**
+/// state -- `holding`, a lane with a recursive state word other than `+0.0` or `-0.0` (a NaN
+/// counts) at block start ([`kernels::svf_state_held`]) -- or when the block is longer than
+/// `armed_after`. `false` guarantees that the armed and the unarmed forms of every SVF section of
+/// the channel give the same bits over the block, so a caller may run the unarmed one.
+///
+/// Exact. A lane can carry an armed threshold on frame `f` only if its input was exactly zero on
+/// the `armed_after` frames ending at `f`. When the block is at most `armed_after` frames long,
+/// those frames reach back to the block's first frame, so a lane that starts the block at rest sees
+/// only zero input up to any armed frame. An SVF step from a `±0.0` state on a `±0.0` input
+/// computes `±0.0` words, which both flush laws write as `+0.0`; so such a lane is still at rest on
+/// its first armed frame, where the joint rule has nothing to zero, and the two forms agree on it.
+/// A non-zero input after an armed frame resets the counter, which cannot reach `armed_after` again
+/// within the block. A lane whose counter cannot arm in the block carries only `+0.0` thresholds
+/// ([`silence_armable`]). A padding lane, or a track that has been silent since its tail rested,
+/// therefore keeps its bank on the unarmed form.
+///
+/// One compare against the block length and three mask operations beside [`silence_armable`]'s,
+/// once per block per channel.
+#[inline(always)]
+pub fn silence_armable_holding<L: Lane>(
+    run: L,
+    frames: usize,
+    armed_after: L,
+    holding: L::Mask,
+) -> bool {
+    let frames = L::splat(frames as f32);
+    let armable = run.ge(armed_after.sub(frames));
+    let long = frames.gt(armed_after);
+    L::mask_any(L::mask_and(armable, L::mask_or(holding, long)))
+}
+
 /// The joint flush of a two-word recursive state `(n1, n2)` (issue #1328), armed by the rest
 /// threshold `rest` that [`silence_step`] gave the effect input's frame (amendment A9).
 ///

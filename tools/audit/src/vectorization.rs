@@ -75,7 +75,7 @@ fn probe_svf_simd8(
     state: &mut SvfState<lane::Simd8>,
     rest: &[f32; PROBE_FRAMES * 8],
 ) {
-    svf_block::<lane::Simd8>(
+    svf_block::<lane::Simd8, &[f32]>(
         io,
         PROBE_FRAMES,
         black_box(coefficients),
@@ -110,7 +110,7 @@ fn probe_svf_simd4(
     state: &mut SvfState<lane::Simd4>,
     rest: &[f32; PROBE_FRAMES * 4],
 ) {
-    svf_block::<lane::Simd4>(
+    svf_block::<lane::Simd4, &[f32]>(
         io,
         PROBE_FRAMES,
         black_box(coefficients),

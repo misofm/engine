@@ -521,7 +521,7 @@ pub fn run_kernel<L: Lane>(
         }
         match kernel {
             Kernel::SvfLow | Kernel::SvfHigh | Kernel::SvfBand | Kernel::SvfBell => {
-                svf_block::<L>(block, block_frames, &svf_coef, &mut svf_state, plane);
+                svf_block::<L, &[f32]>(block, block_frames, &svf_coef, &mut svf_state, &*plane);
             }
             Kernel::SvfRamped | Kernel::SvfRampedIdle => {
                 let window = if ramping {
@@ -529,14 +529,14 @@ pub fn run_kernel<L: Lane>(
                 } else {
                     0
                 };
-                svf_block_ramped::<L>(
+                svf_block_ramped::<L, &[f32]>(
                     block,
                     block_frames,
                     &mut svf_coef,
                     &svf_step,
                     window,
                     &mut svf_state,
-                    plane,
+                    &*plane,
                 );
             }
             Kernel::OnePole => {
