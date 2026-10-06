@@ -1065,9 +1065,8 @@ fn empty_mask<L: Lane>() -> L::Mask {
 /// [`nonfinite_lane_mask`] reports them. D7's failing path only.
 ///
 /// One load and one compare against `+0.0`, so the mask is the backend's canonical form. Not an
-/// `or` of [`lane_mask`]s: each of those compares with a splatted `1.0`, and on Apple targets LLVM
-/// stores every such splat through `_memset_pattern16` (known defect #1018, whose per-crate
-/// ceilings `check-cross-targets.sh` holds); one flag vector per call needs none.
+/// `or` of [`lane_mask`]s: that form is longer on both shipped targets, `simd128` and AArch64
+/// (measured in #1452, undo 3).
 fn lanes_mask<L: Lane>(bits: u32) -> L::Mask {
     let mut flags = [0.0_f32; MAX_LANES];
     for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
