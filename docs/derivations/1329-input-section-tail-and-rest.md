@@ -130,19 +130,28 @@ over every word a live history can load and where those words lie as poles
 
 * **Recursion words.** Under #1407 every word is a design, the identity at rest, or within the
   allowance `E = 64 h + u D` (`h = (u/2, u/4, u/2)`, `D = (1, 0.3, 1)`, at block size 1, its
-  worst) of the convex hull of the `f32` designs the history used. `||A(w)||_V + mu_state(w)` is
+  worst) of the convex hull of the `f32` designs the history used, and an `f32` design is within
+  the half-ulp box `h` plus the design's `f64` evaluation error (a few `f64` ulps; the pole
+  domain's pads and the scan's per-design checks cover it) of the exact design.
+  `||A(w)||_V + mu_state(w)` is
   convex in `w`, so over the hull it peaks at a design. `rho(g)` is symmetric under `g -> 1/g` and
   smallest at `g = 1`, so on `[10 Hz, max]` it peaks at the maximum cutoff. The designs split at
   `g1 = g_max / 2`: above it `||A||_V <= rho(g_max) + P(h)` and `a2 <= a2(g1)`; below it
   `||A||_V <= max(rho(g1), rho(g_min)) + P(h)` and `a2 <= 1 / (2 + sqrt(2))`. `P(.)` is the
   vertex supremum of `2 ||[[e1, e2], [-e2, e3]]||_V` over a word box. Then
-  `rho_ramp = max(top, rest) + P(E)` with the rounding counts at the largest word magnitudes plus
-  `E + h`, and `rho_settled` the same without `E`. Certified margin `1 - rho_ramp`: `3.673e-5`
+  `rho_ramp = max(top, rest) + P(E)` with the state rounding counts (each increasing in every
+  word's magnitude) at the largest word magnitudes plus `E + h`, and `rho_settled` the same without `E`. Certified margin `1 - rho_ramp`: `3.673e-5`
   (44.1, 88.2 kHz) and `3.701e-5` (48, 96 kHz).
 * **Input column, output row, feedthrough.** `||b||_V < 2`, `||c||_V* <= sqrt(2) / sqrt(1 + t_min)`
   (10 Hz), `|d| <= 1`, each plus the `E + h` word perturbation, the mix words' own ramp allowance
   (a mix ramp toward or from the identity scales the row by its weight) and
-  `|fl(sqrt(2)) - sqrt(2)|` for the HPF band mix.
+  `|fl(sqrt(2)) - sqrt(2)|` for the HPF band mix. The input column adds the input rounding and the
+  feedthrough `omega_input`, both increasing in every word's magnitude, so taken at the largest
+  words. The output row adds the output rounding on the state, `omega_state`, as a supremum over
+  every word: its value at the largest words plus its value at the corner where `c1` and `a3` are
+  `-(E + h)`. Its `U |1 - c1|` and `U |1 - a3|` terms peak at small `c1` and `a3`, so its value at
+  the largest words alone is not a supremum (#1433 found mid-band designs above it, up to
+  `8.71e-7` against `8.04e-7` at 44.1 kHz).
 * **Trim.** `g_t <= fl(10^(24/20))`: a trim ramp stays inside its endpoints (#1408).
 * **The cascade.** #1329 bounded the LPF's input by the HPF's universal output ball, about
   `7.7e4 g_t P`, and certified `R(+24 dBFS)` about 1.26M against a real rest of 983,374. #1433

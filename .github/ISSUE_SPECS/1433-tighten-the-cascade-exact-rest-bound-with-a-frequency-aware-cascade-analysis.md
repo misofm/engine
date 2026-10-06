@@ -360,3 +360,79 @@ before the memory restructuring (a change inside `LiveBound` only); doc, clippy,
 partition four times finer moved the prototype's `R` by 121 frames; a frequency-aware LPF before
 `N` (not taken) would mostly shrink the `sup Psi` flush charges, which only affect `P*`'s
 pre-`T_decay` part. (3) #1329's `omega_state` finding above.
+
+### Follow-up (verdict MINOR/NITs) (2026-10-06)
+
+Sol's attempt-1 verdict (`docs/handoffs/decision-15-2026-10-05/verdicts/stream-g/1433-attempt1.md`)
+was PASS with two MINOR findings and four NITs. This follow-up applies them on the same branch.
+
+**m1, fixed in the code.** The envelope's output row (`output_state`, read by both sections and
+by #1433's settled system) used `output_rounding`'s `omega_state` at the largest words, which is
+not a supremum (its `U |1 - c1|` and `U |1 - a3|` terms peak at small `c1`, `a3`; the verifier
+found mid-band designs at up to `8.71e-7` against `8.04e-7` at 44.1 kHz). It was sound only through
+an unstated slack. `input_section_live_envelope` now computes `omega_state` once as the supremum
+#1433's own term already used (its value at the largest words plus its value at the corner where
+`c1` and `a3` are `-(E + h)`), and both the output row and `first_output_rounding` read it. The doc
+comment and the derivation's D5 bullets now state the output rounding and its supremum, and say
+which rounding counts increase in every word's magnitude (state, input, `omega_input`) and so
+are taken at the largest words.
+
+- **Figures.** `output_state` rises by `1.02e-6` (1.4135215505 -> 1.4135225690 at 44.1 kHz) and
+  `P*` by `8.5e-7` relative (1.20246943e-7 -> 1.20247047e-7 at 44.1 kHz). No integer figure
+  moves at any rate: `T_decay`, `T_rest`, `R(P*)`, `peak_plus_24_dbfs` and `any_sanitized_input`
+  are the attempt-1 values in the table above. The 5-digit `P*` row, D15-4 in the ruling,
+  `dsp-research/filters.md` and `docs/BUILTINS_AND_METERING_V1.md` print nothing that moves.
+  No graph fixture token moves (fixed-design bounds are unchanged).
+- **Independent recomputation.** `verify_1433.py` (60-digit decimal) on a fresh dump of the
+  module's terms: ALL OK, the module 17-19 frames above in `T_decay`, `R(P*)` and
+  `peak_plus_24_dbfs`, 42-43 in `any_sanitized_input`, and `P*` within `1e-6` relative, at every
+  rate (as in attempt 1).
+- **Test.** The oracle test now also requires the envelope's output row to carry the 10 Hz
+  design's `||c||_V*`, the first-order word and mix perturbations and `first_output_rounding`.
+  M12 (the output row's `omega` back at the largest words only) is RED there
+  (1.413521550504 < 1.413522568990 at 44.1 kHz) and was green under every test before.
+
+**m2, tested.** New evidence API `math::tail::live_cascade_groups` (with `LiveGroupRest`; `rest`
+now reads the same per-group computation, so nothing is duplicated) states each settled zone
+group's `r`, `c_y`, `c_d`, the window's second-section state, `H_0`, `X_0`, the first section's
+rest frame, the second section's state there and the group's `R`. The oracle
+(`live_bound_carries_every_term_an_independent_recomputation_requires`) now also compares, at
+every launch rate:
+
+- `sup Psi Phi`, `K`, `K_L` and `sup Phi` (`live_zones`), per unit of `g` and of `F`, and per
+  group at +24 dBFS `r`, `c_y`, `c_d`, the window state, `H_0` and `X_0`, within `1e-5` relative
+  (largest observed difference `2.1e-6`, the direct zones' flush charge `K_L`);
+- the first section's rest frame (the module only later, by at most `0.01 %` and 2 frames: its
+  inflated `r` puts it up to 18 frames after the exact one) and the second section's state at the
+  module's frame, from the oracle's closed form at that frame, within `[1, 1 + 4e-3]` (the
+  module's squared-power table, rounded up at every product, is at most `1.3e-3` above);
+- each group's `R` (within 64 frames above).
+
+Mutations (release, the oracle test and the whole `tail_contract` with `--include-ignored`; the tree
+restored and checked unchanged; every test green on revert):
+
+| mutation | oracle test | whole `tail_contract` |
+|---|---|---|
+| V2 `settled_start`'s `X_0 = 2 c_y H` set to zero | RED: `X_0` 0 against 1,499.43 (44.1 kHz) | RED (8 pass, 1 fail) |
+| V3 neighbours without the pole step | RED: `K_L` per `F` 4.16395 against 4.17151 (-1.8e-3); the window state also moves by -4.3e-4 | RED (8 pass, 1 fail) |
+| M12 the output row's `omega` at the largest words only | RED (above) | RED (8 pass, 1 fail) |
+
+**n1.** `LiveBound::new`'s comment now says "one quarter octave of `1 - r`" (the same integer
+part of `4 log2(1 - r)`), and the closure is named `quarter_octave`.
+
+**n4.** #1329 D5's premise now reads "within the half-ulp box `h` plus the design's `f64`
+evaluation error" in the derivation and in `input_section_live_envelope`'s doc comment; no figure
+changes (the pole domain's pads and the scan's per-design checks cover that error).
+
+**Notes, not changed.**
+
+- **n2.** `builtins::input_section_live_envelope` now returns the whole `LiveCascade`; a rename
+  (for example to `input_section_live_terms`) needs `crates/builtins/src/lib.rs`, outside this
+  slice's paths. It belongs to a slice that owns `lib.rs`.
+- **n3.** Gate 2's `R_meas <= R <= 1.15 R_meas` assertion has no unique catch: its lower side
+  follows from the same loop's `measured <= bound`, and its upper side is weaker at every rate
+  than gate 3's restated ceiling `peak_plus_24_dbfs <= 1_075_000` (a ratio of 1.093-1.099). The
+  spec requires it, and its value is the recorded `R_meas` and ratio; future briefs should not
+  require two assertions where one is strictly stronger.
+- **Cost (Items for ROOT 6).** The live bound's cost is recorded in #1457's spec as context for
+  its budget.

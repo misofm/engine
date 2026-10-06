@@ -282,19 +282,25 @@ fn design_radius(g: f64) -> f64 {
 ///
 /// * **Recursion words.** Every word is a design, the identity at rest, or within the allowance
 ///   `E` (the ramp word allowance below) of the convex hull of the `f32` designs its history used
-///   (#1407); an `f32` design is within the half-ulp box `h = (u/2, u/4, u/2)` of the exact
-///   design (`c1`, `a3 < 1`, `a2 < 1/2`). The kernel's contraction `||A(w)||_V + mu_state(w)` is
+///   (#1407); an `f32` design is within the half-ulp box `h = (u/2, u/4, u/2)` plus the design's
+///   `f64` evaluation error (a few `f64` ulps, which the pole domain's pads and the scan's checks
+///   cover) of the exact design (`c1`, `a3 < 1`, `a2 < 1/2`). The kernel's contraction `||A(w)||_V + mu_state(w)` is
 ///   convex in the words, so over the hull it is largest at a design. The exact designs split at
 ///   `g1 = g_max / 2`: above it the norm is at most `rho(g_max)` and `a2` at most `a2(g1)`
 ///   (`a2 = g / (1 + g (g + sqrt(2)))` falls for `g > 1`); below it the norm is at most
 ///   `max(rho(g1), rho(g_min))` and `a2` at most its global maximum `1 / (2 + sqrt(2))`. The
-///   `f32` box adds `P(h)`, the allowance `P(E)` ([`word_box_norm`]), and the rounding counts take
-///   every word at its largest magnitude plus `E + h`.
+///   `f32` box adds `P(h)`, the allowance `P(E)` ([`word_box_norm`]), and the state and input rounding
+///   counts, which increase in every word's magnitude, take every word at its largest magnitude
+///   plus `E + h`.
 /// * **Input column.** `||b||_V = 2 g / sqrt(1 + g (g + sqrt(2))) < 2`, plus `E + h` on `(a2, a3)`
 ///   and the input rounding.
 /// * **Output row.** For both mixes `||c||_V* = sqrt(2) / sqrt(1 + g (g + sqrt(2)))`, largest at
 ///   10 Hz; a mix ramp toward or from the identity scales the row by its weight. The words' `E + h`,
-///   the mix words' own ramp allowance and `|fl(sqrt(2)) - sqrt(2)|` (the HPF's band mix) add to it.
+///   the mix words' own ramp allowance and `|fl(sqrt(2)) - sqrt(2)|` (the HPF's band mix) add to it,
+///   and so does the output rounding on the state, `omega_state` ([`output_rounding`]), as a
+///   supremum over every word: its value at the largest words plus its value at the corner where
+///   `c1` and `a3` are `-(E + h)`. Its `|1 - c1|` and `|1 - a3|` terms peak at small `c1` and
+///   `a3`, so its value at the largest words alone is not a supremum (#1433).
 ///   `|d|` is at most `1` (identity `1`, HPF `1 / (1 + g (g + sqrt(2)))`, LPF `a3`), with the same
 ///   corrections.
 /// * **Pole domain (#1433, `math::tail::PoleDomain`).** An exact design's pole has real part
@@ -308,7 +314,7 @@ fn design_radius(g: f64) -> f64 {
 ///   a crossfade toward or from the identity) within the mix allowance, so
 ///   `||(m1, m2)||_V* <= ||(-k, -1)||_V* + ` the allowance box's largest dual norm; the box term
 ///   (above `1e-6`) and the final `1 + 2^-30` cover this evaluation's few `f64` roundings. Its
-///   output rounding on the state, `omega_state`, is taken over every word (below).
+///   output rounding on the state is the output row's supremum `omega_state`.
 #[must_use]
 pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
     let _environment = lane::CanonicalFpEnv::enter();
@@ -379,7 +385,19 @@ pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
         m1: k + mix[1],
         m2: 1.0 + mix[2],
     };
-    let (omega_state, omega_input) = output_rounding(&largest);
+    // `omega_state` as a supremum (#1433): [`output_rounding`] is a norm of terms each increasing
+    // in one of `|c1|`, `|1 - c1|`, `|a2|`, `|a3|`, `|1 - a3|` and the mix words, so its value at
+    // the largest words plus its value at the opposite corner (`c1`, `a3` at `-(E + h)`, where
+    // `|1 - c1|` and `|1 - a3|` are largest) bounds it for every word. Its value at the largest
+    // words alone is not a supremum: the `U |1 - c1|` and `U |1 - a3|` terms are largest at small
+    // `c1` and `a3`, which mid-band designs reach. `omega_input` has no such term.
+    let (omega_largest, omega_input) = output_rounding(&largest);
+    let corner = SvfWords {
+        c1: -off_design[0],
+        a3: -off_design[2],
+        ..largest
+    };
+    let omega_state = omega_largest + output_rounding(&corner).0;
     let envelope = EnvelopeSection {
         rho_ramp,
         rho_settled,
@@ -406,16 +424,8 @@ pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
         mix_box = mix_box.max(v_dual_norm([mix[1] * sign(1), mix[2] * sign(2)]));
     }
     let first_mix_row = (v_dual_norm([-k, -1.0]) + mix_box) * (1.0 + 1.0 / 1_073_741_824.0);
-    // `omega_state` as a supremum: [`output_rounding`] is a norm of terms each increasing in one
-    // of `|c1|`, `|1 - c1|`, `|a2|`, `|a3|`, `|1 - a3|` and the mix words, so its value at the
-    // largest words plus its value at the opposite corner (`c1`, `a3` at `-(E + h)`, where
-    // `|1 - c1|` and `|1 - a3|` are largest) bounds it for every word.
-    let corner = SvfWords {
-        c1: -off_design[0],
-        a3: -off_design[2],
-        ..largest
-    };
-    let first_output_rounding = omega_state + output_rounding(&corner).0;
+    // The first section's output rounding on the state is the supremum above.
+    let first_output_rounding = omega_state;
     Some(LiveCascade {
         envelope,
         poles,

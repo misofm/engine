@@ -1220,9 +1220,10 @@ impl<'a> LiveBound<'a> {
             change: 0.0,
             state: [0.0, 0.0],
         });
-        // Consecutive zones whose settled contractions lie in one octave of `1 - r` share one
-        // system, with the largest of each term (it covers each of them).
-        let octave = |terms: &SettledTerms| {
+        // Consecutive zones whose settled contractions lie in one quarter octave of `1 - r` (the
+        // same integer part of `4 log2(1 - r)`) share one system, with the largest of each term
+        // (it covers each of them).
+        let quarter_octave = |terms: &SettledTerms| {
             let gap = 1.0 - terms.contraction;
             if gap > 0.0 {
                 (4.0 * crate::log2(gap)) as i32
@@ -1233,7 +1234,7 @@ impl<'a> LiveBound<'a> {
         let mut grouped: Vec<SettledTerms> = Vec::new();
         let mut previous = None;
         for terms in &every {
-            let band = octave(terms);
+            let band = quarter_octave(terms);
             match grouped.last_mut() {
                 Some(last) if previous == Some(band) => {
                     last.contraction = last.contraction.max(terms.contraction);
@@ -1383,12 +1384,21 @@ impl<'a> LiveBound<'a> {
     /// `R` for one input scale `g = gain * peak`: the first section rests (its state bound below
     /// `REST_EPS` per word, plus `N_SILENCE`), then the second, from its bound at that frame.
     fn rest(&self, g: f64) -> Result<u64, TailBoundError> {
+        let mut worst = 0_u64;
+        for group in self.group_rests(g)? {
+            worst = worst.max(group.rested);
+        }
+        Ok(worst)
+    }
+
+    /// [`Self::rest`] per zone group, with the quantities it reads.
+    fn group_rests(&self, g: f64) -> Result<Vec<LiveGroupRest>, TailBoundError> {
         let f = self.law.per_step();
         let limit = self.law.rest_eps / R_INV_NORM;
         let rho = self.live.envelope.rho_settled;
         let window = self.window(g, f);
         let start = self.ramp_frames + 1;
-        let mut worst = 0_u64;
+        let mut groups = Vec::with_capacity(self.terms.len());
         for terms in &self.terms {
             let u0 = self.settled_start(terms, &window, g, f);
             let first = free_decay_frames(u0[1], terms.contraction, f, limit)
@@ -1409,9 +1419,19 @@ impl<'a> LiveBound<'a> {
                 .and_then(|value| value.checked_add(self.law.silence_frames))
                 .filter(|value| *value < HORIZON_LIMIT)
                 .ok_or(TailBoundError::Horizon)?;
-            worst = worst.max(rested);
+            groups.push(LiveGroupRest {
+                contraction: terms.contraction,
+                output: terms.output,
+                change: terms.change,
+                window_state: window.state,
+                energy: u0[1],
+                one_off: u0[2],
+                first_rested,
+                second_state: sigma,
+                rested,
+            });
         }
-        Ok(worst)
+        Ok(groups)
     }
 
     /// A frame `m` from which `row . M^m u` stays below `limit`, for a system without constant
@@ -1551,6 +1571,69 @@ impl<'a> LiveBound<'a> {
     }
 }
 
+/// One settled zone group of [`live_cascade`]'s rest at one input scale, with the quantities the
+/// rest reads (evidence for the derivation's independent recomputation; issue #1433).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveGroupRest {
+    /// The group's settled contraction `r` (the largest of its zones').
+    pub contraction: f64,
+    /// `c_y`: the first section's settled output is at most `c_y H + F`.
+    pub output: f64,
+    /// `c_d`: the first section's settled output change is at most
+    /// `c_d H + (gamma + 2 + omega) F`.
+    pub change: f64,
+    /// The second section's state bound at `N + ramp_frames + 1`, from the window (shared by
+    /// every group).
+    pub window_state: f64,
+    /// `H_0`: the first section's state bound at `N + ramp_frames`, the smaller of the window's
+    /// and the group's `Phi`.
+    pub energy: f64,
+    /// `X_0 = 2 c_y H_0`: the joint flush's one-off terms at `N + ramp_frames + 1`.
+    pub one_off: f64,
+    /// The frame (from `N`) at which the first section is proven at rest, `N_SILENCE` included.
+    pub first_rested: u64,
+    /// The second section's state bound at [`Self::first_rested`] (`tau + c_y H + X` plus the
+    /// flush's constant).
+    pub second_state: f64,
+    /// `R` for this group: the frame at which the second section is proven at rest.
+    pub rested: u64,
+}
+
+/// [`live_cascade`]'s rest at one input peak, per settled zone group, with the quantities it reads
+/// (the groups no other group covers, in increasing `Re p`; issue #1433). The cascade's `R` at
+/// `peak` is the largest [`LiveGroupRest::rested`]. Evidence for the independent recomputation:
+/// terms such as the joint flush's `X_0` move the final figures by at most a frame at the launch
+/// configuration, so only a comparison of these intermediate quantities defends them.
+///
+/// # Errors
+///
+/// As [`live_cascade`].
+pub fn live_cascade_groups(
+    live: &LiveCascade,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+    peak: f64,
+) -> Result<Vec<LiveGroupRest>, TailBoundError> {
+    let zones = live_cascade_zones(live)?;
+    let bound = LiveBound::new(live, &zones, law, ramp_frames);
+    bound.group_rests(gain * (1.0 + U) * peak)
+}
+
+/// [`live_zones`], after checking that both of the envelope's contractions are below `1` (a NaN
+/// is refused with the rest) and the settled one at most the ramp one.
+fn live_cascade_zones(live: &LiveCascade) -> Result<LiveZones, TailBoundError> {
+    let envelope = &live.envelope;
+    let contracts = |rho: f64| rho.partial_cmp(&1.0) == Some(core::cmp::Ordering::Less);
+    if !(contracts(envelope.rho_ramp)
+        && contracts(envelope.rho_settled)
+        && envelope.rho_settled <= envelope.rho_ramp)
+    {
+        return Err(TailBoundError::NotContracting);
+    }
+    live_zones(live)
+}
+
 /// The tail and rest bound of a two-section live cascade, frequency-aware (issue #1433;
 /// `docs/derivations/1329-input-section-tail-and-rest.md`, "#1433: the frequency-aware cascade").
 ///
@@ -1583,16 +1666,7 @@ pub fn live_cascade(
     ramp_frames: u64,
     peaks: [f64; 2],
 ) -> Result<CascadeBound, TailBoundError> {
-    let envelope = &live.envelope;
-    // A NaN contraction is refused with the rest: only `rho < 1` passes.
-    let contracts = |rho: f64| rho.partial_cmp(&1.0) == Some(core::cmp::Ordering::Less);
-    if !(contracts(envelope.rho_ramp)
-        && contracts(envelope.rho_settled)
-        && envelope.rho_settled <= envelope.rho_ramp)
-    {
-        return Err(TailBoundError::NotContracting);
-    }
-    let zones = live_zones(live)?;
+    let zones = live_cascade_zones(live)?;
     let bound = LiveBound::new(live, &zones, law, ramp_frames);
     // `gain` is the trim word's magnitude; the kernel's `fl(x * trim)` is at most `(1 + u)` times
     // the product.

@@ -20,7 +20,7 @@ use builtins::{
 use effect_contract::{RestSamples, TailSamples};
 use math::tail::{
     CascadeBound, LiveZones, SectionConstants, SvfWords, TAIL_FLOOR, fixed_cascade, live_cascade,
-    live_zones, pole_real, v_operator_norm,
+    live_cascade_groups, live_zones, pole_real, v_operator_norm,
 };
 
 const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -801,13 +801,35 @@ fn independent_box_norm(box_: [f64; 3]) -> f64 {
 /// `Phi` and the potential `Psi` by plain fixed-point iteration, the window frame by frame, and
 /// the settled phase per zone group in closed form. It takes #1329's envelope and rounding counts
 /// from the module (#1329's gates check those).
-#[derive(Debug)]
 struct LiveOracle {
     t_decay: u64,
     p_star: f64,
     rest_at_p_star: u64,
     rest_peak: u64,
     rest_any: u64,
+    /// `sup Psi Phi`, `sup Psi' beta` and `sup Psi`, `sup q Phi` over the direct zones and
+    /// `sup Phi`, each per unit of `gain * peak` and of `F` ([`math::tail::LiveZones`]).
+    potential_state: [f64; 2],
+    charge: [f64; 2],
+    direct_output: [f64; 2],
+    largest_state: [f64; 2],
+    /// Every zone group's rest at +24 dBFS, with the quantities it reads.
+    groups_peak: Vec<OracleGroupRest>,
+}
+
+/// One zone group's rest ([`math::tail::LiveGroupRest`]): `r`, `c_y`, `c_d`, the window's
+/// second-section state, `H_0`, `X_0`, the first section's exact rest frame, the second section's
+/// state bound at any later frame (from `N`) and the group's `R`.
+struct OracleGroupRest {
+    r: f64,
+    cy: f64,
+    cd: f64,
+    window_state: f64,
+    h0: f64,
+    x0: f64,
+    first_rested: u64,
+    second_state_at: Box<dyn Fn(u64) -> f64>,
+    rested: u64,
 }
 
 /// One zone of the oracle: `[a, b]`, ramp constants, settled constants, direct.
@@ -1085,7 +1107,7 @@ fn live_oracle(rate: u32) -> LiveOracle {
     // The settled phase in closed form, `m` frames after `N + ramp + 1`: returns
     // `(tau, H_(n-1), X)` with and without the flush drive.
     let closed =
-        |t: &OracleTerms, tau0: f64, h0: f64, x0: f64, f: f64, m: u64| -> (f64, f64, f64) {
+        move |t: &OracleTerms, tau0: f64, h0: f64, x0: f64, f: f64, m: u64| -> (f64, f64, f64) {
             let mf = m as f64;
             let a_h = rs * t.cd + mu_settled * t.cy + mu_x * t.cy * t.r;
             let a_f = rs * (os + 2.0 + omega) + mu_settled + mu_x * (t.cy + 1.0) + 1.0;
@@ -1115,27 +1137,41 @@ fn live_oracle(rate: u32) -> LiveOracle {
         }
         m
     };
-    let rest = |g: f64| -> u64 {
+    let group_rests = |g: f64| -> Vec<OracleGroupRest> {
         let f = f_step;
         let (sigma, energy, _) = window(g, f);
         groups
             .iter()
             .map(|t| {
+                let t = *t;
                 let h0 = energy.min(t.phi[0] * g + t.phi[1] * f).min(cap);
+                let x0 = 2.0 * t.cy * h0;
                 let first = frames_to(h0, t.r, f);
-                let rested = ramp + first + silence;
-                let (tau, h, x) = closed(
-                    t,
-                    sigma + t.cy * h0 + f,
-                    h0,
-                    2.0 * t.cy * h0,
-                    f,
-                    rested - start,
-                );
+                let first_rested = ramp + first + silence;
                 let st = f / (1.0 - t.r);
-                let state = (tau + t.cy * h + f + x + 2.0 * (t.cy * st + f)).min(cap);
-                rested + frames_to(state, rs, f) + silence
+                let state_at = move |frame: u64| {
+                    let (tau, h, x) = closed(&t, sigma + t.cy * h0 + f, h0, x0, f, frame - start);
+                    (tau + t.cy * h + f + x + 2.0 * (t.cy * st + f)).min(cap)
+                };
+                let state = state_at(first_rested);
+                OracleGroupRest {
+                    r: t.r,
+                    cy: t.cy,
+                    cd: t.cd,
+                    window_state: sigma,
+                    h0,
+                    x0,
+                    first_rested,
+                    second_state_at: Box::new(state_at),
+                    rested: first_rested + frames_to(state, rs, f) + silence,
+                }
             })
+            .collect()
+    };
+    let rest = |g: f64| -> u64 {
+        group_rests(g)
+            .iter()
+            .map(|group| group.rested)
             .max()
             .expect("groups")
     };
@@ -1221,8 +1257,23 @@ fn live_oracle(rate: u32) -> LiveOracle {
         rest_at_p_star: rest(gain * p_star),
         rest_peak: rest(gain * rest_peaks()[0]),
         rest_any: rest(gain * rest_peaks()[1]),
+        potential_state: v,
+        charge,
+        direct_output: direct,
+        largest_state: phi_max,
+        groups_peak: group_rests(gain * rest_peaks()[0]),
     }
 }
+
+/// The relative tolerance of the intermediate quantities' comparison with the recomputation: far
+/// above the module's own inflation and the recomputation's iteration stop (at most `2.1e-6`, the
+/// direct zones' flush charge `K_L`), far below what a dropped neighbour or term moves (the pole
+/// step's use: `K_L` by `1.8e-3`, the window's second-section state by `4.3e-4`).
+const INTERMEDIATE_TOLERANCE: f64 = 1.0e-5;
+/// The same for the second section's state at the first section's rest frame, which the module
+/// carries through a table of squared powers rounded up at every product (at most `1.3e-3` above
+/// the recomputation's closed form at the launch rates): the module may only be larger.
+const REST_STATE_TOLERANCE: f64 = 4.0e-3;
 
 /// Gate 2's terms and gate 3's A9 term (#1329 Amendment 4, R3), and #1433's independent
 /// recomputation. The real kernel cannot show that the live bound omits the `f32` rounding, the
@@ -1238,6 +1289,15 @@ fn live_oracle(rate: u32) -> LiveOracle {
 ///   the settled phase in closed form, no shared code) and that value plus `0.01 %` and 64 frames:
 ///   the module may only be more conservative, by its own rounding inflation, never optimistic,
 ///   and never loose.
+/// * The envelope's output row carries the 10 Hz design's `||c||_V*`, its first-order word and
+///   mix perturbations and the output rounding's supremum over every word (#1433 verdict m1).
+/// * The intermediate quantities agree within [`INTERMEDIATE_TOLERANCE`]: `sup Psi Phi`, the
+///   charges `K`, the direct zones' `K_L` and `sup Phi` ([`math::tail::LiveZones`]), and per zone
+///   group at +24 dBFS ([`math::tail::live_cascade_groups`]) `r`, `c_y`, `c_d`, the window's
+///   second-section state, `H_0` and the joint flush's `X_0`; the first section's rest frame and
+///   the second section's state there within [`REST_STATE_TOLERANCE`]. Terms such as `X_0` and the
+///   neighbour radius' use of the pole step move the final figures by at most a frame (#1433
+///   verdict m2), so only these comparisons defend them.
 #[test]
 fn live_bound_carries_every_term_an_independent_recomputation_requires() {
     let u = 1.0 / 16_777_216.0;
@@ -1270,6 +1330,36 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
             envelope.rho_ramp - ramp <= 8.0 * u * kappa,
             "{rate} Hz: the live envelope carries more than its rounding count"
         );
+        // The output row (#1329 D5, #1433 verdict m1): the 10 Hz design's `||c||_V*`, the
+        // first-order row perturbation of the words' `E + h`, the mix words' ramp allowance and
+        // `|fl(sqrt(2)) - sqrt(2)|`, and the output rounding's supremum over every word, which the
+        // scan above checks against every design (the value at the largest words alone is not
+        // one).
+        let terms = input_section_live_envelope(rate).expect("launch rate");
+        let sqrt2 = core::f64::consts::SQRT_2;
+        let k = f64::from(sqrt2 as f32);
+        let k_error = (k - sqrt2).abs();
+        let a2_max = 1.0 / (2.0 + sqrt2);
+        let half = [u / 2.0, u / 4.0, u / 2.0];
+        let off: [f64; 3] = core::array::from_fn(|i| 65.0 * half[i] + u * [1.0, 0.3, 1.0][i]);
+        let (mix_m1, mix_m2) = (64.0 * u + u * k, 32.0 * u + u);
+        let row = [
+            k * off[0] + off[1] + mix_m1 + mix_m2 * a2_max + k_error,
+            k * off[1] + off[2] + mix_m1 * a2_max + mix_m2 + k_error * a2_max,
+        ];
+        let second = row[0] + sqrt2 * row[1];
+        let row_norm = math::sqrt(row[0] * row[0] + second * second);
+        let g_min = math::tan(core::f64::consts::PI * 10.0 / f64::from(rate));
+        let gamma_10 = sqrt2 / math::sqrt(1.0 + g_min * (g_min + sqrt2));
+        let output_row = gamma_10 + row_norm + terms.first_output_rounding;
+        eprintln!(
+            "R3 {rate} Hz: output row {:.12e} (needs {output_row:.12e}; omega {:.6e})",
+            envelope.output_state, terms.first_output_rounding
+        );
+        assert!(
+            envelope.output_state >= output_row * (1.0 - 1.0e-12),
+            "{rate} Hz: the live envelope's output row omits a term the derivation requires"
+        );
         let oracle = live_oracle(rate);
         let cascade = input_section_live_cascade(rate).expect("launch rate");
         let live = input_section_live_bound(rate).expect("launch rate");
@@ -1297,6 +1387,93 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
             cascade.flush_floor,
             oracle.p_star
         );
+        // The intermediate quantities, at a tight relative tolerance: terms that move the final
+        // figures by at most a frame at the launch configuration (the neighbour radius' use of
+        // the pole step, the joint flush's one-off `X_0`) still move these.
+        let zones = live_zones(&terms).expect("live zones");
+        let close = |name: &str, module: f64, recomputed: f64| {
+            eprintln!(
+                "R3 {rate} Hz {name}: module {module:.12e}, recomputed {recomputed:.12e}, ratio \
+                 {:.3e}",
+                module / recomputed - 1.0
+            );
+            assert!(
+                (module - recomputed).abs() <= INTERMEDIATE_TOLERANCE * recomputed.abs(),
+                "{rate} Hz {name}: module {module:e} against the recomputed {recomputed:e}"
+            );
+        };
+        for c in 0..2 {
+            close(
+                "sup Psi Phi",
+                zones.potential_state[c],
+                oracle.potential_state[c],
+            );
+            close("K", zones.charge[c], oracle.charge[c]);
+            close("K_L", zones.direct_output[c], oracle.direct_output[c]);
+            close("sup Phi", zones.largest_state[c], oracle.largest_state[c]);
+        }
+        let groups = live_cascade_groups(
+            &terms,
+            rest_peaks()[0],
+            &input_section_flush_law(rate),
+            u64::from(INPUT_FILTER_RAMP_SAMPLES),
+            rest_peaks()[0],
+        )
+        .expect("live groups");
+        assert!(groups.len() > 1, "{rate} Hz: fewer than two zone groups");
+        for group in &groups {
+            // The module keeps only the groups no other group covers; each is one of the
+            // oracle's, which keeps them all.
+            let found = oracle
+                .groups_peak
+                .iter()
+                .min_by(|a, b| {
+                    (a.r - group.contraction)
+                        .abs()
+                        .total_cmp(&(b.r - group.contraction).abs())
+                })
+                .expect("oracle groups");
+            close("group r", group.contraction, found.r);
+            close("group c_y", group.output, found.cy);
+            close("group c_d", group.change, found.cd);
+            close("window sigma", group.window_state, found.window_state);
+            close("group H_0", group.energy, found.h0);
+            close("group X_0", group.one_off, found.x0);
+            // The module's frame count may only be later, by its contraction's inflation and
+            // the rounding of its `log`.
+            assert!(
+                group.first_rested >= found.first_rested
+                    && group.first_rested <= found.first_rested + found.first_rested / 10_000 + 2,
+                "{rate} Hz: the group at r = {} rests its first section at {} against the \
+                 recomputed {}",
+                group.contraction,
+                group.first_rested,
+                found.first_rested
+            );
+            let recomputed = (found.second_state_at)(group.first_rested);
+            eprintln!(
+                "R3 {rate} Hz sigma at the HPF's rest frame {}: module {:.12e}, recomputed \
+                 {recomputed:.12e}, ratio {:.3e}",
+                group.first_rested,
+                group.second_state,
+                group.second_state / recomputed - 1.0
+            );
+            assert!(
+                group.second_state >= recomputed
+                    && group.second_state <= recomputed * (1.0 + REST_STATE_TOLERANCE),
+                "{rate} Hz: the group at r = {} has the second section's state {:e} at the first \
+                 section's rest against the recomputed {recomputed:e}",
+                group.contraction,
+                group.second_state
+            );
+            assert!(
+                group.rested >= found.rested && group.rested <= found.rested + 64,
+                "{rate} Hz: the group at r = {} rests at {} against the recomputed {}",
+                group.contraction,
+                group.rested,
+                found.rested
+            );
+        }
         for (name, module, recomputed) in [
             ("T_decay", finite(live.tail), oracle.t_decay),
             ("T_rest", finite(live.tail_every_peak), t_rest),

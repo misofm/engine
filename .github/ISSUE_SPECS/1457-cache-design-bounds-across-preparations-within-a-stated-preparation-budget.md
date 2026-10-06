@@ -140,6 +140,28 @@ pays it; at 64 tracks it is inside the noise. The work is not waste (every live 
 bound), but it depends only on the rate, of which there are four launch rates, so this issue's
 cache, or a per-rate table checked by a test, removes it.
 
+### Context from #1433 (2026-10-06): the live bound now costs more
+
+*Tighten the cascade exact-rest bound with a frequency-aware cascade analysis* (#1433) replaced
+#1329's crude live cascade step, so the live bound's cost above (0.04 ms native, about 0.07 ms per
+live-control browser boot) is out of date. From #1433's record and verdict
+(`docs/handoffs/decision-15-2026-10-05/verdicts/stream-g/1433-attempt1.md`, "Cost and memory"):
+
+- **Native.** `input_section_live_bound` costs about 42 us before #1433 and about 240-254 us
+  after, per preparation with a live input lane (release, one pinned core, best of 50; the
+  verifier measured 236.5 / 241.6 / 245.8 / 249.5 us at 44.1 / 48 / 88.2 / 96 kHz). About 85 us
+  is the zones; the settled zone groups take the rest.
+- **Browser boot with live controls** (`rebuild-round`, p50, two rounds): +0.25 to +0.4 ms per
+  boot. The 9-track EQ document boots in 2.22 / 2.22 ms before and 2.46 / 2.48 ms after; the
+  64-track console in 20.28 / 20.21 ms before and 20.55 / 20.62 ms after. An audio-only boot
+  computes no live bound.
+- **Memory.** The bound's peak allocation (one power table of at most 26 `4x4` entries per zone
+  group, dropped after each group) is what the browser fixture's exact `memoryBytes` pin observes.
+
+The live bound still depends only on the rate (four launch rates), so this issue's cache, or a
+per-rate table checked by a test, removes its whole cost from every preparation after the first.
+D1's budget states it beside the design bounds.
+
 ## Non-goals
 
 - Tightening any bound (#1433). Any render-side change. Effects' bounds (#1372-#1376).
