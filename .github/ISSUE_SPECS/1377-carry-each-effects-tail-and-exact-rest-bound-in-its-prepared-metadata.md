@@ -191,17 +191,21 @@ boxing the variant or allowing the lint: control-only data must not live in rend
 
 ### Attempt 1
 
-Implementer checkpoint. **Blocked on a required gate:** `cargo clippy --workspace --all-targets
--- -D warnings` (and `--all-features`) is red, `clippy::large_enum_variant` on
-`crates/graph/src/runtime.rs` `NodeKind`: `NodeKind::Effect(GraphPreparedEffect)` holds a
-`PreparedEffectMetadata` inline, and D3's two new fields (`tail_every_peak`, 16 bytes; `rest`,
-24 bytes) take the variant to at least 240 bytes, over the lint's 200-byte threshold (it passed at
-`cd984d844`). The fix lies outside the Authorized paths and is a root decision: box the variant's
-payload in `crates/graph/src/runtime.rs` (one more indirection per effect node in render's node
-table), allow the lint there with a reason, or move the bounds out of the inline metadata. No
-value moves either way. Everything else below is green.
+**History.** First run `d0af9d53d` (2026-10-06) stopped on workspace clippy
+(`clippy::large_enum_variant` on `graph::runtime::NodeKind`: `NodeKind::Effect` held a whole
+`PreparedEffectMetadata` inline, and D3's two fields took the variant past the lint's limit).
+Root reverted it (`23a32823a`, history kept) and landed #1460 first (Amendment 2). This record is
+for the re-apply: `d0af9d53d` cherry-picked onto `320baffce` (#1460 attempt 1) as `a5b4d0727`.
+Amendment 2 keeps this the same attempt 1.
 
-What landed:
+**What changed from `d0af9d53d`.** No code. The cherry-pick applied cleanly to every source file;
+the only conflict was this spec. After #1460, `PreparedEffectMetadata` reaches the graph only in
+`PreparedGraphPlan::effects` (`GraphPreparedEffect`, the control-side table); the render node is
+`runtime::EffectNode { processor, quantum }`, so D3's `tail_every_peak` and `rest` are never in the
+render node table (Amendment 2, ruling 2). `crates/graph/src/lib.rs` changes in test struct
+literals only.
+
+What landed (as in `d0af9d53d`):
 
 - `effect-contract`: `RestBound { Bounded(RestSamples), Unstated }` (doc names #1378 and both tail
   fields), `EffectTailBound { tail, tail_every_peak, rest }`, `EffectDescriptor::tail_and_rest`
@@ -223,39 +227,67 @@ What landed:
   `crates/effect-contract/tests/registry.rs` (ruling 3). Test doubles state their old tail,
   `Infinite`, `Unstated`.
 
-Tests and test value (each mutation red, green on revert):
+**Sizes** (x86-64 `size_of`, measured with a temporary test removed before commit; base
+`320baffce` against head):
+
+| Type | Base | Head |
+|---|---|---|
+| `NodeKind`, `RuntimeOp`, `RuntimeUnit` | 32, 112, 248 | 32, 112, 248 |
+| `LiveControlEffect`, `EffectNode` | 128, 24 | 128, 24 |
+| `GraphPreparedEffect` (control side) | 200 | 240 |
+| `PreparedEffectMetadata` | 104 | 144 |
+
+The render node table does not move. `graph-compiler`'s live-control owner charge is
+`EFFECT_RENDER_NODE_BYTES` (#1460 D4), so no resource estimate moves.
+
+**Tests and test value** (each mutation re-run on `a5b4d0727`; red with the defect, green on
+revert):
 
 - `effect_contract` `tail_bound_tests::prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate`
   (a test descriptor with distinct per-rate values in every field). Defends D3: no shipped effect
-  states a `Bounded` rest or finite `tail_every_peak`, so nothing else sees a wrong copy. Red on:
-  M1 `expected_prepared_metadata` writes `rest: Unstated`; M2 calls the function at a fixed 48 kHz;
-  M3 copies `tail` into `tail_every_peak`; M4 `program_key` crosses `tail_every_peak`; M5
-  `program_key` writes `rest: Unstated`.
-- Gate 1, conformance `metadata.tail_bound`: M6 removing the check turns the `UndeclaredRestBound`
-  row red (detected only as `metadata.changed`/`metadata.exact`/`reset.semantics`). M7
-  `expected_prepared_metadata` writing `tail: Infinite`: `gate-expander --test conformance` green
-  without the new check (both sides of `metadata.exact` share the bad value), red with it
-  (`["metadata.tail_bound"]`). Candidly: an effect that writes its own values is already caught by
-  `metadata.exact` now that the program key carries them; the new check's own catch is a wrong
-  `expected_prepared_metadata`, seen on real effects.
+  states a `Bounded` rest or finite `tail_every_peak`, so nothing else sees a wrong copy. Red on
+  each of: M1 `expected_prepared_metadata` writes `rest: Unstated`; M2 calls the function at a
+  fixed 48 kHz; M3 copies `tail` into `tail_every_peak`; M4 `program_key` crosses
+  `tail_every_peak`; M5 `program_key` writes `rest: Unstated`.
+- Gate 1, conformance `metadata.tail_bound`: M6 (the check disabled) turns
+  `every_faulty_mock_is_detected` red ("fault UndeclaredRestBound was detected as
+  ["metadata.changed", "metadata.exact", "reset.semantics"], not "metadata.tail_bound""). M7
+  (`expected_prepared_metadata` writes `tail: Infinite`): `gate-expander --test conformance` is
+  red with the check (`launch gate failures: ["metadata.tail_bound"]`) and green without it (both
+  sides of `metadata.exact` share the bad value). Candidly: an effect that writes its own values is
+  already caught by `metadata.exact` now that the program key carries them; the new check's own
+  catch is a wrong `expected_prepared_metadata`, seen on real effects.
 - Gate 2, `effect-compiler` `prepare::metadata_mismatch_tests::a_processor_whose_rest_or_tail_every_peak_drifts_is_refused`
   (production EQ wrapped so its metadata drifts; nine-track fixture; undrifted control prepares 9).
-  Red on dropping either new comparison (two runs). No earlier test reached
-  `effect.metadata.mismatch`.
+  Red on dropping the `tail_every_peak` comparison, and red on dropping the `rest` comparison (two
+  runs). No earlier test reached `effect.metadata.mismatch`.
 - The four `quality.tail` reads (gate, transient shaper, soft clip, limiter) moved onto
   `tail_and_rest(...).tail` with the same expected value.
 
-Gates run at this checkpoint:
+**Gates at `a5b4d0727`, all PASS:** `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets [--all-features] -- -D warnings` (both, no allow);
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; test-debug-a and
+test-debug-b (the `qualification.yml` commands); `conformance_fixtures -- --check`;
+`graph_fixture --check`; `check-graph-determinism.sh` (100/100); `check-workspace-policy.sh`;
+`check-realtime-policy.sh`; `check-lane-policy.sh`; `audit capi` (0 allocations, 0
+deallocations, 0 locks, 0 syscalls, 0 violations, `pcm_digest` `cb10fbface44a3a4`, the value #1460
+recorded at its base and head); `check-capi-abi.sh` and its `--self-test`;
+`check-builtins-fixtures.sh` (50 files); `check-effect-contract.sh` (8 production factories, 0
+failed gates); `check-cross-targets.sh` (PASS, the known #1018 iOS memset rows only);
+`run-wasm-gates.sh --without-v8-spill --without-native`; the worklet chain (fresh output
+directories, `build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`,
+`check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+`test-web-audioworklet.sh`). AArch64 runs in CI only.
 
-- PASS: `cargo fmt --all -- --check`; test-debug-b (the gate-3 DSP command, exit 0); test-debug-a
-  (exact workspace command from `qualification.yml`, exit 0); `conformance_fixtures -- --check`;
-  `check-graph-determinism.sh` (100/100); `check-effect-contract.sh` (8 production factories);
-  `check-workspace-policy.sh`; `check-realtime-policy.sh`; `check-lane-policy.sh`;
-  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`.
-- FAIL: workspace clippy, default and `--all-features` (above).
-- Not run (stopped on the blocker): `check-cross-targets.sh`, `run-wasm-gates.sh`, the worklet
-  chain, capi audit/ABI (no C ABI or preparation byte is meant to change; graph canonical text
-  copies `metadata.tail` only).
+No rendered bit, latency, tail value, fixture, digest or resource byte count moved; nothing was
+re-pinned.
 
-No rendered bit, latency or tail value moved: every value is the earlier one, and the DSP and
-workspace suites pass unchanged.
+**Open.**
+
+- Each effect's prepared processor keeps its own `PreparedEffectMetadata` copy (for example
+  `PreparedGate::metadata`, `crates/gate-expander/src/lib.rs`), which its `metadata()` returns for
+  the prepare-time check. That copy sits in the processor's heap object, which render owns, and
+  D3's two fields add 40 bytes to it. The copy predates this slice and #1460 left processors out
+  of scope; whether it is control-only data in render-owned memory (#1329 ruling R5) is for root.
+- GitHub sync of #1377 waits for owner permission (Amendment 1, ruling 4).
