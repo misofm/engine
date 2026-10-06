@@ -613,14 +613,17 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   and on a block of live audio the builtin chain and the EQ run their unarmed form, with no
   counter, no threshold and no joint term in any frame loop: what remains is one armability test
   per channel per block and one compare of the block's last frame (the multiband compressor runs
-  the counter and the joint flush on every frame). A bank with a silent or padding lane beside live
-  ones also scans each channel's block for zeros (about 3 % of an eight-lane builtin block, about
-  1 % of an eight-lane EQ block, natively), and the builtin chain's constants, carried as words for
-  the iOS memset ratchet (#1018), cost about 3 % to 4 % p50 on the 64-track app-shape browser
-  document against the per-word law (#1451 removes that cause; #1328's follow-up record has the
-  numbers). The counter rides the state payload, the
-  carry and the mono-collapse disengage copy. Details: #1328 Amendment 1 A9 and
-  `dsp-research/filters.md`.
+  the counter and the joint flush on every frame). A block in which some lane ends on an exact
+  zero, common in quiet 16-bit sources, adds a backward scan from the last frame that stops at
+  each such lane's first non-zero frame: within noise natively (an eight-lane builtin block
+  1.005-1.008 of all-live, an eight-lane EQ block 0.98-1.02; before the backward scan they paid
+  13 % to 21 % and 7 % to 9 %). A bank with a silent or padding lane beside live ones scans that
+  lane's whole block (about 3 % of an eight-lane builtin block; the EQ's within noise). In the
+  browser the builtins' dual loop costs about 2 % to 5 % p50 on the 64-track documents against
+  the per-word build; the cause is the loop's structure since #1328, not the chain constants, and
+  #1454 owns it (#1451 removed the iOS memset cause). #1328's follow-up record has the numbers.
+  The counter rides the state payload, the carry and the mono-collapse disengage copy. Details:
+  #1328 Amendment 1 A9 and `dsp-research/filters.md`.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
   the live filter retarget law, is *Retarget a live input filter only through its designs and their
   mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its

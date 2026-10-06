@@ -1307,14 +1307,17 @@ derivation), `37d8583f8` (floors, m5, m7, docs) and the commit that adds this re
 
 **Root item 1: the accepted app-shape cost (recorded, not tuned).** Against the per-word build P0
 (the parent with `flush_pair` as two `flush`, the verifier's recipe), the checkpoint measured the
-64-track app-shape document at +3.5 % / +3.9 % p50 (rounds 1 / 2), above the owner's 2 %. Cause:
-the builtin chain's four vector constants are carried as words (`InputChainConstants`) for the iOS
-`memset_pattern16` ratchet (#1018), and V8 then compiles the builtins' dual loop to 218 instructions
-against 196 with splatted constants; splatting them instead raised the builtins' iOS count from 186
-to 397 `memset_pattern16` calls, which the ratchet refuses. The root accepted the cost now; #1451
-(*Let the builtins splat their chain constants without iOS memset calls*) is filed to remove the
-cause. Benchmark (descriptive; `web-mixing-automation-benchmark.mjs run`, one warmup and two
-measured rounds per module, interleaved, `taskset -c 31`, uncontrolled host, not retried; every
+64-track app-shape document at +3.5 % / +3.9 % p50 (rounds 1 / 2), above the owner's 2 %. The
+root accepted the cost now. *Corrected in attempt 2 (root ruling 6):* this record first attributed
+the cost to the builtin chain's four vector constants carried as words (`InputChainConstants`) for
+the iOS `memset_pattern16` ratchet (#1018). #1451 (*Let the builtins splat their chain constants
+without iOS memset calls*) measured otherwise: the V8 builtins dual loop's 218 instructions against
+P0's 196 come from the loop's structure since #1328 (26 indexed memory moves against 4, and a
+bounds branch), not from the carried words; splatted constants are flat against carried ones.
+#1451's D2 removed the iOS cause (2,122 -> 16 `memset_pattern16` calls) and D3 removed
+`InputChainConstants`; #1454 (*Bring the builtins dual loop back to P0's instruction count*) owns
+the browser gap. Benchmark (descriptive; `web-mixing-automation-benchmark.mjs run`, one warmup and
+two measured rounds per module, interleaved, `taskset -c 31`, uncontrolled host, not retried; every
 output digest equal across modules):
 
 | p50 vs P0, round 1 / round 2 | A9 (`a124b40be`) | checkpoint `4264bb190` | after the scan (this tree) |
@@ -1331,8 +1334,11 @@ the last is a second run of P0, the checkpoint and this tree (load 2.8-3.7), in 
 checkpoint's own round 1 also read +4.5 % / +11.6 % / +5.0 % on the three 64-track documents and its
 round 2 +2.2 % / +3.7 % / +3.2 %. Round 1 of that run is disturbed on the 64-track documents for
 both the checkpoint and this tree (a verifier was building on the host); round 2 is consistent with
-the checkpoint's run. On live documents the scan cannot cost anything (their banks' last frames are
-non-zero), so the app-shape cost is the accepted #1018 one.
+the checkpoint's run. *Corrected in attempt 2 (verdict m1):* this sentence first said the scan
+cannot cost anything on live documents. That holds only for a block whose last frame is non-zero
+on every lane; a live block that ends on an exact zero ran the whole-block scan and then the
+counter's frame loop. Attempt 2's backward scan removes that cost (its section below has the
+numbers). The app-shape cost is the loop-structure cost #1454 owns.
 
 **Root item 2: the silent-lane penalty after the scan (native, descriptive).** A scratch harness
 (not committed): the builtin input chain at `Simd8`, a 30 Hz high-pass into an 18 kHz low-pass,
@@ -1444,12 +1450,12 @@ is green):
 | MK | skewed cascade reads frame `i`'s threshold for every section | `g2_skewed_cascade_arms_each_section_on_its_own_frame` | RED |
 | MI | `input_chain_block` decides armability from channel 0 only | `the_right_channel_arms_its_joint_flush_alone`, `any_state_word_in_the_band_arms_the_block` | RED |
 | MW | `svf_state_held` ignores `ic2` | `any_state_word_in_the_band_arms_the_block` | RED |
-| ML | `silence_armable_holding` drops the long-block term | builtins `a_block_longer_than_the_window_arms_from_rest`, EQ `a_block_longer_than_the_window_renders_as_its_quantum_sized_parts` | RED |
+| ML | `silence_armable_holding` drops the long-block term | builtins `a_block_longer_than_the_window_arms_from_rest`, EQ `a_block_longer_than_the_window_renders_as_its_quantum_sized_parts`, and the existing `builtins/tests/stage.rs::scalar_stage_is_bit_identical_to_reference_recurrence` (verdict n4) | RED |
 | ME | EQ arms from the left channel only | `the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band` | RED |
 | MS | EQ holding mask reads section 0 only | the same, the long-block test, `a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms`, `the_low_shelf_fixed_point_reaches_exact_rest` | RED |
 | MM | EQ collapsed body never arms | `mono_collapse::the_collapsed_body_arms_its_joint_flush` | RED |
 | MD | EQ descriptor declares no scratch (m6) | `the_rest_planes_are_the_scratch_the_descriptor_declares` | RED |
-| MG | joint test reads the first magnitude only (`a1 < rest`) | `g5_native_digests_match_pins` (the armed case) | RED |
+| MG | joint test reads the first magnitude only (`a1 < rest`) | `g5_native_digests_match_pins` (the armed case), and natively also the existing `g4_pair_law_holds_at_every_width`, `g4_pair_law_cases_at_every_width` and G6 (verdict n3) | RED |
 | MF | spill gate rows and their anchors ignore the form | `--self-test` (`..., 2, 2, 1, 1, 1`); either check alone stays green, since the other keeps the forms apart in the synthetic listing | RED |
 | -- | `silence_skip_block` always takes the transition loop | none: equivalent by construction (the loop is the reference); the scan is a cost saving | equivalent |
 
@@ -1470,7 +1476,9 @@ Test value, one sentence each:
   the rest planes.
 - G5 `svf_block/armed/impulse_tails` (m4; pin added individually, reason: the only corpus case whose
   joint test runs against armed thresholds, so `i32x4.max_u` and the armed compare are exercised on
-  wasm): a joint test that does not take the larger magnitude.
+  wasm): a wasm lowering of `i32x4.max_u` or of the armed compare that differs from native.
+  Natively a joint test that does not take the larger magnitude is already red on `g4_pair_law_*`
+  (corrected in attempt 2, verdict n3).
 - Spill self-test, two forms (checkpoint) and ceilings (this tree): rows that ignore the form, and a
   ceiling that is ignored, unchecked for missing loops, or compared off by one.
 
@@ -1496,7 +1504,151 @@ Test value, one sentence each:
   `test-web-audioworklet.sh`: ok.
 
 **Open items.**
-- The builtins keep about 3 % per block in an eight-lane bank with one silent lane (the scan).
-- The app-shape browser cost (+3 % to +4 % p50 against P0) stands until #1451.
+- The builtins keep about 3 % per block in an eight-lane bank with one silent lane (the scan); the
+  root accepted it in attempt 2.
+- The app-shape browser cost (+3 % to +4 % p50 against P0) stands until #1454 (corrected in
+  attempt 2; first written as #1451, which removed the iOS cause only).
 - The multiband compressor still runs the counter and the joint flush on every frame (#1018).
 - n3 (attempt 5) stands: documented, not changed.
+
+### Follow-up attempt 2 (2026-10-06, branch `codex/d15-stream-g`; after the attempt-1 FAIL verdict)
+
+Host: AMD EPYC 7313P (x86-64-v3), rustc 1.97.1, Node v22.23.2. Base of this attempt `e2e6d0e7d`
+(after #1451 D2-D4). Rulings: the root's six rulings on the attempt-1 verdict. Commits: `91724e66c`
+(backward scan, m2 tests, n1, n5) and the commit that adds this record (decision 15, this record).
+
+**M1 (documentation gate).** `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
+passes. The `channel_arms` link went with #1451's D3 (`InputChainConstants` removed); `cc2b4e0c1`
+had already removed the `silence_skip_settle` link; the new scan's doc names the outlined function
+as a code span.
+
+**m1 -> root ruling (b): the backward trailing-zero scan.** `lane::kernels::silence_skip_block` now
+has two forms. Live (the last frame non-zero on every lane: one load, one `mask_any`, unchanged) and
+the backward scan (`silence_skip_settle`, outlined, one per lane width): from the frame before the
+last, four frames per group (four loads and `eq`, three `mask_and`, one test), the lanes zero on
+the last frame are followed backwards; a lane that meets a non-zero frame leaves with its trailing
+count, resolved frame by frame inside that group (an exact integer `f32`, the frames after it); the
+scan stops once no lane is left. A lane still in the scan after frame 0 is zero throughout and takes
+`silence_advance` (`min(run + frames, 2^24)`). This replaces both the whole-block forward scan and
+the counter's loop-carried frame loop. A live lane that ends on a few zeros costs a group or two; a
+silent or padding lane keeps the scan over the whole block, at the forward scan's cost (the `Simd8`
+group compiles to four `vcmpeqps` with folded loads, three `vandps`, one `vtestps` and the loop
+branch). The live-audio lane-op count does not change (the live form is untouched), so the floors
+stay as the follow-up derived them.
+
+Timing (descriptive; scratch harness, not committed: the builtin input chain at `Simd8` as the
+attempt-1 verifier's harness, 30 Hz high-pass into 18 kHz low-pass, 128-frame blocks, 300,000
+blocks per point; the parametric EQ bank at eight lanes, four +6 dB bells and both cuts, 48 kHz,
+128-frame blocks, 150,000 blocks; one warmup and two measured rounds, `taskset -c 31`, one
+invocation per build, not retried; load 6.5-6.7 before, 4.1-4.8 after). Ratio to all-live float
+noise, round 1 / round 2:
+
+| case | builtins before (`e2e6d0e7d`) | builtins after | EQ bank before | EQ bank after |
+|---|---|---|---|---|
+| lane 7's last frame `0.0` | 1.151 / 1.197 | 1.008 / 1.005 | 1.084 / 1.075 | 1.007 / 0.982 |
+| lane 7's last two frames `0.0` | 1.143 / 1.210 | 1.008 / 0.998 | 1.089 / 1.079 | 1.007 / 0.981 |
+| int16 noise at +-2 LSB (frequent exact zeros on every lane) | 1.125 / 1.156 | 1.008 / 1.001 | 1.069 / 1.066 | 1.015 / 0.981 |
+| lane 7 silent | 0.977 / 1.021 | 1.037 / 1.029 | 1.046 / 1.012 | 1.012 / 0.992 |
+
+All live, measured rounds: builtins 1,774 / 1,700 ns per block before, 1,669 / 1,678 after; EQ
+bank 4,635 / 4,672 before, 4,610 / 4,696 after. A block that ends on an exact zero now costs
+within noise of a live one (it cost 13 % to 21 % for the builtins and 7 % to 9 % for the EQ). The
+silent-lane case still scans the whole block: 1.037 / 1.029 here against attempt 1's 1.030 / 1.035
+and this run's own before-measurement of 0.977 / 1.021 at the forward scan, which shows the
+run-to-run spread at that level; about 3 %, the price of exact silence detection (deviation (a)
+below).
+
+Bit identity (one-time, scratch, not committed). Base `a124b40be` (the A9 bits) against this tree,
+release builds:
+- the attempt-1 verifier's independent harness (`zz_verifier_diff.rs`, scale 3): **2,160 of 2,160**
+  scenarios identical; its base output reproduces the verifier's `vdiff-base.txt` byte for byte;
+- attempt 1's harness (`bitid2.rs`): **908 of 908** identical;
+- a new direct harness of `silence_skip_block` alone (`zz_skip_diff.rs`): per-lane programs (live,
+  silent, trailing zero runs of every length around the four-frame groups, sprinkled zeros, a lone
+  non-zero, NaN/inf/subnormal non-zeros, signed zeros), blocks of 1-17, 31-33, 127-129, 1,000 and
+  8,192 frames, counters around the window and `2^24`, two blocks each, at `f32`, `Simd4` and
+  `Simd8`: **4,000 of 4,000** identical.
+
+The two harnesses that call the builtin chain were adapted to #1451's D3 for head only
+(`InputChainConstants` removed); nothing else changed.
+
+Mutants of the new scan (each applied, all three harnesses and `cargo test --release -p lane -p
+parametric-eq -p builtins` with test-support re-run, reverted). Scenarios moved (verifier / 908 /
+skip) and the committed tests that turn red:
+
+| id | mutant | moved | red tests |
+|---|---|---|---|
+| B1 | trailing count starts at 0 (`scanned = 0`) | 1,622 / 548 / 3,778 | `g4_silence_skip_block_is_the_frame_loop` and 8 more (EQ carry, restore and long-block, elision, `one_second_impulse_dfts_match_rbj_...`) |
+| B2 | a group without a leaver counts 3 frames | 1,300 / 532 / 2,130 | g4 and 4 more |
+| B3 | a group resolves earliest frame first | 1,413 / 498 / 3,249 | g4, `elision_is_bit_identical_...`, `mixed_elision_matches_frozen_bodies_w4` / `_w8` |
+| B4 | the scan ends after the first group with a leaver | 1,189 / 518 / 3,324 | g4, `mixed_elision_matches_frozen_bodies_w8`, `padded_banks::a_padded_bank_renders_its_per_node_instances` |
+| B5 | the frames before the first full group are skipped | 1,283 / 300 / 1,307 | g4 and 4 more |
+| B6 | the final select uses the last-frame mask, not the lanes still in the scan | 1,464 / 484 / 3,692 | g4 and 10 more (EQ padded-bank and bank tests) |
+| B7 | the scan also covers the last frame | 1,624 / 548 / 3,778 | g4 and 8 more |
+| B8 | the group test drops its latest frame | 638 / 252 / 509 | g4, `padded_banks::a_padded_bank_renders_its_per_node_instances` |
+| B9 | no early exit | 0 / 0 / 0 | none: equivalent by construction (the exit is the cost saving) |
+
+Every bits mutant is red on the existing `g4_silence_skip_block_is_the_frame_loop`, which compares
+`silence_skip_block` with the frame loop, so no new test was added for the scan.
+
+**m2: the long-block boundary.** The two long-block tests also run a block exactly one frame longer
+than the window: `lane/tests/input_chain_arming.rs::a_block_longer_than_the_window_arms_from_rest`
+(every entry point, dual and mono, every width) with window 31 in a 32-frame block, and the EQ's
+`a_block_longer_than_the_window_renders_as_its_quantum_sized_parts` with 4,097 frames (window
+4,096 at 48 kHz) as one block against 128-frame parts. Mutant MLoff (`crates/lane/src/lib.rs`,
+`frames.gt(armed_after + 1)`): **red** on exactly these two tests (release, lane, parametric-eq
+and builtins with test-support); green on the tree. Test value: a long-block term off by one,
+which treats a block of exactly `window + 1` frames as short; the attempt-1 verifier found MLoff
+green on every committed test.
+
+**NITs.** n1: the sample-peak doc is back on `meter_peak_values`. n2: decision 15 now gives the
+measured EQ numbers (the silent-lane EQ cost within noise), in agreement with this record. n3 and
+n4: the MG and ML rows and the G5 test-value sentence above are corrected. n5: the follow-up's
+doc lines over 100 columns are rewrapped (`builtins.rs` five body docs, `svf_step_when`'s doc, a
+g2 and an EQ test doc; `builtins.rs:542` went with D3).
+
+**Restated.** Decision 15's A9 entry, the `RestThresholds` doc and
+`docs/rulings/effect-floor-accounting.md` now state the backward scan and its measured cost; the
+follow-up's "On live documents the scan cannot cost anything" and the app-shape attribution are
+corrected in place above (root ruling 6: the builtins dual loop's 218 against 196 V8 instructions
+come from the loop structure since #1328, 26 indexed memory moves against 4 and a bounds branch,
+not the carried words; #1451 D2 fixed the iOS cause; #1454 owns the browser gap).
+
+**Deviations the root accepted (recorded with numbers).**
+- (a) About 3 % remains for an eight-lane builtin bank with one silent lane: the whole-block zero
+  scan, the price of exact silence detection; the EQ's penalty is gone. Attempt 1: implementer
+  1.030 / 1.035, verifier 1.041 / 0.980, against A9's 1.27-1.39; a timing build without the scan
+  1.001; 55-60 ns per block. This attempt: 1.037 / 1.029 (about 50-60 ns per block); the backward
+  scan does not change the silent-lane case's cost.
+- (b) The V8 spill gate's EQ "dual armed depth-2 pair" ceiling was 11, not the ruling's 12, as
+  measured at attempt 1; it is now 12 after #1451's D3 with #1451's own reason (splatting the
+  EQ's `FLUSH_EPS` again gave V8 one more carried slot in the armed loop only, which runs only on
+  silent tails). This tree measures 12 at 219 instructions.
+
+**Gates (this tree, `91724e66c`).**
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: ok;
+- gate-4 `cargo test --locked --all-targets` set (14 packages, spec features): 879 passed, 0
+  failed; `cargo test -p audit -p graph-compiler -p builtins-compiler -p graph -p host-core
+  -p host-web -p capi -p bench`: 900 passed, 0 failed;
+- `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`: 120 passed
+  (G5 green);
+- `run-wasm-gates.sh`: ok (spill rows: dual armed tail 2 at ceiling 2, dual armed pair 12 at
+  ceiling 12, mono armed rows 0, held unarmed rows clean); spill and known-defects `--self-test`:
+  ok;
+- `check-cross-targets.sh`: PASS; iOS `memset_pattern16` counts unchanged (builtins 5, host-core 4,
+  soft-clip 1, true-peak-limiter 6; no other crate has a call);
+- `conformance_fixtures --check`, `check-builtins-fixtures.sh` (50 files), `audit unfused-fma
+  conformance`, `graph_fixture --check`, `check-graph-determinism.sh` (100/100): ok; no fixture or
+  digest moved;
+- policy: `check-{lane,workspace,realtime,builtins,graph,effect-runtime,rack,session,host-core,
+  bench}-policy.sh`, `check-dsp-research.sh`, `check-console-benchmark-fixture.sh`,
+  `test-{lane,realtime,workspace,builtins}-policy.sh`: ok;
+- `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`
+  and with `--all-features`: ok;
+- `cargo test -p bench floor`, `test-console-benchmark.sh`: ok (floors unchanged);
+- worklet chain (output directories cleared first): `build-web-audioworklet.sh --named-twin`,
+  `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`: ok.
+
+**Open items.** The silent-lane builtin cost (deviation (a)); the browser loop-structure cost
+(#1454); the multiband compressor's per-frame counter (#1018).
