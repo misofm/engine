@@ -584,3 +584,15 @@ files", `poll_meters` unmarked) and `bash scripts/check-workspace-policy.sh` exi
 
 **Test value.** Unchanged from attempt 1: `meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows`
 is the only test red on mutant (min), the lasting one-window lag at meter blocks 1.
+
+### Follow-ups (verifier NITs)
+
+The attempt-2 verdict (PASS) found two comment NITs. Both are folded in `hosts/host-web/src/lib.rs`
+with no code change:
+- NIT-1: the `meter_remaining` doc now says "one count per strip meter (track or submix)", as the
+  `METER_QUEUE_DEPTH` doc does.
+- NIT-2: the `poll_meters` comment now says the function has no runtime-checked `[]` index (only
+  `get`/`get_mut` and constant indexes into a fixed array), so it adds no bounds check of its own.
+  The constant `reserved[0]`/`reserved[1]` indexes into the `[u64; 2]` are checked at compile time.
+
+The blank lines around `poll_meters` that the realtime-policy guard needs (#1443 G-D1) are kept.

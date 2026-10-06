@@ -1634,9 +1634,10 @@ struct ReadyOwnership {
     /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
     /// the callback; the queue itself remains the only producer-side buffer.
     meter_pending: Box<[Option<MeterSnapshot>]>,
-    /// One count per track meter, read from its queue at each poll's entry and decremented before
-    /// each pop (issue #1448 D2). Scratch for one call: every poll sets every entry before it pops,
-    /// so delivery resets do not touch it. Allocated at preparation, sized by the meter count.
+    /// One count per strip meter (track or submix), read from its queue at each poll's entry and
+    /// decremented before each pop (issue #1448 D2). Scratch for one call: every poll sets every
+    /// entry before it pops, so delivery resets do not touch it. Allocated at preparation, sized
+    /// by the meter count.
     meter_remaining: Box<[usize]>,
     /// Host publication generation, advanced on lease transitions and detected producer resets.
     meter_generation: u64,
@@ -3443,11 +3444,12 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return 0;
         };
-        // This function indexes with `get`/`get_mut`, never `[]`, so it adds no bounds check of its
-        // own. The one `panic_bounds_check` in this export's call graph is the slot index of the
-        // inlined SPSC `try_pop` (`slots[self.local]` in `crates/engine/src/realtime/spsc.rs`),
-        // which the ring keeps in range. This export is called from `process()`, so the shipped
-        // artifact's call-graph gate covers it exactly as it covers the render export.
+        // This function has no runtime-checked `[]` index (only `get`/`get_mut` and constant
+        // indexes into a fixed array), so it adds no bounds check of its own. The one
+        // `panic_bounds_check` in this export's call graph is the slot index of the inlined SPSC
+        // `try_pop` (`slots[self.local]` in `crates/engine/src/realtime/spsc.rs`), which the ring
+        // keeps in range. This export is called from `process()`, so the shipped artifact's
+        // call-graph gate covers it as it covers the render export.
         let meter_count = ready.meters.len();
         if meter_count == 0 {
             return 0;
