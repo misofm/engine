@@ -34,28 +34,37 @@ function body.
 ## Decisions frozen for this slice
 
 - **D1. The home.** `EffectDescriptor` gains
-  `pub tail_and_rest: fn(sample_rate: u32, quality: EffectQuality) -> (TailSamples, RestBound)`.
-  It runs on the control thread; render never calls it.
+  `pub tail_and_rest: fn(sample_rate: u32, quality: EffectQuality) -> EffectTailBound`, with
+  `pub struct EffectTailBound { pub tail: TailSamples, pub tail_every_peak: TailSamples, pub rest: RestBound }`
+  in `effect-contract`: the three values #1329 defines, `T_decay`, `T_rest = max(T_decay, R(P*))`
+  and the exact-rest bound (Amendment 1, ruling 1). It runs on the control thread; render never
+  calls it.
 - **D2. `RestBound`.** `pub enum RestBound { Bounded(RestSamples), Unstated }` in `effect-contract`.
   `Unstated` is the effect-side counterpart of `TailSamples::Infinite`. It is not a lasting
   variant: it exists only because the per-effect slices land one at a time, and the same stream-G
   sequence deletes it. *Retire the Infinite tail* (#1378) depends on every per-effect slice
   (#1372-#1376) and removes `Unstated` together with `Infinite`, so no release of the sequence's
-  end state contains either. Its doc comment says exactly that and names #1378.
+  end state contains either. Its doc comment says exactly that and names #1378, and says #1378
+  retires `Infinite` in both tail fields (`tail` and `tail_every_peak`).
 - **D3. One source.** `QualityDescriptor::tail` is deleted. `expected_prepared_metadata` calls
-  `(descriptor.tail_and_rest)(rate, quality)` and fills `PreparedEffectMetadata::{tail, rest}`.
-  `EffectProgramKey` gains `rest`, for the same reason it carries `tail`. The `effect-compiler`
-  mismatch check compares `rest` too.
-- **D4. Values unchanged.** Each effect's function returns its current tail and `RestBound::Unstated`.
-  No rendered bit, latency or canonical plan byte moves.
+  `(descriptor.tail_and_rest)(rate, quality)` and fills
+  `PreparedEffectMetadata::{tail, tail_every_peak, rest}`. `EffectProgramKey` gains
+  `tail_every_peak` and `rest`, for the same reason it carries `tail`. The `effect-compiler`
+  mismatch check compares `tail_every_peak` and `rest` too.
+- **D4. Values unchanged.** Each effect's function returns its current tail,
+  `tail_every_peak: TailSamples::Infinite` and `RestBound::Unstated`; the conformance test effect
+  does the same. `tail_every_peak` is `Infinite` for all eight effects, even the gate's and the
+  transient shaper's `Finite(0)` and the soft clip's `Finite(29)`: `T_rest = max(T_decay, R(P*))`,
+  and with `RestBound::Unstated` no `R(P*)` is derived, so no finite `T_rest` can be stated
+  soundly (Amendment 1, ruling 1). No rendered bit, latency or canonical plan byte moves.
 - **D5. Parameter independence.** The function takes the rate and quality only. Effect parameters are
   live or automatable, so each bound is over the parameter domain at that rate; a per-instance
   refinement is not part of the contract.
 
 ## Deliverables
 
-1. `RestBound`, the descriptor field, the metadata and program-key fields, the expected-metadata
-   change, the compiler check.
+1. `RestBound`, `EffectTailBound`, the descriptor field, the metadata and program-key fields
+   (`tail_every_peak`, `rest`), the expected-metadata change, the compiler check.
 2. A `tail_and_rest` function in each of the eight effect crates, and in the conformance test
    effect (`crates/conformance/src/effect.rs:90`, `:397`).
 3. Doc: `docs/EFFECT_CONTRACT_V1.md` (where tail and rest come from).
@@ -63,7 +72,10 @@ function body.
 ## Authorized paths
 
 - `crates/effect-contract/src/lib.rs`, `docs/EFFECT_CONTRACT_V1.md`
-- `crates/effect-compiler/src/prepare.rs` (the mismatch check)
+- `crates/effect-compiler/src/prepare.rs` (the mismatch check and its one unit test; Amendment 1,
+  ruling 2)
+- `docs/handoffs/decision-15-2026-10-05/STREAMS.md` (the `prepare.rs` hot-file row only; Amendment 1,
+  ruling 2)
 - The descriptor and `quality` functions only in: `crates/parametric-eq/src/lib.rs`,
   `crates/compressor/src/lib.rs`, `crates/true-peak-limiter/src/lib.rs`,
   `crates/multiband-compressor/src/lib.rs`, `crates/delay/src/lib.rs`,
@@ -75,6 +87,7 @@ function body.
 - Struct literals that must gain the new field (`tail_and_rest` on an `EffectDescriptor`, `rest`
   on a `PreparedEffectMetadata` or an `EffectProgramKey`, `tail` removed from a
   `QualityDescriptor`), that field only: `crates/effect-contract/tests/response_analysis.rs`,
+  `crates/effect-contract/tests/registry.rs` (Amendment 1, ruling 3),
   `crates/conformance/tests/effect_contract.rs`, `crates/effect-compiler/tests/native_session.rs`,
   `crates/true-peak-limiter/tests/observation.rs`, `crates/compressor/tests/native_points.rs`,
   `crates/transient-shaper/src/corpus.rs`, `crates/builtins-compiler/src/lib.rs`,
@@ -98,11 +111,12 @@ function body.
 
 ## Objective gates
 
-1. **Conformance**: for every effect, at every launch rate, `metadata().rest` and `metadata().tail` of
-   a prepared instance equal `(descriptor.tail_and_rest)(rate, Normal)`
-   (`crates/conformance`, the existing per-effect conformance run).
-2. **Mismatch refused**: an `effect-compiler` unit test where a processor reports a `rest`
-   different from the expected one gets `effect.metadata.mismatch`.
+1. **Conformance**: for every effect, at every launch rate, `metadata().tail`,
+   `metadata().tail_every_peak` and `metadata().rest` of a prepared instance equal the fields of
+   `(descriptor.tail_and_rest)(rate, Normal)` (`crates/conformance`, the existing per-effect
+   conformance run).
+2. **Mismatch refused**: an `effect-compiler` unit test where a processor reports a `rest`, or a
+   `tail_every_peak`, different from the expected one gets `effect.metadata.mismatch`.
 3. No bit moves: the existing suites, unchanged.
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - the `test-debug-a` workspace command from `.github/workflows/qualification.yml`
@@ -115,8 +129,35 @@ function body.
 
 - Gate 1: an effect whose prepare writes a tail or rest of its own instead of its declared function
   is red; nothing compares metadata to a computed bound today.
-- Gate 2: a compiler that stops checking `rest` would let a processor's `rest` drift from its declared
-  function unseen; the existing mismatch test covers only the older fields.
+- Gate 2: a compiler that stops checking `rest` or `tail_every_peak` would let a processor's value
+  drift from its declared function unseen; no existing test reaches `effect.metadata.mismatch`.
+
+## Amendment 1 (root rulings, 2026-10-06)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(b) and #1329 Amendment 3.
+The first worker stopped before code on a spec conflict: #1329 (passed) defines three values per
+node, `T_decay`, `T_rest = max(T_decay, R(P*))` (`tail_every_peak`) and `RestSamples`, and this
+spec carried only two. No attempt was consumed. These rulings are binding; D1-D4, the
+Deliverables, the Authorized paths, gates 1 and 2 and the Test value above are updated to match.
+
+1. **Three values, one struct.** D1's function returns
+   `EffectTailBound { tail: TailSamples, tail_every_peak: TailSamples, rest: RestBound }`, using
+   the `RestBound`/`RestSamples` names #1329 and this spec established, with no version suffix.
+   `PreparedEffectMetadata`, `EffectProgramKey`, `expected_prepared_metadata` and the
+   `effect-compiler` mismatch check carry and compare `tail_every_peak` too, and gates 1 and 2
+   cover it. D4 sets `tail_every_peak = TailSamples::Infinite` for all eight effects in this slice:
+   with `RestBound::Unstated` no `R(P*)` is derived, so even a `Finite(0)` or `Finite(29)` tail
+   cannot soundly state a finite `T_rest`. D2's doc names #1378 as retiring `Infinite` in both tail
+   fields.
+2. **Hot-file order.** #1377 goes ahead of B (#1315, #1345) and G (#1339, #1340) in the
+   `crates/effect-compiler/src/prepare.rs` order: those slices are blocked, and #1377's edit there
+   is one comparison and one test. The `STREAMS.md` hot-file row records this reason; the later
+   slices rebase.
+3. **`crates/effect-contract/tests/registry.rs`** is in scope for its struct literal (the field
+   only).
+4. **GitHub sync of #1377 is pending owner permission.** No GitHub write is made for this issue
+   until the owner grants it; the local spec is the record meanwhile.
 
 ## Dependencies
 
