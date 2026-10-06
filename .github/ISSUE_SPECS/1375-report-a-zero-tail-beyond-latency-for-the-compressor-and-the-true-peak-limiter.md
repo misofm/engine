@@ -25,7 +25,15 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   stalls in `f32` when `|u - e| < ulp(e) / (2k)`. With `u = 0` a stall above `FLUSH_EPS` would be a
   state that never rests.
 - The home for the values is `tail_and_rest` (#1377); the contract and `RestSamples` are #1329's;
-  gain and decay are #1379's.
+  the composition values (`D`, `G_p`, `G_t`, `sigma`) are #1379 Amendment 1's H1 contract, carried
+  by `CompositionBound::Stated` in `NodeTailBound` (#1464; contract text in
+  `docs/handoffs/decision-15-2026-10-05/1379-amendment1-design.md`, H1).
+- **Root ruling (2026-10-06, #1379 Amendment 1, third round).** This slice needs only the carrier
+  and the contract from #1379, not the composed graph extent: no gate or deliverable reads
+  `output_tail`, and the graph-compiler test it edits checks the effect entry's own
+  `metadata.tail`. Its dependency on #1379 narrows to #1464 and #1465, and D4 is restated to H1.
+  It lands on `main` in the batch with #1379 (slice C), never before it: before C the extent ignores
+  the compressor's makeup gain, so a newly finite plan tail would not yet be composed through gain.
 - Round-1 evidence (decision 15): "the compressor and limiter only multiply a delayed input, the
   argument the transient shaper used for `Finite(0)`".
 
@@ -57,9 +65,16 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   two-product form the condition is `c < 1 - 2^-24`; for the `e + c (u - e)` form it is
   `c > 2^-24`, scale-free. If a word fails, stop and report it to Sol as a class-B defect, as in
   *Flush the SVF jointly so builtin and EQ filters reach exact rest* (#1328); do not state a bound.
-- **D4. Gain.** `PeakGain` (#1379 D1: a peak gain and an incremental gain after silence) is the
-  compressor's maximum makeup (`mix` never raises above it; after silence the output is
-  `g * x` with `g <= makeup`), and the limiter's `0 dB` (`g <= 1`).
+- **D4. Composition values** (restated 2026-10-06 to #1379 Amendment 1, H1). Both state
+  `CompositionBound::Stated` with `decay` `TailDecay(0)` (D1). `peak_gain = tail_gain`: for the
+  compressor, `max(makeup_max, 1)` over the parameter domain (its output is
+  `(mix g + 1 - mix) x` with `0 <= g <= makeup`), and for the limiter `0 dB` (`g <= 1`), each
+  times `(1 + u)` per rounded product on the output's chain (`u = 2^-24`), rounded up to millibels;
+  after silence the output is `g x` with the same bound, so `G_t = G_p`. `stall`: the underflow
+  allowance of the output's chain (`2^-126` per rounded operation, rounded up into
+  `FlushStall::Level`), as #1379 H3 states for gain-only nodes. Each value holds for every sidechain
+  input (H1's quantifier): a sidechain feeds only the detector, so `g <= makeup` and `g <= 1` hold
+  whatever it carries.
 
 ## Deliverables
 
@@ -93,12 +108,15 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
    with the same parameters and settled ramps, fed the same number of zero samples, except the
    cursor words the test names (`phase`, ring write positions). As a cursor-independent check, both instances then render the same 4,096
    samples of seeded noise and their outputs agree under `==`.
-3. **Recompute**: the helper's value for each word is checked against a brute-force `f32`
+3. **Composition** (both effects, every rate): the stated `peak_gain` equals D4's formula
+   recomputed in the test, and over gate 1's runs (sidechain connected with full-scale noise, and
+   unconnected) every output sample satisfies `|y| <= g_p max|x| + sigma`.
+4. **Recompute**: the helper's value for each word is checked against a brute-force `f32`
    iteration of that word's recurrence from `E_max` with zero input, counted until it equals its
    value in `Z` (with `B` that count:
    `B <= helper <= B + max(2, ceil(B / 100))`; the two-sample floor covers the `ceil` and rounding
    of short fast-coefficient runs).
-4. Commands: the `test-debug-b` command from `.github/workflows/qualification.yml`; the conformance
+5. Commands: the `test-debug-b` command from `.github/workflows/qualification.yml`; the conformance
    fixtures check; `cargo clippy --locked --workspace --all-targets -- -D warnings`;
    `cargo fmt --all -- --check`.
 
@@ -109,9 +127,18 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
 - Gate 2: a state word that stalls above the flush (D3), a bound computed from the wrong
   coefficient, or a limiter box sum that drifts off `Wb` is red; an all-zero rest check could not
   pass on the limiter at all.
-- Gate 3: a helper formula off by the rounding inflation under-reports and is red.
+- Gate 3: a gain stated from `makeup` alone that ignores the dry term of `mix` (below 0 dB makeup the
+  dry path dominates), or a gain that depends on the sidechain, is red; nothing else checks the
+  composition values.
+- Gate 4: a helper formula off by the rounding inflation under-reports and is red.
 
 ## Dependencies
 
 - *Carry each effect's tail and exact-rest bound in its prepared metadata* (#1377)
-- *Define how node tails compose through gain in the graph extent* (#1379)
+- *Carry every node's tail bound in one node-neutral struct* (#1464): the carrier.
+- *State a fixed input section's decay, gains and flush stall* (#1465): the contract text and the
+  derivation note it starts.
+- **Landing constraint (confirmed by root, 2026-10-06):** implemented after #1465, but lands on
+  `main` only in the same batch as *Define how node tails compose through gain in the graph extent*
+  (#1379), never before it: before #1379 a finite effect tail would be composed without the
+  compressor's makeup gain, and `main` must never report a plan tail that is not certified.
