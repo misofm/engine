@@ -129,6 +129,45 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
 - D7. Trap-on-allocate mode is not built: the counter is the gate, and a trap would end audio in
   production.
 
+## Amendment 1 (root, 2026-10-06)
+
+Attempt 1 stopped on a spec problem: the runtime counter found a real render-thread allocation, and
+D3 and the existing gates need paths outside the list below. Root ruled all four items in scope.
+This slice lands after *Bound every drain the AudioWorklet runs on its audio thread* (#1449), which
+owns the `spectrum.rs` drains; the fix in A1 is made on #1449's `spectrum.rs`.
+
+- **A1. Render-thread allocation fix.** `PreparedSpectrumCapture::channels()`
+  (`hosts/host-web/src/lib.rs`) calls `SpectrumCaptureCollection::selected_entry()`
+  (`crates/host-core/src/spectrum.rs`), which clones the selected target's `String` and drops it,
+  so `miso_engine_web_v1_spectrum_read` and `_spectrum_stream_read` allocate and free on every read
+  of a collection capture (the counter read 312-354 in the SDK's spectrum-collection instance in
+  Chromium). Add a non-cloning `selected_channels()` accessor in host-core and use it in
+  `channels()`. This is a real defect; fix it here, not in #1449. A test reads a collection
+  capture's spectrum and spectrum stream inside the locked window and asserts the counter reads 0;
+  restoring the clone makes the counter read more than 0 (mutation run in the attempt record). The
+  test lives in the gate-8 binary's single `#[test]` or in a second integration binary that also
+  registers `RenderLockedAllocator<System>` and holds one `#[test]`.
+- **A2. Reading the count through the host.** The worklet host refuses reply tags it does not
+  expect, the worklet requires increasing request IDs, and each workload runs in its own instance
+  with its own counter. The host therefore gains `renderAllocationCount()`, which sends D3's port
+  message in its request sequence; `qualification.js` calls it on every instance before that
+  instance's dispose, and gate `render-allocations` requires every read to be 0.
+- **A3. Re-pins.** D5 makes boot reserve the three stagings, so three exact `memoryBytes` rows in
+  `hosts/host-web/tests/browser-v1/expected.json` grow by 17 pages. Re-pin each row individually
+  with that reason: `simd128.initialStatus` and `simd128.beforeDisposeStatus` 1310720 -> 2424832,
+  `commandTimeline.beforeDisposeStatus` 1376256 -> 2490368. No PCM digest may move.
+- **A4. Realtime policy.** `hosts/host-web/src/render_lock.rs` joins the approved `unsafe` list in
+  `scripts/check-realtime-policy.sh` (a `GlobalAlloc` impl needs `unsafe`). Hot file: stream J's
+  realtime-policy tool later reproduces this listing.
+
+Authorized paths added by this amendment: `crates/host-core/src/spectrum.rs` (A1's accessor and its
+unit test only), `hosts/host-web/src/lib.rs` (A1's `channels()` change), a second
+`hosts/host-web/tests/*.rs` integration binary if A1's test uses one,
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`,
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`
+(A2), `hosts/host-web/tests/browser-v1/expected.json` (A3's three rows only) and
+`scripts/check-realtime-policy.sh` (A4's listing only).
+
 ## Deliverables
 
 1. `hosts/host-web/src/render_lock.rs` (D1) and its unit tests; D2 and D3 wiring in
@@ -235,3 +274,270 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
   (#1334): it gates today's stable, single-instance artifact and closes today's blind spot.
 Dependent: *Run the browser control plane in a Worker and keep the AudioWorklet render-only*
 (#1332) depends on this issue.
+
+## Attempt record
+
+### Pre-amendment pass (unverified; implementer, branch `codex/d15-stream-h` at `6d28a80ec`) -- STOPPED, not complete
+
+**Status.** D1, D2, D4, D5, the D3 export and worklet message, deliverables 1, 2, 4 and 5 are
+implemented and green. Deliverable 3 (the qualification gate and its mutation) and gates 4 and 5
+are **not** done, and gate 3's `check-browser-expected-resources.py` and
+`check-realtime-policy.sh` are red. Each needs a path outside "Authorized paths", and the
+hazard below fired. Nothing was relaxed.
+
+**Hazard fired: a real render-thread allocation on today's artifact.** A scratch run (not
+committed) gave a copy of the built artifact's host a `miso.renderallocations.v1` request before
+each dispose, and ran the Chromium leg with `?sdk=1`. 24 of 25 worklet instances read 0. The
+SDK's spectrum-collection instance read 312, then 354 on a second run. A scratch build that
+recorded the open window's closure type named all of them:
+`host_web::ffi::miso_engine_web_v1_spectrum_stream_read::{{closure}}`, first allocation 7 bytes.
+The cause: `PreparedSpectrumCapture::channels()` (`hosts/host-web/src/lib.rs:1496`) calls
+`SpectrumCaptureCollection::selected_entry()` (`crates/host-core/src/spectrum.rs:843`). That
+call clones the selected `SpectrumTarget` (its `String` id `track-a` is 7 bytes) and drops it.
+So `spectrum_stream_read` and `spectrum_read` allocate and free once per read through
+`AudioWorkletEngineHost::spectrum_channels` on a collection capture. The fix is bounded: add a
+`selected_channels()` accessor that does not clone, in `crates/host-core/src/spectrum.rs`, and
+use it in `PreparedSpectrumCapture::channels()`. Both files are outside this slice's authorized
+paths (`lib.rs` is authorized for its module line and re-export only).
+
+**Paths the slice needs that "Authorized paths" omits.**
+1. `crates/host-core/src/spectrum.rs` and `hosts/host-web/src/lib.rs` (`PreparedSpectrumCapture::channels`)
+   for the hazard fix above.
+2. `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`,
+   `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and its checked mirror
+   `sdk/src/browser/shipped-host.d.ts`. Qualification reaches the worklet only through the host,
+   whose `#receive` refuses any reply tag it does not expect, and the worklet refuses a request
+   id at or below its last one. So qualification cannot send `miso.renderallocations.v1` before
+   `dispose()` without a host method. The workloads the spec names (live control, meters,
+   observation, stall, and the reads through the SDK) each run in their own host instance with
+   its own counter. So the count must be read per host, before each dispose. A raw-node workload
+   only in `qualification.js` would cover one instance and copy the host's protocol. It would not
+   read the instances the spec names. The planned shape: a host method
+   `renderAllocationCount()` (response kind `renderAllocations`, reply fields
+   `tag, requestId, result, count`). `qualification.js` calls it before each `dispose()` in
+   `runLiveControlQualification`, `runObservationRun` and `runStallQualification`. The SDK's
+   instances are reached through the same host. `run.mjs` adds gate `render-allocations`
+   (every count `=== 0`) and mutation `render-allocations` (one count set to 1).
+3. `hosts/host-web/tests/browser-v1/expected.json`: three exact `memoryBytes` rows move. Boot now
+   allocates the three stagings (D5), mostly `ResponseStaging`'s fixed 1 MiB live-response
+   capture. The raw direct oracle never touched them, but the shipped worklet already allocated
+   them right after boot. Each row needs its own re-pin, with this reason:
+   `simd128.initialStatus.memoryBytes` 1310720 -> 2424832,
+   `simd128.beforeDisposeStatus.memoryBytes` 1310720 -> 2424832 and
+   `commandTimeline.beforeDisposeStatus.memoryBytes` 1376256 -> 2490368 (+17 pages each). No PCM
+   digest moved: `direct-oracle.mjs` asserts them before it prints.
+4. `scripts/check-realtime-policy.sh`: `hosts/host-web/src/render_lock.rs` must join the list of
+   approved files that may contain `unsafe`. A `GlobalAlloc` impl is `unsafe` by definition, and
+   the policy already lists the other counting allocators (`boot_transient_budget.rs`,
+   `bench_support::alloc`). The gate-8 binary has no `unsafe`: it stages through safe native
+   writers.
+
+**Decisions taken in this attempt.**
+- D2's locked set is the set the worklet calls after boot. The spectrum request and collection
+  accessors (`spectrum_request_*`, `spectrum_collection_*`) are not in it, because the worklet
+  calls them only before boot, where they size and allocate the collection staging by design.
+  Including them would count legal boot-time allocations. `ffi.rs`'s module doc records this.
+- D5: the boot exports allocate the stagings only when boot returns a handle
+  (`reserved_after_boot`). A refused boot allocates none of them. `check-web-boot-budget.mjs`
+  requires a typed pre-parse refusal to grow memory by at most one page, and it went red while
+  the reservation came first.
+- D4: `closure()` now takes an exact name match before a substring match.
+  `miso_engine_web_v1_render` is a prefix of `miso_engine_web_v1_render_allocation_count`, and
+  the existing render gate otherwise stopped with "ambiguous export name". Self-test (h4) holds
+  this.
+- The integration binary cannot write through the `u32` pointer exports on a 64-bit host. A
+  `#[doc(hidden)]` `native_staging` module was added to `ffi.rs`, behind
+  `cfg(not(target_family = "wasm"))`, so it is not in the shipped artifact. It holds safe writers
+  that store what the worklet writes through the exports' addresses.
+- `INDIRECT_SITES`, measured on this attempt's named twin: render 2 (`PreparedRenderPlan::render`
+  `invalidate_observers`, `render_inner` `executor.render`), meter_poll 0, command_submit 13 in 5
+  members (the `&dyn Fn` mute predicate in `LiveRouteState::follow` and `followed_lanes`, and
+  `Arc<dyn NativeEffectFactory>` in `EffectControlOwner::edit` and the producer's publish and
+  preflight). The script gives the reason for each one.
+
+**Gates run.**
+- Gate 1, `cargo test --locked -p host-web --lib render_lock`: pass.
+- Gate 2, `bash scripts/test-web-audioworklet.sh`: pass, with cases (h)-(h4).
+- Gate 3: the build passes. `check-web-audioworklet.sh <out> <twin>` passes, with the three
+  `--render-thread` runs. `check-browser-expected-resources.py --artifacts` **fails**: only the
+  three `memoryBytes` rows (item 3 above).
+- Gate 4: **not run as a gate**. The gate does not exist yet (item 2). The existing Chromium leg
+  passes on this artifact (`--check-matrix --self-test-mutations`, Chromium 151.0.7922.34).
+  Firefox and WebKit were not run.
+- Gate 5: not run. It needs gate 4.
+- Gate 6, `check-sdk-generated.sh <out>` and `parameter-metadata --check <out>`: pass.
+- Gate 7: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings` and `check-workspace-policy.sh` pass.
+  `check-realtime-policy.sh` **fails** (item 4).
+- Gate 8, `cargo test --locked -p host-web --test render_locked_staging`: pass.
+- `cargo test --locked -p host-web`: all pass. `check-cross-targets.sh` was not run, because no
+  engine crate changed.
+
+**Mutation evidence. Each mutation was applied, the test went red, and the revert went green.**
+- `render_lock` unit test. Each of these turned it red: an inverted flag test, no
+  `fetch_add`, `dealloc` not counted, `realloc` not counted, and a window that never clears the
+  flag. Test value: it catches a wrapper that counts the wrong calls, or counts outside its
+  window. Nothing else tests the wrapper.
+- `needs_drop` assertions. `LiveHostSlot` back to `RefCell<Option<LiveHost>>`, and
+  `StagingSlot<T>` as `Cell<Option<Box<RefCell<T>>>>`, each fail to compile on the
+  `const _: () = assert!(!needs_drop::<..>())` lines.
+- Gate 8 (PR evidence). With the boot reservation of the observation staging removed, the count
+  reads 6. With the response staging's removed, it reads 7. With the spectrum staging's removed,
+  it stays 0. That is expected: boot itself touches the spectrum staging (`boot_staged`), and so
+  does the worklet's pre-boot request staging. Test value: it catches a staging that a booted
+  instance still allocates lazily inside the locked window.
+- Callgraph self-test. Each of these turned the self-test red: the destructor-registration
+  check disabled (h2, two cases), the atomic-wait check disabled (h3, two cases), the indirect
+  comparison disabled (h1, h1a, h1b), hash stripping disabled (h1d, two cases), and the
+  exact-name root disabled (h4). Test value: each D4 rule has a case that only that rule
+  catches.
+
+### Attempt 1 under Amendment 1 (implementer, branch `codex/d15-stream-h` on `1e658aa65`)
+
+**Status.** The pre-amendment pass was cherry-picked without conflicts onto #1449's head, and
+A1-A4 and deliverables 3 and 6 are done. All eight objective gates pass; gate 4 passes in
+Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, with every instance reading 0.
+
+**A1.** `SpectrumCaptureCollection::selected_channels()` returns the selected entry's mask
+without cloning its target. `PreparedSpectrumCapture::channels()` uses it. The native counter
+test is phase 2 of gate 8's single `#[test]`: on a second fresh thread it boots the observation
+session with a two-entry collection (`trackPostPan:track` and `output:main-out`). It selects the
+second entry and renders. Then it requires a completed spectrum read and a completed
+spectrum-stream read, with the counter unchanged. To stage the collection natively,
+`native_staging` gains `spectrum_collection` and `spectrum_target_id`.
+
+**A2.** The host's `renderAllocationCount()` (response kind `renderAllocations`, reply fields
+`tag, requestId, result, count`, at most one in flight, `result === 0` and `count` a `u32`) is in
+the `.js`, the `.d.ts` and its mirror. `qualification.js` reads the count on every instance it
+boots, before that instance's `dispose()`. That is ten instances: four corpus segments, live
+control, both observation runs, the stall, and two new staging-read instances. Deliverable 3's
+reads were in none of the existing raw workloads, so a new workload `runStagingReadRun` boots the
+observation session with the same two-entry collection and selects `output:main-out`:
+- `oneShot`: one completed one-shot spectrum read, one observation read (one row), one track
+  response capture, then a stream start and a stream read. That stream read returns warming:
+  nothing renders after its start, but it still goes through the selected entry's
+  `channels()`.
+- `stream`: the stream starts before the render, then one completed stream-window read.
+`run.mjs` adds gate `staging-reads` (each read completed, so the counter covers real data) and
+gate `render-allocations` (exactly ten rows, every count `=== 0`). It adds the matching
+`--self-test-mutations` entries and prints the per-instance counts.
+
+**A3.** The measured rows equal the amendment's values. Each was re-pinned on its own line, for
+the same reason: boot now reserves the three stagings (D5), +17 pages.
+`simd128.initialStatus.memoryBytes` 1310720 -> 2424832, `simd128.beforeDisposeStatus.memoryBytes`
+1310720 -> 2424832, and `commandTimeline.beforeDisposeStatus.memoryBytes` 1376256 -> 2490368.
+No digest moved: `direct-oracle.mjs` asserts the PCM digests before it prints, and
+`check-browser-expected-resources.py` compared every other row exactly.
+
+**A4.** `^hosts/host-web/src/render_lock.rs:` joins the unsafe exclusion list. The header
+comment beside the list gives its reason.
+
+**Pre-amendment choices, re-checked against the spec.**
+- D2's locked set does not include `spectrum_request_*` or `spectrum_collection_*`. Kept. D2
+  names the accessors "that the worklet calls" in the post-boot sense: the paragraph after the
+  list says #1332 makes the set "the worklet's whole post-boot export set". The worklet calls
+  those accessors only in `stageSpectrumRequest` and `stageSpectrumCollectionRequest`, before
+  boot. There, `_collection_entry_ptr` and `_collection_target_ids_ptr` size and allocate the
+  collection staging by design, which decision 15 permits before boot. An audit of every export
+  the worklet calls found that each post-boot staging accessor and read is locked:
+  `observation_*`, `track_response_*`, `spectrum_target_id_*`, `spectrum_capture_*`,
+  `spectrum_stream_metadata_*`, `spectrum_read` and `spectrum_stream_read`.
+- D5: the boot exports reserve the stagings only when boot returns a handle. Kept. D5's
+  requirement is that "a booted instance never allocates a staging later", and this meets it. A
+  refused boot has no render thread to protect. Reserving on refusal would grow memory, and
+  `check-web-boot-budget.mjs` allows a typed pre-parse refusal at most one page.
+  `spectrum_staging()` stays in `reserved_after_boot` as D5 requires, although `boot_staged`
+  already touches it.
+- D4: `closure()` prefers an exact name match. Kept. D3's mandated export name has
+  `miso_engine_web_v1_render` as a prefix, so without the exact match the existing render gate
+  stops with "ambiguous export name". Self-test (h4) holds this.
+- `native_staging`: `#[doc(hidden)]`, `cfg(not(target_family = "wasm"))`. Kept. Gate 8 must stage
+  requests through the exports, but on a 64-bit host `pointer_u32` returns 0 for every staging
+  address. The writers store exactly what the worklet writes through those addresses, and the
+  module is not built into the shipped artifact.
+- `#[global_allocator]` is under `cfg(all(target_family = "wasm", not(test)))`, which is narrower
+  than D1's `cfg(target_family = "wasm")`. `src/tests.rs`'s counting allocator is
+  `#[cfg(test)]`, so a host-web unit-test build for wasm would otherwise register two allocators.
+  The shipped module is a non-test wasm build and registers the counter.
+
+**Gates run** (artifacts under `/tmp/claude-1002/h1333/`, deleted afterwards).
+1. `cargo test --locked -p host-web --lib render_lock`: pass.
+2. `bash scripts/test-web-audioworklet.sh`: pass.
+3. `build-web-audioworklet.sh --named-twin`: pass. `check-web-audioworklet.sh <out> <twin>`: pass.
+   The render-thread runs report render indirect_sites=2, meter_poll 0, and command_submit 13
+   in 5 members, with no destructor registration and no atomic wait.
+   `check-browser-expected-resources.py --artifacts`: pass after A3.
+4. `npm run qualify -- --artifacts <out> --sdk-root <repo>/sdk --browser <b> --check-matrix
+   --self-test-mutations`: pass in chromium, firefox and webkit. Each prints
+   `render-allocations: corpus-0-0=0 corpus-0-1=0 corpus-1-0=0 corpus-1-1=0 live-control=0
+   observation-armed=0 observation-disarmed=0 stall=0 staging-reads-one-shot=0
+   staging-reads-stream=0`.
+5. PR evidence: a scratch build with `let planted: Vec<u8> = Vec::with_capacity(1);` in
+   `render_next` failed the Chromium leg at `render-allocations`, with corpus 2/4/2/4, live
+   control 260, observation 32/32, stall 80, and staging reads 32/32. The plant was reverted.
+6. `check-sdk-generated.sh <out>` and `parameter-metadata -- --check <out>`: pass.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features
+   -- -D warnings`, `check-workspace-policy.sh` and `check-realtime-policy.sh`: pass.
+8. `cargo test --locked -p host-web --test render_locked_staging`: pass.
+
+Also run: `cargo test --locked -p host-web -p host-core` (all pass), `check-cross-targets.sh`
+(PASS), `check-sdk-types.sh`, `check-sdk-headless.sh <out>`, `sdk-package.sh check <out>` and
+`check-sdk-deletions.py` (all pass). The stray `sdk/dist` was deleted after the package check.
+
+**Mutation evidence.** Each mutation was applied, its test went red, and the revert went green.
+`hosts/host-web/MUTATIONS.md` has one row per mutation.
+- A1's native test: with `channels()` back to `selected_entry()`, phase 2 reads 4. Test value: it
+  catches a collection capture's spectrum read that allocates on the render thread. Before it,
+  only the SDK-path browser run could see this, and no gate read that run's count.
+- A1 in the browser: a module rebuilt with the clone failed `render-allocations` without
+  `--sdk-root`, with `staging-reads-one-shot` 4, `staging-reads-stream` 2 and every other
+  instance 0. Test value of `staging-reads` and `render-allocations` together: a staging read
+  that allocates turns them red, including the executor's `call_indirect` path. The static gate
+  cannot see either.
+- `selected_channels_reports_the_selected_entrys_mask`: an accessor that reports a mask while
+  nothing is selected (`Some(self.captures[self.selected.unwrap_or(0)].channels())`) turns it
+  red, and no other test in host-core or host-web. Test value: it catches `selected_channels`
+  reporting a mask for an unselected collection, which production reaches because a collection
+  starts unselected after preparation. (Corrected by the follow-ups below: reading `captures[0]`
+  also turns it red, but `collection_selection_is_atomic_and_keeps_one_active_capture` already
+  catches that.)
+- Gate 8 phase 1: with the response or the observation reservation removed, the count reads 7
+  or 6.
+- `render_lock` unit test: an inverted flag, no `fetch_add`, an uncounted `dealloc`, an uncounted
+  `realloc`, and a window that never clears each turn it red.
+- `needs_drop`: a `Vec<u8>` field added to `BootStaging` fails to compile on the assertion.
+- Callgraph self-test: each case goes red when its rule is disabled: (h2), (h3), (h1)/(h1a)/(h1b),
+  hash stripping (h1d), and the exact-name root (h4).
+- `run.mjs --self-test-mutations` proves `render-allocations` (one count set to 1) and
+  `staging-reads` (the one-shot read set to backpressure) red in all three browsers.
+
+**Open items (outside this slice's paths).**
+- The SDK-path instances that `sdk-response-entry.ts` creates (`?sdk=1`) do not read their
+  counts. That file is not authorized. The raw `staging-reads` workload covers the collection
+  read that the SDK's spectrum-collection instance exposed. A successor could read
+  `browser.host.renderAllocationCount()` before each SDK dispose.
+- The hermetic boot-contract test in `scripts/test-web-audioworklet.mjs` (#288) does not list
+  `runStagingReadRun` as a boot caller. That file is not authorized. The browser legs boot it
+  for real.
+- `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", does not yet name
+  `render_lock.rs`. The policy script's header comment does.
+
+### Follow-ups (verifier MINOR/NIT)
+
+Folded from the attempt-1 verdict (PASS): MINOR 1 and MINOR 2. MINOR 3-5 and the
+`selected_entry()` NIT are outside this slice's paths; root files them.
+
+- **MINOR 1 (hop boot export reservation undefended).** The reservation moved from the two boot
+  exports into `boot_staged`'s one success path (`reserve_stagings()`, after the handle is
+  published). `miso_engine_web_v1_boot` and `miso_engine_web_v1_boot_with_spectrum_hop` both
+  reach it, so gate 8 phase 1 now defends the one place both exports reserve through. Refused
+  boots still return before it. Mutation: removing `reserve_stagings();` from `boot_staged` turns
+  gate 8 red (`a staging accessor allocated inside its render-locked window`: 13); the revert is
+  green. Test value: gate 8 turns red when the shared boot path stops reserving the stagings,
+  which no other test catches and which now covers the hop export too.
+- **MINOR 2 (test-value claim).** The record above and `hosts/host-web/MUTATIONS.md` now name
+  the test's unique catch. Re-run on the current tree (builder `capture_with_held_producer`):
+  with `selected_channels` returning `Some(self.captures[self.selected.unwrap_or(0)].channels())`,
+  `cargo test --locked --no-fail-fast -p host-core` fails only
+  `selected_channels_reports_the_selected_entrys_mask` (`Some(Left)` against `None`, at the
+  unselected assertion) and `cargo test --locked -p host-web` stays green; the revert is green.

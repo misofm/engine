@@ -333,9 +333,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return this.exports.miso_engine_web_v1_boot_result();
     }
     this.backend = "simd128";
-    // The first observation and live-response staging queries allocate their fixed control
-    // buffers. Force every one before caching any views, so a lazy linear-memory growth cannot
-    // detach the status/PCM/response views that the render path keeps for this processor.
+    // Boot allocated the observation, live-response and spectrum stagings (issue #1333 D5), so
+    // these queries allocate nothing and cannot grow linear memory. Read every one before
+    // caching any views all the same: a view taken before a growth would be detached.
     const observationStagingPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
     if (!u32(observationStagingPointer) || observationStagingPointer === 0) return RESULT_INTERNAL;
     const trackResponseRequestPointer = this.exports.miso_engine_web_v1_track_response_request_ptr();
@@ -1061,6 +1061,17 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
           || exactFields(message, SPECTRUM_STREAM_READ_FIELDS)
           || exactFields(message, SPECTRUM_STREAM_STOP_FIELDS))) {
       this.receiveSpectrum(message);
+    } else if (message?.tag === "miso.renderallocations.v1"
+        && exactFields(message, ["tag", "requestId"])) {
+      // Issue #1333 D3: the allocator calls this instance made inside render-locked windows --
+      // every export this processor calls on the render thread after boot. Answered here, never
+      // in process(); qualification asserts exactly zero.
+      this.port.postMessage({
+        tag: "miso.renderallocations.v1",
+        requestId: message.requestId,
+        result: RESULT_OK,
+        count: this.exports.miso_engine_web_v1_render_allocation_count(),
+      });
     } else if (message?.tag === "miso.status.v1"
         && exactFields(message, ["tag", "requestId"])) {
       this.port.postMessage({

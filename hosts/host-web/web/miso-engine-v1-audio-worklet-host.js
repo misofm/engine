@@ -717,6 +717,7 @@ class MisoAudioWorkletHost {
   #inFlightSources = new Map();
   #inFlightSeeks = new Map();
   #inFlightStatus = 0;
+  #inFlightRenderAllocations = 0;
   #inFlightCommands = 0;
   #inFlightObservationReads = 0;
   #inFlightTrackResponses = 0;
@@ -871,6 +872,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.delete(pending.sourceId);
     } else if (pending.response === "status") {
       this.#inFlightStatus -= 1;
+    } else if (pending.response === "renderAllocations") {
+      this.#inFlightRenderAllocations -= 1;
     } else if (pending.response === "command") {
       this.#inFlightCommands -= 1;
     } else if (pending.response === "preparedCommand") {
@@ -1015,9 +1018,13 @@ class MisoAudioWorkletHost {
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
           "quantumFrames", "nextAbsoluteSample", "renderedQuanta", "memoryBytes",
         ]
+        : pending.response === "renderAllocations"
+          ? ["tag", "requestId", "result", "count"]
         : ["tag", "requestId", "result"];
     const expectedTag = pending.response === "status"
       ? "miso.status.v1"
+      : pending.response === "renderAllocations"
+        ? "miso.renderallocations.v1"
       : pending.response === "eqConfig"
         ? "miso.eq-target-config.v1"
         : pending.response === "preparedCommand"
@@ -1126,9 +1133,11 @@ class MisoAudioWorkletHost {
       && validU64(message.nextAbsoluteSample) && validU64(message.renderedQuanta)
       && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes === this.memoryBytes
     );
+    const validRenderAllocations = pending.response !== "renderAllocations"
+      || (message.result === RESULT_OK && validU32(message.count));
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus || !validCommandAck || !validConfig || !validSessionMap
+        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validConfig || !validSessionMap
         || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum) {
       this.#fail(webError(255, message.requestId));
       return;
@@ -1151,6 +1160,7 @@ class MisoAudioWorkletHost {
     this.#inFlightSources.clear();
     this.#inFlightSeeks.clear();
     this.#inFlightStatus = 0;
+    this.#inFlightRenderAllocations = 0;
     this.#inFlightObservationReads = 0;
     this.#inFlightTrackResponses = 0;
     this.#inFlightSpectrum = 0;
@@ -1165,6 +1175,7 @@ class MisoAudioWorkletHost {
     }
     if (response === "seek") return this.#inFlightSeeks.has(sourceId);
     if (response === "status") return this.#inFlightStatus >= 1;
+    if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
     // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
     // before any transfer, and the caller keeps its record block. The engine-side bound is the
     // authority; this one only avoids paying a message round trip to be told so.
@@ -1187,6 +1198,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.set(sourceId, true);
     } else if (response === "status") {
       this.#inFlightStatus += 1;
+    } else if (response === "renderAllocations") {
+      this.#inFlightRenderAllocations += 1;
     } else if (response === "command" || response === "preparedCommand") {
       this.#inFlightCommands += 1;
     } else if (response === "observationRead") {
@@ -1293,6 +1306,17 @@ class MisoAudioWorkletHost {
 
   status() {
     return this.#request({ tag: "miso.status.v1" }, [], "status");
+  }
+
+  /// Read this instance's render-locked allocator count (issue #1333 D3).
+  ///
+  /// The count is every allocator call the instance made inside the exports its processor calls
+  /// on the render thread after boot: render, command submission, meter polling and the
+  /// observation, response and spectrum staging reads. Decision 15 requires it to stay zero. It
+  /// is per instance, so a caller reads it on each host before that host's `dispose()`. The
+  /// worklet answers in its message handler, never in `process()`.
+  renderAllocationCount() {
+    return this.#request({ tag: "miso.renderallocations.v1" }, [], "renderAllocations");
   }
 
   /// Submit one live-control command batch (issue #137 D1).

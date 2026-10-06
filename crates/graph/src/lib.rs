@@ -781,9 +781,11 @@ impl RouteGate {
 /// and the bits a live change sends cannot differ. A silencing gate returns `[+0.0; 4]`; otherwise
 /// each product is `gain * coefficient` in that operand order, unfused, with the column of a
 /// follow-zeroed source lane replaced by `+0.0`. A product that is subnormal, of either sign, is
-/// flushed to `+0.0` (issue #1237 D3): inside the route domain (`[-144, 24]` dB, coefficients in
-/// `[-1, 1]`) a coefficient below about `1.9e-31` at -144 dB folds to one, and a subnormal
-/// constant would only cost the render multiply its slow path for an inaudible contribution.
+/// flushed to `+0.0` (issue #1237 D3): inside the route domain (the session model's
+/// `ROUTE_GAIN_DB_MINIMUM`, `ROUTE_GAIN_DB_MAXIMUM` and `ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`,
+/// which this crate cannot link) a coefficient below about `1.9e-31` at today's minimum gain folds
+/// to one, and a subnormal constant would only cost the render multiply its slow path for an
+/// inaudible contribution.
 #[must_use]
 pub const fn gated_route_coefficients(transform: &RouteTransform, gate: RouteGate) -> [f32; 4] {
     /// `gain * coefficient`, a subnormal result flushed to `+0.0`.

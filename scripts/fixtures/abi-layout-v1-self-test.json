@@ -61,6 +61,7 @@
     "miso_engine_web_v1_prepared_companion_capacity",
     "miso_engine_web_v1_prepared_companion_ptr",
     "miso_engine_web_v1_render",
+    "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_close",
     "miso_engine_web_v1_response_effect_id_capacity",

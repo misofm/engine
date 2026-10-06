@@ -274,15 +274,25 @@ pub fn canonical_fp_control_word() -> FpControlWord {
 ///
 /// The guard is neither `Send` nor `Sync`: a control word belongs to one thread, so a guard that
 /// could be moved or shared across threads could restore one thread's word onto another's.
+/// rustc reports E0277 for each (`Send`, then `Sync`, is not implemented); the fences carry no
+/// code because stable rustdoc does not check one.
 ///
 /// ```compile_fail
-/// fn requires_send<T: Send>() {}
-/// requires_send::<lane::fpenv::CanonicalFpEnv>();
+/// fn requires<T: Send>() {}
+/// requires::<lane::fpenv::CanonicalFpEnv>();
 /// ```
 ///
 /// ```compile_fail
-/// fn requires_sync<T: Sync>() {}
-/// requires_sync::<lane::fpenv::CanonicalFpEnv>();
+/// fn requires<T: Sync>() {}
+/// requires::<lane::fpenv::CanonicalFpEnv>();
+/// ```
+///
+/// The twin of both: each doctest above differs from it in its one bound only, so a renamed type
+/// turns it red (issue #1422 D2).
+///
+/// ```
+/// fn requires<T>() {}
+/// requires::<lane::fpenv::CanonicalFpEnv>();
 /// ```
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub struct CanonicalFpEnv {
@@ -356,6 +366,10 @@ impl Drop for CanonicalFpEnv {
 /// implementation, so a render entry that constructs one emits no code for it at all. It is still
 /// neither `Send` nor `Sync`, so a host cannot write code against the portable guard that would
 /// stop compiling on a target that does pin.
+///
+/// The two fences below are documentation only: this type exists only on targets without a
+/// control word (wasm32 here), rustdoc does not run doctests for `wasm32-unknown-unknown` in this
+/// repository, and a native doctest run never compiles them (issue #1422 non-goal).
 ///
 /// ```compile_fail
 /// fn requires_send<T: Send>() {}

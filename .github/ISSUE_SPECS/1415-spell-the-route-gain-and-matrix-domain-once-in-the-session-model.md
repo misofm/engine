@@ -85,7 +85,9 @@ session model already publishes a domain constant that other crates read:
    - `cargo test --locked -p graph-compiler`
    - `cargo test --locked -p host-core --features control-provider,test-support`
    - `cargo test --locked -p host-web --features test-support`
-   - `cargo test --locked -p graph-compiler --test graph_fixture -- --check`
+   - `cargo run --locked -p graph-compiler --bin graph_fixture -- --check` (root correction,
+     2026-10-05: `graph_fixture` is a binary, `crates/graph-compiler/src/bin/graph_fixture.rs`, not a
+     test target; the original spelling `cargo test ... --test graph_fixture` cannot run)
    - `bash scripts/check-graph-determinism.sh`
 3. **Workspace.** `cargo fmt --all -- --check`;
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
@@ -110,3 +112,88 @@ decided domain moves.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Change: `crates/session/src/model.rs` adds the three public constants
+(`ROUTE_GAIN_DB_MINIMUM = -144.0`, `ROUTE_GAIN_DB_MAXIMUM = 24.0`,
+`ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM = 1.0`) before `Route`, with doc comments that name #1237 and
+owner question Q2 of decision 13. `validate.rs` and `ids.rs` lose their private copies;
+`validate_routes` imports the model constants and `route_values` reads them as
+`session::ROUTE_*` (qualified, so no glob import can clash). `validate_routes` has a new doc comment
+and `route_values`' doc comment names the shared constants. The doc comments of `route_transform`,
+`RouteValueError` and `route_coefficients` did not name the other copy, so they are unchanged.
+`route_coefficients.rs` is unchanged (D3). Hazard check: no crate glob-imports `session::*`, and no
+other definition of the three names exists in the workspace.
+
+Gate 1 (mutation, `cargo test --locked -p graph-compiler --test route_coefficients
+a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it`):
+
+- Baseline: ok.
+- `ROUTE_GAIN_DB_MAXIMUM = 24.5` -> red: `route_coefficients.rs:414`, `assertion left == right
+  failed, left: 33, right: 35` (the refused count; the literal boundaries `24.0.next_up()` and the
+  half-step are now accepted on both paths).
+- `ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM = 0.5` -> red: `route_coefficients.rs:347`, `fixture
+  parses: DiagnosticSet([... NumericOutOfSchemaRange ... channel_matrix.ll ...])` (the fixture's
+  unit coefficients are refused).
+- Both reverted -> ok.
+
+Gate 2 (all at the attempt head):
+
+- `cargo test --locked -p session` -> 0
+- `cargo test --locked -p graph-compiler` -> 0 (includes the `graph_fixture` binary's unit tests)
+- `cargo test --locked -p host-core --features control-provider,test-support` -> 0
+- `cargo test --locked -p host-web --features test-support` -> 0
+- `cargo test --locked -p graph-compiler --test graph_fixture -- --check` -> 101, `error: no test
+  target named graph_fixture in graph-compiler package`. **Spec defect:** `graph_fixture` is a
+  binary (`crates/graph-compiler/src/bin/graph_fixture.rs`), not a test target. The command it
+  intends, `cargo run --locked -p graph-compiler --bin graph_fixture -- --check`, -> 0.
+- `bash scripts/check-graph-determinism.sh` -> 0 (100/100)
+
+Gate 3: `cargo fmt --all -- --check` -> 0; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` -> 0; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+--no-deps` -> 0; `bash scripts/check-session-policy.sh` -> 0;
+`bash scripts/check-workspace-policy.sh` -> 0.
+
+### Follow-ups (stream J batch 2 follow-ups worker; verdict `1415-attempt1.md`)
+
+**MINOR-1 (evidence the attempt did not record).** `session` and `graph-compiler` are compiled into
+the browser module, so the change moves it. The verifier built the shipped AudioWorklet module at
+the parent and at `50b6d4482`: `d4cf86ea0fe3523a560a4e2bc0eefd738435c5c7f977b0ae4b47d37cc02cb9fa`
+-> `c4d170ddb3563090d5bec09edf369d380a42b888a926ad1fef34547d7a2a72c5`, 2,896,157 B each, 7 bytes
+differ, every one the line field of a `core::panic::Location` record (the moved lines of `ids.rs`
+and `validate.rs`); no code byte moved. CI's `artifact-identity` job reports ARTIFACT CHANGED for
+it (an information line; the release pin is untouched). The verifier ran the worklet chain
+(`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh`) and `scripts/check-cross-targets.sh` at `50b6d4482`: all exit 0.
+
+**NIT-1.** The prose that restated the domain now links the constants: `route_values`' doc,
+`RouteValueError::Domain` and `route_coefficients` (`crates/graph-compiler/src/ids.rs`) link
+`session::ROUTE_GAIN_DB_MINIMUM`, `ROUTE_GAIN_DB_MAXIMUM` and `ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`;
+the overflow and subnormal notes say "with today's values". `graph::gated_route_coefficients`
+(`crates/graph/src/lib.rs`) names the three constants as code text, because `graph` does not depend
+on `session` and cannot link them. The SDK comments on `ROUTE_GAIN_DB_DOMAIN` and
+`ROUTE_COEFFICIENT_DOMAIN` (`sdk/src/core/session.ts`) say they copy those constants and are held
+to the engine by `sdk/test/builder-evals.mjs`, instead of naming `validate_routes`. Comment-only;
+no value moved.
+
+**NIT-2.** `ROUTE_GAIN_DB_MINIMUM`'s doc (`crates/session/src/model.rs`) says the domain is spelled
+once *in Rust* and names the SDK's TypeScript copy and the builder eval that holds it, so a domain
+change edits both.
+
+No test is new or changed, so no mutation is owed.
+
+Gates (follow-ups): `RUSTDOCFLAGS='-D warnings' cargo doc --locked -p graph-compiler -p graph -p
+session --no-deps` and `cargo fmt --all -- --check`: exit 0. `node sdk/codegen/generate.mjs --check`:
+exit 0. Worklet chain on this change: `build-web-audioworklet.sh --named-twin` exit 0 (shipped
+module `ffc62262ec890efd154d6eaa65d615df8d308f340bc2398fcb3b4988b2421cbf`, named twin
+`033567e960e08af799d974c83756245c4959b035197186a2743853a99be65465`; against the module before
+these doc edits, `46c8b035...`, the size is unchanged and 9 bytes differ, all in the data section:
+panic `Location` line numbers moved by the doc lines), `check-web-audioworklet.sh
+--without-metadata-regeneration` exit 0, `check-browser-expected-resources.py --artifacts` exit 0,
+`test-web-audioworklet.sh` (fresh `TMPDIR`) exit 0 with nothing left.
+`bash scripts/check-cross-targets.sh`: exit 0, "cross-target matrix: PASS" (the #1018 iOS memset rows
+are its expected failures). `bash scripts/check-workspace-policy.sh`: exit 0.

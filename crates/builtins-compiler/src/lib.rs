@@ -6140,8 +6140,9 @@ mod tests {
 
     /// Builds the five-level graph the harness renders: one level per track stage.
     ///
-    /// `Output` is fed by track 0's `PostMatrix` only: `GraphEdgeId::TrackMain { target }` is not
-    /// unique for fan-in, and a reduction is not what this harness measures.
+    /// `Output` is fed by one track's `PostMatrix` only (track 0's, or the last track's for
+    /// `NonadjacentOutputConflict`): `GraphEdgeId::TrackMain { target }` is not unique for fan-in,
+    /// and a reduction is not what this harness measures.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum BoundaryVariant {
         Plain,
@@ -6247,12 +6248,17 @@ mod tests {
         } else {
             output.clone()
         };
-        let output_track = match variant {
-            BoundaryVariant::NonadjacentTrackA => n - 1,
-            #[cfg(all(test, feature = "test-support"))]
-            BoundaryVariant::NonadjacentOutputConflict => n - 1,
-            _ => 0,
+        // Issue #1420: only `NonadjacentOutputConflict` moves the output track, and the #916 test
+        // reads that edge. `NonadjacentTrackA` used to give `n - 1` too, but since #916 the
+        // `Output` is dedicated storage and no outcome read it, so it takes track 0.
+        #[cfg(all(test, feature = "test-support"))]
+        let output_track = if variant == BoundaryVariant::NonadjacentOutputConflict {
+            n - 1
+        } else {
+            0
         };
+        #[cfg(not(all(test, feature = "test-support")))]
+        let output_track = 0;
         edges.push(GraphEdge {
             id: GraphEdgeId::TrackMain {
                 target: main_target.clone(),
@@ -7011,6 +7017,12 @@ mod tests {
             )
         }
         .expect("prepared builtins");
+        let nonadjacent = match variant {
+            BoundaryVariant::NonadjacentTrackA => true,
+            #[cfg(all(test, feature = "test-support"))]
+            BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
+            _ => false,
+        };
         let (mut graph, mut levels) = track_graph_variant(n, variant);
         if backend == Backend::Scalar && n >= 2 {
             let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
@@ -7018,12 +7030,7 @@ mod tests {
                 stage,
             };
             let mut schedule = Vec::new();
-            if match variant {
-                BoundaryVariant::NonadjacentTrackA => true,
-                #[cfg(all(test, feature = "test-support"))]
-                BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
-                _ => false,
-            } {
+            if nonadjacent {
                 for stage_kind in [
                     TrackStage::Input,
                     TrackStage::PostInputBuiltins,
@@ -7074,21 +7081,13 @@ mod tests {
             graph.sequential_schedule = schedule;
             graph.dependency_levels = levels.clone();
         }
-        if backend == Backend::Scalar && n >= 2 {
-            let selected_index = match variant {
-                BoundaryVariant::NonadjacentTrackA => 0,
-                #[cfg(all(test, feature = "test-support"))]
-                BoundaryVariant::NonadjacentOutputConflict => 0,
-                _ => n - 1,
-            };
+        if backend == Backend::Scalar && n >= 2 && !nonadjacent {
             let fader = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(selected_index))
-                    .expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(n - 1)).expect("last scalar track"),
                 stage: TrackStage::PostFader,
             };
             let matrix = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(selected_index))
-                    .expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(n - 1)).expect("last scalar track"),
                 stage: TrackStage::PostMatrix,
             };
             let slot = graph
@@ -7096,63 +7095,11 @@ mod tests {
                 .iter()
                 .position(|node| node == &fader)
                 .expect("scheduled scalar fader");
-            if match variant {
-                BoundaryVariant::NonadjacentTrackA => true,
-                #[cfg(all(test, feature = "test-support"))]
-                BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
-                _ => false,
-            } {
-                let other_index = if selected_index == 0 { n - 1 } else { 0 };
-                let other_fader = GraphNodeId::TrackStage {
-                    track_id: StableGraphId::parse(&track_name(other_index))
-                        .expect("other scalar track"),
-                    stage: TrackStage::PostFader,
-                };
-                let other_matrix = GraphNodeId::TrackStage {
-                    track_id: StableGraphId::parse(&track_name(other_index))
-                        .expect("other scalar track"),
-                    stage: TrackStage::PostMatrix,
-                };
-                if selected_index == 0 {
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 1),
-                        Some(&other_fader),
-                        "production scalar schedule places F_B between A's pair owners"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 2),
-                        Some(&matrix),
-                        "production scalar schedule retains A's matrix boundary"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 3),
-                        Some(&other_matrix),
-                        "production scalar schedule retains B's matrix after A's pair"
-                    );
-                } else {
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 1),
-                        Some(&other_matrix),
-                        "production scalar schedule places the other matrix between pair owners"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 2),
-                        Some(&matrix),
-                        "production scalar schedule retains the selected matrix boundary"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot - 1),
-                        Some(&other_fader),
-                        "production scalar schedule retains both fader boundaries"
-                    );
-                }
-            } else {
-                assert_eq!(
-                    graph.sequential_schedule.get(slot + 1),
-                    Some(&matrix),
-                    "the actually prepared scalar ops are adjacent"
-                );
-            }
+            assert_eq!(
+                graph.sequential_schedule.get(slot + 1),
+                Some(&matrix),
+                "the actually prepared scalar ops are adjacent"
+            );
         }
         let classes = SessionPoolClasses::from_session(&compiled);
         let scalar_resource = builtins
@@ -8087,6 +8034,34 @@ mod tests {
         let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        // Issue #1420: the premise. The first fixture's output track is t00 and the second's is
+        // t01, named by literal ID so this does not restate the harness.
+        let output_source = |variant| {
+            let (graph, _) = track_graph_variant(2, variant);
+            let sources = graph
+                .spec
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                .map(|edge| edge.source.node.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(sources.len(), 1, "one edge feeds the Output");
+            sources[0].clone()
+        };
+        for (variant, track) in [
+            (BoundaryVariant::Nonadjacent, "t00"),
+            (BoundaryVariant::NonadjacentOutputConflict, "t01"),
+        ] {
+            assert_eq!(
+                output_source(variant),
+                GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse(track).expect("track"),
+                    stage: TrackStage::PostMatrix,
+                },
+                "{variant:?} feeds the Output from {track}'s post-matrix"
+            );
+        }
+
         // With t00 observed, the t01 interval is the only remaining candidate when the output is
         // t00. It is selected.
         test_only_reset_fader_matrix_witness();
@@ -8595,8 +8570,8 @@ mod tests {
         };
 
         // The selected production fixture is t00's genuinely nonadjacent F_A -> F_B -> M_A ->
-        // M_B interval. Keep t00's post-matrix capture separate from the output track so this
-        // assertion observes the paired owner itself as well as the graph's final PCM.
+        // M_B interval. t00's post-matrix capture observes the paired owner itself, beside the
+        // graph's final PCM.
         let make_pair = || {
             let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
             let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));

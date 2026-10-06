@@ -34,6 +34,9 @@ const MUTATIONS = [
   "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
   // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one.
   "sdk-live-bypass-console", "sdk-live-bypass-insert", "sdk-live-bypass-address",
+  // Issue #1333 D3: one render-locked allocator call on one instance, and a staging-read workload
+  // whose spectrum read never completed a window.
+  "render-allocations", "staging-reads",
 ];
 
 function option(name) {
@@ -216,6 +219,31 @@ function validate(browserName, result) {
     && stall?.noDesync === true
     && stall?.renderedDigest === stall?.expectedDigest,
     "100 ms fault did not preserve exact 5,120-frame output");
+  // Issue #1333 D3 / Amendment 1: the staging reads ran over real data -- a completed one-shot
+  // window and a completed stream window from a collection's selected entry, an observation row
+  // and a track response -- so the render-allocation gate below covers each of them.
+  const oneShot = result.stagingReads?.oneShot;
+  const streamRun = result.stagingReads?.stream;
+  gate(browserName, "staging-reads", oneShot?.selectResult === 0
+    && oneShot?.subscribeResult === 0
+    && oneShot?.spectrumReadResult === 0 && oneShot?.spectrumReadBytes > 0
+    && oneShot?.observationReadResult === 0 && oneShot?.observationRows === 1
+    && oneShot?.trackResponseResult === 0 && oneShot?.trackResponseBytes > 0
+    && oneShot?.streamStartResult === 0
+    && (oneShot?.streamReadResult === 0 || oneShot?.streamReadResult === 6),
+  `the one-shot staging reads did not all complete: ${JSON.stringify(oneShot)}`);
+  gate(browserName, "staging-reads", streamRun?.selectResult === 0
+    && streamRun?.streamStartResult === 0
+    && streamRun?.streamReadResult === 0 && streamRun?.streamReadBytes > 0,
+  `the stream staging read did not return a completed window: ${JSON.stringify(streamRun)}`);
+  // Issue #1333 D3: every booted instance, read before its dispose, made no allocator call in any
+  // export its processor calls on the render thread after boot -- including everything the plan
+  // executor does behind its `call_indirect`, which the static gate cannot see.
+  const allocations = result.renderAllocations;
+  gate(browserName, "render-allocations", Array.isArray(allocations)
+    && allocations.length === 10
+    && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
+  `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
   return "simd128 supported";
 }
@@ -676,6 +704,8 @@ function mutate(result, mutation) {
     copy.sdkResponse.liveBypass.insertOffLive = copy.sdkResponse.liveBypass.consoleOff;
   }
   if (mutation === "sdk-live-bypass-address") copy.sdkResponse.liveBypass.consoleAddress = [3, 0];
+  if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;
+  if (mutation === "staging-reads") copy.stagingReads.oneShot.spectrumReadResult = 6;
   return copy;
 }
 
@@ -840,6 +870,11 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
+    if (Array.isArray(result.renderAllocations)) {
+      // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
+      process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
+        .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
+    }
     process.stdout.write(`${browserName}: all qualification gates passed (${browser.version()})\n`);
     const row = normalizedRow(browserName, browser.version(), outcome);
     if (sdkEnabled) row.gates.sdkResponse = "pass";

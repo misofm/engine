@@ -345,8 +345,23 @@ jobs:
       # contain it (owner ruling 2026-09-28, decision 3). Read from the named twin (#1109).
       - name: Shipped AudioWorklet module contains no whole-plan scalar path
         run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
+      # Issue #1429: the suite runs with a fresh, private TMPDIR, so anything it or a process it
+      # starts leaves there fails the step (the runner's shared temporary directory hid #1421's
+      # leak). The script's own failure still fails the step first; the trap removes the directory.
       - name: Hermetic browser host and worklet tests
-        run: bash scripts/test-web-audioworklet.sh
+        run: |
+          # pipefail: GitHub's default shell is `bash -e {0}`, so without it a `find` failure in the
+          # emptiness check would leave `leftover` empty and the check would pass.
+          set -o pipefail
+          scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          bash scripts/test-web-audioworklet.sh
+          leftover="$(find "$scratch" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          if [[ -n "$leftover" ]]; then
+            printf 'scripts/test-web-audioworklet.sh left these entries in its TMPDIR:\n%s\n' "$leftover" >&2
+            exit 1
+          fi
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
       # the downloaded, digest-verified named twin of the artifact (#1109; run-wasm-gates.sh
       # --without-v8-spill leaves it to this job). Register allocation belongs to one V8, so the Node version is exact and the
@@ -617,6 +632,19 @@ jobs:
             --exclude wasm-gates --exclude wasm-gate-guest \
             --exclude wasm-gate-corpus \
             --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
+      # --all-targets runs no doctest, and most doctests here are compile_fail type-level
+      # guarantees, each beside a plain twin (#1422). Same packages and features as the step above.
+      - name: Workspace doctests (same packages and features as the debug tests)
+        run: |
+          cargo test --locked --workspace --doc \
+            --exclude lane --exclude math --exclude effect-runtime --exclude delay \
+            --exclude compressor --exclude multiband-compressor --exclude gate-expander \
+            --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
+            --exclude parametric-eq --exclude builtins --exclude dsp-reference \
+            --exclude conformance --exclude audit --exclude bench --exclude console-workload \
+            --exclude wasm-gates --exclude wasm-gate-guest \
+            --exclude wasm-gate-corpus \
+            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
 
   test-debug-b:
     name: DSP crates debug tests
@@ -640,6 +668,14 @@ jobs:
       - name: DSP crates debug tests (lane feature unification pinned explicitly)
         run: |
           cargo test --locked --all-targets \
+            -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
+            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
+            -p parametric-eq -p builtins -p dsp-reference -p conformance \
+            --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
+      # --all-targets runs no doctest (#1422). Same packages and features as the step above.
+      - name: DSP crates doctests (same packages and features as the debug tests)
+        run: |
+          cargo test --locked --doc \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \

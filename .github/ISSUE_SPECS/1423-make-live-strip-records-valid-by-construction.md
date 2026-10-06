@@ -66,9 +66,14 @@ moves.
   queued record; say so in the drain's comment. Do not remove them in this issue.
 - **D5. The guarantee is a compile-time one, and the test says so.** A `compile_fail` doctest per
   record type shows that a record cannot be written as a struct or variant literal from outside
-  the crate (pin the error code, for example `E0451` for a private field or `E0603` for a private
-  enum). A plain doctest shows the constructor path compiles. These run in CI once the dependency
-  below lands.
+  the crate. Each `compile_fail` doctest has a passing twin, by the rule of *Run doctests in CI*
+  (#1422, D2 and Amendment 1): a plain doctest identical except for exactly the one forbidden
+  construct, building the same record through its constructor, so a rename, a typo or an
+  unrelated error in the shared code turns the twin red. Stable rustdoc does not check
+  `compile_fail,E....` codes (*The rustdoc book*, "Unstable features", "Error numbers for
+  compile-fail doctests"), so the fence stays `compile_fail` and a comment beside it names the
+  code rustc reports today (for example `E0451` for a private field or `E0603` for a private enum)
+  as documentation only. No `RUSTC_BOOTSTRAP`. These run in CI once the dependency below lands.
 - **D6. Split if it does not fit.** If the three types do not fit half a day, the coordinator
   splits the input record (`TrackInputRecord`) into a successor before implementation.
 
@@ -110,7 +115,9 @@ moves.
    `TrackFaderRecord::fader_db` skip `checked_fader_gain`; the test turns red.
 2. **The bypass does not compile (new doctests, D5).** The tests pass under the doctest step that
    the dependency below adds. Mutation (PR evidence): make one record's field public again; its
-   `compile_fail` doctest turns red.
+   `compile_fail` doctest turns red. Per pair (PR evidence): rename an item in the shared part of
+   both snippets, and the twin turns red; delete the forbidden construct from the `compile_fail`
+   snippet, and it turns red. Revert each.
 3. **No behaviour moved.**
    - `cargo test --locked -p builtins-compiler --features test-support` and
      `cargo test --locked -p builtins-compiler`

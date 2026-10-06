@@ -83,3 +83,22 @@ touch.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Change (`scripts/test-web-audioworklet.sh` only): D1 one `cleanup` before the first `mktemp`, which
+removes `host_test_dir` and `mutation_dir` each only when non-empty, with `trap cleanup EXIT` set
+once; both variables start empty, so a caller's environment cannot name a directory for the trap to
+remove. `cleanup_safe`, its trap and the second `trap` are gone. D2 the per-file `rm` is gone. D3
+`mutation_dir` is `mktemp -d "${TMPDIR:-/tmp}/miso-engine-mutation.XXXXXX"`.
+
+- Gate 1 at the branch base (script unchanged, red on revert): exit 0; `find "$t" -mindepth 1`
+  printed `miso-engine-host.iQRg7g` and `miso-engine-host.iQRg7g/prepared-control.js`.
+- Gate 1 at the edit: exit 0; `find` printed nothing.
+- Gate 2: scratch copy `scripts/gate2-scratch-1421.sh` with `exit 1` right after the
+  `mutation_dir=$(mktemp ...)` line, fresh `TMPDIR`: exit 1; `find` printed nothing. Copy deleted.
+- Gate 3: no directory from another script appeared under `$t`.
+- Gate 4: `bash -n` exit 0; `scripts/check-workspace-policy.sh` exit 0 (`workspace policy: ok`).
+- No committed test (spec, Test value); no CI file changed.

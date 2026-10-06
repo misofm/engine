@@ -24,7 +24,8 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   no per-edit length; it always uses the session mute ramp.
 - **What #1054 delivers first.** `LiveRamps` (`crates/host-core/src/live_delta.rs:33-58` today)
   gains `pan_samples` and `link_samples`, `for_session` fills all four from the session, and
-  `for_row(row)` returns the D3 key field for a row (#1054 D3, D4). The matrix precedence is the
+  `for_row(row)` returns the D3 key field for a row (twice `mute_samples` for `PolarityInvert`;
+  root, 2026-10-05, from #1055) (#1054 D3, D4). The matrix precedence is the
   post-commit model's non-zero `smoothing_samples`, else `pan_samples` (#1054 D5).
 - **The transaction.** `SessionStore::prepare_transaction` (`crates/protocol/src/model.rs:917-954`)
   applies each edit with `apply_session_edit` (`:529`) to a candidate model and returns
@@ -93,7 +94,9 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   index, before anything commits. The check uses the candidate's rate after all edits, so a
   transaction that also changes the rate is checked against the rate it commits.
 - **D5. `LiveRamps::resolve`.** `resolve(row: LiveRampRow, edit_ramp: Option<u32>) -> u32` returns
-  the edit's value when present, else `for_row(row)` (#1054 D4). After this slice the classifier
+  the edit's value when present, else `for_row(row)` (#1054 D4), so an absent polarity length
+  resolves to twice `mute_samples` with no rule of its own here, and an edit's own length is kept
+  as given (root, 2026-10-05, from #1055). After this slice the classifier
   reads every record length through `resolve`; nothing reads a `LiveRamps` field directly. The
   matrix precedence becomes: the edit's ramp; else #1054 D5.
 - **D6. Classifier.** `classify_live_delta(current, next, ramps, edit_ramps: &EditRamps)` looks up

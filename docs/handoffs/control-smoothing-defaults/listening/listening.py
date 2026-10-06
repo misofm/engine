@@ -5,7 +5,7 @@ Standard library only. The stimuli come from the engine's own ramps
 (`control_smoothing_measure stimuli`); this tool only blinds, plays, records and scores them.
 
     listening.py prepare --stimuli DIR --out PACKET [--seed N] [--commit SHA]
-    listening.py run PACKET [--block M|F|R] [--player "afplay"]
+    listening.py run PACKET [--block M|F|R|P] [--player "afplay"]
     listening.py validate PACKET
     listening.py reveal PACKET
     listening.py self-test
@@ -20,8 +20,10 @@ self-test's temporary directory and are never written as listening evidence.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
+import io
 import json
 import math
 import os
@@ -44,11 +46,17 @@ BLOCKS = {
     "M": "Which interval has a click, tick or thump at the moment the sound stops or restarts?",
     "F": "Which interval sounds stepped, buzzy or rough while the level moves?",
     "R": "Which interval's cuts sound softer, rounder or later (less tight)?",
+    "P": "Which interval has a click, tick, thump or brief dip while the sound plays on?",
 }
+
+# Blocks M, F and R decide the three values; block P (PREREGISTRATION.md, Amendment 1) decides none.
+VALUE_BLOCKS = ("M", "F", "R")
 
 # (contrast, block, candidate, reference, trials, role). The candidate is the interval the
 # question describes when the difference is audible: the shorter ramp for M and F (it may click
-# or zip), the longer ramp for R (it may sound soft). Frozen by design_sha256 at preparation.
+# or zip), the longer ramp for R (it may sound soft), the flip or one part of its change for P
+# (Amendment 1; the reference is the same note with no flip). Frozen by design_sha256 at
+# preparation.
 DESIGN = [
     ("M-bass-0", "M", "mute-bass-0ms", "mute-bass-50ms", 2, "control"),
     ("M-bass-5", "M", "mute-bass-5ms", "mute-bass-50ms", 8, "primary"),
@@ -66,7 +74,20 @@ DESIGN = [
     ("R-mix-10", "R", "chop-mix-10ms", "chop-mix-5ms", 4, "secondary"),
     ("R-mix-20", "R", "chop-mix-20ms", "chop-mix-5ms", 4, "secondary"),
     ("R-mix-50", "R", "chop-mix-50ms", "chop-mix-5ms", 2, "control"),
+    ("P-bass-0-oob", "P", "polarity-bass-0ms-oob", "polarity-bass-none", 2, "control"),
+    ("P-bass-200-inband", "P", "polarity-bass-200ms-inband", "polarity-bass-none", 2, "control"),
+    ("P-bass-20", "P", "polarity-bass-20ms", "polarity-bass-none", 8, "primary"),
+    ("P-bass-20-inband", "P", "polarity-bass-20ms-inband", "polarity-bass-none", 8, "primary"),
+    ("P-bass-20-oob", "P", "polarity-bass-20ms-oob", "polarity-bass-none", 8, "primary"),
+    ("P-kick-20", "P", "polarity-kick-20ms", "polarity-kick-none", 4, "secondary"),
+    ("P-mix-20", "P", "polarity-mix-20ms", "polarity-mix-none", 4, "secondary"),
 ]
+
+# Block P's rule (Amendment 1): the cue each primary contrast tests at the shipped flip, which is
+# twice the shipped muteMs. It changes no value.
+SHIPPED_MUTE_MS = 10
+POLARITY_FLIP_MS = 2 * SHIPPED_MUTE_MS
+POLARITY_CUES = {"flip": "P-bass-20", "dip": "P-bass-20-inband", "click": "P-bass-20-oob"}
 
 # Labelled familiarisation pairs: they carry no answer and are not trials.
 TRAINING = [
@@ -76,6 +97,9 @@ TRAINING = [
     ("04-drag-bass-30hz-40ms", "drag-bass-30hz-40ms"),
     ("05-chop-mix-5ms", "chop-mix-5ms"),
     ("06-chop-mix-soft-50ms", "chop-mix-50ms"),
+    ("07-polarity-bass-no-flip", "polarity-bass-none"),
+    ("08-polarity-bass-click-of-a-hard-flip", "polarity-bass-0ms-oob"),
+    ("09-polarity-bass-dip-of-a-slow-flip-200ms", "polarity-bass-200ms-inband"),
 ]
 
 
@@ -434,8 +458,26 @@ def score(rows: list[dict], key: dict) -> dict:
             "role": role,
             "trials": count,
         }
-    controls = all(r["correct"] == r["trials"] for r in results.values() if r["role"] == "control")
-    return {"controls_passed": controls, "contrasts": results, "decisions": decide(results, controls)}
+
+    def passed(blocks: tuple[str, ...]) -> bool:
+        return all(
+            r["correct"] == r["trials"]
+            for r in results.values()
+            if r["role"] == "control" and r["block"] in blocks
+        )
+
+    # Each part's positive controls gate only its own non-detections (Amendment 1).
+    controls, polarity_controls = passed(VALUE_BLOCKS), passed(("P",))
+    decisions = decide(results, controls)
+    decisions["polarity"] = decide_polarity(
+        results, polarity_controls, decisions.get("mute_ms", SHIPPED_MUTE_MS)
+    )
+    return {
+        "contrasts": results,
+        "controls_passed": controls,
+        "decisions": decisions,
+        "polarity_controls_passed": polarity_controls,
+    }
 
 
 def decide(results: dict, controls: bool) -> dict:
@@ -465,6 +507,53 @@ def decide(results: dict, controls: bool) -> dict:
     }
 
 
+def decide_polarity(results: dict, controls: bool, mute_ms: int) -> dict:
+    """Amendment 1's block-P rule, applied mechanically. It changes no value.
+
+    Each cue at the shipped flip is heard when its contrast is detected, not heard when it is not
+    detected and both P controls are 2/2, and inconclusive otherwise. The answer is carried to the
+    flip of the decided muteMs (twice it) where the length makes it certain: a longer flip has a
+    longer dip and a weaker click, a shorter one the reverse; anything else is not assessed.
+    """
+
+    def status(contrast: str) -> str:
+        if results[contrast]["detected"]:
+            return "heard"
+        return "not heard" if controls else "inconclusive"
+
+    shipped = {cue: status(contrast) for cue, contrast in POLARITY_CUES.items()}
+    if "heard" in shipped.values():
+        outcome = "heard"
+    elif set(shipped.values()) == {"not heard"}:
+        outcome = "not heard"
+    else:
+        outcome = "inconclusive"
+    flip_ms = 2 * mute_ms
+    decided = {cue: shipped[cue] for cue in ("dip", "click")}
+    if flip_ms > POLARITY_FLIP_MS:
+        decided = {
+            "dip": "heard" if shipped["dip"] == "heard" else "not assessed",
+            "click": "not heard" if shipped["click"] == "not heard" else "not assessed",
+        }
+    elif flip_ms < POLARITY_FLIP_MS:
+        decided = {
+            "dip": "not heard" if shipped["dip"] == "not heard" else "not assessed",
+            "click": "heard" if shipped["click"] == "heard" else "not assessed",
+        }
+    return {
+        "at_decided_flip": {"flip_ms": flip_ms, **decided},
+        "at_shipped_flip": {"flip_ms": POLARITY_FLIP_MS, **shipped},
+        "heard_as": [cue for cue in ("dip", "click") if shipped[cue] == "heard"],
+        "outcome": outcome,
+        "record": {
+            "heard": "a finding for root; defaults unchanged",
+            "not heard": "answers FINDINGS 9.7 for this listener, chain and level; defaults unchanged",
+            "inconclusive": "a P control was missed, so no P non-detection is read; defaults unchanged",
+        }[outcome],
+        "values_changed": [],
+    }
+
+
 def reveal(packet: Path) -> None:
     preparation, trials, key = validate(packet)
     path = packet / "responses.jsonl"
@@ -480,9 +569,9 @@ def reveal(packet: Path) -> None:
     }
     out = packet / "reveal.json"
     write_mode(out, canonical(report), 0o600)
-    print(f"{'contrast':12} {'role':9} {'correct':>9} {'p':>8}  detected")
+    print(f"{'contrast':18} {'role':9} {'correct':>9} {'p':>8}  detected")
     for name, r in result["contrasts"].items():
-        print(f"{name:12} {r['role']:9} {r['correct']:>4}/{r['trials']:<4} {r['p_one_sided']:8.4f}  {r['detected']}")
+        print(f"{name:18} {r['role']:9} {r['correct']:>4}/{r['trials']:<4} {r['p_one_sided']:8.4f}  {r['detected']}")
     print(json.dumps(result["decisions"], indent=2, sort_keys=True))
     print(f"wrote {out}")
 
@@ -509,6 +598,10 @@ def self_test() -> None:
         packet = root / "packet"
         prepare(stimuli, packet, 42, "0" * 40)
         _, trials, key = validate(packet)
+        # Amendment 1: block P's 36 trials follow the 68 of M, F and R, balanced like them.
+        blocks = [t["block"] for t in trials]
+        assert blocks == ["M"] * 34 + ["F"] * 24 + ["R"] * 10 + ["P"] * 36, blocks
+        assert all(t["contrast"].startswith("P-") == (t["sequence"] > 68) for t in key["trials"])
         # The public records never carry the assignment: no role words, no seed.
         public_text = b"".join(p.read_bytes() for p in (packet / "public").glob("*.json"))
         for word in (b"candidate", b"reference", b"seed", b"contrast"):
@@ -525,6 +618,12 @@ def self_test() -> None:
                     "trial": t["sequence"], "utc": "2026-01-01T00:00:00Z", "valid": True,
                 }
                 handle.write(canonical(row))
+        # The reveal record carries every block-P contrast and the P decision (run quietly here).
+        with contextlib.redirect_stdout(io.StringIO()):
+            reveal(packet)
+        revealed = load_json(packet / "reveal.json")
+        assert {n for n in revealed["contrasts"] if n.startswith("P-")} == {d[0] for d in DESIGN if d[1] == "P"}
+        assert revealed["decisions"]["polarity"]["outcome"] == "heard", revealed["decisions"]
         # A listener who hears every difference: 5, 10 and 20 ms all detected, and 20 ms audibly
         # softens the chops, so the rules fall back to 10 ms; the 30 Hz zipper moves faders to 35.
         result = score(read_responses(path), key)
@@ -539,6 +638,56 @@ def self_test() -> None:
             flipped.append({"answer": answer, "trial": t["sequence"], "valid": True})
         decisions = score(flipped, key)["decisions"]
         assert (decisions["mute_ms"], decisions["fader_ms"]) == (5, 20), decisions
+
+        # Block P (Amendment 1). A synthetic listener who hears exactly `hears` (every other trial
+        # answered wrong); it exists only in memory here.
+        controls = {d[0] for d in DESIGN if d[5] == "control"}
+
+        def listener(hears: set[str]) -> dict:
+            rows = []
+            for t in key["trials"]:
+                right = "1" if t["candidate_first"] else "2"
+                wrong = "2" if right == "1" else "1"
+                rows.append({"answer": right if t["contrast"] in hears else wrong, "trial": t["sequence"], "valid": True})
+            return score(rows, key)
+
+        def polarity(result: dict) -> tuple:
+            p = result["decisions"]["polarity"]
+            assert p["values_changed"] == [], p
+            shipped, decided = p["at_shipped_flip"], p["at_decided_flip"]
+            return (p["outcome"], tuple(p["heard_as"]), shipped["flip"], decided["flip_ms"], decided["dip"], decided["click"])
+
+        # The perfect listener hears the flip, its dip and its click at the shipped 20 ms flip.
+        assert polarity(result) == ("heard", ("dip", "click"), "heard", 20, "heard", "heard"), polarity(result)
+        # At chance on every non-control contrast: not heard. muteMs falls to 5, so the 10 ms flip's
+        # shorter dip is not heard either and its stronger click is not assessed.
+        chance = listener(controls)
+        assert polarity(chance) == ("not heard", (), "not heard", 10, "not heard", "not assessed"), polarity(chance)
+        # A missed P control makes P's non-detections inconclusive and leaves M, F and R decided.
+        missed = listener(controls - {"P-bass-0-oob"})
+        assert missed["controls_passed"] and not missed["polarity_controls_passed"]
+        assert (missed["decisions"]["mute_ms"], missed["decisions"]["fader_ms"]) == (5, 20)
+        assert polarity(missed) == ("inconclusive", (), "inconclusive", 10, "not assessed", "not assessed"), polarity(missed)
+        # A missed M control leaves the values at the defaults and P decided on its own controls.
+        missed = listener(controls - {"M-bass-0"})
+        assert missed["decisions"]["status"] == "inconclusive" and missed["polarity_controls_passed"]
+        assert polarity(missed) == ("not heard", (), "not heard", 20, "not heard", "not heard"), polarity(missed)
+        # The dip alone, with muteMs moved to 20 by M: the 40 ms flip's longer dip is heard too and
+        # its weaker click not heard.
+        dip = listener(controls | {"M-bass-5", "M-bass-10", "P-bass-20-inband"})
+        assert dip["decisions"]["mute_ms"] == 20
+        assert polarity(dip) == ("heard", ("dip",), "not heard", 40, "heard", "not heard"), polarity(dip)
+        # The click alone, with muteMs 5: the 10 ms flip's stronger click is heard too.
+        click = listener(controls | {"P-bass-20-oob"})
+        assert polarity(click) == ("heard", ("click",), "not heard", 10, "not heard", "heard"), polarity(click)
+        # The flip alone, neither part: heard, cue not separated.
+        flip = listener(controls | {"P-bass-20"})
+        assert polarity(flip) == ("heard", (), "heard", 10, "not heard", "not assessed"), polarity(flip)
+        # Block P never moves a value: the same listeners without any P detection decide the same.
+        for hears in ({"M-bass-5", "M-bass-10"}, {"F-30-20"}, set()):
+            with_p = listener(controls | hears | set(POLARITY_CUES.values()))["decisions"]
+            without = listener(controls | hears)["decisions"]
+            assert {k: v for k, v in with_p.items() if k != "polarity"} == {k: v for k, v in without.items() if k != "polarity"}
         validate(packet)
         target = packet / "public" / trials[0]["file"]
         target.chmod(0o644)
