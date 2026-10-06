@@ -8,6 +8,7 @@ mod fixture;
 mod manifest;
 mod prng;
 mod protocol_corpus;
+pub mod ramp_endpoint;
 mod randomized;
 
 pub use block::{BlockError, PlanarBlock};

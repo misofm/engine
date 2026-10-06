@@ -97,3 +97,88 @@ copy. Gate 2's re-run proves the move kept each gate's catches.
 ## Dependencies
 
 - #1409 and #1411 (merged with the stream G batch).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-06)
+
+Test code only; no `src` change outside `crates/conformance/src`.
+
+**D1, home.** `conformance::ramp_endpoint` (`crates/conformance/src/ramp_endpoint.rs`, `pub mod` in
+`lib.rs`). It is not behind a feature: the crate's other shared harnesses (`randomized.rs`,
+`EffectDifferential`) are not either, and `realtime-audit` only forwards engine's render-audit
+instrumentation, which this harness does not use. No `Cargo.toml` change and no new dependency
+(`check-conformance-boundaries.sh` exit 0).
+
+**The harness** holds `Section` (`Common`, `Channels`), `RampWord`, `Move` (with `whole`),
+`FRAMES = 72`, the request (48 kHz `qualities[1]` row asserted, quantum 128, dual mono, sidechain
+connected or not), the snapshot and ramp-word readers, the signal, the one-frame render with the
+endpoint check after each block, the unclamped-law reach check, the one-block partition comparison,
+and the native-width bank half. Entry points: `check_every_move(factory, &RampEndpoints, sidechain:
+&[bool])` and `check_every_bank_move(factory, &RampEndpoints)`. Each admits the boxed factory into
+a registry once (`randomized::admit`) and reads the tail-bound entry from it, the entry
+`tail_bound_of` gave every request before. No effect is named in it.
+
+Two changes of form, no change of reach: (1) the delay's `values_with` hook is the data field
+`RampEndpoints::rest` (`&[(0, DELAY_TIME_MS)]`), applied before the move's own `start`, as the delay
+copy did; a bank's resting lanes would rest at the same values (no banking effect sets any). (2) A
+connected run of an effect without a sidechain port now panics instead of silently running
+unconnected (the spec's hazard); the compressor's connected run is the only one and its port exists.
+
+**Per crate (gate 3)** each `tests/ramp_endpoint.rs` keeps only: its module doc (render site,
+effect-specific remarks, test value), `WORDS`, `MOVES` (unchanged: same words, starts, targets,
+`whole` flags), the `ENDPOINTS` constant, the delay's `DELAY_TIME_MS`, and the two test functions
+(one for the delay), each a single harness call with the factory and the sidechain list (compressor
+`[false, true]`, every other effect `[false]`).
+
+**Line counts.** Before: compressor 563, delay 407, gate-expander 500, multiband-compressor 591,
+soft-clip 493, transient-shaper 498, true-peak-limiter 481 (3,533). After: 162, 95, 99, 179, 83, 90,
+78 (786), plus the harness module 519; 1,305 in all.
+
+**Gate 1.** Debug and `cargo test --locked --release -p compressor -p delay -p gate-expander -p
+multiband-compressor -p soft-clip -p transient-shaper -p true-peak-limiter --test ramp_endpoint`:
+pass, 13 tests in 7 targets, the same names and counts as before (`--list` before the change: two
+per effect, one for the delay).
+
+**Gate 2, mutation re-run.** Each mutant applied alone to the new tree by a scratch script, the
+named crates' `--test ramp_endpoint` run in debug, the file restored (`git status` of every `src`
+clean afterwards; the seven targets green after).
+
+| Mutant (#1409 table) | Result on the shared harness |
+| --- | --- |
+| site 2 `next_value` back to `current += step` | red: compressor connected (threshold, frame 33, `0xc2a00001`); transient (attack amount, frame 48, `0x3f800001`); delay (feedback, frame 33, `0x3f733334`) |
+| site 2 `advance_block` first word back to `current + step` | **green** on the delay (see below) |
+| site 4 `advance_where` back to `add` | red: compressor unconnected (threshold, frame 33, `0xc2a00001`) |
+| site 4 gather: target from lane `W - 1 - lane` | red: compressor bank test (threshold, frame 0) |
+| site 5 gate prologue back to `add` | red: gate (threshold, frame 33) |
+| site 6 `run_segment` back to `add` | red: multiband (low threshold, frame 33) |
+| site 6 `Side::segment` target from lane `W - 1 - track` | red: multiband bank test (low threshold, frame 0) |
+| site 7 `ramp_word` at `RAMPING` back to `value + step` | red: delay (feedback, final snapshot depends on the partition) |
+| site 7 D5 choice inverted | red: delay (feedback, final snapshot) |
+| site 8 drive back to `add` | red: soft clip (drive gain, frame 33, `0x427c620b`) |
+| site 8 D5 choice inverted (`if !L::mask_any(L::mask_not(settled))`) | **green** (see below) |
+| site 8 `target_vector` from lane `W - 1 - lane` | red: soft clip bank test (drive gain, frame 0) |
+| site 9 limiter back to `add` | red: limiter (limit coefficient, frame 33, `0x3d6655c2`) |
+| #1409 attempt 2, site 7 left damping `g` | red: delay (damping coefficient, final snapshot) |
+| site 7 left feedback | red: delay (feedback, final snapshot) |
+| site 7 right damping `g` | red: delay (damping coefficient, final snapshot) |
+| site 7 right feedback | red: delay (feedback, final snapshot) |
+| site 7 cross position | red: delay (cross feedback, final snapshot) |
+
+The two green rows are green on the pre-move tree too: with the seven old copies restored from
+`8fc41c5b0` and the same mutants applied, both tests pass. So the move loses no reach, but #1409's
+table no longer describes `8fc41c5b0`:
+- Soft clip's D5 choice changed shape after #1409 (#1452 undo 5): the settled copy now holds the
+  three words instead of adding a zero step. Inverted, a ramping block holds its words at rest,
+  which stays inside the endpoints and is partition- and lane-invariant, so an endpoint gate cannot
+  see it (it is a frozen ramp, not an overshoot).
+- The delay's `advance_block` first-word mutant: the first word of a block differs from the
+  clamped one only on a frame where `current + step` passes the target; no gate-2 test of the
+  delay reaches that on `8fc41c5b0`. Not investigated further (outside this slice: no new moves).
+Both are open items for root, not defects of this slice.
+
+**Gate 4 and the rest.** `cargo clippy --locked --workspace --all-targets -- -D warnings`: pass.
+`cargo fmt --all -- --check`: pass. `RUSTDOCFLAGS='-D warnings' cargo doc --locked -p conformance
+--no-deps`: pass. `check-workspace-policy.sh`, `check-conformance-boundaries.sh`,
+`check-realtime-policy.sh`: exit 0. No engine or render code changed, so `check-cross-targets.sh`
+was not run.
