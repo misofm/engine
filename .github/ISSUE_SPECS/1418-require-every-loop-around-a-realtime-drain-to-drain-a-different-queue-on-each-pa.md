@@ -437,3 +437,316 @@ approaches it.
 - **Attempt budget.** The budget restarts under Amendment 1. Attempts 1 and 2 above do not count
   against it.
 - **GitHub.** The issue stays open. It is not delivered.
+
+## Amendment 1 (root, 2026-10-05)
+
+**Status.** Root rescopes this issue after the verdicts on attempts 1 and 2 (both FAIL). This is a
+rescope, not a failed attempt 3.
+- The verdicts are `docs/handoffs/decision-15-2026-10-05/verdicts/stream-j2/1418-attempt1.md`
+  (filed in `186b796f0`) and `1418-attempt2.md` (filed in `c4018e2a2`), on `main` since #1436
+  merged `codex/d15-stream-j2`.
+- Attempts 1 and 2 (`da878bd49`, `7caf972db`) were reverted in `9d955dc66`. All three commits are
+  on `main`. The Attempt 1 and Attempt 2 records above stay as evidence.
+- Attempt 2's gate and self-test (from `7caf972db`) are also kept in the corpus folder (Cases).
+- The attempt budget is three attempts, counted from zero (root, 2026-10-05).
+
+**Why.** The verdict rounds on #1302 and on this issue found escapes that a text scan cannot see:
+- a `cfg`-gated `let`;
+- a `.zip(..)` argument;
+- a `map_or` closure;
+- a macro call that looks like a receiver read;
+- a local `macro_rules!`.
+
+gawk and mawk also gave different results (mawk's eval stack). Root's ruling is to replace the
+tool, not to add a fourth layer of patterns.
+
+*Check realtime regions with a Rust syntax-tree tool* (slices C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446),
+B2b-1 (#1443) and B2b-2 (#1444); "the tool issue" below) moves every check into `tools/realtime-policy`. That tool
+reads `syn`'s syntax tree, and the tool issue deletes the awk script (C2). This issue then changes
+the tool's drain rule, not awk.
+
+**Problem, corrected.** The Problem says that the marked fader and matrix drains "have no outer
+loop". That is wrong. On `origin/main` at `6d28a80ec` (the same lines on `6b9067ede` and on the
+stream B batch-1 tree):
+- `drain_fader_controls` loops `for (lane, control) in controls.iter_mut().enumerate()`
+  (`crates/builtins-compiler/src/lib.rs:1068`). It takes
+  `let Some(control) = control.as_mut() else { continue; };` (`:1069-1071`), and it counts at
+  `:1074`.
+- `drain_matrix_controls` has the same shape at `:1112`, `:1113-1115` and `:1118`.
+
+The drains with no outer loop are `crates/graph/src/runtime.rs:897` and
+`crates/effect-contract/src/live.rs` `EffectControlLane::stage` (`:349-366`). So D1 must accept
+the pattern-root and `let .. else` form on drains that are already marked.
+
+**Real-tree claims are re-measured.** Stream B's cell slices (#1312, #1346, #1347, #1345) replace
+the fader, matrix, input, route and effect-parameter rings with latest-target cells (D15-2). Root
+ruled that this issue is not ordered against them. So, at implementation time:
+- list the outer-loop drains that `main` still marks;
+- run gates 1 and 4(M3) on those drains;
+- record any drain that a cell slice removed.
+
+The committed synthetic cases (Cases) keep every shape tested, whatever the real tree then holds.
+
+**Decisions, as amended.**
+- **D1 stands,** implemented in the tool's drain rule.
+  - An outer loop around a drain must be finite (tool B1b-D1) and must also select a different
+    queue on each pass (D1). D1 does not replace B1b-D1. This follows D2: D1 is "in addition to
+    today's finite-iterable forms, not in place of them".
+  - The walk resolves names with the tool's one resolver (tool B1a-D2): Rust's block scope, not
+    text.
+  - Attempt 2's narrowing under D1's governing clause stands, with the attempt-2 verdict's fixes.
+- **The index form.** An index selects only when it is the one identifier that takes a new
+  value on each pass:
+  - the lone, non-`mut` pattern of a `0..<bound>` loop;
+  - the index slot of a trailing `.enumerate()` (not over `&mut` of an iterator);
+  - an `array::from_fn` closure parameter.
+  - **Invariance.** Inside the selecting loop, the base and every root the walk read are named
+    only in two places:
+    - the binding the walk read;
+    - a receiver read of `available_at_entry` or `try_pop`.
+
+    `map_or` counts only as `map_or(0, <Type>::available_at_entry)`, never with a closure
+    (attempt-2 verdict, MAJOR-3 a).
+  - **Macros.** Two things are refused (MAJOR-3 b, MINOR-1):
+    - any mention of those names inside a macro token tree, except inside a `debug_assert!` that
+      the tool takes at its word (tool B2a-D2: no file under the roots shadows `debug_assert`);
+    - any call of a macro other than `debug_assert!` in the body of a selecting loop.
+
+    The second refusal means a local `macro_rules!` that moves the base cannot pass.
+  - **`cfg`.** A binding the walk reads that carries a `cfg`-family attribute is refused
+    (MAJOR-1).
+  - **`zip`.** A pattern root bound by a `.zip(..)` argument selects for its own loop. No loop
+    outside it selects through it (MAJOR-2).
+  - **Depth.** Rebinding chains of any depth give one answer. There is no link cap and no
+    recursion limit (MINOR-2).
+  - **The per-queue form** (tool slice B1a-D8b; root's ruling 1 on the fourth review). Each pop in
+    the form is bounded by its own queue's counter, which is set at entry and only falls, however
+    many passes run. So D1 does not apply to the form's own loops: the pass loop and every loop
+    between it and the set loop. A loop that encloses the set loop would re-read every counter on
+    each of its passes; D1 refuses every such loop, whatever it iterates (fourth review, MINOR-3).
+    No real drain has one. With D1 off for the form's own loops, its invariance rule (the base and
+    roots named only in the walk's binding and the receiver reads) no longer protects the counted
+    queue's place there. B1a-D8b carries that protection itself (fifth review, MINOR-2): the pass
+    body names `<r'>` only in the pop's receiver (condition 5,
+    `per_queue_element_swapped_with_spare`), and the window names `<Q>` only in the pass header and in listed shared reads (condition 6,
+    `per_queue_collection_swapped`). This issue adds no case for it.
+  - **The two NIT-3 forms are accepted** (attempt-1 verdict):
+    - `let Some(control) = self.controls[lane].as_mut() else`: the index form, followed by one
+      `.as_mut()` or `.as_ref()`, in a `let` or `let .. else` binding;
+    - an `else if let Some(control) = control.as_mut()` around the drain: an `if let` in an
+      `else` branch binds as `if let` does.
+- **D2 stands.**
+- **D3 stands.** The tool's module documentation says it.
+- **D4 stands,** written as committed cases of the tool (Cases).
+- **D5 moves to the tool issue** (tool B1b-D5). This issue changes no Rust source outside
+  `tools/realtime-policy`.
+- **D6 stands** for the drain rule's module documentation in the tool. It states the bound as
+  attempt 2 wrote it:
+  - each drain pops at most the records its queue held when its count was read;
+  - each drain reads a given queue at most once per pass of its outer loops.
+
+  A sequential double drain of one queue stays outside the rule.
+
+**Cases.**
+- **Sources.** The sources are in `/home/bl/misofm/submix-verdicts/evidence/1418-probes/`:
+  - `probe-corpus.tar.gz`, paths `v1418/rs/probe.rs` and
+    `v1418b/evidence/{probe,probe2,probe3,zipself,refchain40,chain55}.rs` and `*.regions`;
+  - `1418-attempt2-test-realtime-policy.sh` and `1418-attempt2-check-realtime-policy.sh`
+    (attempt 2's self-test and gate, from `7caf972db`).
+- **Format.** Each shape below becomes one committed case in the tool's case format. A shape
+  that duplicates another is committed once, and the Evidence maps the duplicate. Every expected
+  failure expects {drain}.
+- **Expected failures, from D4:**
+  - `0..usize::MAX` around a re-read drain;
+  - `0..control.capacity()`;
+  - the `[(); usize::MAX]` parameter;
+  - `&mut rounds` over `0_u32..`;
+  - `let control = &mut controls[lane % 2];` inside `for lane in 0..2`;
+  - a counted outer loop (`for _ in 0..outer_available`);
+  - the same-queue `drain_lane_pairs`. The tool's base tree changes `drain_lane_pairs` to drain
+    `controls[lane]`.
+- **Expected failures, from attempt 2's cases** (bodies in the attempt-2 self-test):
+  - `outer-index-table`, `outer-index-table-field`, `outer-enumerated-index-table`;
+  - `outer-borrowed-index-cycle`, `outer-borrowed-enumerated-cycle`;
+  - `outer-index-base-swapped`, `outer-index-base-reassigned`, `outer-index-base-rebound`;
+  - `outer-element-swapped-with-spare`, `outer-element-moved-in-let-else`;
+  - `outer-index-rebound`, `outer-index-rebound-by-macro`, `outer-index-shadowed-by-block-const`,
+    `outer-index-reassigned`;
+  - `outer-loop-around-unselected-base`.
+- **Expected failures, from attempt 1's hand probes.** These were never committed; the Attempt 1
+  record lists them. A receiver rebound by:
+  - a struct `let`;
+  - a closure parameter;
+  - a `match` arm;
+  - `let control = &mut *fixed`;
+  - `for mut control` with reassignment;
+  - `rebind!(control)`.
+
+  Also `controls[0]`, and a base rebound inside the loop.
+- **Expected failures, from the attempt-2 verdict:**
+  - `cfg_let_outer`, `cfg_let_before` and `cfg_letelse` (MAJOR-1);
+  - `zip_nxt_mut` and `Mixer::drain` over `zip(self.controls.iter_mut())`, plus `zipself.rs`'s
+    `zip(&mut self.controls)` and `.zip(..).enumerate()` (MAJOR-2);
+  - `mapor_swap`, `mapor_index_chain`, `macro_swap`, `macro_before_read_base` and
+    `macro_after_read_index` (MAJOR-3);
+  - the local `macro_rules! rotate` (MINOR-1);
+  - the shapes it confirmed as refused:
+    - `while let Some(control) = it.next()`;
+    - `iter_mut().rev()`;
+    - `chunks_mut(1)`;
+    - a closure that drains;
+    - a closure parameter or an inner-block `let` that shadows the queue;
+    - `mem::swap` or `mem::take` named with the base or the root;
+    - `let c = &mut *controls; c.swap(..)` inside the loop.
+- **Expected failure, new (the per-queue form):** `per_queue_inside_outer_loop`: the meter poll's
+  twin inside `for _ in 0..rounds`, so that the set loop runs once per round. D1 refuses the outer
+  loop.
+- **Expected failures, from #1302's and the batch verdict's outer-loop escapes.** These pass on
+  `main` and fail under D1:
+  - s05 (`array::from_fn` into `[(); usize::MAX]`);
+  - s06 (`0..18_446_744_073_709_551_615_usize`);
+  - s07 (the count re-read after the inner loop, inside `for _ in 0..1_000_000`).
+
+  n03, s04, e01, e04 and e08 duplicate D4 cases.
+- **Accepted cases:**
+  - from D4: `array::from_fn` over `controls[lane]`, and the two-level `BankSet::drain_banks`;
+  - from the attempts:
+    - `drain_fader_records` (`let .. else` with `.as_mut()`);
+    - `drain_optional_controls` (`if let` with `.as_mut()`);
+    - `drain_gained_lanes`, `drain_bank_lanes`, `drain_even_lanes`;
+  - from the verdicts:
+    - `if let Some(control) = control.as_mut()`;
+    - `let control = &mut controls[lane]`;
+    - a pure `if control.ready()`;
+    - a labelled `continue 'lanes`;
+    - `split_at_mut` halves taken before the loop;
+    - `let control = &mut controls[lane]; let Some(control) = control.as_mut() else`;
+    - a 60-level nest of distinctly named bank loops;
+    - a 64-link `let control = &mut control;` chain and a 64-link
+      `let Some(control) = control.as_mut() else` chain (`refchain40.rs` and `chain55.rs`,
+      lengthened);
+  - the two NIT-3 forms (D1);
+  - tool slice B1a-D8b's two accepted per-queue cases (`per_queue_meter_poll` and
+    `per_queue_single_pass`), kept as they are (committed once, in
+    B1a): D1 does not apply to the form's own loops. B1a's refused per-queue cases need no twin
+    here: they are refused by the form's own conditions, which this issue does not change;
+  - synthetic twins of the three real outer-loop drains: `drain_controls` with its
+    `let Self { .. } = self` destructure, and the fader and matrix drains (tool B1b-D6);
+  - the twins of the drains that production issues prescribe (Hazards): `cancel_except` (tool
+    B2b-1-D9) and #1345's drain-only observation loop (tool B2b-2-D5). Each must pass unchanged.
+
+**Authorized paths, as amended.**
+- `tools/realtime-policy/**` (the drain rule, its module documentation and its cases)
+- This spec
+
+`scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` no longer exist after the
+tool issue's C2. `crates/builtins-compiler/src/lib.rs` moves to the tool issue (B1b-D5).
+
+**Non-goals, added.**
+- #1426 (the pop's receiver is the counted receiver).
+- The tool's other rules.
+
+**Hazards, as amended.**
+- The awk portability hazard is void.
+- "Over-refusal is acceptable, a false pass is not" and "Two passes over one queue" stand.
+- New: every outer-loop drain that `main` marks at implementation time must pass with no change
+  to its source. On `6d28a80ec` there are two: `drain_fader_controls` and
+  `drain_matrix_controls`; `drain_controls` is a third after tool B1b-D5. Before this issue starts,
+  production issues add these, each with a twin in the tool's cases. Each is written so that D1's
+  invariance rule accepts it as it stands; the rule is not relaxed for them (fourth review,
+  MAJOR-5):
+  - `SpectrumCaptureCollection::cancel_except` (stream H, *Bound every drain the AudioWorklet runs
+    on its audio thread*, D9): a drain loop `for (index, capture) in
+    self.captures.iter_mut().enumerate()` with the `keep` check, which names `capture` only in its
+    count and its pop, then a separate reset loop with the same header and check. Each pass of the
+    drain loop selects a different capture: D1 accepts it. (A reset call inside the drain loop
+    names `capture` outside a receiver read, and attempt 2's gate refused that shape.)
+  - The effect bank's observation loop (#1345 Amendment 1, D8): a pop-free loop that stages the
+    lanes' cells, then a drain-only loop over `self.lanes.iter_mut()` that names the lane only in
+    its binding, its count and its pop, and hands each record to a sink not reached through the
+    lane. Each pass selects a different lane's queue.
+  - `AudioWorkletEngineHost::poll_meters` (stream H, *Bound the browser meter poll by each queue's
+    count at entry*, D2; marked by the J batch's #1448 guard commit): tool slice B1a-D8b's per-queue
+    form. Its pass loop, `ready.meters.iter_mut().zip(..).zip(&mut ready.meter_remaining)`, and the
+    `for _ in 0..passes` around it are the form's own loops, which D1 does not judge (Decisions).
+    No loop encloses its set loop.
+  - #1449 and #1345 each record, as PR evidence, that attempt 2's gate
+    (`1418-attempt2-check-realtime-policy.sh` in the probes folder) accepts their marked shape.
+
+**Objective gates, as amended** (they replace gates 1-5).
+1. **The real tree passes.** `cargo run --locked --release -q -p realtime-policy` prints
+   `realtime policy: ok (<R> marked regions in <F> files)`. R and F are the counts on `main`
+   when this issue starts, re-measured.
+2. **The cases.** `cargo test --locked -p realtime-policy` passes, with every case above.
+3. **Red on revert (PR evidence).** Run the tool at this change's parent with this change's cases.
+   Exactly the new expected-failure cases pass, and every accepted case still passes. Record the
+   names.
+4. **Mutations (PR evidence).** Apply each alone. Each turns red the named cases:
+   - **The per-queue form:**
+     - D1 applied to the form's own loops: `per_queue_meter_poll` is red (the fourth-review
+       fold also named `per_queue_sibling_passes`, which B1a dropped after the fifth review),
+       and gate 1 fails at `poll_meters`;
+     - loops that enclose a set loop not judged: `per_queue_inside_outer_loop` passes.
+   - **Spec mutations:**
+     - M1 (any identifier inside the index): `lane % 2`;
+     - M2 (a receiver bound before the loop is accepted): the D4 outer-loop cases;
+     - M3 (the `let` step dropped): the `.as_mut()` accepted cases and the synthetic twins. Gate 1
+       also fails at each real outer-loop pop still marked. On `6d28a80ec` plus tool B1b-D5 those
+       are `crates/builtins-compiler/src/lib.rs:474` (`drain_controls`), `:1076` and `:1120`
+       (B1b-D5's markers replace blank lines, so no line moves). Re-measure them, and add the
+       collection's, the effect bank's and `poll_meters`'s pops if M3 reaches them.
+   - **Attempt 2's mutations, restated on the tool:**
+     - A (any pattern identifier is an index);
+     - B (`uses` always true);
+     - C (the `else` block counted);
+     - D and D2 (the next receiver after an index step);
+     - E, F, G (binder, macro, item);
+     - H (`mut` index);
+     - I (`if` header);
+     - K (`if let`);
+     - L and L2 (the `enumerate` slot);
+     - N (the spelling restore);
+     - P (`enumerate` over `&mut`).
+
+     Each one's only-catch case: D2 `outer-loop-around-unselected-base`, L2
+     `outer-enumerated-index-table`, P `outer-borrowed-enumerated-cycle`, as the attempt-2
+     verdict lists them.
+   - **The attempt-2 verdict's fixes, each undone alone:**
+     - `cfg` accepted: the `cfg_*` cases;
+     - `zip` carried outward: the `zip` cases;
+     - a `map_or` closure accepted: `mapor_*`;
+     - a macro mention or call accepted: `macro_*` and `rotate`;
+     - the NIT-3 `.as_mut()` after an index refused: its accepted case.
+5. **Run time (PR evidence).** Record the time on the real tree, and on one `for lane in 0..2`
+   body with 300 counted drains of `controls[lane]`. That is attempt 2's NIT-1 input, which took
+   more than 300 s in awk.
+6. `cargo fmt --all -- --check`,
+   `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and
+   `bash scripts/check-workspace-policy.sh` exit 0.
+
+*Test value, as amended.* The *Test value* section above stands, read for the tool's cases.
+Added:
+- the `cfg_*` cases are red if a binding that may not be compiled counts as the one in scope;
+- the `zip` cases are red if a `zip` argument's selection is carried to an outer loop;
+- the `mapor_*` and `macro_*` cases are red if a closure or a macro that only looks like a
+  receiver read passes the invariance check;
+- the 64-link chains are red if the walk has a depth cap below 64. Gate 5 records the run time
+  that a cap was meant to bound;
+- the synthetic twins are red on the same defects as the real drains, and keep that defence after
+  the cell slices remove them;
+- `per_queue_inside_outer_loop` is red if a loop that re-runs a per-queue form's set loop passes:
+  each of its passes re-reads every count, which chases the producer. B1a's per-queue cases do not
+  reach it, because B1a does not judge outer loops (B1a-D9).
+
+No other case reaches these.
+
+**Dependencies, as amended.**
+- After (same stream): the whole J tool batch on `main` (C1, A1, A2, B1a, B1b, B2a, C2, the #1448
+  guard commit, B2b-1 and B2b-2). This issue is outside the batch (root, 2026-10-05). The batch
+  pushes once, and B2b-2 waits for #1345 (Amendment 1), so this issue comes after B2b-2 and after
+  #1345.
+- After (other streams), through the tool batch: stream B batch 1 (#1309, #1343, #1314, #1311,
+  #1348), B #1447, H #1448, H #1449 and B #1345 (Amendment 1).
+- Not ordered against #1312, #1346 and #1347 (root's ruling, 2026-10-05). Real-tree claims are
+  re-measured (above).
+- Before: #1426.
