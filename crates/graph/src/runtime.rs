@@ -2484,13 +2484,37 @@ pub(crate) struct ResponseOwnerBinding {
     response_snapshot_declared: bool,
     /// A per-node effect's prepared `bypass`, which its snapshot reports; `false` for every other
     /// owner, whose bypass comes from its live control or its bank. It sits in the row's padding,
-    /// so the row's size is unchanged.
+    /// so the row's size is unchanged (checked below).
     prepared_bypass: bool,
     rack: u8,
     slot: u32,
     unit: usize,
     member: usize,
 }
+
+/// [`ResponseOwnerBinding`] without its `prepared_bypass` flag, compared below.
+#[allow(dead_code)]
+struct ResponseOwnerBindingWithoutBypass {
+    track_id: Box<str>,
+    native_id: Box<str>,
+    stable_id: Box<str>,
+    response_snapshot_declared: bool,
+    rack: u8,
+    slot: u32,
+    unit: usize,
+    member: usize,
+}
+
+// #1460: `prepared_bypass` lives in the padding the binding row already had, so it retains no
+// byte, on every target (the wasm32 browser module included). A compile-time assertion, so every
+// build checks it.
+const _: () = assert!(
+    core::mem::size_of::<ResponseOwnerBinding>()
+        == core::mem::size_of::<ResponseOwnerBindingWithoutBypass>()
+        && core::mem::align_of::<ResponseOwnerBinding>()
+            == core::mem::align_of::<ResponseOwnerBindingWithoutBypass>(),
+    "ResponseOwnerBinding's prepared_bypass no longer fits the row's padding"
+);
 
 /// Which side of the fader/matrix seam one graph node's stage sits on.
 ///

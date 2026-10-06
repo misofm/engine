@@ -11,7 +11,9 @@ The render node table holds, for a per-node prepared effect, exactly the fields 
 processor and its block quantum. The rest of the prepared effect -- its `PreparedEffectMetadata`,
 node identity and response facts -- stays in the prepared plan's control-side effect table, keyed
 by node. Adding a control-only field to the metadata (as #1377 does with `tail_every_peak` and
-`rest`) then costs render-owned memory nothing.
+`rest`) then costs the render node table nothing. (Corrected by the follow-up: it still costs
+render-owned memory, because each effect's prepared processor holds its own
+`PreparedEffectMetadata` copy; *#1461* removes that copy.)
 
 ## Context
 
@@ -163,8 +165,11 @@ No fixture, digest or resource count was re-pinned.
 `check-realtime-policy.sh` passes. `execute_op` reads `effect.quantum` and `effect.processor`
 inline in the op, as it read `effect.metadata.quantum` before; no pointer step was added.
 
-**Gate 4.** No render-owned struct holds `PreparedEffectMetadata`: `NodeKind` and
+**Gate 4.** No struct in `graph::runtime` holds `PreparedEffectMetadata`: `NodeKind` and
 `LiveControlEffect` hold `EffectNode`; the snapshot's prepared bypass reads the binding row.
+(Narrowed by the follow-up: render-owned structs outside `graph::runtime` still hold one -- each
+effect's prepared processor, for example `PreparedDelay` or `PreparedParametricEq`, keeps its own
+copy inside the `Box<dyn PreparedNativeEffect>` that `EffectNode` owns; *#1461* removes it.)
 
 **Gate 5.** `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
 [--all-features] -- -D warnings` (both, no allow added); `RUSTDOCFLAGS='-D warnings' cargo doc
@@ -188,3 +193,45 @@ only.
 **Open.** The GitHub body of #1460 does not carry this record or the Authorized-paths and
 Test-value updates above (one `gh issue create` was authorized). #1377 re-applies `d0af9d53d` on
 top of this slice.
+
+### Follow-up (verdict MINOR/NITs)
+
+Attempt 1 passed (`/home/bl/misofm/submix-verdicts/1460-attempt1.md`: one MINOR, three NITs).
+
+- **m1.** Gate 4's evidence sentence is narrowed to "No struct in `graph::runtime` holds
+  `PreparedEffectMetadata`" with a pointer to *#1461*: each effect's prepared processor (for
+  example `PreparedDelay`, `PreparedParametricEq`) still holds its own copy inside the
+  `Box<dyn PreparedNativeEffect>` that `EffectNode` owns. The `GraphPreparedEffect` doc
+  (`crates/graph/src/lib.rs`) now says the record itself never enters render-owned memory, that
+  its `processor` does, with its own metadata copy, and that #1461 removes that copy. The Product
+  outcome's "costs render-owned memory nothing" is corrected the same way (it costs the render
+  node table nothing). #1377's Amendment 2 ruling 2 gets the same pointer.
+- **n2.** `GraphEffectControlBinding`'s "Why beside" text drops the moot "so `NodeKind`'s largest
+  variant stays unchanged" clause (`EffectNode::new` takes only the processor and quantum, so a
+  channel field could not reach `NodeKind`) and keeps the true reason: a live-control-free plan
+  retains no control-channel payload.
+- **n3.** `crates/graph/src/runtime.rs`: a `const _: () = assert!` that
+  `ResponseOwnerBinding`'s size and alignment equal those of a mirror without `prepared_bypass`
+  (`ResponseOwnerBindingWithoutBypass`, the `UnitIdentityWithoutFlags` pattern), so the
+  "sits in the row's padding" claim is checked on every build. Red: adding
+  `mutant_pad: [u8; 3]` after `prepared_bypass` fails the build on x86-64 and on
+  `wasm32-unknown-unknown` (`+simd128`) with "ResponseOwnerBinding's prepared_bypass no longer
+  fits the row's padding"; green on revert. A const assertion moves no byte of any build.
+- **n1 (note for stream A, not changed).** `crates/graph-compiler/src/ids.rs:377-379` still says
+  the control channels are returned beside the effects "because
+  `core::mem::size_of::<RuntimeOp>()` is a reported byte". After #1460 a `GraphPreparedEffect`
+  field does not reach `RuntimeOp`. `ids.rs` is outside this slice's paths; stream A's next slice
+  that edits it corrects the rationale.
+
+Gates on the follow-up tree (both follow-ups together), all PASS: `cargo fmt --all -- --check`;
+`cargo clippy --locked --workspace --all-targets [--all-features] -- -D warnings` (both);
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; test-debug-a and test-debug-b
+with their doctest steps (the `qualification.yml` commands); `conformance_fixtures -- --check`;
+`graph_fixture --check`; `check-graph-determinism.sh`; `check-effect-contract.sh`;
+`check-workspace-policy.sh`; `check-realtime-policy.sh`; `check-lane-policy.sh`;
+`run-wasm-gates.sh --without-v8-spill --without-native`; `audit capi` (0 allocations,
+0 deallocations, 0 locks, 0 syscalls, 0 violations, `pcm_digest` `cb10fbface44a3a4`, unchanged);
+the worklet chain into fresh directories (`build-web-audioworklet.sh --named-twin`,
+`strip-wasm-names.py check`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`). No
+rendered bit, fixture, digest or resource count moved; nothing was re-pinned.
