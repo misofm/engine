@@ -88,6 +88,11 @@ where it sits in the listing:
 | mono | depth-1 tail, after the pair | 1 | 1 | held |
 | mono | depth-2 pair, masked (`svf_cascade_skewed_with_dry_masks`, refused or all-live plan) | 1 | 2 | held |
 | dual | depth-2 pair | 2 | 4 | reported |
+| dual | armed depth-1 tail, after the armed pair | 2 | 2 | reported, ceiling 2 |
+| dual | armed depth-2 pair | 2 | 4 | reported, ceiling 11 |
+| mono | armed depth-2 pair | 1 | 2 | reported, ceiling 0 |
+| mono | armed depth-1 tail, after the armed pair | 1 | 1 | reported, ceiling 0 |
+| mono | armed depth-2 pair, masked | 1 | 2 | reported, ceiling 0 |
 
 A held row must match exactly one innermost loop of its shape in its function (select-free, or
 masked for the masked row). A row that matches none, or more than one, fails closed and prints the
@@ -114,6 +119,19 @@ registers. At #977-#979 TurboFan routes ten stack slots through its recurrences,
 and `ic2` of one chain live across the back edge (issue #1000 evidence); #977's scan reported the
 loop clean because it is entered in the middle. In a loop that starved, the count moves with any
 allocation change and says nothing about time, so the gate prints it and does not hold it.
+
+**Two forms, and why the armed rows have ceilings** (issue #1328 and its follow-up). The cascades
+run in two forms: the unarmed form on every block of live audio, and the armed form (the joint
+flush, one `vpmaxud` per SVF step, which tells the forms apart) only on a block where some lane's
+silence counter can arm and that lane still holds state -- a decaying tail after the input stopped.
+Each row matches the loop of its own form and anchors a tail on the pair of its own form. The
+unarmed rows are the rows above them and are held as before. The armed rows are reported with a
+ceiling equal to the carried slots measured when the ceilings were set (dual tail 2, two
+general-purpose words; dual pair 11; every mono row 0): a row with a ceiling is checked like a
+held row, failing closed when its loop is missing or ambiguous, and fails when V8 carries more
+slots than its ceiling; fewer passes and asks for the ceiling to be lowered. They are not held at
+zero because the armed form runs only on silent tails, where a carried slot costs nothing a
+listener hears, and the root's ruling chose to make a rise visible rather than to hold them.
 
 Loops are natural loops of the listing's control-flow graph (a back edge is a jump to a block that
 dominates its source). Blocks that make a call are left out of a loop's body: inside these kernels
@@ -190,6 +208,9 @@ class Row:
     after: str | None = None  # the label of a row whose loops this loop must be reachable from
     masked: bool = False  # the row's loop carries the dry-mask selects (not select-free)
     armed: bool = False  # the row's loop is the armed form (the joint flush's `vpmaxud`)
+    # A reported row with a ceiling is checked like a held one, but passes with up to this many
+    # carried slots (issue #1328 follow-up): its count is today's, so a rise is visible.
+    ceiling: int | None = None
 
 
 PAIR = "depth-2 pair, select-free"
@@ -201,13 +222,13 @@ LOOPS = (
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
     Row("mono", "depth-2 pair, masked", streams=1, steps=2, masked=True),
     Row("dual", "armed depth-1 tail, select-free", streams=2, steps=2, held=False,
-        after=ARMED_PAIR, armed=True),
-    Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True),
-    Row("mono", ARMED_PAIR, streams=1, steps=2, held=False, armed=True),
+        after=ARMED_PAIR, armed=True, ceiling=2),
+    Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True, ceiling=11),
+    Row("mono", ARMED_PAIR, streams=1, steps=2, held=False, armed=True, ceiling=0),
     Row("mono", "armed depth-1 tail, select-free", streams=1, steps=1, held=False,
-        after=ARMED_PAIR, armed=True),
+        after=ARMED_PAIR, armed=True, ceiling=0),
     Row("mono", "armed depth-2 pair, masked", streams=1, steps=2, held=False, masked=True,
-        armed=True),
+        armed=True, ceiling=0),
 )
 # The armed form's joint flush: `max_u32` of the two magnitudes, one `i32x4.max_u` per SVF step,
 # which V8 lowers to `vpmaxud`. Nothing else in the EQ's loops uses it.
@@ -723,7 +744,7 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
             continue
         label = f"{name} {row.label}"
         matched = shaped(loops, row, rows)
-        if not row.held:
+        if not row.held and row.ceiling is None:
             for loop in matched or [None]:
                 state = (
                     f"{describe(loop)}; {len(loop.carried)} carried slots"
@@ -747,13 +768,22 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
                     print(f"  {mark} {describe(loop)}", file=sys.stderr)
             continue
         (loop,) = matched
-        if not loop.carried:
-            print(f"ok   {label}: {describe(loop)}; no carried stack slot")
+        allowed = 0 if row.held else row.ceiling
+        if len(loop.carried) <= allowed:
+            if row.held:
+                print(f"ok   {label}: {describe(loop)}; no carried stack slot")
+            else:
+                lower = "" if len(loop.carried) == allowed else ": lower its ceiling"
+                print(
+                    f"ok   {label} (reported, ceiling {allowed}): {describe(loop)}; "
+                    f"{len(loop.carried)} carried slots{lower}"
+                )
             continue
         failures += 1
+        bound = "" if row.held else f", above the row's ceiling of {allowed}"
         print(
             f"FAIL {label}: V8 carries {', '.join(loop.carried)} from one iteration to the "
-            f"next ({describe(loop)}). Listing, carried slots marked:",
+            f"next ({describe(loop)}{bound}). Listing, carried slots marked:",
             file=sys.stderr,
         )
         for instruction in loop.instructions:
@@ -1069,9 +1099,25 @@ def self_test() -> int:
             at = armed_carry.index("jnz <+ATAIL>") - 1
             armed_carry[at:at] = ["vmovups [rbp-0xc0],xmm5"]
             verdicts.append(check_function("t", assemble(armed_carry), form_rows))
+            # A reported row with a ceiling (issue #1328 follow-up): the armed tail above carries
+            # one slot. A ceiling of one passes it, a second carried slot fails it, and a ceiling
+            # row whose loop is missing fails closed like a held row.
+            ceiling_rows = (form_rows[0],
+                            Row("t", "armed pair", streams=2, steps=2, held=False, armed=True),
+                            Row("t", "armed tail", streams=1, steps=1, held=False,
+                                after="armed pair", armed=True, ceiling=1))
+            verdicts.append(check_function("t", assemble(armed_carry), ceiling_rows))
+            two_carried = list(armed_carry)
+            at = two_carried.index("ATAIL:") + 1
+            two_carried[at:at] = ["vmovups xmm1,[rbp-0xd0]"]
+            at = two_carried.index("jnz <+ATAIL>") - 1
+            two_carried[at:at] = ["vmovups [rbp-0xd0],xmm6"]
+            verdicts.append(check_function("t", assemble(two_carried), ceiling_rows))
+            no_armed = [line for line in forms if line not in maxud]
+            verdicts.append(check_function("t", assemble(no_armed), ceiling_rows))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    want = [1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1]
+    want = [1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1]
     if verdicts != want:
         failures += 1
         print(f"self-test FAIL verdicts: {verdicts}, want {want}", file=sys.stderr)
