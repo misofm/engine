@@ -1210,8 +1210,9 @@ fn filter_ramp_words<L: Lane>(
 /// How many of a filter ramp's 64 updates step from the current word (#1407).
 ///
 /// A frame steps from the current word when the lane's ramp countdown, after that frame's
-/// decrement, is at least [`FILTER_LEADING_FLOOR`]: the frames that leave a countdown of `63` down
-/// to `60`. The bodies read the countdown they already carry, so the owner passes nothing more.
+/// decrement, is at least `64 - INPUT_FILTER_LEADING_UPDATES`: the frames that leave a countdown
+/// of `63` down to `60`. The bodies read the countdown they already carry, so the owner passes
+/// nothing more.
 pub const INPUT_FILTER_LEADING_UPDATES: u32 = 4;
 
 /// The lowest countdown, after a frame's decrement, at which that frame still steps from the
