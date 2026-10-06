@@ -66,15 +66,19 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # EQ reads its rest thresholds from memory, in place of splatted compares. Its follow-up lowered
 # one more (parametric-eq 88 -> 48), as the check asked: the EQ's cascades run in two forms per
 # block (armed and unarmed) and carry `lane::FLUSH_EPS` as a word from the prepared EQ
-# (`ArmedRest`, `UnarmedRest`) instead of splatting it in each kernel instantiation.
+# (`ArmedRest`, `UnarmedRest`) instead of splatting it in each kernel instantiation; and two more
+# (builtins 71 -> 40, parametric-eq 48 -> 47), as the check asked: the silence counter's skip form
+# (`lane::kernels::silence_skip_block`) keeps only its live test inline and runs its whole-block
+# scan and its frame loop in one outlined function per lane width, so their constants are no
+# longer materialised at every call site.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 71),
+    "builtins": ("1018", 40),
     "compressor": ("1018", 970),
     "gate-expander": ("1018", 91),
     "graph": ("1018", 10),
     "host-core": ("1018", 4),
     "multiband-compressor": ("1018", 566),
-    "parametric-eq": ("1018", 48),
+    "parametric-eq": ("1018", 47),
     "soft-clip": ("1018", 22),
     "transient-shaper": ("1018", 268),
     "true-peak-limiter": ("1018", 104),

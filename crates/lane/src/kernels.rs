@@ -354,10 +354,24 @@ pub fn silence_block<L: Lane>(
 /// whose thresholds no section needs: one no lane's counter can arm ([`crate::silence_armable`]),
 /// or one no section runs (issue #1328, amendment A9).
 ///
-/// The counter is left exactly where [`silence_block`] would leave it. When the block's last frame
-/// is non-zero on every lane -- any block of live audio -- that is `+0.0`, read off one frame
-/// with one `mask_any`; otherwise the frame loop runs [`crate::silence_step`]'s counter, three
-/// operations per frame, with no threshold and no store.
+/// The counter is left exactly where [`silence_block`] would leave it, in one of three forms:
+///
+/// 1. **Live.** The block's last frame is non-zero on every lane -- any block of live audio: every
+///    counter ends at `+0.0`, read off one frame with one `mask_any`.
+/// 2. **Settled.** Otherwise a whole-block zero scan (a load, an `eq` and a `mask_and` per frame,
+///    no counter and no loop-carried add) finds the lanes whose input is `±0.0` on every frame of
+///    the block. When every lane is either such a lane or non-zero on its last frame -- a bank
+///    with a silent or padding lane beside live ones, or a block of silence -- the counter is
+///    `min(run + frames, 2^24)` ([`silence_advance`]) on the silent lanes and `+0.0` on the
+///    others, which is what the frame loop computes: `run + 1` per zero frame is exact below
+///    `2^24` and saturates there, and a lane non-zero on its last frame ends at `+0.0`.
+/// 3. **Transition.** Some lane is zero on its last frame but not on every frame (its silence
+///    starts inside the block): the frame loop runs [`crate::silence_step`]'s counter, three
+///    operations per frame, with no threshold and no store.
+///
+/// The live form is inlined into each caller; the other two are one outlined function per lane
+/// width ([`silence_skip_settle`]), so their constants are materialised once per width, not at
+/// every call site (on `aarch64-apple-ios` a constant vector is a `memset_pattern16` call, #1018).
 #[inline(always)]
 pub fn silence_skip_block<L: Lane>(input: &[f32], frames: usize, run: &mut L) {
     if frames == 0 {
@@ -365,14 +379,46 @@ pub fn silence_skip_block<L: Lane>(input: &[f32], frames: usize, run: &mut L) {
     }
     let span = frames * L::WIDTH;
     debug_assert!(input.len() >= span);
-    let last = L::load(&input[span - L::WIDTH..span]);
-    if !L::mask_any(last.eq(L::zero())) {
+    let input = &input[..span];
+    let ends_silent = L::load(&input[span - L::WIDTH..]).eq(L::zero());
+    if !L::mask_any(ends_silent) {
         *run = L::zero();
+        return;
+    }
+    silence_skip_settle(input, ends_silent, run);
+}
+
+/// [`silence_skip_block`]'s settled and transition forms over `input`, a whole block of
+/// `L::WIDTH`-word frames whose last frame is zero on the lanes of `ends_silent`, some lane at
+/// least.
+#[inline(never)]
+fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L) {
+    let frames = input.len() / L::WIDTH;
+    // Four independent `mask_and` chains, so the scan runs at the loads' throughput instead of
+    // one `mask_and` latency per frame; `mask_and` is exact in any grouping.
+    let mut silent = [ends_silent; 4];
+    let mut quads = input.chunks_exact(4 * L::WIDTH);
+    for quad in &mut quads {
+        for (chain, frame) in silent.iter_mut().zip(quad.chunks_exact(L::WIDTH)) {
+            *chain = L::mask_and(*chain, L::load(frame).eq(L::zero()));
+        }
+    }
+    for frame in quads.remainder().chunks_exact(L::WIDTH) {
+        silent[0] = L::mask_and(silent[0], L::load(frame).eq(L::zero()));
+    }
+    let silent = L::mask_and(
+        L::mask_and(silent[0], silent[1]),
+        L::mask_and(silent[2], silent[3]),
+    );
+    if !L::mask_any(L::mask_and(ends_silent, L::mask_not(silent))) {
+        let mut advanced = *run;
+        silence_advance(&mut advanced, frames);
+        *run = L::select(silent, advanced, L::zero());
         return;
     }
     let one = L::splat(1.0);
     let mut counted = *run;
-    for frame in input[..span].chunks_exact(L::WIDTH) {
+    for frame in input.chunks_exact(L::WIDTH) {
         counted = L::select(L::load(frame).eq(L::zero()), counted.add(one), L::zero());
     }
     *run = counted;

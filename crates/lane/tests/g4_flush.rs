@@ -20,7 +20,7 @@
 
 mod support;
 
-use lane::kernels::{silence_advance, silence_block};
+use lane::kernels::{silence_advance, silence_block, silence_skip_block};
 use lane::{FLUSH_EPS, Lane, REST_EPS, flush, flush_pair, silence_frames, silence_step};
 use support::Xorshift64Star;
 
@@ -544,4 +544,105 @@ fn armable_is_exact<L: Lane>(width_name: &str) {
 #[test]
 fn g4_silence_armable_is_exact() {
     lane::each_lane!(|L| armable_is_exact::<L>(core::any::type_name::<L>()));
+}
+
+/// One lane's input over a block for [`skip_matches_blocks`]: `shape` picks how the lane's zeros
+/// fall in the block, so every lane mix reaches each of `silence_skip_block`'s three forms.
+fn skip_lane_input(shape: u32, frames: usize, random: &mut Xorshift64Star) -> Vec<f32> {
+    let live = |random: &mut Xorshift64Star| {
+        // Never an exact zero of either sign: NaN, infinities and subnormals stay live.
+        let pick = random.next_u32() as usize;
+        let x = random.next_mixed(pick);
+        if x == 0.0 { 1.0e-30 } else { x }
+    };
+    let zero = |random: &mut Xorshift64Star| {
+        if random.next_u32() & 1 == 0 {
+            0.0
+        } else {
+            -0.0
+        }
+    };
+    let split = 1 + (random.next_u32() as usize) % frames.max(1);
+    (0..frames)
+        .map(|f| match shape {
+            // silent throughout, `+0.0` and `-0.0` mixed
+            0 => zero(random),
+            // live throughout
+            1 => live(random),
+            // live, but exactly zero on the last frame only
+            2 if f + 1 == frames => zero(random),
+            2 => live(random),
+            // live up to a frame inside the block, silent after it
+            3 if f + 1 < split.min(frames) => live(random),
+            3 => zero(random),
+            // live on the first frame only
+            4 if f == 0 => live(random),
+            4 => zero(random),
+            // one live frame somewhere in silence
+            _ if f + 1 == split => live(random),
+            _ => zero(random),
+        })
+        .collect()
+}
+
+fn skip_matches_blocks<L: Lane>(width_name: &str) {
+    let mut random = Xorshift64Star::new(0x1328_5c1b);
+    let starts = [
+        0.0f32,
+        1.0,
+        5.0,
+        4_095.0,
+        16_777_000.0,
+        16_777_215.0,
+        16_777_216.0,
+    ];
+    for frames in [1usize, 2, 3, 17, 128, 129] {
+        for trial in 0..400 {
+            // The first trials put one shape on every lane; later ones mix shapes across lanes.
+            let shapes: Vec<u32> = (0..L::WIDTH)
+                .map(|lane| {
+                    if trial < 6 {
+                        trial as u32
+                    } else {
+                        (random.next_u32() + lane as u32) % 6
+                    }
+                })
+                .collect();
+            let lanes: Vec<Vec<f32>> = shapes
+                .iter()
+                .map(|&shape| skip_lane_input(shape, frames, &mut random))
+                .collect();
+            let mut input = vec![0.0f32; frames * L::WIDTH];
+            for (lane, samples) in lanes.iter().enumerate() {
+                for (f, x) in samples.iter().enumerate() {
+                    input[f * L::WIDTH + lane] = *x;
+                }
+            }
+            let start: Vec<f32> = (0..L::WIDTH)
+                .map(|_| starts[(random.next_u32() as usize) % starts.len()])
+                .collect();
+            let mut plane = vec![0.0f32; frames * L::WIDTH];
+            let mut walked = L::load(&start);
+            silence_block::<L>(&input, frames, &mut walked, &mut plane, L::splat(4_096.0));
+            let mut skipped = L::load(&start);
+            silence_skip_block::<L>(&input, frames, &mut skipped);
+            let (mut a, mut b) = ([0u32; 8], [0u32; 8]);
+            walked.store_bits(&mut a);
+            skipped.store_bits(&mut b);
+            assert_eq!(
+                a, b,
+                "{width_name}: silence_skip_block over {frames} frames, lane shapes {shapes:?}, \
+                 starts {start:?}"
+            );
+        }
+    }
+}
+
+/// `silence_skip_block` (the counter of a block no threshold is read from) leaves every lane's
+/// counter exactly where `silence_block`'s frame loop does, in each of its forms: a live last frame
+/// on every lane, a block where every lane is silent throughout or live on its last frame (counter
+/// saturation included), and a block where some lane's silence starts inside it (issue #1328).
+#[test]
+fn g4_silence_skip_block_is_the_frame_loop() {
+    lane::each_lane!(|L| skip_matches_blocks::<L>(core::any::type_name::<L>()));
 }
