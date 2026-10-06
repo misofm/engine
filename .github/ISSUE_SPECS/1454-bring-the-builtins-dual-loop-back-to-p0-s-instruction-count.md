@@ -169,6 +169,35 @@ spills. The timing and the instruction counts are PR evidence, not committed tes
 
 #1451 (and #1328, which it follows).
 
+## Amendment 1 (root ruling, 2026-10-06, before attempt 1)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15, on #1451's verifier MINOR 1
+(2026-10-06). It governs where the sections above seem to disagree.
+
+- **A1. The splatted `FLUSH_EPS` constant rebuilt inside the loop is in scope.** Since #1451 D3
+  splatted the flush constant again, TurboFan rematerialises that `v128.const` inside the loop
+  (one `movq`/`movl` + `vmovq` + `vpunpcklqdq` per iteration, where base reused the carried word;
+  one stack `vmovups` fewer). The #1451 verifier measured the held unarmed V8 rows' instruction
+  counts moving with it, base `5b44be979` -> #1451 head `cc2b4e0c1`, carried slots unchanged at 0:
+
+  | held row | base | #1451 head |
+  |---|---|---|
+  | dual depth-1 tail | 107 | 110 |
+  | dual depth-2 pair | 184 | 187 |
+  | mono depth-2 pair | 81 | 79 |
+  | mono depth-1 tail | 49 | 52 |
+
+  This slice owns the dual loop's instruction count, so it owns this rematerialisation too, in
+  the builtins dual loop and in these held rows (this narrows the Non-goals' "The EQ's loops and
+  V8 rows (#1451)" for this one mechanism). D1 names why TurboFan rebuilds the constant inside the
+  loop; D2 removes it with a lane-kernel change in the Authorized paths, one shape for all
+  targets, with no carried word brought back for the iOS ratchet (#1451 removed that cause). If
+  the fix needs a path outside the Authorized paths, stop and ask root. Gate 3 also records these
+  four rows' TurboFan instruction counts and carried slots, base and head; no held row may gain a
+  slot. If no lane-kernel shape changes TurboFan's choice, the attempt record gives the evidence
+  and the rows stay as measured.
+
 ## Attempt record
 
 None yet.

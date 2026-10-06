@@ -137,8 +137,8 @@ recorded reason.
 
 ## Deliverables
 
-1. Up to five commits, one per undo (D2), each with its gate evidence in the commit message or this
-   spec's attempt record.
+1. Up to six commits, one per undo (D2; undo 6 by Amendment 1), each with its gate evidence in the
+   commit message or this spec's attempt record.
 2. Per undo, a row in the attempt record: kept or reverted, base and head iOS counts of the crate,
    x86-64-v3 and `simd128` instruction counts of the affected loop or function, TurboFan count where
    held, p50 table (or the D3 off-loop note), and the reason.
@@ -154,7 +154,8 @@ recorded reason.
 - `crates/builtins/src/lib.rs` (undo 1: `InputStage::load_filter_leading` and its two call sites
   only; stream A's file, named exception) and the doc at
   `crates/builtins/tests/filter_liveness.rs:1088`
-- `crates/lane/src/kernels.rs` (undo 2: `route_mix_ramp_block`'s index only)
+- `crates/lane/src/kernels.rs` (undo 2: `route_mix_ramp_block`'s index only; undo 6, Amendment 1:
+  `silence_skip_block`, `silence_skip_settle` and their docs only)
 - `crates/parametric-eq/src/lib.rs` (undo 3: `lanes_mask` and its doc only)
 - `crates/true-peak-limiter/src/lib.rs` (undo 4: `clear_runtime`'s attribute and doc only)
 - `crates/soft-clip/src/kernel.rs` (undo 5: `soft_clip_block` only)
@@ -206,8 +207,8 @@ recorded reason.
    `simd128`, V8 spill gate with every held row clean).
 4. **Better or recorded (D3), descriptive.** Codegen: x86-64-v3 and `simd128` instruction counts of
    the affected loop or function, base and head. p50: `scripts/web-mixing-automation-benchmark.mjs
-   run` on the shipped module of base and head for undos 1, 2 and 5 (the browser documents that
-   reach the site), one warmup and two measured rounds each, interleaved, pinned to one CPU, host
+   run` on the shipped module of base and head for undos 1, 2, 5 and 6 (the browser documents that
+   reach the site; undo 6 by Amendment 1), one warmup and two measured rounds each, interleaved, pinned to one CPU, host
    load average recorded; not retried, not tuned.
 5. **Workspace gates.**
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p soft-clip -p true-peak-limiter -p parametric-eq -p builtins -p graph -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
@@ -234,6 +235,35 @@ word; the V8 spill gate turns red if a held loop spills. A test that only names 
 ## Dependencies
 
 #1451; #1409 (root, 2026-10-06: a real dependency edge, not only a Hazards note, so undo 5 cannot land before #1409's final D5 shape; #1409 and #1411 merge in one pull request).
+
+## Amendment 1 (root ruling, 2026-10-06, before attempt 1)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15, on #1451's verifier MINOR 3
+(2026-10-06). It governs where the sections above seem to disagree; Deliverables, Authorized paths
+and gate 4 are updated to match.
+
+- **A1. A sixth undo: the outlined `silence_skip_settle`.** The #1328 follow-up (`6293440ff`,
+  `91724e66c`, recorded in `0725a8949`; landed) wrote `lane::kernels::silence_skip_block`'s
+  settle path, the backward scan over a block whose last frame is zero on some lane, as one
+  `#[inline(never)]` function per lane width (`silence_skip_settle`,
+  `crates/lane/src/kernels.rs`), chosen while every constant vector cost a `memset_pattern16`
+  call on `aarch64-apple-ios` (#1018); its doc says only that "the outlining stays as it is". It
+  has no recorded reason of its own. It joins the undo list as **undo 6**, done last in D2's
+  order (2, 1, 5, 3, 4, 6), in its own commit.
+  - **Natural shape:** the scan inlined into `silence_skip_block` (no `#[inline(never)]`: the
+    body in place, or an `#[inline(always)]` helper, whichever reads better); the live form
+    unchanged.
+  - **Keep-or-undo:** D3's rule applies unchanged. The site is on the frame path of the builtins
+    input chain's and the EQ's unarmed form (every block whose last frame is zero on some lane,
+    including a partial bank's padding lanes), so its p50 is measured (gate 4, browser
+    documents). The counts are those of the callers that inline `silence_skip_block` (the
+    builtins and EQ unarmed bodies) on x86-64-v3 and `simd128`, and the TurboFan count of the held
+    rows. The outlining stays only if its own merit is measured (the inlined form is worse by D3),
+    and the attempt record states the reason either way; the doc at the site then states that
+    reason in one sentence, or goes with the outlining.
+  - **Gates:** 1-5 as for every undo; gate 2 also covers `builtins` and `parametric-eq`, the
+    crates that inline the function (a count that rises is a revert, D4).
 
 ## Attempt record
 
