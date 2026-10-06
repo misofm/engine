@@ -56,15 +56,14 @@ use lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            GainMuteRamp, INPUT_FILTER_LEADING_UPDATES, InputChainCoef, InputChainPlan,
-            InputChainState, InputTrimRamp, Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block,
-            fader_matrix_block_without_identity, gain_mute_block, gain_mute_ramp_block,
-            input_chain_block_elided, input_chain_block_mono_elided, input_chain_plan,
-            input_chain_ramp_block_elided, input_chain_ramp_block_filter,
-            input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
-            mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity,
-            matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric, section_is_identity,
-            zero_lanes_block,
+            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
+            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
+            gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
+            input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
+            input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
+            input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
+            matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
+            plan_is_channel_symmetric, section_is_identity, zero_lanes_block,
         },
     },
 };
@@ -1331,27 +1330,6 @@ impl<L: Lane> InputStage<L> {
         if self.collapsed { 0 } else { channel }
     }
 
-    /// Each lane's leading countdown for the filter-ramp bodies: its ramp countdown less
-    /// `64 - INPUT_FILTER_LEADING_UPDATES`, so the bodies step a word from the current one while it
-    /// is at least zero (#1407). Built per block, like [`InputStage::load_filter_countdown`], and
-    /// never stored.
-    fn load_filter_leading(&self) -> [[L; 2]; 2] {
-        let floor = (INPUT_FILTER_RAMP_SAMPLES - INPUT_FILTER_LEADING_UPDATES) as f32;
-        let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
-        for (channel, channel_words) in words.iter_mut().enumerate() {
-            for (section, section_words) in channel_words.iter_mut().enumerate() {
-                for (lane, word) in section_words.iter_mut().enumerate() {
-                    *word = self.filter_remaining[channel][section][lane]
-                        .min(INPUT_FILTER_RAMP_SAMPLES) as f32
-                        - floor;
-                }
-            }
-        }
-        core::array::from_fn(|channel| {
-            core::array::from_fn(|section| lane_words::<L>(&words[channel][section]))
-        })
-    }
-
     fn load_filter_countdown(&self) -> [[L; 2]; 2] {
         let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
         for (channel, channel_words) in words.iter_mut().enumerate() {
@@ -1781,7 +1759,6 @@ impl<L: Lane> InputStage<L> {
                 self.load_countdown();
             }
             let mut filter_remaining = self.load_filter_countdown();
-            let filter_leading = self.load_filter_leading();
             #[cfg(test)]
             FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
             let mut report = input_chain_ramp_block_filter::<L>(
@@ -1795,7 +1772,6 @@ impl<L: Lane> InputStage<L> {
                 &self.filter_target,
                 &self.filter_step,
                 &mut filter_remaining,
-                filter_leading,
             );
             if self.ramping {
                 self.settle(prefix, 0..2);
@@ -1928,7 +1904,6 @@ impl<L: Lane> InputStage<L> {
                 self.load_countdown();
             }
             let mut filter_remaining = self.load_filter_countdown();
-            let filter_leading = self.load_filter_leading();
             #[cfg(test)]
             FILTER_PREFIX_KERNEL_FRAMES.with(|observed| observed.set(prefix));
             let mut report = input_chain_ramp_block_filter_mono::<L>(
@@ -1941,7 +1916,6 @@ impl<L: Lane> InputStage<L> {
                 &self.filter_target,
                 &self.filter_step,
                 &mut filter_remaining,
-                filter_leading,
             );
             if self.ramping {
                 self.settle(prefix, 0..1);

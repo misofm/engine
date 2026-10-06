@@ -138,7 +138,6 @@ fn run<L: Lane>(
     };
     let step = [[zero; 2]; 2];
     let mut remaining = [[L::zero(); 2]; 2];
-    let leading = [[L::zero(); 2]; 2];
     let plan = InputChainPlan {
         elided: [[true, false], [true, false]],
     };
@@ -167,7 +166,6 @@ fn run<L: Lane>(
                 &target,
                 &step,
                 &mut remaining,
-                leading,
             );
         }
         (Entry::FilterRamp, true) => {
@@ -181,7 +179,6 @@ fn run<L: Lane>(
                 &target,
                 &step,
                 &mut remaining,
-                leading,
             );
         }
         (Entry::Mixed, false) => {

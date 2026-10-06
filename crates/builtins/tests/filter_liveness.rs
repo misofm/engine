@@ -931,7 +931,7 @@ fn every_reachable_recursion_word_stays_inside_the_hull_of_the_designs() {
     }
 }
 
-// ---- #1407 follow-up: the owner's leading countdown, per lane, at every width ------------
+// ---- #1407 follow-up: each lane's own leading window, at every width ----------------------
 
 /// One section's ramp record as the A3 law defines it, for the oracle of gate 8.
 #[derive(Clone, Copy)]
@@ -1059,8 +1059,8 @@ impl RampSubject {
     }
 }
 
-/// Gate 8 (#1407 verdict MINOR 1): the owner's per-lane leading countdown
-/// (`InputStage::load_filter_leading`) gives every lane of every width exactly four stepped
+/// Gate 8 (#1407 verdict MINOR 1): the filter-ramp bodies' leading window, read from each lane's
+/// own ramp countdown (#1452 undo 1), gives every lane of every width exactly four stepped
 /// words, through the dual body and the collapsed one. Each lane is retargeted design to design
 /// on its own staggered schedule, re-sends and restarts included, so the lanes of one bank are
 /// out of phase; blocks of 1 to 16 frames put block ends on every ramp frame, the four leading

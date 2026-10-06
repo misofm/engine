@@ -19,8 +19,8 @@ mod support;
 use lane::Lane;
 use lane::kernels::SvfCoef;
 use lane::kernels::builtins::{
-    INPUT_FILTER_LEADING_UPDATES, InputChainCoef, InputChainState, InputTrimRamp,
-    input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
+    InputChainCoef, InputChainState, InputTrimRamp, input_chain_ramp_block_filter,
+    input_chain_ramp_block_filter_mono,
 };
 use support::Xorshift64Star;
 
@@ -186,12 +186,6 @@ fn check_body<L: Lane>(rng: &mut Xorshift64Star, mono: bool) {
     };
     let channels = if mono { 1 } else { 2 };
     for frame in 1..=65_i64 {
-        // The owner's leading countdown, rebuilt from the ramp countdown before every block (this
-        // test's blocks are one frame): the countdown less `64 - INPUT_FILTER_LEADING_UPDATES`.
-        let floor = L::splat((64 - INPUT_FILTER_LEADING_UPDATES) as f32);
-        let leading: [[L; 2]; 2] = core::array::from_fn(|channel| {
-            core::array::from_fn(|section| remaining[channel][section].sub(floor))
-        });
         let mut left = vec![0.25_f32; L::WIDTH];
         let mut right = vec![-0.25_f32; L::WIDTH];
         if mono {
@@ -205,7 +199,6 @@ fn check_body<L: Lane>(rng: &mut Xorshift64Star, mono: bool) {
                 &target,
                 &step,
                 &mut remaining,
-                leading,
             );
         } else {
             input_chain_ramp_block_filter(
@@ -219,7 +212,6 @@ fn check_body<L: Lane>(rng: &mut Xorshift64Star, mono: bool) {
                 &target,
                 &step,
                 &mut remaining,
-                leading,
             );
         }
         for (channel, (coefficients, channel_ramps)) in

@@ -979,7 +979,6 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
-    filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
     // ([`channel_arms`]).
@@ -998,7 +997,6 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
             filter_target,
             filter_step,
             filter_remaining,
-            filter_leading,
         )
     } else {
         silence_skip_block(left, frames, &mut s.silence[0]);
@@ -1015,7 +1013,6 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
             filter_target,
             filter_step,
             filter_remaining,
-            filter_leading,
         )
     }
 }
@@ -1037,13 +1034,13 @@ fn input_chain_ramp_block_filter_body<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
-    mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
     let limit = L::splat(NONFINITE_LIMIT);
     let one = L::splat(1.0);
     let zero = L::zero();
+    let leading_floor = L::splat(FILTER_LEADING_FLOOR);
     let armed_after = c.silence;
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
@@ -1108,9 +1105,7 @@ fn input_chain_ramp_block_filter_body<L: Lane>(
                 let remaining = filter_remaining[channel][section].sub(one);
                 let done = remaining.le(zero);
                 filter_remaining[channel][section] = remaining;
-                let lead = filter_leading[channel][section].sub(one);
-                filter_leading[channel][section] = lead;
-                let leading = zero.le(lead);
+                let leading = leading_floor.le(remaining);
                 let target = &filter_target[channel][section];
                 filter_ramp_words(
                     &mut coefficients[channel][section],
@@ -1214,13 +1209,15 @@ fn filter_ramp_words<L: Lane>(
 
 /// How many of a filter ramp's 64 updates step from the current word (#1407).
 ///
-/// The owner hands the filter-ramp bodies each lane's leading countdown, `remaining - 60` before
-/// the block (`remaining` its integer ramp countdown), and a frame steps from the current word
-/// while that countdown, decremented with the ramp's, is still at least zero: the frames that leave
-/// a ramp countdown of `63` down to `60`. Carried as a per-lane word rather than compared against a
-/// splatted `60.0` so the bodies hold no new vector constant: on Apple targets each one is a
-/// `memset_pattern16` call in the render function (known defect #1018).
+/// A frame steps from the current word when the lane's ramp countdown, after that frame's
+/// decrement, is at least [`FILTER_LEADING_FLOOR`]: the frames that leave a countdown of `63` down
+/// to `60`. The bodies read the countdown they already carry, so the owner passes nothing more.
 pub const INPUT_FILTER_LEADING_UPDATES: u32 = 4;
+
+/// The lowest countdown, after a frame's decrement, at which that frame still steps from the
+/// current word: `64 - INPUT_FILTER_LEADING_UPDATES`. Exact, as is every countdown word (an
+/// integer of at most 64).
+const FILTER_LEADING_FLOOR: f32 = (64 - INPUT_FILTER_LEADING_UPDATES) as f32;
 
 /// Mono-collapse form of [`input_chain_ramp_block_filter`].  Only channel zero advances; the
 /// owner mirrors its complete filter and trim records onto channel one after the block.
@@ -1236,7 +1233,6 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
-    filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on
     // ([`channel_arms`]).
@@ -1252,7 +1248,6 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
             filter_target,
             filter_step,
             filter_remaining,
-            filter_leading,
         )
     } else {
         silence_skip_block(io, frames, &mut s.silence[0]);
@@ -1267,7 +1262,6 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
             filter_target,
             filter_step,
             filter_remaining,
-            filter_leading,
         )
     }
 }
@@ -1288,12 +1282,12 @@ fn input_chain_ramp_block_filter_mono_body<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
-    mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let limit = L::splat(NONFINITE_LIMIT);
     let one = L::splat(1.0);
     let zero = L::zero();
+    let leading_floor = L::splat(FILTER_LEADING_FLOOR);
     let armed_after = c.silence;
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
@@ -1347,9 +1341,7 @@ fn input_chain_ramp_block_filter_mono_body<L: Lane>(
             let remaining = filter_remaining[0][section].sub(one);
             let done = remaining.le(zero);
             filter_remaining[0][section] = remaining;
-            let lead = filter_leading[0][section].sub(one);
-            filter_leading[0][section] = lead;
-            let leading = zero.le(lead);
+            let leading = leading_floor.le(remaining);
             let target = &filter_target[0][section];
             filter_ramp_words(
                 &mut coefficients[section],
