@@ -200,4 +200,117 @@ Made by the decision-15 root coordinator under the owner's no-shortcuts delegati
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (2026-10-06)
+
+Base `f3956e63c` (stream G2 tip, #1461 on #1451/#1452). One code change,
+`crates/lane/src/kernels/builtins.rs`. Scratch tools and logs under the session scratchpad
+`w1454/` (not committed).
+
+**D1, cause.** In the shipped `simd128` module of the base, LLVM kept `core`'s
+`ZipImpl::new` for two `ChunksExactMut<f32>` out of line (one 58-instruction function, five calls
+in `InputStage<f32x4>::process`; P0 inlines every one), so each of those dual frame loops reads its
+chunk size and frame addresses back from linear memory, which costs a per-frame bounds branch to
+`slice_index_fail` and the reload of every section coefficient on every frame, because the frame
+pointers loaded from memory cannot be told apart from the coefficients. Evidence, base against P0:
+
+- `wasm2wat` of the stationary unarmed dual loop: base 24 `v128.load` (22 coefficient loads at
+  `offset=1664..2032` from the coefficient pointer), 3 `br_if`, 1 `call` (`slice_index_fail`),
+  stride `local.get 30`/`31` read from the stored iterator (`i32.load offset=16`); P0 2
+  `v128.load`, 1 `br_if`, no call, coefficients in locals before the loop. The same outlined
+  call precedes four more dual loops in the function: the stationary body's second inlined copy
+  (unarmed and armed), the identity chain, and one copy of the trim-ramp body (unarmed).
+- TurboFan (`--no-liftoff`, the spill gate's `analyse`): base 222 instructions / 5 blocks /
+  16 carried slots, P0 196 / 3 / 12. The base loop's `testl r14,r14; jz` and `cmpl rbx,0x4; jc`
+  are the stored chunk-size checks, its 22 `vmovdqu xmm,[rdx+0x6..0x8..]` the coefficient loads.
+- The three `v128.const` rebuilt in the base loop (`NONFINITE_LIMIT`, `1.0`, `FLUSH_EPS`, each
+  `movq`+`vmovq`+`vpunpcklqdq`) sit after the bounds branch. LLVM emits the constants inside the
+  loop in P0, base and head alike (3, 4, 3 `v128.const`); TurboFan hoists them only in a loop with
+  no early exit (P0, head). That V8's scheduler hoists a node only from a block that dominates
+  every loop exit is inferred from these listings and the experiment below, not read in V8's
+  source.
+
+**A1 (the EQ held rows).** The four held rows' `FLUSH_EPS` rebuild has the same shape: the dual
+depth-1 tail (110) and the mono depth-1 tail (52) rebuild `NONFINITE_LIMIT` and `FLUSH_EPS` per
+frame after an early loop exit, the per-frame bounds branch of `io[stream][base..base + width]`
+in `svf_cascade_interleaved_form` (`crates/lane/src/kernels.rs`), which the code comment there
+says is absent. That function is not an Authorized path, so this attempt does not change it.
+Experiment only (reverted, not committed): the interleaved form rewritten to split its planes
+(the `FramePairs` shape) gives dual tail 110 -> 107, mono tail 52 -> 43 (no constant rebuilt),
+dual pair (reported) 187 / 10 slots -> 172 / 6, mono pair 79 -> 81, dual armed tail 128 / 2 ->
+129 / 1, dual armed pair 219 / 12 -> 221 / 11, mono armed pair 92 -> 96, mono armed tail 58 -> 60,
+masked rows 86 -> 86 and 102 -> 103, every held row clean; the dual tail still rebuilds both
+constants (one early exit remains). **For root:** the EQ rows need a change to
+`svf_cascade_interleaved_form` (and, for the pairs, `svf_cascade_skewed_form`), outside this
+spec's Authorized paths. The rows stay as measured: head equals base on every row.
+
+**D2, the change (`crates/lane/src/kernels/builtins.rs`).** A private iterator `FramePairs`
+replaces `left.chunks_exact_mut(W).zip(right.chunks_exact_mut(W))` in every dual input-chain
+frame loop of the module: `input_chain_block_body`, `identity_chain_block` (the two stationary
+bodies), `input_chain_ramp_block_body`, `identity_chain_ramp_block` and
+`input_chain_ramp_block_filter_body` (the ramp bodies, where D1 found the same outlined call). It
+cuts both planes to their common length once and splits one frame off each per step with
+`#[inline(always)]` code, so the frames are the zip's and no bit can move; its doc states why. No
+`cfg`, no `#[inline(never)]`, the #1328 law (two forms, arming, counter, joint flush) untouched.
+The mono bodies iterate one plane and have no outlined call; the matrix and gain kernels are not
+input-chain loops and are unchanged.
+
+**Gate 1, no bit moved.** The #1451 harness (`bitid2.rs`), adapted to #1461's
+`PreparedEffect { processor, metadata }` and #1452's filter-ramp signature, plus a superset of 160
+scenarios (entries 4 and 5: the all-identity plan, stationary and ramping, which reach
+`identity_chain_block` and `identity_chain_ramp_block`): **1068 of 1068 identical** base vs head;
+the base's first 908 lines equal #1451's `bitid2-head-final.txt`. Sensitivity: `FramePairs::new`
+cutting one frame short moves 200 of 1068 (every dual line of entries 0, 1, 2, 4, 5; the mixed plan,
+entry 3, does not use it); reverted, identical. Pinned artifacts: `g5_native_digests_match_pins` (in `run-wasm-gates.sh` and the release `wasm-gates` tests), `BUILTINS_DIGESTS`, `E9_DIGESTS` and multiband `DIGESTS` (in the gate-5 test runs), `conformance_fixtures --check`, `check-builtins-fixtures.sh` and `check-graph-determinism.sh` all pass. AArch64 legs: CI only, not run.
+
+**Gate 2, browser cost: MISS in round 1, met in round 2.** `web-mixing-automation-benchmark.mjs run`, controls
+`scratchpad/bench-controls.json` (#1451's), modules frozen: P0 `1968517e...` (#1451's), base
+`aa991860...`, head `1ce4a5b4...`; one warmup and two measured rounds each, interleaved (p0, base,
+head warmups; p0 1, base 1, head 1, head 2, base 2, p0 2), `taskset -c 31`, `node --no-liftoff`,
+load 5.35 -> 4.21 on 32 threads (about twice #1451's); one invocation, not retried. Every output
+digest equal across all six measured runs, on every arm and document.
+
+| p50 | P0 r1 / r2 (ns) | base vs P0 | head vs P0 | head vs base |
+|---|---|---|---|---|
+| mono console, quiet | 151,168 / 151,038 | +2.4 % / -1.2 % | **+2.4 %** / -0.8 % | -0.1 % / +0.4 % |
+| mono console, restated | 154,124 / 153,843 | -1.1 % / -1.6 % | -0.8 % / -1.3 % | +0.3 % / +0.3 % |
+| mono console, automated | 159,404 / 157,489 | -1.9 % / -1.4 % | -1.7 % / -0.9 % | +0.2 % / +0.5 % |
+| sixty-four-track console | 234,547 / 236,650 | +8.5 % / +0.6 % | **+7.4 %** / -0.7 % | -1.0 % / -1.2 % |
+| app shape | 149,435 / 147,822 | +9.4 % / +2.6 % | +0.8 % / +1.2 % | -7.9 % / -1.3 % |
+| bus-and-send console | 340,768 / 339,807 | +5.6 % / +1.1 % | **+5.3 %** / +0.3 % | -0.3 % / -0.7 % |
+
+Round 2 meets the gate on every row (head within -1.3 % .. +1.2 % of P0). Round 1 misses it on
+three rows; in that round base is also +5.6 % to +9.4 % over P0 on the 64-track documents, against
++2.4 % to +3.9 % in #1451's quieter run, and head is at or below base on every 64-track row in both
+rounds. So round 1 reads as host noise on CPU 31 during the base and head round-1 runs, but by the
+gate's own rule it is a miss: reported, not re-run; root decides.
+
+**Gate 3, codegen.** TurboFan, `InputStage<f32x4>::process`, every dual loop, in V8's listing
+order (the function inlines each body twice; instructions / blocks / carried slots), P0's
+stationary loop 196 / 3 / 12:
+
+| loop | base | head |
+|---|---|---|
+| stationary, first copy, unarmed (the builtins dual loop) | 222 / 5 / 16 | **196 / 3 / 11** |
+| stationary, first copy, armed | 239 / 3 / 16 | 242 / 3 / 16 |
+| stationary, second copy, unarmed | 222 / 5 / 16 | 194 / 3 / 11 |
+| stationary, second copy, armed | 259 / 5 / 18 | 238 / 3 / 16 |
+| trim ramp, first copy, unarmed | 245 / 3 / 18 | 246 / 3 / 18 |
+| trim ramp, first copy, armed | 289 / 3 / 22 | 290 / 3 / 22 |
+| trim ramp, second copy, unarmed | 262 / 5 / 20 | 244 / 3 / 18 |
+| trim ramp, second copy, armed | 287 / 3 / 22 | 288 / 3 / 22 |
+
+The head's stationary unarmed loop has P0's op histogram except the exit (52 / 50 stack `vmovups`,
+4 / 4 `vmovdqu`, no `v128.const` rebuilt, no bounds branch; P0 counts down `addl rsi,0xff; jnz`,
+head compares the remaining length `cmpl rdx,0x3; ja`). Named increases: the armed stationary loop
++3 and the three ramp loops that already inlined the zip +1 each; no slot gained anywhere. The
+A1 rows: unchanged, head equals base on all ten (`run-wasm-gates.sh` exits 0; dual depth-1 tail 110, dual pair 187 / 10 slots, mono pair 79, mono tail 52, every held row clean, armed rows at their ceilings or below), the D1 and A1 notes above give why. `simd128` (`wasm-objdump -d`, every instruction): module -529;
+`InputStage<f32x4>::process` 15,876 -> 15,405, the outlined `ZipImpl::new` (58) gone; no other
+function changes. x86-64-v3 (`cargo rustc --release -p builtins --lib --emit asm`, instruction
+lines): `InputStage<f32>::process` 8,168 -> 8,034, `<f32x4>` 7,805 -> 7,691, `<f32x8>` 7,357 ->
+7,056; no other function changes.
+
+**Gate 4.** `check-cross-targets.sh` passes; `builtins` 5 `memset_pattern16` calls, within its #1018 row.
+
+**Gate 5.** Pass: the DSP-crate `cargo test` with the spec features (441 passed), the release `lane`/`math`/`wasm-gates` tests, `test-debug-a` (1,453 passed), the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`), lane, builtins, workspace and realtime policies, `cargo doc` with `-D warnings`, clippy, fmt. `check-lane-policy.sh` first refused `left.len().min(right.len())` (D8 float-method rule); the span now uses `core::cmp::min`, the lane policy passes, the lane tests pass again (84), and the gated module's code is instruction-identical to the timed head (`wasm-objdump -d` equal; one data byte differs, a source-location string).
+
+**Test value.** No test added, rewritten or deleted.
