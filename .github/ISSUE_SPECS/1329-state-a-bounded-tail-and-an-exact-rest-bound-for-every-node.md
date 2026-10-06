@@ -248,7 +248,8 @@ the test value are amended accordingly. This is still attempt 3 (no verdict yet)
     `T_rest` is its low-peak case)*. `TailSamples::Finite` carries `T_decay`, and its doc and
     `docs/EFFECT_CONTRACT_V1.md` state the peak range `P >= P*` and the exact-zero branch from
     `T_rest` below it. `T_rest` is stored and exposed beside `T_decay` wherever `T_decay` is
-    (`InputBuiltins`, `BuiltinChain`, `input_section_live_bound`); the implementer names the field
+    (`InputBuiltins`, `BuiltinChain`, `input_section_live_bound`; *Amendment 4, R5:*
+    `PreparedBuiltinsSession` and `input_section_live_bound`); the implementer names the field
     or accessor and states it in `docs/EFFECT_CONTRACT_V1.md`. D2's `RestSamples` is unchanged.
 - **G2. Option 2 refused.** An absolute floor (`|y[n]| < max(P * eps, eps_abs)`) makes the tail a
   fixed-level one: below `eps_abs` whatever the input's peak. #1328's A8 and A9 removed exactly
@@ -308,6 +309,61 @@ amend G1's consumer line, G5, "Hazards" and gate 7.
   multiband `run_segment` hot-file row: after #1409, and in either order with #1338 (neither
   depends on the other; the later slice rebases).
 
+## Amendment 4 (root rulings, 2026-10-06, after attempt 3's verdict)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(b). Attempt 3 failed
+adversarial review (`/home/bl/misofm/submix-verdicts/1329-attempt3.md`): one MAJOR finding (M1,
+the fixed-design certificate's `f64` operator norm cancels and falls below the exact norm by up to
+`6.4x` its inflation), three MINOR findings (m1 gate 2 not run at the domain extreme and its `1e29`
+sign-pattern run vacuous through the non-finite recovery; m2 the live `T_rest` untested; m3
+derivation and research-note errors), two NITs, and eight items for root (ROOT-1 to ROOT-8). Root
+ruled on the eight items; attempt 4 fixes M1, m1-m3 and the NITs under these rulings. D7, G1's
+storage line, Deliverables 2 and 3, gates 2, 5 and 6, the authorized paths and the test value are
+amended accordingly.
+
+- **R1. Outside-path edits.** `tools/audit/src/builtins_graph.rs` (the joined-corpus manifest
+  identity that moves with `resources.jsonl`), `fixtures/builtins/v1/MANIFEST.tsv` and
+  `fixtures/graph/MANIFEST.tsv` (generator companions of the authorized regenerations) are
+  ratified. `crates/builtins/src/filter_response.rs` is **reverted** to its pre-#1329 content: it
+  was not needed under the shipped design.
+- **R2. Gate 5 names `maximum_single_allocation_bytes`.** Attempt 3 moved it (+72 bytes per track,
+  the strip vector) where gate 5 named only the `engine_owned_*` counts. Gate 5 now names it, with
+  the delta measured after R5 and recorded in the attempt record; `resources.jsonl` is re-pinned
+  once more after R5 and every moved size is audited individually with its reason.
+- **R3. Every test-value claim is true.** Gate 2's claim (a bound that ignores `f32` rounding, the
+  ramp in flight or the flush stall), gate 3's lower side (a dropped A9 term) and gate 7's claim
+  each get a discriminating test that is red on that defect; a claim is amended only where no
+  discriminating test is possible, and the amendment says why.
+- **R4. Gate 2's `-0.0` wording.** "(one run with polarity inverted, so `-0.0` is reached)" asks
+  for what the node cannot produce: every enabled section's output mix, and the identity's
+  trailing `+0.0`, normalize a `-0.0`. Gate 2 states what the node produces (below).
+- **R5. The bounds live beside `tails` in `PreparedBuiltinsSession`.** The prepared bounds are
+  control-side data: `PreparedBuiltinsSession` keeps every strip's `T_decay`, `T_rest` and
+  `RestSamples` beside its tail (#1107 reads them there). `InputBuiltins` and `BuiltinChain` carry
+  no bound and no accessor for one; there is no lazy, allocating accessor (the `OnceCell` path
+  goes). Render-owned memory carries no control-only data. This replaces D7's "`InputBuiltins::tail()`
+  ... and a new `InputBuiltins::rest()` ..., both computed once at preparation and stored" and G1's
+  "stored and exposed beside `T_decay` wherever `T_decay` is (`InputBuiltins`, `BuiltinChain`,
+  `input_section_live_bound`)": the owners are now `PreparedBuiltinsSession` (per strip, as
+  reported) and `input_section_live_bound` (the live bound).
+- **R6. CI runs `tail_contract` at release scale.** `.github/workflows/qualification.yml` gains one
+  step in the required `test-release` job: `cargo test --locked --release -p builtins --features
+  builtins/test-support --test tail_contract`, as #1428 added `filter_liveness`.
+  `scripts/check-ci-path-routing.py` stays green (its router expectations and the verdict table
+  change only if it needs them).
+- **R7. Preparation cost.** Each distinct design's bound is computed once per preparation and
+  reused for the seal check (`validate_for_session`); nothing is computed twice. The worst-case
+  preparation cost is measured and recorded. A stream G issue, *Cache design bounds across
+  preparations within a stated preparation budget*, is filed for the cross-preparation cache and
+  its budget (it notes that stream H's #1332 moves browser preparation off the AudioWorklet
+  thread).
+- **R8. D2 across a swap.** A plan swap that carries non-zero integrators into a disabled section
+  leaves them frozen (#1407 rule 4: the identity recursion keeps them and the output ignores them),
+  so D2's rest is not reached there. *Swap a rebuilt plan without an audio gap* (#1269) records
+  this and must state whether a carried state counts as admitted history; a root-authorized edit to
+  #1269's spec and its GitHub body.
+
 ## Deliverables
 
 1. `effect-contract`: D1 docs on `TailSamples`, the `RestSamples` type (D2).
@@ -321,7 +377,13 @@ amend G1's consumer line, G5, "Hazards" and gate 7.
    `builtins`: `crates/builtins/src/tail.rs` (new) composing them for the input section;
    `input_section_live_bound`, `input_section_worst_case_pair`; `InputBuiltins::{tail, rest}` and `BuiltinChain::{tail, rest}`.
    *(Amendment 3, G1:)* every owner of `T_decay` also states `T_rest`.
+   *(Amendment 4, R5:)* the per-strip owner is `PreparedBuiltinsSession` (beside `tails`), not
+   `InputBuiltins` or `BuiltinChain`; `math::tail`'s operator norm is a certified upper bound with
+   its own `f64` rounding bounded explicitly (M1).
 3. Plumbing: `builtins-compiler` and `graph-compiler` on `TailSamples`; `BuiltinTail` removed.
+   *(Amendment 4, R5, R7:)* `builtins-compiler` computes each distinct design's bound once per
+   preparation, keeps every strip's bounds beside its tail, and its seal check reuses them.
+   *(Amendment 4, R6:)* the release `tail_contract` step in `qualification.yml`'s `test-release`.
 4. Tests (gates 1-3); superseded tests replaced (gate 4).
 5. Docs: `docs/EFFECT_CONTRACT_V1.md` (with Amendment 3's two values and which consumer uses each),
    `docs/BUILTINS_AND_METERING_V1.md:50-52`,
@@ -358,6 +420,13 @@ amend G1's consumer line, G5, "Hazards" and gate 7.
 - `docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md` (the D15-4
   rationale figures and, after Amendment 3, its tail and rest definitions only; Deliverable 7,
   root-authorized)
+- *(Amendment 4.)* `tools/audit/src/builtins_graph.rs` (the manifest identity),
+  `fixtures/builtins/v1/MANIFEST.tsv`, `fixtures/graph/MANIFEST.tsv` (R1, ratified);
+  `crates/builtins/src/filter_response.rs` (R1, the revert only); `.github/workflows/qualification.yml`
+  (R6, one `test-release` step) and `scripts/check-ci-path-routing.py` (only if R6 needs it);
+  `.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md` (R8, the D2-across-swap
+  statement only); the R7 issue's new spec in `.github/ISSUE_SPECS/` and its row under Stream G
+  in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`
 
 `builtins-compiler`, `graph-compiler`, `host-core` and `fixtures` sit outside stream G's column:
 coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
@@ -431,8 +500,13 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    every `n` from `N + T` until exact rest (`T` = `T_decay`; every `P` here is above the live
    `P* = 1.7e-3`, Amendment 3), and from `N + R` on (`R` = `peak_plus_24_dbfs` for the
    first two `P`, `any_sanitized_input` for the last; both include the A9 term `2 * N_SILENCE`) D2's rest: every output sample is `±0.0`
-   (one run with polarity inverted, so `-0.0` is reached), and the eight SVF integrator words
+   (one run with polarity inverted; *Amendment 4, R4:* the builtin input section's output mix
+   normalizes `-0.0`, so that run shows `+0.0`, which D2 admits, and the gate asserts `±0.0`, not
+   that a `-0.0` is seen), and the eight SVF integrator words
    equal those of a freshly reset `InputBuiltins` with the same targets (`Z`), under `f32` `==`.
+   *(Amendment 4, m1:)* "the domain extreme" means the whole 1,000,000-sample history runs with the
+   worst-case pair designed (HPF one `f32` below the maximum into the LPF at the maximum); the live
+   HPF target 32 samples before `N` retargets it from there.
 3. **Contract figures** (*amended by Amendment 2, F2*): `input_section_live_bound` at every rate has
    `peak_plus_24_dbfs` and `any_sanitized_input` at or below the figures restated in decision 15's
    D15-4 rationale (Deliverable 7: the certified values, each including `2 * N_SILENCE`; restated
@@ -449,10 +523,14 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    and update `ZERO_DELAY_CANONICAL_SHA256`; the only expected byte change is `infinite` →
    `finite:<T>` on post-input-builtins rows. Any other moved byte stops the slice.
    `resources.jsonl`: only the `engine_owned_*` byte counts move, by exactly the
-   tail-entry/`InputBuiltins` size delta.
+   tail-entry/`InputBuiltins` size delta. *(Amendment 4, R2:)* and
+   `maximum_single_allocation_bytes`, by the measured delta recorded in the attempt record, after
+   R5; each moved size is audited individually with its reason.
 6. Commands:
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract`
+     (*Amendment 4, R6:* also a step of `qualification.yml`'s required `test-release` job), and
+     `python3 scripts/check-ci-path-routing.py`
    - the `test-debug-a` workspace command from `.github/workflows/qualification.yml` (it covers
      `builtins-compiler`, `graph-compiler`, `host-core` and `capi` with their `test-support` features)
    - `bash scripts/check-graph-determinism.sh`, `bash scripts/check-builtins-policy.sh`,
@@ -486,6 +564,11 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
 - Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
   eigenvector bound applies) breaks the restated D15-4 figures, and an unsound one (a dropped A9
   term) falls below the measured real rest.
+- *(Amendment 4, R3.)* Attempt 3's verdict showed the gate 2 claim (rounding, ramp, stall), gate
+  3's lower side (A9) and gate 7's claim untrue as written (the crude cascade's slack absorbs each
+  omission on the real kernel). Each gets a discriminating test that is red on the named defect,
+  or the claim is amended where no discriminating test is possible, with the reason; the attempt-4
+  record names each test and its mutation run, and this section is restated to match.
 
 ## Dependencies
 
