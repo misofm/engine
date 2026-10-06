@@ -1,8 +1,8 @@
 //! Issue #1333 gate 8: a booted instance never allocates a staging inside a render-locked window,
 //! and (Amendment 1, A1) a collection capture's spectrum reads never allocate there either.
 //!
-//! The three stagings (response, spectrum, observation) are allocated by the boot exports
-//! (issue #1333 D5). Were one still lazily allocated on first touch, a booted worklet would
+//! The three stagings (response, spectrum, observation) are allocated on the one success path
+//! that both boot exports share (issue #1333 D5). Were one still lazily allocated on first touch, a booted worklet would
 //! allocate it inside the render-locked window the first time it read observations, responses or
 //! spectra. The browser gate sees that only if its workload happens to touch each staging first
 //! inside the window; this binary touches each one first through a render-locked export, on a

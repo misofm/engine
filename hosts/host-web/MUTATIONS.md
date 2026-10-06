@@ -557,10 +557,11 @@ Chromium leg of `qualification/run.mjs`.
 | same | `dealloc` (or `realloc`) skips `count_if_locked` | the in-window count of 5 fails |
 | same | `render_locked` never clears the flag | `the window clears the flag when it returns` |
 | `const _: () = assert!(!needs_drop::<..>())` in `ffi.rs` | add a `Vec<u8>` field to `BootStaging` | `error[E0080]`: `assertion failed: !needs_drop::<RefCell<BootStaging>>()` |
-| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserved_after_boot` | `a staging accessor allocated inside its render-locked window`: 7 |
-| same | drop `observation_staging()` from `reserved_after_boot` | the same assertion: 6 |
+| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
+| same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
+| same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
 | `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1) | `PreparedSpectrumCapture::channels` back to `selected_entry().map(\|entry\| entry.channels)` | `a collection capture's spectrum read allocated`: 4 |
-| `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` reads `captures[0]` | `Some(Left)` where `Some(Right)` is selected |
+| `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
 | `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
 | same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |
 | same, (h1)/(h1a)/(h1b) | the `INDIRECT_SITES` comparison is skipped | (h1) new site, (h1a) removed site, (h1b) changed count |

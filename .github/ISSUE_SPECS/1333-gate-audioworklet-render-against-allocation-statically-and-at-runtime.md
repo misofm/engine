@@ -494,9 +494,13 @@ Also run: `cargo test --locked -p host-web -p host-core` (all pass), `check-cros
   instance 0. Test value of `staging-reads` and `render-allocations` together: a staging read
   that allocates turns them red, including the executor's `call_indirect` path. The static gate
   cannot see either.
-- `selected_channels_reports_the_selected_entrys_mask`: reading `captures[0]` turns it red.
-  Test value: it catches an accessor that reports another entry's mask. Phase 2 selects a
-  `both` entry beside a `both` entry, so it cannot see this.
+- `selected_channels_reports_the_selected_entrys_mask`: an accessor that reports a mask while
+  nothing is selected (`Some(self.captures[self.selected.unwrap_or(0)].channels())`) turns it
+  red, and no other test in host-core or host-web. Test value: it catches `selected_channels`
+  reporting a mask for an unselected collection, which production reaches because a collection
+  starts unselected after preparation. (Corrected by the follow-ups below: reading `captures[0]`
+  also turns it red, but `collection_selection_is_atomic_and_keeps_one_active_capture` already
+  catches that.)
 - Gate 8 phase 1: with the response or the observation reservation removed, the count reads 7
   or 6.
 - `render_lock` unit test: an inverted flag, no `fetch_add`, an uncounted `dealloc`, an uncounted
@@ -517,3 +521,23 @@ Also run: `cargo test --locked -p host-web -p host-core` (all pass), `check-cros
   for real.
 - `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", does not yet name
   `render_lock.rs`. The policy script's header comment does.
+
+### Follow-ups (verifier MINOR/NIT)
+
+Folded from the attempt-1 verdict (PASS): MINOR 1 and MINOR 2. MINOR 3-5 and the
+`selected_entry()` NIT are outside this slice's paths; root files them.
+
+- **MINOR 1 (hop boot export reservation undefended).** The reservation moved from the two boot
+  exports into `boot_staged`'s one success path (`reserve_stagings()`, after the handle is
+  published). `miso_engine_web_v1_boot` and `miso_engine_web_v1_boot_with_spectrum_hop` both
+  reach it, so gate 8 phase 1 now defends the one place both exports reserve through. Refused
+  boots still return before it. Mutation: removing `reserve_stagings();` from `boot_staged` turns
+  gate 8 red (`a staging accessor allocated inside its render-locked window`: 13); the revert is
+  green. Test value: gate 8 turns red when the shared boot path stops reserving the stagings,
+  which no other test catches and which now covers the hop export too.
+- **MINOR 2 (test-value claim).** The record above and `hosts/host-web/MUTATIONS.md` now name
+  the test's unique catch. Re-run on the current tree (builder `capture_with_held_producer`):
+  with `selected_channels` returning `Some(self.captures[self.selected.unwrap_or(0)].channels())`,
+  `cargo test --locked --no-fail-fast -p host-core` fails only
+  `selected_channels_reports_the_selected_entrys_mask` (`Some(Left)` against `None`, at the
+  unselected assertion) and `cargo test --locked -p host-web` stays green; the revert is green.

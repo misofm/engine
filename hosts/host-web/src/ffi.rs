@@ -599,18 +599,15 @@ fn with_observation_staging<R>(operation: impl FnOnce(&RefCell<ObservationStagin
     operation(observation_staging())
 }
 
-/// Allocate all three stagings once a boot has published its handle. Both boot exports call this
-/// before they return, so a booted instance never allocates a staging later, inside or outside a
-/// render-locked window (issue #1333 D5). A refused boot allocates none of them, so a typed
-/// refusal stays within its memory bound, and an instance that never boots allocates each on
-/// first touch, outside any window.
-fn reserved_after_boot(handle: u32) -> u32 {
-    if handle != 0 {
-        let _ = response_staging();
-        let _ = spectrum_staging();
-        let _ = observation_staging();
-    }
-    handle
+/// Allocate all three stagings once a boot has published its handle. `boot_staged` calls this
+/// on its one success path, which both boot exports share, so a booted instance never allocates
+/// a staging later, inside or outside a render-locked window (issue #1333 D5). A refused boot
+/// allocates none of them, so a typed refusal stays within its memory bound, and an instance that
+/// never boots allocates each on first touch, outside any window.
+fn reserve_stagings() {
+    let _ = response_staging();
+    let _ = spectrum_staging();
+    let _ = observation_staging();
 }
 
 #[cfg(test)]
@@ -3783,6 +3780,7 @@ fn boot_staged(len: u32, spectrum_hop: Option<SpectrumHop>) -> u32 {
         });
         return 0;
     };
+    reserve_stagings();
     handle
 }
 
@@ -3814,13 +3812,13 @@ pub extern "C" fn miso_engine_web_v1_spectrum_hop_capability() -> u32 {
 /// Boot the exact staged document and atomically publish the sole running handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
-    reserved_after_boot(boot_staged(len, None))
+    boot_staged(len, None)
 }
 
 /// Boot the exact staged document with an explicit ordinary spectrum capture hop in frames.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot_with_spectrum_hop(len: u32, hop_frames: u32) -> u32 {
-    reserved_after_boot(boot_staged_with_spectrum_hop(len, hop_frames))
+    boot_staged_with_spectrum_hop(len, hop_frames)
 }
 
 /// Return the frozen result code of the last boot attempt.
