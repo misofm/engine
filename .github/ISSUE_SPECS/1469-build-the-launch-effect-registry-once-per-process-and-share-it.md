@@ -69,6 +69,10 @@ diagnostic and no rendered bit moves.
   call, which is the first preparation, live rebuild or preview of the process; no eager boot hook is
   added. A failed build is cached too (the descriptors are `&'static`, so a rebuild gives the same
   error) and every call returns a clone of the `RegistryError`. The builder is not public.
+  *(Root ruling, 2026-10-06.)* A cached `RegistryError` is permanent for the process (for the
+  module instance in the browser). The registry's inputs (the eight factories and their `&'static`
+  descriptors) are compiled in, so a retry cannot succeed. There is no retry, reset or rebuild
+  path.
 - **D2. The one entry point.** `launch_native_effect_registry()` keeps its name and becomes
   `pub fn launch_native_effect_registry() -> Result<&'static NativeEffectRegistry, RegistryError>`.
   Every production call site reads the shared registry through it:
