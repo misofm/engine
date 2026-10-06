@@ -942,7 +942,10 @@ pub fn live_zones(live: &LiveCascade) -> Result<LiveZones, TailBoundError> {
                 square_norm,
             }
         });
-        let contracts = |rho: f64| rho.partial_cmp(&1.0) == Some(core::cmp::Ordering::Less);
+        // The own-zone fixed points below need `rho (1 + margin) < 1`.
+        let contracts = |rho: f64| {
+            (rho * (1.0 + FIXED_POINT_MARGIN)).partial_cmp(&1.0) == Some(core::cmp::Ordering::Less)
+        };
         if !contracts(contraction) {
             return Err(TailBoundError::NotContracting);
         }
