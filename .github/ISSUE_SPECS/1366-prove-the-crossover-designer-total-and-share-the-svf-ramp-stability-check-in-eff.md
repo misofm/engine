@@ -73,6 +73,8 @@ No rendered bit and no EQ refusal moves.
 - `crates/effect-runtime/src/lib.rs` (the module line), `crates/effect-runtime/src/svf.rs` (new)
 - `crates/parametric-eq/src/lib.rs` (`word_spectral_norm`, the two constants and their uses only;
   #1337 edits other parts of this file, so rebase on whichever lands first)
+- Root-authorized batch follow-up (2026-10-06, attempt 1 verdict MINOR2):
+  `.github/workflows/qualification.yml`, one step in the required `test-release` job only
 
 ## Non-goals
 
@@ -164,3 +166,22 @@ is identical at `8439972be`, not from this change); `cargo clippy --workspace --
 **Test value.** The per-PR and exhaustive sweeps turn red on a crossover the checked designer
 refuses, a checked design that diverges from the infallible one, or a design outside the
 contractive set; no existing test sweeps the domain.
+
+## Follow-up record
+
+### Batch follow-up (2026-10-06, stream G part A; root ruling on attempt 1 verdict MINOR2)
+
+- **The exhaustive designer sweep runs in required CI.** Made by the decision-15 root coordinator
+  under the owner's no-shortcuts delegation (2026-10-06). The `#[ignore]` sweep
+  `designer_is_total_on_every_f32_in_the_domain` (`crates/multiband-compressor/tests/designer_total.rs`)
+  ran in no CI job. `qualification.yml`'s required `test-release` job has a new step,
+  `Multiband crossover designer exhaustive sweep (designer_total) in release`:
+  `cargo test --locked --release -p multiband-compressor --test designer_total -- --ignored`.
+  No job added, so the router and the verdict's expectation table are unchanged. If
+  `test-release` then exceeds every other required job, #1428's amended D2 moves the release
+  sweeps into their own parallel required job.
+- **Local measurement** (x86-64, 32 hardware threads, release dependencies already built,
+  worktree `codex/d15-stream-g`): 13.1 s wall including the test crate's build; the sweep itself
+  4.16 s (1 passed, the per-PR test filtered out by `--ignored`). The CI step time is pending-CI
+  until the batch push. `check-ci-path-routing.py`, `test-ci-path-routing.py`,
+  `check-test-support-ci.py`, `test-test-support-ci.py` and `check-workspace-policy.sh` exit 0.

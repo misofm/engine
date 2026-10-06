@@ -43,7 +43,7 @@ rate, quanta 1-63, 22 histories of 512 blocks) runs in the required `qualificati
   `test-release` took 254 s (timeout 15 min). The longest jobs were `aarch64-debug` 524 s,
   `audit-native` 483 s and `aarch64-release` 397 s; the verdict waits for the slowest. A GitHub
   `ubuntu-24.04` runner has 4 vCPUs and is slower per thread than the measuring host, so the
-  implementer measures the step on the PR run (gate 2).
+  implementer measures the step on the batch's qualification run (gate 2).
 - **The CI rules (AGENTS.md, "CI-conscious batch delivery").** `qualification.yml` is the only
   required check; a job that cannot fail a merge does not belong in it; it has no `paths:` filter
   on any trigger; every leaf job is gated by its router's `route` output, and the `verdict` job
@@ -77,26 +77,32 @@ rate, quanta 1-63, 22 histories of 512 blocks) runs in the required `qualificati
   placed directly after the `Lane and math gates ... in release` step (`:666-667`), before the
   steps that set their own `CARGO_TARGET_DIR`. No new job, so no router or verdict change: the step
   inherits `test-release`'s `if: needs.route.outputs.route == 'full'`, and every change to
-  `crates/builtins` or its dependencies routes `full` (`scripts/ci-path-router.py`: only
-  `.github/ISSUE_SPECS/` and `docs/` paths route away from it).
-- **D2. The fallback, decided now.** If gate 2 measures the new step above 240 s on the PR run, or
-  `test-release` exceeds the slowest required job of that run, the step moves to `nightly.yml`
-  instead (a new job `filter-liveness-release-sweep`, the same command, `needs` nothing, joining
-  `failure-notice`'s `needs` list), and this spec records the measurement and the move. Neither
-  case changes the test.
+  `crates/builtins` or its dependencies routes `full` (`scripts/ci-path-router.py` routes
+  `.github/ISSUE_SPECS/`, `docs/`, `README.md` and `dsp-research/*.md` to evidence and `sdk/` plus
+  the SDK script set to `sdk`; none of these is an input of the sweep).
+- **D2. The response if the step lengthens the critical path, decided now (amended by Root
+  amendment R1 below).** The trigger is wall time: on the batch's qualification run (PR or `main`
+  push), `test-release` takes longer than every other required job (it becomes the run's slowest
+  job). When that is measured, the release sweeps move out of `test-release` into their own
+  parallel **required** job in `qualification.yml`, routed like `test-release`
+  (`needs: route`, `if: needs.route.outputs.route == 'full'`), with the `verdict` job's `needs`
+  list and expectation table updated to hold it (`full_expected`), and this spec records the
+  measurement and the move. The sweep never moves to `nightly.yml`: a check that guards a
+  merge-blocking defect (D0) stays able to fail the merge. Neither case changes the test.
 - **D3. No test change.** `filter_liveness.rs` already selects the release scale by
   `cfg!(debug_assertions)`, so no environment knob is added; the test file is not edited.
 
 ## Deliverables
 
-1. The D1 step in `.github/workflows/qualification.yml` `test-release` (or, under D2, the
-   `nightly.yml` job).
+1. The D1 step in `.github/workflows/qualification.yml` `test-release` (or, under D2, its own
+   parallel required job in `qualification.yml` with the verdict's `needs` and expectation table
+   updated).
 2. Gate 2's measurement recorded in this spec.
 
 ## Authorized paths
 
-- `.github/workflows/qualification.yml` (`test-release`'s steps only; under D2,
-  `.github/workflows/nightly.yml` instead)
+- `.github/workflows/qualification.yml` (`test-release`'s steps and their comments; under D2, the
+  new parallel job, its router `if:` and the `verdict` job's `needs` list and expectation table)
 - This spec
 
 ## Non-goals
@@ -104,9 +110,11 @@ rate, quanta 1-63, 22 histories of 512 blocks) runs in the required `qualificati
 - Changing the sweep, its scale, its bound or any other test.
 - The AArch64 legs (`scripts/run-aarch64-tests.sh`): its release leg runs `-p lane -p math` gates
   only; running the builtins sweep on NEON is a separate decision.
-- Splitting `test-release` into a new job (adds a router and verdict row for no measured need).
+- Splitting `test-release` into a new job before D2's trigger is measured (adds a router and
+  verdict row for no measured need).
 - Rejected alternatives:
-  - `nightly.yml` first: reports a stability regression only after it is on `main`.
+  - `nightly.yml`, first or as a fallback: reports a stability regression only after it is on
+    `main`, against D0.
   - Scaling the debug subset up in `test-debug-b`: a debug run of the full sweep costs minutes and
     tests the unoptimized arithmetic, not the shipped release code.
 
@@ -115,26 +123,29 @@ rate, quanta 1-63, 22 histories of 512 blocks) runs in the required `qualificati
 - `--features builtins/test-support` builds `builtins` (and the crates that depend on it inside the
   test) a second time in `test-release`'s shared target directory, beside the `wasm-gates` build
   without the feature; the two builds have separate fingerprints and do not invalidate each other.
-  The `Swatinem/rust-cache` key (`shared-key: test-release`) then caches both.
+  `Swatinem/rust-cache` drops workspace crates from its cache, and the step compiles no third-party
+  crate the lane/math step has not already built, so the step does not change the cache.
 - `scripts/check-test-support-ci.py` (lint job) reads the workflow's `cargo test` steps; it must
   stay green.
 - Hot file: `.github/workflows/qualification.yml` (STREAMS.md row `rust-toolchain.toml`,
-  `.github/workflows/*.yml`: #877, H #1334, J #1422, J #1427); this slice edits only
+  `.github/workflows/*.yml`: #877, H #1334, J #1422); this slice edits only
   `test-release`'s steps, so any order works and the later slice rebases.
 
 ## Objective gates
 
 1. **The step runs the sweep.** Locally, the D1 command exits 0 and lists
-   `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs ... ok` among 14 passed
-   tests. On the PR or batch run, the `test-release` job shows the new step passing.
-2. **It fits (D1/D2).** The PR run's new step wall time and `test-release`'s job time, against
-   that run's slowest required job, recorded here.
+   `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs ... ok` among 15 passed
+   tests. On the batch's qualification run (PR or `main` push), the `test-release` job shows the
+   new step passing.
+2. **It fits (D1/D2).** On the batch's qualification run (PR or `main` push): the new step's wall
+   time and `test-release`'s job time, against every other required job of that run, recorded
+   here. If `test-release` is the slowest required job, D2 applies.
 3. **The workflow checks.** `python3 -B scripts/check-ci-path-routing.py`,
    `python3 -B scripts/test-ci-path-routing.py`, `python3 -B scripts/check-test-support-ci.py`,
    `python3 -B scripts/test-test-support-ci.py` and `bash scripts/check-workspace-policy.sh` exit
-   0. No job is added, so the verdict's expectation table is unchanged; under D2 the nightly job is
-   added to `failure-notice`'s `needs`.
-4. **The PR run's `qualification` verdict is green.**
+   0. No job is added, so the verdict's expectation table is unchanged; under D2 the new required
+   job is in the `verdict` job's `needs` list and expectation table, and these checks stay green.
+4. **The batch's qualification run (PR or `main` push) has a green `qualification` verdict.**
 
 ## Test value
 
@@ -176,3 +187,38 @@ CI job catches today.
   scripts/check-artifact-evidence-leak.sh` and a YAML parse of the workflow (`actionlint` is not
   installed on the host). The verdict's expectation table is unchanged.
 - **Gate 4.** Open until the batch push (CI cannot run locally).
+
+## Root amendments
+
+### R1 (2026-10-06): D2's trigger and response
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation, after attempt
+1's verdict (`MINOR2`). The nightly fallback is dropped: it contradicted D0 (a merge-gating check
+never moves to a non-blocking workflow). D2's trigger is now wall time only: `test-release` takes
+longer than every other required job of the batch's qualification run (the old trigger "exceeds the
+slowest required job" could never fire, because `test-release` is itself required, and the 240 s
+limit had no reason of its own). The response is a separate parallel required job in
+`qualification.yml`, routed like `test-release`, with the verdict's `needs` and expectation table
+updated. Deliverables, Authorized paths, Non-goals and gates 2-4 are amended to match; the gates'
+"PR run" is now "the batch's qualification run (PR or `main` push)".
+
+## Follow-up record
+
+### Batch follow-up (2026-10-06, stream G part A; on `codex/d15-stream-g`)
+
+- **MINOR1 (comment).** The #1044 comment above `M3's leg is built with FMA` said "the step above
+  runs M3"; after this slice and #1329's `tail_contract` step, the step above is no longer the
+  lane/math step. The comment now names the `Lane and math gates ... in release` step. No step was
+  moved.
+- **NITs folded.** Gate 1 says 15 passed tests; the hot-file note no longer names the closed
+  J #1427; D1's routing sentence names every path class that routes away from `full`; the
+  rust-cache hazard sentence is corrected; gates 2 and 4 name the batch's qualification run.
+- **Other release steps now in `test-release` (relevant to D2's trigger).** Beside this slice's
+  step, the job now also runs #1329's `tail_contract` step, #1409's `ramp_endpoint` step (seven
+  effect crates and `effect-runtime`; local: 11.5 s build, 6.1 s run) and #1366's exhaustive
+  `designer_total` sweep (local: 13.1 s including its build, 4.2 s run). Gate 2's measurement on
+  the batch's qualification run covers the whole job; if `test-release` then exceeds every other
+  required job, D2 moves the release sweeps into their own parallel required job.
+- **D2 not triggered by recorded measurements.** No CI run with these steps exists yet; gate 2's
+  measurement is pending-CI until the batch push. Locally the added steps cost well under a
+  minute against the 254 s baseline job and the 524 s slowest job.

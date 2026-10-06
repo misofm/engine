@@ -261,6 +261,8 @@ through the clamp #1408 adds for the builtins.
   `crates/{delay,compressor,gate-expander,multiband-compressor,true-peak-limiter,transient-shaper}/tests/randomized.rs`,
   and the `EffectDifferential::edge_ramp_restore_violations` doc in
   `crates/conformance/src/randomized.rs`
+- Root-authorized batch follow-up (2026-10-06, ruling (1) on attempt 2's open items):
+  `.github/workflows/qualification.yml`, one step in the required `test-release` job only
 
 `crates/lane`, `crates/effect-runtime` and the effects' parameter code are stream G's column; the
 `ParameterSmoother` arm (stream J's `crates/effect-contract`), the payload refusal rows and soft
@@ -630,3 +632,27 @@ the unclamped walk only to pick the moves and the `k - 2 ..= k` positions.
 - The verdict's MINOR 2 (soft clip line clause) is #1411's and its verifier confirmed it covered.
 - Verdict NIT 5's shared harness (one helper instead of seven copies) and NIT 7 (a wasm effect-ramp
   corpus case) stay optional follow-ups.
+
+## Follow-up record
+
+### Batch follow-up (2026-10-06, stream G part A; root rulings on attempt 2's open items)
+
+- **Ruling (1): gate 1 at 100,000 ramps runs in CI.** Made by the decision-15 root coordinator
+  under the owner's no-shortcuts delegation. `qualification.yml`'s required `test-release` job has
+  a new step, `Effect ramp endpoint gates (ramp_endpoint) in release`:
+  `cargo test --locked --release -p compressor -p delay -p gate-expander -p multiband-compressor
+  -p soft-clip -p transient-shaper -p true-peak-limiter -p effect-runtime --test ramp_endpoint`.
+  It runs `effect-runtime`'s gate 1 at its release size (100,000 random ramps, 200,000 restored)
+  and the seven effects' gate 2 in the shipping profile. `lane`'s own `ramp_endpoint` target
+  already runs in release in the same job's lane/math step. No job added, so the router and the
+  verdict's expectation table are unchanged; if `test-release` becomes the slowest required job,
+  #1428's amended D2 moves the release sweeps into their own parallel required job.
+  Local measurement (x86-64, 32 hardware threads, release dependencies already built, worktree
+  `codex/d15-stream-g`): `--no-run` 11.5 s; the run 6.1 s wall (16 tests in 8 targets, all pass;
+  `effect-runtime`'s 3 tests 5.96 s, every other target under 0.1 s). The CI step time is
+  pending-CI until the batch push. `check-ci-path-routing.py`, `test-ci-path-routing.py`,
+  `check-test-support-ci.py`, `test-test-support-ci.py` and `check-workspace-policy.sh` exit 0.
+- **Ruling (2): two stream G issues filed.** #1458 *Share one effect-ramp endpoint harness instead
+  of seven copies* (verdict NIT 5; each test keeps its mutation evidence, re-run red after the
+  move) and #1459 *Replay an effect ramp whose endpoint clamp acts in the wasm corpus* (verdict
+  NIT 7). Both are in STREAMS.md's Stream G table after #1411.
