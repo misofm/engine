@@ -2294,7 +2294,14 @@ fn bind_eligibility(
             varied[member].sample_rate = row.sample_rate;
             varied[member].quality = row.quality;
         }
-        3 => varied[member].quantum = if shape.quantum == 128 { 64 } else { 128 },
+        3 => {
+            let quantum = if shape.quantum == 128 { 64 } else { 128 };
+            varied[member].quantum = quantum;
+            // A legal member of another program: its limits admit its own quantum's scratch, as
+            // every other member's admit theirs (an effect with per-frame scratch, the EQ's rest
+            // planes since issue #1328, would otherwise be refused for the limit, not declined).
+            varied[member].limits = limits(Shape { quantum, ..shape });
+        }
         4 => match shape.ports.sidechain {
             PreparedSidechainPort::Connected { id, required } if !required => {
                 varied[member].ports.sidechain =
@@ -2650,22 +2657,31 @@ macro_rules! randomized_effect_test {
 }
 
 impl EffectDifferential<'_> {
-    /// Every refusal of the effect's **own** snapshot, taken at each sample of a ramp that
-    /// rounds past its parameter's domain edge (#1278): no seed.
+    /// Every refusal of the effect's **own** snapshot, taken at each sample of a smoothed ramp to
+    /// its parameter's domain edge whose unclamped model walk would round past that edge (#1278):
+    /// no seed.
     ///
     /// The plan-swap carry restores every lane it carries, so a restore must accept every state
-    /// the effect itself reaches. A smoothed ramp iterates `current + step` with a step rounded
-    /// once, so a ramp that ends on a domain edge can round a few ulps past the edge on its way.
+    /// the effect itself reaches. A smoothed ramp iterates `ramp_toward(current, step, target)`
+    /// (#1409), which holds every word between its start and its target, so a ramp to a domain
+    /// edge stays inside the domain and the strict restore (#1411) admits each snapshot. The
+    /// unclamped walk, `current + step` with a step rounded once, can round a few ulps past the
+    /// edge; this probe uses that walk only to pick moves the clamp acts on. A refusal therefore
+    /// means that the render site whose word the snapshot holds left a ramp word outside its
+    /// endpoints (a missing or reverted clamp), or that the restore refuses a valid snapshot; the
+    /// fix is that clamp or that validation, never a restore slack.
+    ///
     /// For each smoothed continuous parameter, each edge and each quality row, this finds a start
-    /// value a few hundred ulps inside the edge whose `f32` walk leaves the domain, prepares a
-    /// scalar instance there on both channels, sends a `Point` to the edge, and renders every
-    /// sample of the ramp. After each sample in a fixed position set it restores the instance's
-    /// snapshot into a freshly prepared twin (#1301): for a ramp of `n` samples on quality row
-    /// `r`, with `k` the first step of the probe's own `f32` walk that leaves the domain, the set
-    /// is `{0, n - 2, n - 1} U {k - 2, k - 1, k} U {s : s mod 16 == 4r mod 16}`. Sample 0 reaches
-    /// a refusal of the whole path, `k - 2 ..= k` the first sample past the edge with one sample
-    /// of slack each way, `n - 2 ..= n - 1` the last moving sample and the snap, and the rotating
-    /// stride positions the model does not predict. When
+    /// value a few hundred ulps inside the edge whose unclamped `f32` walk leaves the domain,
+    /// prepares a scalar instance there on both channels, sends a `Point` to the edge, and renders
+    /// every sample of the ramp. After each sample in a fixed position set it restores the
+    /// instance's snapshot into a freshly prepared twin (#1301): for a ramp of `n` samples on
+    /// quality row `r`, with `k` the first step of the probe's own unclamped `f32` walk that
+    /// leaves the domain, the set is
+    /// `{0, n - 2, n - 1} U {k - 2, k - 1, k} U {s : s mod 16 == 4r mod 16}`. Sample 0 is the
+    /// first moving state, `k - 2 ..= k` the first sample at which an unclamped site would pass
+    /// the edge, with one sample of slack each way, `n - 2 ..= n - 1` the last moving sample and
+    /// the snap, and the rotating stride positions the model does not predict. When
     /// [`dsp_reference::randomized::overridden`] is true (the nightly's scaled run, or a seed
     /// replay), it restores after every sample instead. It returns each refusal. (An associated
     /// function of this exported type, so an effect crate's tests reach it.)

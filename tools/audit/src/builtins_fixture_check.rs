@@ -8,7 +8,7 @@ use std::{
 };
 
 use bench_support::digest::sha256_hex as sha256;
-use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
+use dsp_reference::{ReferenceRetainedTptF32, ReferenceSilenceRun, ReferenceTptOutput};
 use sha2::{Digest, Sha256};
 
 const BLOCKS: u64 = 1_000_000;
@@ -67,6 +67,8 @@ struct ReferenceChain {
     left_lpf: ReferenceRetainedTptF32,
     right_hpf: ReferenceRetainedTptF32,
     right_lpf: ReferenceRetainedTptF32,
+    /// Each channel input's silence run, which arms both of its sections (issue #1328, A9).
+    silence: [ReferenceSilenceRun; 2],
     matrix_current: [f32; 4],
     matrix_target: [f32; 4],
     matrix_step: [f32; 4],
@@ -87,6 +89,7 @@ impl ReferenceChain {
             left_lpf: filter(1_000.0, ReferenceTptOutput::LowPass),
             right_hpf: filter(200.0, ReferenceTptOutput::HighPass),
             right_lpf: filter(2_000.0, ReferenceTptOutput::LowPass),
+            silence: [ReferenceSilenceRun::for_rate(48_000); 2],
             matrix_current: [1.0, 0.0, 0.0, 1.0],
             matrix_target: [1.0, 0.0, 0.0, 1.0],
             matrix_step: [0.0; 4],
@@ -116,6 +119,7 @@ impl ReferenceChain {
         self.left_lpf.reset();
         self.right_hpf.reset();
         self.right_lpf.reset();
+        self.silence = [ReferenceSilenceRun::for_rate(48_000); 2];
         self.matrix_current = self.matrix_target;
         self.remaining = 0;
     }
@@ -135,12 +139,14 @@ impl ReferenceChain {
         samples: &mut [f32; QUANTUM],
         high: &mut ReferenceRetainedTptF32,
         low: &mut ReferenceRetainedTptF32,
+        silence: &mut ReferenceSilenceRun,
         sanitized_input: &mut u64,
     ) -> u64 {
         for sample in samples.iter_mut() {
+            let armed = silence.observe(*sample);
             let input = sanitize(*sample, sanitized_input);
-            let high_output = f32::from_bits(high.process(input).output_bits);
-            *sample = f32::from_bits(low.process(high_output).output_bits);
+            let high_output = f32::from_bits(high.process(input, armed).output_bits);
+            *sample = f32::from_bits(low.process(high_output, armed).output_bits);
         }
         if samples.iter().all(|sample| sample.abs() < NONFINITE_LIMIT) {
             return 0;
@@ -179,6 +185,7 @@ impl ReferenceChain {
             &mut left,
             &mut self.left_hpf,
             &mut self.left_lpf,
+            &mut self.silence[0],
             &mut counts.sanitized_input,
         );
         self.lifetime[0] += counts.recovered_left;
@@ -186,6 +193,7 @@ impl ReferenceChain {
             &mut right,
             &mut self.right_hpf,
             &mut self.right_lpf,
+            &mut self.silence[1],
             &mut counts.sanitized_input,
         );
         self.lifetime[1] += counts.recovered_right;

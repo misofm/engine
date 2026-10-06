@@ -126,11 +126,33 @@ when a dependency forces the order, and then sequence the correct solution.
   builtin computes it from its designer, per rate, on the control thread, with a test that
   recomputes it (never a digest). Every node also states an exact-rest bound. Gain-only processors
   report 0 beyond their latency.
+  Each node states two tail values (root, 2026-10-06; #1329 Amendment 3). `T_decay` is the bound
+  above for every peak at or above the node's flush floor `P*` (below it the `f32` output near the
+  1e-20 per-word flush is no longer relative to `P`); tail reporting uses it (#1261, #1262, PDC).
+  `T_rest = max(T_decay, R(P*))`, at least `N_SILENCE` for an enabled filter section, is the bound
+  over every peak: from it on the output is below `P·10^(−144/20)` for `P ≥ P*` and exactly zero
+  for `P < P*`. Silence skipping (#1107) uses the exact-rest bound (`RestSamples`), which holds for
+  every input; `T_rest` is its low-peak case (root, 2026-10-06; #1329 Amendment 3 addendum). An absolute output floor in place of the
+  `P < P*` branch is refused: it would make the tail a fixed-level one, which #1328's A8 and A9
+  removed. A two-level `P*` is a candidate for #1433.
+  A live input-filter retarget (#1407) moves the recursion only through designs and their
+  mixtures: every recursion word the kernel loads is a design, the identity at rest with +0.0
+  integrators, or within a proven f32 rounding allowance (64 half-ulps plus u·D per word) of the
+  convex hull of the designs its history used, so the section's zero-input step stays a
+  contraction, ||A(w)||_V ≤ q_design + 1.419e-5 ≤ 1 − 3.79e-5, at every launch rate and block
+  size (with the `f32` state rounding, the certified margin is 3.673e-5 at 44.1 and 88.2 kHz and
+  3.701e-5 at 48 and 96 kHz; #1329 Amendment 3); a collapsed strip decides every record over
+  channel 0's state and renders the bits of the same strip rendered dual. (Root, 2026-10-05; #1407 Amendment 1.)
 - (c) #1261 and #1262 then report the bounded tail, never `Infinite`.
 - *Rationale:* exact zero was provably never reached at the top of the cutoff domain, and the EQ
   had a second trap (round 1, B4.3; round 2, "Bits moved"). With the fix, exact rest is reached
-  within a stated bound (input section ≤1.0M samples at +24 dBFS), so silence skipping can rely on
-  it.
+  within a stated bound, so silence skipping can rely on it. For the input section with a live
+  input lane the certified bounds, each including `2·N_SILENCE`, are about 1.07M samples at
+  +24 dBFS and 2.39M for any sanitized input (44.1 / 48 / 88.2 / 96 kHz: 1,067,207 / 1,061,497 /
+  1,071,057 / 1,065,688 and 2,384,997 / 2,372,008 / 2,388,800 / 2,376,147; #1433's
+  frequency-aware cascade bound, 8.5-8.9 % above the real kernel's rest of the top pair; it
+  supersedes #1329 Amendment 3's 1.26M / 2.58M, the earlier ≤1.0M and Amendment 2's 1.19M /
+  2.5M).
 - *Recorded resolution:* with f32 rounding and ramps in flight the smallest `T` is not computable
   exactly, so each node reports a certified upper bound on it, checked against a brute-force
   recompute.
@@ -579,13 +601,32 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
   mono depth-2 pair's `ic1` spill is eliminated (A6 chose elimination, not A3's exception path:
   each section's dry mask is kept in state); D6 (class B) is restated by change size.
-- **#1328 A4 corrected:** the SVF joint flush has a defined rest threshold. While every input
-  sample satisfies `|x| < L* = REST_EPS / (2 · max(a2, a3))`, a section stays at rest and outputs
-  only its direct term; the worst output change is about 5.0e-10 (−186 dBFS; `L*` ≤ −210.3 dBFS,
-  EQ low shelf 10 Hz +24 dB at 96 kHz). Accepted under D15-4(a) by root under the owner's
-  delegation of math decisions: it is below the f32 rounding error of any signal above about
-  −30 dBFS through the same section. Gating the flush on `x == 0` was rejected (spill risk, no
-  measurable gain). Details: #1328 Amendment 1 A7 and `dsp-research/filters.md`.
+- **#1328 A8 (supersedes the A4/A7 rest threshold), itself superseded by A9:** A8 armed the joint
+  flush on a sample whose section input is exactly zero. The attempt-4 verdict showed that this
+  still loses a sparse signal's boost (non-zero samples below the rest limit with exact zeros
+  between them: about −120 dBFS at four +24 dB shelves) and moves bits inside a live EQ where a
+  section's own input cancels to zero.
+- **#1328 A9 (supersedes A8):** silence is a time property. Each effect input channel (the builtin
+  input stage, the parametric EQ, the multiband compressor) keeps one counter word per lane, the
+  run of exactly-zero input samples, and a section may apply the joint flush only once its effect
+  input has been zero for `N_SILENCE` samples, a time of `4096 / 48000` s (3,764 to 8,192 samples
+  by rate; 1,024 samples left a sparse-input residual above one tail's worth at every rate). While
+  the effect input is live, sparse or tiny, no bit moves; in tails the change is at most one tail's
+  worth (analytic bound `1.95e-13` at one +24 dB shelf, largest found `3.5e-10` at four, −189 dBFS),
+  and on a block of live audio the builtin chain and the EQ run their unarmed form, with no
+  counter, no threshold and no joint term in any frame loop: what remains is one armability test
+  per channel per block and one compare of the block's last frame (the multiband compressor runs
+  the counter and the joint flush on every frame). A block in which some lane ends on an exact
+  zero, common in quiet 16-bit sources, adds a backward scan from the last frame that stops at
+  each such lane's first non-zero frame: within noise natively (an eight-lane builtin block
+  1.005-1.008 of all-live, an eight-lane EQ block 0.98-1.02; before the backward scan they paid
+  13 % to 21 % and 7 % to 9 %). A bank with a silent or padding lane beside live ones scans that
+  lane's whole block (about 3 % of an eight-lane builtin block; the EQ's within noise). In the
+  browser the builtins' dual loop costs about 2 % to 5 % p50 on the 64-track documents against
+  the per-word build; the cause is the loop's structure since #1328, not the chain constants, and
+  #1454 owns it (#1451 removed the iOS memset cause). #1328's follow-up record has the numbers.
+  The counter rides the state payload, the carry and the mono-collapse disengage copy. Details:
+  #1328 Amendment 1 A9 and `dsp-research/filters.md`.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
   the live filter retarget law, is *Retarget a live input filter only through its designs and their
   mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its

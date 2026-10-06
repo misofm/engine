@@ -73,8 +73,15 @@ fn probe_svf_simd8(
     io: &mut [f32; PROBE_FRAMES * 8],
     coefficients: &SvfCoef<lane::Simd8>,
     state: &mut SvfState<lane::Simd8>,
+    rest: &[f32; PROBE_FRAMES * 8],
 ) {
-    svf_block::<lane::Simd8>(io, PROBE_FRAMES, black_box(coefficients), black_box(state));
+    svf_block::<lane::Simd8, &[f32]>(
+        io,
+        PROBE_FRAMES,
+        black_box(coefficients),
+        black_box(state),
+        black_box(rest),
+    );
 }
 
 // Same rationale as the 8-lane (AVX2) gain probe above: opaque value, static length (#372).
@@ -101,8 +108,15 @@ fn probe_svf_simd4(
     io: &mut [f32; PROBE_FRAMES * 4],
     coefficients: &SvfCoef<lane::Simd4>,
     state: &mut SvfState<lane::Simd4>,
+    rest: &[f32; PROBE_FRAMES * 4],
 ) {
-    svf_block::<lane::Simd4>(io, PROBE_FRAMES, black_box(coefficients), black_box(state));
+    svf_block::<lane::Simd4, &[f32]>(
+        io,
+        PROBE_FRAMES,
+        black_box(coefficients),
+        black_box(state),
+        black_box(rest),
+    );
 }
 
 fn execute_probes() {
@@ -125,7 +139,7 @@ fn execute_probes() {
         };
         probe_gain_simd8(&mut io, &[0.75; 8]);
         probe_sum2_simd8(&mut io, &a, &b);
-        probe_svf_simd8(&mut io, &coefficients, &mut state);
+        probe_svf_simd8(&mut io, &coefficients, &mut state, &[0.0; PROBE_FRAMES * 8]);
         black_box((io, state));
     }
     #[cfg(target_feature = "neon")]
@@ -147,7 +161,7 @@ fn execute_probes() {
         };
         probe_gain_simd4(&mut io, &[0.75; 4]);
         probe_sum2_simd4(&mut io, &a, &b);
-        probe_svf_simd4(&mut io, &coefficients, &mut state);
+        probe_svf_simd4(&mut io, &coefficients, &mut state, &[0.0; PROBE_FRAMES * 4]);
         black_box((io, state));
     }
 }

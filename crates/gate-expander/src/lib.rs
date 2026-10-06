@@ -241,7 +241,6 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
         maximum_state: StatePayloadSizes {
             common_bytes: common,
             left_bytes: per_lane,
@@ -249,6 +248,17 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         },
         scratch_fixed_bytes: 64,
         scratch_bytes_per_frame: 0,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::EffectTailBound {
+    effect_contract::EffectTailBound {
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
     }
 }
 
@@ -297,6 +307,7 @@ pub const GATE_EXPANDER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &GATE_EXPANDER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &GATE_EXPANDER_OBSERVATIONS,
 };
 
@@ -776,16 +787,15 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             let target = payload::read_f32(bytes, word + 1);
             let step = payload::read_f32(bytes, word + 2);
             let remaining = payload::read_f32(bytes, word + 3);
-            let resting = remaining == 0.0;
-            // #1278: the effect's own mid-ramp snapshot must restore. A ramping `current` is an
-            // iterated `current + step` that may round a few ulps past a domain edge, and its step
-            // is `(target - current) / 64`, which is subnormal for a ramp a few ulps long near
-            // zero. So the target and a resting current are held to the domain, and a moving ramp
-            // to its whole remaining path within a 64-ulp rounding budget.
+            // #1278: the effect's own mid-ramp snapshot must restore. Its step is
+            // `(target - current) / 64`, which is subnormal for a ramp a few ulps long near zero,
+            // so the step is held only to be finite. The target and the `current`, moving or
+            // resting, are held to the strict domain: the clamped law keeps every word between the
+            // ramp's start and its target (issue #1409 D2), so a word past the domain is one the
+            // engine never holds (issue #1411 D1).
             let spec = &GATE_SPECS[index];
-            let slack = 64.0 * f32::EPSILON * spec.minimum.abs().max(spec.maximum.abs());
             let path = integral_within(remaining, RAMP_SAMPLES as f32)
-                && payload::ramp_path_within(
+                && payload::ramp_path_inside(
                     LinearRamp {
                         current,
                         target,
@@ -793,12 +803,11 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                         remaining: remaining as u32,
                     },
                     (spec.minimum, spec.maximum),
-                    slack,
                     RAMP_SAMPLES,
                 );
             if is_negative_zero(current)
                 || is_negative_zero(target)
-                || (resting && !parameter_value_valid(spec, current))
+                || !parameter_value_valid(spec, current)
                 || !parameter_value_valid(spec, target)
                 || !path
             {

@@ -888,6 +888,14 @@ pub struct PreparedGraphPlan {
     observers: Vec<GraphNodeObserverBinding>,
     _not_sync: Cell<()>,
 }
+/// One prepared per-node effect in the plan's control-side effect table, keyed by its node `id`.
+///
+/// This record itself never enters render-owned memory. Bind reads its metadata and response
+/// facts on the control thread and moves only what render reads -- the processor and the
+/// metadata's block quantum -- into the render node (`runtime::EffectNode`). Control-only data,
+/// such as the rest of [`PreparedEffectMetadata`], therefore stays here and costs the render node
+/// table nothing. The `processor` does enter render-owned memory, and each effect's processor
+/// still holds its own `PreparedEffectMetadata` copy; #1461 removes that copy.
 pub struct GraphPreparedEffect {
     pub id: EffectNodeId,
     pub metadata: PreparedEffectMetadata,
@@ -899,15 +907,20 @@ pub struct GraphPreparedEffect {
     pub native_id: &'static str,
 }
 
+/// Bytes of the render node a per-node prepared effect binds to (`runtime::EffectNode`): the
+/// processor and the block quantum, and nothing else. A live-control-driven effect's boxed owner
+/// holds one, so `graph-compiler`'s resource estimate charges this size for it.
+pub const EFFECT_RENDER_NODE_BYTES: usize = core::mem::size_of::<runtime::EffectNode>();
+
 /// One prepared effect's live-control channel, carried **beside** the prepared effects
 /// rather than inside them (issue #140 A).
 ///
 /// # Why beside, and not a field of [`GraphPreparedEffect`]
 ///
-/// `GraphPreparedEffect` is the payload of `runtime::NodeKind::Effect`. Runtime op/unit layout
-/// changes are admitted separately by the derived runtime metadata reservation, while this
-/// channel remains in its own vector so `NodeKind`'s largest variant stays unchanged. A
-/// live-control-free plan therefore retains no control-channel payload.
+/// A `GraphPreparedEffect`'s render-read fields become the payload of `runtime::NodeKind::Effect`.
+/// Runtime op/unit layout changes are admitted separately by the derived runtime metadata
+/// reservation, while this channel remains in its own vector, so a live-control-free plan retains
+/// no control-channel payload.
 pub struct GraphEffectControlBinding {
     /// The effect node this channel drives.
     pub node: EffectNodeId,
@@ -3615,6 +3628,11 @@ mod tests {
         parameters: &[],
         ports: &SUM_PORTS,
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::EffectTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+        },
         observations: &[],
     };
 
@@ -5182,6 +5200,8 @@ mod tests {
             },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -6600,6 +6620,11 @@ mod tests {
         parameters: &GAIN_PARAMETERS,
         ports: &SUM_PORTS,
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::EffectTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+        },
         observations: &[],
     };
 
@@ -6726,6 +6751,8 @@ mod tests {
             },
             latency: LatencySamples(latency),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -7141,6 +7168,8 @@ mod tests {
             },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,

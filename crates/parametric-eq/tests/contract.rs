@@ -155,7 +155,7 @@ fn descriptor_is_frozen() {
         assert!(parameter.readable);
     }
     assert_eq!(SECTIONS, EQ_SECTION_COUNT);
-    assert_eq!(SECTIONS * WORDS_PER_BAND * 4 + 2 * 4, LANE_BYTES);
+    assert_eq!(SECTIONS * WORDS_PER_BAND * 4 + 3 * 4, LANE_BYTES);
 }
 
 /// Enables band one as a bell at `1 kHz`, `0 dB`, on the left channel only.
@@ -687,7 +687,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     assert_eq!(word(&common, 0), 1, "the layout version is stamped");
     assert_eq!(
         word(&common, 1),
-        (SECTIONS * WORDS_PER_BAND * 2 + 2 * 2) as u32,
+        (SECTIONS * WORDS_PER_BAND * 2 + 3 * 2) as u32,
         "the data word count is stamped"
     );
 

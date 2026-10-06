@@ -729,3 +729,114 @@ fn bank_restore_of_one_track_does_not_mutate_peers() {
         .unwrap();
     assert_eq!(snapshot_bank(&*target_bank, peer), peer_before);
 }
+
+/// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp moves.
+///
+/// From the effect's own snapshot with all four ramps in flight (threshold, ratio, range and
+/// hysteresis on both channels), each left ramp's `current` in turn is written one ulp outside
+/// each edge of its parameter's domain. The restore refuses it with `effect.state.parameter` and
+/// leaves the scalar instance and a bank track unchanged; the same payload with `current` on the
+/// edge restores. Red when `parse_lane` exempts a moving `current` from the domain or keeps a
+/// rounding budget for it.
+#[test]
+fn a_moving_ramp_word_past_its_domain_is_refused() {
+    const RAMPS: usize = 4;
+    let values = active_values();
+    let mut effect = prepare(request(&values));
+    let mut left = noise(301, 9, 0.4);
+    let mut right = noise(302, 9, 0.4);
+    render_scalar_sidechain(
+        effect.as_mut(),
+        &mut left,
+        &mut right,
+        None,
+        9,
+        &retarget_spans(0),
+        0,
+    );
+    let saved = snapshot(effect.as_ref());
+    let sizes = effect.metadata().state_sizes;
+    let ramp_word = |index: usize| 6 + index * 4;
+    for index in 0..RAMPS {
+        assert_ne!(
+            f32::from_bits(word(&saved.1, ramp_word(index) + 3)),
+            0.0,
+            "ramp {index} is in flight"
+        );
+    }
+    let with_current = |index: usize, current: f32| {
+        let mut section = saved.1.clone();
+        let at = ramp_word(index) * 4;
+        section[at..at + 4].copy_from_slice(&current.to_le_bytes());
+        section
+    };
+
+    fn input<'a>(saved: &'a (Vec<u8>, Vec<u8>, Vec<u8>), left: &'a [u8]) -> StatePayloadInput<'a> {
+        StatePayloadInput {
+            common: &saved.0,
+            left,
+            right: &saved.2,
+        }
+    }
+    let bank_values: [Values; 8] = core::array::from_fn(|_| active_values());
+    let mut bank = prepare_bank_native(&bank_values, LinkMode::DualMono);
+    if let Some(bank) = bank.as_mut() {
+        bank.restore_track_state_payload(
+            0,
+            STATE_LAYOUT_VERSION,
+            StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes).expect("sizes"),
+        )
+        .expect("the scalar snapshot restores into a bank track");
+    }
+    let bank_saved = bank.as_ref().map(|bank| snapshot_bank(&**bank, 0));
+
+    for index in 0..RAMPS {
+        let row = &gate_expander::GATE_EXPANDER_PARAMETERS[index];
+        let (low, high) = (row.minimum.expect("min"), row.maximum.expect("max"));
+        for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
+            let case = format!(
+                "ramp {index}: current {outside:e} ({:#010x})",
+                outside.to_bits()
+            );
+            let section = with_current(index, outside);
+            assert_eq!(
+                effect
+                    .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, &section))
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "{case}"
+            );
+            assert_eq!(snapshot(effect.as_ref()), saved, "{case}");
+            if let (Some(bank), Some(bank_saved)) = (bank.as_mut(), bank_saved.as_ref()) {
+                assert_eq!(
+                    bank.restore_track_state_payload(
+                        0,
+                        STATE_LAYOUT_VERSION,
+                        input(&saved, &section)
+                    )
+                    .expect_err(&case)
+                    .code,
+                    "effect.state.parameter",
+                    "bank {case}"
+                );
+                assert_eq!(&snapshot_bank(&**bank, 0), bank_saved, "bank {case}");
+            }
+            let section = with_current(index, edge);
+            effect
+                .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, &section))
+                .unwrap_or_else(|error| panic!("ramp {index}: current {edge:e}: {}", error.code));
+            effect
+                .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, &saved.1))
+                .expect("own snapshot");
+            if let Some(bank) = bank.as_mut() {
+                bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, &section))
+                    .unwrap_or_else(|error| {
+                        panic!("bank ramp {index}: current {edge:e}: {}", error.code)
+                    });
+                bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, &saved.1))
+                    .expect("own snapshot");
+            }
+        }
+    }
+}

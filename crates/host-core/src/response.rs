@@ -992,9 +992,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn mixed_prepared_track_composes_real_filter_eq_and_excludes_compressor() {
-        let caps = HostPrepareCaps {
+    /// Host caps with every resource ceiling open, for the prepared-session snapshot tests.
+    fn unbounded_caps() -> HostPrepareCaps {
+        HostPrepareCaps {
             shape: HostShapePolicy::AnyLaunchRate,
             source_ring_frames: 256,
             maximum_source_channels: None,
@@ -1015,7 +1015,62 @@ mod tests {
             maximum_meter_streams: u64::MAX,
             maximum_meter_items: u64::MAX,
             maximum_meter_bytes: u64::MAX,
-        };
+        }
+    }
+
+    /// A per-node effect's snapshot reports its prepared bypass (#1460 D3): the delay keeps its
+    /// session bypass as a prepared `bypass` (it never banks, so the bypass is not lowered to a
+    /// lane), and the owner record must carry it, for both values.
+    #[test]
+    fn a_per_node_effect_snapshot_reports_its_prepared_bypass() {
+        for bypass in [false, true] {
+            let caps = unbounded_caps();
+            let mut model = parse_host_session(include_str!(
+                "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+            ))
+            .expect("EQ fixture");
+            let mut delay = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+            delay.id = session::StableId::parse("dly").expect("stable id");
+            delay.identity = session::EffectIdentity::Native {
+                effect_id: session::StableId::parse("miso.delay").expect("stable id"),
+            };
+            delay.params.clear();
+            delay.bypass = bypass;
+            model.tracks[0].inserts.effects = vec![delay];
+            let compiled = compile_host_model(
+                &model,
+                caps.compile_caps(model.sources.len())
+                    .expect("compile caps"),
+            )
+            .expect("delay session");
+            let mut host = prepare_host_runtime(&compiled, &caps).expect("prepared host");
+            let mut collector = ResponseSnapshotCollector::new(
+                48_000,
+                8,
+                effect_contract::RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS,
+                32,
+            );
+            let track = model.tracks[0].id.as_str().to_owned();
+            let capture = host
+                .copy_response_snapshot(&track, &mut collector)
+                .expect("delay track capture");
+            let snapshot = collector.finish(capture);
+            let owner = snapshot
+                .owners
+                .iter()
+                .find(|owner| owner.native_id.as_ref() == "miso.delay")
+                .expect("delay owner");
+            assert_eq!(
+                owner.availability,
+                ResponseSnapshotAvailability::DeclaredUnavailable
+            );
+            assert_eq!(owner.bypassed, bypass, "the delay's prepared bypass");
+        }
+    }
+
+    #[test]
+    fn mixed_prepared_track_composes_real_filter_eq_and_excludes_compressor() {
+        let caps = unbounded_caps();
         let mut model = parse_host_session(include_str!(
             "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))

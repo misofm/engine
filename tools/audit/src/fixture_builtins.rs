@@ -16,7 +16,8 @@ use builtins::{
 use builtins_compiler::{BuiltinCompileCaps, MeterRequest, prepare_session_builtins};
 use conformance::DualAccumulatorDelayFactory;
 use dsp_reference::{
-    ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceTptOutput, rbj_butterworth_magnitude_db,
+    ReferenceFilterKind, ReferenceRetainedTptF32, ReferenceSilenceRun, ReferenceTptOutput,
+    rbj_butterworth_magnitude_db,
 };
 use effect_compiler::{
     CONSOLE_ELIGIBLE_EFFECTS, EffectCompileCaps,
@@ -325,8 +326,12 @@ struct ReferenceMeter {
 // These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi`
 // checks every public type and the queue payload boundary that can be named outside production.
 const GRAPH_NODE_BINDING_BYTES: u64 = 72;
-const BOXED_INPUT_ENTRY_BYTES: u64 = 704;
-const BOXED_TAIL_ENTRY_BYTES: u64 = 24;
+// #1328 A9: +24 with `InputBuiltins` (704 before). #1451: -16 with `InputBuiltins` (728 before).
+const BOXED_INPUT_ENTRY_BYTES: u64 = 712;
+// #1329: a tail entry carries the strip's `builtins::InputSectionBound` (two `TailSamples` and an
+// `Option<RestSamples>`, 56 bytes), not the one-byte `BuiltinTail` it replaced (24 before): the
+// prepared bounds live beside the tail, control-side (Amendment 4, R5).
+const BOXED_TAIL_ENTRY_BYTES: u64 = 72;
 const BOXED_STR_BYTES: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 /// One `InputBuiltins`, 168 -> 272 at #210 phase 3: `InputStage<f32>` gained the live trim ramp
@@ -335,7 +340,12 @@ const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 /// It is no longer *boxed* at preparation -- the section rides `STRIP_PREPARATION_BYTES` -- but
 /// the size is still pinned here because the bank-input table below is an entry of it.
 // #808: +288 target/step/initial coefficient bytes and +128 countdown bytes.
-const INPUT_PROCESSOR_BYTES: u64 = 688;
+// #1328 amendment A9: +24 (688 before): the input's two `f32` silence counters (8) and the
+// coefficient set's four carried `f32` constants (16, `InputChainConstants`); its `f32`
+// `N_SILENCE` word lands in padding the stage already had.
+// #1451: -16 (712 before): the four carried constants are splatted again and leave the
+// coefficient set.
+const INPUT_PROCESSOR_BYTES: u64 = 696;
 /// One `StripPreparation`: the whole strip of a track -- input, fader and matrix section -- held
 /// inline in the strip vector until lowering decides whether they bind per node or as bank lanes
 /// (issue #212 for the fader and the matrix, #210 phase 3 for the input).
@@ -350,7 +360,9 @@ const INPUT_PROCESSOR_BYTES: u64 = 688;
 /// grid to match it exactly -- so a drift here shows up there, on the same three track counts this
 /// projection uses.
 // #808 retains the same additional 416-byte input state inline.
-const STRIP_PREPARATION_BYTES: u64 = 1072;
+// #1328 amendment A9: +24 with the input section (1072 before).
+// #1451: -16 with the input section (1096 before).
+const STRIP_PREPARATION_BYTES: u64 = 1080;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
 // #1080 removed the controlled-activation flag #816 added, so the binding is 80 bytes again.
@@ -2408,10 +2420,15 @@ fn retained_tpt_outputs(
         .ok_or_else(|| {
             "independent retained-f32 TPT design rejected a frozen PCM coordinate".to_owned()
         })?;
+    // The section's input is the effect input: its own silence run arms it (issue #1328, A9).
+    let mut silence = ReferenceSilenceRun::for_rate(48_000);
     Ok(input
         .iter()
         .copied()
-        .map(|sample| f32::from_bits(reference.process(sample).output_bits))
+        .map(|sample| {
+            let armed = silence.observe(sample);
+            f32::from_bits(reference.process(sample, armed).output_bits)
+        })
         .collect())
 }
 
@@ -3506,11 +3523,11 @@ fn verify_pinned_native_resource_abi() -> Result<(), String> {
             core::mem::align_of::<(Box<str>, builtins::InputBuiltins)>(),
         ),
         (
-            "boxed BuiltinTail entry",
+            "boxed InputSectionBound entry",
             BOXED_TAIL_ENTRY_BYTES as usize,
             8,
-            core::mem::size_of::<(Box<str>, builtins::BuiltinTail)>(),
-            core::mem::align_of::<(Box<str>, builtins::BuiltinTail)>(),
+            core::mem::size_of::<(Box<str>, builtins::InputSectionBound)>(),
+            core::mem::align_of::<(Box<str>, builtins::InputSectionBound)>(),
         ),
         (
             "boxed TrackStage entry",
@@ -4065,12 +4082,15 @@ fn retained_tpt_filter_chain(input: &[f32]) -> Result<Vec<f32>, String> {
         ReferenceTptOutput::LowPass,
     )
     .ok_or_else(|| "independent graph LPF design rejected".to_owned())?;
+    // One silence run on the chain input arms both sections (issue #1328, amendment A9).
+    let mut silence = ReferenceSilenceRun::for_rate(48_000);
     Ok(input
         .iter()
         .copied()
         .map(|sample| {
-            let high = f32::from_bits(high_pass.process(sample).output_bits);
-            f32::from_bits(low_pass.process(high).output_bits)
+            let armed = silence.observe(sample);
+            let high = f32::from_bits(high_pass.process(sample, armed).output_bits);
+            f32::from_bits(low_pass.process(high, armed).output_bits)
         })
         .collect())
 }
@@ -4599,11 +4619,13 @@ fn verify_response_oracle_tolerances(rows: &[ResponseCsvRow]) -> Result<(), Stri
 }
 
 enum IndependentResponseProcessor {
-    HighPass(ReferenceRetainedTptF32),
-    LowPass(ReferenceRetainedTptF32),
+    HighPass(ReferenceRetainedTptF32, ReferenceSilenceRun),
+    LowPass(ReferenceRetainedTptF32, ReferenceSilenceRun),
     Cascade {
         high_pass: ReferenceRetainedTptF32,
         low_pass: ReferenceRetainedTptF32,
+        /// The chain input's silence run, which arms both sections (issue #1328, A9).
+        silence: ReferenceSilenceRun,
     },
 }
 
@@ -4619,14 +4641,14 @@ impl IndependentResponseProcessor {
                 })
         };
         match row.section {
-            ResponseSection::HighPass => Ok(Self::HighPass(section(
-                row.cutoff_hz as f32,
-                ReferenceTptOutput::HighPass,
-            )?)),
-            ResponseSection::LowPass => Ok(Self::LowPass(section(
-                row.cutoff_hz as f32,
-                ReferenceTptOutput::LowPass,
-            )?)),
+            ResponseSection::HighPass => Ok(Self::HighPass(
+                section(row.cutoff_hz as f32, ReferenceTptOutput::HighPass)?,
+                ReferenceSilenceRun::for_rate(row.rate_hz),
+            )),
+            ResponseSection::LowPass => Ok(Self::LowPass(
+                section(row.cutoff_hz as f32, ReferenceTptOutput::LowPass)?,
+                ReferenceSilenceRun::for_rate(row.rate_hz),
+            )),
             ResponseSection::Cascade => {
                 if row.cutoff_hz.to_bits() != 100.0_f64.to_bits() {
                     return Err(format!(
@@ -4637,6 +4659,7 @@ impl IndependentResponseProcessor {
                 Ok(Self::Cascade {
                     high_pass: section(100.0, ReferenceTptOutput::HighPass)?,
                     low_pass: section(1_000.0, ReferenceTptOutput::LowPass)?,
+                    silence: ReferenceSilenceRun::for_rate(row.rate_hz),
                 })
             }
         }
@@ -4646,15 +4669,18 @@ impl IndependentResponseProcessor {
     /// output is caught once per block by the caller, which counts blocks, not samples.
     fn process(&mut self, input: f32) -> (f32, u64) {
         match self {
-            Self::HighPass(section) | Self::LowPass(section) => {
-                (f32::from_bits(section.process(input).output_bits), 0)
+            Self::HighPass(section, silence) | Self::LowPass(section, silence) => {
+                let armed = silence.observe(input);
+                (f32::from_bits(section.process(input, armed).output_bits), 0)
             }
             Self::Cascade {
                 high_pass,
                 low_pass,
+                silence,
             } => {
-                let high = high_pass.process(input);
-                let low = low_pass.process(f32::from_bits(high.output_bits));
+                let armed = silence.observe(input);
+                let high = high_pass.process(input, armed);
+                let low = low_pass.process(f32::from_bits(high.output_bits), armed);
                 (f32::from_bits(low.output_bits), 0)
             }
         }
@@ -5279,7 +5305,24 @@ mod tests {
             // else moved.
             // Re-pinned by issue #1240: root key `vcas` added, empty, so `canonical.json` and the
             // two `prepare_256_tracks` workloads naming it move; nothing else moved.
-            "09f675d1cc3e87374c9daac12ab7471be57a73247874c5a8b62b992e7787b6dd",
+            // Re-pinned by issue #1328 amendment A9: `resources.jsonl` moves by the input
+            // section's two `f32` silence counters and its four carried `f32` constants (+24
+            // bytes per input stage, counted in the preparation strip and in the bound
+            // processor), and `reference/filter-response.csv`
+            // moves in `impulse_dft_magnitude_db` alone (565 of 1,630 rows, at most 3.2e-5 dB, at
+            // probes 187 dB down) because the twin's one-second impulse now arms the joint flush
+            // after `N_SILENCE` zero samples. No PCM, meter or benchmark fixture moved.
+            // Re-pinned by issue #1451: `resources.jsonl` alone moves, by the four carried `f32`
+            // chain constants leaving the input section's coefficients (-16 bytes per input
+            // stage, counted in the preparation strip and in the bound processor). No PCM, meter,
+            // response or benchmark fixture moved.
+            // Re-pinned by issue #1329: `resources.jsonl` alone moves, by the strip bounds kept
+            // beside each tail (`(Box<str>, InputSectionBound)`, 72 bytes, against 24 for the
+            // `BuiltinTail` entry before: +48 bytes in each of the payload's and the seal's tail
+            // vectors, +96 per track in both payload counts). The input section and the strip
+            // preparation keep their size, so the largest allocation does not move. No PCM,
+            // meter, response or benchmark fixture moved.
+            "1a8fd9a15ed441fbe3ff3557ce64369a2912152fd795a05ef336450c5446e288",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

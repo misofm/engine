@@ -11,8 +11,8 @@
 use lane::Lane;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
-    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
-    svf_block, svf_block_ramped,
+    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, silence_block, sum_into_block,
+    sum2_block, svf_block, svf_block_ramped,
 };
 
 /// Widest lane count the gates instantiate; every corpus length is a multiple of it.
@@ -177,6 +177,8 @@ pub enum Op {
     Max,
     /// `min(a, b)` (D8).
     Min,
+    /// `max_u32(a, b)`: the unsigned maximum of the raw bits (issue #1328, amendment A9).
+    MaxU32,
     /// `exp2_int(a)`.
     Exp2Int,
     /// `exp2_int_in_range(a)` for integer-valued `a` in `[-126, 127]`.
@@ -212,6 +214,7 @@ pub const ALL_OPS: &[Op] = &[
     Op::Andnot,
     Op::Max,
     Op::Min,
+    Op::MaxU32,
     Op::Exp2Int,
     Op::Exp2IntInRange,
     Op::FrexpSignificand,
@@ -245,6 +248,7 @@ impl Op {
             Self::Andnot => "andnot",
             Self::Max => "max",
             Self::Min => "min",
+            Self::MaxU32 => "max_u32",
             Self::Exp2Int => "exp2_int",
             Self::Exp2IntInRange => "exp2_int_in_range",
             Self::FrexpSignificand => "frexp.significand",
@@ -317,6 +321,7 @@ pub fn apply<L: Lane>(op: Op, a: L, b: L, c: L) -> L {
         Op::Andnot => a.andnot(b.lt(c)),
         Op::Max => a.max(b),
         Op::Min => a.min(b),
+        Op::MaxU32 => a.max_u32(b),
         Op::Exp2Int => L::exp2_int(a),
         Op::Exp2IntInRange => L::exp2_int_in_range(a),
         Op::FrexpSignificand => a.frexp().0,
@@ -487,14 +492,36 @@ pub fn run_kernel<L: Lane>(
         c: L::splat(0.002_083_333_3),
     };
     let mut gain = L::zero();
+    // The SVF kernels' effect input is the block itself: one silence counter across the run, and
+    // one rest plane the length of the whole run, sliced like `io` (issue #1328, amendment A9).
+    let mut silence = L::zero();
+    let mut rest = vec![0.0_f32; io.len()];
 
     let mut offset = 0;
     while offset < frames {
         let block_frames = core::cmp::min(partition, frames - offset);
         let block = &mut io[offset * width..(offset + block_frames) * width];
+        let plane = &mut rest[offset * width..(offset + block_frames) * width];
+        match kernel {
+            Kernel::SvfLow
+            | Kernel::SvfHigh
+            | Kernel::SvfBand
+            | Kernel::SvfBell
+            | Kernel::SvfRamped
+            | Kernel::SvfRampedIdle => {
+                silence_block::<L>(
+                    block,
+                    block_frames,
+                    &mut silence,
+                    plane,
+                    L::splat(lane::silence_frames(48_000) as f32),
+                );
+            }
+            _ => {}
+        }
         match kernel {
             Kernel::SvfLow | Kernel::SvfHigh | Kernel::SvfBand | Kernel::SvfBell => {
-                svf_block::<L>(block, block_frames, &svf_coef, &mut svf_state);
+                svf_block::<L, &[f32]>(block, block_frames, &svf_coef, &mut svf_state, &*plane);
             }
             Kernel::SvfRamped | Kernel::SvfRampedIdle => {
                 let window = if ramping {
@@ -502,13 +529,14 @@ pub fn run_kernel<L: Lane>(
                 } else {
                     0
                 };
-                svf_block_ramped::<L>(
+                svf_block_ramped::<L, &[f32]>(
                     block,
                     block_frames,
                     &mut svf_coef,
                     &svf_step,
                     window,
                     &mut svf_state,
+                    &*plane,
                 );
             }
             Kernel::OnePole => {

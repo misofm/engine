@@ -48,15 +48,33 @@ zero, which its trailing `+ 0.0` normalizes to positive zero; the behaviour is u
 width and target, which is the property the determinism claim buys. The pre-#83 preparation-time
 Jury check and cutoff-response gate are gone: the public cutoff domain is the frozen issue-036
 table, enforced before preparation, and preparation now rejects only a coefficient that is not
-representable in `f32`. Enabled filters declare an infinite tail; all other builtin parts declare a
-zero finite tail and zero latency.
+representable in `f32`. Enabled filters declare a certified finite tail, computed once on the
+control thread from the designed `f32` words, by the compiler at preparation for each distinct
+design (issue #1329, decision 15 D15-4(b)): `T_decay` (`tail`, the value PDC and every tail report
+use), the tail over every peak `T_rest` (`tail_every_peak`) and the exact-rest bound (`rest`,
+`RestSamples`), the three fields of `builtins::InputSectionBound`. The prepared session keeps every
+strip's bounds beside its tail, control-side (`PreparedBuiltinsSession::input_bounds`; silence
+skipping, #1107, reads them there); the render-owned input section carries none of them. A strip
+whose input lane is live reports `builtins::input_section_live_bound`, which covers every live
+trim, polarity and filter target over the whole cutoff domain. All other builtin parts declare a zero tail and
+zero latency. The meaning of each value is in `docs/EFFECT_CONTRACT_V1.md` ("Tail and exact
+rest"); the derivation is `docs/derivations/1329-input-section-tail-and-rest.md`.
 
 Checks go where the hazard is (master plan D7). Input is sanitized **once per channel per block**,
 at the input stage: a sample whose magnitude is not below `1e30` — which includes every NaN,
 because an ordered compare against NaN is false — becomes exact positive zero and increments
 `sanitized_input`. A subnormal input is no longer sanitized: it is a legal finite sample. The two
 recursive state words of each section are flushed to positive zero below `1e-20` inside the kernel,
-which is the only denormal mechanism and strictly contains the band hardware FTZ acts on. Output
+which is the only denormal mechanism and strictly contains the band hardware FTZ acts on; and once
+the chain's input (the sample the stage loads, before sanitising and trim) has been exactly zero
+for `N_SILENCE` samples -- `4096 / 48000` s, 3,764 to 8,192 samples by rate (`lane::silence_frames`)
+-- when both are below `1e-14` (`REST_EPS`), they are flushed to positive zero together
+(`lane::flush_pair`, issue #1328 with its amendment A9). Each channel keeps one counter word per
+lane for this, the run of zero input samples, which every body advances, the all-identity one
+included; a carry and the mono collapse's disengage copy move it with the integrators. So an
+enabled filter reaches exact rest after its input stops instead of holding a limit cycle near the
+top of the cutoff domain, while any input that is not silent for that long -- a tiny signal, or a
+sparse one with exact zeros between its samples -- gets the filter's whole response. Output
 finiteness is checked **once per block, per lane**, on the output of the recursive stage: a failing
 lane has its block zeroed and both of its sections reset, and increments `recovered_left_state` or
 `recovered_right_state` — which therefore count lane-blocks, not samples. No other lane's bits
@@ -69,9 +87,15 @@ is exact positive zero even for a negative input, while an unmuted lane at unity
 negative zero. Matrix coefficients are bounded finite values in `[-1, 1]`; a settled lane whose
 matrix is exactly the identity passes its samples through untouched. A retarget computes each
 coefficient's per-sample increment **once**, at the event (`step = (target - current) / n`), then
-iterates `current += step` and assigns the target exactly on the last sample (master plan D11).
-The pre-#83 law, which divided by the remaining count on every sample, is not the same arithmetic
-for windows longer than two samples.
+iterates `current = ramp_toward(current, step, target)` and assigns the target exactly on the last
+sample (master plan D11). `ramp_toward` is `current + step` held inside
+`[min(current, target), max(current, target)]` (issue #1408): without it a long ramp's accumulated
+rounding can carry the word past its target before the snap (a +24 dB polarity flip over
+22,137,669 samples reached +26.46 dB), and with it every trim, fader, mute and matrix word stays
+between the values it moves between on every frame. The clamp replaces a word only when it is
+strictly beyond an endpoint, so an in-range word -- signed zeros included -- keeps the unclamped
+bits, and it needs no stored start. The pre-#83 law, which divided by the remaining count on every
+sample, is not the same arithmetic for windows longer than two samples.
 
 A bank accepts one to `width` prepared tracks. Lanes at or above that count are **padding lanes**:
 they carry identity coefficients and unit trim, they are sanitized like any other lane so nothing

@@ -62,26 +62,56 @@ where it sits in the listing:
   the shape.
 * **Streams** `s`: vector stores to non-stack memory per iteration. The last section of each
   stream writes its frame back, so there is one per stream.
-* **Select-free**: no `vpor`/`vorps`/blend. The dry-mask kernels' bitselect needs one; the flush
-  does not.
+* **Select-free**: no select. A blend is one; an `or` is one unless both its inputs are lane masks
+  the loop itself computed (compares, and bitwise ops over such masks alone). The dry-mask
+  kernels' bitselect ors two data words, `x & m` and `y & ~m`, so it is a select; the joint flush's
+  two `(|n| < FLUSH_EPS) | rest` ors combine compare masks and are not (issue #1328, which
+  replaced "no `vpor`/`vorps` at all"). An `or` the rule cannot see through counts as a select,
+  so a doubtful loop reads as masked and a held row fails closed (`selects`).
 
 * **After the pairs** (the tails only): `interleave` runs the depth-2 passes and then the depth-1
   tail, so the tail is reachable from a pair loop. The ramp path's per-section `svf_block` loop
   computes exactly a mono tail's arithmetic (one section, one stream); today only V8's unrolling of
   it by three gives it another shape. It is not reachable from the stationary passes, so this
-  tells the two apart with or without unrolling (issue #1009).
+  tells the two apart with or without unrolling (issue #1009). The pair loops anchor the tail by
+  their shape alone, steps and streams, select-free or masked: either pair kernel is a
+  stationary pass the tail follows, and which one a loop is says nothing about where the tail is.
+  The anchor used to be the select-free pair only, which tied a held row to a reported row's
+  classification: at #1328 attempt 5 V8 spilled one of the dual pair's compare masks inside its
+  iteration, the rule cannot see through a spilled mask, so the starved dual pair read as masked
+  and the held dual tail lost its anchor and failed closed with nothing checked.
 
 | function | loop | streams | steps | |
 |---|---|---:|---:|---|
 | dual | depth-1 tail (`svf_cascade_interleaved`, no dry lane), after the pair | 2 | 2 | held |
 | mono | depth-2 pair (`svf_cascade_skewed`, admitted plan) | 1 | 2 | held |
 | mono | depth-1 tail, after the pair | 1 | 1 | held |
+| mono | depth-2 pair, masked (`svf_cascade_skewed_with_dry_masks`, refused or all-live plan) | 1 | 2 | held |
 | dual | depth-2 pair | 2 | 4 | reported |
+| dual | armed depth-1 tail, after the armed pair | 2 | 2 | reported, ceiling 2 |
+| dual | armed depth-2 pair | 2 | 4 | reported, ceiling 12 |
+| mono | armed depth-2 pair | 1 | 2 | reported, ceiling 0 |
+| mono | armed depth-1 tail, after the armed pair | 1 | 1 | reported, ceiling 0 |
+| mono | armed depth-2 pair, masked | 1 | 2 | reported, ceiling 0 |
 
-A held row must match exactly one select-free innermost loop of its function. A row that matches
-none, or more than one, fails closed and prints the loops that were found: nothing is checked, so
-nothing passes. The masked kernels (a refused or all-live plan's pairs, a tail with a dry lane) are
+A held row must match exactly one innermost loop of its shape in its function (select-free, or
+masked for the masked row). A row that matches none, or more than one, fails closed and prints the
+loops that were found: nothing is checked, so nothing passes. The masked mono pair is held since
+issue #1328 (amendment A6): the joint flush's live values once pushed one of its integrators
+through a slot while V8 rebuilt section 0's dry mask in the loop, and the EQ now reads that mask
+from channel state. The other masked kernels (the dual masked pair, a tail with a dry lane) are
 out of scope: the masked depth-one tails carried a slot before #977.
+
+**The dual tail's row also holds the EQ's block-limit fold** (issue #1328, A2 and A6). After the
+joint flush, V8 kept the fold's two per-channel flags (one packed word) in a stack slot across the
+tail's back edge (`[rbp-0xc8]`). The slot follows the tail site's own dry masks: built in place
+there (`dry_mask(at)`), they also feed the masked tail loop (that V8 sank their construction into
+it is inferred from the reverts below, not measured). It stopped once the tail read them from
+channel state. Reverting only the tail's mask build
+brings `[rbp-0xc8]` back; reverting only the dual masked pair's leaves the tail clean (#1328
+attempt 2's verifier). Folding both channels into one flag instead moved the slot rather than
+removing it. A general-purpose value's slot follows the whole function's register use, so the
+allocation is observed, not structurally guaranteed, and this row is what holds it.
 
 **Why the dual pair is reported, not held.** It carries ten values across its back edge (eight
 integrators and two skew carries) beside 24 loop-invariant coefficients, in sixteen vector
@@ -89,6 +119,24 @@ registers. At #977-#979 TurboFan routes ten stack slots through its recurrences,
 and `ic2` of one chain live across the back edge (issue #1000 evidence); #977's scan reported the
 loop clean because it is entered in the middle. In a loop that starved, the count moves with any
 allocation change and says nothing about time, so the gate prints it and does not hold it.
+
+**Two forms, and why the armed rows have ceilings** (issue #1328 and its follow-up). The cascades
+run in two forms: the unarmed form on every block of live audio, and the armed form (the joint
+flush, one `vpmaxud` per SVF step, which tells the forms apart) only on a block where some lane's
+silence counter can arm and that lane still holds state -- a decaying tail after the input stopped.
+Each row matches the loop of its own form and anchors a tail on the pair of its own form. The
+unarmed rows are the rows above them and are held as before. The armed rows are reported with a
+ceiling equal to the carried slots measured when the ceilings were set (dual tail 2, two
+general-purpose words; dual pair 12; every mono row 0): a row with a ceiling is checked like a
+held row, failing closed when its loop is missing or ambiguous, and fails when V8 carries more
+slots than its ceiling; fewer passes and asks for the ceiling to be lowered. They are not held at
+zero because the armed form runs only on silent tails, where a carried slot costs nothing a
+listener hears, and the root's ruling chose to make a rise visible rather than to hold them.
+The dual pair's ceiling rose once, from 11 to 12 (issue #1451, root's Amendment 2): splatting
+the EQ's `FLUSH_EPS` again in place of a carried word, after the iOS `memset_pattern16` cause was
+removed at `Lane::splat`, gave V8 one more carried slot in this armed loop only (221 -> 219
+instructions). The armed path runs only on silent tails, and every unarmed row, the loops that
+run on live audio, stays held at zero.
 
 Loops are natural loops of the listing's control-flow graph (a back edge is a jump to a block that
 dominates its source). Blocks that make a call are left out of a loop's body: inside these kernels
@@ -106,9 +154,16 @@ Nothing in the listing is pinned: no offset, register or instruction count. Ever
 names the CPU model, since a CI runner's codegen is observed only there.
 
 Re-pinning Node (`PINNED_NODE`, `PINNED_V8`) is a change to the reference V8, not a chore: build
-the #1000 red arms (#977 attempt 1, and the one-token tail edit) and the current head, run the gate
-on the new V8, and record what each gives. Keep the rule whatever they show; if a red arm turns
-green, say so, rather than loosening a row to match.
+the red arms and the current head, run the gate on the new V8, and record what each gives. Keep the
+rule whatever they show; if a red arm turns green, say so, rather than loosening a row to match.
+The red arms (issue #1328, attempt 3) are #977 attempt 1 (module `0db9b2f5`, red on the dual tail
+at `[rbp-0xa0]`) and #1328 attempt 1's code, which is the EQ with `Channel::dry` reverted to masks
+built in place: red on the dual tail at `[rbp-0xc8]` and on the masked mono pair at `[rbp-0x220]`.
+The one-token tail edit #977's attempt-2 verifier recorded (`if !admitted && (...)`) is no longer
+one: bisected with today's gate, it is red at `6f4c0379e` (#1009) and at `d09d50248`, and green
+from the #999 merge `27cf24132` on, which replaced the tail with the bounded-verdict kernel (84 to
+112 instructions). It was never red on `main` (green at `a9414c0c6`, the first `main` commit with
+#1009).
 
 Usage
 -----
@@ -156,17 +211,44 @@ class Row:
     steps: int
     held: bool = True
     after: str | None = None  # the label of a row whose loops this loop must be reachable from
+    masked: bool = False  # the row's loop carries the dry-mask selects (not select-free)
+    armed: bool = False  # the row's loop is the armed form (the joint flush's `vpmaxud`)
+    # A reported row with a ceiling is checked like a held one, but passes with up to this many
+    # carried slots (issue #1328 follow-up): its count is today's, so a rise is visible.
+    ceiling: int | None = None
 
 
 PAIR = "depth-2 pair, select-free"
+ARMED_PAIR = "armed depth-2 pair, select-free"
 LOOPS = (
     Row("dual", "depth-1 tail, select-free", streams=2, steps=2, after=PAIR),
     Row("dual", PAIR, streams=2, steps=4, held=False),
     Row("mono", PAIR, streams=1, steps=2),
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
+    Row("mono", "depth-2 pair, masked", streams=1, steps=2, masked=True),
+    Row("dual", "armed depth-1 tail, select-free", streams=2, steps=2, held=False,
+        after=ARMED_PAIR, armed=True, ceiling=2),
+    # Ceiling 12 since #1451 (was 11): the splatted `FLUSH_EPS` adds one slot to this armed loop,
+    # which runs only on silent tails; the unarmed rows above stay held at zero.
+    Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True, ceiling=12),
+    Row("mono", ARMED_PAIR, streams=1, steps=2, held=False, armed=True, ceiling=0),
+    Row("mono", "armed depth-1 tail, select-free", streams=1, steps=1, held=False,
+        after=ARMED_PAIR, armed=True, ceiling=0),
+    Row("mono", "armed depth-2 pair, masked", streams=1, steps=2, held=False, masked=True,
+        armed=True, ceiling=0),
 )
+# The armed form's joint flush: `max_u32` of the two magnitudes, one `i32x4.max_u` per SVF step,
+# which V8 lowers to `vpmaxud`. Nothing else in the EQ's loops uses it.
+ARMED_OP = "vpmaxud"
 STEP_SHAPE = {"vmulps": 7, "vaddps": 9, "vsubps": 2}
-SELECT_OPS = frozenset({"vpor", "vorps", "vpblendvb", "vblendvps", "vpternlogd", "vpternlogq"})
+# A blend is a select whatever its inputs. An `or` is one unless it only combines masks (below).
+BLENDS = frozenset({"vpblendvb", "vblendvps", "vpternlogd", "vpternlogq"})
+ORS = frozenset({"vpor", "vorps"})
+# Lane masks: a compare writes all-ones or all-zero bits per lane, and a bitwise op over masks
+# alone writes another. A register move carries a mask along.
+MASK_COMPARES = re.compile(r"^v?(cmp\w*p[sd]|pcmp(eq|gt)[bwdq])$")
+MASK_LOGIC = frozenset({"vpand", "vandps", "vpandn", "vandnps", "vpor", "vorps", "vpxor", "vxorps"})
+REGISTER_MOVES = frozenset({"vmovaps", "vmovapd", "vmovups", "vmovdqa", "vmovdqu"})
 VECTOR_MOVES = frozenset({"vmovdqu", "vmovups", "vmovaps", "vmovapd"})
 
 LINE = re.compile(r"^0x[0-9a-f]+\s+([0-9a-f]+)\s+[0-9a-f]+\s+(.*?)\s*$")
@@ -213,6 +295,7 @@ class Loop:
     streams: int
     select_free: bool
     carried: list[str]
+    armed: bool
 
 
 # -------------------------------------------------------------------------------------------------
@@ -548,6 +631,40 @@ def recurrent_slots(blocks: dict[int, Block], header: int, body: set[int]) -> se
     return found
 
 
+def selects(code: list[Instruction]) -> int:
+    """The selects in one loop's code: every blend, and every `or` that is not a mask combine.
+
+    An `or` is a mask combine when each of its inputs is a register that holds a lane mask written
+    earlier in the same loop body: a compare's result, or a bitwise op over such masks alone (the
+    joint flush's `(|n| < FLUSH_EPS) | rest`, issue #1328). A dry-mask bitselect's `or` takes two
+    *data* words, `x & m` and `y & ~m`, so it is a select. Anything this cannot see through -- a
+    memory operand, a mask computed outside the loop or carried around its back edge, a mask
+    spilled and reloaded -- counts as a select, so a doubtful loop reads as masked and a held row
+    fails closed rather than passing. The rule never reads a data `or` as a combine: an `or` of
+    two lane masks is itself a lane mask and selects nothing."""
+    masks: set[str] = set()
+    found = 0
+    for instruction in code:
+        op, operands = instruction.op, instruction.operands
+        written, read = data_flow(instruction)
+        from_memory = any("[" in operand for operand in operands[1:])
+        sources_are_masks = bool(read) and not from_memory and all(r in masks for r in read)
+        if op in BLENDS or (op in ORS and not sources_are_masks):
+            found += 1
+        if MASK_COMPARES.match(op):
+            is_mask = True
+        elif op in MASK_LOGIC or op in REGISTER_MOVES:
+            is_mask = sources_are_masks
+        else:
+            is_mask = False
+        for location in written:
+            if is_mask:
+                masks.add(location)
+            else:
+                masks.discard(location)
+    return found
+
+
 def analyse(listing: str) -> list[Loop]:
     instructions, tables = parse_listing(listing)
     blocks = build_blocks(instructions, tables)
@@ -574,7 +691,7 @@ def analyse(listing: str) -> list[Loop]:
             and (memory := MEMORY.search(instruction.operands[0])) is not None
             and STACK_SLOT.match(memory[1]) is None
         )
-        select_free = not any(ops[op] for op in SELECT_OPS)
+        select_free = selects(code) == 0
         carried = sorted(live_across(blocks, header, body) | recurrent_slots(blocks, header, body))
         reaches, pending = set(body), list(body)
         while pending:
@@ -584,7 +701,7 @@ def analyse(listing: str) -> list[Loop]:
                     pending.append(child)
         result.append(
             Loop(code, len(body), frozenset(reaches), frozenset(body), ops, steps, streams,
-                 select_free, carried)
+                 select_free, carried, ops[ARMED_OP] > 0)
         )
     return result
 
@@ -594,20 +711,29 @@ def describe(loop: Loop) -> str:
     return (
         f"{len(loop.instructions)} instructions in {loop.blocks} blocks, {shape}, "
         f"{loop.streams} streams, {'select-free' if loop.select_free else 'masked'}, "
+        f"{'armed' if loop.armed else 'unarmed'}, "
         f"vmulps={loop.ops['vmulps']} vaddps={loop.ops['vaddps']} vsubps={loop.ops['vsubps']}"
     )
 
 
 def shaped(loops: list[Loop], row: Row, rows: tuple[Row, ...]) -> list[Loop]:
-    """The select-free loops of a row's shape, restricted by its `after` row."""
+    """The loops of a row's shape (select-free, or masked for a masked row), restricted by its
+    `after` row."""
     matched = [
         loop
         for loop in loops
-        if loop.select_free and loop.steps == row.steps and loop.streams == row.streams
+        if loop.select_free != row.masked and loop.steps == row.steps
+        and loop.streams == row.streams and loop.armed == row.armed
     ]
     if row.after is not None:
         (before,) = [r for r in rows if r.function == row.function and r.label == row.after]
-        sources = shaped(loops, before, rows)
+        # The anchor is the source row's shape, select-free or masked (see "After the pairs").
+        sources = [
+            loop
+            for loop in loops
+            if loop.steps == before.steps and loop.streams == before.streams
+            and loop.armed == before.armed
+        ]
         matched = [
             loop
             for loop in matched
@@ -625,7 +751,7 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
             continue
         label = f"{name} {row.label}"
         matched = shaped(loops, row, rows)
-        if not row.held:
+        if not row.held and row.ceiling is None:
             for loop in matched or [None]:
                 state = (
                     f"{describe(loop)}; {len(loop.carried)} carried slots"
@@ -649,13 +775,22 @@ def check_function(name: str, listing: str, rows: tuple[Row, ...] = LOOPS) -> in
                     print(f"  {mark} {describe(loop)}", file=sys.stderr)
             continue
         (loop,) = matched
-        if not loop.carried:
-            print(f"ok   {label}: {describe(loop)}; no carried stack slot")
+        allowed = 0 if row.held else row.ceiling
+        if len(loop.carried) <= allowed:
+            if row.held:
+                print(f"ok   {label}: {describe(loop)}; no carried stack slot")
+            else:
+                lower = "" if len(loop.carried) == allowed else ": lower its ceiling"
+                print(
+                    f"ok   {label} (reported, ceiling {allowed}): {describe(loop)}; "
+                    f"{len(loop.carried)} carried slots{lower}"
+                )
             continue
         failures += 1
+        bound = "" if row.held else f", above the row's ceiling of {allowed}"
         print(
             f"FAIL {label}: V8 carries {', '.join(loop.carried)} from one iteration to the "
-            f"next ({describe(loop)}). Listing, carried slots marked:",
+            f"next ({describe(loop)}{bound}). Listing, carried slots marked:",
             file=sys.stderr,
         )
         for instruction in loop.instructions:
@@ -829,6 +964,15 @@ def svf_step(stream: str) -> list[str]:
 
 def self_test() -> int:
     tail = svf_step("rax") + svf_step("rsi")
+    # `flush_pair` as V8 12.4 lowers it from the shipped module: `abs` by `vandps` with a constant,
+    # four ordered compares, the rest `and`, two mask `or`s and two `andnot`s.
+    flush_pair = [
+        "vandps xmm12,xmm3,[r10]", "vandps xmm13,xmm0,[r10]",
+        "vcmpps xmm1,xmm12,xmm10, (lt)", "vcmpps xmm11,xmm13,xmm10, (lt)",
+        "vcmpps xmm13,xmm13,xmm14, (lt)", "vpand xmm11,xmm11,xmm1", "vpor xmm13,xmm11,xmm13",
+        "vandnps xmm0,xmm13,xmm0", "vcmpps xmm12,xmm12,xmm14, (lt)", "vpor xmm11,xmm11,xmm12",
+        "vandnps xmm3,xmm11,xmm3",
+    ]
     carried = ["vmovups xmm0,[rbp-0xc0]", *tail, "vmovups [rbp-0xc0],xmm5"]
     # A rotated loop: entered in the middle, so the back edge's store comes first in the listing.
     rotated = synthetic(
@@ -874,6 +1018,24 @@ def self_test() -> int:
         # The dry-mask kernels' bitselect.
         ("masked", synthetic([*tail, "vpand xmm1,xmm1,xmm3", "vpandn xmm3,xmm3,xmm4",
                               "vpor xmm1,xmm1,xmm3"]), (2, 2, [], False)),
+        # The joint flush (issue #1328), as V8 lowers it: its two `or`s combine compare masks
+        # only, so the loop is select-free.
+        ("flush pair", synthetic([*tail, *flush_pair]), (2, 2, [], True)),
+        # The same loop with a dry-mask bitselect beside it is still masked.
+        ("flush pair, masked", synthetic([*tail, *flush_pair, "vpand xmm1,xmm1,xmm3",
+                                          "vpandn xmm3,xmm3,xmm4", "vpor xmm1,xmm1,xmm3"]),
+         (2, 2, [], False)),
+        # An `or` of a compare mask and a data word selects.
+        ("mask or data", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
+                                    "vpor xmm1,xmm1,xmm4"]), (2, 2, [], False)),
+        # A mask the loop did not compute (here, a register set before the loop) is not seen
+        # through: the `or` counts as a select, so a held row fails closed.
+        ("outside mask", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
+                                    "vpor xmm1,xmm1,xmm9"]), (2, 2, [], False)),
+        # An `or` with a memory operand is not seen through either, even beside a mask the loop
+        # computed: the loaded word may be data, so the `or` counts as a select.
+        ("memory operand", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
+                                      "vpor xmm1,xmm1,[r10]"]), (2, 2, [], False)),
         # A ramped section's six coefficient increments.
         ("ramped", synthetic(svf_step("rax") + ["vaddps xmm5,xmm5,xmm6"] * 6), (None, 1, [], True)),
         # An out-of-line stack guard that spills around its call.
@@ -906,13 +1068,66 @@ def self_test() -> int:
             rows = (Row("t", "pair", streams=2, steps=2, held=False),
                     Row("t", "tail", streams=1, steps=1, after="pair"))
             verdicts.append(check_function("t", assemble(layout), rows))
+            # A pair that reads masked (a data `or`, or a spilled mask the rule cannot see
+            # through) anchors the tail just the same (#1328 attempt 5).
+            masked_pair = list(layout)
+            at = masked_pair.index("subl rax,0x1")
+            masked_pair[at:at] = ["vpand xmm1,xmm1,xmm3", "vpandn xmm3,xmm3,xmm4",
+                                  "vpor xmm1,xmm1,xmm3"]
+            verdicts.append(check_function("t", assemble(masked_pair), rows))
             layout[layout.index("jnz <+TAIL>") + 1] = "jmp <+RAMP>"
             verdicts.append(check_function("t", assemble(layout), rows))
+            # A masked row holds the masked loop: a carry there fails it, a clean one passes, and
+            # a select-free loop of the same shape is not its loop (fails closed).
+            select = ["vpand xmm1,xmm1,xmm3", "vpandn xmm3,xmm3,xmm4", "vpor xmm1,xmm1,xmm3"]
+            masked_row = (Row("t", "masked", streams=2, steps=2, masked=True),)
+            for listing in (carried + select, tail + select, tail):
+                verdicts.append(check_function("t", synthetic(listing), masked_row))
+            # Two forms (issue #1328): the cascades run unarmed on live audio and armed, with the
+            # joint flush's `vpmaxud`, only near silence, so each shape appears twice. A row holds
+            # the loop of its own form, anchored on the pair of its own form: clean in both forms
+            # passes, and a slot carried by the armed tail fails its row. (A form-blind row sees
+            # two tails here and fails closed.)
+            maxud = ["vpmaxud xmm5,xmm5,xmm6"]
+            forms = ["movl rax,0x40", "cmpl rdi,0x0", "jz <+ARMED>", "PAIR:", *tail,
+                     "subl rax,0x1", "jnz <+PAIR>", "TAIL:", *svf_step("rsi"), "subl rcx,0x1",
+                     "jnz <+TAIL>", "retl", "ARMED:", *tail, *maxud * 2, "subl rax,0x1",
+                     "jnz <+ARMED>", "ATAIL:", *svf_step("rsi"), *maxud, "subl rcx,0x1",
+                     "jnz <+ATAIL>", "retl"]
+            form_rows = (Row("t", "pair", streams=2, steps=2, held=False),
+                         Row("t", "tail", streams=1, steps=1, after="pair"),
+                         Row("t", "armed pair", streams=2, steps=2, held=False, armed=True),
+                         Row("t", "armed tail", streams=1, steps=1, after="armed pair",
+                             armed=True))
+            verdicts.append(check_function("t", assemble(forms), form_rows))
+            armed_carry = list(forms)
+            at = armed_carry.index("ATAIL:") + 1
+            armed_carry[at:at] = ["vmovups xmm0,[rbp-0xc0]"]
+            at = armed_carry.index("jnz <+ATAIL>") - 1
+            armed_carry[at:at] = ["vmovups [rbp-0xc0],xmm5"]
+            verdicts.append(check_function("t", assemble(armed_carry), form_rows))
+            # A reported row with a ceiling (issue #1328 follow-up): the armed tail above carries
+            # one slot. A ceiling of one passes it, a second carried slot fails it, and a ceiling
+            # row whose loop is missing fails closed like a held row.
+            ceiling_rows = (form_rows[0],
+                            Row("t", "armed pair", streams=2, steps=2, held=False, armed=True),
+                            Row("t", "armed tail", streams=1, steps=1, held=False,
+                                after="armed pair", armed=True, ceiling=1))
+            verdicts.append(check_function("t", assemble(armed_carry), ceiling_rows))
+            two_carried = list(armed_carry)
+            at = two_carried.index("ATAIL:") + 1
+            two_carried[at:at] = ["vmovups xmm1,[rbp-0xd0]"]
+            at = two_carried.index("jnz <+ATAIL>") - 1
+            two_carried[at:at] = ["vmovups [rbp-0xd0],xmm6"]
+            verdicts.append(check_function("t", assemble(two_carried), ceiling_rows))
+            no_armed = [line for line in forms if line not in maxud]
+            verdicts.append(check_function("t", assemble(no_armed), ceiling_rows))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    if verdicts != [1, 0, 1, 0, 0, 1]:
+    want = [1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1]
+    if verdicts != want:
         failures += 1
-        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 1]", file=sys.stderr)
+        print(f"self-test FAIL verdicts: {verdicts}, want {want}", file=sys.stderr)
     if failures:
         return 1
     print(f"V8 spill gate self-test: {len(cases) + len(verdicts)} cases ok")

@@ -55,7 +55,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_within, read_f32, read_ramp, write_f32, write_ramp,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, write_f32, write_ramp,
 };
 use lane::kernels::gain_mix_step;
 use lane::{Backend, Lane};
@@ -149,7 +149,6 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: LANE_STATE_BYTES,
@@ -160,6 +159,17 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         // therefore the Issue-082 effect identity, so it belongs to #95 and not here.
         scratch_fixed_bytes: 24,
         scratch_bytes_per_frame: 0,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::EffectTailBound {
+    effect_contract::EffectTailBound {
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
     }
 }
 
@@ -183,6 +193,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &TRANSIENT_SHAPER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 
@@ -656,9 +667,10 @@ struct LaneWords {
 /// Validates and decodes one lane's fourteen state words, reading the payload bytes in place.
 ///
 /// Each ramp is read whole, its step included (#1278 D2a), and its every remaining value is
-/// checked against the parameter's domain (`ramp_path_within`, with a 64-ulp rounding budget for
-/// the iterated `current + step`), so a carried step cannot walk a ramp out of its domain. The
-/// returned value is a few words on the stack: nothing here allocates.
+/// checked against the parameter's strict domain (`ramp_path_inside`): the clamped law keeps every
+/// word between the ramp's start and its target (issue #1409 D2), so a word past the domain is one
+/// the engine never holds (issue #1411 D1). The returned value is a few words on the stack:
+/// nothing here allocates.
 fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     let fast = read_f32(bytes, 0);
     let slow = read_f32(bytes, 1);
@@ -673,14 +685,10 @@ fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
             .minimum
             .zip(parameter.maximum)
             .ok_or(state_error("effect.state.parameter"))?;
-        let slack = 64.0 * f32::EPSILON * low.abs().max(high.abs());
-        // As in the compressor: a ramping `current` is an iterated sum that may round a few ulps
-        // past a domain edge, and the effect's own snapshot must restore, so it is held to the
-        // path's rounding budget; the target and a settled current are held to the domain.
-        let current_valid = read.remaining != 0 || value_valid(parameter, read.current);
-        if !current_valid
+        // The target and the current, moving or settled, are held to the strict domain.
+        if !value_valid(parameter, read.current)
             || !value_valid(parameter, read.target)
-            || !ramp_path_within(read, (low, high), slack, RAMP_SAMPLES)
+            || !ramp_path_inside(read, (low, high), RAMP_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
         }

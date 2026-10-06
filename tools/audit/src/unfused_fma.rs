@@ -81,6 +81,29 @@ fn flush(x: f32) -> f32 {
     if x.abs() < FLUSH_EPS { 0.0 } else { x }
 }
 
+/// The joint rest threshold of the SVF state (issue #1328), restated like [`FLUSH_EPS`].
+const REST_EPS: f32 = 1.0e-14;
+
+/// Frames the effect input must have been exactly zero before the joint rule may fire at the
+/// audit's 48 kHz (issue #1328, amendment A9: `4096 / 48000` s), restated like [`FLUSH_EPS`].
+const N_SILENCE: u32 = 4_096;
+
+/// The SVF's joint flush (issue #1328), restated: each word follows [`flush`], and when the
+/// effect input has been exactly zero (either sign) for [`N_SILENCE`] frames (`armed`, amendment
+/// A9) and both magnitudes are below [`REST_EPS`] both are zeroed. Ordered compares, so a NaN word
+/// passes. The third value is `true` when the joint rule zeroed a word the per-word law would have
+/// kept.
+#[inline(always)]
+fn flush_pair(n1: f32, n2: f32, armed: bool) -> (f32, f32, bool) {
+    let rest = armed && n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+    let joint = rest && (n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS);
+    if rest {
+        (0.0, 0.0, joint)
+    } else {
+        (flush(n1), flush(n2), false)
+    }
+}
+
 /// dBFS of an absolute error, floored so an exact match prints as a finite sentinel.
 fn dbfs(x: f64) -> f64 {
     if x <= 0.0 {
@@ -162,6 +185,13 @@ struct SvfF32 {
     m2: f32,
     ic1: f32,
     ic2: f32,
+    /// The effect input's run of exactly-zero samples, saturating at `2^24` (issue #1328, A9).
+    run: u32,
+    /// Steps where the joint flush zeroed a word the per-word law would have kept.
+    joint: usize,
+    /// Steps where only the silence term kept the joint flush from zeroing such a pair: both words
+    /// below `REST_EPS`, one at or above `FLUSH_EPS`, the rule not armed.
+    held: usize,
 }
 
 impl SvfF32 {
@@ -175,7 +205,31 @@ impl SvfF32 {
             m2: c.m2 as f32,
             ic1: 0.0,
             ic2: 0.0,
+            run: 0,
+            joint: 0,
+            held: 0,
         }
+    }
+
+    /// Counts one effect input sample and answers whether the joint rule is armed for it.
+    fn armed(&mut self, v0: f32) -> bool {
+        self.run = if v0 == 0.0 {
+            (self.run + 1).min(1 << 24)
+        } else {
+            0
+        };
+        self.run >= N_SILENCE
+    }
+
+    /// The joint flush with its reach tallies.
+    fn flush_state(&mut self, n1: f32, n2: f32, armed: bool) {
+        let joint;
+        (self.ic1, self.ic2, joint) = flush_pair(n1, n2, armed);
+        self.joint += usize::from(joint);
+        let band = n1.abs() < REST_EPS
+            && n2.abs() < REST_EPS
+            && (n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS);
+        self.held += usize::from(band && !armed);
     }
 
     /// The frozen order as it stood before #163 phase 2: single-rounding `d1`, `d2` and mix.
@@ -183,6 +237,7 @@ impl SvfF32 {
     /// UNFUSED-SEAL-EXEMPT: the retired fused arm, kept so the audit can measure the unfused
     /// contract against the one it replaced. Evidence code, unreachable from any render path.
     fn step_fused(&mut self, v0: f32) -> f32 {
+        let armed = self.armed(v0);
         let v3 = v0 - self.ic2;
         // UNFUSED-SEAL-EXEMPT
         let d1 = self.nc1.mul_add(self.ic1, self.a2 * v3);
@@ -190,21 +245,20 @@ impl SvfF32 {
         // UNFUSED-SEAL-EXEMPT
         let d2 = self.a3.mul_add(v3, self.a2 * self.ic1);
         let v2 = self.ic2 + d2;
-        self.ic1 = flush(self.ic1 + (d1 + d1));
-        self.ic2 = flush(self.ic2 + (d2 + d2));
+        self.flush_state(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2), armed);
         // UNFUSED-SEAL-EXEMPT (two calls)
         self.m2.mul_add(v2, self.m1.mul_add(v1, self.m0 * v0))
     }
 
     /// The same order with every fused operation replaced by `(a*b) + c`.
     fn step_unfused(&mut self, v0: f32) -> f32 {
+        let armed = self.armed(v0);
         let v3 = v0 - self.ic2;
         let d1 = mutate(M_SVF_D1, (self.nc1 * self.ic1) + (self.a2 * v3));
         let v1 = self.ic1 + d1;
         let d2 = mutate(M_SVF_D2, (self.a3 * v3) + (self.a2 * self.ic1));
         let v2 = self.ic2 + d2;
-        self.ic1 = flush(self.ic1 + (d1 + d1));
-        self.ic2 = flush(self.ic2 + (d2 + d2));
+        self.flush_state(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2), armed);
         mutate(
             M_SVF_MIX,
             (self.m2 * v2) + ((self.m1 * v1) + (self.m0 * v0)),
@@ -1332,7 +1386,7 @@ pub(crate) fn main() {
 fn model_conformance(frames: usize) {
     use lane::kernels::{
         OnePoleCoef, OnePoleState, SvfCoef, SvfState, gain_mix_block, mix2x2_block, one_pole_block,
-        svf_block,
+        silence_block, svf_block,
     };
 
     println!("## Model conformance: which arm do the production kernels implement?");
@@ -1340,6 +1394,9 @@ fn model_conformance(frames: usize) {
     let noise = deterministic_bipolar_noise(1, frames, 0x0163_0006)
         .expect("deterministic noise for the conformance pass");
     let input: Vec<f32> = noise.samples().iter().map(|&x| x as f32).collect();
+    // The first SVF pass appends silence; the second pass (below) is the one that reaches the
+    // joint flush's band, where the models' `flush_pair` decides the bits (issue #1328).
+    let svf_input: Vec<f32> = input.iter().copied().chain([0.0; 4_096]).collect();
 
     /// Names the arm a kernel matched, or fails the audit.
     fn verdict(label: &str, fused_mismatches: usize, unfused_mismatches: usize) -> &'static str {
@@ -1366,29 +1423,73 @@ fn model_conformance(frames: usize) {
     let design =
         ReferenceSvfCoefficients::design(ReferenceSvfKind::LowShelf, 48_000.0, 1_000.0, 0.7, 6.0)
             .expect("the conformance design");
-    let coefficients = SvfCoef::<f32> {
-        c1: design.c1 as f32,
-        a2: design.a2 as f32,
-        a3: design.a3 as f32,
-        m0: design.m0 as f32,
-        m1: design.m1 as f32,
-        m2: design.m2 as f32,
+    // The kernel reads the rest plane of its own input (a standalone section is its own effect
+    // input, issue #1328 amendment A9); the models keep the same run themselves.
+    let svf_conformance = |design: &ReferenceSvfCoefficients, svf_input: &[f32]| {
+        let coefficients = SvfCoef::<f32> {
+            c1: design.c1 as f32,
+            a2: design.a2 as f32,
+            a3: design.a3 as f32,
+            m0: design.m0 as f32,
+            m1: design.m1 as f32,
+            m2: design.m2 as f32,
+        };
+        let mut buffer = svf_input.to_vec();
+        let mut rest = vec![0.0f32; svf_input.len()];
+        silence_block::<f32>(
+            svf_input,
+            svf_input.len(),
+            &mut 0.0,
+            &mut rest,
+            lane::silence_frames(48_000) as f32,
+        );
+        let mut state = SvfState::<f32>::default();
+        svf_block(
+            &mut buffer,
+            svf_input.len(),
+            &coefficients,
+            &mut state,
+            &rest[..],
+        );
+        let mut fused_model = SvfF32::new(design);
+        let mut unfused_model = SvfF32::new(design);
+        let (mut fused_bad, mut unfused_bad) = (0usize, 0usize);
+        for (kernel, &x) in buffer.iter().zip(svf_input.iter()) {
+            if kernel.to_bits() != fused_model.step_fused(x).to_bits() {
+                fused_bad += 1;
+            }
+            if kernel.to_bits() != unfused_model.step_unfused(x).to_bits() {
+                unfused_bad += 1;
+            }
+        }
+        (fused_bad, unfused_bad, unfused_model)
     };
-    let mut buffer = input.clone();
-    let mut state = SvfState::<f32>::default();
-    svf_block(&mut buffer, frames, &coefficients, &mut state);
-    let mut fused_model = SvfF32::new(&design);
-    let mut unfused_model = SvfF32::new(&design);
-    let (mut fused_bad, mut unfused_bad) = (0usize, 0usize);
-    for (kernel, &x) in buffer.iter().zip(input.iter()) {
-        if kernel.to_bits() != fused_model.step_fused(x).to_bits() {
-            fused_bad += 1;
-        }
-        if kernel.to_bits() != unfused_model.step_unfused(x).to_bits() {
-            unfused_bad += 1;
-        }
-    }
+    let (fused_bad, unfused_bad, _) = svf_conformance(&design, &svf_input);
     arms.push(verdict("F1/F2 svf_block", fused_bad, unfused_bad));
+    // The silence law (issue #1328, amendment A9), on a design slow enough to hold its state in the
+    // joint band for longer than `N_SILENCE` frames: noise, the same noise at `1e-13` for long
+    // enough (65,536 frames) that the full-scale state has decayed to that noise floor (both words
+    // below `REST_EPS` on a non-zero input), then silence (the band on a zero input, first unarmed
+    // for `N_SILENCE` frames, then armed). A model whose rule ignored the silence run, or fired on
+    // any zero input, would zero pairs the kernel keeps and match neither arm here.
+    let slow =
+        ReferenceSvfCoefficients::design(ReferenceSvfKind::LowShelf, 48_000.0, 10.0, 0.7, 6.0)
+            .expect("the slow conformance design");
+    let silence_input: Vec<f32> = input
+        .iter()
+        .copied()
+        .chain(input.iter().cycle().take(65_536).map(|&x| x * 1.0e-13))
+        .chain([0.0; 32_768])
+        .collect();
+    let (fused_bad, unfused_bad, model) = svf_conformance(&slow, &silence_input);
+    assert!(
+        model.joint > 0 && model.held > 0,
+        "F1/F2: the silence pass must reach the joint band both armed ({}) and unarmed ({}), or \
+         the model's silence term is untested",
+        model.joint,
+        model.held
+    );
+    arms.push(verdict("F1/F2 svf_block silence", fused_bad, unfused_bad));
 
     // F3 -- one_pole_block.
     let c = (1.0 - (-1.0f64 / (0.05 * 48_000.0)).exp()) as f32;

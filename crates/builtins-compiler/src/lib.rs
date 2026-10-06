@@ -25,14 +25,14 @@ use std::any::Any;
 
 use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
-    BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, FaderMuteBuiltins,
-    FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator, MeterConfig,
-    MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap,
-    PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    BuiltinParameterError, BuiltinParameters, ChannelParameters, FaderMuteBuiltins,
+    FaderMuteRampBuiltins, InputBuiltins, InputSectionBound, Matrix2x2, MatrixBuiltins,
+    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
+    MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveControlRecord, ResponseAnalysisError,
-    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent,
+    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent, TailSamples,
 };
 use engine::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
@@ -383,7 +383,11 @@ pub struct PreparedBuiltinsSession {
     /// matrix processors. Declared after `processors` so a dropped preparation releases the
     /// producers before the consumers that own the ring storage.
     track_controls: Vec<TrackControlProducer>,
-    tails: Vec<(Box<str>, BuiltinTail)>,
+    /// Every strip's input-section bounds as reported (#1329 D7, Amendment 4 R5), sorted by track
+    /// ID: `T_decay` (the tail graph lowering reads), `T_rest` and `RestSamples` (silence skipping,
+    /// #1107). Control-side: nothing render owns carries them. A strip with a live input lane
+    /// carries [`builtins::input_section_live_bound`], any other its own design's bound.
+    tails: Vec<(Box<str>, InputSectionBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
 }
@@ -1562,7 +1566,10 @@ struct BuiltinSessionSeal {
     quantum: u32,
     tracks: Vec<Box<str>>,
     processors: Vec<(Box<str>, TrackStage)>,
-    tails: Vec<(Box<str>, BuiltinTail)>,
+    tails: Vec<(Box<str>, InputSectionBound)>,
+    /// The live input bound, computed once per preparation when any strip's input lane is live
+    /// (#1329 Amendment 4, R7); the seal check reuses it.
+    live_bound: Option<InputSectionBound>,
     requests: Vec<MeterRequestSeal>,
     observers: Vec<(Box<str>, TrackStage, u64)>,
     consumers: Vec<(u64, Box<str>, MeterTap)>,
@@ -2147,11 +2154,20 @@ impl PreparedBuiltinsSession {
         self.track_controls.len()
     }
 
-    /// Read-only builtin tails used by graph lowering.
-    pub fn tails(&self) -> impl Iterator<Item = (&str, BuiltinTail)> {
+    /// Read-only builtin tails used by graph lowering: each strip's `T_decay` (#1329 G1).
+    pub fn tails(&self) -> impl Iterator<Item = (&str, TailSamples)> {
         self.tails
             .iter()
-            .map(|(track, tail)| (track.as_ref(), *tail))
+            .map(|(track, bound)| (track.as_ref(), bound.tail))
+    }
+
+    /// Every strip's input-section bounds as reported, by track ID (#1329 D7, Amendment 4 R5):
+    /// `T_decay`, the tail over every peak `T_rest`, and D2's exact-rest bound, which silence
+    /// skipping reads (#1107). Computed once per preparation on the control thread.
+    pub fn input_bounds(&self) -> impl Iterator<Item = (&str, InputSectionBound)> {
+        self.tails
+            .iter()
+            .map(|(track, bound)| (track.as_ref(), *bound))
     }
 
     /// Validate the immutable payload against the exact effect-prepared session.
@@ -2203,7 +2219,12 @@ impl PreparedBuiltinsSession {
             })
             .collect();
         actual_controls.sort_unstable();
-        let expected_tails = match expected_tails(session, &actual_controls) {
+        let expected_tails = match expected_tails(
+            session,
+            &actual_controls,
+            &self.seal.tails,
+            self.seal.live_bound,
+        ) {
             Ok(value) => value,
             Err(()) => {
                 diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
@@ -2790,12 +2811,12 @@ impl PreparedBuiltinsSession {
             PreparedBuiltinsCorruptionCase::TailExtra => self
                 .seal
                 .tails
-                .push(("forged-tail".into(), BuiltinTail::FiniteZero)),
+                .push(("forged-tail".into(), InputSectionBound::ZERO)),
             PreparedBuiltinsCorruptionCase::TailChanged => {
-                if let Some((_, tail)) = self.tails.first_mut() {
-                    *tail = match *tail {
-                        BuiltinTail::FiniteZero => BuiltinTail::Infinite,
-                        BuiltinTail::Infinite => BuiltinTail::FiniteZero,
+                if let Some((_, bound)) = self.tails.first_mut() {
+                    bound.tail = match bound.tail {
+                        TailSamples::Finite(samples) => TailSamples::Finite(samples + 1),
+                        TailSamples::Infinite => TailSamples::Finite(0),
                     };
                 }
             }
@@ -3246,27 +3267,43 @@ fn processors_match(
     bindings == processors.len() && actual == expected
 }
 
+/// The bound a session with a live input lane gives each of its live strips (#1329 D5, D7): the
+/// live bound, which holds for every history of live trim, polarity and filter targets. Off the
+/// launch rates no bound is stated (no rate there has a cutoff domain, and preparation refuses the
+/// session before this is reached).
+fn live_input_bound(sample_rate: u32) -> InputSectionBound {
+    builtins::input_section_live_bound(sample_rate).unwrap_or(InputSectionBound::UNBOUNDED)
+}
+
+/// The strip bounds the seal check expects, sorted by track ID: the sealed live bound for a strip
+/// whose input lane is live, and the strip's own sealed design bound otherwise.
+///
+/// The bounds are the preparation's own, computed once per distinct design and sealed with the
+/// session's identity (#1329 Amendment 4, R7): the check reuses them rather than computing every
+/// design again, and checks the rule that chooses between them, the track set, and that the
+/// payload's copy agrees with the seal's.
 fn expected_tails(
     session: &CompiledSession,
     sorted_controls: &[(&str, usize, bool)],
-) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
+    sealed: &[(Box<str>, InputSectionBound)],
+    live_bound: Option<InputSectionBound>,
+) -> Result<Vec<(Box<str>, InputSectionBound)>, ()> {
     let model = session.normalized_model();
-    let mut values: Vec<(Box<str>, BuiltinTail)> = Vec::with_capacity(model.strips().count());
-    for (strip, fader) in model.strips().zip(model.effective_strip_faders()) {
-        let parameters =
-            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).map_err(|_| ())?;
-        let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
-        // #1254 D1: only a live input lane makes the tail infinite (a live filter target can
-        // enable a filter); a fader-and-matrix channel keeps the chain's own tail.
-        let tail = if sorted_controls
-            .binary_search_by(|(control, _, _)| control.cmp(&strip.id.as_str()))
-            .is_ok_and(|index| sorted_controls[index].2)
-        {
-            BuiltinTail::Infinite
+    let mut values: Vec<(Box<str>, InputSectionBound)> = Vec::with_capacity(model.strips().count());
+    for strip in model.strips() {
+        let id = strip.id.as_str();
+        let live = sorted_controls
+            .binary_search_by(|(control, _, _)| control.cmp(&id))
+            .is_ok_and(|index| sorted_controls[index].2);
+        let bound = if live {
+            live_bound.ok_or(())?
         } else {
-            chain.tail()
+            sealed
+                .binary_search_by(|(track, _)| track.as_ref().cmp(id))
+                .map(|index| sealed[index].1)
+                .map_err(|_| ())?
         };
-        values.push((strip.id.as_str().into(), tail));
+        values.push((id.into(), bound));
     }
     values.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(values)
@@ -3528,6 +3565,41 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             (control.queue_capacity, control.input_lane),
         );
     }
+    // #1329 D7, Amendment 4 R7: each distinct input design's certified tail and rest bound is
+    // computed here, once per preparation, before the phase-two observation: the computation
+    // allocates transient storage, which phase two's retained-allocation account must not see. A
+    // live input lane's bound depends only on the rate, so it is computed once for the session.
+    // Amendment 5 (MJ1): a strip whose input lane is live reports the live bound, so no design
+    // bound is computed for it, so a browser boot with live controls computes none. An audio-only
+    // browser boot (the SDK default) and the C ABI attach no input lane and bound every distinct
+    // design (#1329 follow-up C; the cost is #1457's).
+    let input_lane_live = |track_id: &str| {
+        control_capacity
+            .get(track_id)
+            .is_some_and(|(_, input_lane)| *input_lane)
+    };
+    let design_bounds = builtins::input_section_bounds(
+        session.sample_rate().0,
+        session
+            .normalized_model()
+            .strips()
+            .zip(&effective_faders)
+            .filter(|(strip, _)| !input_lane_live(strip.id.as_str()))
+            .map(|(strip, fader)| {
+                strip_parameters(
+                    &strip,
+                    (fader.db, fader.mute),
+                    caps.maximum_smoothing_samples,
+                )
+                .expect("preflighted parameters")
+            }),
+    )
+    .expect("preflighted coefficients");
+    let mut design_bounds = design_bounds.into_iter();
+    let live_bound = control_capacity
+        .values()
+        .any(|(_, input_lane)| *input_lane)
+        .then(|| live_input_bound(session.sample_rate().0));
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
     let track_count = session.normalized_model().strips().count();
@@ -3551,7 +3623,6 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         .expect("preflighted parameters");
         let chain = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted coefficients");
-        let tail = chain.tail();
         let (input, fader, matrix) = chain.into_sections();
         // The bank candidate is prepared independently from the scalar fallback.  The selected
         // full-bank artifact consumes this copy and removes the corresponding scalar binding;
@@ -3559,15 +3630,16 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         let bank_input = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted bank coefficients")
             .into_input_builtins();
-        let tail = if control_capacity
-            .get(strip.id.as_str())
-            .is_some_and(|(_, input_lane)| *input_lane)
-        {
-            BuiltinTail::Infinite
+        // #1329 D7: the same rule as the seal check's `expected_tails`. The design bounds are the
+        // non-live strips' own, in strip order.
+        let bound = if input_lane_live(strip.id.as_str()) {
+            live_bound.expect("a live input lane computed the live bound")
         } else {
-            tail
+            design_bounds
+                .next()
+                .expect("one design bound per non-live strip")
         };
-        tails.push((Box::<str>::from(strip.id.as_str()), tail));
+        tails.push((Box::<str>::from(strip.id.as_str()), bound));
         bank_inputs.push((Box::<str>::from(strip.id.as_str()), bank_input));
         let graph_id = StableGraphId::parse(strip.id.as_str()).expect("preflighted stable ID");
         let control_failure = || {
@@ -3691,6 +3763,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             tracks,
             processors: processor_seal,
             tails: tails.clone(),
+            live_bound,
             requests: request_seals.clone(),
             observers: observer_seal,
             consumers: consumer_seal,
@@ -3735,10 +3808,10 @@ fn resource_plan(
     // this one.
     add_vector_layout::<StripPreparation>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, InputBuiltins)>(&mut processor, track_count)?;
-    add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    add_vector_layout::<(Box<str>, InputSectionBound)>(&mut processor, track_count)?;
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, sealed_stage_count)?;
-    add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    add_vector_layout::<(Box<str>, InputSectionBound)>(&mut processor, track_count)?;
     for strip in session.normalized_model().strips() {
         let bytes = strip.id.as_str().len();
         // Nine independently retained copies of the track's ID: the strip's own ID and its graph
@@ -6027,6 +6100,11 @@ mod tests {
         parameters: &[],
         ports: &SIDECHAIN_SUM_PORTS,
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::EffectTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+        },
         observations: &[],
     };
 
@@ -6433,6 +6511,8 @@ mod tests {
                     },
                     latency: effect_contract::LatencySamples(0),
                     tail: effect_contract::TailSamples::Finite(0),
+                    tail_every_peak: effect_contract::TailSamples::Infinite,
+                    rest: effect_contract::RestBound::Unstated,
                     state_sizes: StatePayloadSizes {
                         common_bytes: 0,
                         left_bytes: 0,
@@ -11853,14 +11933,32 @@ mod tests {
             prepared.resources.maximum_single_allocation_bytes
                 >= 5 * core::mem::size_of::<MeterSnapshot>() as u64
         );
+        // #1329 D4, D7: a strip without a live input lane reports its prepared design's own
+        // certified tail; the fixture's input HPF makes it finite and non-zero.
+        let session = session();
+        let model = session.normalized_model();
+        let (strip, fader) = model
+            .strips()
+            .zip(model.effective_strip_faders())
+            .next()
+            .expect("one strip");
+        let parameters =
+            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).expect("parameters");
+        let own =
+            builtins::input_section_bound(session.sample_rate().0, parameters).expect("bound");
+        assert!(matches!(own.tail, TailSamples::Finite(samples) if samples > 0));
         assert_eq!(
             prepared.tails().collect::<Vec<_>>(),
-            vec![("vocal", BuiltinTail::Infinite)]
+            vec![("vocal", own.tail)]
+        );
+        assert_eq!(
+            prepared.input_bounds().collect::<Vec<_>>(),
+            vec![("vocal", own)]
         );
     }
 
     #[test]
-    fn disabled_live_control_input_has_infinite_tail_but_plain_input_does_not() {
+    fn live_input_lane_reports_the_live_bound_and_plain_input_its_own() {
         let mut model =
             parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("parse");
@@ -11882,10 +11980,15 @@ mod tests {
             },
         )
         .expect("compile");
+        // Disabled filters: trim and polarity are memoryless (#1329 D4).
         let plain = prepare_session_builtins(&compiled, &[], caps()).expect("plain");
         assert_eq!(
             plain.tails().collect::<Vec<_>>(),
-            vec![("vocal", BuiltinTail::FiniteZero)]
+            vec![("vocal", TailSamples::Finite(0))]
+        );
+        assert_eq!(
+            plain.input_bounds().collect::<Vec<_>>(),
+            vec![("vocal", InputSectionBound::ZERO)]
         );
 
         let live = prepare_session_builtins_with_live_controls(
@@ -11899,10 +12002,125 @@ mod tests {
             caps(),
         )
         .expect("live");
+        // A live input lane can enable either filter anywhere in the domain, so the strip reports
+        // the live bound (#1329 D5, D7), whatever its prepared design.
+        let live_bound =
+            builtins::input_section_live_bound(compiled.sample_rate().0).expect("launch rate");
+        assert!(matches!(live_bound.tail, TailSamples::Finite(samples) if samples > 0));
         assert_eq!(
             live.tails().collect::<Vec<_>>(),
-            vec![("vocal", BuiltinTail::Infinite)]
+            vec![("vocal", live_bound.tail)]
         );
+        assert_eq!(
+            live.input_bounds().collect::<Vec<_>>(),
+            vec![("vocal", live_bound)]
+        );
+        assert!(live.validate_for_session(&compiled).0.is_empty());
+        // #1329 Amendment 5 (m1): the seal check's live rule. A live strip that carries its own
+        // design bound (here `ZERO`: both filters disabled) in the payload and in the seal alike
+        // agrees with itself, so only the rule that a live strip reports the live bound refuses it.
+        let mut forged = live;
+        forged.tails[0].1 = InputSectionBound::ZERO;
+        forged.seal.tails[0].1 = InputSectionBound::ZERO;
+        let diagnostics = forged.validate_for_session(&compiled);
+        assert!(
+            diagnostics
+                .0
+                .iter()
+                .any(|diagnostic| diagnostic.code == "builtin.prepared.tail_set"),
+            "a live strip carrying its design bound passed the seal check: {diagnostics:?}"
+        );
+    }
+
+    /// #1329 Amendment 5 (MJ1): preparation computes a design bound only for a strip without a
+    /// live input lane, once per distinct design.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn design_bounds_are_computed_only_for_strips_without_a_live_input_lane() {
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("parse");
+        // Six distinct designs over nine strips: eq0-eq2 keep the fixture's 20 Hz / 20 kHz pair,
+        // eq3 moves its HPF, eq4 its LPF, eq5 its trim, eq6 only its right channel's HPF, and
+        // eq7-eq8 disable both filters.
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            let builtins = &mut track.builtins;
+            match index {
+                3 => {
+                    builtins.left.hpf_hz = 40.0;
+                    builtins.right.hpf_hz = 40.0;
+                }
+                4 => {
+                    builtins.left.lpf_hz = 10_000.0;
+                    builtins.right.lpf_hz = 10_000.0;
+                }
+                5 => {
+                    builtins.left.trim_db = 6.0;
+                    builtins.right.trim_db = 6.0;
+                }
+                6 => builtins.right.hpf_hz = 80.0,
+                7 | 8 => {
+                    for channel in [&mut builtins.left, &mut builtins.right] {
+                        channel.hpf_hz = 0.0;
+                        channel.lpf_hz = 0.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compile");
+        let ids: Vec<String> = model
+            .tracks
+            .iter()
+            .map(|track| track.id.to_string())
+            .collect();
+        let controls = |live: &[usize]| -> Vec<TrackControlRequest> {
+            ids.iter()
+                .enumerate()
+                .map(|(index, id)| TrackControlRequest {
+                    track_id: id.clone(),
+                    queue_capacity: NonZeroUsize::new(1).expect("queue"),
+                    input_lane: live.contains(&index),
+                })
+                .collect()
+        };
+        let computed = |live: &[usize]| {
+            let before = builtins::test_support::fixed_input_bounds_computed();
+            let prepared = prepare_session_builtins_with_live_controls(
+                &compiled,
+                &[],
+                &controls(live),
+                caps(),
+            )
+            .expect("prepare");
+            let after = builtins::test_support::fixed_input_bounds_computed();
+            assert!(prepared.validate_for_session(&compiled).0.is_empty());
+            after - before
+        };
+        assert_eq!(
+            computed(&[]),
+            6,
+            "no strip live: one bound per distinct design"
+        );
+        assert_eq!(
+            computed(&(0..9).collect::<Vec<_>>()),
+            0,
+            "every strip live (the browser): no design bound is computed"
+        );
+        // eq3 and eq4 are the only strips of their designs.
+        assert_eq!(computed(&[3, 4]), 4, "a live strip's design is not bounded");
     }
 
     #[test]

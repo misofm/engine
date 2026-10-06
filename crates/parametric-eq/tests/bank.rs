@@ -1102,7 +1102,8 @@ impl Layout {
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) was reported"
             );
             assert!(
-                &snapshot_bank(processor, lane as u32) == bound_payload,
+                support::without_silence(&snapshot_bank(processor, lane as u32))
+                    == support::without_silence(bound_payload),
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) moved its state"
             );
         }

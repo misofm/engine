@@ -224,6 +224,32 @@ catches, which gate 1 shows once against its full walk; no caller test changes.
 
 - None. #1278 (PR #1299) is on `main` at `d2fe0555a`.
 
+## Amendment note (root decision 2026-10-05)
+
+This issue lands as written. Later, stream G's *Keep every effect parameter ramp inside its
+endpoints* (#1409, which lands after this one) clamps every effect ramp word to its endpoints,
+deletes the `ramp_path_inside` walk (`crates/effect-runtime/src/state_payload.rs`) and the restore
+refusal rows and tests it supersedes, and re-measures this issue's gate-1 mutation counts (delay
+M18 24, gate strict current 32, limiter 4-ulp budget 4), which were measured on the unclamped
+ramp law and may fall to zero. #1409 records the new counts here.
+
+**#1409 re-measurement (2026-10-05, PR evidence).** On `codex/d15-stream-g` with #1301 merged and
+#1409's clamp applied, each gate-1 mutation was applied as above and the crate's
+`the_effects_own_edge_ramp_snapshots_restore` run per pull request (no variable) and full
+(`MISO_ENGINE_RANDOMIZED_SCALE=1`), then reverted:
+
+| Mutation | Per-PR refusals | Full refusals | Lists identical | Green after revert |
+| --- | --- | --- | --- | --- |
+| Delay M18 | 0 | 0 | yes (both empty) | yes |
+| Gate strict current | 0 | 0 | yes (both empty) | yes |
+| Limiter 4-ulp budget | 0 | 0 | yes (both empty) | yes |
+
+All three catches fall to zero, as #1409's Hazards predicted: with the clamp, no engine snapshot
+holds a ramp word outside its endpoints, so a restore that drops the rounding budget refuses
+nothing. The probe and its six caller tests are unchanged. #1411, in the same Stream G pull
+request, removes the slack and restores a catch for each probe on a render-side mutant (its
+gate 3). Under M18 the delay probe took 9.61 s per pull request and 73.95 s full (debug).
+
 ## Standing rules for the implementer
 
 - Work only from this body. Read the cited lines first; do not survey the workspace.

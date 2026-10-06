@@ -1,7 +1,7 @@
 MISO-GRAPH-V1
 envelope	48000	128
 node	track:vocal:input	track-stage	0	finite:0
-node	track:vocal:post-input-builtins	track-stage	0	infinite
+node	track:vocal:post-input-builtins	track-stage	0	finite:10048
 node	track:vocal:post-simd1	track-stage	0	finite:0
 node	track:vocal:post-dynamic	track-stage	0	finite:0
 node	track:vocal:post-simd2-pre-fader	track-stage	0	finite:0
@@ -56,7 +56,7 @@ level	8	output:main-out
 route-transform	route:to-main	3f800000	3f800000	00000000	00000000	3f800000
 route-timing	to-main	0	0	0
 tail	track:vocal:input	finite:0
-tail	track:vocal:post-input-builtins	infinite
+tail	track:vocal:post-input-builtins	finite:10048
 tail	track:vocal:post-simd1	finite:0
 tail	track:vocal:post-dynamic	finite:0
 tail	track:vocal:post-simd2-pre-fader	finite:0

@@ -40,36 +40,40 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
     "debug": [],
     "release": [
         # LANE-3 (#1019): in release the D8 `select(a > b, a, b)` folds into `fmaxnm`/`fminnm`
-        # inside `exp2_lane` and `log2_lane`, scalar and vector alike. Those instructions answer
+        # inside `exp2_lane`, scalar and vector alike (`log2_lane` passes since #1451's
+        # splat change). Those instructions answer
         # differently on NaN and signed-zero inputs. The same tests pass in the debug leg.
         ("1019", "math", "test:m2_lane_identity", "m2_exp2_lane_identity",
          "exp2_lane: scalar digest 69c5e8f5e4639e1438b6f38bce75a7267904f84501a3d89c2704146272c4942a"
          " does not match the pin"),
-        ("1019", "math", "test:m2_lane_identity", "m2_log2_lane_identity",
-         "log2_lane: width 4 differs from the scalar oracle at input 870 (NaN): 0x43c06e2d vs "
-         "0xc2fc0000"),
     ],
 }
 
 # Product crate -> (owning issue, ceiling): `bl _memset_pattern16` calls in the crate's
 # `aarch64-apple-ios` release assembly, as `scripts/check-cross-targets.sh` emits it. Recorded by
-# #1017 attempt 2 on Rust 1.97.1. A stored `f32x4` splat constant lowers to a libc call on Apple
-# targets: `lane::FLUSH_EPS` and also `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others.
-# Nearly every call sits inside a render function; the register in `docs/TARGET_MATRIX.md` names
-# them. #1112 lowered six rows (builtins 376, gate-expander 181, graph 20, multiband-compressor 1132,
-# parametric-eq 146, transient-shaper 534): it removed the eight-lane instantiations from the
-# AArch64 builds, and their two-half `f32x8` splats made the same calls.
+# #1017 attempt 2 on Rust 1.97.1 (3,494 calls). LLVM's loop-idiom pass rewrites a loop that stores
+# one constant `f32` pattern into `llvm.experimental.memset.pattern`, which only Darwin lowers to
+# this libc call. #1112, #1328, its amendment A9 and its follow-up lowered the rows by removing
+# eight-lane AArch64 code and by carrying constants as words (2,122 calls before #1451).
+#
+# #1451 found the cause of nearly all of them: `wide`'s `splat` is `transmute([elem; N])`, rustc
+# lowers that array repeat to a store loop, and every `Lane::splat` in a kernel became such a loop.
+# `lane` now builds its splats as array literals (`crates/lane/src/wide_impl.rs`), which reach
+# LLVM with no loop: 2,122 -> 16 calls, and six rows were deleted at zero (compressor 970,
+# gate-expander 91, graph 10, multiband-compressor 566, parametric-eq 47, transient-shaper 268).
+# The rows left are scalar fills of a real length, not lane splats: `builtins` 5 (preparation
+# constructors: `lanes_below`'s flag fill, `InputStage::new`, `BuiltinFaderBank::new`,
+# `FaderMuteRampBuiltins::new`), `host-core` 4 (`SpectrumAnalyzer::analyze` and
+# `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each), `soft-clip` 1
+# (the test corpus's `fill`) and `true-peak-limiter` 6 (three `fill(1.0)` in `clear_runtime`, which
+# also runs at a reset and on a failed block, and three in `ChannelState::new`). #1452 undid the
+# shapes chosen only for this ratchet where the natural shape was better; no row moved, and the
+# limiter's `clear_runtime` stays out of line because inlining it adds three calls (6 -> 9).
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 194),
-    "compressor": ("1018", 970),
-    "gate-expander": ("1018", 91),
-    "graph": ("1018", 10),
+    "builtins": ("1018", 5),
     "host-core": ("1018", 4),
-    "multiband-compressor": ("1018", 566),
-    "parametric-eq": ("1018", 132),
-    "soft-clip": ("1018", 22),
-    "transient-shaper": ("1018", 268),
-    "true-peak-limiter": ("1018", 104),
+    "soft-clip": ("1018", 1),
+    "true-peak-limiter": ("1018", 6),
 }
 
 

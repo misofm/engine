@@ -1055,6 +1055,13 @@ impl Budget {
 /// inside its budget: the effect producer table (nine 104-byte producers) and its owned payload,
 /// the EQ owners and the effect and strip IDs (14,425), and 16 bytes in each of the three
 /// provider-epoch slots (48).
+///
+/// #1328 raised the effect scalar scratch row from its zero claim, a structural move: the
+/// parametric EQ now declares its two rest planes as scratch (`REST_PLANE_BYTES_PER_FRAME`, 8 bytes
+/// per frame per prepared lane: one `f32` threshold word per channel), which it had allocated at
+/// preparation and declared as 0. Nine EQs at a 128-frame quantum declare 9 x 128 x 8 = 9,216 at
+/// both widths, since the declaration is per prepared lane; the ceiling is that plus 10 %, rounded
+/// up to 64.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1137,8 +1144,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "effect_scalar_scratch_bytes",
         value: |report| report.effect_scalar_scratch_bytes,
-        eight_lanes: 0,
-        four_lanes: 0,
+        eight_lanes: 10_176,
+        four_lanes: 10_176,
     },
     Budget {
         row: "builtin_processor_payload_bytes",

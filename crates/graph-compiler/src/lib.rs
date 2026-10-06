@@ -4,7 +4,6 @@
 use crate::banks::rack_location;
 use std::collections::{BTreeMap, BTreeSet};
 
-use builtins::BuiltinTail;
 use builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
     PreparedBuiltinsSession, SessionPoolClasses,
@@ -2181,8 +2180,8 @@ mod tests {
     /// `compile_with_builtins` renders the bits and carries the tails of its graph alone (#964).
     ///
     /// * **Input section.** No polarity inversion, 0 dB trim, and both filters off: a zero cutoff
-    ///   disables a filter (#808), and with both off the section's tail is `FiniteZero` rather
-    ///   than `Infinite` (`InputSection::tail`).
+    ///   disables a filter (#808), and with both off the section's tail is `Finite(0)` rather
+    ///   than the certified tail of a filter design (`builtins::input_section_bound`, #1329).
     /// * **Fader.** 0 dB and unmuted on both lanes.
     /// * **Matrix.** The explicit 2x2 identity. The canonical fixture's `pan: {left: 1, right: 1}`
     ///   is *not* one: pan values are constant-power positions, so both lanes are panned hard
@@ -3242,7 +3241,7 @@ mod tests {
                 expected_largest = expected_largest.max(lane_bytes);
                 // `graph`'s boxed `LiveControlEffect`, its staging window and its shunt.
                 // The allocator-observed retention gate covers the owner.
-                let owner = size_of::<GraphPreparedEffect>()
+                let owner = graph::EFFECT_RENDER_NODE_BYTES
                     + size_of::<Box<EffectControlLane>>()
                     + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
                     + size_of::<effect_contract::BypassShunt>()
@@ -14178,6 +14177,13 @@ mod tests {
             },
         )
         .expect("builtins");
+        // #1329: the fixture's input HPF has a certified finite tail, computed at preparation;
+        // the graph carries the prepared value onto the node and composes it to the output.
+        let (_, prepared_tail) = builtins
+            .tails()
+            .find(|(track, _)| *track == "vocal")
+            .expect("vocal tail");
+        assert!(matches!(prepared_tail, TailSamples::Finite(samples) if samples > 0));
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             dispatch: host_dispatch(),
             plan_id: 77,
@@ -14190,7 +14196,7 @@ mod tests {
         })
         .unwrap_or_else(|_| panic!("graph"));
         assert_eq!(artifact.external_binding_nodes().count(), 2);
-        assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
+        assert_eq!(artifact.report().output_tail, prepared_tail);
         // Issue #925: with builtins the three stages are compiler-owned bindings, listed in
         // `required_bindings`, and each keeps its op -- a builtin bank member or a scalar owner
         // has to run. Every other stage boundary lowers as an alias, so the ops are exactly these.
@@ -14235,7 +14241,7 @@ mod tests {
             .find(|node| node.id == track_node("vocal", TrackStage::PostInputBuiltins))
             .expect("input builtins node")
             .tail;
-        assert_eq!(tail, TailSamples::Infinite);
+        assert_eq!(tail, prepared_tail);
     }
 
     #[test]

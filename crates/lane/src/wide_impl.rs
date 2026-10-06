@@ -123,13 +123,45 @@
 //! caller's FTZ+DAZ never reaches a render. wasm has no such mode at all. A world in which the
 //! `fpenv` guard is removed is a world in which this lowering must be revisited, which is why the
 //! dependency is written down here rather than left implicit.
+//!
+//! # Splats are array literals, not `wide::splat` (#1018, #1451)
+//!
+//! Every splat this crate builds -- [`crate::Lane::splat`], [`crate::Lane::zero`] and the bit
+//! constants of `exp2_int_in_range` and `frexp` -- is the array literal `[x, x, x, x]` (eight
+//! copies at eight lanes) handed to `new`, never `wide`'s own `splat`. The two are the same vector
+//! on every target; they differ in what LLVM is given. `wide` 1.6.1 writes `splat` as
+//! `transmute([elem; N])`, and rustc lowers an array repeat of a value that is not all-zero bytes
+//! to a `repeat_loop` that stores one element per trip. Once that loop is inlined into a kernel,
+//! LLVM's loop-idiom pass (`LoopIdiomRecognize`) runs before full unrolling and rewrites the
+//! loop that stores a constant pattern into `llvm.experimental.memset.pattern`. On Darwin, the only
+//! platform with the routine, that intrinsic becomes `bl _memset_pattern16` to fill a 16-byte stack
+//! slot, often inside the frame loop: a libc call in render, which the realtime rules forbid
+//! (`aarch64-apple-ios`, known defect #1018; other targets expand it inline, so Android, x86 and
+//! wasm never showed it). An array literal reaches LLVM as straight-line stores with no loop for
+//! the pass to recognise, and becomes the backend's broadcast (`dup`, `fmov`, `vbroadcastss`,
+//! `v128.const`). The source is the same on every target. `wide`'s other methods are still
+//! forwarded; a `wide` method that splats internally is outside this rule, and
+//! `scripts/check-cross-targets.sh` counts what is left.
+macro_rules! splat_array {
+    (4, $x:expr) => {{
+        let x = $x;
+        [x, x, x, x]
+    }};
+    (8, $x:expr) => {{
+        let x = $x;
+        [x, x, x, x, x, x, x, x]
+    }};
+}
+
+pub(crate) use splat_array;
 
 /// Implements [`crate::Lane`] for one `wide` vector type.
 ///
 /// Arguments: the vector type, its unsigned companion, the lane count, and the tuned SVF cascade
-/// depth ([`crate::Lane::SVF_CASCADE_DEPTH`], issue #163 phase 3).
+/// depth ([`crate::Lane::SVF_CASCADE_DEPTH`], issue #163 phase 3). The lane count is a `tt`, not a
+/// `literal`, so that [`splat_array`] can match it.
 macro_rules! impl_lane_for_wide {
-    ($simd:ty, $uint:ty, $width:literal, $cascade_depth:literal) => {
+    ($simd:ty, $uint:ty, $width:tt, $cascade_depth:literal) => {
         impl $crate::Lane for $simd {
             const WIDTH: usize = $width;
             const SVF_CASCADE_DEPTH: usize = $cascade_depth;
@@ -137,12 +169,13 @@ macro_rules! impl_lane_for_wide {
 
             #[inline(always)]
             fn splat(x: f32) -> Self {
-                <$simd>::splat(x)
+                // An array literal, not `wide`'s `splat`: see "Splats are array literals".
+                <$simd>::new($crate::wide_impl::splat_array!($width, x))
             }
 
             #[inline(always)]
             fn zero() -> Self {
-                <$simd>::splat(0.0)
+                <$simd>::new($crate::wide_impl::splat_array!($width, 0.0f32))
             }
 
             #[inline(always)]
@@ -270,6 +303,14 @@ macro_rules! impl_lane_for_wide {
             }
 
             #[inline(always)]
+            fn max_u32(self, b: Self) -> Self {
+                // LANE-OP-OK(u32 max): `wide`'s unsigned integer maximum, one instruction on every
+                // admitted target (`vpmaxud`, `i32x4.max_u`, `umax`); a bit-pattern operation with
+                // no float rule to diverge, held to the scalar oracle by gate G1.
+                <$simd>::from_bits(self.to_bits().max(b.to_bits()))
+            }
+
+            #[inline(always)]
             fn max(self, b: Self) -> Self {
                 // x86: `maxps`/`vmaxps` is `SRC1 > SRC2 ? SRC1 : SRC2`, which is D8 exactly.
                 // The crate refuses to compile on x86 without `+avx2,+fma`, so both widths reach
@@ -325,11 +366,26 @@ macro_rules! impl_lane_for_wide {
             fn exp2_int_in_range(n: Self) -> Self {
                 debug_assert!(!<$simd as $crate::Lane>::mask_any(
                     <$simd as $crate::Lane>::mask_not(<$simd as $crate::Lane>::mask_and(
-                        <$simd as $crate::Lane>::ge(n, <$simd>::splat($crate::bits::EXP2_INT_MIN),),
-                        <$simd as $crate::Lane>::le(n, <$simd>::splat($crate::bits::EXP2_INT_MAX),),
+                        <$simd as $crate::Lane>::ge(
+                            n,
+                            <$simd>::new($crate::wide_impl::splat_array!(
+                                $width,
+                                $crate::bits::EXP2_INT_MIN
+                            )),
+                        ),
+                        <$simd as $crate::Lane>::le(
+                            n,
+                            <$simd>::new($crate::wide_impl::splat_array!(
+                                $width,
+                                $crate::bits::EXP2_INT_MAX
+                            )),
+                        ),
                     )),
                 ));
-                let biased = n + <$simd>::splat($crate::bits::EXP2_INT_MAGIC);
+                let biased = n + <$simd>::new($crate::wide_impl::splat_array!(
+                    $width,
+                    $crate::bits::EXP2_INT_MAGIC
+                ));
                 <$simd>::from_bits(biased.to_bits() << $crate::bits::MANTISSA_BITS)
             }
 
@@ -337,13 +393,26 @@ macro_rules! impl_lane_for_wide {
             fn frexp(self) -> (Self, Self) {
                 let bits = self.to_bits();
                 let significand = <$simd>::from_bits(
-                    (bits & <$uint>::splat($crate::bits::MANTISSA_MASK))
-                        | <$uint>::splat($crate::bits::ONE_EXPONENT_BITS),
+                    (bits
+                        & <$uint>::new($crate::wide_impl::splat_array!(
+                            $width,
+                            $crate::bits::MANTISSA_MASK
+                        )))
+                        | <$uint>::new($crate::wide_impl::splat_array!(
+                            $width,
+                            $crate::bits::ONE_EXPONENT_BITS
+                        )),
                 );
                 let exponent = <$simd>::from_bits(
                     (bits >> $crate::bits::MANTISSA_BITS)
-                        | <$uint>::splat($crate::bits::EXPONENT_MAGIC_BITS),
-                ) - <$simd>::splat($crate::bits::EXP2_INT_MAGIC);
+                        | <$uint>::new($crate::wide_impl::splat_array!(
+                            $width,
+                            $crate::bits::EXPONENT_MAGIC_BITS
+                        )),
+                ) - <$simd>::new($crate::wide_impl::splat_array!(
+                    $width,
+                    $crate::bits::EXP2_INT_MAGIC
+                ));
                 (significand, exponent)
             }
 

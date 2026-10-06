@@ -701,11 +701,34 @@ jobs:
       # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
         run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
-      # #1044: the step above runs M3 (`m3_determinism`) with FMA on, because `.cargo/config.toml`
-      # builds every x86-64 target with +avx2,+fma and `lane` refuses to compile without both. The
-      # retired "Math M3 digests on an FMA-enabled build" step replaced those flags with +fma alone,
-      # a build that ships nowhere. This prints the cfg cargo gives that step's `math` (no
-      # dependency is built: `math` has none without `lane`), and fails without FMA.
+      # #1407 gate 4: the release scale of the reachable-word sweep (every launch rate, quanta
+      # 1-63, 22 histories x 512 blocks). test-debug-b runs only its debug subset (48 kHz, quanta
+      # {1, 2, 7, 63}).
+      - name: Live input filter reachable-word sweep (filter_liveness) in release
+        run: cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness
+      # #1329 Amendment 4 (R6): the input section's tail and exact-rest gates at release scale
+      # (every launch rate; gate 2's real-kernel run at the domain extreme, which debug ignores).
+      # test-debug-b runs only the debug subset (48 kHz, a tenth of gate 1(b)'s scan).
+      - name: Input section tail and exact-rest gates (tail_contract) in release
+        run: cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract
+      # #1409 gate 1 at release scale (root ruling, 2026-10-06): effect-runtime's ramp-endpoint
+      # gate draws 100,000 random ramps in release (debug draws fewer), and the seven effect crates'
+      # ramp_endpoint targets run beside it in the shipping profile.
+      - name: Effect ramp endpoint gates (ramp_endpoint) in release
+        run: >-
+          cargo test --locked --release -p compressor -p delay -p gate-expander
+          -p multiband-compressor -p soft-clip -p transient-shaper -p true-peak-limiter
+          -p effect-runtime --test ramp_endpoint
+      # #1366 (root ruling, 2026-10-06): the exhaustive crossover designer sweep over every f32 in
+      # the domain; the per-PR debug test checks every 1024th f32 only.
+      - name: Multiband crossover designer exhaustive sweep (designer_total) in release
+        run: cargo test --locked --release -p multiband-compressor --test designer_total -- --ignored
+      # #1044: the "Lane and math gates ... in release" step runs M3 (`m3_determinism`) with FMA on,
+      # because `.cargo/config.toml` builds every x86-64 target with +avx2,+fma and `lane` refuses to
+      # compile without both. The retired "Math M3 digests on an FMA-enabled build" step replaced
+      # those flags with +fma alone, a build that ships nowhere. This prints the cfg cargo gives the
+      # lane-and-math step's `math` (no dependency is built: `math` has none without `lane`), and
+      # fails without FMA.
       - name: M3's leg is built with FMA (cargo's cfg for math)
         run: cargo rustc --locked --release -p math --lib -- --print cfg | grep -x 'target_feature="fma"'
       # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not

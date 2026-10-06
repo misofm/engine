@@ -369,8 +369,10 @@ impl Default for HostLiveControlRequest {
 /// nothing is attached whatever it says.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostLiveLanes {
-    /// Each strip's input trim/polarity/filter lane. It makes the strip's builtin tail infinite,
-    /// because a live filter target can enable a filter the session left off.
+    /// Each strip's input trim/polarity/filter lane. A strip with this lane reports the live
+    /// input bound (#1329 D5), finite at every launch rate and valid for every history of live
+    /// trim, polarity and filter targets (a live target can enable a filter the session left
+    /// off), instead of its prepared design's bound; preparation computes no design bound for it.
     pub strip_input: bool,
     /// One lane per prepared strip effect instance; observation taps ride these.
     pub effects: bool,

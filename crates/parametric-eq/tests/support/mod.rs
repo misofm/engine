@@ -15,8 +15,9 @@ use effect_contract::{
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
-/// Bytes in each channel section of the current payload (114 section words plus two cut enables).
-pub const LANE_BYTES: usize = 464;
+/// Bytes in each channel section of the current payload (114 section words, two cut enables and
+/// the input's silence counter, issue #1328 amendment A9).
+pub const LANE_BYTES: usize = 468;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
@@ -217,12 +218,13 @@ pub fn request_at_rate<'a>(
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
-        // The current layout is 936 bytes; production admits megabytes (`maximum_effect_state_bytes` is
+        // The current layout is 944 bytes; production admits megabytes (`maximum_effect_state_bytes` is
         // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
         // number and not a contract change.
         limits: PrepareEffectLimits {
             maximum_total_state_bytes: 1_024,
-            maximum_scratch_bytes: 1,
+            // The two rest planes' declared scratch at this quantum (issue #1328).
+            maximum_scratch_bytes: 128 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
             maximum_automation_spans_per_block: 48,
         },
     }
@@ -249,6 +251,22 @@ pub fn point(
 
 /// A whole payload: common header, left lane, right lane.
 pub type Payload = ([u8; COMMON_BYTES], [u8; LANE_BYTES], [u8; LANE_BYTES]);
+
+/// The lane section word that carries the channel input's silence counter (issue #1328, A9): the
+/// last one, after the six bands and the two cut enables.
+pub const SILENCE_WORD: usize = LANE_BYTES / 4 - 1;
+
+/// `payload` with both channels' silence counters cleared.
+///
+/// A padded lane is fed `+0.0`, so its input's run of zero frames grows with every block, as a
+/// member's does on silence: the word counts the input, it is not audio state the render moves.
+#[must_use]
+pub fn without_silence(payload: &Payload) -> Payload {
+    let mut words = *payload;
+    words.1[SILENCE_WORD * 4..].fill(0);
+    words.2[SILENCE_WORD * 4..].fill(0);
+    words
+}
 
 /// Snapshots a prepared scalar effect.
 #[must_use]

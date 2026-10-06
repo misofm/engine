@@ -529,6 +529,19 @@ input filters (`807b48547`).
 - Smaller open review items, each recorded in its slice spec in git history: #1270 NIT-4, #1271 NIT
   2 and 3, #1272 NIT 2, #1273 NIT-3 and NIT-4, #1276 NIT-2 and NIT-3, #1274 attempt-1 NIT-2.
 
+## Exact rest across a swap (from #1329, root-authorized, 2026-10-06)
+
+*State a bounded tail and an exact-rest bound for every node* (#1329, decision 15 D15-4(c)) states
+D2's exact-rest bound `RestSamples` for every control history the node admits within one prepared
+plan. A plan swap that carries non-zero integrators into a disabled (identity) input section leaves
+them frozen: under #1407's rule 4 the identity recursion keeps them and the output ignores them, so
+the section's state never equals its rest state `Z` and D2's rest is not reached there, although
+every output is `+0.0`. This umbrella must state whether a carried state counts as admitted history
+for D2 (and so whether a carry slice clears the integrators of a section it carries into the
+identity, or D2 excludes carried state). Until it does, D2 holds within one prepared plan only, and
+silence skipping (#1107) does not read `RestSamples` across a swap that carried state into a
+disabled section.
+
 ## Deferred (designed, not filed)
 
 - **True crossfade (ghost strips)** (D15-9): reopens on a measured, audible dip in a listening test.

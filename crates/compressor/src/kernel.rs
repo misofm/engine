@@ -8,7 +8,7 @@ use effect_contract::LinkMode;
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use effect_runtime::envelope::rms_follow;
 use effect_runtime::ramp::LinearRamp;
-use lane::kernels::gain_mix_step;
+use lane::kernels::{gain_mix_step, ramp_toward};
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
@@ -955,16 +955,22 @@ impl<L: Lane> RampVec<L> {
 
     /// `LinearRamp::next_value` on the lanes of `gate`, as selects: `remaining == 0` leaves every
     /// word as it is (at rest, or a restored ramp whose `current` is not its `target`),
-    /// `remaining == 1` assigns the target and clears the step, and otherwise the step is added
-    /// once and `remaining` counts down. Lanes outside `gate` are untouched. Returns the lanes
-    /// that were in flight, which are the lanes `next_value` would have advanced.
+    /// `remaining == 1` assigns the target and clears the step, and otherwise the word advances
+    /// once by `ramp_toward(current, step, target)` (the step added, held inside `[min(current,
+    /// target), max(current, target)]` so it never passes its target, issue #1409) and `remaining`
+    /// counts down. Lanes outside `gate` are untouched. Returns the lanes that were in flight,
+    /// which are the lanes `next_value` would have advanced.
     #[inline(always)]
     fn advance_where(&mut self, gate: L::Mask) -> L::Mask {
         let zero = L::zero();
         let one = L::splat(1.0);
         let moving = L::mask_and(gate, self.remaining.gt(zero));
         let last = L::mask_and(moving, self.remaining.eq(one));
-        let next = L::select(last, self.target, self.current.add(self.step));
+        let next = L::select(
+            last,
+            self.target,
+            ramp_toward(self.current, self.step, self.target),
+        );
         self.current = L::select(moving, next, self.current);
         self.step = L::select(last, zero, self.step);
         self.remaining = L::select(moving, self.remaining.sub(one), self.remaining);

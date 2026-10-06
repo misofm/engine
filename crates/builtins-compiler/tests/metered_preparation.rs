@@ -9,7 +9,7 @@
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
-use builtins::{BuiltinTail, MeterConfig, MeterHandle, MeterTap};
+use builtins::{MeterConfig, MeterHandle, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, PreparedBuiltinsSession, prepare_session_builtins,
 };
@@ -101,7 +101,7 @@ fn projection(
     prepared: &PreparedBuiltinsSession,
 ) -> (
     [usize; 4],
-    Vec<(String, BuiltinTail)>,
+    Vec<(String, effect_contract::TailSamples)>,
     builtins_compiler::BuiltinResourceEstimate,
 ) {
     (

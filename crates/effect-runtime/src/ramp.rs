@@ -1,9 +1,20 @@
 //! Linear parameter ramps with a precomputed increment (decision D11).
 //!
 //! A ramp divides **once, at the moment its target changes**, and then only adds. That is the
-//! whole of D11: `step = (target - current) / samples` at event time, `current += step` per
-//! sample, and an exact assignment of `target` on the final sample so a ramp always arrives
-//! exactly where it was sent rather than within a rounding error of it.
+//! whole of D11: `step = (target - current) / samples` at event time,
+//! `current = ramp_toward(current, step, target)` per sample, and an exact assignment of `target`
+//! on the final sample so a ramp always arrives exactly where it was sent rather than within a
+//! rounding error of it.
+//!
+//! # The endpoint clamp (issue #1409)
+//!
+//! `lane::kernels::ramp_toward` is `current + step` held inside `[min(current, target),
+//! max(current, target)]`. Without it the accumulated rounding of a 64-sample ramp can carry the
+//! word up to about 30 ulps past its target before the snap (a ratio ramp from `1.0000039` to its
+//! domain floor `1.0` reaches `0.99999994`). With it every word lies between the word at the event
+//! (or at the restore) and the target, for any finite step: the interval each update allows lies
+//! inside the previous one. An in-range word keeps the unclamped law's bits, signed zeros
+//! included, and a NaN step propagates (#1408 D2-D3).
 //!
 //! # Why the snap is a separate concept
 //!
@@ -22,7 +33,7 @@
 //! bit for bit (`tests/ramp.rs`).
 
 use lane::Lane;
-use lane::kernels::RampSegment;
+use lane::kernels::{RampSegment, ramp_toward};
 
 /// A linear ramp from `current` to `target` in `remaining` samples.
 ///
@@ -133,7 +144,8 @@ impl LinearRamp {
     ///
     /// * `remaining == 0` — the ramp is at rest: returns `current` unchanged.
     /// * `remaining == 1` — the final sample: assigns `target` exactly (the D11 snap).
-    /// * otherwise — `current += step`, `remaining -= 1`.
+    /// * otherwise — `current = ramp_toward(current, step, target)`, `remaining -= 1`: the word
+    ///   never passes its target (issue #1409).
     ///
     /// A three-sample ramp from `0.0` to `1.0` therefore produces `1/3`, `1/3 + 1/3`, `1.0` — not
     /// `1/3`, `1/2`, `1.0`, which is what re-deriving the step from the remaining distance gives.
@@ -147,7 +159,7 @@ impl LinearRamp {
                 self.current
             }
             _ => {
-                self.current += self.step;
+                self.current = ramp_toward(self.current, self.step, self.target);
                 self.remaining -= 1;
                 self.current
             }
@@ -158,8 +170,9 @@ impl LinearRamp {
     ///
     /// The returned segment reproduces [`LinearRamp::next_value`] exactly, sample for sample:
     ///
-    /// * `start` is the value of the first sample of the block — `current + step`, or `target`
-    ///   when this block contains the final sample, or `current` when the ramp is at rest.
+    /// * `start` is the value of the first sample of the block — `ramp_toward(current, step,
+    ///   target)`, or `target` when this block contains the final sample, or `current` when the
+    ///   ramp is at rest.
     /// * `step` is the precomputed increment, splatted.
     /// * `ramp_frames` is `min(remaining - 1, frames)`: the frames that step. The remaining frames
     ///   of the block take `target` exactly. **The `- 1` is the snap**: the last ramping sample is
@@ -176,7 +189,7 @@ impl LinearRamp {
         let start = match self.remaining {
             0 => self.current,
             1 => self.target,
-            _ => self.current + self.step,
+            _ => ramp_toward(self.current, self.step, self.target),
         };
         let ramp_frames = core::cmp::min(self.remaining.saturating_sub(1) as usize, frames);
         // Captured before the advance: `next_value` zeroes `step` when it snaps, and the segment must

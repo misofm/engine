@@ -9,6 +9,28 @@ use lane::kernels::{
 const DEPTH: usize = 2;
 const FRAMES: usize = 9;
 
+/// A rest plane (issue #1328, amendment A9) that arms the joint flush on half the lane-frames, so
+/// both arms of the rule run under every mask these gates compare.
+fn rest_plane(width: usize, frames: usize) -> Vec<f32> {
+    (0..frames * width)
+        .map(|index| {
+            if (index / width + index % width).is_multiple_of(2) {
+                lane::REST_EPS
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// One lane of [`rest_plane`], for the scalar oracles.
+fn lane_rest(width: usize, frames: usize, lane: usize) -> Vec<f32> {
+    let plane = rest_plane(width, frames);
+    (0..frames)
+        .map(|frame| plane[frame * width + lane])
+        .collect()
+}
+
 fn mask<L: Lane>(dry: bool) -> L::Mask {
     if dry {
         L::zero().eq(L::zero())
@@ -162,16 +184,25 @@ fn false_cascade_equivalence<L: Lane, const S: usize>() {
     let mut old_iter = old_io.iter_mut();
     let old_blocks: [&mut [f32]; S] =
         core::array::from_fn(|_| old_iter.next().expect("stream").as_mut_slice());
-    svf_cascade_interleaved::<L, S, DEPTH>(old_blocks, FRAMES, &coefficients, &mut old_state);
+    let plane = rest_plane(L::WIDTH, FRAMES);
+    let rest: [&[f32]; S] = [plane.as_slice(); S];
+    svf_cascade_interleaved::<L, &[f32], S, DEPTH>(
+        old_blocks,
+        FRAMES,
+        &coefficients,
+        &mut old_state,
+        rest,
+    );
     let mut masked_iter = masked_io.iter_mut();
     let masked_blocks: [&mut [f32]; S] =
         core::array::from_fn(|_| masked_iter.next().expect("stream").as_mut_slice());
-    svf_cascade_interleaved_with_dry_masks::<L, S, DEPTH>(
+    svf_cascade_interleaved_with_dry_masks::<L, &[f32], S, DEPTH>(
         masked_blocks,
         FRAMES,
         &coefficients,
         &mut masked_state,
         &dry_masks,
+        rest,
     );
 
     for stream in 0..S {
@@ -208,12 +239,14 @@ fn mixed_cascade_matches_scalar<L: Lane, const S: usize>() {
     let mut actual_iter = actual_io.iter_mut();
     let actual_blocks: [&mut [f32]; S] =
         core::array::from_fn(|_| actual_iter.next().expect("stream").as_mut_slice());
-    svf_cascade_interleaved_with_dry_masks::<L, S, DEPTH>(
+    let plane = rest_plane(L::WIDTH, FRAMES);
+    svf_cascade_interleaved_with_dry_masks::<L, &[f32], S, DEPTH>(
         actual_blocks,
         FRAMES,
         &coefficients,
         &mut actual_state,
         &dry_masks,
+        [plane.as_slice(); S],
     );
 
     for stream in 0..S {
@@ -227,13 +260,14 @@ fn mixed_cascade_matches_scalar<L: Lane, const S: usize>() {
             ];
             for (section, state) in expected_state.iter_mut().enumerate().take(DEPTH) {
                 let mut coefficient = scalar_coef(stream * DEPTH + section, lane_index);
-                svf_block_ramped_with_dry_mask::<f32>(
+                svf_block_ramped_with_dry_mask::<f32, &[f32]>(
                     &mut expected,
                     FRAMES,
                     &mut coefficient,
                     &SvfCoefStep::default(),
                     0,
                     state,
+                    &lane_rest(L::WIDTH, FRAMES, lane_index)[..],
                     mask::<f32>((stream + section + lane_index) % 3 == 0),
                 );
             }
@@ -272,15 +306,23 @@ fn dry_state_matches_unmasked<L: Lane>() {
         }),
     };
     let mut dry_state = old_state;
-    svf_block::<L>(&mut old_io, FRAMES, &coefficient, &mut old_state);
+    let plane = rest_plane(L::WIDTH, FRAMES);
+    svf_block::<L, &[f32]>(
+        &mut old_io,
+        FRAMES,
+        &coefficient,
+        &mut old_state,
+        &plane[..],
+    );
     let mut dry_coefficient = coefficient;
-    svf_block_ramped_with_dry_mask::<L>(
+    svf_block_ramped_with_dry_mask::<L, &[f32]>(
         &mut dry_io,
         FRAMES,
         &mut dry_coefficient,
         &SvfCoefStep::default(),
         0,
         &mut dry_state,
+        &plane[..],
         mask::<L>(true),
     );
     assert_block_bits(&dry_io, &source::<1>(L::WIDTH)[0], "dry output bits");
@@ -304,13 +346,21 @@ fn downstream_signed_zero<L: Lane>() {
     let mut unmasked_state = [[SvfState::<L>::default(); DEPTH]; 1];
     let mut masked_state = unmasked_state;
     let dry_masks = [[mask::<L>(true), mask::<L>(false)]];
-    svf_cascade_interleaved::<L, 1, DEPTH>([&mut unmasked], 1, &coefficients, &mut unmasked_state);
-    svf_cascade_interleaved_with_dry_masks::<L, 1, DEPTH>(
+    let plane = rest_plane(L::WIDTH, 1);
+    svf_cascade_interleaved::<L, &[f32], 1, DEPTH>(
+        [&mut unmasked],
+        1,
+        &coefficients,
+        &mut unmasked_state,
+        [&plane],
+    );
+    svf_cascade_interleaved_with_dry_masks::<L, &[f32], 1, DEPTH>(
         [&mut masked],
         1,
         &coefficients,
         &mut masked_state,
         &dry_masks,
+        [&plane],
     );
     assert!(unmasked.iter().all(|sample| sample.to_bits() == 0));
     assert!(
@@ -357,6 +407,7 @@ fn packed_step<L: Lane>() -> SvfCoefStep<L> {
 
 fn ramp_oracle(
     input: &[f32],
+    rest: &[f32],
     mut coefficient: SvfCoef<f32>,
     step: SvfCoefStep<f32>,
     ramp_frames: usize,
@@ -364,8 +415,15 @@ fn ramp_oracle(
     dry: bool,
 ) -> (Vec<u32>, SvfCoef<f32>) {
     let mut output = Vec::with_capacity(input.len());
-    for (index, &v0) in input.iter().enumerate() {
-        let (v1, v2) = svf_step(v0, -coefficient.c1, coefficient.a2, coefficient.a3, state);
+    for (index, (&v0, &threshold)) in input.iter().zip(rest).enumerate() {
+        let (v1, v2) = svf_step(
+            v0,
+            -coefficient.c1,
+            coefficient.a2,
+            coefficient.a3,
+            threshold,
+            state,
+        );
         let wet = <f32 as Lane>::fma(
             coefficient.m2,
             v2,
@@ -399,6 +457,7 @@ fn ramped_masks_and_partitions<L: Lane>() {
     let mut false_coefficient = initial_coefficient;
     let mut old_state = initial_state;
     let mut false_state = initial_state;
+    let plane = rest_plane(L::WIDTH, FRAMES);
     svf_block_ramped(
         &mut old,
         FRAMES,
@@ -406,6 +465,7 @@ fn ramped_masks_and_partitions<L: Lane>() {
         &step,
         5,
         &mut old_state,
+        &plane[..],
     );
     svf_block_ramped_with_dry_mask(
         &mut false_mask,
@@ -414,6 +474,7 @@ fn ramped_masks_and_partitions<L: Lane>() {
         &step,
         5,
         &mut false_state,
+        &plane[..],
         mask::<L>(false),
     );
     assert_block_bits(&false_mask, &old, "all-false ramp output");
@@ -425,13 +486,14 @@ fn ramped_masks_and_partitions<L: Lane>() {
     assert_eq!(bits(false_coefficient.m1), bits(old_coefficient.m1));
     assert_eq!(bits(false_coefficient.m2), bits(old_coefficient.m2));
 
-    svf_block_ramped_with_dry_mask::<L>(
+    svf_block_ramped_with_dry_mask::<L, &[f32]>(
         &mut actual,
         FRAMES,
         &mut coefficient,
         &step,
         5,
         &mut state,
+        &plane[..],
         dry_mask,
     );
     for lane_index in 0..L::WIDTH {
@@ -440,6 +502,7 @@ fn ramped_masks_and_partitions<L: Lane>() {
             .collect::<Vec<_>>();
         let (expected, expected_coefficient) = ramp_oracle(
             &lane_input,
+            &lane_rest(L::WIDTH, FRAMES, lane_index),
             scalar_coef(11, lane_index),
             scalar_step(lane_index),
             5,
@@ -479,31 +542,34 @@ fn ramped_masks_and_partitions<L: Lane>() {
     let mut split = input;
     let mut split_coefficient = initial_coefficient;
     let mut split_state = initial_state;
-    svf_block_ramped_with_dry_mask::<L>(
+    svf_block_ramped_with_dry_mask::<L, &[f32]>(
         &mut whole,
         FRAMES,
         &mut whole_coefficient,
         &step,
         5,
         &mut whole_state,
+        &plane[..],
         dry_mask,
     );
-    svf_block_ramped_with_dry_mask::<L>(
+    svf_block_ramped_with_dry_mask::<L, &[f32]>(
         &mut split[..3 * L::WIDTH],
         3,
         &mut split_coefficient,
         &step,
         3,
         &mut split_state,
+        &plane[..3 * L::WIDTH],
         dry_mask,
     );
-    svf_block_ramped_with_dry_mask::<L>(
+    svf_block_ramped_with_dry_mask::<L, &[f32]>(
         &mut split[3 * L::WIDTH..],
         FRAMES - 3,
         &mut split_coefficient,
         &step,
         2,
         &mut split_state,
+        &plane[3 * L::WIDTH..],
         dry_mask,
     );
     assert_block_bits(&split, &whole, "split ramp equivalence");

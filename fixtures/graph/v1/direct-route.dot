@@ -1,6 +1,6 @@
 digraph miso_engine_graph_v1 {
   "track:vocal:input" [label="track:vocal:input|track-stage|latency=0|tail=finite:0"];
-  "track:vocal:post-input-builtins" [label="track:vocal:post-input-builtins|track-stage|latency=0|tail=infinite"];
+  "track:vocal:post-input-builtins" [label="track:vocal:post-input-builtins|track-stage|latency=0|tail=finite:10048"];
   "track:vocal:post-simd1" [label="track:vocal:post-simd1|track-stage|latency=0|tail=finite:0"];
   "track:vocal:post-dynamic" [label="track:vocal:post-dynamic|track-stage|latency=0|tail=finite:0"];
   "track:vocal:post-simd2-pre-fader" [label="track:vocal:post-simd2-pre-fader|track-stage|latency=0|tail=finite:0"];

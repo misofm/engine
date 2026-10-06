@@ -38,6 +38,8 @@ fn program_key(latency: u64) -> EffectProgramKey {
         },
         latency: LatencySamples(latency),
         tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
         state_sizes: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: 0,

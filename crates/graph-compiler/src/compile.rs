@@ -137,18 +137,7 @@ impl GraphCompiler {
     ) -> Result<CompiledGraph, GraphFailure> {
         // `validate_for_session` has checked the tail set against the session's tracks, so every
         // track has exactly one entry here.
-        let builtin_tails: BTreeMap<&str, TailSamples> = builtins
-            .tails()
-            .map(|(track_id, tail)| {
-                (
-                    track_id,
-                    match tail {
-                        BuiltinTail::FiniteZero => TailSamples::Finite(0),
-                        BuiltinTail::Infinite => TailSamples::Infinite,
-                    },
-                )
-            })
-            .collect();
+        let builtin_tails: BTreeMap<&str, TailSamples> = builtins.tails().collect();
         let mut diagnostics = Vec::new();
         if !caps.all_nonzero() {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));

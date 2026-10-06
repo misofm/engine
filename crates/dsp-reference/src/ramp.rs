@@ -5,6 +5,11 @@
 //! deliberately not the pre-#83 one, which divided by the remaining count on every sample; the two
 //! are not numerically equivalent for windows longer than two samples, and the trailing snap is
 //! what used to hide that.
+//!
+//! Issue #1408: every intermediate update is held inside `[min(current, target),
+//! max(current, target)]`, so a long ramp's accumulated rounding can never carry the word past its
+//! target before the snap. The clamp is written out here with the same strict comparisons as
+//! `lane::kernels::builtins::ramp_toward`, so the twin stays independent of `lane`.
 
 /// One linearly ramped `f32` parameter, evaluated the way a kernel evaluates it.
 ///
@@ -57,7 +62,7 @@ impl ReferenceLinearRamp {
             self.current = self.target;
         } else {
             self.remaining -= 1;
-            self.current += self.step;
+            self.current = ramp_toward(self.current, self.step, self.target);
         }
         self.current
     }
@@ -75,6 +80,21 @@ impl ReferenceLinearRamp {
     }
 }
 
+/// One D11 update that never passes its target: `current + step`, held strictly inside
+/// `[min(current, target), max(current, target)]`.
+///
+/// `max(a, b)` is `if a > b { a } else { b }` and `min(a, b)` is `if a < b { a } else { b }`,
+/// the `lane` crate's D8 forms: a word is replaced only when it is strictly beyond an endpoint, so
+/// an in-range word (signed zeros included) keeps its bits and a NaN passes through.
+#[must_use]
+fn ramp_toward(current: f32, step: f32, target: f32) -> f32 {
+    let next = current + step;
+    let low = if current < target { current } else { target };
+    let high = if current > target { current } else { target };
+    let raised = if low > next { low } else { next };
+    if high < raised { high } else { raised }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ReferenceLinearRamp;
@@ -90,6 +110,41 @@ mod tests {
         assert_eq!(ramp.next_value().to_bits(), 1.0_f32.to_bits());
         assert_eq!(ramp.next_value().to_bits(), 1.0_f32.to_bits());
         assert_eq!(ramp.remaining(), 0);
+    }
+
+    /// Issue #1408: a one-second fade from unity to zero at 48 kHz carries the unclamped word to
+    /// `-0.000624` before its snap; the twin holds it at the target instead.
+    ///
+    /// Red mutation: revert `next_value` to `self.current += self.step` -> a word below zero.
+    #[test]
+    fn a_long_ramp_never_passes_its_target() {
+        let mut ramp = ReferenceLinearRamp::settled(1.0);
+        ramp.set_target(0.0, 48_000);
+        for frame in 0..48_001 {
+            let value = ramp.next_value();
+            assert!((0.0..=1.0).contains(&value), "frame {frame}: {value:e}");
+        }
+        assert_eq!(ramp.current().to_bits(), 0.0_f32.to_bits());
+    }
+
+    /// The clamp keeps an in-range word's sign: `-1 + 1` is `+0.0` next to a `-0.0` target.
+    #[test]
+    fn the_clamp_keeps_a_signed_zero_word() {
+        let mut ramp = ReferenceLinearRamp::settled(-1.0);
+        ramp.set_target(-0.0, 2);
+        assert_eq!(ramp.next_value().to_bits(), (-0.5_f32).to_bits());
+        let mut ramp = ReferenceLinearRamp::settled(-1.0);
+        ramp.set_target(-0.0, 1);
+        assert_eq!(ramp.next_value().to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(
+            super::ramp_toward(-1.0, 1.0, -0.0).to_bits(),
+            0.0_f32.to_bits()
+        );
+        assert_eq!(
+            super::ramp_toward(-0.0, -0.0, 0.0).to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert!(super::ramp_toward(0.5, f32::NAN, 1.0).is_nan());
     }
 
     /// A zero-length window is an immediate assignment, not a division by zero.

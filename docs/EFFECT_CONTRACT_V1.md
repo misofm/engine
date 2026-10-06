@@ -15,7 +15,8 @@ gone.
 
 Factories validate static descriptors and allocate/design all processor resources off render.
 Prepared metadata fixes sample rate, quantum, quality, bypass, link mode, ports, exact integer
-latency, tail, state-section sizes, scratch bytes, and automation capacity. The compiler caches
+latency, tail, tail over every peak (`tail_every_peak`), exact-rest bound (`rest`),
+state-section sizes, scratch bytes, and automation capacity. The compiler caches
 that metadata; graph/PDC consumers never query a live processor. The semantic `EffectProgramKey`
 contains these fields directly and is not a digest or persistence identity.
 
@@ -59,6 +60,55 @@ Class-A identity, the same bits on every lane width and target, treats every NaN
 (owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`
 before comparing or hashing, the engine does not canonicalize NaNs at render, and finite input
 must still render finite output, with each effect's documented NaN behaviour unchanged.
+
+## Tail and exact rest
+
+Decision 15 D15-4(b) (issue #1329) gives every node's tail one meaning. For an input of peak `P`
+that is zero from sample `N` on, under any control history the node admits before `N` (a ramp may
+be in flight at `N`) and with no control event at or after it, with `eps = 10^(-144/20)`, each
+node states three values, all counted beyond its latency, all certified upper bounds computed on
+the control thread at preparation and never pinned:
+
+* **`TailSamples` -- `T_decay`, the tail.** `|y[n]| < P * eps` for every `n >= N + latency + T`,
+  for every input peak `P >= P*`. `P*`, the node's **flush floor**, is the smallest peak for which
+  the `f32` kernel's absolute deviation near the per-word state flush (`lane::FLUSH_EPS`) fits the
+  `-144 dB` budget; below it the output is no longer relative to `P`. PDC composes `T_decay` along
+  a path, and every tail report uses it (the C ABI and browser reports, #1261, #1262). `Infinite`
+  states no bound and remains for nodes whose bound has not been derived (#1378 retires it).
+* **The tail over every peak -- `T_rest = max(T_decay, R(P*))`, named `tail_every_peak`** (a
+  `TailSamples`, beside `tail` wherever `tail` is stated: `builtins::InputSectionBound`, which
+  `builtins-compiler`'s prepared session keeps per strip beside its tail,
+  `PreparedBuiltinsSession::input_bounds`; and for a native effect `EffectTailBound`,
+  `PreparedEffectMetadata` and `EffectProgramKey`). From `N + latency + T_rest` on the output is below `P * eps` for
+  `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. `R(P*)` includes the joint-flush arming
+  window `N_SILENCE` (#1328 A9), so `T_rest >= N_SILENCE` for every enabled filter section. It is
+  the exact-zero branch for low peaks only.
+* **`RestSamples` -- the exact-rest bound `R`.** With input peak at most +24 dBFS
+  (`peak_plus_24_dbfs`) or any input the input sanitizer passes, below `1e30`
+  (`any_sanitized_input`), from `N + latency + R` on every output is `+0.0` or `-0.0` and every
+  signal-state word equals, under `f32` `==`, the node's rest state `Z` (a fixed point of the
+  zero-input step; for the builtin input section the reset state, every integrator `+0.0`). Silence
+  skipping (#1107) uses this bound: it holds for every input up to its stated peak.
+
+Gain-only parts (trim, polarity, fader, mute, matrix) state `0` for all three. An absolute output
+floor in place of the exact-zero branch is refused (Amendment 3, G2): it would make the tail a
+fixed-level one, which #1328's A8 and A9 removed.
+
+A native effect states its three values in one place, its descriptor's
+`tail_and_rest(sample_rate, quality) -> EffectTailBound { tail, tail_every_peak, rest }` (#1377).
+It runs on the control thread, takes no parameter values (each bound holds over the whole
+parameter domain at that rate), and render never calls it. `QualityDescriptor` carries no tail.
+`expected_prepared_metadata`, the sole conforming metadata, copies the three values into
+`PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the program key carries them too, so
+cohorts with different bounds never share a bank. `effect-compiler` refuses a prepared effect whose
+metadata differs in any of them (`effect.metadata.mismatch`), and the conformance harness's
+`metadata.exact` compares each prepared instance's program key, which carries all three, with the
+expected one. `rest` is a `RestBound`:
+`Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
+effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
+`tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and
+`Unstated`. #1378 retires `Unstated` and `Infinite` in both tail fields.
+The builtin input section's derivation is `docs/derivations/1329-input-section-tail-and-rest.md`.
 
 ## Parameters and automation
 
@@ -134,13 +184,19 @@ Smoothing length is `smoothing_samples` from the parameter descriptor; it is bin
 effect may substitute a literal.
 
 For `N` smoothing updates, **linear precomputes its increment once, at the moment the target
-changes** (master plan decision D11): `step = (target - current) / N`, then `current += step` per
-update, and the exact target is assigned on update `N`. There is no per-sample division anywhere
-in the engine. The audited rule — "linear adds `(target-current)/remaining`" — is withdrawn by
-issue #95 finding F2: it cost one integer-to-float convert and one `fdiv` per parameter per lane
-per sample for the whole length of every ramp. One-pole-99 likewise precomputes `a =
-exp(ln(0.01)/N)` and `1-a` once, then `y = a*y_previous + (1-a)*target`, and assigns the exact
-target on update `N`. `None` assigns immediately. A new target restarts from the current value.
+changes** (master plan decision D11): `step = (target - current) / N`, then
+`current = ramp_toward(current, step, target)` per update, and the exact target is assigned on
+update `N`. `ramp_toward` (`lane::kernels::ramp_toward`, issues #1408 and #1409) is
+`current + step` held inside `[min(current, target), max(current, target)]`, so no ramp word ever
+passes its target: without it, accumulated rounding carries a 64-update ramp up to about 30 ulps
+past its target before the snap, which can leave the parameter's domain. Every word therefore lies
+between the value at the event (or at a restore) and the target, for any finite step; an in-range
+word keeps the unadjusted sum's bits, signed zeros included, and a NaN step propagates. There is
+no per-sample division anywhere in the engine. The audited rule — "linear adds
+`(target-current)/remaining`" — is withdrawn by issue #95 finding F2: it cost one integer-to-float
+convert and one `fdiv` per parameter per lane per sample for the whole length of every ramp.
+One-pole-99 likewise precomputes `a = exp(ln(0.01)/N)` and `1-a` once, then
+`y = a*y_previous + (1-a)*target`, and assigns the exact target on update `N`. `None` assigns immediately. A new target restarts from the current value.
 
 `effect_runtime::ramp::LinearRamp` is the one render-path implementation;
 `effect_contract::ParameterSmoother` states the same law for the control plane, and

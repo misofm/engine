@@ -194,7 +194,7 @@ pub(crate) fn effect_control_resource(
     // Charge the five fields retained by `graph`'s `runtime::LiveControlEffect`.
     // `bypass_resources`' allocator-observed estimate test sees the box if it
     // ever outgrows this sum.
-    let live_control_effect_bytes = bytes(core::mem::size_of::<GraphPreparedEffect>())?
+    let live_control_effect_bytes = bytes(graph::EFFECT_RENDER_NODE_BYTES)?
         .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
         .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
         .checked_add(bytes(core::mem::size_of::<BypassShunt>())?)?

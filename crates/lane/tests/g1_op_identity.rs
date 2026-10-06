@@ -171,6 +171,80 @@ fn g1_random_vectors_are_lane_identical() {
     }
 }
 
+/// `max_u32` is the unsigned maximum of the two lanes' raw bits, lane by lane, at every width the
+/// build has -- the scalar `f32` lane included, so this is not the G1 sweep's comparison of the
+/// vector widths against the scalar implementation but each width against the definition (issue
+/// #1328, amendment A9). The pool is every ordered pair of [`EDGES`] plus the patterns the
+/// definition turns on: both zeros, the infinities, the smallest and largest NaN payloads of both
+/// signs, and words either side of the sign bit. Lane `l` of each vector takes a different pair,
+/// so a body that broadcast one lane is caught. On magnitudes it is the larger one, and a NaN
+/// magnitude beats `+inf`: the property `flush_pair` relies on.
+#[test]
+fn g1_max_u32_is_the_unsigned_maximum_of_the_bits() {
+    fn check<L: Lane>(width_name: &str) {
+        let mut pool: Vec<f32> = EDGES.to_vec();
+        for bits in [
+            0x0000_0000_u32,
+            0x8000_0000,
+            0x7F80_0000,
+            0xFF80_0000,
+            0x7F80_0001,
+            0x7FFF_FFFF,
+            0xFF80_0001,
+            0xFFFF_FFFF,
+            0x7FC0_0000,
+            0x7F7F_FFFF,
+            0x8000_0001,
+            0x0000_0001,
+        ] {
+            pool.push(f32::from_bits(bits));
+        }
+        let pairs: Vec<(f32, f32)> = pool
+            .iter()
+            .flat_map(|&a| pool.iter().map(move |&b| (a, b)))
+            .collect();
+        for chunk in pairs.chunks(L::WIDTH) {
+            let mut a = [0.0f32; 8];
+            let mut b = [0.0f32; 8];
+            for (lane, &(x, y)) in chunk.iter().enumerate() {
+                a[lane] = x;
+                b[lane] = y;
+            }
+            let mut bits = [0u32; 8];
+            L::load(&a[..L::WIDTH])
+                .max_u32(L::load(&b[..L::WIDTH]))
+                .store_bits(&mut bits);
+            for (lane, &(x, y)) in chunk.iter().enumerate() {
+                assert_eq!(
+                    bits[lane],
+                    x.to_bits().max(y.to_bits()),
+                    "{width_name}: max_u32({:#010x}, {:#010x}) on lane {lane}",
+                    x.to_bits(),
+                    y.to_bits()
+                );
+            }
+        }
+        // On magnitudes: the larger value, and a NaN beats every number, `+inf` included.
+        let mut bits = [0u32; 8];
+        L::splat(1.0e-14)
+            .max_u32(L::splat(9.9e-15))
+            .store_bits(&mut bits);
+        assert_eq!(
+            bits[0],
+            1.0e-14f32.to_bits(),
+            "{width_name}: larger magnitude"
+        );
+        L::splat(f32::INFINITY)
+            .max_u32(L::splat(f32::from_bits(0x7F80_0001)))
+            .store_bits(&mut bits);
+        assert!(
+            f32::from_bits(bits[0]).is_nan(),
+            "{width_name}: NaN beats +inf"
+        );
+    }
+    lane::each_lane!(|L| check::<L>(core::any::type_name::<L>()));
+}
+
 #[test]
 fn g1_signed_zero_max_and_min_follow_d8() {
     /// `max(-0.0, +0.0)` is `+0.0` and `max(+0.0, -0.0)` is `-0.0`: `max` returns its second

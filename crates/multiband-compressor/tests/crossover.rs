@@ -53,13 +53,16 @@ fn the_two_stage_split_matches_the_reference_and_recombines_flat() {
         for crossover in CROSSOVERS {
             let coefficients = lr4_coefficients::<f32>(rate, crossover).expect("design");
             let mut state = Lr4State::<f32>::default();
+            // The split's input arms its joint flush (issue #1328, amendment A9).
+            let mut run = 0.0f32;
             let mut reference =
                 ReferenceLr4Crossover::new(f64::from(rate), f64::from(crossover)).expect("oracle");
             let (mut input, mut low_band, mut sum) = (Vec::new(), Vec::new(), Vec::new());
             for index in 0..8_192 {
                 let sample =
                     (core::f32::consts::TAU * crossover * index as f32 / rate as f32).sin();
-                let (low, high) = lr4_step(sample, &coefficients, &mut state);
+                let rest = lane::silence_step(sample, &mut run, lane::silence_frames(rate) as f32);
+                let (low, high) = lr4_step(sample, rest, &coefficients, &mut state);
                 let (expected_low, expected_high) = reference.process_sample(f64::from(sample));
                 worst_band = worst_band
                     .max(f64::from((low - expected_low as f32).abs()))
@@ -87,19 +90,21 @@ fn the_two_stage_split_matches_the_reference_and_recombines_flat() {
                 }
                 let frames = rate as usize;
                 let mut state = Lr4State::<f32>::default();
+                let mut run = 0.0f32;
                 let step = core::f64::consts::TAU * probe / f64::from(rate);
                 for frame in 0..frames {
-                    let _ = lr4_step(
-                        (step * frame as f64).sin() as f32,
-                        &coefficients,
-                        &mut state,
-                    );
+                    let sample = (step * frame as f64).sin() as f32;
+                    let rest =
+                        lane::silence_step(sample, &mut run, lane::silence_frames(rate) as f32);
+                    let _ = lr4_step(sample, rest, &coefficients, &mut state);
                 }
                 let mut input = Vec::with_capacity(frames);
                 let mut summed = Vec::with_capacity(frames);
                 for frame in frames..2 * frames {
                     let sample = (step * frame as f64).sin() as f32;
-                    let (low, high) = lr4_step(sample, &coefficients, &mut state);
+                    let rest =
+                        lane::silence_step(sample, &mut run, lane::silence_frames(rate) as f32);
+                    let (low, high) = lr4_step(sample, rest, &coefficients, &mut state);
                     input.push(sample);
                     summed.push(low + high);
                 }
@@ -154,8 +159,10 @@ fn the_recursive_words_are_flushed() {
                 ic2: L::splat(-1.0e-40),
             },
         };
+        let mut run = L::zero();
         for _ in 0..4 {
-            let _ = lr4_step(L::zero(), &coefficients, &mut state);
+            let rest = lane::silence_step(L::zero(), &mut run, L::splat(4_096.0));
+            let _ = lr4_step(L::zero(), rest, &coefficients, &mut state);
         }
         let mut words = [0u32; 8];
         for value in [state.a.ic1, state.a.ic2, state.b.ic1, state.b.ic2] {
