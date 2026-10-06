@@ -39,10 +39,12 @@
 //!   summed exactly to a horizon and closed by a contraction remainder. The `f32` half is the
 //!   kernel's deviation from that reference: relative rounding (this module's rounding count) and
 //!   the absolute per-word flush, never modelled as relative error.
-//! * [`envelope_cascade`]: a cascade whose words may change under a control law, given per-section
-//!   suprema of the contraction and gains over every reachable word. The state at the input's end
-//!   is bounded by the invariant ball of each section in turn; the free response is propagated
-//!   directly on the kernel.
+//! * [`live_cascade`]: a two-section cascade whose words may change under a control law (issue
+//!   #1433), given per-section suprema over every reachable word ([`EnvelopeSection`]) and where
+//!   those words lie as poles ([`PoleDomain`]). It is frequency-aware: the first section's output
+//!   is `c . s = 1/2 (m1, m2) (I + A) s`, which a slow pole near `-1` makes small, and its state
+//!   is bounded per zone of pole position ([`LiveZones`]), so the second section is charged only
+//!   for what the first can deliver near its own slow pole.
 //! * Exact rest, for both: proven section by section, first section first. A section rests on the
 //!   first armed frame (its effect input exactly zero for `N_SILENCE` frames, #1328 amendment A9)
 //!   on which both its words are below `REST_EPS`; once it rests its output is exactly zero, so
@@ -448,7 +450,7 @@ pub struct CascadeBound {
     /// `R(P*)`: exact rest for every input peak at or below [`Self::flush_floor`].
     pub rest_at_flush_floor: u64,
     /// The exact half alone: the first frame `t0` from which the reference's impulse-response
-    /// suffix is below `eps / 2` (evidence only). A live bound ([`envelope_cascade`]) has no
+    /// suffix is below `eps / 2` (evidence only). A live bound ([`live_cascade`]) has no
     /// reference split, its decay being propagated directly on the kernel's envelope, so there it
     /// equals [`Self::tail`].
     pub tail_reference: u64,
@@ -492,7 +494,9 @@ pub struct EnvelopeSection {
 ///
 /// (`F` on the output covers the mix's underflow allowance, which it exceeds by far). Linear in
 /// `w = (z_1, ..., z_K, 1)`: `M` is `(K + 1)`-square and non-negative. A section before `from` is
-/// at rest: its state stays zero and its output is exactly zero.
+/// at rest: its state stays zero and its output is exactly zero. [`live_cascade`]'s settled
+/// systems use the same shape (a non-negative `(K + 1)`-square matrix whose last component is the
+/// constant `1`).
 struct Propagator {
     k: usize,
     m: Vec<f64>,
@@ -533,12 +537,6 @@ impl Propagator {
         }
         m[k * n + k] = 1.0;
         Self { k, m }
-    }
-
-    /// The coefficients of the output bound `v_{K+1}` on `w`.
-    fn output_row(sections: &[EnvelopeSection], from: usize, f: f64) -> Vec<f64> {
-        let mut rows = Self::input_rows(sections, from, f);
-        rows.pop().expect("K + 1 rows")
     }
 
     fn apply(&self, z: &[f64]) -> Vec<f64> {
@@ -645,194 +643,1004 @@ fn rest_frames(
     Ok(now)
 }
 
-/// For a non-negative system, the first `m >= start` from which the bound `row . M^m z` stays
-/// below `limit`. `M^m z` is propagated frame by frame until it is componentwise non-increasing
-/// (after which it stays so, `M` being non-negative) and below `limit`.
-fn decay_frames(
-    system: &Propagator,
-    row: &[f64],
-    z: &[f64],
-    limit: f64,
-) -> Result<u64, TailBoundError> {
-    let mut current = z.to_vec();
-    let mut last_above = None::<u64>;
-    let mut frame = 0_u64;
-    loop {
-        let value: f64 = row.iter().zip(&current).map(|(a, b)| a * b).sum::<f64>() * SLACK;
-        if value >= limit {
-            last_above = Some(frame);
-        }
-        let next = system.apply(&current);
-        let falling = next.iter().zip(&current).all(|(next, now)| next <= now);
-        if falling && value < limit {
-            return Ok(last_above.map_or(0, |frame| frame + 1));
-        }
-        current = next;
-        frame += 1;
-        if frame >= HORIZON_LIMIT {
-            return Err(TailBoundError::Horizon);
-        }
+// ---- The frequency-aware live cascade (issue #1433) ------------------------------------------
+
+/// Where the recursion words a live section can load lie, read as poles (issue #1433).
+///
+/// For any words `w = (c1, a2, a3)`, in the `V`-basis
+/// `R A(w) R^-1 = (Re p) I + (Im p) J + kappa [[-1, 1], [1, 1]]` exactly, with
+/// `Re p = 1 - c1 - a3`, `Im p = 2 sqrt(2) a2 - c1 + a3`, `kappa = c1 - a3 - sqrt(2) a2` and
+/// `J = [[0, -1], [1, 0]]`. The matrices `a I + b J` are the complex numbers `a + i b` (their
+/// spectral norm is `|a + i b|`, `J^2 = -I`), and the last term has norm `sqrt(2) |kappa|`, so
+/// `||A(w)||_V <= |p| + sqrt(2) |kappa|`, and likewise `||I + A||_V <= |1 + p| + sqrt(2) |kappa|`,
+/// `||I - A||_V <= |1 - p| + sqrt(2) |kappa|`. All three are affine in the words.
+///
+/// An exact Butterworth design (`k = sqrt(2)`) has `kappa = 0` and its pole on the circle
+/// `|p + i| = sqrt(2)`: the bilinear image of the analog ray `g e^(i 3 pi / 4)`, through `1`, `-1`
+/// and `(sqrt(2) - 1) i`. Over a cutoff interval the poles are an arc of it, and the convex hull of
+/// the exact designs maps onto the region between that arc and its chord: at `Re p = x` the
+/// imaginary part lies in `[0, h(x)]`, `h(x) = sqrt(2 - x^2) - 1`. A word the kernel loads is such
+/// a hull point moved by at most a box per word (#1407's ramp allowance, or an `f32` design's own
+/// rounding), which moves `Re p`, `Im p` and `kappa` by at most the box's image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PoleDomain {
+    /// A lower bound on `Re p` over the exact designs of the cutoff domain (the top design's).
+    pub low: f64,
+    /// An upper bound on `Re p` over the exact designs (the lowest cutoff's).
+    pub high: f64,
+    /// Per recursion word `(c1, a2, a3)`, how far any word the kernel can load lies from the
+    /// convex hull of the exact designs (#1407: `E + h`).
+    pub ramp_box: [f64; 3],
+    /// The same for a settled word, an `f32` design (`h`).
+    pub design_box: [f64; 3],
+    /// [`state_rounding`]'s `mu_state` over every reachable word.
+    pub state_rounding: f64,
+    /// `mu_state` over every settled word.
+    pub settled_state_rounding: f64,
+    /// [`state_rounding`]'s `mu_input` over every reachable word.
+    pub input_rounding: f64,
+}
+
+/// What [`live_cascade`] bounds: two live sections that share one domain (issue #1433).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiveCascade {
+    /// Both sections' suprema over every reachable word ([`EnvelopeSection`]).
+    pub envelope: EnvelopeSection,
+    /// Where both sections' recursion words lie.
+    pub poles: PoleDomain,
+    /// The supremum of `||(m1, m2)||_V*` ([`v_dual_norm`]) over the first section's mix words:
+    /// its output row on the state is `1/2 (m1, m2) (I + A)`.
+    pub first_mix_row: f64,
+    /// [`output_rounding`]'s `omega_state` over the first section's words: the output mix's
+    /// rounding relative to the state.
+    pub first_output_rounding: f64,
+}
+
+/// One zone of pole positions: every reachable word whose `Re p` lies in `[low, high]`, with its
+/// certified constants and the state and potential bounds of [`live_zones`] (issue #1433).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PoleZone {
+    /// The zone's range of `Re p`.
+    pub low: f64,
+    /// The zone's range of `Re p`.
+    pub high: f64,
+    /// At least `||A(w)||_V + mu_state` over the zone's words.
+    pub contraction: f64,
+    /// At least `||I + A(w)||_V` over the zone's words.
+    pub sum_norm: f64,
+    /// At least `||b(w)||_V + mu_input` over the zone's words (`b = (I - A) e2`).
+    pub input: f64,
+    /// The zone's constants over settled words, `None` when no design lies in it.
+    pub settled: Option<SettledPoleZone>,
+    /// `Phi`: the first section's state while its words are in this zone is at most
+    /// `state * gain * peak + flush_state * F` (`F` [`FlushLaw`]'s per-step perturbation).
+    pub state: f64,
+    /// `Phi`'s part per unit of `F`.
+    pub flush_state: f64,
+    /// `Psi`, the potential: `potential >= q + rho * potential'` for every neighbouring zone
+    /// (`q` the zone's [`Self::sum_norm`], zero for a direct zone).
+    pub potential: f64,
+    /// Whether the zone's output is charged directly (its pole lies at or right of `Re p = 0`)
+    /// rather than through the potential.
+    pub direct: bool,
+    /// The zones a frame can move to from this one: indices `first_neighbour..=last_neighbour`.
+    pub first_neighbour: usize,
+    /// See [`Self::first_neighbour`].
+    pub last_neighbour: usize,
+}
+
+/// A zone's constants over the settled words (`f32` designs) in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SettledPoleZone {
+    /// At least `||A(w)||_V + mu_state` over the settled words.
+    pub contraction: f64,
+    /// At least `||I + A(w)||_V` over the settled words.
+    pub sum_norm: f64,
+    /// At least `||A(w)^2 - I||_V` over the settled words.
+    pub square_norm: f64,
+}
+
+/// The zones of a live section's pole domain and the suprema [`live_cascade`] reads (issue #1433).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveZones {
+    /// The zones, in increasing `Re p`, covering every reachable word's `Re p`.
+    pub zones: Vec<PoleZone>,
+    /// The largest change of `Re p` from one frame's word to the next's, under any history.
+    pub step: f64,
+    /// `sup Psi Phi` over the zones: per unit of `gain * peak`, and per unit of `F`.
+    pub potential_state: [f64; 2],
+    /// `sup Psi' beta` over every move from a zone to a neighbour (per unit of `gain * peak`) and
+    /// `sup Psi` (per unit of `F`): the potential's charge per frame.
+    pub charge: [f64; 2],
+    /// `sup q Phi` over the direct zones, per unit of `gain * peak` and of `F`.
+    pub direct_output: [f64; 2],
+    /// `sup Phi` over the zones, per unit of `gain * peak` and of `F`.
+    pub largest_state: [f64; 2],
+    /// `sup q` over the zones.
+    pub largest_sum_norm: f64,
+}
+
+impl LiveZones {
+    /// The zone that holds a word whose pole has real part `re` (the first whose closed range
+    /// contains it), or `None` when no reachable word has that real part.
+    #[must_use]
+    pub fn zone_of(&self, re: f64) -> Option<&PoleZone> {
+        self.zones
+            .iter()
+            .find(|zone| zone.low <= re && re <= zone.high)
     }
 }
 
-/// [`decay_frames`] for a long decay: jumps ahead with powers of the system while the bound is
-/// still falling and above `limit`, then finishes frame by frame.
-fn decay_frames_fast(
-    system: &Propagator,
-    row: &[f64],
-    z: &[f64],
-    limit: f64,
-) -> Result<u64, TailBoundError> {
-    let evaluate = |state: &[f64]| row.iter().zip(state).map(|(a, b)| a * b).sum::<f64>() * SLACK;
-    let mut current = z.to_vec();
-    let mut base = 0_u64;
-    // Walk frame by frame until the propagation is componentwise falling.
+/// The real part of a word set's pole, `Re p = 1 - c1 - a3` ([`PoleDomain`]).
+#[must_use]
+pub fn pole_real(words: &SvfWords) -> f64 {
+    1.0 - words.c1 - words.a3
+}
+
+/// The first zone's width at either end of the domain; widths then grow by [`ZONE_GROWTH`] up to
+/// [`ZONE_WIDEST`]. The zones only partition the domain: any partition is sound, a finer one is
+/// tighter (#1433 attempt 1 measured `R` within 200 frames of a partition four times finer).
+const ZONE_FIRST: f64 = 1.0e-6;
+/// See [`ZONE_FIRST`].
+const ZONE_GROWTH: f64 = 1.5;
+/// See [`ZONE_FIRST`].
+const ZONE_WIDEST: f64 = 0.02;
+/// The relative margin of the potential's and the state bound's starting values above their
+/// own-zone fixed points ([`live_zones`]), far above the few `f64` roundings each update makes.
+const FIXED_POINT_MARGIN: f64 = 1.0 / 1_099_511_627_776.0;
+/// The most passes [`live_zones`] makes before it gives up: no bound above it is stated.
+const ZONE_PASSES: usize = 4096;
+
+/// `h(x) = sqrt(2 - x^2) - 1`, the exact pole circle's height at `Re p = x`, in a form without
+/// cancellation (`|x| < 1`).
+fn arc_height(x: f64) -> f64 {
+    (1.0 - x) * (1.0 + x) / (crate::sqrt(2.0 - x * x) + 1.0)
+}
+
+/// The largest `|p|` over the exact designs' hull at `Re p = x`: `sqrt(x^2 + h(x)^2)`.
+fn hull_radius(x: f64) -> f64 {
+    let h = arc_height(x);
+    crate::sqrt(x * x + h * h)
+}
+
+/// The largest `|1 + p|` over the hull at `Re p = x`, increasing in `x`.
+fn hull_sum(x: f64) -> f64 {
+    let h = arc_height(x);
+    crate::sqrt((1.0 + x) * (1.0 + x) + h * h)
+}
+
+/// The largest `|1 - p|` over the hull at `Re p = x`, decreasing in `x`.
+fn hull_difference(x: f64) -> f64 {
+    let h = arc_height(x);
+    crate::sqrt((1.0 - x) * (1.0 - x) + h * h)
+}
+
+/// The image of a per-word box `|e_i| <= box_[i]` on the pole: the largest change of `Re p`, of
+/// `|p|` and of `kappa` ([`PoleDomain`]).
+fn pole_shift(box_: [f64; 3]) -> (f64, f64, f64) {
+    let sqrt2 = core::f64::consts::SQRT_2;
+    let real = (box_[0] + box_[2]) * SLACK;
+    let imaginary = 2.0 * sqrt2 * box_[1] + box_[0] + box_[2];
+    let shift = crate::sqrt(real * real + imaginary * imaginary) * SLACK;
+    let kappa = (box_[0] + box_[2] + sqrt2 * box_[1]) * SLACK;
+    (real, shift, kappa)
+}
+
+/// The zone boundaries: from `first` up to `0` and from `last` down to `0`, the widths growing
+/// from [`ZONE_FIRST`] by [`ZONE_GROWTH`] up to [`ZONE_WIDEST`] (`first < 0 < last` clamps the
+/// split point into the domain otherwise).
+fn zone_boundaries(first: f64, last: f64) -> Vec<f64> {
+    let middle = 0.0_f64.clamp(first, last);
+    let mut left = std::vec![first];
+    let (mut x, mut width) = (first, ZONE_FIRST);
     loop {
-        let next = system.apply(&current);
-        if next.iter().zip(&current).all(|(next, now)| next <= now) {
+        x += width;
+        width = (width * ZONE_GROWTH).min(ZONE_WIDEST);
+        if x >= middle {
             break;
         }
-        current = next;
-        base += 1;
-        if base >= HORIZON_LIMIT {
-            return Err(TailBoundError::Horizon);
-        }
+        left.push(x);
     }
-    // From `base` on the bound is non-increasing; before it, every frame was walked, and a frame
-    // above `limit` before `base` is covered because the answer is at least `base` whenever the
-    // value at `base` is still above `limit`, and is found by [`decay_frames`] otherwise.
-    if evaluate(&current) < limit {
-        return decay_frames(system, row, z, limit);
+    let mut right = std::vec![last];
+    let (mut x, mut width) = (last, ZONE_FIRST);
+    loop {
+        x -= width;
+        width = (width * ZONE_GROWTH).min(ZONE_WIDEST);
+        if x <= middle {
+            break;
+        }
+        right.push(x);
     }
-    // Exponential search for a power that brings the bound below `limit`, then bisection.
-    let mut step = 1_u64;
-    let mut low = 0_u64; // above the limit at `base + low`
-    let high = loop {
-        let candidate = low + step;
-        if base + candidate >= HORIZON_LIMIT {
-            return Err(TailBoundError::Horizon);
-        }
-        if evaluate(&system.power_apply(candidate, &current)) < limit {
-            break candidate;
-        }
-        low = candidate;
-        step *= 2;
-    };
-    let (mut low, mut high) = (low, high);
-    while high - low > 1 {
-        let middle = low + (high - low) / 2;
-        if evaluate(&system.power_apply(middle, &current)) < limit {
-            high = middle;
-        } else {
-            low = middle;
-        }
+    if middle > first && middle < last {
+        left.push(middle);
     }
-    Ok(base + high)
+    left.extend(right.into_iter().rev());
+    left.dedup();
+    left
 }
 
-/// The tail and rest bound of a cascade whose words may change under a control law, from
-/// per-section suprema over every reachable word ([`EnvelopeSection`]).
+/// The zones of a live section's pole domain, with the state invariant `Phi` and the potential
+/// `Psi` (issue #1433; `docs/derivations/1329-input-section-tail-and-rest.md`, "#1433").
 ///
-/// * Before the input's end `N` the kernel state of section `k` lies in the invariant ball
-///   `B_k = (input_k V_k + F) / (1 - rho_ramp_k)`, `V_1 = gain * peak` and
-///   `V_{k+1} = output_state_k B_k + output_input_k V_k`, capped at the `V`-norm of a state of
-///   finite `f32` words (a state that overflows is cleared by the per-block recovery).
-/// * After `N` the input is exactly zero; for `ramp_frames` frames a ramp may still be in flight
-///   (`rho_ramp`), then every section is settled (`rho_settled`).
-/// * The output bound is `peak * r(m) + a`, `a` the flush stall the absolute drive `F` sustains.
-///   The tail is the first `m` with `gain * r(m) < TAIL_FLOOR / 2` for every later frame, and for
-///   a peak below `p_star = a / (TAIL_FLOOR / 2)` the tail is proven by exact rest instead, so the
-///   tail is at least the rest bound at `p_star`.
+/// * **Zones.** `Re p` of every reachable word lies in `[low - eta, high + eta]` (`eta` the ramp
+///   box's image). A zone's constants hold for every word whose `Re p` lies in it: such a word is a
+///   hull point at `Re p` within `eta` of the zone, moved by the box, so `|p|` is at most the hull
+///   radius at the zone's extended end farthest from `0` plus the box's image, and so on
+///   ([`PoleDomain`]). `contraction`, `input` are also capped by the envelope's suprema.
+/// * **Moves.** From one frame to the next a word moves by one ramp step (#1407: a fraction
+///   `1/64` of a target minus a reachable word, `c1` and `a3` each within a few `f32` roundings of
+///   it), holds, or is replaced with zero state (a rule-3 enable, a completed disable, a reset), so
+///   `Re p` moves by at most [`LiveZones::step`]: zones within it of each other are neighbours.
+/// * **`Phi`.** The least solution, per unit of `gain * peak` and of `F`, of
+///   `Phi_k >= rho_i Phi_i + beta_i` for every neighbour `i` of `k` (itself included), computed
+///   upward from each zone's own fixed point; the first section's state then never exceeds its
+///   zone's `Phi` (induction over frames; a reset only lowers it).
+/// * **`Psi`.** The least solution of `Psi_k >= q_k + rho_k Psi_i` for every neighbour `i`, with
+///   `q_k` zero for a direct zone (`Re p >= 0`). Then for every frame
+///   `q_k E_j [k not direct] <= Psi_k E_j - Psi_k' E_(j+1) + Psi_k' (beta_k |x_j| + F)`: the
+///   first section's output mass telescopes against its state.
+///
+/// Every update is made an upper bound by [`STEP_UP`] and checked again when the iteration stops,
+/// so the stated inequalities hold for the computed values.
 ///
 /// # Errors
 ///
-/// [`TailBoundError`] when a section does not contract, the stall is not below `REST_EPS`, or a
+/// [`TailBoundError::NotContracting`] when a zone does not contract or the domain is not inside
+/// `(-1, 1)`; [`TailBoundError::Horizon`] when the iteration does not settle within
+/// [`ZONE_PASSES`] passes.
+pub fn live_zones(live: &LiveCascade) -> Result<LiveZones, TailBoundError> {
+    let poles = &live.poles;
+    let envelope = &live.envelope;
+    let interior = |x: f64| x > -1.0 && x < 1.0;
+    if !(interior(poles.low) && interior(poles.high) && poles.low <= poles.high) {
+        return Err(TailBoundError::NotContracting);
+    }
+    let sqrt2 = core::f64::consts::SQRT_2;
+    let (ramp_real, ramp_shift, ramp_kappa) = pole_shift(poles.ramp_box);
+    let (design_real, design_shift, design_kappa) = pole_shift(poles.design_box);
+    let ramp_norm = (ramp_shift + sqrt2 * ramp_kappa) * SLACK;
+    let design_norm = (design_shift + sqrt2 * design_kappa) * SLACK;
+    // A margin far above the rounding of `x +- eta` (`|x| <= 1`).
+    let pad = 1.0e-15;
+    let first = poles.low - ramp_real - pad;
+    let last = poles.high + ramp_real + pad;
+    let boundaries = zone_boundaries(first, last);
+    // `Re p` of consecutive words: one ramp step of `c1` and `a3` together is at most `1/64` of the
+    // distance between a design and a reachable word, plus each word's rounding.
+    let step = ((poles.high - poles.low + 2.0 * ramp_real) / 64.0 + 32.0 * U) * SLACK;
+    let mut zones = Vec::with_capacity(boundaries.len());
+    for window in boundaries.windows(2) {
+        let (low, high) = (window[0], window[1]);
+        let reach = |eta: f64| {
+            let from = (low - eta - pad).max(poles.low);
+            let to = (high + eta + pad).min(poles.high);
+            (from <= to).then_some((from, to))
+        };
+        let Some((from, to)) = reach(ramp_real) else {
+            continue;
+        };
+        let radius = hull_radius(from).max(hull_radius(to));
+        let contraction =
+            ((radius + ramp_norm + poles.state_rounding) * SLACK).min(envelope.rho_ramp);
+        let sum_norm = (hull_sum(to) + ramp_norm) * SLACK;
+        let input = ((hull_difference(from) + ramp_norm + poles.input_rounding) * SLACK)
+            .min(envelope.input);
+        let settled = reach(design_real).map(|(from, to)| {
+            let radius = hull_radius(from).max(hull_radius(to));
+            // `||A^2 - I|| <= |p^2 - 1| + 2 |p| sqrt(2) |kappa| + 2 kappa^2`, with `p` a hull
+            // point `p0` moved by at most `d`: `|p^2 - 1| <= |1 - p0| |1 + p0| + 2 d + d^2`.
+            let square_norm = (hull_difference(from) * hull_sum(to)
+                + 2.0 * design_shift
+                + design_shift * design_shift
+                + 2.0 * sqrt2 * design_kappa * (1.0 + design_shift)
+                + 2.0 * design_kappa * design_kappa)
+                * SLACK;
+            SettledPoleZone {
+                contraction: ((radius + design_norm + poles.settled_state_rounding) * SLACK)
+                    .min(envelope.rho_settled),
+                sum_norm: (hull_sum(to) + design_norm) * SLACK,
+                square_norm,
+            }
+        });
+        let contracts = |rho: f64| rho.partial_cmp(&1.0) == Some(core::cmp::Ordering::Less);
+        if !contracts(contraction) {
+            return Err(TailBoundError::NotContracting);
+        }
+        zones.push(PoleZone {
+            low,
+            high,
+            contraction,
+            sum_norm,
+            input,
+            settled,
+            state: 0.0,
+            flush_state: 0.0,
+            potential: 0.0,
+            direct: low >= 0.0,
+            first_neighbour: 0,
+            last_neighbour: 0,
+        });
+    }
+    let count = zones.len();
+    for k in 0..count {
+        let (low, high) = (zones[k].low, zones[k].high);
+        let first = zones
+            .iter()
+            .position(|zone| zone.high >= low - step)
+            .expect("a zone is its own neighbour");
+        let last = zones
+            .iter()
+            .rposition(|zone| zone.low <= high + step)
+            .expect("a zone is its own neighbour");
+        zones[k].first_neighbour = first;
+        zones[k].last_neighbour = last;
+    }
+    // `Phi`, upward from each zone's own fixed point (with the margin), until no update.
+    let own = |drive: f64, rho: f64| {
+        drive * (1.0 + FIXED_POINT_MARGIN) / (1.0 - rho * (1.0 + FIXED_POINT_MARGIN)) * STEP_UP
+    };
+    let mut state: Vec<f64> = zones.iter().map(|z| own(z.input, z.contraction)).collect();
+    let mut flush: Vec<f64> = zones.iter().map(|z| own(1.0, z.contraction)).collect();
+    let mut settled = false;
+    for _ in 0..ZONE_PASSES {
+        let mut changed = false;
+        for k in 0..count {
+            let zone = zones[k];
+            for i in zone.first_neighbour..=zone.last_neighbour {
+                let from = zones[i];
+                let relative = (from.contraction * state[i] + from.input) * STEP_UP;
+                let absolute = (from.contraction * flush[i] + 1.0) * STEP_UP;
+                if relative > state[k] {
+                    state[k] = relative;
+                    changed = true;
+                }
+                if absolute > flush[k] {
+                    flush[k] = absolute;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            settled = true;
+            break;
+        }
+    }
+    // `Psi`, upward from each zone's own fixed point, until no update.
+    let reward = |zone: &PoleZone| if zone.direct { 0.0 } else { zone.sum_norm };
+    let mut potential: Vec<f64> = zones
+        .iter()
+        .map(|z| own(reward(z), z.contraction))
+        .collect();
+    let mut potential_settled = false;
+    for _ in 0..ZONE_PASSES {
+        let mut changed = false;
+        for k in 0..count {
+            let zone = zones[k];
+            let best = potential[zone.first_neighbour..=zone.last_neighbour]
+                .iter()
+                .fold(0.0_f64, |best, value| best.max(*value));
+            let candidate = (reward(&zone) + zone.contraction * best) * STEP_UP;
+            if candidate > potential[k] {
+                potential[k] = candidate;
+                changed = true;
+            }
+        }
+        if !changed {
+            potential_settled = true;
+            break;
+        }
+    }
+    if !(settled && potential_settled) {
+        return Err(TailBoundError::Horizon);
+    }
+    // Check every stated inequality on the computed values.
+    for k in 0..count {
+        let zone = zones[k];
+        for i in zone.first_neighbour..=zone.last_neighbour {
+            let from = zones[i];
+            let holds = state[k] >= (from.contraction * state[i] + from.input) * STEP_UP
+                && flush[k] >= (from.contraction * flush[i] + 1.0) * STEP_UP
+                && potential[k] >= (reward(&zone) + zone.contraction * potential[i]) * STEP_UP;
+            if !holds {
+                return Err(TailBoundError::Horizon);
+            }
+        }
+    }
+    let mut potential_state = [0.0_f64; 2];
+    let mut charge = [0.0_f64; 2];
+    let mut direct_output = [0.0_f64; 2];
+    let mut largest_state = [0.0_f64; 2];
+    let mut largest_sum_norm = 0.0_f64;
+    for k in 0..count {
+        let zone = &mut zones[k];
+        zone.state = state[k];
+        zone.flush_state = flush[k];
+        zone.potential = potential[k];
+        potential_state[0] = potential_state[0].max(potential[k] * state[k] * SLACK);
+        potential_state[1] = potential_state[1].max(potential[k] * flush[k] * SLACK);
+        for value in &potential[zone.first_neighbour..=zone.last_neighbour] {
+            charge[0] = charge[0].max(value * zone.input * SLACK);
+        }
+        charge[1] = charge[1].max(potential[k]);
+        if zone.direct {
+            direct_output[0] = direct_output[0].max(zone.sum_norm * state[k] * SLACK);
+            direct_output[1] = direct_output[1].max(zone.sum_norm * flush[k] * SLACK);
+        }
+        largest_state[0] = largest_state[0].max(state[k]);
+        largest_state[1] = largest_state[1].max(flush[k]);
+        largest_sum_norm = largest_sum_norm.max(zone.sum_norm);
+    }
+    Ok(LiveZones {
+        zones,
+        step,
+        potential_state,
+        charge,
+        direct_output,
+        largest_state,
+        largest_sum_norm,
+    })
+}
+
+/// The second section's bound through the window `N ..= N + ramp_frames` (a ramp may still be in
+/// flight), for one input scale `g = gain * peak` and flush drive `f`.
+struct LiveWindow {
+    /// `sigma` at `N + ramp_frames + 1`: the second section's state bound.
+    state: f64,
+    /// The first section's state bound at `N + ramp_frames`.
+    energy: f64,
+    /// The cascade's output bound at each window frame.
+    outputs: Vec<f64>,
+}
+
+/// The settled-phase terms of one zone a first section's settled design can lie in (or of the
+/// first section at the identity).
+#[derive(Clone, Copy, PartialEq)]
+struct SettledTerms {
+    /// The first section's settled contraction `r`.
+    contraction: f64,
+    /// `c_y`: its output is at most `c_y H + F`.
+    output: f64,
+    /// `c_d`: its output's frame-to-frame change is at most `c_d H + (gamma + 2 + omega) F`.
+    change: f64,
+    /// `Phi` per unit of `gain * peak` and of `F`.
+    state: [f64; 2],
+}
+
+impl SettledTerms {
+    /// Whether every term of `self` is at least the same term of `other`. The settled system is
+    /// non-negative and increasing in every term (its entries, its start and its rows are), so a
+    /// bound computed with `self`'s terms holds for `other`'s zone too: its first section rests no
+    /// later than `self`'s rest bound and the second section's bound is larger at every frame.
+    fn covers(&self, other: &Self) -> bool {
+        self.contraction >= other.contraction
+            && self.output >= other.output
+            && self.change >= other.change
+            && self.state[0] >= other.state[0]
+            && self.state[1] >= other.state[1]
+    }
+}
+
+/// A non-negative 4x4 matrix, row major.
+type Square4 = [[f64; 4]; 4];
+
+/// `m v`, each component inflated by [`SLACK`] (every operand is non-negative).
+fn apply4(m: &Square4, v: &[f64; 4]) -> [f64; 4] {
+    core::array::from_fn(|i| {
+        (m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2] + m[i][3] * v[3]) * SLACK
+    })
+}
+
+/// `a b`, each entry inflated by [`SLACK`].
+fn multiply4(a: &Square4, b: &Square4) -> Square4 {
+    core::array::from_fn(|i| {
+        core::array::from_fn(|j| {
+            (a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j]) * SLACK
+        })
+    })
+}
+
+/// `row . v`, inflated by [`SLACK`].
+fn dot4(row: &[f64; 4], v: &[f64; 4]) -> f64 {
+    (row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3]) * SLACK
+}
+
+/// The powers `M^(2^j)` of one settled system, squared on demand up to `j < 26`: `M^m v` for
+/// any `m` below [`HORIZON_LIMIT`] by one product per set bit (powers of one matrix commute, and
+/// every product is rounded up, so the order does not matter for an upper bound). Only the powers a
+/// call needs are formed: the high powers of a contraction near `1` underflow, and subnormal
+/// arithmetic is slow.
+struct Powers4 {
+    table: core::cell::RefCell<Vec<Square4>>,
+}
+
+impl Powers4 {
+    fn new(m: Square4) -> Self {
+        Self {
+            table: core::cell::RefCell::new(std::vec![m]),
+        }
+    }
+
+    /// `M^steps v`; `steps` below [`HORIZON_LIMIT`].
+    fn apply(&self, steps: u64, v: &[f64; 4]) -> [f64; 4] {
+        let needed = (u64::BITS - steps.leading_zeros()) as usize;
+        let mut table = self.table.borrow_mut();
+        while table.len() < needed {
+            let last = table[table.len() - 1];
+            table.push(multiply4(&last, &last));
+        }
+        let mut result = *v;
+        for (bit, power) in table.iter().enumerate().take(needed) {
+            if steps & (1 << bit) != 0 {
+                result = apply4(power, &result);
+            }
+        }
+        result
+    }
+}
+
+/// One zone group's settled system, without the flush drive (for the relative tail and the
+/// decaying part of the stall) and with it (for the rest), and their powers.
+struct SettledSystem {
+    terms: SettledTerms,
+    homogeneous: Square4,
+    homogeneous_powers: Powers4,
+    output_row: [f64; 4],
+    driven: Square4,
+    driven_powers: Powers4,
+    driven_state_row: [f64; 4],
+    driven_output_row: [f64; 4],
+}
+
+/// The bound machinery of [`live_cascade`] for one cascade.
+struct LiveBound<'a> {
+    live: &'a LiveCascade,
+    zones: &'a LiveZones,
+    systems: Vec<SettledSystem>,
+    ramp_frames: u64,
+    law: &'a FlushLaw,
+    cap: f64,
+}
+
+impl<'a> LiveBound<'a> {
+    fn new(live: &'a LiveCascade, zones: &'a LiveZones, law: &'a FlushLaw, ramp: u64) -> Self {
+        let half_row = 0.5 * live.first_mix_row;
+        let omega = live.first_output_rounding;
+        let mu = live.poles.settled_state_rounding;
+        let gamma = live.envelope.output_state;
+        let mut every: Vec<SettledTerms> = zones
+            .zones
+            .iter()
+            .filter_map(|zone| {
+                let settled = zone.settled?;
+                let r = settled.contraction;
+                Some(SettledTerms {
+                    contraction: r,
+                    output: (half_row * settled.sum_norm + omega) * SLACK,
+                    change: (half_row * settled.square_norm + gamma * mu + omega * (1.0 + r))
+                        * SLACK,
+                    state: [zone.state, zone.flush_state],
+                })
+            })
+            .collect();
+        // The first section at the identity: its output is the (zero) input.
+        every.push(SettledTerms {
+            contraction: 0.0,
+            output: 0.0,
+            change: 0.0,
+            state: [0.0, 0.0],
+        });
+        // Consecutive zones whose settled contractions lie in one octave of `1 - r` share one
+        // system, with the largest of each term (it covers each of them).
+        let octave = |terms: &SettledTerms| {
+            let gap = 1.0 - terms.contraction;
+            if gap > 0.0 {
+                (4.0 * crate::log2(gap)) as i32
+            } else {
+                i32::MIN
+            }
+        };
+        let mut grouped: Vec<SettledTerms> = Vec::new();
+        let mut previous = None;
+        for terms in &every {
+            let band = octave(terms);
+            match grouped.last_mut() {
+                Some(last) if previous == Some(band) => {
+                    last.contraction = last.contraction.max(terms.contraction);
+                    last.output = last.output.max(terms.output);
+                    last.change = last.change.max(terms.change);
+                    last.state[0] = last.state[0].max(terms.state[0]);
+                    last.state[1] = last.state[1].max(terms.state[1]);
+                }
+                _ => grouped.push(*terms),
+            }
+            previous = Some(band);
+        }
+        let every = grouped;
+        // Only the zones no other zone covers need their own system.
+        let mut terms: Vec<SettledTerms> = Vec::new();
+        for (index, candidate) in every.iter().enumerate() {
+            let covered = every.iter().enumerate().any(|(other, terms)| {
+                other != index
+                    && terms.covers(candidate)
+                    && (!candidate.covers(terms) || other < index)
+            });
+            if !covered {
+                terms.push(*candidate);
+            }
+        }
+        let mut bound = Self {
+            live,
+            zones,
+            systems: Vec::with_capacity(terms.len()),
+            ramp_frames: ramp,
+            law,
+            cap: R_NORM * core::f64::consts::SQRT_2 * F32_MAX,
+        };
+        let f = law.per_step();
+        for terms in terms {
+            let (homogeneous, _, output_row) = bound.settled_system(&terms, 0.0);
+            let (driven, driven_state_row, driven_output_row) = bound.settled_system(&terms, f);
+            bound.systems.push(SettledSystem {
+                terms,
+                homogeneous,
+                homogeneous_powers: Powers4::new(homogeneous),
+                output_row,
+                driven,
+                driven_powers: Powers4::new(driven),
+                driven_state_row,
+                driven_output_row,
+            });
+        }
+        bound
+    }
+
+    /// The window, frame by frame, from the bounds at `N`:
+    /// `sigma <= iota (1/2 m (V + K + K_L) + D + Omega) + F_sum` with the potential's telescoped
+    /// mass `V`, its per-frame charges `K`, the direct zones' output `K_L`, the feedthrough `D`,
+    /// the output rounding `Omega` and the second section's own flush `F_sum`, each a weighted sum
+    /// with the second section's contraction as the weight's ratio.
+    fn window(&self, g: f64, f: f64) -> LiveWindow {
+        let envelope = &self.live.envelope;
+        let zones = self.zones;
+        let rho = envelope.rho_ramp;
+        let one_minus = 1.0 - rho;
+        let half_row = 0.5 * self.live.first_mix_row;
+        let omega = self.live.first_output_rounding;
+        let potential = (zones.potential_state[0] * g + zones.potential_state[1] * f) * SLACK;
+        let direct = (zones.direct_output[0] * g + zones.direct_output[1] * f) * SLACK;
+        let mut energy = (zones.largest_state[0] * g + zones.largest_state[1] * f) * SLACK;
+        let mut charge = (zones.charge[0] * g + zones.charge[1] * f) / one_minus * SLACK;
+        let mut direct_sum = direct / one_minus * SLACK;
+        let mut feedthrough = (envelope.output_input * g + f) / one_minus * SLACK;
+        let mut rounding = omega * energy / one_minus * SLACK;
+        let mut flush_sum = f / one_minus * SLACK;
+        let output_coefficient = (half_row * zones.largest_sum_norm + omega) * SLACK;
+        let state =
+            |charge: f64, direct_sum: f64, feedthrough: f64, rounding: f64, flush_sum: f64| {
+                ((envelope.input
+                    * (half_row * (potential + charge + direct_sum) + feedthrough + rounding)
+                    + flush_sum)
+                    * SLACK)
+                    .min(self.cap)
+            };
+        let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
+        for frame in 0..=self.ramp_frames {
+            let sigma = state(charge, direct_sum, feedthrough, rounding, flush_sum);
+            outputs.push(
+                (envelope.output_state * sigma
+                    + envelope.output_input * (output_coefficient * energy + f)
+                    + f)
+                    * SLACK,
+            );
+            charge = (rho * charge + zones.charge[1] * f) * SLACK;
+            direct_sum = (rho * direct_sum + direct) * SLACK;
+            feedthrough = (rho * feedthrough + f) * SLACK;
+            rounding = (rho * rounding + omega * energy) * SLACK;
+            flush_sum = (rho * flush_sum + f) * SLACK;
+            if frame < self.ramp_frames {
+                energy = (rho * energy + f) * SLACK;
+            }
+        }
+        LiveWindow {
+            state: state(charge, direct_sum, feedthrough, rounding, flush_sum),
+            energy: energy.min(self.cap),
+            outputs,
+        }
+    }
+
+    /// The settled phase from `n0 = N + ramp_frames + 1` for one zone, as the non-negative system
+    /// on `(tau_n, H_(n-1), X_n, 1)`:
+    ///
+    /// ```text
+    /// tau' = rho tau + (rho c_d + mu c_y + mu_x c_y r) H + a_F F
+    /// H'   = r H + F
+    /// X'   = max(rho, r) X
+    /// ```
+    ///
+    /// `tau = sigma - e2 y_prev` (the second section's deviation from its input's DC state), `H`
+    /// the first section's state bound, `X` the joint flush's one-off terms. Returns the system,
+    /// the row of `sigma` and the row of the cascade's output.
+    fn settled_system(&self, terms: &SettledTerms, f: f64) -> (Square4, [f64; 4], [f64; 4]) {
+        let envelope = &self.live.envelope;
+        let rho = envelope.rho_settled;
+        let mu = self.live.poles.settled_state_rounding;
+        let mu_x = self.live.poles.input_rounding;
+        let omega = self.live.first_output_rounding;
+        let gamma = envelope.output_state;
+        let r = terms.contraction;
+        let (c_y, c_d) = (terms.output, terms.change);
+        let a_h = (rho * c_d + mu * c_y + mu_x * c_y * r) * SLACK;
+        let a_f = (rho * (gamma + 2.0 + omega) + mu + mu_x * (c_y + 1.0) + 1.0) * SLACK;
+        let stall = f / (1.0 - r) * SLACK;
+        let m = [
+            [rho, a_h, 0.0, a_f * f * SLACK],
+            [0.0, r, 0.0, f],
+            [0.0, 0.0, rho.max(r), 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let constant = (f + 2.0 * (c_y * stall + f)) * SLACK;
+        let state_row = [1.0, c_y, 1.0, constant];
+        let (out_state, out_input) = (envelope.output_state, envelope.output_input);
+        let output_row = [
+            out_state,
+            (out_state * c_y + out_input * c_y * r) * SLACK,
+            out_state,
+            (out_state * constant + out_input * (c_y * f + f) + f) * SLACK,
+        ];
+        (m, state_row, output_row)
+    }
+
+    /// The settled phase's state at `n0` for one zone: `tau <= sigma + |y|`, `H` the smaller of
+    /// the window's state bound and the zone's `Phi`, `X = 2 c_y H`.
+    fn settled_start(&self, terms: &SettledTerms, window: &LiveWindow, g: f64, f: f64) -> [f64; 4] {
+        let h = window
+            .energy
+            .min((terms.state[0] * g + terms.state[1] * f) * SLACK)
+            .min(self.cap);
+        [
+            (window.state + terms.output * h + f) * SLACK,
+            h,
+            2.0 * terms.output * h * SLACK,
+            1.0,
+        ]
+    }
+
+    /// `R` for one input scale `g = gain * peak`: the first section rests (its state bound below
+    /// `REST_EPS` per word, plus `N_SILENCE`), then the second, from its bound at that frame.
+    fn rest(&self, g: f64) -> Result<u64, TailBoundError> {
+        let f = self.law.per_step();
+        let limit = self.law.rest_eps / R_INV_NORM;
+        let rho = self.live.envelope.rho_settled;
+        let window = self.window(g, f);
+        let start = self.ramp_frames + 1;
+        let mut worst = 0_u64;
+        for system in &self.systems {
+            let terms = &system.terms;
+            let u0 = self.settled_start(terms, &window, g, f);
+            let first = free_decay_frames(u0[1], terms.contraction, f, limit)
+                .ok_or(TailBoundError::StallAboveRest)?;
+            let first_rested = self
+                .ramp_frames
+                .checked_add(first)
+                .and_then(|value| value.checked_add(self.law.silence_frames))
+                .filter(|value| *value < HORIZON_LIMIT)
+                .ok_or(TailBoundError::Horizon)?;
+            let at = system.driven_powers.apply(first_rested - start, &u0);
+            let sigma = dot4(&system.driven_state_row, &at).min(self.cap);
+            let second =
+                free_decay_frames(sigma, rho, f, limit).ok_or(TailBoundError::StallAboveRest)?;
+            let rested = first_rested
+                .checked_add(second)
+                .and_then(|value| value.checked_add(self.law.silence_frames))
+                .filter(|value| *value < HORIZON_LIMIT)
+                .ok_or(TailBoundError::Horizon)?;
+            worst = worst.max(rested);
+        }
+        Ok(worst)
+    }
+
+    /// A frame `m` from which `row . M^m u` stays below `limit`, for a system without constant
+    /// drive.
+    ///
+    /// First a frame `m_f` at which the computed `w >= M^m_f u` satisfies `M w <= w` (checked
+    /// with the product rounded up): then `M^j w` is non-increasing in `j` and bounds every later
+    /// frame (`M` is non-negative). Whether a frame passes is found by an exponential search and a
+    /// bisection that keeps a passing upper end. If the output is already below `limit` there,
+    /// `m_f` is stated; otherwise the first `j` with `row . M^j w < limit`, found the same way,
+    /// is added. A computed value below `limit` bounds the exact one, which bounds every later
+    /// one, so the search needs no monotonicity of the computed values.
+    fn settled_decay(
+        m: &Square4,
+        powers: &Powers4,
+        row: &[f64; 4],
+        u: [f64; 4],
+        limit: f64,
+    ) -> Result<u64, TailBoundError> {
+        let falling = |state: &[f64; 4]| {
+            apply4(m, state)
+                .iter()
+                .zip(state)
+                .all(|(next, now)| next <= now)
+        };
+        // The first passing frame of a search over `0..HORIZON_LIMIT`: `test(0)` first, then
+        // doubling, then bisection keeping a passing upper end.
+        let search = |test: &dyn Fn(u64) -> bool| -> Result<u64, TailBoundError> {
+            if test(0) {
+                return Ok(0);
+            }
+            let (mut low, mut high) = (0_u64, 1_u64);
+            while !test(high) {
+                low = high;
+                high *= 2;
+                if high >= HORIZON_LIMIT {
+                    return Err(TailBoundError::Horizon);
+                }
+            }
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if test(middle) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            Ok(high)
+        };
+        let settle = search(&|steps| falling(&powers.apply(steps, &u)))?;
+        let w = powers.apply(settle, &u);
+        let after = search(&|steps| dot4(row, &powers.apply(steps, &w)) < limit)?;
+        settle
+            .checked_add(after)
+            .filter(|value| *value < HORIZON_LIMIT)
+            .ok_or(TailBoundError::Horizon)
+    }
+
+    /// `T_decay`: the first frame from which the relative output bound (per unit of the peak,
+    /// without the flush) stays below `TAIL_FLOOR / 2`, over the window and every zone.
+    fn tail(&self, gain: f64) -> Result<u64, TailBoundError> {
+        let limit = TAIL_FLOOR / 2.0;
+        let window = self.window(gain, 0.0);
+        let mut tail = window
+            .outputs
+            .iter()
+            .rposition(|value| *value >= limit)
+            .map_or(0, |frame| frame as u64 + 1);
+        let start = self.ramp_frames + 1;
+        for system in &self.systems {
+            // Without the flush the constant component is unused; it is zero so that every
+            // component can fall.
+            let mut u0 = self.settled_start(&system.terms, &window, gain, 0.0);
+            u0[3] = 0.0;
+            // A zone already falling and below the limit at the tail found so far cannot raise
+            // it (from there on its bound is non-increasing).
+            if let Some(pivot) = tail.checked_sub(start) {
+                let at = system.homogeneous_powers.apply(pivot, &u0);
+                let next = apply4(&system.homogeneous, &at);
+                if next.iter().zip(&at).all(|(next, now)| next <= now)
+                    && dot4(&system.output_row, &at) < limit
+                {
+                    continue;
+                }
+            }
+            let after = Self::settled_decay(
+                &system.homogeneous,
+                &system.homogeneous_powers,
+                &system.output_row,
+                u0,
+                limit,
+            )?;
+            if after > 0 {
+                tail = tail.max(start + after);
+            }
+        }
+        Ok(tail)
+    }
+
+    /// The flush's part of the output bound from frame `tail` on (per unit `F`, then scaled): the
+    /// window's from there, and per zone the settled system's fixed point plus the decaying part
+    /// of its start (`u_n = U + M_h^m (u0 - U) <= U + M_h^m u0`, `M_h` the system without its
+    /// constant).
+    fn stall(&self, tail: u64) -> Result<f64, TailBoundError> {
+        let f = self.law.per_step();
+        let window = self.window(0.0, f);
+        let mut stall = window
+            .outputs
+            .iter()
+            .skip(tail as usize)
+            .fold(0.0_f64, |sup, value| sup.max(*value));
+        let start = self.ramp_frames + 1;
+        let rho = self.live.envelope.rho_settled;
+        for system in &self.systems {
+            let terms = &system.terms;
+            let mut u0 = self.settled_start(terms, &window, 0.0, f);
+            u0[3] = 0.0;
+            // The fixed point `U`, rounded up.
+            let h_star = f / (1.0 - terms.contraction) * SLACK;
+            let tau_star =
+                (system.driven[0][1] * h_star + system.driven[0][3]) / (1.0 - rho) * SLACK;
+            let fixed = dot4(&system.driven_output_row, &[tau_star, h_star, 0.0, 1.0]);
+            let mut current = system
+                .homogeneous_powers
+                .apply(tail.saturating_sub(start), &u0);
+            let mut peak = 0.0_f64;
+            let mut frames = 0_u64;
+            loop {
+                peak = peak.max(dot4(&system.output_row, &current));
+                let next = apply4(&system.homogeneous, &current);
+                if next.iter().zip(&current).all(|(next, now)| next <= now) {
+                    break;
+                }
+                current = next;
+                frames += 1;
+                if frames >= HORIZON_LIMIT {
+                    return Err(TailBoundError::Horizon);
+                }
+            }
+            stall = stall.max(fixed + peak);
+        }
+        Ok(stall * SLACK)
+    }
+}
+
+/// The tail and rest bound of a two-section live cascade, frequency-aware (issue #1433;
+/// `docs/derivations/1329-input-section-tail-and-rest.md`, "#1433: the frequency-aware cascade").
+///
+/// * **Before `N`.** The first section's state is at most its zone's `Phi`; its output is
+///   `1/2 (m1, m2) (I + A) s + d x` up to rounding, so the second section's state is at most
+///   `iota sum_j W_j |y_j|` (`W_j` its contraction's powers) with
+///   `|c . s_j| <= 1/2 |m| q_k E_j`. The weighted mass of `q_k E_j` telescopes through the
+///   potential (Abel summation with non-decreasing weights): at most `sup Psi Phi` plus the
+///   charges `Psi' (beta |x| + F)` per frame; direct zones are charged `q Phi` per frame.
+/// * **Window.** For `ramp_frames + 1` frames a ramp may still be in flight: the same sums, with
+///   the input zero.
+/// * **Settled.** From `N + ramp_frames + 1` the words are fixed. With `b = (I - B) e2` exactly,
+///   `tau = sigma - e2 y_prev` obeys `tau' = B (tau - e2 (y - y_prev)) + rounding`: the second
+///   section is driven by the first's output *change*, `1/2 (m1, m2) (A^2 - I) s`, small at
+///   both ends of the domain. Per zone the first section's settled design can lie in, a
+///   four-term non-negative system bounds it; a joint-flush reset of either section adds at most
+///   one output's worth (`X`).
+/// * **Tail, stall, rest.** `T_decay` from the relative output bound; `P*` from the flush's
+///   part of the output bound from `T_decay` on; rest section by section, each adding
+///   `N_SILENCE`, maximised over the zones.
+///
+/// # Errors
+///
+/// [`TailBoundError`] when a section does not contract, a stall is not below `REST_EPS`, or a
 /// bound exceeds the horizon.
-pub fn envelope_cascade(
-    sections: &[EnvelopeSection],
+pub fn live_cascade(
+    live: &LiveCascade,
     gain: f64,
     law: &FlushLaw,
     ramp_frames: u64,
     peaks: [f64; 2],
 ) -> Result<CascadeBound, TailBoundError> {
-    if sections.is_empty() {
-        return Ok(CascadeBound::ZERO);
-    }
+    let envelope = &live.envelope;
     // A NaN contraction is refused with the rest: only `rho < 1` passes.
     let contracts = |rho: f64| rho.partial_cmp(&1.0) == Some(core::cmp::Ordering::Less);
-    if sections.iter().any(|s| {
-        !(contracts(s.rho_ramp) && contracts(s.rho_settled) && s.rho_settled <= s.rho_ramp)
-    }) {
+    if !(contracts(envelope.rho_ramp)
+        && contracts(envelope.rho_settled)
+        && envelope.rho_settled <= envelope.rho_ramp)
+    {
         return Err(TailBoundError::NotContracting);
     }
+    let zones = live_zones(live)?;
+    let bound = LiveBound::new(live, &zones, law, ramp_frames);
     // `gain` is the trim word's magnitude; the kernel's `fl(x * trim)` is at most `(1 + u)` times
     // the product.
     let gain = gain * (1.0 + U);
-    let f = law.per_step();
-    let cap = R_NORM * core::f64::consts::SQRT_2 * F32_MAX;
-    // The balls per unit of `gain * peak` (relative) and from `F` alone (absolute): the fixed
-    // point of the ramp system, section by section.
-    let balls = |drive: f64, absolute: f64| -> Vec<f64> {
-        let mut v = drive;
-        sections
-            .iter()
-            .map(|s| {
-                let ball = (s.input * v + absolute) / (1.0 - s.rho_ramp) * SLACK;
-                v = (s.output_state * ball + s.output_input * v + absolute) * SLACK;
-                ball
-            })
-            .collect()
-    };
-    let relative = balls(1.0, 0.0);
-    let absolute = balls(0.0, f);
-    // The absolute part of the output bound never exceeds its value at the ramp system's fixed
-    // point, which the settled system (smaller contractions) maps below itself.
-    let stall: f64 = {
-        let row = Propagator::output_row(sections, 0, f);
-        let fixed: Vec<f64> = absolute.iter().copied().chain([1.0]).collect();
-        row.iter().zip(&fixed).map(|(a, b)| a * b).sum::<f64>() * SLACK
-    };
-    let p_star = stall / (TAIL_FLOOR / 2.0) * SLACK;
-    let ramp: Vec<f64> = sections.iter().map(|s| s.rho_ramp).collect();
-    let settled: Vec<f64> = sections.iter().map(|s| s.rho_settled).collect();
-    // Relative tail: the system without `F`, from the relative balls at `gain`, through the ramp
-    // window frame by frame, then settled.
-    let relative_state: Vec<f64> = relative.iter().map(|b| b * gain).chain([0.0]).collect();
-    let window = Propagator::new(sections, &ramp, 0, 0.0);
-    let settled_system = Propagator::new(sections, &settled, 0, 0.0);
-    let row = Propagator::output_row(sections, 0, 0.0);
-    let limit = TAIL_FLOOR / 2.0;
-    let mut tail_relative = 0_u64;
-    let mut state = relative_state;
-    for frame in 0..ramp_frames {
-        let value: f64 = row.iter().zip(&state).map(|(a, b)| a * b).sum();
-        if value * SLACK >= limit {
-            tail_relative = frame + 1;
-        }
-        state = window.apply(&state);
-    }
-    let after = decay_frames_fast(&settled_system, &row, &state, limit)?;
-    if after > 0 {
-        tail_relative = ramp_frames + after;
-    }
-    let ball_at = |peak: f64| -> Vec<f64> {
-        relative
-            .iter()
-            .zip(&absolute)
-            .map(|(r, a)| (r * gain * peak + a).min(cap))
-            .collect()
-    };
-    let rest_star = rest_frames(sections, &ball_at(p_star), law, ramp_frames)?;
-    let rest_peak = rest_frames(sections, &ball_at(peaks[0]), law, ramp_frames)?;
-    let rest_any = rest_frames(sections, &ball_at(peaks[1]), law, ramp_frames)?;
+    let tail = bound.tail(gain)?;
+    let p_star = bound.stall(tail)? / (TAIL_FLOOR / 2.0) * SLACK;
+    let rest_star = bound.rest(gain * p_star)?;
+    let rest_peak = bound.rest(gain * peaks[0])?;
+    let rest_any = bound.rest(gain * peaks[1])?;
     Ok(CascadeBound {
-        tail: tail_relative,
-        tail_every_peak: tail_relative.max(rest_star),
+        tail,
+        tail_every_peak: tail.max(rest_star),
         rest_peak,
         rest_any,
         flush_floor: p_star,
         rest_at_flush_floor: rest_star,
-        tail_reference: tail_relative,
+        tail_reference: tail,
     })
 }
 

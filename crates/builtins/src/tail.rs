@@ -18,8 +18,8 @@
 
 use effect_contract::{RestSamples, TailSamples};
 use math::tail::{
-    CascadeBound, EnvelopeSection, FlushLaw, SvfWords, envelope_cascade, fixed_cascade,
-    output_rounding, state_rounding, v_norm, word_box_norm,
+    CascadeBound, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords, fixed_cascade,
+    live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm, word_box_norm,
 };
 
 use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
@@ -205,12 +205,13 @@ pub const fn input_section_worst_case_pair(sample_rate: u32) -> Option<(f32, f32
 /// D5: the bound of an input section whose trim, polarity and filter targets may change live,
 /// over every history: each section disabled or designed anywhere in `[10 Hz, maximum]`, the trim
 /// anywhere up to +24 dB, and any history of 64-frame filter ramps (#1407), at any block size.
+/// The HPF-to-LPF cascade is bounded frequency-aware (#1433, `math::tail::live_cascade`).
 /// `None` off the launch rates (only a launch rate has a cutoff domain).
 #[must_use]
 pub fn input_section_live_bound(sample_rate: u32) -> Option<InputSectionBound> {
-    let section = input_section_live_envelope(sample_rate)?;
+    let terms = input_section_live_envelope(sample_rate)?;
     Some(
-        live_cascade(sample_rate, section).map_or(InputSectionBound::UNBOUNDED, |bound| {
+        live_bound(sample_rate, &terms).map_or(InputSectionBound::UNBOUNDED, |bound| {
             InputSectionBound::from_cascade(&bound)
         }),
     )
@@ -221,16 +222,16 @@ pub fn input_section_live_bound(sample_rate: u32) -> Option<InputSectionBound> {
 /// when no bound is proven.
 #[must_use]
 pub fn input_section_live_cascade(sample_rate: u32) -> Option<CascadeBound> {
-    live_cascade(sample_rate, input_section_live_envelope(sample_rate)?).ok()
+    live_bound(sample_rate, &input_section_live_envelope(sample_rate)?).ok()
 }
 
-fn live_cascade(
+fn live_bound(
     sample_rate: u32,
-    section: EnvelopeSection,
+    terms: &LiveCascade,
 ) -> Result<CascadeBound, math::tail::TailBoundError> {
     let _environment = lane::CanonicalFpEnv::enter();
-    envelope_cascade(
-        &[section, section],
+    live_cascade(
+        terms,
         f64::from(max_trim_gain()),
         &input_section_flush_law(sample_rate),
         u64::from(INPUT_FILTER_RAMP_SAMPLES),
@@ -275,7 +276,8 @@ fn design_radius(g: f64) -> f64 {
     math::sqrt(1.0 + g * g * g * g) / (1.0 + core::f64::consts::SQRT_2 * g + g * g)
 }
 
-/// D5's per-section suprema over every word a live input section can load, at `sample_rate`. Both
+/// D5's per-section suprema over every word a live input section can load, at `sample_rate`, and
+/// where those words lie as poles (#1433): everything [`input_section_live_bound`] reads. Both
 /// sections share it: each may be disabled or designed anywhere in the cutoff domain.
 ///
 /// * **Recursion words.** Every word is a design, the identity at rest, or within the allowance
@@ -295,8 +297,20 @@ fn design_radius(g: f64) -> f64 {
 ///   the mix words' own ramp allowance and `|fl(sqrt(2)) - sqrt(2)|` (the HPF's band mix) add to it.
 ///   `|d|` is at most `1` (identity `1`, HPF `1 / (1 + g (g + sqrt(2)))`, LPF `a3`), with the same
 ///   corrections.
+/// * **Pole domain (#1433, `math::tail::PoleDomain`).** An exact design's pole has real part
+///   `Re p = (1 - g^2) / (1 + sqrt(2) g + g^2)`, falling in `g`, so over the domain it lies in
+///   `[Re p(g_max), Re p(g_min)]`; both ends are padded by `1e-12`, far above the `f64` error of
+///   `g` (near Nyquist `tan` amplifies its argument's rounding to about `1e-11` relative in `g`,
+///   which moves `Re p = -1 + O(1 / g)` by below `1e-15`). A ramp word lies within `E + h` of the
+///   exact designs' hull, a settled word (an `f32` design) within `h`. The rounding counts are
+///   the ones above.
+/// * **First section's mix row.** The HPF's mix words are `theta (-k, -1)` (`theta` in `[0, 1]`,
+///   a crossfade toward or from the identity) within the mix allowance, so
+///   `||(m1, m2)||_V* <= ||(-k, -1)||_V* + ` the allowance box's largest dual norm; the box term
+///   (above `1e-6`) and the final `1 + 2^-30` cover this evaluation's few `f64` roundings. Its
+///   output rounding on the state, `omega_state`, is taken over every word (below).
 #[must_use]
-pub fn input_section_live_envelope(sample_rate: u32) -> Option<EnvelopeSection> {
+pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
     let _environment = lane::CanonicalFpEnv::enter();
     let maximum = f64::from(builtin_filter_cutoff_maximum_hz(sample_rate)?);
     let rate = f64::from(sample_rate);
@@ -366,11 +380,46 @@ pub fn input_section_live_envelope(sample_rate: u32) -> Option<EnvelopeSection> 
         m2: 1.0 + mix[2],
     };
     let (omega_state, omega_input) = output_rounding(&largest);
-    Some(EnvelopeSection {
+    let envelope = EnvelopeSection {
         rho_ramp,
         rho_settled,
         input: beta_sup + column + input_rounding,
         output_state: gamma_design + row_correction + omega_state,
         output_input: delta_sup + omega_input,
+    };
+
+    // #1433: where the words lie as poles, and the first section's mix row.
+    const POLE_PAD: f64 = 1.0e-12;
+    let real_pole = |g: f64| (1.0 - g * g) / (1.0 + sqrt2 * g + g * g);
+    let poles = PoleDomain {
+        low: real_pole(g_max) - POLE_PAD,
+        high: real_pole(g_min) + POLE_PAD,
+        ramp_box: off_design,
+        design_box: half_ulp,
+        state_rounding: ramp_top.0.max(ramp_other.0),
+        settled_state_rounding: settled_top.0.max(settled_other.0),
+        input_rounding,
+    };
+    let mut mix_box = 0.0_f64;
+    for signs in 0..4_u32 {
+        let sign = |bit: u32| if signs & bit == 0 { 1.0 } else { -1.0 };
+        mix_box = mix_box.max(v_dual_norm([mix[1] * sign(1), mix[2] * sign(2)]));
+    }
+    let first_mix_row = (v_dual_norm([-k, -1.0]) + mix_box) * (1.0 + 1.0 / 1_073_741_824.0);
+    // `omega_state` as a supremum: [`output_rounding`] is a norm of terms each increasing in one
+    // of `|c1|`, `|1 - c1|`, `|a2|`, `|a3|`, `|1 - a3|` and the mix words, so its value at the
+    // largest words plus its value at the opposite corner (`c1`, `a3` at `-(E + h)`, where
+    // `|1 - c1|` and `|1 - a3|` are largest) bounds it for every word.
+    let corner = SvfWords {
+        c1: -off_design[0],
+        a3: -off_design[2],
+        ..largest
+    };
+    let first_output_rounding = omega_state + output_rounding(&corner).0;
+    Some(LiveCascade {
+        envelope,
+        poles,
+        first_mix_row,
+        first_output_rounding,
     })
 }
