@@ -64,6 +64,11 @@ fn request(
             maximum_scratch_bytes: quality.scratch_fixed_bytes,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(crate::SoftClipFactory),
+            rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 

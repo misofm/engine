@@ -104,6 +104,11 @@ fn request<'a>(
                 .max(1),
             maximum_automation_spans_per_block: 4,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(soft_clip::SoftClipFactory),
+            quality.sample_rate,
+            quality.quality,
+        ),
     }
 }
 

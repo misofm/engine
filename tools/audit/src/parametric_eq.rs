@@ -137,6 +137,11 @@ fn prepare_eq() -> Box<dyn PreparedNativeEffect> {
                 maximum_scratch_bytes: QUANTUM as u64 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
                 maximum_automation_spans_per_block: 48,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(ParametricEqFactory),
+                48_000,
+                EffectQuality::Normal,
+            ),
         })
         .expect("prepared parametric EQ")
         .processor

@@ -206,10 +206,10 @@ use console_workload::{
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, EffectQuality, EffectTargetRequest, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedEffectTarget, PreparedNativeEffectBank, PreparedPorts,
-    PreparedSidechainPort,
+    BankWidth, EffectBankProcessBlock, EffectId, EffectQuality, EffectTargetRequest,
+    InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedEffectTarget,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 use engine::realtime::audit;
 use lane::Backend;
@@ -1030,6 +1030,14 @@ fn eq_request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
             maximum_scratch_bytes: 1 << 16,
             maximum_automation_spans_per_block: 48,
         },
+        tail_bound: launch_native_effect_registry()
+            .expect("launch effect registry")
+            .tail_bound(
+                EffectId::new("miso.parametric-eq").expect("static effect id"),
+                SAMPLE_RATE_HZ,
+                EffectQuality::Normal,
+            )
+            .expect("a declared row"),
     }
 }
 

@@ -35,7 +35,13 @@ fn descriptor_and_exact_zero_latency_resources_are_frozen() {
         assert_eq!(quality.sample_rate, rate);
         assert_eq!(quality.latency, LatencySamples(0));
         assert_eq!(
-            (GATE_EXPANDER_DESCRIPTOR.tail_and_rest)(quality.sample_rate, quality.quality).tail,
+            conformance::tail_bound_of(
+                Box::new(gate_expander::GateExpanderFactory),
+                quality.sample_rate,
+                quality.quality
+            )
+            .bound()
+            .tail,
             TailSamples::Finite(0)
         );
         assert_eq!(quality.maximum_state.common_bytes, 8);

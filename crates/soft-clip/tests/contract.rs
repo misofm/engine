@@ -30,7 +30,13 @@ fn descriptor_resources_and_independent_fir_design_are_frozen() {
     for quality in SOFT_CLIP_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(31));
         assert_eq!(
-            (SOFT_CLIP_DESCRIPTOR.tail_and_rest)(quality.sample_rate, quality.quality).tail,
+            conformance::tail_bound_of(
+                Box::new(soft_clip::SoftClipFactory),
+                quality.sample_rate,
+                quality.quality
+            )
+            .bound()
+            .tail,
             TailSamples::Finite(29)
         );
         // Current layout: 104 effect words per channel, plus the shared codec's two header words.

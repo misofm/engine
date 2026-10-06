@@ -92,6 +92,11 @@ pub(crate) fn request_full<'a>(
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(transient_shaper::TransientShaperFactory),
+            sample_rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 

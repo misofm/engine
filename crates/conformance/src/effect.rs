@@ -11,15 +11,15 @@ use crate::prng::SplitMix64;
 use effect_contract::{
     AutomationSpanKind, BankProcessReport, BankWidth, EffectDescriptor, EffectId,
     EffectPrepareError, EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples,
-    LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
-    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind, RestBound,
-    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
-    validate_descriptor,
+    LinkMode, LinkModeSet, NativeEffectFactory, NativeEffectRegistry, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
+    PreparedEffect, PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
+    QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, default_initial_values,
+    expected_prepared_metadata, valid_runtime_span,
 };
 use engine::{LAUNCH_SAMPLE_RATES, realtime::audit};
 
@@ -946,7 +946,7 @@ macro_rules! effect_conformance_test {
             ::bench_support::alloc::assert_installed();
             ::bench_support::alloc::set_mode(::bench_support::alloc::Mode::Count);
             let report = $crate::run_effect_conformance(
-                &$factory,
+                ::std::boxed::Box::new($factory),
                 $crate::ConformanceConfig {
                     quantum: 128,
                     blocks: 1,
@@ -1040,18 +1040,34 @@ fn lane_isolation_probe(
     }
 }
 
+/// Runs every launch gate against `factory`.
+///
+/// The harness admits the factory through a [`NativeEffectRegistry`] of its own, as a host does,
+/// so every request carries the registry's tail-bound entry (issue #1462 D1): a descriptor the
+/// registry refuses fails `descriptor.validation`, or names the registry's own code (for example
+/// `effect.tail_bound.inconsistent`).
 pub fn run_effect_conformance(
-    factory: &dyn NativeEffectFactory,
+    factory: Box<dyn NativeEffectFactory>,
     config: ConformanceConfig,
 ) -> EffectConformanceReport {
     let mut report = EffectConformanceReport {
         launch_gates: EffectConformanceTierReport::new(),
     };
     let descriptor = factory.descriptor();
-    if validate_descriptor(descriptor).is_err() {
+    let registry = match NativeEffectRegistry::new([factory]) {
+        Ok(registry) => registry,
+        Err(error) => {
+            report.launch_gates.failures.push(match error.code {
+                "effect.descriptor.invalid" => "descriptor.validation",
+                code => code,
+            });
+            return report;
+        }
+    };
+    let Some(factory) = registry.get(descriptor.id) else {
         report.launch_gates.failures.push("descriptor.validation");
         return report;
-    }
+    };
     if config.quantum < 4 || config.blocks == 0 {
         report.launch_gates.failures.push("configuration");
         return report;
@@ -1072,6 +1088,12 @@ pub fn run_effect_conformance(
                 // Issue #95: built from the descriptor, not hard-coded to the mock's single
                 // parameter. This is what lets the harness run against a real effect (eval E6).
                 let initial: Vec<_> = default_initial_values(descriptor).collect();
+                let Ok(tail_bound) =
+                    registry.tail_bound(descriptor.id, quality.sample_rate, quality.quality)
+                else {
+                    tier.failures.push("prepare.request");
+                    continue;
+                };
                 let request = PrepareEffectRequest {
                     sample_rate: quality.sample_rate,
                     quantum: config.quantum,
@@ -1081,6 +1103,7 @@ pub fn run_effect_conformance(
                     ports: unconnected_ports(descriptor),
                     initial_values: &initial,
                     limits: declared_limits(quality, config.quantum),
+                    tail_bound,
                 };
                 let expected = match expected_prepared_metadata(descriptor, request) {
                     Ok(v) => v,

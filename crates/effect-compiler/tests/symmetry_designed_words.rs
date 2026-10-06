@@ -107,6 +107,10 @@ fn request<'a>(
             maximum_scratch_bytes: 1 << 22,
             maximum_automation_spans_per_block: 128,
         },
+        tail_bound: launch_native_effect_registry()
+            .expect("launch registry")
+            .tail_bound(descriptor.id, SAMPLE_RATE, EffectQuality::Normal)
+            .expect("a declared row"),
     }
 }
 

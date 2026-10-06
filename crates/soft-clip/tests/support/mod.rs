@@ -70,6 +70,11 @@ pub fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(soft_clip::SoftClipFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 

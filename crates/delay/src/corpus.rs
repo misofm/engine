@@ -25,11 +25,11 @@
 
 use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
+    NativeEffectFactory, NativeEffectRegistry, ParameterChannel, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
 };
 
-use crate::{DELAY_PARAMETERS, DelayFactory};
+use crate::{DELAY_DESCRIPTOR, DELAY_PARAMETERS, DelayFactory};
 
 /// Sample rate every case renders at.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -155,6 +155,13 @@ pub fn run_case(case: usize, out: &mut [u32]) {
     assert_eq!(out.len(), POINTS, "corpus result buffer length");
 
     let values = initial_values(case);
+    // Issue #1462 D1: the request carries the registry's tail-bound entry.
+    let registry =
+        NativeEffectRegistry::new([Box::new(DelayFactory) as Box<dyn NativeEffectFactory>])
+            .expect("the delay is admitted");
+    let tail_bound = registry
+        .tail_bound(DELAY_DESCRIPTOR.id, SAMPLE_RATE, EffectQuality::Normal)
+        .expect("a declared row");
     let mut effect = DelayFactory
         .prepare(PrepareEffectRequest {
             sample_rate: SAMPLE_RATE,
@@ -171,6 +178,7 @@ pub fn run_case(case: usize, out: &mut [u32]) {
                 maximum_scratch_bytes: 36,
                 maximum_automation_spans_per_block: 16,
             },
+            tail_bound,
         })
         .expect("frozen corpus prepare request")
         .processor;

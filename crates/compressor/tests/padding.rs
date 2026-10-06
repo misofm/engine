@@ -266,6 +266,11 @@ fn the_fixtures_render_through_a_padded_bank_as_they_do_per_node() {
                     .map(|values| {
                         let mut request = request(values);
                         request.sample_rate = *rate;
+                        request.tail_bound = conformance::tail_bound_of(
+                            Box::new(compressor::CompressorFactory),
+                            request.sample_rate,
+                            request.quality,
+                        );
                         request.link_mode = link;
                         request
                     })

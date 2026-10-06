@@ -158,6 +158,11 @@ fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> 
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(compressor::CompressorFactory),
+            SAMPLE_RATE,
+            EffectQuality::Normal,
+        ),
     }
 }
 

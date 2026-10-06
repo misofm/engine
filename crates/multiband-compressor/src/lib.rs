@@ -1895,6 +1895,11 @@ mod reset_tests {
                     maximum_scratch_bytes: u64::MAX,
                     maximum_automation_spans_per_block: 32,
                 },
+                tail_bound: conformance::tail_bound_of(
+                    Box::new(crate::MultibandCompressorFactory),
+                    48_000,
+                    EffectQuality::Normal,
+                ),
             },
         )
         .expect("test metadata")

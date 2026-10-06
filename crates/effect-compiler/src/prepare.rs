@@ -4,7 +4,8 @@ use effect_contract::{
     InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane,
     ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
     PrepareEffectRequest, PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort, RegistryError, expected_prepared_metadata,
+    PreparedPorts, PreparedSidechainPort, RegisteredTailBound, RegistryError,
+    expected_prepared_metadata,
 };
 use engine::realtime::{
     ObservationReader, Producer, QueueFull, QueueGeneration, bounded_spsc, observation_slot,
@@ -84,6 +85,9 @@ pub struct EffectBankPreparation {
     pub ports: PreparedPorts,
     pub initial_values: Box<[InitialParameterValue]>,
     pub limits: PrepareEffectLimits,
+    /// The registry's tail-bound entry for this rate and quality (issue #1462 D1), read once
+    /// here and replayed into every request, so binding a bank never evaluates the descriptor.
+    pub tail_bound: RegisteredTailBound,
 }
 
 impl EffectBankPreparation {
@@ -98,6 +102,7 @@ impl EffectBankPreparation {
             ports: self.ports,
             initial_values: &self.initial_values,
             limits: self.limits,
+            tail_bound: self.tail_bound,
         }
     }
 }
@@ -451,15 +456,20 @@ fn prepare_with_console_eligibility(
                     });
                     continue;
                 }
-                if !descriptor.qualities.iter().any(|item| {
-                    item.quality == quality && item.sample_rate == session.sample_rate().0
-                }) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.quality.unsupported",
-                        path,
-                    });
-                    continue;
-                }
+                // Issue #1462 D1: the registry's table entry, not a call of the descriptor's
+                // `tail_and_rest`. A rate or quality the effect does not declare has no entry and
+                // is `effect.quality.unsupported`, as it always was.
+                let tail_bound =
+                    match registry.tail_bound(descriptor.id, session.sample_rate().0, quality) {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            diagnostics.push(EffectDiagnostic {
+                                code: error.code,
+                                path,
+                            });
+                            continue;
+                        }
+                    };
                 let initial = match resolve_initial_values(descriptor, &effect.params) {
                     Ok(initial) => initial,
                     Err(code) => {
@@ -536,6 +546,7 @@ fn prepare_with_console_eligibility(
                         maximum_scratch_bytes: caps.maximum_scratch_bytes,
                         maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
                     },
+                    tail_bound,
                 };
                 let request = bank_preparation.request();
                 let expected = match expected_prepared_metadata(descriptor, request) {
@@ -1267,6 +1278,12 @@ mod owner_tests {
                 maximum_scratch_bytes: u64::MAX,
                 maximum_automation_spans_per_block: 64,
             },
+            tail_bound: NativeEffectRegistry::new([
+                Box::new(ParametricEqFactory) as Box<dyn NativeEffectFactory>
+            ])
+            .expect("the EQ is admitted")
+            .tail_bound(PARAMETRIC_EQ_DESCRIPTOR.id, 48_000, EffectQuality::Normal)
+            .expect("a declared row"),
         }
     }
 
@@ -1520,6 +1537,16 @@ mod owner_tests {
         for sample_rate in [44_100, 48_000, 88_200, 96_000] {
             let mut preparation = preparation();
             preparation.sample_rate = sample_rate;
+            preparation.tail_bound = NativeEffectRegistry::new([
+                Box::new(ParametricEqFactory) as Box<dyn NativeEffectFactory>
+            ])
+            .expect("the EQ is admitted")
+            .tail_bound(
+                PARAMETRIC_EQ_DESCRIPTOR.id,
+                sample_rate,
+                EffectQuality::Normal,
+            )
+            .expect("a declared row");
             EffectControlOwner::new(
                 Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>,
                 &preparation,
@@ -1950,4 +1977,283 @@ fn same_unit(session: SessionUnit, contract: ParameterUnit) -> bool {
             | (SessionUnit::Linear, ParameterUnit::Linear)
             | (SessionUnit::Ratio, ParameterUnit::Ratio)
     )
+}
+
+/// Issue #1462 gate 1: an effect's `tail_and_rest` is evaluated once per (rate, quality) at
+/// registry build, and never again by preparation or bank binding.
+#[cfg(test)]
+mod tail_bound_count_tests {
+    use super::{EffectCompileCaps, prepare_native_session_effects};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use effect_contract::{
+        AutomationRate, BankWidth, EffectDescriptor, EffectId, EffectPrepareError,
+        EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples, LinkModeSet,
+        NativeEffectFactory, NativeEffectRegistry, ParameterChannelPolicy, ParameterDescriptor,
+        ParameterDomain, ParameterId, ParameterLattice, ParameterMapping, ParameterUnit,
+        PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+        PrepareEffectRequest, PreparedEffect, PreparedEffectBank, PreparedNativeEffect,
+        ProcessReport, QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError,
+        StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+        expected_prepared_metadata,
+    };
+    use session::{CompileCaps, compile_session, parse_session_json};
+
+    /// Every evaluation of [`counted`]; only this module's effect states it.
+    static EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    const TAIL: EffectTailBound = EffectTailBound {
+        tail: TailSamples::Finite(7),
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+    };
+
+    fn counted(_: u32, _: EffectQuality) -> EffectTailBound {
+        EVALUATIONS.fetch_add(1, Ordering::SeqCst);
+        TAIL
+    }
+
+    const fn port(id: &'static str) -> PortId {
+        match PortId::new(id) {
+            Ok(id) => id,
+            Err(_) => panic!("valid test port ID"),
+        }
+    }
+
+    const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
+        id: ParameterId(1),
+        display_name: "Gain",
+        display_unit: "dB",
+        unit: ParameterUnit::Db,
+        domain: ParameterDomain::Continuous,
+        minimum: Some(-24.0),
+        maximum: Some(24.0),
+        default_value: 0.0,
+        mapping: ParameterMapping::Linear,
+        automation_rate: AutomationRate::Block,
+        channel_policy: ParameterChannelPolicy::Shared,
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: 8,
+        readable: true,
+        automatable: true,
+        enum_choices: &[],
+        lattice: ParameterLattice::arithmetic(0.1, 1),
+    }];
+    const PORTS: [PortDescriptor; 2] = [
+        PortDescriptor {
+            id: port("main-in"),
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptor {
+            id: port("main-out"),
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+    const fn quality(sample_rate: u32) -> QualityDescriptor {
+        QualityDescriptor {
+            quality: EffectQuality::Normal,
+            sample_rate,
+            latency: LatencySamples(0),
+            maximum_state: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_fixed_bytes: 0,
+            scratch_bytes_per_frame: 0,
+        }
+    }
+    /// Four rows: every launch rate at `Normal`.
+    const QUALITIES: [QualityDescriptor; 4] = [
+        quality(44_100),
+        quality(48_000),
+        quality(88_200),
+        quality(96_000),
+    ];
+    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+        id: match EffectId::new("counted-tail") {
+            Ok(id) => id,
+            Err(_) => panic!("valid test effect ID"),
+        },
+        display_name: "Counted Tail",
+        contract_major: 1,
+        contract_minor: 0,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::DUAL_MONO,
+        parameters: &PARAMETERS,
+        ports: &PORTS,
+        qualities: &QUALITIES,
+        tail_and_rest: counted,
+        observations: &[],
+    };
+
+    /// Prepares and binds as every launch effect does: each instance's and each bank member's
+    /// metadata through `expected_prepared_metadata`. The bank then declines, which is all the
+    /// count needs.
+    struct Factory;
+    impl NativeEffectFactory for Factory {
+        fn descriptor(&self) -> &'static EffectDescriptor {
+            &DESCRIPTOR
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<PreparedEffect, EffectPrepareError> {
+            Ok(PreparedEffect {
+                processor: Box::new(Processor),
+                metadata: expected_prepared_metadata(&DESCRIPTOR, request)?,
+            })
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
+            for member in request.requests {
+                expected_prepared_metadata(&DESCRIPTOR, *member)?;
+            }
+            Ok(None)
+        }
+    }
+    struct Processor;
+    impl PreparedNativeEffect for Processor {
+        fn reset(&mut self, _: ResetKind) {}
+        fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
+            ProcessReport::default()
+        }
+        fn snapshot_state_payload(
+            &self,
+            _: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_state_payload(
+            &mut self,
+            _: u32,
+            _: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+    }
+
+    /// `tracks` tracks, each with two inserts of the counted effect, all routed to the output.
+    fn session_json(tracks: usize) -> String {
+        let insert = |id: &str| {
+            format!(
+                r#"{{"id":"{id}","identity":{{"kind":"native","effect_id":"counted-tail"}},
+                "quality":"normal","bypass":false,"link_mode":"dual_mono",
+                "params":[{{"parameter_id":1,"channel":"both","unit":"db","value":0.0}}],
+                "sidechain":{{"kind":"none"}}}}"#
+            )
+        };
+        let builtins = r#"{"polarity_invert":false,"trim_db":0.0,"hpf_hz":20.0,
+            "lpf_hz":20000.0,"delay_samples":0}"#;
+        let track = |index: usize| {
+            format!(
+                r#"{{"id":"t{index}","source_id":"voice","left_source_channel":0,
+                "right_source_channel":1,"builtins":{{"left":{builtins},"right":{builtins}}},
+                "console":[],"inserts":{{"effects":[{},{}]}},
+                "fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},
+                "pan":{{"left":1.0,"right":1.0,"smoothing_samples":16}}}}"#,
+                insert("a"),
+                insert("b")
+            )
+        };
+        let route = |index: usize| {
+            format!(
+                r#"{{"id":"r{index}","source":{{"kind":"track","track_id":"t{index}",
+                "tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"main-out"}},
+                "channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0,
+                "mute":false,"follows_mute":false}}"#
+            )
+        };
+        let join = |items: Vec<String>| items.join(",");
+        format!(
+            r#"{{"schema_version":1,"session_id":"counted.session","revision":"1",
+            "sample_rate_hz":48000,"quantum_frames":128,
+            "render_profile":{{"id":"native","mode":"single_thread"}},
+            "output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
+            "sources":[{{"id":"voice",
+            "content":"blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+            "channels":2,"bit_depth":"32f","frames":"48000"}}],
+            "console":{{"pre_insert":[],"post_insert":[]}},
+            "tracks":[{}],"submixes":[],"vcas":[],"outputs":[{{"id":"main-out"}}],
+            "routes":[{}],"automation":[]}}"#,
+            join((0..tracks).map(track).collect()),
+            join((0..tracks).map(route).collect())
+        )
+    }
+
+    /// Building the registry evaluates the statement once per declared row (four), and preparing
+    /// sixteen instances and binding them as four-lane banks evaluates it no further; every
+    /// prepared instance carries the stated values.
+    ///
+    /// Red mutation: `expected_prepared_metadata` calls `tail_and_rest` again instead of reading
+    /// the request's table entry (each instance, each compiler check and each bank member then
+    /// adds one), or the registry evaluates a row more than once.
+    #[test]
+    fn preparation_and_bank_binding_never_evaluate_the_tail_bound() {
+        const TRACKS: usize = 8;
+        let registry =
+            NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>])
+                .expect("the counted effect is admitted");
+        assert_eq!(EVALUATIONS.load(Ordering::SeqCst), QUALITIES.len());
+
+        let model = parse_session_json(&session_json(TRACKS)).expect("a valid session");
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("a compiled session");
+        let prepared = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("the counted effect prepares");
+        assert_eq!(prepared.entries.len(), TRACKS * 2);
+        for entry in &prepared.entries {
+            assert_eq!(
+                (
+                    entry.metadata.tail,
+                    entry.metadata.tail_every_peak,
+                    entry.metadata.rest
+                ),
+                (TAIL.tail, TAIL.tail_every_peak, TAIL.rest)
+            );
+        }
+
+        // Bind as the graph compiler does: each bank's requests are its members' replayed
+        // preparations (`EffectBankPreparation::request`).
+        for members in prepared.entries.chunks(BankWidth::Four.lanes() as usize) {
+            let requests: Vec<_> = members
+                .iter()
+                .map(|entry| entry.bank_preparation.request())
+                .collect();
+            let bound = members[0]
+                .factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: BankWidth::Four.backend(),
+                    width: BankWidth::Four,
+                    requests: &requests,
+                    active_mask: BankWidth::Four.full_mask(),
+                })
+                .expect("every member's metadata derives");
+            assert!(bound.is_none());
+        }
+        assert_eq!(EVALUATIONS.load(Ordering::SeqCst), QUALITIES.len());
+    }
 }

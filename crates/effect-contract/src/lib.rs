@@ -201,8 +201,10 @@ pub enum RestBound {
 /// The three bounds #1329 defines for a node, as one native effect states them at one rate and
 /// quality (#1377 D1).
 ///
-/// Computed by [`EffectDescriptor::tail_and_rest`] on the control thread and copied into the
-/// prepared metadata by [`expected_prepared_metadata`]; render never computes one.
+/// Computed by [`EffectDescriptor::tail_and_rest`] on the control thread, once per launch rate
+/// and quality when [`NativeEffectRegistry::new`] builds its table (issue #1462), and copied from
+/// that table into the prepared metadata by [`expected_prepared_metadata`]; render never computes
+/// one.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectTailBound {
     /// `T_decay`: the tail every report and PDC use ([`TailSamples`]).
@@ -613,9 +615,13 @@ pub struct EffectDescriptor {
     /// The effect's tail, tail over every peak and exact-rest bound at one rate and quality
     /// (decision 15 D15-4(b), #1377 D1): the one place they are computed.
     ///
-    /// Control plane only: [`expected_prepared_metadata`] calls it while it derives a prepared
-    /// instance's metadata, and render never calls it. It takes no parameter values, because
-    /// every bound holds over the effect's whole parameter domain at that rate (#1377 D5).
+    /// Control plane only, and evaluated once per launch rate and declared quality, by
+    /// [`NativeEffectRegistry::new`] alone (issue #1462 D1 and D3): the registry checks the three
+    /// values' consistency there and keeps them in its table, and every preparation reads the
+    /// table entry ([`NativeEffectRegistry::tail_bound`], carried by
+    /// [`PrepareEffectRequest::tail_bound`]) instead of calling this. Render never calls it. It
+    /// takes no parameter values, because every bound holds over the effect's whole parameter
+    /// domain at that rate (#1377 D5).
     pub tail_and_rest: fn(sample_rate: u32, quality: EffectQuality) -> EffectTailBound,
     /// The declared observation menu (issue #143 D1). Last, and empty for every effect that
     /// declares no tap, so a zero-tap descriptor encodes byte-identically to the pre-#143 wire.
@@ -1053,6 +1059,11 @@ pub struct PrepareEffectRequest<'a> {
     pub ports: PreparedPorts,
     pub initial_values: &'a [InitialParameterValue],
     pub limits: PrepareEffectLimits,
+    /// The effect's tail bound at this request's rate and quality, read from the
+    /// [`NativeEffectRegistry`]'s table (issue #1462 D1). [`expected_prepared_metadata`] copies it
+    /// into the metadata and refuses a request whose entry belongs to another effect, rate or
+    /// quality; it never calls [`EffectDescriptor::tail_and_rest`].
+    pub tail_bound: RegisteredTailBound,
 }
 /// One homogeneous bank's preparation: a request per lane, and which lanes carry a member.
 ///
@@ -2420,9 +2431,86 @@ pub trait PreparedNativeEffectBank: Send {
         false
     }
 }
+/// One entry of a [`NativeEffectRegistry`]'s tail-bound table: the [`EffectTailBound`] an effect's
+/// [`EffectDescriptor::tail_and_rest`] stated at one launch rate and one declared quality
+/// (issue #1462 D1).
+///
+/// Only the registry builds one, so a [`PrepareEffectRequest`] can carry no bound that the
+/// registry did not compute and check (D2). The entry names the effect, rate and quality it
+/// belongs to, and [`expected_prepared_metadata`] refuses it on any other request with
+/// `effect.tail_bound.mismatch`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisteredTailBound {
+    effect_id: EffectId,
+    sample_rate: u32,
+    quality: EffectQuality,
+    bound: EffectTailBound,
+}
+impl RegisteredTailBound {
+    /// The effect this entry belongs to.
+    #[must_use]
+    pub const fn effect_id(&self) -> EffectId {
+        self.effect_id
+    }
+    /// The launch rate this entry belongs to.
+    #[must_use]
+    pub const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+    /// The quality this entry belongs to.
+    #[must_use]
+    pub const fn quality(&self) -> EffectQuality {
+        self.quality
+    }
+    /// The three values, as the registry computed and checked them.
+    #[must_use]
+    pub const fn bound(&self) -> EffectTailBound {
+        self.bound
+    }
+}
+
+/// Whether one (rate, quality) row of an effect's [`EffectTailBound`] is consistent (issue #1462
+/// D2). Each rule is one check, so each has its own red mutant:
+///
+/// * (a) `tail_every_peak >= tail`, with [`TailSamples::Infinite`] the largest
+///   (`T_rest = max(T_decay, R(P*))` cannot be shorter than `T_decay`);
+/// * (b) [`RestBound::Unstated`] only with an infinite `tail_every_peak` (no `R(P*)` is derived,
+///   so no `T_rest` is);
+/// * (c) [`RestBound::Bounded`] only with a finite `tail_every_peak` (a derived `R(P*)` gives a
+///   finite `T_rest`).
+///
+/// `RestBound` and `TailSamples` each have exactly two variants, so "`rest` is `Unstated` if and
+/// only if `tail_every_peak` is `Infinite`" and "`rest` is `Bounded` if and only if
+/// `tail_every_peak` is finite" are one statement. (b) and (c) are its two directions, the two
+/// ways it can fail independently, and together they are the whole equivalence.
+const fn tail_bound_consistent(bound: EffectTailBound) -> bool {
+    let ordered = match (bound.tail, bound.tail_every_peak) {
+        (_, TailSamples::Infinite) => true,
+        (TailSamples::Infinite, TailSamples::Finite(_)) => false,
+        (TailSamples::Finite(tail), TailSamples::Finite(every_peak)) => every_peak >= tail,
+    };
+    let unstated_is_infinite = !matches!(bound.rest, RestBound::Unstated)
+        || matches!(bound.tail_every_peak, TailSamples::Infinite);
+    let bounded_is_finite = !matches!(bound.rest, RestBound::Bounded(_))
+        || matches!(bound.tail_every_peak, TailSamples::Finite(_));
+    ordered && unstated_is_infinite && bounded_is_finite
+}
+
+/// One admitted effect: its factory and its tail-bound table, one entry per declared quality row
+/// (every launch rate of every declared quality, as [`validate_descriptor`] requires).
+struct RegistryEntry {
+    factory: Arc<dyn NativeEffectFactory>,
+    tail_bounds: Box<[RegisteredTailBound]>,
+}
+
+/// The native effects a host can prepare, each admitted once (issue #1330) with its tail-bound
+/// table computed and checked once (issue #1462).
+///
+/// The table is control-side memory: its entries reach a [`PreparedEffectMetadata`], never a
+/// processor.
 #[derive(Default)]
 pub struct NativeEffectRegistry {
-    factories: BTreeMap<&'static str, Arc<dyn NativeEffectFactory>>,
+    entries: BTreeMap<&'static str, RegistryEntry>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryError {
@@ -2450,30 +2538,81 @@ impl NativeEffectRegistry {
                     id: Some(d.id),
                 });
             }
-            if m.insert(d.id.as_str(), Arc::from(x)).is_some() {
+            // Issue #1462 D1/D2: the descriptor's statement is evaluated here, once per declared
+            // quality row (every launch rate of every declared quality), checked, and kept.
+            let mut tail_bounds = Vec::with_capacity(d.qualities.len());
+            for row in d.qualities {
+                let bound = (d.tail_and_rest)(row.sample_rate, row.quality);
+                if !tail_bound_consistent(bound) {
+                    return Err(RegistryError {
+                        code: "effect.tail_bound.inconsistent",
+                        id: Some(d.id),
+                    });
+                }
+                tail_bounds.push(RegisteredTailBound {
+                    effect_id: d.id,
+                    sample_rate: row.sample_rate,
+                    quality: row.quality,
+                    bound,
+                });
+            }
+            let entry = RegistryEntry {
+                factory: Arc::from(x),
+                tail_bounds: tail_bounds.into_boxed_slice(),
+            };
+            if m.insert(d.id.as_str(), entry).is_some() {
                 return Err(RegistryError {
                     code: "effect.registry.duplicate",
                     id: Some(d.id),
                 });
             }
         }
-        Ok(Self { factories: m })
+        Ok(Self { entries: m })
     }
     pub fn get(&self, id: EffectId) -> Option<&dyn NativeEffectFactory> {
-        self.factories.get(id.as_str()).map(Arc::as_ref)
+        self.get_ascii(id.as_str())
     }
     pub fn get_ascii(&self, id: &str) -> Option<&dyn NativeEffectFactory> {
-        self.factories.get(id).map(Arc::as_ref)
+        self.entries.get(id).map(|entry| entry.factory.as_ref())
     }
     /// Clone the immutable factory handle for an off-render prepared plan.
     pub fn get_shared_ascii(&self, id: &str) -> Option<Arc<dyn NativeEffectFactory>> {
-        self.factories.get(id).map(Arc::clone)
+        self.entries.get(id).map(|entry| Arc::clone(&entry.factory))
+    }
+    /// The table entry for `id` at `sample_rate` and `quality` (issue #1462 D1): the value every
+    /// [`PrepareEffectRequest::tail_bound`] carries.
+    ///
+    /// # Errors
+    ///
+    /// `effect.native.unavailable` when no admitted effect has `id`;
+    /// `effect.quality.unsupported` when the effect declares no quality row at `sample_rate` and
+    /// `quality` (a rate outside the launch set never has one). The lookup never falls back to
+    /// [`EffectDescriptor::tail_and_rest`].
+    pub fn tail_bound(
+        &self,
+        id: EffectId,
+        sample_rate: u32,
+        quality: EffectQuality,
+    ) -> Result<RegisteredTailBound, RegistryError> {
+        let entry = self.entries.get(id.as_str()).ok_or(RegistryError {
+            code: "effect.native.unavailable",
+            id: Some(id),
+        })?;
+        entry
+            .tail_bounds
+            .iter()
+            .find(|row| row.sample_rate == sample_rate && row.quality == quality)
+            .copied()
+            .ok_or(RegistryError {
+                code: "effect.quality.unsupported",
+                id: Some(id),
+            })
     }
     pub fn len(&self) -> usize {
-        self.factories.len()
+        self.entries.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.factories.is_empty()
+        self.entries.is_empty()
     }
     /// Every registered descriptor, in stable [`EffectId`] order (issue #137 D4).
     ///
@@ -2481,7 +2620,9 @@ impl NativeEffectRegistry {
     /// registry is missing from the emitted metadata" is not a rule anyone has to remember to
     /// check: there is no other list to fall out of step with.
     pub fn descriptors(&self) -> impl Iterator<Item = &'static EffectDescriptor> + '_ {
-        self.factories.values().map(|factory| factory.descriptor())
+        self.entries
+            .values()
+            .map(|entry| entry.factory.descriptor())
     }
 }
 /// The exact `(parameter_index, channel)` sequence a prepare request must carry, in order.
@@ -2710,6 +2851,14 @@ pub fn validate_prepare_request(
 }
 
 /// Derive the sole conforming immutable metadata value for a validated prepare request.
+///
+/// The tail bound comes from the request's [`RegisteredTailBound`], the registry's table entry
+/// (issue #1462 D1): this never calls [`EffectDescriptor::tail_and_rest`].
+///
+/// # Errors
+///
+/// Every [`validate_prepare_request`] error, then `effect.tail_bound.mismatch` when the request's
+/// [`PrepareEffectRequest::tail_bound`] is the entry of another effect, rate or quality.
 pub fn expected_prepared_metadata(
     descriptor: &'static EffectDescriptor,
     request: PrepareEffectRequest<'_>,
@@ -2718,7 +2867,16 @@ pub fn expected_prepared_metadata(
         quality,
         scratch_bytes,
     } = validate_prepare_request(descriptor, request)?;
-    let bound = (descriptor.tail_and_rest)(request.sample_rate, request.quality);
+    let entry = request.tail_bound;
+    if entry.effect_id != descriptor.id
+        || entry.sample_rate != request.sample_rate
+        || entry.quality != request.quality
+    {
+        return Err(EffectPrepareError {
+            code: "effect.tail_bound.mismatch",
+        });
+    }
+    let bound = entry.bound;
     Ok(PreparedEffectMetadata {
         descriptor,
         sample_rate: request.sample_rate,
@@ -3055,11 +3213,12 @@ mod continuous_mapping_validity_tests {
 #[cfg(test)]
 mod tail_bound_tests {
     use super::{
-        EffectDescriptor, EffectId, EffectQuality, EffectTailBound, LatencySamples, LinkMode,
-        LinkModeSet, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectLimits,
-        PrepareEffectRequest, PreparedPorts, PreparedSidechainPort, QualityDescriptor, RestBound,
+        EffectDescriptor, EffectId, EffectPrepareError, EffectQuality, EffectTailBound,
+        LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, NativeEffectRegistry,
+        PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+        PrepareEffectLimits, PrepareEffectRequest, PreparedEffect, PreparedEffectBank,
+        PreparedPorts, PreparedSidechainPort, QualityDescriptor, RegisteredTailBound, RestBound,
         RestSamples, StatePayloadSizes, TailSamples, expected_prepared_metadata,
-        validate_descriptor,
     };
     use engine::LAUNCH_SAMPLE_RATES;
 
@@ -3084,9 +3243,9 @@ mod tail_bound_tests {
         }
     }
 
-    const fn quality(sample_rate: u32) -> QualityDescriptor {
+    const fn quality(quality: EffectQuality, sample_rate: u32) -> QualityDescriptor {
         QualityDescriptor {
-            quality: EffectQuality::Normal,
+            quality,
             sample_rate,
             latency: LatencySamples(0),
             maximum_state: StatePayloadSizes {
@@ -3114,61 +3273,108 @@ mod tail_bound_tests {
         },
     ];
 
-    static QUALITIES: [QualityDescriptor; 4] = [
-        quality(44_100),
-        quality(48_000),
-        quality(88_200),
-        quality(96_000),
+    static QUALITIES: [QualityDescriptor; 8] = [
+        quality(EffectQuality::Normal, 44_100),
+        quality(EffectQuality::Normal, 48_000),
+        quality(EffectQuality::Normal, 88_200),
+        quality(EffectQuality::Normal, 96_000),
+        quality(EffectQuality::High, 44_100),
+        quality(EffectQuality::High, 48_000),
+        quality(EffectQuality::High, 88_200),
+        quality(EffectQuality::High, 96_000),
     ];
 
-    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
-        id: match EffectId::new("tail-bound-test") {
-            Ok(id) => id,
-            Err(_) => panic!("valid test effect ID"),
-        },
-        display_name: "Tail Bound Test",
-        contract_major: 1,
-        contract_minor: 0,
-        state_layout_version: 1,
-        supported_link_modes: LinkModeSet::DUAL_MONO,
-        parameters: &[],
-        ports: &PORTS,
-        qualities: &QUALITIES,
-        tail_and_rest,
-        observations: &[],
-    };
+    const fn descriptor(id: &'static str) -> EffectDescriptor {
+        EffectDescriptor {
+            id: match EffectId::new(id) {
+                Ok(id) => id,
+                Err(_) => panic!("valid test effect ID"),
+            },
+            display_name: "Tail Bound Test",
+            contract_major: 1,
+            contract_minor: 0,
+            state_layout_version: 1,
+            supported_link_modes: LinkModeSet::DUAL_MONO,
+            parameters: &[],
+            ports: &PORTS,
+            qualities: &QUALITIES,
+            tail_and_rest,
+            observations: &[],
+        }
+    }
 
-    /// #1377 D3: the prepared metadata, and the program key a cohort is grouped by, carry the
-    /// three values the descriptor's `tail_and_rest` states for the request's own rate.
+    static DESCRIPTOR: EffectDescriptor = descriptor("tail-bound-test");
+    static OTHER: EffectDescriptor = descriptor("tail-bound-other");
+
+    struct Factory(&'static EffectDescriptor);
+
+    impl NativeEffectFactory for Factory {
+        fn descriptor(&self) -> &'static EffectDescriptor {
+            self.0
+        }
+
+        fn prepare(
+            &self,
+            _request: PrepareEffectRequest<'_>,
+        ) -> Result<PreparedEffect, EffectPrepareError> {
+            Err(EffectPrepareError {
+                code: "fixture.prepare.unsupported",
+            })
+        }
+
+        fn bind_homogeneous_bank(
+            &self,
+            _request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
+            Ok(None)
+        }
+    }
+
+    fn registry() -> NativeEffectRegistry {
+        NativeEffectRegistry::new([
+            Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>,
+            Box::new(Factory(&OTHER)),
+        ])
+        .expect("valid test descriptors")
+    }
+
+    fn request(sample_rate: u32, tail_bound: RegisteredTailBound) -> PrepareEffectRequest<'static> {
+        PrepareEffectRequest {
+            sample_rate,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            initial_values: &[],
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 1024,
+                maximum_scratch_bytes: 1024,
+                maximum_automation_spans_per_block: 8,
+            },
+            tail_bound,
+        }
+    }
+
+    /// #1377 D3, through #1462's table: the prepared metadata, and the program key a cohort is
+    /// grouped by, carry the three values the descriptor's `tail_and_rest` states for the
+    /// request's own rate.
     ///
-    /// Red mutations: `expected_prepared_metadata` calls the function at a fixed rate, or copies
-    /// one field into another, or writes `Unstated`/`Infinite` in place of the stated value;
-    /// `program_key` drops or crosses `tail_every_peak` or `rest`.
+    /// Red mutations: the registry evaluates the function at a fixed rate, or
+    /// `expected_prepared_metadata` copies one field into another, or writes `Unstated`/`Infinite`
+    /// in place of the stated value; `program_key` drops or crosses `tail_every_peak` or `rest`.
     #[test]
     fn prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate() {
-        validate_descriptor(&DESCRIPTOR).expect("valid test descriptor");
+        let registry = registry();
         for rate in LAUNCH_SAMPLE_RATES {
             let rate = rate.0;
-            let metadata = expected_prepared_metadata(
-                &DESCRIPTOR,
-                PrepareEffectRequest {
-                    sample_rate: rate,
-                    quantum: 128,
-                    quality: EffectQuality::Normal,
-                    bypass: false,
-                    link_mode: LinkMode::DualMono,
-                    ports: PreparedPorts {
-                        sidechain: PreparedSidechainPort::None,
-                    },
-                    initial_values: &[],
-                    limits: PrepareEffectLimits {
-                        maximum_total_state_bytes: 1024,
-                        maximum_scratch_bytes: 1024,
-                        maximum_automation_spans_per_block: 8,
-                    },
-                },
-            )
-            .expect("valid request");
+            let entry = registry
+                .tail_bound(DESCRIPTOR.id, rate, EffectQuality::Normal)
+                .expect("a declared row");
+            let metadata =
+                expected_prepared_metadata(&DESCRIPTOR, request(rate, entry)).expect("valid");
             let stated = tail_and_rest(rate, EffectQuality::Normal);
             assert_eq!(metadata.tail, stated.tail, "{rate}");
             assert_eq!(metadata.tail_every_peak, stated.tail_every_peak, "{rate}");
@@ -3178,6 +3384,53 @@ mod tail_bound_tests {
             assert_eq!(key.tail_every_peak, stated.tail_every_peak, "{rate}");
             assert_eq!(key.rest, stated.rest, "{rate}");
         }
+    }
+
+    /// #1462 D1: a request carrying the table entry of another rate, another quality or another
+    /// effect is refused, never prepared with that entry's bound; a rate outside the launch set
+    /// has no entry and is a typed lookup error.
+    ///
+    /// Red mutations: `expected_prepared_metadata` stops comparing the entry's effect, rate or
+    /// quality with the request's (each one turns one assertion red); `tail_bound` falls back to
+    /// some row for an undeclared rate.
+    #[test]
+    fn a_request_with_another_rows_entry_is_refused() {
+        let registry = registry();
+        let entry = |descriptor: &EffectDescriptor, rate, quality| {
+            registry
+                .tail_bound(descriptor.id, rate, quality)
+                .expect("a declared row")
+        };
+        let normal_96k = entry(&DESCRIPTOR, 96_000, EffectQuality::Normal);
+        let mismatch = Err(EffectPrepareError {
+            code: "effect.tail_bound.mismatch",
+        });
+        // Another rate.
+        assert_eq!(
+            expected_prepared_metadata(&DESCRIPTOR, request(48_000, normal_96k)).map(|_| ()),
+            mismatch
+        );
+        // Another quality.
+        let mut high = request(96_000, normal_96k);
+        high.quality = EffectQuality::High;
+        assert_eq!(
+            expected_prepared_metadata(&DESCRIPTOR, high).map(|_| ()),
+            mismatch
+        );
+        // Another effect.
+        let other = entry(&OTHER, 96_000, EffectQuality::Normal);
+        assert_eq!(
+            expected_prepared_metadata(&DESCRIPTOR, request(96_000, other)).map(|_| ()),
+            mismatch
+        );
+        // The matching entry prepares.
+        assert!(expected_prepared_metadata(&DESCRIPTOR, request(96_000, normal_96k)).is_ok());
+        assert_eq!(
+            registry
+                .tail_bound(DESCRIPTOR.id, 192_000, EffectQuality::Normal)
+                .map_err(|error| error.code),
+            Err("effect.quality.unsupported")
+        );
     }
 }
 

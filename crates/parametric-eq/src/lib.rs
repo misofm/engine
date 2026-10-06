@@ -6617,6 +6617,11 @@ mod target_application {
                 maximum_scratch_bytes: 128 * REST_PLANE_BYTES_PER_FRAME,
                 maximum_automation_spans_per_block: 48,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::ParametricEqFactory),
+                48_000,
+                Quality::Normal,
+            ),
         }
     }
 
@@ -7193,6 +7198,11 @@ mod ramping_elision {
                 maximum_scratch_bytes: 1 << 16,
                 maximum_automation_spans_per_block: 48,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::ParametricEqFactory),
+                rate,
+                Quality::Normal,
+            ),
         }
     }
 
@@ -8106,6 +8116,11 @@ mod stationary_subnormal {
                 maximum_scratch_bytes: 1 << 16,
                 maximum_automation_spans_per_block: 48,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::ParametricEqFactory),
+                RATE.0,
+                Quality::Normal,
+            ),
         };
         let requests = vec![request; W];
         let metadata =

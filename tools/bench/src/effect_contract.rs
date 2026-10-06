@@ -46,6 +46,11 @@ fn prepared(bypass: bool) -> Box<dyn PreparedNativeEffect> {
                 maximum_scratch_bytes: 1 << 20,
                 maximum_automation_spans_per_block: 8,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(DualAccumulatorDelayFactory::correct()),
+                48_000,
+                EffectQuality::Normal,
+            ),
         })
         .expect("valid bounded conformance processor")
         .processor
@@ -113,7 +118,7 @@ fn conformance() {
     // abort policy: it is a different process.
     bench_alloc::set_mode(bench_alloc::Mode::Count);
     let report = run_effect_conformance(
-        &DualAccumulatorDelayFactory::correct(),
+        Box::new(DualAccumulatorDelayFactory::correct()),
         ConformanceConfig {
             quantum: 128,
             blocks: 1,

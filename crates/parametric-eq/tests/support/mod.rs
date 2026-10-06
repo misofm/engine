@@ -227,6 +227,11 @@ pub fn request_at_rate<'a>(
             maximum_scratch_bytes: 128 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
             maximum_automation_spans_per_block: 48,
         },
+        tail_bound: conformance::tail_bound_for_request(
+            Box::new(parametric_eq::ParametricEqFactory),
+            sample_rate,
+            Quality::Normal,
+        ),
     }
 }
 

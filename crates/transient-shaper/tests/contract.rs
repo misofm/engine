@@ -33,7 +33,13 @@ fn descriptor_resources_and_transactional_caps_are_frozen() {
     for quality in TRANSIENT_SHAPER_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(0));
         assert_eq!(
-            (TRANSIENT_SHAPER_DESCRIPTOR.tail_and_rest)(quality.sample_rate, quality.quality).tail,
+            conformance::tail_bound_of(
+                Box::new(transient_shaper::TransientShaperFactory),
+                quality.sample_rate,
+                quality.quality
+            )
+            .bound()
+            .tail,
             TailSamples::Finite(0)
         );
         assert_eq!(quality.maximum_state.total(), Some(112));

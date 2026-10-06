@@ -108,6 +108,11 @@ fn request<'a>(
                 .max(1),
             maximum_automation_spans_per_block: 4,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(multiband_compressor::MultibandCompressorFactory),
+            quality.sample_rate,
+            quality.quality,
+        ),
     }
 }
 

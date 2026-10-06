@@ -1252,6 +1252,11 @@ mod tests {
                     maximum_scratch_bytes: 64,
                     maximum_automation_spans_per_block: 16,
                 },
+                tail_bound: conformance::tail_bound_of(
+                    Box::new(crate::GateExpanderFactory),
+                    48_000,
+                    EffectQuality::Normal,
+                ),
             },
         )
         .expect("prepared metadata")

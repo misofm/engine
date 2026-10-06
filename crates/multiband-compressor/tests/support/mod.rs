@@ -110,6 +110,11 @@ pub fn request_with(
             maximum_scratch_bytes: u64::MAX,
             maximum_automation_spans_per_block: 32,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(multiband_compressor::MultibandCompressorFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 

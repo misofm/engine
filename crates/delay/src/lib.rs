@@ -1763,6 +1763,11 @@ mod tests {
                 maximum_scratch_bytes: FIXED_BYTES,
                 maximum_automation_spans_per_block: 16,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::DelayFactory),
+                sample_rate,
+                EffectQuality::Normal,
+            ),
         }
     }
 

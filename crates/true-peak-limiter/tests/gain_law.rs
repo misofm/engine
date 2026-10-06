@@ -76,6 +76,11 @@ fn request_at_rate(values: &[InitialParameterValue], sample_rate: u32) -> Prepar
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(true_peak_limiter::TruePeakLimiterFactory),
+            sample_rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 

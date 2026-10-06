@@ -49,6 +49,11 @@ fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(crate::CompressorFactory),
+            rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 

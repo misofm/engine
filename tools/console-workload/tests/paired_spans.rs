@@ -210,6 +210,10 @@ fn prepare_request<'a>(
             maximum_scratch_bytes: 1 << 28,
             maximum_automation_spans_per_block: QUEUE as u32,
         },
+        tail_bound: launch_native_effect_registry()
+            .expect("launch registry")
+            .tail_bound(descriptor.id, RATE, quality(descriptor))
+            .expect("a declared row"),
     })
 }
 

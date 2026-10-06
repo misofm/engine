@@ -79,6 +79,11 @@ fn request(values: &[InitialParameterValue], link_mode: LinkMode) -> PrepareEffe
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(true_peak_limiter::TruePeakLimiterFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 

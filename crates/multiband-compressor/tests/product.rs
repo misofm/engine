@@ -68,6 +68,11 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         let initial = values();
         let mut prepared = request(&initial);
         prepared.sample_rate = rate;
+        prepared.tail_bound = conformance::tail_bound_of(
+            Box::new(multiband_compressor::MultibandCompressorFactory),
+            prepared.sample_rate,
+            prepared.quality,
+        );
         prepared.limits.maximum_total_state_bytes = 384;
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
@@ -118,6 +123,11 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
 
         let mut bypass_request = request_with(&initial, LinkMode::DualMono, 128, true);
         bypass_request.sample_rate = rate;
+        bypass_request.tail_bound = conformance::tail_bound_of(
+            Box::new(multiband_compressor::MultibandCompressorFactory),
+            bypass_request.sample_rate,
+            bypass_request.quality,
+        );
         bypass_request.limits.maximum_total_state_bytes = total;
         bypass_request.limits.maximum_scratch_bytes = 1;
         let bypass = MultibandCompressorFactory
@@ -150,6 +160,11 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
                 .collect::<Vec<_>>();
             for request in &mut bank_requests {
                 request.sample_rate = rate;
+                request.tail_bound = conformance::tail_bound_of(
+                    Box::new(multiband_compressor::MultibandCompressorFactory),
+                    request.sample_rate,
+                    request.quality,
+                );
                 request.limits.maximum_total_state_bytes = total;
                 request.limits.maximum_scratch_bytes = 1;
             }
@@ -194,6 +209,11 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
                 .collect::<Vec<_>>();
             for request in &mut bypass_bank_requests {
                 request.sample_rate = rate;
+                request.tail_bound = conformance::tail_bound_of(
+                    Box::new(multiband_compressor::MultibandCompressorFactory),
+                    request.sample_rate,
+                    request.quality,
+                );
                 request.limits.maximum_total_state_bytes = total;
                 request.limits.maximum_scratch_bytes = 1;
             }
@@ -259,6 +279,11 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         }
         let mut below = request(&initial);
         below.sample_rate = rate;
+        below.tail_bound = conformance::tail_bound_of(
+            Box::new(multiband_compressor::MultibandCompressorFactory),
+            below.sample_rate,
+            below.quality,
+        );
         below.limits.maximum_total_state_bytes = total - 1;
         below.limits.maximum_scratch_bytes = 1;
         assert_eq!(
@@ -272,6 +297,11 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             .collect::<Vec<_>>();
         for request in &mut below_bank_requests {
             request.sample_rate = rate;
+            request.tail_bound = conformance::tail_bound_of(
+                Box::new(multiband_compressor::MultibandCompressorFactory),
+                request.sample_rate,
+                request.quality,
+            );
             request.limits.maximum_total_state_bytes = total - 1;
             request.limits.maximum_scratch_bytes = 1;
         }
@@ -822,6 +852,11 @@ fn bank_rejected_restore_changes_nothing_at_each_launch_rate() {
         let mut requests = (0..4).map(|_| request(&initial)).collect::<Vec<_>>();
         for request in &mut requests {
             request.sample_rate = rate;
+            request.tail_bound = conformance::tail_bound_of(
+                Box::new(multiband_compressor::MultibandCompressorFactory),
+                request.sample_rate,
+                request.quality,
+            );
         }
         let prepared = support::bank(BankWidth::Four, &requests);
         let sizes = prepared.metadata.program_key.state_sizes;

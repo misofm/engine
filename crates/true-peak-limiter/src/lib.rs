@@ -5005,6 +5005,11 @@ mod tests {
                 maximum_scratch_bytes: 24,
                 maximum_automation_spans_per_block: 16,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::TruePeakLimiterFactory),
+                sample_rate,
+                EffectQuality::Normal,
+            ),
         }
     }
 
@@ -5141,8 +5146,13 @@ mod tests {
             assert_eq!(quality.scratch_fixed_bytes, 24);
             assert_eq!(quality.scratch_bytes_per_frame, 0);
             assert_eq!(
-                (TRUE_PEAK_LIMITER_DESCRIPTOR.tail_and_rest)(quality.sample_rate, quality.quality)
-                    .tail,
+                conformance::tail_bound_of(
+                    Box::new(crate::TruePeakLimiterFactory),
+                    quality.sample_rate,
+                    quality.quality
+                )
+                .bound()
+                .tail,
                 TailSamples::Infinite
             );
         }

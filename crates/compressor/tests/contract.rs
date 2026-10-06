@@ -65,6 +65,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
     for rate in RATES {
         let mut active_request = request(&active_values);
         active_request.sample_rate = rate;
+        active_request.tail_bound = conformance::tail_bound_of(
+            Box::new(compressor::CompressorFactory),
+            active_request.sample_rate,
+            active_request.quality,
+        );
         let prepared = support::prepare_with_metadata(active_request);
         assert_eq!(prepared.metadata.latency, LatencySamples(0));
         let mut active = prepared.processor;
@@ -78,6 +83,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
 
         let mut bypass_request = request(&active_values);
         bypass_request.sample_rate = rate;
+        bypass_request.tail_bound = conformance::tail_bound_of(
+            Box::new(compressor::CompressorFactory),
+            bypass_request.sample_rate,
+            bypass_request.quality,
+        );
         bypass_request.bypass = true;
         let mut bypass = prepare(bypass_request);
         let mut bypass_left = vec![0.0_f32; 128];
@@ -101,6 +111,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
         ] {
             let mut identity_request = request(values);
             identity_request.sample_rate = rate;
+            identity_request.tail_bound = conformance::tail_bound_of(
+                Box::new(compressor::CompressorFactory),
+                identity_request.sample_rate,
+                identity_request.quality,
+            );
             let mut identity = prepare(identity_request);
             let mut identity_left = vec![0.0_f32; 128];
             let mut identity_right = vec![0.0_f32; 128];
@@ -134,6 +149,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
             .map(|_| {
                 let mut request = request(&active_values);
                 request.sample_rate = rate;
+                request.tail_bound = conformance::tail_bound_of(
+                    Box::new(compressor::CompressorFactory),
+                    request.sample_rate,
+                    request.quality,
+                );
                 request
             })
             .collect();
@@ -174,6 +194,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
             .map(|_| {
                 let mut request = request(&active_values);
                 request.sample_rate = rate;
+                request.tail_bound = conformance::tail_bound_of(
+                    Box::new(compressor::CompressorFactory),
+                    request.sample_rate,
+                    request.quality,
+                );
                 request.bypass = true;
                 request
             })

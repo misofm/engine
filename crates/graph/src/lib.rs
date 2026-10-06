@@ -7370,6 +7370,11 @@ mod tests {
                     maximum_scratch_bytes: 1_000,
                     maximum_automation_spans_per_block: 1,
                 },
+                tail_bound: conformance::tail_bound_of(
+                    Box::new(DualAccumulatorDelayFactory::correct()),
+                    rate,
+                    EffectQuality::Normal,
+                ),
             })
             .expect("effect");
         let direct_destination = GraphEdgeId::RouteDestination {
