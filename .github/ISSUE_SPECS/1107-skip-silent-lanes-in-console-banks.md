@@ -40,3 +40,9 @@ active lane per bank), split that row into a qualification issue first.
 ## Dependencies
 
 - None open. *Measure the console strip against its baseline* (S4, #1099) is closed as completed.
+- Note (root-authorized, 2026-10-06; #1329 Amendment 3 addendum, A2): a lane's state is at the
+  kernel's exact fixed point no later than the node's exact-rest bound, `RestSamples` (#1329 D2),
+  which holds for every input up to its stated peak. Silence skipping uses `RestSamples`, not
+  #1329's `T_rest`: `T_rest = max(T_decay, R(P*))` reaches exact zero only for inputs below the
+  flush floor `P*` (above it, it is the `-144 dB` decay bound). #1329 delivers both for the builtin
+  input section; each effect's bounds follow in #1372-#1376.

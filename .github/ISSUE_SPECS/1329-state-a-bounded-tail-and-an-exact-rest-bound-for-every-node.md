@@ -243,8 +243,9 @@ the test value are amended accordingly. This is still attempt 3 (no verdict yet)
     can be skipped.
   - Disabled filters and gain-only parts: both `0` (D4, D6).
   - Each consumer names which value it uses: **tail reporting uses `T_decay`** (`TailSamples` as
-    composed by PDC, the C ABI and browser reports, #1261, #1262); **silence skipping uses
-    `T_rest`** (#1107). `TailSamples::Finite` carries `T_decay`, and its doc and
+    composed by PDC, the C ABI and browser reports, #1261, #1262); ~~silence skipping uses
+    `T_rest` (#1107)~~ *(replaced by the addendum, A2: silence skipping uses D2's `RestSamples`;
+    `T_rest` is its low-peak case)*. `TailSamples::Finite` carries `T_decay`, and its doc and
     `docs/EFFECT_CONTRACT_V1.md` state the peak range `P >= P*` and the exact-zero branch from
     `T_rest` below it. `T_rest` is stored and exposed beside `T_decay` wherever `T_decay` is
     (`InputBuiltins`, `BuiltinChain`, `input_section_live_bound`); the implementer names the field
@@ -285,6 +286,27 @@ the test value are amended accordingly. This is still attempt 3 (no verdict yet)
   tools and `console-workload` to 10,000,000. Which limit, if any, 2.6M was meant to protect is
   open for root. Gate 7 gates the headroom to the limits the documents name and records the
   envelope's headroom (`any_sanitized_input` is 13,000 samples, 0.5 %, below 2.6M at 88.2 kHz).
+  *(Closed by the addendum, A1: no limit stands at 2.6M.)*
+
+## Amendment 3 addendum (root answers, 2026-10-06)
+
+Root's answers to the implementer's questions after Amendment 3, binding on this attempt. They
+amend G1's consumer line, G5, "Hazards" and gate 7.
+
+- **A1. No 2.6M limit.** The phrase came from Amendment 2's value range; no limit stands behind it.
+  The 2.6M check is dropped. Gate 7 checks `T_decay` and the exact-rest bound against the real
+  configured limit, `maximum_finite_tail_samples` = 10,000,000 (`graph_fixture`, the audit tools,
+  `console-workload`), and records the headroom. G5's open question is closed.
+- **A2. Silence skipping uses `RestSamples`.** #1107 uses D2's `RestSamples`, the exact-rest bound
+  valid for every input. `T_rest = max(T_decay, R(P*))` is only the low-peak case: the time to
+  exact zero for an input of peak `P < P*` (for `P >= P*` it is the decay bound, not exact zero).
+  G1's "silence skipping uses `T_rest`" is replaced by this, and #1107's spec records it.
+- **A3. The name.** The implementer names the exposed `T_rest` consistently with `RestSamples` and
+  the existing `TailSamples`: no version suffix, no ad-hoc abbreviation. The chosen name is stated
+  in `docs/EFFECT_CONTRACT_V1.md` and in the attempt record.
+- **A4. Hot-file order.** `docs/handoffs/decision-15-2026-10-05/STREAMS.md` lists #1455 in the
+  multiband `run_segment` hot-file row: after #1409, and in either order with #1338 (neither
+  depends on the other; the later slice rebases).
 
 ## Deliverables
 
@@ -368,9 +390,8 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   (`tools/audit/src/graph.rs:285`, `fixture_builtins.rs:709`, `builtins_graph.rs:641`) and
   `console-workload` (`tools/console-workload/src/lib.rs:2013`) 10,000,000. It compares the
   composed `TailSamples`, which carry `T_decay` (Amendment 3, G1): about 0.9M per input section at
-  the live bound, summed along a path. Values here are below 2.6M (Amendment 2); that figure is the
-  envelope of this slice's values, not a limit the documents name, and which limit it was meant to
-  protect is open for root (Amendment 3, G5). Gate 7 holds the headroom.
+  the live bound, summed along a path. No limit stands at 2.6M (addendum, A1). Gate 7 holds the
+  headroom to 10,000,000.
 - Depends on #1328's `REST_EPS` and its A9 `N_SILENCE` law; without them D2 has no finite value at
   the top of the domain. Use #1328's `N_SILENCE` constant, never a copy of its value.
 
@@ -440,12 +461,11 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    - `cargo build --locked --release -p audit && ./target/release/audit capi` (`qualification.yml:715`)
    - `bash scripts/check-builtins-fixtures.sh . target/release/audit`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
-7. *(Amendment 3, G5.)* **Headroom.** In `tail_contract.rs`, at every launch rate: `T_decay` and
-   `T_rest` of `input_section_live_bound(rate)` are below 10,000,000, the smallest finite
-   `maximum_finite_tail_samples` the tree sets (a strip's builtin path has one input section, so
-   one term); and `any_sanitized_input` is below 2,600,000, the envelope "Hazards" states. Record
-   each headroom per rate in the evidence. If root names another limit behind 2.6M, it is added
-   here.
+7. *(Amendment 3, G5; restated by the addendum, A1.)* **Headroom.** In `tail_contract.rs`, at
+   every launch rate: `T_decay`, `T_rest` and both exact-rest bounds (`peak_plus_24_dbfs`,
+   `any_sanitized_input`) of `input_section_live_bound(rate)` are below 10,000,000, the smallest
+   finite `maximum_finite_tail_samples` the tree sets (a strip's builtin path has one input
+   section, so one term). Record each headroom per rate in the evidence. There is no 2.6M check.
 
 ## Test value
 
@@ -461,8 +481,8 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
 - Gate 1(c): a `T_rest` that drops its `R(P*)` term (reports `T_decay` as the time to exact zero)
   is beaten by the real kernel at small peaks (attempt 3: 346 frames against 175 for a 1 kHz
   section); no other gate drives peaks below `P*`.
-- Gate 7: a bound that grows past a configured tail cap, or past the stated envelope, turns red
-  before a plan is refused at preparation.
+- Gate 7: a bound that grows past the configured tail cap turns red before a plan is refused at
+  preparation.
 - Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
   eigenvector bound applies) breaks the restated D15-4 figures, and an unsound one (a dropped A9
   term) falls below the measured real rest.

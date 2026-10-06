@@ -131,7 +131,8 @@ when a dependency forces the order, and then sequence the correct solution.
   1e-20 per-word flush is no longer relative to `P`); tail reporting uses it (#1261, #1262, PDC).
   `T_rest = max(T_decay, R(P*))`, at least `N_SILENCE` for an enabled filter section, is the bound
   over every peak: from it on the output is below `P·10^(−144/20)` for `P ≥ P*` and exactly zero
-  for `P < P*`; silence skipping uses it (#1107). An absolute output floor in place of the
+  for `P < P*`. Silence skipping (#1107) uses the exact-rest bound (`RestSamples`), which holds for
+  every input; `T_rest` is its low-peak case (root, 2026-10-06; #1329 Amendment 3 addendum). An absolute output floor in place of the
   `P < P*` branch is refused: it would make the tail a fixed-level one, which #1328's A8 and A9
   removed. A two-level `P*` is a candidate for #1433.
   A live input-filter retarget (#1407) moves the recursion only through designs and their
