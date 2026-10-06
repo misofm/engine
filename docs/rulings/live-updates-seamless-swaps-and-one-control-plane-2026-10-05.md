@@ -126,18 +126,30 @@ when a dependency forces the order, and then sequence the correct solution.
   builtin computes it from its designer, per rate, on the control thread, with a test that
   recomputes it (never a digest). Every node also states an exact-rest bound. Gain-only processors
   report 0 beyond their latency.
+  Each node states two tail values (root, 2026-10-06; #1329 Amendment 3). `T_decay` is the bound
+  above for every peak at or above the node's flush floor `P*` (below it the `f32` output near the
+  1e-20 per-word flush is no longer relative to `P`); tail reporting uses it (#1261, #1262, PDC).
+  `T_rest = max(T_decay, R(P*))`, at least `N_SILENCE` for an enabled filter section, is the bound
+  over every peak: from it on the output is below `P·10^(−144/20)` for `P ≥ P*` and exactly zero
+  for `P < P*`; silence skipping uses it (#1107). An absolute output floor in place of the
+  `P < P*` branch is refused: it would make the tail a fixed-level one, which #1328's A8 and A9
+  removed. A two-level `P*` is a candidate for #1433.
   A live input-filter retarget (#1407) moves the recursion only through designs and their
   mixtures: every recursion word the kernel loads is a design, the identity at rest with +0.0
   integrators, or within a proven f32 rounding allowance (64 half-ulps plus u·D per word) of the
   convex hull of the designs its history used, so the section's zero-input step stays a
   contraction, ||A(w)||_V ≤ q_design + 1.419e-5 ≤ 1 − 3.79e-5, at every launch rate and block
-  size; a collapsed strip decides every record over channel 0's state and renders the bits of the
-  same strip rendered dual. (Root, 2026-10-05; #1407 Amendment 1.)
+  size (with the `f32` state rounding, the certified margin is 3.673e-5 at 44.1 and 88.2 kHz and
+  3.701e-5 at 48 and 96 kHz; #1329 Amendment 3); a collapsed strip decides every record over
+  channel 0's state and renders the bits of the same strip rendered dual. (Root, 2026-10-05; #1407 Amendment 1.)
 - (c) #1261 and #1262 then report the bounded tail, never `Infinite`.
 - *Rationale:* exact zero was provably never reached at the top of the cutoff domain, and the EQ
   had a second trap (round 1, B4.3; round 2, "Bits moved"). With the fix, exact rest is reached
-  within a stated bound (input section ≤1.0M samples at +24 dBFS), so silence skipping can rely on
-  it.
+  within a stated bound, so silence skipping can rely on it. For the input section with a live
+  input lane the certified bounds, each including `2·N_SILENCE`, are about 1.27M samples at
+  +24 dBFS and 2.59M for any sanitized input (44.1 / 48 / 88.2 / 96 kHz: 1,264,736 / 1,257,840 /
+  1,268,585 / 1,262,029 and 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156; #1329 Amendment 3,
+  which supersedes the earlier ≤1.0M and Amendment 2's 1.19M / 2.5M). #1433 may tighten them.
 - *Recorded resolution:* with f32 rounding and ramps in flight the smallest `T` is not computable
   exactly, so each node reports a certified upper bound on it, checked against a brute-force
   recompute.

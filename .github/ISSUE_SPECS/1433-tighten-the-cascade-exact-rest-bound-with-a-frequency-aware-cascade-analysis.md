@@ -24,7 +24,10 @@ changes: only the control-plane bound and the figures that quote it.
   `2 · N_SILENCE`, below). Rest is proven in sequence: the HPF rests first (its input is exactly
   zero in the tail; stall at most `3.6e-16`), then the LPF. The HPF's universal stall carried
   through the LPF gives an LPF stall radius `3.8e-11`, far above `REST_EPS`, so the LPF's rest cannot
-  be proven before the HPF's.
+  be proven before the HPF's. *(#1329 Amendment 3 restates the certified values, unsampled, per
+  rate: `peak_plus_24_dbfs` 1,264,736 / 1,257,840 / 1,268,585 / 1,262,029 and
+  `any_sanitized_input` 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156 at 44.1 / 48 / 88.2 / 96 kHz;
+  live `T_decay` about 905k and `T_rest` about 1.08M. Gate 1's "crude values" are these.)*
 - **The A9 term.** *Flush the SVF jointly so builtin and EQ filters reach exact rest* (#1328,
   Amendment A9): a section may take the joint `REST_EPS` flush only after its effect input has been
   exactly zero for `N_SILENCE` frames (1024 at every launch rate unless #1328's measurement states
@@ -87,7 +90,8 @@ changes: only the control-plane bound and the figures that quote it.
 - **Coefficient and update rules:** unchanged from #1329, #1407 and #1408 (designed `f32` words,
   64-sample ramps through designs and their mixtures).
 - **Numerical limits:** the `f32` rate inflation `7 · 2^-24 · κ` (`μ_s = 1.007e-6` at the top) and
-  the margin `q_ramp + μ_s < 1` by at least `3.69e-5`, as #1329's Amendment 2 records; the bound is
+  the margin `q_ramp + μ_s < 1` by at least `3.69e-5`, as #1329's Amendment 2 records (certified
+  `3.673e-5` at 44.1 and 88.2 kHz, `3.701e-5` at 48 and 96 kHz, #1329 Amendment 3); the bound is
   valid for every reset pattern of the joint flush.
 - **Latency and tail:** latency 0; the reported tail `T` may shrink with the same analysis but must
   not grow; exact rest `R` is the target of this slice.
@@ -98,6 +102,22 @@ changes: only the control-plane bound and the figures that quote it.
   N. J. Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed., for the rounding model.
 - **Fixtures and objective tests:** gates 1-3. **Benchmarks:** none (control-plane only; the bound
   is computed once per preparation). **Listening:** none; no rendered bit moves.
+
+## Candidate (root, 2026-10-06; #1329 Amendment 3, G3)
+
+Not a frozen decision: a method this slice may adopt if its derivation proves it and it meets
+D2-D4. **A two-level `P*`** (#1329 attempt 3's option 3). #1329 states two tail values per node:
+`T_decay` (the bound for every peak `P >= P*`) and `T_rest = max(T_decay, R(P*))`, where `P*` comes
+from the per-word flush stall and `R(P*)` is the exact-rest bound at `P*`. In a cascade whose slow
+LPF follows a section with a large output row, the HPF's flush stall, amplified by the LPF, raises
+`P*` (about `5e-9` for a 10 Hz HPF into the LPF at the maximum, 44.1 kHz, 0 dB), and `R(P*)` then
+exceeds `T_decay` by far (498,399 against 362,155). The HPF rests first, so after its rest only the
+LPF's own stall applies: a second `P*` for the LPF alone would bring the cascade rows of #1329
+attempt 3's table back near `T_decay` (that table: 1 kHz LPF 174 / 3,842; 10 Hz HPF into 1 kHz LPF
+18,271 / 20,373; 10 Hz HPF into LPF max 362,155 / 498,399; 1 kHz HPF into LPF max at +24 dB
+415,269 / 462,674; decay part / rest at `P*`, 44.1 kHz). Every enabled section still keeps
+`T_rest >= N_SILENCE`. If adopted, it shortens `T_rest` only; `T_decay` must not grow, and #1329's
+gate 1(c) (`T_rest` against the real kernel's rest) must stay green.
 
 ## Deliverables
 

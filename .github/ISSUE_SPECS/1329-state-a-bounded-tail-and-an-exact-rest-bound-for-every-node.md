@@ -39,8 +39,8 @@ gets its own slice (see "Non-goals").
   (slowest pole at the *maximum* cutoff, radius 1 - 5.2e-5). With #1328, exact rest at +24 dBFS:
   ≤ 934,193 (44.1/88.2 kHz), ≤ 929,225 (48/96 kHz); any sanitized input: ≤ 2.27M. D15-4 states the
   contract figures 1.0M and 2.4M; Amendment 2 (F2) supersedes these estimates and figures with the
-  certified values plus `2 * N_SILENCE`. Every step matrix of these sections is non-expansive in the
-  2-norm (bilinear map of a passive `M`).
+  certified values plus `2 * N_SILENCE`, which Amendment 3 (G4) states: about 1.27M and 2.59M.
+  Every step matrix of these sections is non-expansive in the 2-norm (bilinear map of a passive `M`).
 - **Tests that pin today's rule:** `input_tail_is_infinite_while_a_filter_target_is_ramping`
   (`crates/builtins/tests/filter_liveness.rs:313-336`); `builtins-compiler` unit tests at
   `crates/builtins-compiler/src/lib.rs:11885`, `:11915`, `:11931`; `crates/host-core/tests/live_lanes.rs:202-211`
@@ -57,6 +57,9 @@ gets its own slice (see "Non-goals").
   `|y[n]| < P * 10^(-144/20)` for every `n >= N + latency + T`. `T` is counted beyond latency, as
   PDC already composes it. Document it on the type and in `docs/EFFECT_CONTRACT_V1.md`.
   `Infinite` keeps its meaning ("no bound stated") for nodes whose slice has not landed.
+  *(Amended by Amendment 3, G1: the reported `T` is `T_decay`, the bound for every `P >= P*`; for
+  `P < P*` the output is exactly `±0.0` from `N + latency + T_rest`, `T_rest = max(T_decay, R(P*))`.
+  Both are stated.)*
 - **D2. Exact rest.** New `pub struct RestSamples { pub peak_plus_24_dbfs: u64, pub any_sanitized_input: u64 }`
   in `effect-contract`: under D1's conditions, with input peak at most +24 dBFS (respectively below
   the input sanitizer's `1e30`), from `N + latency + R` on (a) every output sample is `+0.0` or
@@ -94,8 +97,10 @@ gets its own slice (see "Non-goals").
   Per rate define `P*` from the per-word flush alone, as the smallest peak for which that term fits
   the deviation budget left after rounding. For `P >= P*` the bound is the sum; for `P < P*` the
   derivation proves exact rest (all integrator words `+0.0` via `REST_EPS`, plus the A9 term of
-  Amendment 2) at or before `N + latency + T`. The flush is never modelled as relative error, and a
-  joint-flush reset is never modelled as an absolute kick on an unreset reference. Gate 1(a)'s
+  Amendment 2) at or before `N + latency + T`. *(Amendment 3, G1: the bound for `P >= P*` is
+  `T_decay`; the `T` of the `P < P*` branch is `T_rest = max(T_decay, R(P*))`.)* The flush is
+  never modelled as relative error, and a joint-flush reset is never modelled as an absolute kick on
+  an unreset reference. Gate 1(a)'s
   tightness line is checked against the bound computed with this reference.
 - **D4. Fixed design (no live input lane).** `T` and `R` come from the strip's own designed sections
   (max over left and right), with the prepared trim as a gain on `P`. Disabled filters: `T = 0`,
@@ -114,8 +119,10 @@ gets its own slice (see "Non-goals").
   96 kHz); with the kernel inflation `7*2^-24*kappa` (*amended by Amendment 2*: the rigorous
   rounding count of the SVF step and output mix, where the final rounding of `n1`/`n2` adds
   `u*q*kappa`, gives `mu_s = 1.007e-6` at the top), `q_ramp + mu_s < 1` with at least `3.69e-5`
-  (measured) to spare at every launch rate. The derivation uses this computed `q_ramp`, not a
-  sampled maximum. The state at N is bounded by the invariant ball `R = g * max_w b(w)/(1 - q(w))`, with `b`
+  (measured) to spare at every launch rate (*restated by Amendment 3, G4*: certified margin
+  `3.673e-5` at 44.1 and 88.2 kHz, `3.701e-5` at 48 and 96 kHz). The derivation uses this
+  computed `q_ramp`, not a sampled maximum. The state at N is bounded by the invariant ball `R = g *
+  max_w b(w)/(1 - q(w))`, with `b`
   the V-norm of the input column. *(Amended by Amendment 2, F2.)* That per-section ball covers the
   HPF only: the LPF's input is the HPF's output, not `g * P`. The cascade uses the crude-but-sound
   bound: the HPF's universal output ball `Y_H` (about `7.7e4 * g * P` after a top-to-low retarget)
@@ -215,6 +222,70 @@ non-goals, the hazards and the dependencies are amended accordingly.
   optimistic). `q_ramp + mu_s < 1` still holds at every launch rate.
 - **Dependencies.** This slice now also depends on #1328 passing with A9.
 
+## Amendment 3 (root rulings, 2026-10-06, after attempt 3's findings)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(b). Attempt 3 stopped before
+plumbing: the real kernel exceeds gate 1(a)'s tightness line at small peaks (F3), and D3's `P < P*`
+branch makes the certified tail at least the rest bound at `P*`, which includes A9's `N_SILENCE`
+(F4); see "Attempt record". Root chose option 1. D1, D3, D5's figures, gates 1(a), 2 and 3, a new
+gate 1(c) and a new gate 7, the deliverables, the authorized paths, the non-goals, the hazards and
+the test value are amended accordingly. This is still attempt 3 (no verdict yet).
+
+- **G1. Two tail values (option 1).** Every node states both, computed at preparation (D3):
+  - `T_decay`, the decay part: the exact half below `eps / 2` (D3's reset-aware reference) and
+    the relative rounding below the other half from then on. It is D1's bound for every input of
+    peak `P >= P*`. Gate 1(a)'s soundness and tightness lines apply to `T_decay`.
+  - `T_rest = max(T_decay, R(P*))`, at least `N_SILENCE` for every enabled filter section (A9).
+    From `N + latency + T_rest` on, for every peak `P > 0`, the output is below `P * eps`
+    (`P >= P*`, by `T_decay`) or exactly `±0.0` (`P < P*`, D3's exact-rest branch at `P*`): it is
+    D1's bound over every peak, the value D3's `T` was before this amendment. Exact zero; the work
+    can be skipped.
+  - Disabled filters and gain-only parts: both `0` (D4, D6).
+  - Each consumer names which value it uses: **tail reporting uses `T_decay`** (`TailSamples` as
+    composed by PDC, the C ABI and browser reports, #1261, #1262); **silence skipping uses
+    `T_rest`** (#1107). `TailSamples::Finite` carries `T_decay`, and its doc and
+    `docs/EFFECT_CONTRACT_V1.md` state the peak range `P >= P*` and the exact-zero branch from
+    `T_rest` below it. `T_rest` is stored and exposed beside `T_decay` wherever `T_decay` is
+    (`InputBuiltins`, `BuiltinChain`, `input_section_live_bound`); the implementer names the field
+    or accessor and states it in `docs/EFFECT_CONTRACT_V1.md`. D2's `RestSamples` is unchanged.
+- **G2. Option 2 refused.** An absolute floor (`|y[n]| < max(P * eps, eps_abs)`) makes the tail a
+  fixed-level one: below `eps_abs` whatever the input's peak. #1328's A8 and A9 removed exactly
+  that (an effect applies its response to whatever it is given; only exact zero is silence), so
+  the contract does not bring it back through the tail.
+- **G3. Option 3 moved to #1433 as a candidate.** A two-level `P*` (the HPF rests first, then only
+  the LPF's own stall applies) would bring the cascade rows of attempt 3's table back near the
+  decay part, though every enabled section keeps `T_rest >= N_SILENCE`. It is a tightening, not a
+  correctness change, so it is recorded in *Tighten the cascade exact-rest bound with a
+  frequency-aware cascade analysis* (#1433) as a candidate, not done here.
+- **G4. Figures restated to the certified, unsampled values** (attempt 3's module; D5's crude
+  cascade, ramp window 64, settled contraction after it, each `R` including `2 * N_SILENCE`), at
+  44.1 / 48 / 88.2 / 96 kHz:
+
+  | live bound | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz | D15-4 figure |
+  |---|---|---|---|---|---|
+  | `peak_plus_24_dbfs` | 1,264,736 | 1,257,840 | 1,268,585 | 1,262,029 | about 1.27M |
+  | `any_sanitized_input` | 2,583,197 | 2,569,016 | 2,587,000 | 2,573,156 | about 2.59M |
+  | `T_decay` (expected) | 904,785 | 899,524 | 904,795 | 899,533 | -- |
+  | `T_rest` (expected) | 1,081,764 | 1,075,575 | 1,085,641 | 1,079,792 | -- |
+
+  These replace Amendment 2's "about 1.19M and 2.5M" and D15-4's "≤1.0M"; the `T` rows are attempt
+  3's measured outputs of the module, recorded as evidence, not pinned. The certified contraction
+  margin `1 - rho_ramp` (exact design radius `rho(g)` at the maximum cutoff, plus the `f32` design
+  box `P(h) = 2.16e-7`, the ramp allowance `P(E) = 1.419e-5` and the state rounding
+  `mu_state = 1.0073e-6`) is **`3.673e-5` (44.1, 88.2 kHz) and `3.701e-5` (48, 96 kHz)**; it
+  replaces D5's and Amendment 2's "at least `3.69e-5` (measured)", which used the `f32` top
+  design's norm.
+- **G5. The 2.6M hazard.** Root's ruling asks to name the limit the "below 2.6M" of "Hazards"
+  stands for and to gate its headroom. The documents name no limit at 2.6M: the figure entered
+  "Hazards" with Amendment 2 as the envelope of this slice's values (then about 2.5M for
+  `any_sanitized_input`), beside the one limit the hazard does name, `maximum_finite_tail_samples`
+  (`crates/graph-compiler/src/pdc.rs:132-135`), which compares composed `TailSamples` (`T_decay`
+  after G1), not `RestSamples`, and which the hosts set to `u64::MAX` and `graph_fixture`, the audit
+  tools and `console-workload` to 10,000,000. Which limit, if any, 2.6M was meant to protect is
+  open for root. Gate 7 gates the headroom to the limits the documents name and records the
+  envelope's headroom (`any_sanitized_input` is 13,000 samples, 0.5 %, below 2.6M at 88.2 kHz).
+
 ## Deliverables
 
 1. `effect-contract`: D1 docs on `TailSamples`, the `RestSamples` type (D2).
@@ -227,9 +298,11 @@ non-goals, the hazards and the dependencies are amended accordingly.
    It uses `math::log`/`math::exp`, never `f64::ln`/`f64::exp`;
    `builtins`: `crates/builtins/src/tail.rs` (new) composing them for the input section;
    `input_section_live_bound`, `input_section_worst_case_pair`; `InputBuiltins::{tail, rest}` and `BuiltinChain::{tail, rest}`.
+   *(Amendment 3, G1:)* every owner of `T_decay` also states `T_rest`.
 3. Plumbing: `builtins-compiler` and `graph-compiler` on `TailSamples`; `BuiltinTail` removed.
 4. Tests (gates 1-3); superseded tests replaced (gate 4).
-5. Docs: `docs/EFFECT_CONTRACT_V1.md`, `docs/BUILTINS_AND_METERING_V1.md:50-52`,
+5. Docs: `docs/EFFECT_CONTRACT_V1.md` (with Amendment 3's two values and which consumer uses each),
+   `docs/BUILTINS_AND_METERING_V1.md:50-52`,
    `dsp-research/filters.md` "Latency and tail", the derivation note (D3, D5) with equations,
    numerical limits, NaN behaviour (a non-finite state is reset by the per-block check, so it never
    starts a tail) and citations ([SIMPER-SVF], [ZAVALISHIN-TPT], [ORFANIDIS-ISP], [SMITH-SASP];
@@ -237,7 +310,10 @@ non-goals, the hazards and the dependencies are amended accordingly.
 6. Canonical plan digests re-pinned one by one (gate 5), with the reason in the commit message.
 7. *(Amendment 2, F2.)* The #1329 implementer restates decision 15's D15-4 rationale figures
    (currently "≤1.0M samples at +24 dBFS") to the certified values plus `2 * N_SILENCE`, on this
-   branch (root-authorized).
+   branch (root-authorized). *(Amendment 3, G4: done with Amendment 3 on this branch: about 1.27M
+   and 2.59M, the per-rate values, the certified margin, and the `T_decay`/`T_rest` definitions in
+   D15-4(b). If the implemented values differ from G4's table, the implementer restates them
+   again.)*
 
 ## Authorized paths
 
@@ -258,7 +334,8 @@ non-goals, the hazards and the dependencies are amended accordingly.
 - `docs/BUILTINS_AND_METERING_V1.md`, `dsp-research/filters.md`,
   `docs/derivations/1329-input-section-tail-and-rest.md` (new), this spec
 - `docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md` (the D15-4
-  rationale figures only; Deliverable 7, root-authorized)
+  rationale figures and, after Amendment 3, its tail and rest definitions only; Deliverable 7,
+  root-authorized)
 
 `builtins-compiler`, `graph-compiler`, `host-core` and `fixtures` sit outside stream G's column:
 coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
@@ -280,13 +357,20 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   - Last, after #1372-#1376: *Retire the Infinite tail* (#1378).
 - A render-side consumer (silence skipping is #1107). Any C ABI or browser wire change.
 - A tighter cascade exact-rest bound: *Tighten the cascade exact-rest bound with a frequency-aware
-  cascade analysis* (#1433), after this slice (Amendment 2, F2).
+  cascade analysis* (#1433), after this slice (Amendment 2, F2), including Amendment 3's option 3
+  (a two-level `P*`) as a candidate there.
+- An absolute output floor in place of the `P < P*` branch (Amendment 3, G2: refused).
 
 ## Hazards
 
 - `maximum_finite_tail_samples` (`pdc.rs:132-135`) can now refuse a plan that `Infinite` passed;
-  hosts set `u64::MAX` (`crates/host-core/src/prepare.rs:1559`), `graph_fixture` 10,000,000. Values
-  here are below 2.6M (Amendment 2).
+  hosts set `u64::MAX` (`crates/host-core/src/prepare.rs:1559`), `graph_fixture`, the audit tools
+  (`tools/audit/src/graph.rs:285`, `fixture_builtins.rs:709`, `builtins_graph.rs:641`) and
+  `console-workload` (`tools/console-workload/src/lib.rs:2013`) 10,000,000. It compares the
+  composed `TailSamples`, which carry `T_decay` (Amendment 3, G1): about 0.9M per input section at
+  the live bound, summed along a path. Values here are below 2.6M (Amendment 2); that figure is the
+  envelope of this slice's values, not a limit the documents name, and which limit it was meant to
+  protect is open for root (Amendment 3, G5). Gate 7 holds the headroom.
 - Depends on #1328's `REST_EPS` and its A9 `N_SILENCE` law; without them D2 has no finite value at
   the top of the domain. Use #1328's `N_SILENCE` constant, never a copy of its value.
 
@@ -306,24 +390,36 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    250,000 samples at the extreme against the margin's roughly 66,000, so it is red. Disabled
    filters assert `tail == 0`. The certified tail is the one computed with D3's reset-aware exact
    reference (Amendment 2, F1). A certified value above the tightness line is a finding for Sol
-   with the measured ratio, not a gate change. (b) Live bound:
+   with the measured ratio, not a gate change. *(Amendment 3, G1: every assertion of (a) is on
+   `T_decay`, written `tail` above.)* (b) Live bound:
    assert no scanned design exceeds `input_section_live_bound(rate)`: 100,000 log-spaced cutoffs
    plus the last 65,536 `f32` values below each rate's maximum, for both sections, and every
    scanned interior ramp word has `q_f32(w) <= q_ramp < 1`.
+   (c) *(Amendment 3, new.)* **`T_rest` on the real kernel and by its formula.** For every enabled
+   pair of (a) at both trims, (i) `T_rest` equals `max(T_decay, R(P*))` recomputed from the
+   module's own `T_decay`, `P*` and rest bound at `P*`, and `T_rest >= N_SILENCE`; (ii) a real
+   `InputBuiltins` (release, every launch rate) driven by random and alternating inputs of peak `P`
+   in `{P*, P* / 10, 1e-13, 1e-20}` and then silence reaches exact rest (every output `±0.0` and the
+   eight integrator words equal `Z`) at or before `N + T_rest`, and the last sample with
+   `|y| >= P * eps` falls before `N + T_rest`. Record the measured rest per design and peak (attempt
+   3 measured 346 frames for the 1 kHz sections at `P = 1.26e-13` against `T_b(eps / 2)` = 175).
 2. **Soundness on the real kernel** (release): the domain extreme of D5 at every rate, `P` in
    `{1.0, 10^(24/20), 1e29}`, input = `P * sign(h[T + i])` reversed over the last 1,000,000 samples
    before `N`, one live filter target applied 32 samples before `N`; and a quantum-1 history that
    re-sends and alternates the worst-case pair with disable, with a disable in flight at `N`. Assert `|y[n]| < P * eps` for
-   every `n` from `N + T` until exact rest, and from `N + R` on (`R` = `peak_plus_24_dbfs` for the
+   every `n` from `N + T` until exact rest (`T` = `T_decay`; every `P` here is above the live
+   `P* = 1.7e-3`, Amendment 3), and from `N + R` on (`R` = `peak_plus_24_dbfs` for the
    first two `P`, `any_sanitized_input` for the last; both include the A9 term `2 * N_SILENCE`) D2's rest: every output sample is `±0.0`
    (one run with polarity inverted, so `-0.0` is reached), and the eight SVF integrator words
    equal those of a freshly reset `InputBuiltins` with the same targets (`Z`), under `f32` `==`.
 3. **Contract figures** (*amended by Amendment 2, F2*): `input_section_live_bound` at every rate has
    `peak_plus_24_dbfs` and `any_sanitized_input` at or below the figures restated in decision 15's
-   D15-4 rationale (Deliverable 7: the certified values, each including `2 * N_SILENCE`; expected
-   about 1.19M and 2.5M), and `peak_plus_24_dbfs` at or above the measured real rest of the top
+   D15-4 rationale (Deliverable 7: the certified values, each including `2 * N_SILENCE`; restated
+   by Amendment 3, G4: at most 1,270,000 and 2,590,000, the per-rate values in G4's table), and
+   `peak_plus_24_dbfs` at or above the measured real rest of the top
    pair under the A9 law (gate 2's run; before A9, 983,374 at 44.1 kHz and 978,319 at 48 kHz).
-   Record `T` and `R` per rate in the evidence. Tightening is #1433, not a gate change here.
+   Record `T_decay`, `T_rest` and `R` per rate in the evidence. Tightening is #1433, not a gate
+   change here.
 4. **Superseded:** delete `input_tail_is_infinite_while_a_filter_target_is_ramping`; rewrite the
    three `builtins-compiler` tail tests to the finite values; `live_lanes.rs:265` asserts the live
    bound at the fixture's rate and `:202-211` keeps the plain fixture finite and the EQ fixture
@@ -344,6 +440,12 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    - `cargo build --locked --release -p audit && ./target/release/audit capi` (`qualification.yml:715`)
    - `bash scripts/check-builtins-fixtures.sh . target/release/audit`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
+7. *(Amendment 3, G5.)* **Headroom.** In `tail_contract.rs`, at every launch rate: `T_decay` and
+   `T_rest` of `input_section_live_bound(rate)` are below 10,000,000, the smallest finite
+   `maximum_finite_tail_samples` the tree sets (a strip's builtin path has one input section, so
+   one term); and `any_sanitized_input` is below 2,600,000, the envelope "Hazards" states. Record
+   each headroom per rate in the evidence. If root names another limit behind 2.6M, it is added
+   here.
 
 ## Test value
 
@@ -356,6 +458,11 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   the production kernel at the worst-case input, and a state that settles at a non-reset value (a
   limit cycle the flush misses) fails the fresh-instance comparison; gate 1 only checks `f64`
   arithmetic.
+- Gate 1(c): a `T_rest` that drops its `R(P*)` term (reports `T_decay` as the time to exact zero)
+  is beaten by the real kernel at small peaks (attempt 3: 346 frames against 175 for a 1 kHz
+  section); no other gate drives peaks below `P*`.
+- Gate 7: a bound that grows past a configured tail cap, or past the stated envelope, turns red
+  before a plan is refused at preparation.
 - Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
   eigenvector bound applies) breaks the restated D15-4 figures, and an unsound one (a dropped A9
   term) falls below the measured real rest.
@@ -505,3 +612,6 @@ brute-force `T_b` of gate 1(a) and against the real kernel. Two findings, the fi
 
 Gates run: none of the objective gates (no production code). Measurements: the module's own
 exploration tests in release, and the real-kernel probe above.
+
+Outcome so far: Amendment 3 (root rulings, option 1). Attempt 3 resumes under it, after #1451 and
+#1328's follow-up fix (root's order); no verdict yet.
