@@ -564,11 +564,33 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
 - Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
   eigenvector bound applies) breaks the restated D15-4 figures, and an unsound one (a dropped A9
   term) falls below the measured real rest.
-- *(Amendment 4, R3.)* Attempt 3's verdict showed the gate 2 claim (rounding, ramp, stall), gate
-  3's lower side (A9) and gate 7's claim untrue as written (the crude cascade's slack absorbs each
-  omission on the real kernel). Each gets a discriminating test that is red on the named defect,
-  or the claim is amended where no discriminating test is possible, with the reason; the attempt-4
-  record names each test and its mutation run, and this section is restated to match.
+- *(Amendment 4, R3: restated after attempt 4.)* On the real kernel the crude cascade's slack
+  (live `T_decay` about 905k against a last output above `P eps` near 438k; `R` 1.26M against a
+  rest near 0.98M) absorbs an omitted rounding, ramp, stall or A9 term, so gate 2's real-kernel
+  runs and gate 3's lower side cannot discriminate them; no real-kernel test can. They are caught
+  by `live_bound_carries_every_term_an_independent_recomputation_requires`, which recomputes the
+  derivation independently: a live envelope without the state rounding or the ramp allowance falls
+  below the recomputed contractions, a bound without the flush stall below the recomputed `P*`,
+  and a rest without the A9 term below the recomputed rests. Gate 2's real-kernel runs are red on
+  a bound that drops the cascade's second section or states `any_sanitized_input` at +24 dBFS, and
+  refuse a history the non-finite recovery reset (attempt 3's vacuous `1e29` run).
+- *(Amendment 4, R3.)* Gate 7: no plausible single-term defect drives a finite live bound past
+  10,000,000. Every omission or doubling of a term moves the live values by well under 2.5x (the
+  largest, a ramp contraction kept for the whole decay, gives `T_decay` 1,263,135), and a defect
+  that costs the contraction its margin makes the bound unstated (`Infinite`, no rest), which every
+  live gate reports through its finiteness checks. So gate 7 is a headroom record and a ceiling,
+  with no discriminating claim of its own; a bound that grows, as that defect does, is red on the
+  independent recomputation's upper side (`T_decay` at most the recomputed value plus 0.01 % and
+  64 frames), which gate 7 alone does not see.
+- *(Amendment 4.)* The live `T_rest` identity (`live_tail_every_peak_is_the_rest_at_the_flush_floor`):
+  a live `T_rest` that drops `R(P*)` reports `T_decay`; no other test computes the live `R(P*)`.
+- *(Amendment 4.)* `math::tail`'s
+  `the_operator_norm_bounds_the_exact_norm_of_every_near_top_design`: an operator norm whose `f64`
+  evaluation cancels falls below the exact norm of a near-top design; gate 1(a)'s 2-10 % slack
+  cannot see a `6e-9` error in `q`.
+- *(Amendment 4.)* `each_strip_is_bounded_by_its_own_design_when_designs_are_shared`: a design key
+  that omits a term (the trim magnitude or a section's words) hands one strip another design's
+  bound when a session repeats designs.
 
 ## Dependencies
 
@@ -918,3 +940,168 @@ into preparation), as `artifact-identity` will report. AArch64 is CI-only.
   "a control history the node admits" is for the swap slices (#1269) to state.
 - Gate 7's test value (above) and gate 3's lower side are weaker than the spec's "Test value"
   claims; no gate was changed.
+
+### Attempt 4 (2026-10-06, branch `codex/d15-stream-g`, under Amendment 4)
+
+Spec edits `b9de38e70` (Amendment 4); implementation `feefbe166`; this record and the gate-5,
+doc and test follow-ups in the commit after it. Release measurements on this host (x86-64-v3).
+
+**M1 (the operator norm).** `math::tail::v_operator_norm` now forms `R A R^-1` from its exact
+algebraic entries (`[[al + r ga, sqrt(2) be + de - al - r ga], [r ga, de - r ga]]`), takes the
+larger singular value by the non-cancelling closed form
+`(sqrt((a + d)^2 + (c - b)^2) + sqrt((a - d)^2 + (b + c)^2)) / 2`, adds the Frobenius norm of the
+entries' a-priori `f64` errors (`16 u64` times each entry's term magnitudes) and inflates by
+`1 + 16 u64`: a certified upper bound by derivation, so `SectionConstants::of` no longer multiplies
+`q` by `SLACK` (and `word_box_norm` no longer does either). The other compounding roundings the
+derivation's "Numerical limits" used to wave at are now bounded too: the first section's `f64`
+impulse response carries an error radius through its output row, the later majorant recursions
+step up by `1 + 4 u64` per frame, and the long sums by `1 + 2 n u64`. A unit test
+(`the_operator_norm_bounds_the_exact_norm_of_every_near_top_design`) checks six designs against
+60-digit references; the old form is red on it (`0.99994766942311020` against the exact
+`0.99994767541470919`, 44.1 kHz HPF max-1ulp). Live figures do not move (the live bound uses the
+closed-form `rho(g)`). Gate 1(a)/1(c) re-recorded (149 of 224 printed lines change); selected
+44.1 kHz values, attempt 3 / attempt 4:
+
+| design (44.1 kHz) | attempt 3 | attempt 4 |
+|---|---|---|
+| HPF 22049.48 alone, +24 dB, `T_decay` | 397,389 | 397,440 |
+| LPF 22049.48 alone, +24 dB, `T_decay` | 397,249 | 397,300 |
+| HPF 10 Hz into LPF 22049.48, +24 dB, `T_decay` / `T_rest` | 416,064 / 550,795 | 416,117 / 550,862 |
+| top pair, +24 dB, `T_decay` / `T_rest` | 478,315 / 485,928 | 478,335 / 485,945 |
+| top pair, 0 dB, `T_decay` | 420,130 | 420,148 |
+| 96 kHz HPF 10 Hz into the maximum, +24 dB (largest ratio) | 416,484 | 416,480 |
+
+Where attempt 3's cancelling form was below the exact norm the values rise (by up to about 60
+frames); elsewhere they fall by a few frames, because `q` no longer carries the redundant `2^-30`.
+Gate 1(a): all 112 rows `T_b(eps / 2) <= T_decay <= T_b(eps / 32)`, largest ratio 1.0977 (96 kHz,
+10 Hz into the maximum, +24 dB). Gate 1(c)(i)/(ii): all 112 rows green; the real kernel's figures
+are unchanged. `dsp-research/filters.md` now quotes 420,148; the derivation's FMA sentence (no
+target fuses: `Lane::fma` rounds twice) and its "far below one sample" (it compounds, tens of
+frames, always longer; checked by the independent recomputation) are corrected. The canonical
+graph fixture stays `finite:10048` (`graph_fixture --check` green, no re-pin).
+
+**R5, R7 (where the bounds live; computed once).** `InputBuiltins` and `BuiltinChain` are back to
+their pre-#1329 layout: no `OnceCell`, no stored rate or trims, no `tail`/`tail_every_peak`/`rest`
+accessors, no `with_prepared_bound`. `builtins::input_section_bound(rate, parameters)` and
+`input_section_bounds(rate, strips)` (each distinct design once, keyed by rate, both channels'
+section words and trim magnitudes) are the control-plane entry points. `builtins-compiler` calls
+`input_section_bounds` once per preparation, before the phase-two account, and the live bound
+once if any input lane is live; `PreparedBuiltinsSession.tails` holds `(Box<str>,
+InputSectionBound)` per strip (`tails()` maps it to `T_decay` for graph lowering;
+`input_bounds()` gives #1107 all three values). The seal keeps the same vector and the live bound;
+`validate_for_session` reuses them: it checks the track set, that every live strip carries the
+sealed live bound, and that the payload agrees with the seal, and computes no design bound. The
+seal's design bounds are tied to the session by its identity hash; the check no longer recomputes
+them (a defect only a recomputation would catch, a bound computed for another design, is
+`each_strip_is_bounded_by_its_own_design_when_designs_are_shared`'s, below). Name: `T_rest` stays
+`tail_every_peak`, now a field of `InputSectionBound`.
+
+**Measured preparation cost** (release, one thread, best of three, scratch probe not committed):
+a typical design (20 Hz HPF into 20 kHz LPF) 0.19-0.34 ms; a 1 kHz LPF 0.01-0.02 ms; 1,024 strips
+sharing one design 0.35-0.49 ms; the LPF at the maximum, +24 dB, 3.5 ms; the top pair, +24 dB,
+7.0 ms; 64 distinct near-top designs (HPF 10-640 Hz into the LPF 1-64 `f32` below the maximum,
++24 dB) 529-561 ms, 8.3-8.8 ms each, the worst per-design cost found; the live bound 0.04 ms. The
+worst case per preparation is therefore about 8.8 ms per distinct design, bounded only by the track
+count (65,537 distinct near-top designs: about 9.6 minutes, extrapolated). Filed as #1457, *Cache
+design bounds across preparations within a stated preparation budget* (stream G, row 19), which
+notes that H #1332 moves browser preparation off the AudioWorklet thread.
+
+**R1, R2 (paths, gate 5).** `crates/builtins/src/filter_response.rs` is byte-identical to its
+pre-#1329 content. `resources.jsonl`, regenerated by `audit fixture-builtins --write` into a
+scratch directory (only `resources.jsonl` differed from the tree; `filter-response.csv` and every
+PCM, meter and benchmark file identical), field by field against `main` (pre-#1329): both
+`engine_owned_processor_payload_bytes` and `engine_owned_retained_payload_bytes` +96 per track
+(1 / 4 / 65,537 tracks: +96 / +384 / +6,291,552), the two tail vectors' entries growing from 24 to
+72 bytes (`(Box<str>, InputSectionBound)`); `maximum_single_allocation_bytes` **+0** (back to
+`main`'s 1,080 / 4,320 / 70,779,960: the strip vector no longer grows; attempt 3 had +72 per track).
+Against attempt 3: -64 per track in both payload counts, -72 per track in the largest allocation.
+`fixture_builtins.rs`: `BOXED_INPUT_ENTRY_BYTES` 712, `INPUT_PROCESSOR_BYTES` 696,
+`STRIP_PREPARATION_BYTES` 1,080 (each back to its pre-#1329 value), `BOXED_TAIL_ENTRY_BYTES` 72
+(the ABI row now names `(Box<str>, builtins::InputSectionBound)`); `MANIFEST.tsv`'s
+`resources.jsonl` row and the joined-corpus manifest identity (`1a8fd9a1...6e288`, in
+`builtins_graph.rs` and the fixture test) follow it.
+
+**R6.** `qualification.yml`'s `test-release` runs `cargo test --locked --release -p builtins
+--features builtins/test-support --test tail_contract` after the `filter_liveness` step;
+`check-ci-path-routing.py` green with no router or verdict change. Local cost: 7.2 s run (9 tests,
+gate 2 and 1(c)(ii) included) after the release build.
+
+**R8.** #1269's spec gains "Exact rest across a swap (from #1329, root-authorized, 2026-10-06)";
+its GitHub body is synced.
+
+**m1 (gate 2 at the extreme).** Every gate-2 history now runs with the worst-case pair designed
+from its first sample (the live HPF retarget to one `f32` lower stays at `N - 32`), and the test
+asserts that no non-finite recovery fired (`lifetime_recovered_state() == (0, 0)` at `N`) and that
+the history left a tail (`|y| >= P eps` after `N`). Measured (44.1 / 48 / 88.2 / 96 kHz): `P = 1`
+last above 437,779 / 435,263 / 437,780 / 435,264, rest by 946,193 / 940,676 / 946,203 / 940,621;
+`+24 dBFS` last above 437,809 / 435,293 / 437,810 / 435,293, rest by 982,609 / 977,604 / 982,555 /
+977,613 (`R` 1,264,736 / 1,257,840 / 1,268,585 / 1,262,029); `P = 1e29` (sign pattern, now
+non-vacuous: the state stays finite) last above 437,772 / 435,258 / 437,773 / 435,259, rest by
+2,234,641 / 2,222,916 / 2,234,651 / 2,222,925 (`R` 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156);
+inverted polarity identical to `+24 dBFS` with every output `+0.0` after rest (R4); the
+quantum-1 history at rest by 64. Attempt 3's record of the `1e29` run ("at rest by `N + 64`,
+mechanism not investigated") described the non-finite recovery resetting a history that started
+at 1 kHz; that run tested nothing after `N`. Gate 3's lower side (alternating input, top pair):
+983,377 / 978,372 / 983,387 / 978,381 at +24 dBFS and 2,237,009 / 2,225,028 / 2,237,019 /
+2,225,037 at `1e29`, unchanged.
+
+**m2, R3 (new tests).** `live_tail_every_peak_is_the_rest_at_the_flush_floor`: the live `T_rest`
+equals `max(T_decay, R(P*))` with `R(P*)` recomputed through `envelope_cascade` at `P*`
+(1,081,764 / 1,075,575 / 1,085,641 / 1,079,792) and is at least `N_SILENCE`.
+`live_bound_carries_every_term_an_independent_recomputation_requires`: the envelope's
+contractions are at least the exact top radius plus `P(h)`, `kappa u rho` and (ramp) `P(E)` for
+`E = 64 h + u D` (44.1 kHz: `rho_settled - 1` -5.091925e-5 against a required -5.178264e-5,
+`rho_ramp - 1` -3.673087e-5 against -3.759427e-5), and `P*`, `T_decay`, `T_rest`, `R(P*)` and both
+rests lie between a frame-by-frame recomputation in plain `f64` and that value plus 0.01 % and 64
+frames (module minus recomputed at 44.1 kHz: `T_decay` +17, `R(P*)` +14, `peak_plus_24_dbfs` +18,
+`any_sanitized_input` +42; the verifier's `verify_live.py` reproduces). Superseded and deleted:
+`a_prepared_bound_is_stored_only_for_its_own_design` (its mechanism is gone); replaced by
+`each_strip_is_bounded_by_its_own_design_when_designs_are_shared`. The builtins-compiler tests
+assert `input_bounds()` (the plain strip `InputSectionBound::ZERO`, the live strip the whole live
+bound) and that the live preparation passes the seal check. The SplitMix draw computes
+`x * 2.0 - 1.0` (`x * 2` exact, one rounding, as before) instead of `mul_add` (lane policy).
+
+**Mutation runs** (each applied in the worktree, the named test run in release unless stated,
+the file restored; RED = the test fails):
+
+| defect | test | result |
+|---|---|---|
+| cancelling operator-norm form (attempt 3's) | `the_operator_norm_bounds_…` | RED: 0.99994766942311020 against 0.99994767541470919 |
+| live envelope drops the state rounding | `live_bound_carries_every_term_…` / gate 2 | RED (envelope omits a term) / GREEN |
+| live envelope drops the ramp allowance | same / gate 2 | RED / GREEN |
+| live bound drops the flush stall | same / gate 2 | RED (`P*` 0 against 1.7349e-3) / GREEN |
+| A9 term dropped from every rest | same / 1(c) / gate 2 / gate 3 | RED (`T_rest` 1,077,903 against 1,081,750) / RED / GREEN / GREEN |
+| ramp contraction kept for the whole live decay | same / gate 7 / gate 3 | RED (`T_decay` 1,263,135 against 904,768) / GREEN / GREEN |
+| live `T_rest` drops `R(P*)` (verdict M9) | `live_tail_every_peak_…` / gate 7 | RED (904,785) / GREEN |
+| design key ignores the trim | `each_strip_is_bounded_…` | RED |
+| design key ignores the LPF words | `each_strip_is_bounded_…` | RED (after adding the strip that differs only in its LPF; GREEN before) |
+| gate 2's history starts at 1 kHz (attempt 3's run) | gate 2 | RED (`P = 1e29`: the history overflowed) |
+| a live strip keeps its design bound (preparation) | `live_input_lane_reports_…` (debug) | RED |
+| the seal check takes a live strip's bound from its seal entry | `live_input_lane_reports_…` (debug) | GREEN: no test reaches it (below) |
+
+Test value, against "Test value": all lines now hold as restated by Amendment 4 (R3). Gate 7 has
+no discriminating claim (restated there, with the reason). Open: the seal check's live-strip rule
+(a live strip must carry the sealed live bound) has no test that turns red without it: the payload
+and the seal come from one preparation, so only a forged seal entry reaches the rule, and no
+corruption case forges one.
+
+**Gates run (all green unless stated):** `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked
+--workspace --no-deps` (first red on two private intra-doc links in `math::tail`, fixed);
+`cargo test --release -p builtins --test tail_contract` (9 tests, 7.2 s); the `test-debug-a`
+(1,441 passed, 0 failed, 10 ignored) and `test-debug-b` workspace commands;
+`check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-lane-policy.sh` (attempt 3's
+`mul_add` gone), `check-builtins-policy.sh`, `check-dsp-research.sh`, `check-effect-contract.sh`,
+`check-graph-determinism.sh`, `check-ci-path-routing.py`, `graph_fixture --check`,
+`check-builtins-fixtures.sh` with the release audit, `audit capi` (0 allocations, 0
+deallocations, 0 syscalls, 0 violations; `pcm_digest` `cb10fbface44a3a4`, unchanged),
+`check-capi-abi.sh` and `--self-test`, `check-cross-targets.sh` (PASS; the #1018 expected iOS
+memset rows unchanged), `run-wasm-gates.sh --without-v8-spill --without-native`, and the worklet
+chain (`build-web-audioworklet.sh --named-twin` into fresh empty directories,
+`strip-wasm-names.py --self-test` and `check`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py --wasm` and `--native`, `test-web-audioworklet.sh`). The shipped
+worklet module is `1a833326…c397d7` (3,052,846 B; attempt 3's was `e25b045d…90d9f652`): its bytes
+change with the bound code linked into preparation, as `artifact-identity` will report; no audio
+bit moves (wasm G5 digests, builtins PCM fixtures, `audit capi`'s `pcm_digest`). AArch64 is
+CI-only.

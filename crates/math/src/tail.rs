@@ -217,7 +217,7 @@ fn spectral_norm_bound(m: [[f64; 2]; 2], error: [[f64; 2]; 2]) -> f64 {
 }
 
 /// `||M||_V`, the operator norm `M` induces in the `V`-norm, as a certified upper bound: the
-/// spectral norm of `R M R^-1` ([`spectral_norm_bound`]).
+/// spectral norm of `R M R^-1`, computed by a non-cancelling closed form with its own error term.
 ///
 /// For `M = [[al, be], [ga, de]]` and `sqrt(2) r = 1`, `R M R^-1` is exactly
 /// `[[al + r ga, sqrt(2) be + de - al - r ga], [r ga, de - r ga]]`; the `1`s of a design's diagonal
@@ -349,7 +349,8 @@ pub struct SectionConstants {
 impl SectionConstants {
     /// The constants of one fixed section. `q` is [`v_operator_norm`]'s certified bound, which
     /// already carries its own rounding; the other norms, short non-cancelling evaluations (the
-    /// dual norm's `-c1 + sqrt(2) c2` is at most `2 gamma` in magnitude per term), carry [`SLACK`].
+    /// dual norm's `-c1 + sqrt(2) c2` is at most `2 gamma` in magnitude per term), carry the
+    /// `2^-30` inflation.
     #[must_use]
     pub fn of(words: &SvfWords) -> Self {
         let q = v_operator_norm(words.a());

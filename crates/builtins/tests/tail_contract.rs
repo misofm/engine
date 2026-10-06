@@ -294,9 +294,9 @@ fn fixed_design_tail_is_sound_and_within_thirty_db_of_the_exact_tail() {
 }
 
 /// D7 and Amendment 4 R7: a session's strips are bounded once per distinct design, and each strip
-/// still gets its own design's bound. The designs differ in one key term each (the HPF word, the
-/// trim magnitude, the LPF), and the first design repeats with its polarity inverted (the same
-/// key: the bound reads the trim's magnitude).
+/// still gets its own design's bound. The designs differ from the first in one key term each (the
+/// HPF words, the trim magnitude, the LPF words), and the first design repeats with its polarity
+/// inverted (the same key: the bound reads the trim's magnitude).
 #[test]
 fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
     let rate = 48_000;
@@ -304,7 +304,7 @@ fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
         parameters(1_000.0, 0.0, 0.0, false),
         parameters(10.0, 0.0, 0.0, false),
         parameters(1_000.0, 0.0, 24.0, false),
-        parameters(0.0, 1_000.0, 0.0, false),
+        parameters(1_000.0, 2_000.0, 0.0, false),
         parameters(1_000.0, 0.0, 0.0, true),
     ];
     let own: Vec<InputSectionBound> = strips
