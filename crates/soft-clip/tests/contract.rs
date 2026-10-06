@@ -196,7 +196,7 @@ fn identity_and_bypass_emit_the_delayed_dry_signal_bit_for_bit() {
         };
         let mut request = request(&values);
         request.bypass = !identity;
-        let mut effect = SoftClipFactory.prepare(request).expect("prepare");
+        let mut effect = SoftClipFactory.prepare(request).expect("prepare").processor;
         let mut left = vec![0.0_f32; 128];
         let mut right = vec![0.0_f32; 128];
         left[0] = 0.25;
@@ -363,7 +363,7 @@ fn a_padded_request_binds_and_still_validates_every_lane() {
         let bank = bind(&requests, &mask)
             .expect("a padded request is well formed")
             .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the bank binds"));
-        assert_eq!(bank.metadata().width, width);
+        assert_eq!(bank.metadata.width, width);
     }
     // Malform a member other than the first, so that a check of the first request alone -- or a
     // decision taken above the member loop -- goes red.

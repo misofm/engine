@@ -3,8 +3,8 @@ use effect_contract::{
     AutomationRate, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectQuality,
     InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane,
     ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedEffectMetadata, PreparedNativeEffect, PreparedPorts,
-    PreparedSidechainPort, RegistryError, expected_prepared_metadata,
+    PrepareEffectRequest, PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedPorts, PreparedSidechainPort, RegistryError, expected_prepared_metadata,
 };
 use engine::realtime::{
     ObservationReader, Producer, QueueFull, QueueGeneration, bounded_spsc, observation_slot,
@@ -548,7 +548,12 @@ fn prepare_with_console_eligibility(
                         continue;
                     }
                 };
-                let processor = match factory.prepare(request) {
+                // Issue #1461: the prepare result carries the metadata beside the processor,
+                // which holds no copy of it; this compares that returned value, field by field.
+                let PreparedEffect {
+                    processor,
+                    metadata,
+                } = match factory.prepare(request) {
                     Ok(value) => value,
                     Err(error) => {
                         diagnostics.push(EffectDiagnostic {
@@ -558,7 +563,6 @@ fn prepare_with_console_eligibility(
                         continue;
                     }
                 };
-                let metadata = processor.metadata();
                 if metadata.descriptor.id != expected.descriptor.id
                     || metadata.descriptor.contract_major != expected.descriptor.contract_major
                     || metadata.descriptor.state_layout_version
@@ -1019,92 +1023,134 @@ mod control_producer_tests {
 mod metadata_mismatch_tests {
     use super::{EffectCompileCaps, prepare_native_session_effects};
     use effect_contract::{
-        EffectDescriptor, EffectPrepareError, EffectProcessBlock, NativeEffectFactory,
-        NativeEffectRegistry, PrepareEffectBankRequest, PrepareEffectRequest,
-        PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-        ResetKind, RestBound, RestSamples, StatePayloadError, StatePayloadInput,
-        StatePayloadOutput, TailSamples,
+        EffectDescriptor, EffectId, EffectPrepareError, EffectQuality, LatencySamples, LinkMode,
+        NativeEffectFactory, NativeEffectRegistry, PortId, PrepareEffectBankRequest,
+        PrepareEffectRequest, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
+        PreparedSidechainPort, RestBound, RestSamples, TailSamples,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use session::{CompileCaps, compile_session, parse_session_json};
 
-    /// The production EQ, whose prepared metadata `drift` then edits.
-    struct DriftingEq(fn(&mut PreparedEffectMetadata));
-    struct Drifting {
-        inner: Box<dyn PreparedNativeEffect>,
-        drift: fn(&mut PreparedEffectMetadata),
-    }
-    impl NativeEffectFactory for DriftingEq {
+    /// The production EQ, whose prepare result's metadata `forge` then edits. The processor is
+    /// the EQ's own; only the metadata handed out beside it differs (issue #1461).
+    struct ForgingEq(Forge);
+    impl NativeEffectFactory for ForgingEq {
         fn descriptor(&self) -> &'static EffectDescriptor {
             &PARAMETRIC_EQ_DESCRIPTOR
         }
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-            Ok(Box::new(Drifting {
-                inner: ParametricEqFactory.prepare(request)?,
-                drift: self.0,
-            }))
+        ) -> Result<PreparedEffect, EffectPrepareError> {
+            let mut prepared = ParametricEqFactory.prepare(request)?;
+            (self.0)(&mut prepared.metadata);
+            Ok(prepared)
         }
         fn bind_homogeneous_bank(
             &self,
             _: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
             Ok(None)
         }
     }
-    impl PreparedNativeEffect for Drifting {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            let mut metadata = self.inner.metadata();
-            (self.drift)(&mut metadata);
-            metadata
-        }
-        fn reset(&mut self, kind: ResetKind) {
-            self.inner.reset(kind);
-        }
-        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
-            self.inner.process(block)
-        }
-        fn snapshot_state_payload(
-            &self,
-            output: StatePayloadOutput<'_>,
-        ) -> Result<(), StatePayloadError> {
-            self.inner.snapshot_state_payload(output)
-        }
-        fn restore_state_payload(
-            &mut self,
-            version: u32,
-            input: StatePayloadInput<'_>,
-        ) -> Result<(), StatePayloadError> {
-            self.inner.restore_state_payload(version, input)
-        }
+
+    /// A descriptor equal to the prepared one except for what `edit` changes.
+    fn forged_descriptor(metadata: &mut PreparedEffectMetadata, edit: fn(&mut EffectDescriptor)) {
+        let mut descriptor = *metadata.descriptor;
+        edit(&mut descriptor);
+        metadata.descriptor = Box::leak(Box::new(descriptor));
     }
 
-    /// A rest bound other than the one the processor reports.
-    fn other_rest(metadata: &mut PreparedEffectMetadata) {
-        metadata.rest = match metadata.rest {
-            RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
-            RestBound::Bounded(_) => RestBound::Unstated,
-        };
-    }
-
-    /// A tail over every peak other than the one the processor reports.
-    fn other_tail_every_peak(metadata: &mut PreparedEffectMetadata) {
-        metadata.tail_every_peak = match metadata.tail_every_peak {
+    fn other_tail(tail: TailSamples) -> TailSamples {
+        match tail {
             TailSamples::Infinite => TailSamples::Finite(0),
-            TailSamples::Finite(_) => TailSamples::Infinite,
-        };
+            TailSamples::Finite(samples) => TailSamples::Finite(samples.wrapping_add(1)),
+        }
     }
 
-    /// Gate 2 of #1377: a processor whose `rest` or `tail_every_peak` differs from
-    /// `expected_prepared_metadata`'s, which its descriptor's `tail_and_rest` states, is refused
-    /// with `effect.metadata.mismatch` and prepares no partial session; the same processor without
-    /// the drift prepares.
+    /// One forgery per field the mismatch check compares, each a value other than the one the
+    /// descriptor and request state.
+    /// One edit of a prepare result's metadata.
+    type Forge = fn(&mut PreparedEffectMetadata);
+
+    const FORGERIES: [(&str, Forge); 16] = [
+        ("descriptor.id", |m| {
+            forged_descriptor(m, |d| {
+                d.id = EffectId::new("forged.effect").expect("a valid effect id");
+            });
+        }),
+        ("descriptor.contract_major", |m| {
+            forged_descriptor(m, |d| d.contract_major = d.contract_major.wrapping_add(1));
+        }),
+        ("descriptor.state_layout_version", |m| {
+            forged_descriptor(m, |d| {
+                d.state_layout_version = d.state_layout_version.wrapping_add(1);
+            });
+        }),
+        ("sample_rate", |m| {
+            m.sample_rate = m.sample_rate.wrapping_add(1)
+        }),
+        ("quantum", |m| m.quantum = m.quantum.wrapping_add(1)),
+        ("quality", |m| {
+            m.quality = if m.quality == EffectQuality::High {
+                EffectQuality::Draft
+            } else {
+                EffectQuality::High
+            };
+        }),
+        ("bypass", |m| m.bypass = !m.bypass),
+        ("link_mode", |m| {
+            m.link_mode = if m.link_mode == LinkMode::Maximum {
+                LinkMode::Average
+            } else {
+                LinkMode::Maximum
+            };
+        }),
+        ("ports", |m| {
+            m.ports.sidechain = match m.ports.sidechain {
+                PreparedSidechainPort::None => PreparedSidechainPort::Unconnected {
+                    id: PortId::new("forged-sidechain").expect("a valid port id"),
+                    required: false,
+                },
+                _ => PreparedSidechainPort::None,
+            };
+        }),
+        ("latency", |m| {
+            m.latency = LatencySamples(m.latency.0.wrapping_add(1));
+        }),
+        ("tail", |m| m.tail = other_tail(m.tail)),
+        ("tail_every_peak", |m| {
+            m.tail_every_peak = other_tail(m.tail_every_peak);
+        }),
+        ("rest", |m| {
+            m.rest = match m.rest {
+                RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
+                RestBound::Bounded(_) => RestBound::Unstated,
+            };
+        }),
+        ("state_sizes", |m| {
+            m.state_sizes.common_bytes = m.state_sizes.common_bytes.wrapping_add(1);
+        }),
+        ("scratch_bytes", |m| {
+            m.scratch_bytes = m.scratch_bytes.wrapping_add(1);
+        }),
+        ("automation_capacity", |m| {
+            m.automation_capacity = m.automation_capacity.wrapping_add(1);
+        }),
+    ];
+
+    /// Gate 3 of #1461 (extending #1377's gate 2 to every field): a prepare result whose metadata
+    /// differs from `expected_prepared_metadata` in any compared field is refused with
+    /// `effect.metadata.mismatch`, and prepares no partial session; the same factory with the
+    /// metadata unedited prepares.
     ///
-    /// Red mutations: drop either new comparison from the mismatch check.
+    /// The processor holds no copy of its metadata, so this check is the one thing that ties the
+    /// metadata every control-side reader uses to what the descriptor and the request state.
+    ///
+    /// Red mutations: drop any one comparison from the mismatch check, or compare the returned
+    /// metadata with itself instead of with the expected value.
     #[test]
-    fn a_processor_whose_rest_or_tail_every_peak_drifts_is_refused() {
+    fn a_prepare_result_whose_metadata_differs_in_any_compared_field_is_refused() {
         let model = parse_session_json(include_str!(
             "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))
@@ -1126,23 +1172,20 @@ mod metadata_mismatch_tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let prepare = |drift: fn(&mut PreparedEffectMetadata)| {
+        let prepare = |forge: Forge| {
             let registry = NativeEffectRegistry::new([
-                Box::new(DriftingEq(drift)) as Box<dyn NativeEffectFactory>
+                Box::new(ForgingEq(forge)) as Box<dyn NativeEffectFactory>
             ])
             .expect("registry");
             prepare_native_session_effects(&session, &registry, caps)
         };
 
-        let prepared = prepare(|_| {}).expect("an undrifted processor prepares");
+        let prepared = prepare(|_| {}).expect("an unforged prepare result prepares");
         assert_eq!(prepared.entries.len(), 9);
-        for (field, drift) in [
-            ("rest", other_rest as fn(&mut PreparedEffectMetadata)),
-            ("tail_every_peak", other_tail_every_peak),
-        ] {
-            let diagnostics = prepare(drift)
+        for (field, forge) in FORGERIES {
+            let diagnostics = prepare(forge)
                 .err()
-                .unwrap_or_else(|| panic!("a drifted `{field}` prepared"));
+                .unwrap_or_else(|| panic!("a forged `{field}` prepared"));
             assert_eq!(diagnostics.0.len(), 9, "{field}");
             assert!(
                 diagnostics

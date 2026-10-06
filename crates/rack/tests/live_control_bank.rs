@@ -9,9 +9,9 @@
 use effect_contract::{
     AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectControlLane,
     EffectControlRecord, EffectId, EffectProgramKey, EffectQuality, LatencySamples, LinkMode,
-    ParameterChannel, PreparedBankMetadata, PreparedNativeEffectBank, PreparedPorts,
-    PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples,
+    ParameterChannel, PreparedBankMetadata, PreparedEffectBank, PreparedNativeEffectBank,
+    PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples,
 };
 use engine::realtime::{QueueGeneration, bounded_spsc};
 use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
@@ -52,7 +52,6 @@ fn program_key(latency: u64) -> EffectProgramKey {
 
 /// A bank that applies `parameter 0` as a per-lane gain and delays by `latency` frames.
 struct MockGainBank {
-    metadata: PreparedBankMetadata,
     gain: [f32; LANES],
     /// Per-lane FIFO of the latency the bank declares, so a "real" latency is actually produced.
     line: Vec<[f32; 2]>,
@@ -64,25 +63,30 @@ struct MockGainBank {
 impl MockGainBank {
     fn new(latency: usize) -> Self {
         Self {
-            metadata: PreparedBankMetadata {
-                width: BankWidth::Four,
-                program_key: program_key(latency as u64),
-            },
             gain: [1.0; LANES],
             line: vec![[0.0; 2]; latency * LANES],
             latency,
             seen: [0; LANES],
         }
     }
+
+    /// The bind result a factory would return: this bank, and its metadata beside it.
+    fn bound(self) -> PreparedEffectBank {
+        let latency = self.latency as u64;
+        PreparedEffectBank {
+            processor: Box::new(self),
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Four,
+                program_key: program_key(latency),
+            },
+        }
+    }
 }
 
 impl PreparedNativeEffectBank for MockGainBank {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
     fn reset(&mut self, _kind: ResetKind) {}
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let report = BankProcessReport::empty(self.metadata.width);
+        let report = BankProcessReport::empty(BankWidth::Four);
         for lane in 0..LANES {
             let start = block.automation_offsets[lane] as usize;
             let end = block.automation_offsets[lane + 1] as usize;
@@ -167,7 +171,7 @@ fn live_control_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, 
         })
         .collect();
     let stage = LiveControlEffectBankStage::new(
-        Box::new(MockGainBank::new(latency)),
+        MockGainBank::new(latency).bound(),
         BankWidth::Four,
         8,
         lanes,
@@ -405,7 +409,7 @@ fn a_command_timeline_is_partition_invariant() {
 fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
     assert!(
         LiveControlEffectBankStage::new(
-            Box::new(MockGainBank::new(0)),
+            MockGainBank::new(0).bound(),
             BankWidth::Four,
             8,
             vec![None, None],
@@ -417,7 +421,7 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
     );
     assert!(
         LiveControlEffectBankStage::new(
-            Box::new(MockGainBank::new(0)),
+            MockGainBank::new(0).bound(),
             BankWidth::Four,
             0,
             vec![None, None, None, None],
@@ -426,104 +430,6 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
         )
         .is_err(),
         "a zero quantum is refused"
-    );
-}
-
-/// A bank whose reported `automation_capacity` falls by one on every `metadata()` read.
-///
-/// The stage sizes its staging window from one read and checks it against the next, so this
-/// bank hands the stage exactly the failure issue #1012 closes: a window one span larger than the
-/// capacity the effect enforces. Everything else is `MockGainBank`.
-struct ShrinkingCapacityBank {
-    inner: MockGainBank,
-    reads: core::cell::Cell<u32>,
-}
-
-impl PreparedNativeEffectBank for ShrinkingCapacityBank {
-    fn metadata(&self) -> PreparedBankMetadata {
-        let reads = self.reads.get();
-        self.reads.set(reads + 1);
-        let mut metadata = self.inner.metadata();
-        metadata.program_key.automation_capacity = CAPACITY + 8 - reads;
-        metadata
-    }
-    fn reset(&mut self, kind: ResetKind) {
-        self.inner.reset(kind);
-    }
-    fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        self.inner.process_bank(block)
-    }
-    fn snapshot_track_state_payload(
-        &self,
-        track_index: u32,
-        output: StatePayloadOutput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        self.inner.snapshot_track_state_payload(track_index, output)
-    }
-    fn restore_track_state_payload(
-        &mut self,
-        track_index: u32,
-        state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        self.inner
-            .restore_track_state_payload(track_index, state_layout_version, input)
-    }
-}
-
-/// Issue #1012: a staging window one span larger than the effect's automation capacity is refused
-/// at bind, with a typed error, never discovered on the render thread.
-///
-/// The #1004 pairing rule keeps the mono collapse for a `Left` span staged with its bit-equal
-/// `Right` twin, on the premise that the effect applies both or neither. With a window of
-/// capacity + 1 a drain could stage the last twin across the effect's `span_index <
-/// automation_capacity` cut-off, and the right channel's write would be lost behind a collapse
-/// that still held. The window is refused instead, and a stable bank binds.
-///
-/// Red mutation (issue #1012): delete the `check_automation_window` call from
-/// `LiveControlEffectBankStage::new` -> this binds a capacity + 1 window and fails.
-#[test]
-fn a_staging_window_larger_than_the_capacity_is_refused_at_bind() {
-    let shrinking = ShrinkingCapacityBank {
-        inner: MockGainBank::new(0),
-        reads: core::cell::Cell::new(0),
-    };
-    let lanes = || {
-        (0..LANES)
-            .map(|_| {
-                let (_producer, consumer) = bounded_spsc::<EffectControlRecord>(
-                    depth(CAPACITY as usize),
-                    QueueGeneration(0),
-                )
-                .expect("queue");
-                Some(EffectControlLane::new(consumer, false))
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        LiveControlEffectBankStage::new(
-            Box::new(shrinking),
-            BankWidth::Four,
-            8,
-            lanes(),
-            vec![None, None, None, None],
-            0,
-        )
-        .err(),
-        Some(rack::RackError::AutomationWindow),
-        "a window sized one span past the enforced capacity is refused at bind"
-    );
-    assert!(
-        LiveControlEffectBankStage::new(
-            Box::new(MockGainBank::new(0)),
-            BankWidth::Four,
-            8,
-            lanes(),
-            vec![None, None, None, None],
-            0,
-        )
-        .is_ok(),
-        "a window of exactly the capacity binds"
     );
 }
 
@@ -561,7 +467,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
     }];
 
     let unobserved = LiveControlEffectBankStage::new(
-        Box::new(MockGainBank::new(0)),
+        MockGainBank::new(0).bound(),
         BankWidth::Four,
         8,
         vec![None, None, None, None],
@@ -590,7 +496,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
         lanes.push(Some(observation));
     }
     let mut observed = LiveControlEffectBankStage::new(
-        Box::new(MockGainBank::new(0)),
+        MockGainBank::new(0).bound(),
         BankWidth::Four,
         8,
         vec![None, None, None, None],
@@ -739,9 +645,10 @@ fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
     const LATENCY: usize = 2;
     let mut bank = MockGainBank::new(LATENCY);
     bank.gain = [0.5; LANES];
+    let mut bank = bank.bound();
     bank.metadata.program_key.automation_capacity = u32::MAX;
     let stage = LiveControlEffectBankStage::new(
-        Box::new(bank),
+        bank,
         BankWidth::Four,
         8,
         vec![

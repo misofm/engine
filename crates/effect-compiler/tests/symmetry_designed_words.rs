@@ -216,7 +216,8 @@ fn each_launch_effect_sees_its_own_designed_words_disagree() {
 
         let prepared = factory
             .prepare(request(descriptor, &symmetric))
-            .unwrap_or_else(|failure| panic!("{}: {}", case.effect, failure.code));
+            .unwrap_or_else(|failure| panic!("{}: {}", case.effect, failure.code))
+            .processor;
         assert!(
             prepared.channel_symmetry(),
             "{}: equal per-channel initial values must design to equal words",
@@ -225,7 +226,8 @@ fn each_launch_effect_sees_its_own_designed_words_disagree() {
 
         let prepared = factory
             .prepare(request(descriptor, &asymmetric))
-            .unwrap_or_else(|failure| panic!("{}: {}", case.effect, failure.code));
+            .unwrap_or_else(|failure| panic!("{}: {}", case.effect, failure.code))
+            .processor;
         assert!(
             !prepared.channel_symmetry(),
             "{}: parameter {} differs between the channels and the witness did not see it",
@@ -282,7 +284,8 @@ fn a_bank_declines_exactly_the_asymmetric_lane() {
             active_mask: width.full_mask(),
         })
         .expect("bind")
-        .expect("the EQ carries a homogeneous bank kernel");
+        .expect("the EQ carries a homogeneous bank kernel")
+        .processor;
 
     for lane in 0..lanes {
         assert_eq!(

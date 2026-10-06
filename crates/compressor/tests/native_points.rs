@@ -4,9 +4,8 @@ mod support;
 
 use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, ObservationSample, ParameterAccessError,
-    ParameterChannel, PreparedAutomationSpan, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedParameterState, ProcessReport, ResetKind, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput,
+    ParameterChannel, PreparedAutomationSpan, PreparedNativeEffect, PreparedParameterState,
+    ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
 };
 
 use support::{initial_values, noise, prepare, render_scalar, request, snapshot};
@@ -191,9 +190,6 @@ struct ForwardingWithoutParameterAccess {
 }
 
 impl PreparedNativeEffect for ForwardingWithoutParameterAccess {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.inner.metadata()
-    }
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }

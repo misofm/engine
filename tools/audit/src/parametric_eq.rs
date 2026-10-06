@@ -139,6 +139,7 @@ fn prepare_eq() -> Box<dyn PreparedNativeEffect> {
             },
         })
         .expect("prepared parametric EQ")
+        .processor
 }
 
 fn set(

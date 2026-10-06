@@ -1612,13 +1612,13 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             DualAccumulatorDelayFactory::correct().prepare(request)
         }
         fn bind_homogeneous_bank(
             &self,
             _request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             Err(EffectPrepareError {
                 code: "fixture.bank.bind_failure",
             })
@@ -1637,13 +1637,13 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             self.delegate.prepare(request)
         }
         fn bind_homogeneous_bank(
             &self,
             _: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             Ok(None)
         }
     }
@@ -8935,13 +8935,13 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             self.delegate.prepare(request)
         }
         fn bind_homogeneous_bank(
             &self,
             request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             let marked = self.marker.is_none_or(|marker| {
                 request.requests.iter().any(|member| {
                     member
@@ -8960,10 +8960,13 @@ mod tests {
             };
             self.live.fetch_add(1, Ordering::SeqCst);
             self.bound.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(Box::new(CountedBank {
-                inner,
-                live: Arc::clone(&self.live),
-            })))
+            Ok(Some(effect_contract::PreparedEffectBank {
+                processor: Box::new(CountedBank {
+                    inner: inner.processor,
+                    live: Arc::clone(&self.live),
+                }),
+                metadata: inner.metadata,
+            }))
         }
     }
 
@@ -8978,9 +8981,6 @@ mod tests {
         }
     }
     impl PreparedNativeEffectBank for CountedBank {
-        fn metadata(&self) -> effect_contract::PreparedBankMetadata {
-            self.inner.metadata()
-        }
         fn reset(&mut self, kind: effect_contract::ResetKind) {
             self.inner.reset(kind);
         }

@@ -260,6 +260,7 @@ fn prepare_scalar() -> Box<dyn PreparedNativeEffect> {
     CompressorFactory
         .prepare(request(&values, true))
         .expect("prepared connected-sidechain compressor")
+        .processor
 }
 
 fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
@@ -275,4 +276,5 @@ fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativ
             active_mask: width.full_mask(),
         })
         .expect("bank binding must not fail")
+        .map(|bank| bank.processor)
 }

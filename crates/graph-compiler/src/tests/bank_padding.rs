@@ -69,13 +69,13 @@ impl NativeEffectFactory for PaddingDouble {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
         self.delegate.prepare(request)
     }
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
         request.validate_shape()?;
         let members: Vec<_> = request
             .requests

@@ -45,10 +45,11 @@ use effect_contract::{
     NativeEffectFactory, NativeEffectTargetPreparation, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, canonical_bits,
-    default_initial_values, is_negative_zero, normalize_zero, parameter_value_valid,
+    PreparedEffect, PreparedEffectBank, PreparedEffectMetadata, PreparedEffectTarget,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+    ProcessReport, QualityDescriptor, ResetKind, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, canonical_bits, default_initial_values, is_negative_zero, normalize_zero,
+    parameter_value_valid,
 };
 use engine::realtime::audit;
 use lane::Backend;
@@ -413,7 +414,7 @@ fn run_scalar(
     let mut pairs = Vec::with_capacity(lanes);
     for member in &requests {
         match (factory.prepare(*member), factory.prepare(*member)) {
-            (Ok(oracle), Ok(twin)) => pairs.push((oracle, twin)),
+            (Ok(oracle), Ok(twin)) => pairs.push((oracle, twin.processor)),
             (Err(first), Err(second)) => {
                 assert_eq!(first.code, second.code, "prepare is deterministic");
                 coverage.refused_cohorts += 1;
@@ -423,8 +424,11 @@ fn run_scalar(
         }
     }
     coverage.scalar_scenarios += 1;
-    let metadata = pairs[0].0.metadata();
-    let sizes = metadata.state_sizes;
+    let sizes = pairs[0].0.metadata.state_sizes;
+    let mut pairs: Vec<_> = pairs
+        .into_iter()
+        .map(|(oracle, twin)| (oracle.processor, twin))
+        .collect();
     let version = descriptor.state_layout_version;
     let quantum = shape.quantum as usize;
     let connected = matches!(
@@ -758,6 +762,8 @@ fn index_of(width: BankWidth) -> usize {
 /// The dual bank's collapsing twin, and the witness terms that decide its mode.
 struct MonoArm {
     bank: Box<dyn PreparedNativeEffectBank>,
+    /// The bank's width, from its bind result (issue #1461: the bank holds no metadata).
+    width: BankWidth,
     collapsed: bool,
     /// No dual block has run under a failed witness since bind (`rack::BankChain`'s agreement
     /// invariant). Nothing restores it: every launch effect declines `channels_agree`.
@@ -799,7 +805,10 @@ fn run_width(
     );
 
     // Bind first: a declined width prepares nothing more, which matters for a large state.
-    let mut bank = match factory.bind_homogeneous_bank(bank_request) {
+    let PreparedEffectBank {
+        processor: mut bank,
+        metadata: bank_metadata,
+    } = match factory.bind_homogeneous_bank(bank_request) {
         Ok(Some(bank)) => bank,
         Ok(None) => {
             coverage.declined[index_of(width)] += 1;
@@ -823,7 +832,7 @@ fn run_width(
             return;
         }
     };
-    let mut scalars: Vec<Box<dyn PreparedNativeEffect>> = requests
+    let mut prepared: Vec<PreparedEffect> = requests
         .iter()
         .map(|member| {
             factory.prepare(*member).unwrap_or_else(|error| {
@@ -834,14 +843,16 @@ fn run_width(
             })
         })
         .collect();
+    let metadata = prepared[0].metadata;
+    let mut scalars: Vec<Box<dyn PreparedNativeEffect>> =
+        prepared.drain(..).map(|member| member.processor).collect();
     coverage.banks[index_of(width)] += 1;
     if backend == Backend::current() {
         coverage.native_banks += 1;
     }
-    let metadata = scalars[0].metadata();
-    assert_eq!(bank.metadata().width, width, "the bank's width");
+    assert_eq!(bank_metadata.width, width, "the bank's width");
     assert_eq!(
-        bank.metadata().program_key,
+        bank_metadata.program_key,
         metadata.program_key(),
         "{width:?}: the bank's program key is its members'"
     );
@@ -858,7 +869,9 @@ fn run_width(
         bank: factory
             .bind_homogeneous_bank(bank_request)
             .expect("the same cohort binds twice")
-            .expect("the same cohort binds twice"),
+            .expect("the same cohort binds twice")
+            .processor,
+        width,
         collapsed: false,
         agree: true,
         restored: true,
@@ -1437,7 +1450,8 @@ impl Continuation {
     ) -> Self {
         let mut twin = factory
             .prepare(request)
-            .expect("a lane's own request prepares again");
+            .expect("a lane's own request prepares again")
+            .processor;
         let payload = snapshot_scalar(source, sizes, armed);
         let input = StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
             .expect("the prepared sizes");
@@ -1700,7 +1714,7 @@ fn disengage(
     arm.bank.desymmetrize_channels();
     arm.collapsed = false;
     coverage.disengages += 1;
-    for lane in 0..arm.bank.metadata().width.lanes() as usize {
+    for lane in 0..arm.width.lanes() as usize {
         assert_eq!(
             snapshot_lane(arm.bank.as_ref(), lane, sizes, armed),
             snapshot_lane(bank, lane, sizes, armed),
@@ -2518,7 +2532,8 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
     // The scalar instance: one lane, the poisoned one.
     let mut scalar = factory
         .prepare(request(shape, &values))
-        .expect("the defaults prepare");
+        .expect("the defaults prepare")
+        .processor;
     for block in 0..BLOCKS {
         let first = (block * frames) as u64;
         let mut left: Vec<f32> = (0..frames).map(|f| signal(block, 0, 0, f)).collect();
@@ -2546,12 +2561,16 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         let lanes = width.lanes() as usize;
         let requests: Vec<PrepareEffectRequest<'_>> =
             (0..lanes).map(|_| request(shape, &values)).collect();
-        let Ok(Some(mut bank)) = factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+        let Ok(Some(PreparedEffectBank {
+            processor: mut bank,
+            ..
+        })) = factory.bind_homogeneous_bank(PrepareEffectBankRequest {
             backend,
             width,
             requests: &requests,
             active_mask: width.full_mask(),
-        }) else {
+        })
+        else {
             continue;
         };
         let who = format!("{width:?} bank");
@@ -2764,7 +2783,11 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
                         value.value = start;
                     }
                 }
-                let Ok(mut effect) = factory.prepare(request(shape, &values)) else {
+                let Ok(PreparedEffect {
+                    processor: mut effect,
+                    ..
+                }) = factory.prepare(request(shape, &values))
+                else {
                     continue;
                 };
                 let channels: &[ParameterChannel] = match parameter.channel_policy {
@@ -2805,7 +2828,8 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
                     let payload = snapshot_scalar(effect.as_ref(), sizes, false);
                     let mut twin = factory
                         .prepare(request(shape, &values))
-                        .expect("the same request prepares again");
+                        .expect("the same request prepares again")
+                        .processor;
                     let input = StatePayloadInput::new(
                         &payload.common,
                         &payload.left,

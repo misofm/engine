@@ -172,7 +172,8 @@ pub fn run_case(case: usize, out: &mut [u32]) {
                 maximum_automation_spans_per_block: 16,
             },
         })
-        .expect("frozen corpus prepare request");
+        .expect("frozen corpus prepare request")
+        .processor;
 
     let mut random = Rng::new(case);
     let mut left = vec![0.0_f32; FRAMES];

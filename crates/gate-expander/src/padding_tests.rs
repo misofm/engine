@@ -79,7 +79,7 @@ fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     let request = PrepareEffectBankRequest {
         backend: backend(width),
         width,
@@ -93,10 +93,15 @@ fn bind(
     }
 }
 
-fn scalar(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
+/// A member's scalar instance and the metadata its preparation derived.
+fn prepared(request: PrepareEffectRequest<'_>) -> PreparedEffect {
     GateExpanderFactory
         .prepare(request)
         .expect("a valid member prepares")
+}
+
+fn scalar(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
+    prepared(request).processor
 }
 
 /// Initial values from one `(left, right)` pair per parameter.
@@ -298,7 +303,7 @@ impl Padded<'_> {
             .collect()
     }
 
-    fn bind(&self) -> Box<dyn PreparedNativeEffectBank> {
+    fn bind(&self) -> PreparedEffectBank {
         let lanes = self.lanes();
         assert_eq!(
             lanes.iter().flatten().count(),
@@ -326,13 +331,15 @@ impl Padded<'_> {
 fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>> {
     let lanes = padded.lanes();
     let width = lanes.len();
-    let mut bank = padded.bind();
+    let mut bank = padded.bind().processor;
     let mut scalars: Vec<Box<dyn PreparedNativeEffect>> = padded
         .members
         .iter()
         .map(|values| scalar(request(values, padded.rate, padded.link)))
         .collect();
-    let sizes = scalars[0].metadata().state_sizes;
+    let sizes = prepared(request(&padded.members[0], padded.rate, padded.link))
+        .metadata
+        .state_sizes;
     // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
     // scalar instance of the member the lane clones, fed `+0.0` and no automation.
@@ -702,7 +709,8 @@ fn no_lane_is_prepared_outside_its_declared_domain() {
                 link: LinkMode::DualMono,
             }
             .bind();
-            let sizes = bank.metadata().program_key.state_sizes;
+            let sizes = bank.metadata.program_key.state_sizes;
+            let bank = bank.processor;
             for lane in 0..lanes {
                 let (common, left, right) = bank_payload(bank.as_ref(), lane, sizes);
                 for (channel, section) in [(0, &left), (1, &right)] {
@@ -831,7 +839,7 @@ fn injectable<L: Lane>(
         request(&values[0], 48_000, LinkMode::DualMono),
     )
     .expect("metadata");
-    PreparedGate::<L, false>::new(metadata, Some(width), defaults)
+    PreparedGate::<L, false>::new(&metadata, Some(width), defaults)
         .expect("a bank")
         .with_active_lanes(active_bits(mask))
 }

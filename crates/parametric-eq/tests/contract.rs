@@ -240,7 +240,7 @@ fn automation_starts_a_64_sample_word_ramp() {
         (target.to_array()[index] - start.to_array()[index]) * (1.0 / 64.0)
     });
 
-    let (_, left, _) = snapshot(effect.as_ref());
+    let (_, left, _) = snapshot(&effect);
     for index in 0..6 {
         assert_eq!(
             band_word(&left, 0, 2 + index),
@@ -254,12 +254,12 @@ fn automation_starts_a_64_sample_word_ramp() {
     let mut changed = vec![false; target_values.len()];
     changed[3 * 2] = true;
     assert_eq!(
-        apply_prepared_targets(effect.as_mut(), &target_values, &changed),
+        apply_prepared_targets(&mut effect, &target_values, &changed),
         1
     );
-    let report = process_zeros(effect.as_mut(), 0, 1, &[]);
+    let report = process_zeros(&mut effect, 0, 1, &[]);
     assert_eq!(report.invalid_spans, 0);
-    let (_, left, _) = snapshot(effect.as_ref());
+    let (_, left, _) = snapshot(&effect);
     assert_eq!(band_word(&left, 0, 14), 63, "one frame consumed");
     for (index, increment) in step.into_iter().enumerate() {
         assert_eq!(
@@ -271,9 +271,9 @@ fn automation_starts_a_64_sample_word_ramp() {
     }
     assert_eq!(f32::from_bits(band_word(&left, 0, 16)), 12.0, "gain target");
 
-    let report = process_zeros(effect.as_mut(), 1, 63, &[]);
+    let report = process_zeros(&mut effect, 1, 63, &[]);
     assert_eq!(report.invalid_spans, 0);
-    let (_, left, _) = snapshot(effect.as_ref());
+    let (_, left, _) = snapshot(&effect);
     assert_eq!(band_word(&left, 0, 14), 0, "ramp finished");
     for index in 0..6 {
         assert_eq!(
@@ -306,9 +306,9 @@ fn malformed_automation_rejects_each_span_without_losing_valid_targets() {
         wrong_time,
         mismatched_point,
     ];
-    let report = process_zeros(effect.as_mut(), 0, 1, &automation);
+    let report = process_zeros(&mut effect, 0, 1, &automation);
     assert_eq!(report.invalid_spans, 8);
-    let (_, left, right) = snapshot(effect.as_ref());
+    let (_, left, right) = snapshot(&effect);
     assert_eq!(
         f32::from_bits(band_word(&left, 0, 16)),
         0.0,
@@ -333,9 +333,9 @@ fn an_over_capacity_automation_block_is_rejected_whole() {
     let spans: Vec<_> = (0..49)
         .map(|_| point(3, ParameterChannel::Left, 0, 6.0))
         .collect();
-    let report = process_zeros(effect.as_mut(), 0, 1, &spans);
+    let report = process_zeros(&mut effect, 0, 1, &spans);
     assert_eq!(report.invalid_spans, 49);
-    let (_, left, _) = snapshot(effect.as_ref());
+    let (_, left, _) = snapshot(&effect);
     assert_eq!(band_word(&left, 0, 14), 0);
 }
 
@@ -362,11 +362,11 @@ fn automation_is_partition_invariant() {
         changed[2 * 2] = true;
         changed[3 * 2] = true;
         assert_eq!(
-            apply_prepared_targets(whole.as_mut(), &target_values, &changed),
+            apply_prepared_targets(&mut whole, &target_values, &changed),
             1
         );
         assert_eq!(
-            apply_prepared_targets(split.as_mut(), &target_values, &changed),
+            apply_prepared_targets(&mut split, &target_values, &changed),
             1
         );
         let mut whole_left: Vec<f32> = (0..192).map(|index| (index as f32).sin() * 0.5).collect();
@@ -374,7 +374,7 @@ fn automation_is_partition_invariant() {
         let mut split_left = whole_left.clone();
         let mut split_right = whole_right.clone();
 
-        whole.process(
+        whole.processor.process(
             EffectProcessBlock::new(
                 &mut whole_left[..128],
                 &mut whole_right[..128],
@@ -385,7 +385,7 @@ fn automation_is_partition_invariant() {
             )
             .expect("whole block"),
         );
-        whole.process(
+        whole.processor.process(
             EffectProcessBlock::new(
                 &mut whole_left[128..],
                 &mut whole_right[128..],
@@ -399,7 +399,7 @@ fn automation_is_partition_invariant() {
 
         let mut first = 0_usize;
         for frames in partition.iter().copied() {
-            split.process(
+            split.processor.process(
                 EffectProcessBlock::new(
                     &mut split_left[first..first + frames],
                     &mut split_right[first..first + frames],
@@ -412,7 +412,7 @@ fn automation_is_partition_invariant() {
             );
             first += frames;
         }
-        split.process(
+        split.processor.process(
             EffectProcessBlock::new(
                 &mut split_left[first..],
                 &mut split_right[first..],
@@ -435,8 +435,8 @@ fn automation_is_partition_invariant() {
             "partition {partition:?} right"
         );
         assert_eq!(
-            snapshot(whole.as_ref()),
-            snapshot(split.as_ref()),
+            snapshot(&whole),
+            snapshot(&split),
             "partition {partition:?} state"
         );
     }
@@ -475,32 +475,34 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     let target = prepared[0];
     assert_eq!(target.slot, 0);
     assert_eq!(target.channel, ParameterChannel::Left);
-    let before = snapshot(effect.as_ref());
+    let before = snapshot(&effect);
     effect
+        .processor
         .apply_prepared_target(&target)
         .expect("prepared target");
-    let in_flight = snapshot(effect.as_ref());
+    let in_flight = snapshot(&effect);
     assert_eq!(word(&in_flight.1, 0), word(&before.1, 0));
     assert_eq!(word(&in_flight.1, 114), 1);
 
     let mut first = [1.0_f32; 1];
     let mut first_right = [0.0_f32; 1];
-    effect.process(
+    effect.processor.process(
         EffectProcessBlock::new(&mut first, &mut first_right, None, 0, &[], 128)
             .expect("first sample"),
     );
-    let mid_ramp = snapshot(effect.as_ref());
+    let mid_ramp = snapshot(&effect);
     let mut restored = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("restore prepare");
     restored
+        .processor
         .restore_state_payload(
             1,
             StatePayloadInput::new(
                 &mid_ramp.0,
                 &mid_ramp.1,
                 &mid_ramp.2,
-                restored.metadata().state_sizes,
+                restored.metadata.state_sizes,
             )
             .expect("mid-ramp input"),
         )
@@ -509,10 +511,10 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     let mut rest_right = [0.0_f32; 63];
     let mut restored_rest = rest;
     let mut restored_rest_right = rest_right;
-    effect.process(
+    effect.processor.process(
         EffectProcessBlock::new(&mut rest, &mut rest_right, None, 1, &[], 128).expect("ramp tail"),
     );
-    restored.process(
+    restored.processor.process(
         EffectProcessBlock::new(
             &mut restored_rest,
             &mut restored_rest_right,
@@ -525,7 +527,7 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     );
     assert_eq!(rest.map(f32::to_bits), restored_rest.map(f32::to_bits));
     assert_eq!(restored_rest_right, rest_right);
-    let settled = snapshot(effect.as_ref());
+    let settled = snapshot(&effect);
     let designed = design_svf(
         EqBandKind::HighPass,
         1_000.0,
@@ -548,6 +550,7 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     let mut response_left = [empty_response_section(); EQ_SECTION_COUNT];
     let mut response_right = [empty_response_section(); EQ_SECTION_COUNT];
     effect
+        .processor
         .copy_response_snapshot(effect_contract::ResponseSnapshotRequest {
             bypassed: false,
             left: &mut response_left,
@@ -571,15 +574,16 @@ fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
         1.0,
     );
     effect
+        .processor
         .apply_prepared_target(&disabled)
         .expect("disable target");
     let mut disable_left = [1.0_f32; 64];
     let mut disable_right = [0.0_f32; 64];
-    effect.process(
+    effect.processor.process(
         EffectProcessBlock::new(&mut disable_left, &mut disable_right, None, 64, &[], 128)
             .expect("disable ramp"),
     );
-    let disabled_state = snapshot(effect.as_ref());
+    let disabled_state = snapshot(&effect);
     assert_eq!(word(&disabled_state.1, 114), 0);
 }
 
@@ -591,7 +595,7 @@ fn prepared_target_rejects_general_enable_change_without_mutation() {
     let mut effect = ParametricEqFactory
         .prepare(request(&configured, false))
         .expect("prepare");
-    let before = snapshot(effect.as_ref());
+    let before = snapshot(&effect);
     let target = prepared_target(
         1,
         ParameterChannel::Left,
@@ -603,10 +607,10 @@ fn prepared_target_rejects_general_enable_change_without_mutation() {
         1.0,
     );
     assert_eq!(
-        effect.apply_prepared_target(&target),
+        effect.processor.apply_prepared_target(&target),
         Err(EffectTargetError::Domain)
     );
-    assert_eq!(snapshot(effect.as_ref()), before);
+    assert_eq!(snapshot(&effect), before);
 }
 
 /// A payload claiming an invalid prelaunch version is rejected, never silently migrated.
@@ -616,11 +620,11 @@ fn an_invalid_version_payload_is_rejected() {
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
-    let (common, left, right) = snapshot(effect.as_ref());
+    let (common, left, right) = snapshot(&effect);
     assert_eq!(
-        effect.restore_state_payload(
+        effect.processor.restore_state_payload(
             0,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
+            StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
@@ -639,7 +643,7 @@ fn a_payload_of_the_wrong_length_is_rejected() {
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
-    let (common, left, right) = snapshot(effect.as_ref());
+    let (common, left, right) = snapshot(&effect);
     for (common_len, left_len, right_len) in [
         (COMMON_BYTES - 4, LANE_BYTES, LANE_BYTES),
         (COMMON_BYTES + 4, LANE_BYTES, LANE_BYTES),
@@ -656,7 +660,7 @@ fn a_payload_of_the_wrong_length_is_rejected() {
             bytes
         };
         assert_eq!(
-            effect.restore_state_payload(
+            effect.processor.restore_state_payload(
                 1,
                 StatePayloadInput {
                     common: &resize(&common, common_len),
@@ -683,7 +687,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
-    let (common, left, right) = snapshot(effect.as_ref());
+    let (common, left, right) = snapshot(&effect);
     assert_eq!(word(&common, 0), 1, "the layout version is stamped");
     assert_eq!(
         word(&common, 1),
@@ -694,9 +698,9 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     let mut stale = common;
     stale[0] = 0;
     assert_eq!(
-        effect.restore_state_payload(
+        effect.processor.restore_state_payload(
             1,
-            StatePayloadInput::new(&stale, &left, &right, effect.metadata().state_sizes)
+            StatePayloadInput::new(&stale, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
@@ -708,9 +712,9 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     let mut miscounted = common;
     miscounted[4] = 0xff;
     assert_eq!(
-        effect.restore_state_payload(
+        effect.processor.restore_state_payload(
             1,
-            StatePayloadInput::new(&miscounted, &left, &right, effect.metadata().state_sizes)
+            StatePayloadInput::new(&miscounted, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
@@ -727,8 +731,8 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
-    process_zeros(effect.as_mut(), 0, 8, &[]);
-    let before = snapshot(effect.as_ref());
+    process_zeros(&mut effect, 0, 8, &[]);
+    let before = snapshot(&effect);
     for (word, bits) in [
         (0_usize, f32::NAN.to_bits()),
         (2, f32::NAN.to_bits()),
@@ -740,9 +744,9 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
         let (common, mut left, right) = before;
         left[word * 4..word * 4 + 4].copy_from_slice(&bits.to_le_bytes());
         assert_eq!(
-            effect.restore_state_payload(
+            effect.processor.restore_state_payload(
                 1,
-                StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
+                StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
                     .expect("input"),
             ),
             Err(StatePayloadError {
@@ -750,20 +754,16 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
             }),
             "word {word}"
         );
-        assert_eq!(
-            snapshot(effect.as_ref()),
-            before,
-            "word {word} left a trace"
-        );
+        assert_eq!(snapshot(&effect), before, "word {word} left a trace");
     }
     // A settled band whose stored words disagree with its stored parameters is a forgery.
     let (common, mut left, right) = before;
     let poisoned = f32::from_bits(band_word(&left, 0, 2)) + 1.0e-3;
     left[8..12].copy_from_slice(&poisoned.to_bits().to_le_bytes());
     assert_eq!(
-        effect.restore_state_payload(
+        effect.processor.restore_state_payload(
             1,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
+            StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
@@ -776,9 +776,9 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
     let (common, mut left, right) = before;
     left[8 * 4..9 * 4].copy_from_slice(&1.0_f32.to_bits().to_le_bytes());
     assert_eq!(
-        effect.restore_state_payload(
+        effect.processor.restore_state_payload(
             1,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
+            StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
@@ -798,7 +798,7 @@ fn snapshot_rejects_bad_output_without_touching_either_lane() {
     let mut left = [0xA5_u8; LANE_BYTES];
     let mut right = [0x5A_u8; LANE_BYTES - 1];
     assert_eq!(
-        effect.snapshot_state_payload(StatePayloadOutput {
+        effect.processor.snapshot_state_payload(StatePayloadOutput {
             common: &mut common,
             left: &mut left,
             right: &mut right,
@@ -827,7 +827,7 @@ fn disabled_and_zero_db_sections_return_dry_bits_with_zero_state_growth() {
             .expect("prepare");
         let mut left = samples;
         let mut right = samples;
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"),
         );
         for (index, sample) in samples.into_iter().enumerate() {
@@ -838,7 +838,7 @@ fn disabled_and_zero_db_sections_return_dry_bits_with_zero_state_growth() {
                 "warm={warm} sample {sample}"
             );
         }
-        let (_, state, _) = snapshot(effect.as_ref());
+        let (_, state, _) = snapshot(&effect);
         let charged = (0..SECTIONS)
             .flat_map(|band| (0..2).map(move |word| band_word(&state, band, word)))
             .any(|bits| bits != 0);
@@ -853,17 +853,18 @@ fn bypass_copies_dry_bits_and_leaves_the_state_alone() {
     let mut effect = ParametricEqFactory
         .prepare(request(&values, true))
         .expect("bypass prepare");
-    let before = snapshot(effect.as_ref());
+    let before = snapshot(&effect);
     let mut left = [0.0_f32, f32::NAN, 0.25];
     let mut right = [-0.0_f32, 0.5, 0.0];
     let report = effect
+        .processor
         .process(EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"));
     assert!(left[1].is_nan(), "bypass is a copy, not a sanitiser");
     assert_eq!(right[0].to_bits(), (-0.0_f32).to_bits());
     assert_eq!(left[2].to_bits(), 0.25_f32.to_bits());
     assert_eq!(report.sanitized_main_samples, 0);
     assert_eq!(report.nonfinite_left_blocks, 0);
-    assert_eq!(snapshot(effect.as_ref()), before);
+    assert_eq!(snapshot(&effect), before);
 }
 
 /// The two resets mean two different things and both are exact.
@@ -873,23 +874,26 @@ fn resets_restore_defaults_or_only_clear_history() {
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
-    let fresh = snapshot(effect.as_ref());
+    let fresh = snapshot(&effect);
     let mut target_values = values.clone();
     set_initial(&mut target_values, 2, ParameterChannel::Left, 5_000.0);
     let mut changed = vec![false; target_values.len()];
     changed[2 * 2] = true;
-    apply_prepared_targets(effect.as_mut(), &target_values, &changed);
-    process_zeros(effect.as_mut(), 0, 8, &[]);
+    apply_prepared_targets(&mut effect, &target_values, &changed);
+    process_zeros(&mut effect, 0, 8, &[]);
     let mut left = [0.5_f32; 8];
     let mut right = [0.5_f32; 8];
     effect
+        .processor
         .process(EffectProcessBlock::new(&mut left, &mut right, None, 8, &[], 128).expect("block"));
-    let (_, moved, _) = snapshot(effect.as_ref());
+    let (_, moved, _) = snapshot(&effect);
     assert_ne!(band_word(&moved, 0, 0), 0, "the integrators charged");
     assert_ne!(band_word(&moved, 0, 14), 0, "a ramp is in flight");
 
-    effect.reset(ResetKind::DiscontinuityKeepParameters);
-    let (_, kept, _) = snapshot(effect.as_ref());
+    effect
+        .processor
+        .reset(ResetKind::DiscontinuityKeepParameters);
+    let (_, kept, _) = snapshot(&effect);
     assert_eq!(band_word(&kept, 0, 0), 0, "history cleared");
     assert_eq!(band_word(&kept, 0, 14), 0, "the ramp snapped");
     assert_eq!(
@@ -913,8 +917,8 @@ fn resets_restore_defaults_or_only_clear_history() {
         );
     }
 
-    effect.reset(ResetKind::FullToDefaults);
-    assert_eq!(snapshot(effect.as_ref()), fresh);
+    effect.processor.reset(ResetKind::FullToDefaults);
+    assert_eq!(snapshot(&effect), fresh);
 }
 
 /// A band whose enable or family is not an admitted value is refused at prepare.
@@ -938,13 +942,13 @@ fn a_negative_zero_automation_value_is_accepted_as_zero() {
         .prepare(request(&values, false))
         .expect("prepare");
     let report = process_zeros(
-        effect.as_mut(),
+        &mut effect,
         0,
         1,
         &[point(3, ParameterChannel::Left, 0, -0.0)],
     );
     assert_eq!(report.invalid_spans, 1);
-    let (_, left, _) = snapshot(effect.as_ref());
+    let (_, left, _) = snapshot(&effect);
     assert_eq!(
         band_word(&left, 0, 16),
         6.0_f32.to_bits(),
@@ -953,18 +957,18 @@ fn a_negative_zero_automation_value_is_accepted_as_zero() {
     assert_eq!(band_word(&left, 0, 14), 0, "raw spans cannot start a ramp");
 
     // A payload that carries `-0.0` remains malformed and state-preserving.
-    let (common, mut stored, right) = snapshot(effect.as_ref());
+    let (common, mut stored, right) = snapshot(&effect);
     stored[(19 + 16) * 4..(19 + 16) * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
-    let before = snapshot(effect.as_ref());
+    let before = snapshot(&effect);
     assert_eq!(
-        effect.restore_state_payload(
+        effect.processor.restore_state_payload(
             1,
-            StatePayloadInput::new(&common, &stored, &right, effect.metadata().state_sizes)
+            StatePayloadInput::new(&common, &stored, &right, effect.metadata.state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
             code: "effect.state.payload"
         })
     );
-    assert_eq!(snapshot(effect.as_ref()), before);
+    assert_eq!(snapshot(&effect), before);
 }

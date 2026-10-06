@@ -470,8 +470,7 @@ mod tests {
     use super::*;
     use effect_contract::{
         EffectDescriptor, EffectPrepareError, NativeEffectTargetPreparation,
-        PrepareEffectBankRequest, PrepareEffectRequest, PreparedNativeEffect,
-        PreparedNativeEffectBank,
+        PrepareEffectBankRequest, PrepareEffectRequest,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
@@ -483,7 +482,7 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             ParametricEqFactory.prepare(request)
         }
         fn target_preparation(&self) -> Option<&dyn NativeEffectTargetPreparation> {
@@ -492,7 +491,7 @@ mod tests {
         fn bind_homogeneous_bank(
             &self,
             request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             ParametricEqFactory.bind_homogeneous_bank(request)
         }
     }

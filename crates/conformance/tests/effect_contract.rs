@@ -75,7 +75,8 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
             active_mask: BankWidth::Four.full_mask(),
         })
         .unwrap()
-        .expect("positive bank");
+        .expect("positive bank")
+        .processor;
     let mut left = vec![0.0; 4 * 4];
     let mut right = vec![0.0; 4 * 4];
     for lane in 0..4 {
@@ -194,10 +195,10 @@ fn every_faulty_mock_is_detected() {
         (FaultKind::LogHook, None),
         (FaultKind::SyscallHook, None),
         (FaultKind::SharedLaneState, None),
-        (FaultKind::ChangingMetadata, None),
-        (FaultKind::ChangingTail, None),
-        (FaultKind::LatencyChangingBypass, None),
-        (FaultKind::BadResources, None),
+        // Issue #1461: the two metadata faults lie in the prepare result, which is the only
+        // metadata there is, so `metadata.exact` is what must name them.
+        (FaultKind::LatencyChangingBypass, Some("metadata.exact")),
+        (FaultKind::BadResources, Some("metadata.exact")),
         (FaultKind::MalformedSpanAcceptance, None),
         (FaultKind::NonfinitePropagation, None),
         (FaultKind::NondeterministicSnapshot, None),

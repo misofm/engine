@@ -106,7 +106,8 @@ fn the_render_path_allocates_nothing() {
     let values = values();
     let mut scalar = TruePeakLimiterFactory
         .prepare(request(&values))
-        .expect("prepare");
+        .expect("prepare")
+        .processor;
     let mut left = vec![0.0_f32; 128];
     let mut right = vec![0.0_f32; 128];
     // Warm every lazily initialised path once before arming the counter.
@@ -164,7 +165,8 @@ fn the_render_path_allocates_nothing() {
             active_mask: width.full_mask(),
         })
         .expect("bank binding")
-        .expect("bank available");
+        .expect("bank available")
+        .processor;
     let mut left = vec![0.0_f32; 128 * lanes];
     let mut right = vec![0.0_f32; 128 * lanes];
     // Lane 0 carries the one span; every other lane carries none.
@@ -222,7 +224,8 @@ fn the_render_path_allocates_nothing() {
             active_mask: width.full_mask(),
         })
         .expect("mono bank binding")
-        .expect("mono bank available");
+        .expect("mono bank available")
+        .processor;
     let mut mono_left = vec![0.0_f32; 128 * lanes];
     let mut mono_right = vec![0.0_f32; 128 * lanes];
     mono_bank.process_bank_mono(
@@ -291,7 +294,8 @@ fn the_render_path_allocates_nothing() {
                 active_mask: &mask,
             })
             .expect("padded bank binding")
-            .expect("padded bank available");
+            .expect("padded bank available")
+            .processor;
         let mut left = vec![0.0_f32; 128 * lanes];
         let mut right = vec![0.0_f32; 128 * lanes];
         let fill = |left: &mut [f32], right: &mut [f32], block: usize| {

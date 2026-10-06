@@ -42,11 +42,11 @@ use effect_contract::{
     NativeEffectResponseFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
     ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
     PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
-    ProcessReport, QualityDescriptor, ResetKind, ResponseAnalysisError, ResponseSnapshotKind,
-    ResponseSnapshotRequest, ResponseSnapshotSection, ResponseSnapshotSummary, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    PreparedEffect, PreparedEffectBank, PreparedEffectMetadata, PreparedEffectTarget,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, QualityDescriptor, ResetKind,
+    ResponseAnalysisError, ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSummary, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{BLOCK_LIMIT, block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{
@@ -2941,9 +2941,21 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 pub struct ParametricEqFactory;
 
 /// A prepared EQ over `W = L::WIDTH` tracks: one body for the scalar effect and for every bank.
+///
+/// It holds none of its `PreparedEffectMetadata` or `PreparedBankMetadata` (issue #1461): the
+/// prepare result carries those beside it on the control side, and the instance keeps only the
+/// four values its own code reads.
 struct PreparedParametricEq<L: Lane, const W: usize> {
-    metadata: PreparedEffectMetadata,
-    bank: PreparedBankMetadata,
+    /// The prepared sample rate in hertz: the design functions' rate (a restore's redesign, the
+    /// joint rule's silence window) and the response snapshot's report.
+    sample_rate: u32,
+    /// The prepared render quantum: the bank entry guard's block-length ceiling.
+    quantum: u32,
+    /// The prepared bypass: `process` and the bank body return before any section runs.
+    bypass: bool,
+    /// The bank width this instance was bound at: the bank entry guard and its empty report.
+    /// The scalar instance carries `BankWidth::Four`, which no scalar path reads.
+    width: BankWidth,
     initial: [[[BandTarget; EQ_SECTION_COUNT]; 2]; W],
     /// Designed words corresponding to `initial`, retained so a full reset never redesigns.
     initial_words: [[[EqSvfWords; EQ_SECTION_COUNT]; 2]; W],
@@ -3025,7 +3037,7 @@ fn silence_window<L: Lane>(sample_rate: SampleRateHz) -> L {
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// The channel's sample rate, as the design functions take it.
     fn sample_rate(&self) -> SampleRateHz {
-        SampleRateHz(self.metadata.sample_rate)
+        SampleRateHz(self.sample_rate)
     }
 
     /// Applies one validated prepared target to one prepared track.
@@ -3463,11 +3475,10 @@ fn prepare_width<L: Lane, const W: usize>(
         }
     }
     Ok(PreparedParametricEq {
-        metadata,
-        bank: PreparedBankMetadata {
-            width,
-            program_key: metadata.program_key(),
-        },
+        sample_rate: metadata.sample_rate,
+        quantum: metadata.quantum,
+        bypass: metadata.bypass,
+        width,
         initial,
         initial_words,
         left: Channel::from_prepared(
@@ -3496,14 +3507,17 @@ impl NativeEffectFactory for ParametricEqFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
-        Ok(Box::new(prepare_width::<f32, 1>(
+        Ok(PreparedEffect {
+            processor: Box::new(prepare_width::<f32, 1>(
+                metadata,
+                BankWidth::Four,
+                &[request],
+                &[true],
+            )?),
             metadata,
-            BankWidth::Four,
-            &[request],
-            &[true],
-        )?))
+        })
     }
 
     fn response_analysis(&self) -> Option<&dyn NativeEffectResponseFactory> {
@@ -3517,7 +3531,7 @@ impl NativeEffectFactory for ParametricEqFactory {
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         bind_bank(request, Backend::current().width())
     }
 }
@@ -3531,7 +3545,7 @@ impl NativeEffectFactory for ParametricEqFactory {
 fn bind_bank(
     request: PrepareEffectBankRequest<'_>,
     native_lanes: usize,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     // Issue #95: a self-contradicting shape is a contract violation and a typed error; a
     // width this build does not execute is a capability gap and a legal `Ok(None)`. This
     // crate used to answer `Ok(None)` to both, which was the other half of the wave-2
@@ -3562,17 +3576,20 @@ fn bind_bank(
     // move it off `+0.0` at rest; the padding contract on `PrepareEffectBankRequest` lists the
     // clauses, and `Channel::recover_failed_lanes` is why a padded lane's bits and an active lane's
     // never meet.
-    Ok(Some(effect_contract::match_bank_width!(
-        request.width,
-        |L, N| {
+    Ok(Some(PreparedEffectBank {
+        processor: effect_contract::match_bank_width!(request.width, |L, N| {
             Box::new(prepare_width::<L, N>(
                 metadata,
                 request.width,
                 request.requests,
                 request.active_mask,
             )?) as Box<dyn PreparedNativeEffectBank>
-        }
-    )))
+        }),
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+    }))
 }
 
 // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
@@ -3710,7 +3727,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 /// * `targets[l][s]` (`BandTarget`) -- the control-plane band description. The kernel never reads
 ///   it, and it is the design *input*, not the designed word: two different band descriptions
 ///   that design to the same six words are symmetric, and the words are what decides that.
-/// * `silent_fixed_point`, `metadata.bypass` -- whole-instance, so they cannot be asymmetric.
+/// * `silent_fixed_point`, `bypass` -- whole-instance, so they cannot be asymmetric.
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
         if lane >= W || lane >= L::WIDTH {
@@ -3739,10 +3756,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 }
 
 impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
-    }
-
     fn copy_response_snapshot(
         &self,
         request: ResponseSnapshotRequest<'_>,
@@ -3774,7 +3787,7 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         // prepared targets before this entry point; never design coefficients on the render
         // thread. Count every raw span while rendering the existing state unchanged.
         report.invalid_spans = block.automation.len() as u64;
-        if self.metadata.bypass {
+        if self.bypass {
             return report;
         }
         // A block longer than the prepared quantum (its caller states the length) renders as
@@ -3817,10 +3830,6 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<L, W> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.bank.clone()
-    }
-
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,
@@ -3947,7 +3956,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
         Ok(ResponseSnapshotSummary {
             kind: ResponseSnapshotKind::ParametricEq,
-            sample_rate_hz: self.metadata.sample_rate,
+            sample_rate_hz: self.sample_rate,
             bypassed,
             sections: EQ_SECTION_COUNT as u32,
         })
@@ -3976,9 +3985,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         &mut self,
         block: EffectBankProcessBlock<'_>,
     ) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.bank.width);
-        if !bank_block_matches(&block, self.bank.width, self.metadata.quantum)
-            || self.bank.width.lanes() as usize != W
+        let mut report = BankProcessReport::empty(self.width);
+        if !bank_block_matches(&block, self.width, self.quantum) || self.width.lanes() as usize != W
         {
             return report;
         }
@@ -3994,7 +4002,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             // rendering its already prepared state, so no render-thread designer is reachable.
             report.reports[track].invalid_spans = (end - start) as u64;
         }
-        if self.metadata.bypass {
+        if self.bypass {
             return report;
         }
         let frames = block.frames as usize;
@@ -6693,7 +6701,8 @@ mod target_application {
 
         let mut effect = ParametricEqFactory
             .prepare(request(&values))
-            .expect("effect preparation");
+            .expect("effect preparation")
+            .processor;
         reset_design_calls();
         effect
             .apply_prepared_target(&targets[0])
@@ -6714,7 +6723,8 @@ mod target_application {
 
         let mut raw = ParametricEqFactory
             .prepare(request(&target_values))
-            .expect("legacy effect preparation");
+            .expect("legacy effect preparation")
+            .processor;
         reset_design_calls();
         let mut left = [1.0_f32; 1];
         let mut right = [0.0_f32; 1];
@@ -7357,7 +7367,7 @@ mod ramping_elision {
                 right,
                 None,
                 frames as u32,
-                self.eq.bank.width,
+                self.eq.width,
                 first,
                 &[],
                 &offsets[..=W],
@@ -8394,6 +8404,7 @@ mod padded_banks {
         )
         .expect("a well-formed padded request")
         .expect("the EQ binds a padded bank")
+        .processor
     }
 
     /// One lane's requests for a bank: `member_of[lane]` names the member whose values it carries,
@@ -8633,7 +8644,11 @@ mod padded_banks {
         // A draw whose designs are not all legal is not a scenario.
         let Ok(mut scalars) = initial
             .iter()
-            .map(|values| factory.prepare(request(values, rate)))
+            .map(|values| {
+                factory
+                    .prepare(request(values, rate))
+                    .map(|prepared| prepared.processor)
+            })
             .collect::<Result<Vec<_>, _>>()
         else {
             return;
@@ -9325,6 +9340,7 @@ mod padded_banks {
                                 ParametricEqFactory
                                     .prepare(request(values, rate))
                                     .expect("scalar prepare")
+                                    .processor
                             })
                             .collect();
                         let mut shunt = BypassShunt::new(QUANTUM * lanes, 0);

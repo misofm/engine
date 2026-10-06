@@ -20,7 +20,7 @@ use effect_contract::{
     AutomationSpanKind, InitialParameterValue, NativeEffectFactory, ParameterChannel,
     ParameterChannelPolicy, PortRole, PrepareEffectLimits, PrepareEffectRequest,
     PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
-    ProcessReport, StatePayloadOutput, default_initial_values,
+    ProcessReport, StatePayloadOutput, StatePayloadSizes, default_initial_values,
 };
 
 /// The payload section that holds a ramp.
@@ -108,8 +108,8 @@ fn request<'a>(
 
 type Payload = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-fn snapshot(effect: &dyn PreparedNativeEffect) -> Payload {
-    let sizes = effect.metadata().state_sizes;
+/// Snapshots `effect`, whose prepare result reported the state sizes `sizes`.
+fn snapshot(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Payload {
     let mut common = vec![0_u8; sizes.common_bytes as usize];
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
@@ -265,12 +265,14 @@ fn check_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWord], c
     let samples = factory.descriptor().parameters[mv.word.parameter as usize].smoothing_samples;
     let values = values_with(factory, mv.word.parameter, mv.start);
     let spans = move_spans(factory, mv.word.parameter, mv.target);
-    let mut framewise = factory
+    let prepared = factory
         .prepare(request(factory, &values, connected))
         .expect("prepares");
+    let sizes = prepared.metadata.state_sizes;
+    let mut framewise = prepared.processor;
     let rest: Vec<_> = words
         .iter()
-        .map(|word| ramps(&snapshot(framewise.as_ref()), *word))
+        .map(|word| ramps(&snapshot(framewise.as_ref(), sizes), *word))
         .collect();
     let (mut left, mut right) = (Vec::new(), Vec::new());
     for frame in 0..FRAMES {
@@ -278,7 +280,7 @@ fn check_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWord], c
         let (l, r, _) = render(framewise.as_mut(), frame, 1, first, connected);
         left.extend(l);
         right.extend(r);
-        let now = snapshot(framewise.as_ref());
+        let now = snapshot(framewise.as_ref(), sizes);
         for (word, rest) in words.iter().zip(&rest) {
             for (section, (rest, now)) in rest.iter().zip(ramps(&now, *word)).enumerate() {
                 let (low, high) = (rest.0.min(now.1), rest.0.max(now.1));
@@ -308,9 +310,13 @@ fn check_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWord], c
     }
     let mut whole = factory
         .prepare(request(factory, &values, connected))
-        .expect("prepares");
+        .expect("prepares")
+        .processor;
     let (whole_left, whole_right, _) = render(whole.as_mut(), 0, FRAMES, &spans, connected);
-    let (whole_state, framewise_state) = (snapshot(whole.as_ref()), snapshot(framewise.as_ref()));
+    let (whole_state, framewise_state) = (
+        snapshot(whole.as_ref(), sizes),
+        snapshot(framewise.as_ref(), sizes),
+    );
     for word in words {
         assert_eq!(
             ramps(&whole_state, *word),

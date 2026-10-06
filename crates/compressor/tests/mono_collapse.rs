@@ -217,11 +217,10 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
         }
 
         // Equal PCM must also leave equal state for the following dual-channel block.
-        let scalar = support::prepare(request_linked(&values, link_mode));
         collapsed.desymmetrize_channels();
         for track in 0..lanes as u32 {
-            let dual_payload = support::snapshot_track(dual.as_ref(), track, scalar.as_ref());
-            let mono_payload = support::snapshot_track(collapsed.as_ref(), track, scalar.as_ref());
+            let dual_payload = support::snapshot_track(dual.as_ref(), track);
+            let mono_payload = support::snapshot_track(collapsed.as_ref(), track);
             assert_eq!(
                 mono_payload, dual_payload,
                 "{link_mode:?}/{body} track {track}: the collapsed bank's serialised state must \
@@ -403,8 +402,8 @@ fn mono_reopen_drives_the_next_render_from_the_copied_state() {
     reopened.desymmetrize_channels();
     for track in 0..lanes as u32 {
         assert_eq!(
-            support::snapshot_track(reopened.as_ref(), track, sizes.as_ref()),
-            support::snapshot_track(oracle.as_ref(), track, sizes.as_ref()),
+            support::snapshot_track(reopened.as_ref(), track),
+            support::snapshot_track(oracle.as_ref(), track),
             "track {track}: reopen must copy the uniform left state over ragged right state"
         );
     }
@@ -448,8 +447,8 @@ fn mono_reopen_drives_the_next_render_from_the_copied_state() {
     );
     for track in 0..lanes as u32 {
         assert_eq!(
-            support::snapshot_track(reopened.as_ref(), track, sizes.as_ref()),
-            support::snapshot_track(oracle.as_ref(), track, sizes.as_ref()),
+            support::snapshot_track(reopened.as_ref(), track),
+            support::snapshot_track(oracle.as_ref(), track),
             "track {track}: first dual state after reopen"
         );
     }
@@ -533,12 +532,11 @@ fn a_statically_bypassed_bank_collapses_to_the_dual_bits() {
         }
     }
 
-    let scalar = support::prepare(request_configured(&values, LinkMode::Average, true));
     collapsed.desymmetrize_channels();
     for track in 0..lanes as u32 {
         assert_eq!(
-            support::snapshot_track(collapsed.as_ref(), track, scalar.as_ref()),
-            support::snapshot_track(dual.as_ref(), track, scalar.as_ref()),
+            support::snapshot_track(collapsed.as_ref(), track),
+            support::snapshot_track(dual.as_ref(), track),
             "track {track}: bypassed state after the disengage copy"
         );
     }

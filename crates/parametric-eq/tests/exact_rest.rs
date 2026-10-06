@@ -19,7 +19,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use effect_contract::{
     EffectProcessBlock, InitialParameterValue, NativeEffectFactory, ParameterChannel,
-    PreparedNativeEffect,
+    PreparedEffect,
 };
 use parametric_eq::{EqBandKind, ParametricEqFactory};
 use support::{band_word, request_at_rate, set_initial, single_section_values, snapshot, values};
@@ -31,7 +31,7 @@ const REST_BOUND_SAMPLES: usize = 9_600_000;
 /// Blocks rendered after rest that must stay at rest.
 const HELD_BLOCKS: usize = 4;
 
-fn at_rest(effect: &dyn PreparedNativeEffect, left: &[f32], right: &[f32]) -> bool {
+fn at_rest(effect: &PreparedEffect, left: &[f32], right: &[f32]) -> bool {
     let (_, left_state, right_state) = snapshot(effect);
     [&left_state[..], &right_state[..]]
         .iter()
@@ -54,7 +54,7 @@ fn the_low_shelf_fixed_point_reaches_exact_rest() {
     let mut block = 0_usize;
     while block * FRAMES < REST_BOUND_SAMPLES {
         let first_sample = (block * FRAMES) as u64;
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -65,7 +65,7 @@ fn the_low_shelf_fixed_point_reaches_exact_rest() {
             )
             .expect("block"),
         );
-        if block > 0 && at_rest(effect.as_ref(), &left, &right) {
+        if block > 0 && at_rest(&effect, &left, &right) {
             rest_at = Some(block);
             break;
         }
@@ -74,7 +74,7 @@ fn the_low_shelf_fixed_point_reaches_exact_rest() {
         block += 1;
     }
     let rest_at = rest_at.unwrap_or_else(|| {
-        let (_, left_state, _) = snapshot(effect.as_ref());
+        let (_, left_state, _) = snapshot(&effect);
         panic!(
             "no exact rest within {REST_BOUND_SAMPLES} samples: band 0 left ic1 {:e}, ic2 {:e}",
             f32::from_bits(band_word(&left_state, 0, 0)),
@@ -85,7 +85,7 @@ fn the_low_shelf_fixed_point_reaches_exact_rest() {
         left.fill(0.0);
         right.fill(0.0);
         let first_sample = ((rest_at + held) * FRAMES) as u64;
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -97,7 +97,7 @@ fn the_low_shelf_fixed_point_reaches_exact_rest() {
             .expect("block"),
         );
         assert!(
-            at_rest(effect.as_ref(), &left, &right),
+            at_rest(&effect, &left, &right),
             "rest reached at block {rest_at} must hold, broke {held} blocks later"
         );
     }
@@ -159,7 +159,7 @@ fn render_square(configured: &[InitialParameterValue], level: f32) -> Vec<f32> {
             *sample = polarity * level;
         }
         let mut right = left;
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -240,7 +240,7 @@ fn render_at(configured: &[InitialParameterValue], rate: u32, input: &[f32]) -> 
         let mut left = [0.0_f32; FRAMES];
         left[..chunk.len()].copy_from_slice(chunk);
         let mut right = left;
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -420,15 +420,16 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
     let mut effect = ParametricEqFactory
         .prepare(request_at_rate(&configured, false, RATE))
         .expect("the EQ prepares");
-    let mut payload = snapshot(effect.as_ref());
+    let mut payload = snapshot(&effect);
     for section in [&mut payload.1, &mut payload.2] {
         let at = WORDS_PER_BAND * 4;
         section[at..at + 4].copy_from_slice(&1.0e-15_f32.to_bits().to_le_bytes());
         section[at + 4..at + 8].copy_from_slice(&(-1.0e-15_f32).to_bits().to_le_bytes());
         assert_eq!(support::word(section, SILENCE_WORD), 0, "a fresh counter");
     }
-    let sizes = effect.metadata().state_sizes;
+    let sizes = effect.metadata.state_sizes;
     effect
+        .processor
         .restore_state_payload(
             1,
             StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
@@ -438,7 +439,7 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
     for block in 0..blocks {
         let mut left = [0.0_f32; FRAMES];
         let mut right = [0.0_f32; FRAMES];
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -453,7 +454,7 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
             left.iter().chain(&right).all(|y| y.to_bits() == 0),
             "block {block}: an identity cascade on silence outputs +0.0"
         );
-        let (_, left_state, _) = snapshot(effect.as_ref());
+        let (_, left_state, _) = snapshot(&effect);
         let pair = [band_word(&left_state, 0, 0), band_word(&left_state, 0, 1)];
         if (block + 1) * FRAMES < N_SILENCE_96K {
             assert_ne!(
@@ -470,7 +471,7 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
         }
     }
     // The blocks the fast path skips still count: the counter is the input's, rendered or not.
-    let (_, left_state, right_state) = snapshot(effect.as_ref());
+    let (_, left_state, right_state) = snapshot(&effect);
     for state in [&left_state, &right_state] {
         assert_eq!(
             support::word(state, SILENCE_WORD),
@@ -499,7 +500,7 @@ fn the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band() {
             let mut effect = ParametricEqFactory
                 .prepare(request_at_rate(&configured, false, RATE))
                 .expect("the EQ prepares");
-            let mut payload = snapshot(effect.as_ref());
+            let mut payload = snapshot(&effect);
             let target = if silent == 0 {
                 &mut payload.1
             } else {
@@ -511,8 +512,9 @@ fn the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band() {
             target[at + 4..at + 8].copy_from_slice(&(-1.0e-15_f32).to_bits().to_le_bytes());
             target[SILENCE_WORD * 4..SILENCE_WORD * 4 + 4]
                 .copy_from_slice(&(N_SILENCE_96K - 1.0).to_bits().to_le_bytes());
-            let sizes = effect.metadata().state_sizes;
+            let sizes = effect.metadata.state_sizes;
             effect
+                .processor
                 .restore_state_payload(
                     1,
                     StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
@@ -522,10 +524,10 @@ fn the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band() {
             let mut planes = [[0.25_f32; FRAMES]; 2];
             planes[silent] = [0.0; FRAMES];
             let [left, right] = &mut planes;
-            effect.process(
+            effect.processor.process(
                 EffectProcessBlock::new(left, right, None, 0, &[], FRAMES as u32).expect("block"),
             );
-            let (_, left_state, right_state) = snapshot(effect.as_ref());
+            let (_, left_state, right_state) = snapshot(&effect);
             let state = if silent == 0 {
                 &left_state
             } else {
@@ -574,12 +576,12 @@ fn a_block_longer_than_the_window_renders_as_its_quantum_sized_parts() {
             .enumerate()
         {
             let frames = left.len() as u32;
-            effect.process(
+            effect.processor.process(
                 EffectProcessBlock::new(left, right, None, (index * block) as u64, &[], frames)
                     .expect("block"),
             );
         }
-        (left, snapshot(effect.as_ref()))
+        (left, snapshot(&effect))
     };
     for total in [QUANTUM as usize, WINDOW_48K + 1] {
         let (whole, whole_state) = render(total, total);

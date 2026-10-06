@@ -438,7 +438,7 @@ fn every_lane<L: Lane>(mask: L::Mask) -> bool {
 /// Under DualMono, `Invariants::new` makes `linked` the all-zero mask and `select` is bitwise, so
 /// `link_frame` returns `magnitude`, which is `abs` of the same main word: the arm's bits are
 /// `link_frame`'s for every input, NaN included. The link mode is the prepared, whole-instance
-/// `metadata.link_mode`, never data. The arm lives only in the two-pass body's first pass: in a
+/// `link_mode`, never data. The arm lives only in the two-pass body's first pass: in a
 /// loop that also carries the recurrence it made V8 spill the recurrence and run slower.
 #[inline(always)]
 fn settled_detect<L: Lane, const DUAL_MONO: bool>(

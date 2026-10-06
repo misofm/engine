@@ -21,7 +21,9 @@ use lane::Backend;
 use compressor::CompressorFactory;
 use dsp_reference::class_a;
 use effect_contract::NativeEffectFactory;
-use support::{PARAMETER_COUNT, native_bank_width, prepare, request, values_with};
+use support::{
+    PARAMETER_COUNT, native_bank_width, prepare, prepare_with_metadata, request, values_with,
+};
 
 const QUANTUM: u32 = 128;
 
@@ -79,6 +81,7 @@ fn bind(
         })
         .expect("a well-formed padded request")
         .expect("the compressor binds a padded bank at this build's width")
+        .processor
 }
 
 /// One member's planes for a whole render.
@@ -460,7 +463,7 @@ fn a_padded_lane_is_not_a_track() {
     let lanes = width.lanes() as usize;
     let values: Vec<Values> = (0..lanes).map(console_values).collect();
     let requests: Vec<_> = values.iter().map(|values| request(values)).collect();
-    let sizes = prepare(requests[0]).metadata().state_sizes;
+    let sizes = prepare_with_metadata(requests[0]).metadata.state_sizes;
     for members in 1..lanes {
         let mask = members_first(members, lanes);
         let mut bank = bind(

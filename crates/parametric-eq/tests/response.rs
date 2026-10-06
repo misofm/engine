@@ -800,6 +800,7 @@ fn dedicated_response_keeps_public_band_order_and_retained_target_totals() {
         let mut retained_left = [sentinel; EQ_SECTION_COUNT];
         let mut retained_right = [sentinel; EQ_SECTION_COUNT];
         let retained_summary = effect
+            .processor
             .copy_response_snapshot(ResponseSnapshotRequest {
                 bypassed: false,
                 left: &mut retained_left,
@@ -1018,6 +1019,7 @@ fn dedicated_cut_response_covers_modes_q_and_cutoff_boundaries_at_all_launch_rat
             let mut retained_left = [sentinel; EQ_SECTION_COUNT];
             let mut retained_right = [sentinel; EQ_SECTION_COUNT];
             effect
+                .processor
                 .copy_response_snapshot(ResponseSnapshotRequest {
                     bypassed: false,
                     left: &mut retained_left,
@@ -1386,7 +1388,7 @@ fn settled_pcm_impulse_matches_query_at_all_launch_rates() {
         right[0] = 1.0;
         for first in (0..left.len()).step_by(128) {
             let end = (first + 128).min(left.len());
-            let report = effect.process(
+            let report = effect.processor.process(
                 EffectProcessBlock::new(
                     &mut left[first..end],
                     &mut right[first..end],
@@ -2086,6 +2088,7 @@ fn prepared_owner_snapshot_copies_asymmetric_target_words() {
     let mut left = [sentinel; EQ_SECTION_COUNT];
     let mut right = [sentinel; EQ_SECTION_COUNT];
     let summary = effect
+        .processor
         .copy_response_snapshot(ResponseSnapshotRequest {
             bypassed: false,
             left: &mut left,
@@ -2119,6 +2122,7 @@ fn prepared_owner_snapshot_rejects_wrong_shape_without_writing() {
     let mut left = [sentinel; EQ_SECTION_COUNT - 1];
     let mut right = [sentinel; EQ_SECTION_COUNT];
     let error = effect
+        .processor
         .copy_response_snapshot(ResponseSnapshotRequest {
             bypassed: false,
             left: &mut left,

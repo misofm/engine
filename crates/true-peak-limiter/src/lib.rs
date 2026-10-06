@@ -54,10 +54,10 @@ use effect_contract::{
     ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
@@ -3417,7 +3417,13 @@ const PARAMETER_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
 
 /// Everything one prepared instance or bank owns, at one width.
 struct LimiterCore<L: Lane> {
-    metadata: PreparedEffectMetadata,
+    /// The prepared sample rate: the release coefficient's rate at automation, reset, a failed
+    /// lane's reset and restore.
+    sample_rate: u32,
+    /// The prepared automation capacity: the span index bound [`apply_automation`] enforces.
+    automation_capacity: u32,
+    /// The prepared quantum: the frame bound the bank body asserts in debug builds.
+    quantum: u32,
     shape: Shape,
     coefficients: LimiterCoef<L>,
     left_defaults: Box<[[f32; PARAMETER_COUNT]]>,
@@ -3506,7 +3512,9 @@ impl<L: Lane> LimiterCore<L> {
             gain_linked,
             #[cfg(test)]
             silent_engagements: 0,
-            metadata,
+            sample_rate: metadata.sample_rate,
+            automation_capacity: metadata.automation_capacity,
+            quantum: metadata.quantum,
             shape,
             left_defaults,
             right_defaults,
@@ -3528,7 +3536,7 @@ impl<L: Lane> LimiterCore<L> {
         // precisely the rest state the claim describes, because the claim is a statement about a
         // block that was *rendered and observed*, and a reset renders nothing.
         self.silent_fixed_point = false;
-        let rate = self.metadata.sample_rate;
+        let rate = self.sample_rate;
         match kind {
             ResetKind::FullToDefaults => {
                 self.left
@@ -3573,7 +3581,7 @@ impl<L: Lane> LimiterCore<L> {
         // never write it into the line, and the sample that should have come out of the line four
         // blocks later would be `+0.0` instead. That is the compressor's input-side argument
         // (#163 phase 4, adversarial pass) at a kernel that also has a delay line to carry it.
-        let quiet = self.silent_bypass == self.metadata.bypass
+        let quiet = self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
             && ramps_are_stationary(&self.right.limit)
@@ -3638,7 +3646,7 @@ impl<L: Lane> LimiterCore<L> {
             && self.right.is_at_silent_rest()
             && block_is_positive_zero(&left_io[..words])
             && block_is_positive_zero(&right_io[..words]);
-        self.silent_bypass = self.metadata.bypass;
+        self.silent_bypass = self.coefficients.bypass;
         // The §4.4 boundary check: one vector scan per channel, exactly `effect-runtime`'s
         // `finish_block` test. The two channels fail together per lane, as they do there, because
         // a lane's pair shares its reset.
@@ -3696,7 +3704,7 @@ impl<L: Lane> LimiterCore<L> {
             self.report.nonfinite_blocks = self.report.nonfinite_blocks.saturating_add(1);
         }
         let shape = self.shape;
-        let rate = self.metadata.sample_rate;
+        let rate = self.sample_rate;
         if charged == self.active {
             self.left
                 .reset_to_defaults(&shape, &self.left_defaults, rate);
@@ -3752,7 +3760,7 @@ impl<L: Lane> LimiterCore<L> {
         // channel's gain words go stale until `desymmetrize` copies the left over them.
         self.gain_linked = false;
         let words = frames * L::WIDTH;
-        let quiet = self.silent_bypass == self.metadata.bypass
+        let quiet = self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
             && block_is_positive_zero(&left_io[..words]);
@@ -3775,7 +3783,7 @@ impl<L: Lane> LimiterCore<L> {
         );
         self.silent_fixed_point =
             quiet && self.left.is_at_silent_rest() && block_is_positive_zero(&left_io[..words]);
-        self.silent_bypass = self.metadata.bypass;
+        self.silent_bypass = self.coefficients.bypass;
         if check_block::<L>(left_io) {
             return;
         }
@@ -3832,9 +3840,15 @@ impl<L: Lane> LimiterCore<L> {
 /// the contract, not an implementation detail. What changed is what an accepted value does: it
 /// retargets a ramp of the **linear** coefficient (`limit`, or the release rate), with the single
 /// D11 division performed here, at event time, and never per sample.
+///
+/// `automation_capacity` and `rate` are the core's own prepared scalars, passed by value: the
+/// core keeps no prepared-metadata record (#1461), and `left`/`right` are borrowed from it
+/// mutably, so the core itself cannot be passed.
+#[allow(clippy::too_many_arguments)]
 fn apply_automation(
     spans: &[PreparedAutomationSpan],
-    metadata: &PreparedEffectMetadata,
+    automation_capacity: u32,
+    rate: u32,
     first_sample: u64,
     left: &mut ChannelState,
     right: &mut ChannelState,
@@ -3861,7 +3875,7 @@ fn apply_automation(
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         };
-        let valid = span_index < metadata.automation_capacity as usize
+        let valid = span_index < automation_capacity as usize
             && parameter < RAMP_COUNT
             && span.kind == AutomationSpanKind::Point
             && span.start_sample == first_sample
@@ -3878,7 +3892,6 @@ fn apply_automation(
         last_order = Some(order);
         pending[channel][parameter] = Some(normalize_zero(span.start_value));
     }
-    let rate = metadata.sample_rate;
     for (channel, state) in [left, right].into_iter().enumerate() {
         if let Some(value) = pending[channel][0] {
             state.limit[lane].set_target(limit_coefficient(value), RAMP_UPDATES);
@@ -4233,7 +4246,7 @@ impl<L: Lane> LimiterCore<L> {
         )
         .map_err(|_| state_error("effect.state.length"))?;
         read_header(&layout, input.common).map_err(|error| state_error(error.code))?;
-        let rate = self.metadata.sample_rate;
+        let rate = self.sample_rate;
         let left = read_lane(input.left, &self.shape, rate)?;
         let right = read_lane(input.right, &self.shape, rate)?;
         commit_lane(
@@ -4282,7 +4295,8 @@ pub struct PreparedTruePeakLimiter {
 
 /// A prepared homogeneous cohort of `L::WIDTH` tracks.
 struct PreparedTruePeakLimiterBank<L: Lane> {
-    metadata: PreparedBankMetadata,
+    /// The bound bank width: the width the bank body asserts and its report is sized by.
+    width: effect_contract::BankWidth,
     core: LimiterCore<L>,
 }
 
@@ -4294,7 +4308,7 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let (left, right) = initial_defaults(request.initial_values)?;
         let core = LimiterCore::<f32>::new(
@@ -4305,13 +4319,16 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         .ok_or(EffectPrepareError {
             code: "effect.parameter.initial",
         })?;
-        Ok(Box::new(PreparedTruePeakLimiter { core }))
+        Ok(PreparedEffect {
+            processor: Box::new(PreparedTruePeakLimiter { core }),
+            metadata,
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         request.validate_shape()?;
         let first = request
             .requests
@@ -4363,7 +4380,7 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         let bank: Box<dyn PreparedNativeEffectBank> =
             effect_contract::match_bank_width!(request.width, |L| {
                 Box::new(PreparedTruePeakLimiterBank::<L> {
-                    metadata: bank_metadata,
+                    width: request.width,
                     core: LimiterCore::<L>::new(metadata, left_defaults, right_defaults)
                         .ok_or(EffectPrepareError {
                             code: "effect.parameter.initial",
@@ -4371,7 +4388,10 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
                         .with_active_lanes(active),
                 })
             });
-        Ok(Some(bank))
+        Ok(Some(PreparedEffectBank {
+            processor: bank,
+            metadata: bank_metadata,
+        }))
     }
 }
 
@@ -4419,10 +4439,6 @@ impl<L: Lane> LimiterCore<L> {
 }
 
 impl PreparedNativeEffect for PreparedTruePeakLimiter {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.core.metadata
-    }
-
     fn channel_symmetry(&self) -> bool {
         self.core.designed_channel_symmetry(0)
     }
@@ -4454,7 +4470,8 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         let frames = block.frames();
         apply_automation(
             block.automation,
-            &self.core.metadata,
+            self.core.automation_capacity,
+            self.core.sample_rate,
             block.first_sample,
             &mut self.core.left,
             &mut self.core.right,
@@ -4484,10 +4501,6 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
-
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.core.designed_channel_symmetry(lane)
     }
@@ -4580,9 +4593,9 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
         &mut self,
         block: EffectBankProcessBlock<'_>,
     ) -> BankProcessReport {
-        debug_assert_eq!(block.width, self.metadata.width);
+        debug_assert_eq!(block.width, self.width);
         debug_assert_eq!(block.width.lanes() as usize, L::WIDTH);
-        debug_assert!(block.frames <= self.core.metadata.quantum);
+        debug_assert!(block.frames <= self.core.quantum);
         debug_assert!(block.sidechain.is_none());
         // #182 S2: an admitted span retargets a linear coefficient, and one whose smoothing
         // window resolves to zero updates snaps it outright while leaving `remaining` at zero — so
@@ -4592,7 +4605,7 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
         if !block.automation.is_empty() {
             self.core.silent_fixed_point = false;
         }
-        let mut report = BankProcessReport::empty(self.metadata.width);
+        let mut report = BankProcessReport::empty(self.width);
         for track in 0..L::WIDTH {
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
@@ -4604,7 +4617,8 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
             }
             apply_automation(
                 &block.automation[start..end],
-                &self.core.metadata,
+                self.core.automation_capacity,
+                self.core.sample_rate,
                 block.first_sample,
                 &mut self.core.left,
                 &mut self.core.right,
@@ -4998,12 +5012,13 @@ mod tests {
         request_at_rate(values, 48_000)
     }
 
-    fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let sizes = effect.metadata().state_sizes;
+    fn snapshot(effect: &PreparedEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let sizes = effect.metadata.state_sizes;
         let mut common = vec![0; sizes.common_bytes as usize];
         let mut left = vec![0; sizes.left_bytes as usize];
         let mut right = vec![0; sizes.right_bytes as usize];
         effect
+            .processor
             .snapshot_state_payload(
                 StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"),
             )
@@ -5011,36 +5026,34 @@ mod tests {
         (common, left, right)
     }
 
-    fn snapshot_track(
-        bank: &dyn PreparedNativeEffectBank,
-        track: u32,
-    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let sizes = bank.metadata().program_key.state_sizes;
+    fn snapshot_track(bank: &PreparedEffectBank, track: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let sizes = bank.metadata.program_key.state_sizes;
         let mut common = vec![0; sizes.common_bytes as usize];
         let mut left = vec![0; sizes.left_bytes as usize];
         let mut right = vec![0; sizes.right_bytes as usize];
-        bank.snapshot_track_state_payload(
-            track,
-            StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"),
-        )
-        .expect("snapshot");
+        bank.processor
+            .snapshot_track_state_payload(
+                track,
+                StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"),
+            )
+            .expect("snapshot");
         (common, left, right)
     }
 
     fn render(
-        effect: &mut dyn PreparedNativeEffect,
+        effect: &mut PreparedEffect,
         left: &mut [f32],
         right: &mut [f32],
         block: usize,
     ) -> ProcessReport {
-        let quantum = effect.metadata().quantum;
+        let quantum = effect.metadata.quantum;
         let mut report = ProcessReport::default();
         for (index, (left, right)) in left
             .chunks_mut(block)
             .zip(right.chunks_mut(block))
             .enumerate()
         {
-            let next = effect.process(
+            let next = effect.processor.process(
                 EffectProcessBlock::new(left, right, None, (index * block) as u64, &[], quantum)
                     .expect("block"),
             );
@@ -5054,7 +5067,7 @@ mod tests {
         link_mode: LinkMode,
         width: BankWidth,
         backend: Backend,
-    ) -> Box<dyn PreparedNativeEffectBank> {
+    ) -> PreparedEffectBank {
         let requests: Vec<PrepareEffectRequest<'_>> = values
             .iter()
             .map(|values| {
@@ -5677,12 +5690,12 @@ mod tests {
                 let mut effect = TruePeakLimiterFactory
                     .prepare(request_at_rate(&values, rate))
                     .expect("prepare");
-                assert_eq!(effect.metadata().latency, LatencySamples(latency as u64));
+                assert_eq!(effect.metadata.latency, LatencySamples(latency as u64));
                 let mut left = vec![0.0; latency + 1];
                 let mut right = vec![0.0; latency + 1];
                 left[0] = 1.0;
                 right[0] = 0.5;
-                render(effect.as_mut(), &mut left, &mut right, 128);
+                render(&mut effect, &mut left, &mut right, 128);
                 assert!(
                     left[..latency].iter().all(|sample| sample.to_bits() == 0),
                     "rate {rate} lookahead {lookahead}: output before latency"
@@ -5706,7 +5719,7 @@ mod tests {
         let mut right = vec![0.0; 487];
         left[0] = -0.0;
         right[0] = 0.25;
-        render(bypass.as_mut(), &mut left, &mut right, 128);
+        render(&mut bypass, &mut left, &mut right, 128);
         assert_eq!(left[486].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(right[486].to_bits(), 0.25_f32.to_bits());
     }
@@ -5734,7 +5747,7 @@ mod tests {
             .collect();
         let mut left = source.clone();
         let mut right = source.clone();
-        render(effect.as_mut(), &mut left, &mut right, 128);
+        render(&mut effect, &mut left, &mut right, 128);
 
         let mut previous = 1.0_f32;
         let mut falls = 0_usize;
@@ -5787,10 +5800,10 @@ mod tests {
                 left[index] = noise.next() * 4.0;
                 right[index] = noise.next() * 4.0;
             }
-            render(effect.as_mut(), &mut left, &mut right, 128);
+            render(&mut effect, &mut left, &mut right, 128);
 
             // The recursive word itself, not just its effect on the output.
-            let payload = snapshot(effect.as_ref());
+            let payload = snapshot(&effect);
             assert_eq!(
                 read_f32(&payload.1, words::REDUCTION).to_bits(),
                 0.0_f32.to_bits(),
@@ -5808,7 +5821,7 @@ mod tests {
             right[100] = 0.25;
             let expected_left = left.clone();
             let expected_right = right.clone();
-            render(effect.as_mut(), &mut left, &mut right, 128);
+            render(&mut effect, &mut left, &mut right, 128);
             let latency = 486;
             for index in latency..1024 {
                 assert_eq!(
@@ -5971,8 +5984,8 @@ mod tests {
                     .expect("prepare");
                 let mut left = inputs[track].0.clone();
                 let mut right = inputs[track].1.clone();
-                render(effect.as_mut(), &mut left, &mut right, 128);
-                scalar_state.push(snapshot(effect.as_ref()));
+                render(&mut effect, &mut left, &mut right, 128);
+                scalar_state.push(snapshot(&effect));
                 scalar_out.push((left, right));
             }
 
@@ -6000,7 +6013,7 @@ mod tests {
                         let start = block * 128 * lanes;
                         let end = start + 128 * lanes;
                         process_bank(
-                            bank.as_mut(),
+                            bank.processor.as_mut(),
                             &mut left[start..end],
                             &mut right[start..end],
                             width,
@@ -6023,7 +6036,7 @@ mod tests {
                             );
                         }
                         assert_eq!(
-                            snapshot_track(bank.as_ref(), lane as u32),
+                            snapshot_track(&bank, lane as u32),
                             scalar_state[track],
                             "{link:?} W{lanes} payload track {track}"
                         );
@@ -6106,7 +6119,7 @@ mod tests {
             let start = block * 128 * lanes;
             let end = start + 128 * lanes;
             process_bank(
-                bank.as_mut(),
+                bank.processor.as_mut(),
                 &mut left[start..end],
                 &mut right[start..end],
                 width,
@@ -6142,7 +6155,7 @@ mod tests {
             })
             .collect();
 
-        let mut instances: Vec<Box<dyn PreparedNativeEffect>> = tracks
+        let mut instances: Vec<PreparedEffect> = tracks
             .iter()
             .map(|values| {
                 TruePeakLimiterFactory
@@ -6165,26 +6178,28 @@ mod tests {
             if let Some((after, payload)) = swap_after.as_ref()
                 && block == *after
             {
-                let sizes = instances[0].metadata().state_sizes;
+                let sizes = instances[0].metadata.state_sizes;
                 instances[0]
+                    .processor
                     .restore_state_payload(
                         STATE_LAYOUT_VERSION,
                         StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
                             .expect("sizes"),
                     )
                     .expect("scalar restore");
-                bank.restore_track_state_payload(
-                    0,
-                    STATE_LAYOUT_VERSION,
-                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
-                        .expect("sizes"),
-                )
-                .expect("bank restore");
+                bank.processor
+                    .restore_track_state_payload(
+                        0,
+                        STATE_LAYOUT_VERSION,
+                        StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                            .expect("sizes"),
+                    )
+                    .expect("bank restore");
             }
             let start = block * 128;
             for (lane, effect) in instances.iter_mut().enumerate() {
                 let (left, right) = &mut scalar[lane];
-                effect.process(
+                effect.processor.process(
                     EffectProcessBlock::new(
                         &mut left[start..start + 128],
                         &mut right[start..start + 128],
@@ -6197,7 +6212,7 @@ mod tests {
                 );
             }
             process_bank(
-                bank.as_mut(),
+                bank.processor.as_mut(),
                 &mut bank_left[start * lanes..(start + 128) * lanes],
                 &mut bank_right[start * lanes..(start + 128) * lanes],
                 width,
@@ -6487,8 +6502,8 @@ mod tests {
         let mut noise = Noise(0x0D0D_0182);
         let mut left: Vec<f32> = (0..256).map(|_| noise.next() * 3.0).collect();
         let mut right: Vec<f32> = (0..256).map(|_| noise.next() * 3.0).collect();
-        render(donor.as_mut(), &mut left, &mut right, 128);
-        let payload = snapshot(donor.as_ref());
+        render(&mut donor, &mut left, &mut right, 128);
+        let payload = snapshot(&donor);
         assert_eq!(
             read_u32(&payload.1, words::PHASE),
             256 % 241,
@@ -7293,8 +7308,8 @@ mod tests {
         let mut noise = Noise(0x0118_2000);
         let mut left: Vec<f32> = (0..1024).map(|_| noise.next() * 0.2).collect();
         let mut right: Vec<f32> = (0..1024).map(|_| noise.next() * 0.2).collect();
-        render(donor.as_mut(), &mut left, &mut right, 128);
-        let payload = snapshot(donor.as_ref());
+        render(&mut donor, &mut left, &mut right, 128);
+        let payload = snapshot(&donor);
 
         fn arm(payload: &LanePayload, force_slow: bool) -> (Vec<u32>, Vec<u32>, u32, u32) {
             let mut effect = silent_instance(-6.0, 100.0, 5.0);
@@ -7305,7 +7320,7 @@ mod tests {
             for block in 0..32_usize {
                 if block == 16 {
                     engaged_before_restore = effect.core.silent_engagements();
-                    let sizes = effect.metadata().state_sizes;
+                    let sizes = quality(effect.core.sample_rate).maximum_state;
                     effect
                         .restore_state_payload(
                             STATE_LAYOUT_VERSION,
@@ -7375,19 +7390,11 @@ mod tests {
     /// Red mutation: delete `if !block.automation.is_empty()` from `process_bank`.
     #[test]
     fn automation_withdraws_the_claim_on_the_bank_path_too() {
-        let values = values_with(-6.0, 100.0, 5.0);
-        let mut preparation = request(&values);
-        preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
-            .expect("metadata");
         // At the build's own bank width (issue #1112).
         type L = lane::Native;
         let width = BankWidth::for_lanes(L::WIDTH).expect("a bank width");
         let mut bank = PreparedTruePeakLimiterBank::<L> {
-            metadata: PreparedBankMetadata {
-                width,
-                program_key: metadata.program_key(),
-            },
+            width,
             core: silent_core::<L>(-6.0, 100.0, 5.0),
         };
 
@@ -7473,8 +7480,8 @@ mod tests {
             .expect("prepare");
         let mut left = source_left.clone();
         let mut right = source_right.clone();
-        render(reference.as_mut(), &mut left, &mut right, 512);
-        let reference_state = snapshot(reference.as_ref());
+        render(&mut reference, &mut left, &mut right, 512);
+        let reference_state = snapshot(&reference);
 
         for block in [1_usize, 7, 64, 128] {
             let mut effect = TruePeakLimiterFactory
@@ -7483,7 +7490,7 @@ mod tests {
             let mut partitioned_left = source_left.clone();
             let mut partitioned_right = source_right.clone();
             render(
-                effect.as_mut(),
+                &mut effect,
                 &mut partitioned_left,
                 &mut partitioned_right,
                 block,
@@ -7500,7 +7507,7 @@ mod tests {
                     "block {block} right frame {frame}"
                 );
             }
-            assert_eq!(snapshot(effect.as_ref()), reference_state, "block {block}");
+            assert_eq!(snapshot(&effect), reference_state, "block {block}");
         }
     }
 
@@ -7553,39 +7560,41 @@ mod tests {
         let source_right: Vec<f32> = (0..512).map(|_| noise.next() * 4.0).collect();
         let mut left = source_left.clone();
         let mut right = source_right.clone();
-        render(source.as_mut(), &mut left, &mut right, 128);
+        render(&mut source, &mut left, &mut right, 128);
         let mut left = source_left.clone();
         let mut right = source_right.clone();
-        render(peer.as_mut(), &mut left, &mut right, 128);
+        render(&mut peer, &mut left, &mut right, 128);
 
-        let payload = snapshot(source.as_ref());
-        let before = snapshot(peer.as_ref());
+        let payload = snapshot(&source);
+        let before = snapshot(&peer);
         assert_eq!(payload, before);
-        peer.restore_state_payload(
-            1,
-            StatePayloadInput::new(
-                &payload.0,
-                &payload.1,
-                &payload.2,
-                peer.metadata().state_sizes,
-            )
-            .expect("sizes"),
-        )
-        .expect("restore");
-        assert_eq!(snapshot(peer.as_ref()), payload);
-
-        // Restoring into a fresh instance reproduces the source's continuation bit for bit.
-        let mut fresh = TruePeakLimiterFactory
-            .prepare(request(&values))
-            .expect("prepare");
-        fresh
+        peer.processor
             .restore_state_payload(
                 1,
                 StatePayloadInput::new(
                     &payload.0,
                     &payload.1,
                     &payload.2,
-                    fresh.metadata().state_sizes,
+                    peer.metadata.state_sizes,
+                )
+                .expect("sizes"),
+            )
+            .expect("restore");
+        assert_eq!(snapshot(&peer), payload);
+
+        // Restoring into a fresh instance reproduces the source's continuation bit for bit.
+        let mut fresh = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        fresh
+            .processor
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(
+                    &payload.0,
+                    &payload.1,
+                    &payload.2,
+                    fresh.metadata.state_sizes,
                 )
                 .expect("sizes"),
             )
@@ -7594,9 +7603,9 @@ mod tests {
         let tail_left: Vec<f32> = (0..512).map(|_| noise.next() * 4.0).collect();
         let tail_right: Vec<f32> = (0..512).map(|_| noise.next() * 4.0).collect();
         let mut source_out = (tail_left.clone(), tail_right.clone());
-        render(source.as_mut(), &mut source_out.0, &mut source_out.1, 128);
+        render(&mut source, &mut source_out.0, &mut source_out.1, 128);
         let mut fresh_out = (tail_left, tail_right);
-        render(fresh.as_mut(), &mut fresh_out.0, &mut fresh_out.1, 128);
+        render(&mut fresh, &mut fresh_out.0, &mut fresh_out.1, 128);
         for frame in 0..512 {
             assert_eq!(
                 fresh_out.0[frame].to_bits(),
@@ -7605,8 +7614,8 @@ mod tests {
             );
         }
 
-        let sizes = peer.metadata().state_sizes;
-        let reference = snapshot(peer.as_ref());
+        let sizes = peer.metadata.state_sizes;
+        let reference = snapshot(&peer);
         type Corruption = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
         // #1278 attempt 2: a target and a settled coefficient are held to the designed range
         // exactly, and so is a moving ramp's current (issue #1411 D1). A finite step no longer
@@ -7676,26 +7685,23 @@ mod tests {
             } else {
                 corrupt(&mut left);
             }
-            let result = peer.restore_state_payload(
+            let result = peer.processor.restore_state_payload(
                 STATE_LAYOUT_VERSION,
                 StatePayloadInput::new(&common, &left, right, sizes).expect("sizes"),
             );
             assert!(result.is_err(), "{name} was accepted");
-            assert_eq!(
-                snapshot(peer.as_ref()),
-                reference,
-                "{name} mutated the peer"
-            );
+            assert_eq!(snapshot(&peer), reference, "{name} mutated the peer");
         }
 
         // The declared version argument is checked before anything else.
         assert!(
-            peer.restore_state_payload(
-                0,
-                StatePayloadInput::new(&reference.0, &reference.1, &reference.2, sizes)
-                    .expect("sizes")
-            )
-            .is_err()
+            peer.processor
+                .restore_state_payload(
+                    0,
+                    StatePayloadInput::new(&reference.0, &reference.1, &reference.2, sizes)
+                        .expect("sizes")
+                )
+                .is_err()
         );
         // A one-byte-short section is rejected.
         let short = vec![0_u8; sizes.left_bytes as usize - 4];
@@ -7724,11 +7730,11 @@ mod tests {
             .collect();
         let mut left = [0.25_f32; 8];
         let mut right = [-0.125_f32; 8];
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128).expect("block"),
         );
-        let saved = snapshot(effect.as_ref());
-        let sizes = effect.metadata().state_sizes;
+        let saved = snapshot(&effect);
+        let sizes = effect.metadata.state_sizes;
         let ramps = [
             (
                 words::LIMIT_RAMP,
@@ -7764,11 +7770,12 @@ mod tests {
         let mut bank = BankWidth::for_backend(Backend::current()).map(|width| {
             let members = vec![initial_values(); width.lanes() as usize];
             let mut bank = bank_for(&members, LinkMode::DualMono, width, Backend::current());
-            bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, sizes))
+            bank.processor
+                .restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, sizes))
                 .expect("the scalar snapshot restores into a bank track");
             bank
         });
-        let bank_saved = bank.as_ref().map(|bank| snapshot_track(bank.as_ref(), 0));
+        let bank_saved = bank.as_ref().map(|bank| snapshot_track(bank, 0));
 
         for (word, (low, high)) in ramps {
             for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
@@ -7779,40 +7786,46 @@ mod tests {
                 let crafted = with_current(word, outside);
                 assert_eq!(
                     effect
+                        .processor
                         .restore_state_payload(STATE_LAYOUT_VERSION, input(&crafted, sizes))
                         .map_err(|error| error.code),
                     Err("effect.state.parameter"),
                     "{case}"
                 );
-                assert_eq!(snapshot(effect.as_ref()), saved, "{case}");
+                assert_eq!(snapshot(&effect), saved, "{case}");
                 if let (Some(bank), Some(bank_saved)) = (bank.as_mut(), bank_saved.as_ref()) {
                     assert_eq!(
-                        bank.restore_track_state_payload(
-                            0,
-                            STATE_LAYOUT_VERSION,
-                            input(&crafted, sizes)
-                        )
-                        .map_err(|error| error.code),
+                        bank.processor
+                            .restore_track_state_payload(
+                                0,
+                                STATE_LAYOUT_VERSION,
+                                input(&crafted, sizes)
+                            )
+                            .map_err(|error| error.code),
                         Err("effect.state.parameter"),
                         "bank {case}"
                     );
-                    assert_eq!(&snapshot_track(bank.as_ref(), 0), bank_saved, "bank {case}");
+                    assert_eq!(&snapshot_track(bank, 0), bank_saved, "bank {case}");
                 }
                 let crafted = with_current(word, edge);
                 effect
+                    .processor
                     .restore_state_payload(STATE_LAYOUT_VERSION, input(&crafted, sizes))
                     .unwrap_or_else(|error| panic!("{case}: on the edge: {}", error.code));
                 effect
+                    .processor
                     .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, sizes))
                     .expect("own snapshot");
                 if let Some(bank) = bank.as_mut() {
-                    bank.restore_track_state_payload(
-                        0,
-                        STATE_LAYOUT_VERSION,
-                        input(&crafted, sizes),
-                    )
-                    .unwrap_or_else(|error| panic!("bank {case}: on the edge: {}", error.code));
-                    bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, sizes))
+                    bank.processor
+                        .restore_track_state_payload(
+                            0,
+                            STATE_LAYOUT_VERSION,
+                            input(&crafted, sizes),
+                        )
+                        .unwrap_or_else(|error| panic!("bank {case}: on the edge: {}", error.code));
+                    bank.processor
+                        .restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, sizes))
                         .expect("own snapshot");
                 }
             }
@@ -7826,12 +7839,12 @@ mod tests {
         let values = initial_values();
         let members: Vec<_> = (0..lanes).map(|_| values).collect();
         let bank = bank_for(&members, LinkMode::DualMono, width, backend);
-        let key = bank.metadata().program_key;
+        let key = bank.metadata.program_key;
         assert_eq!(key.state_layout_version, 1);
         assert_eq!(key.state_sizes.left_bytes, 5_900);
         assert_eq!(key.state_sizes.common_bytes, 8);
         assert_eq!(key.state_sizes.total(), Some(11_808));
-        assert_eq!(bank.metadata().width, width);
+        assert_eq!(bank.metadata.width, width);
 
         // Mismatched backend and width are rejected before anything is prepared: the native width
         // with every other width's backend, `Simd4` at `Eight` in the 8-lane (AVX2) build. A 4-lane
@@ -7954,7 +7967,7 @@ mod tests {
                 let bank = bind(&requests, &mask)
                     .expect("a padded request is well formed")
                     .unwrap_or_else(|| panic!("{label}: a padded bank binds"));
-                assert_eq!(bank.metadata().width, width, "{label}");
+                assert_eq!(bank.metadata.width, width, "{label}");
 
                 // A padded lane of another program is not a clone, and a cohort of two programs
                 // is one this artifact declines rather than binds.
@@ -8014,20 +8027,21 @@ mod tests {
                 })
                 .expect("well formed")
                 .expect("binds");
-            let payload = snapshot_track(bank.as_ref(), 0);
-            let sizes = bank.metadata().program_key.state_sizes;
+            let payload = snapshot_track(&bank, 0);
+            let sizes = bank.metadata.program_key.state_sizes;
             let padded = (lanes - 1) as u32;
             let mut common = vec![0; sizes.common_bytes as usize];
             let mut left = vec![0; sizes.left_bytes as usize];
             let mut right = vec![0; sizes.right_bytes as usize];
             assert_eq!(
-                bank.snapshot_track_state_payload(
-                    padded,
-                    StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
-                        .expect("sizes"),
-                )
-                .err()
-                .map(|error| error.code),
+                bank.processor
+                    .snapshot_track_state_payload(
+                        padded,
+                        StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
+                            .expect("sizes"),
+                    )
+                    .err()
+                    .map(|error| error.code),
                 Some("effect.state.track"),
                 "{width:?}: a padded lane has no snapshot"
             );
@@ -8035,13 +8049,15 @@ mod tests {
                 StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("sizes")
             };
             assert_eq!(
-                bank.restore_track_state_payload(padded, STATE_LAYOUT_VERSION, input())
+                bank.processor
+                    .restore_track_state_payload(padded, STATE_LAYOUT_VERSION, input())
                     .err()
                     .map(|error| error.code),
                 Some("effect.state.track"),
                 "{width:?}: nothing is restored into a padded lane"
             );
-            bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input())
+            bank.processor
+                .restore_track_state_payload(0, STATE_LAYOUT_VERSION, input())
                 .expect("a member still restores");
         }
     }
@@ -8081,7 +8097,7 @@ mod tests {
                 .collect();
             let mut left = vec![0.0_f32; 128 * lanes];
             let mut right = vec![0.0_f32; 128 * lanes];
-            let report = bank.process_bank(
+            let report = bank.processor.process_bank(
                 EffectBankProcessBlock::new(
                     &mut left, &mut right, None, 128, width, 0, &spans, &offsets, 128,
                 )
@@ -8144,9 +8160,9 @@ mod tests {
             .expect("bank block");
             clear_dispatch_observation();
             if mono {
-                bank.process_bank_mono(block);
+                bank.processor.process_bank_mono(block);
             } else {
-                bank.process_bank(block);
+                bank.processor.process_bank(block);
             }
             *route = dispatch_observation().route;
         }
@@ -8695,11 +8711,11 @@ mod tests {
         ];
         let mut left = vec![0.0_f32; 8];
         let mut right = vec![0.0_f32; 8];
-        let report = effect.process(
+        let report = effect.processor.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128).expect("block"),
         );
         assert_eq!(report.invalid_spans, 2);
-        let payload = snapshot(effect.as_ref());
+        let payload = snapshot(&effect);
         // Eight of the sixty-four updates have been produced, so the ramp is in flight toward the
         // linear limit of -6 dB and the lookahead word is untouched.
         assert_eq!(read_u32(&payload.1, words::LIMIT_RAMP + 3), 64 - 8);
@@ -8717,14 +8733,14 @@ mod tests {
         let mut effect = TruePeakLimiterFactory
             .prepare(request(&values))
             .expect("prepare");
-        let fresh = snapshot(effect.as_ref());
+        let fresh = snapshot(&effect);
         let mut noise = Noise(0x4444);
         let mut left: Vec<f32> = (0..512).map(|_| noise.next() * 4.0).collect();
         let mut right: Vec<f32> = (0..512).map(|_| noise.next() * 4.0).collect();
-        render(effect.as_mut(), &mut left, &mut right, 128);
-        assert_ne!(snapshot(effect.as_ref()), fresh);
-        effect.reset(ResetKind::FullToDefaults);
-        assert_eq!(snapshot(effect.as_ref()), fresh);
+        render(&mut effect, &mut left, &mut right, 128);
+        assert_ne!(snapshot(&effect), fresh);
+        effect.processor.reset(ResetKind::FullToDefaults);
+        assert_eq!(snapshot(&effect), fresh);
 
         let spans = [PreparedAutomationSpan {
             kind: AutomationSpanKind::Point,
@@ -8737,11 +8753,13 @@ mod tests {
         }];
         let mut left = vec![0.0_f32; 8];
         let mut right = vec![0.0_f32; 8];
-        effect.process(
+        effect.processor.process(
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128).expect("block"),
         );
-        effect.reset(ResetKind::DiscontinuityKeepParameters);
-        let payload = snapshot(effect.as_ref());
+        effect
+            .processor
+            .reset(ResetKind::DiscontinuityKeepParameters);
+        let payload = snapshot(&effect);
         assert_eq!(read_u32(&payload.1, words::LIMIT_RAMP + 3), 0);
         assert_eq!(
             read_f32(&payload.1, words::LIMIT_RAMP).to_bits(),
@@ -9045,7 +9063,8 @@ mod tests {
         for (lane, lane_spans) in spans.iter().enumerate() {
             apply_automation(
                 lane_spans,
-                &core.metadata,
+                core.automation_capacity,
+                core.sample_rate,
                 first_sample,
                 &mut core.left,
                 &mut core.right,
@@ -9059,7 +9078,7 @@ mod tests {
     }
 
     fn core_snapshot<L: Lane>(core: &LimiterCore<L>, track: usize) -> LanePayload {
-        let sizes = core.metadata.state_sizes;
+        let sizes = quality(core.sample_rate).maximum_state;
         let mut common = vec![0; sizes.common_bytes as usize];
         let mut left = vec![0; sizes.left_bytes as usize];
         let mut right = vec![0; sizes.right_bytes as usize];
@@ -9076,7 +9095,7 @@ mod tests {
         track: usize,
         payload: &LanePayload,
     ) -> Result<(), StatePayloadError> {
-        let sizes = core.metadata.state_sizes;
+        let sizes = quality(core.sample_rate).maximum_state;
         core.restore_track(
             track,
             STATE_LAYOUT_VERSION,

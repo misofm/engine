@@ -10,14 +10,15 @@
 mod support;
 
 use effect_contract::{
-    EffectProcessBlock, ObservationSample, PreparedNativeEffect, ResetKind, validate_descriptor,
+    EffectProcessBlock, ObservationSample, PreparedEffect, PreparedNativeEffect, ResetKind,
+    validate_descriptor,
 };
 
-use support::{initial_values, prepare, request};
+use support::{initial_values, prepare, prepare_with_metadata, request};
 
-fn prepared() -> Box<dyn PreparedNativeEffect> {
+fn prepared() -> PreparedEffect {
     let values = initial_values();
-    prepare(request(&values))
+    prepare_with_metadata(request(&values))
 }
 
 fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
@@ -29,8 +30,10 @@ fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
     sample
 }
 
-fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> ObservationSample {
-    let quantum = effect.metadata().quantum;
+/// Renders `blocks` prepared quanta of `value`, the quantum read from the prepare result.
+fn render(prepared: &mut PreparedEffect, value: f32, blocks: usize) -> ObservationSample {
+    let quantum = prepared.metadata.quantum;
+    let effect = prepared.processor.as_mut();
     let mut reduction = ObservationSample::default();
     for block in 0..blocks {
         let mut left = vec![value; quantum as usize];
@@ -74,7 +77,7 @@ fn the_compressor_declares_one_resident_gain_reduction_tap() {
         left: f32::NAN,
         right: f32::NAN,
     };
-    assert!(!effect.observe_resident(1, &mut sample));
+    assert!(!effect.processor.observe_resident(1, &mut sample));
     assert!(
         sample.left.is_nan() && sample.right.is_nan(),
         "out untouched"
@@ -87,15 +90,15 @@ fn the_compressor_declares_one_resident_gain_reduction_tap() {
 fn the_compressor_reports_the_reduction_its_kernel_smoothed() {
     let mut effect = prepared();
     // Well below the prepared threshold: nothing to reduce.
-    let quiet = render(effect.as_mut(), 0.000_1, 8);
+    let quiet = render(&mut effect, 0.000_1, 8);
     assert!(
         quiet.left > -0.5 && quiet.left <= 0.0,
         "a signal under the threshold is barely reduced: {}",
         quiet.left
     );
 
-    effect.reset(ResetKind::FullToDefaults);
-    let loud = render(effect.as_mut(), 0.9, 32);
+    effect.processor.reset(ResetKind::FullToDefaults);
+    let loud = render(&mut effect, 0.9, 32);
     assert!(
         loud.left < -1.0,
         "a signal well over the threshold is audibly reduced: {}",
@@ -119,9 +122,9 @@ fn the_compressor_reports_the_reduction_its_kernel_smoothed() {
 #[test]
 fn the_reading_follows_the_smoother_rather_than_the_instantaneous_curve() {
     let mut effect = prepared();
-    let after_one = render(effect.as_mut(), 0.9, 1);
-    effect.reset(ResetKind::FullToDefaults);
-    let after_many = render(effect.as_mut(), 0.9, 32);
+    let after_one = render(&mut effect, 0.9, 1);
+    effect.processor.reset(ResetKind::FullToDefaults);
+    let after_many = render(&mut effect, 0.9, 32);
     assert!(
         after_many.left < after_one.left,
         "the envelope is still attacking after one block: one={} many={}",
@@ -134,10 +137,10 @@ fn the_reading_follows_the_smoother_rather_than_the_instantaneous_curve() {
 #[test]
 fn a_full_reset_returns_the_reading_to_zero() {
     let mut effect = prepared();
-    let loud = render(effect.as_mut(), 0.9, 16);
+    let loud = render(&mut effect, 0.9, 16);
     assert!(loud.left < 0.0);
-    effect.reset(ResetKind::FullToDefaults);
-    let after = observe(&*effect);
+    effect.processor.reset(ResetKind::FullToDefaults);
+    let after = observe(effect.processor.as_ref());
     assert_eq!(after.left.to_bits(), 0.0_f32.to_bits());
     assert_eq!(after.right.to_bits(), 0.0_f32.to_bits());
 }

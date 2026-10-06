@@ -213,7 +213,8 @@ fn run_scalar(mode: Mode) -> ([MeasuredRound; ROUNDS], ReportTotals, LaneActivit
     let values = initial_values();
     let mut effect = CompressorFactory
         .prepare(request(&values))
-        .expect("scalar prepare");
+        .expect("scalar prepare")
+        .processor;
 
     // The source planes never change. The process planes are copied before every block and are
     // the only buffers handed to the effect.
@@ -286,7 +287,8 @@ fn run_bank(mode: Mode, backend: Backend, width: BankWidth) -> Option<BankRun> {
             requests: &requests,
             active_mask: width.full_mask(),
         })
-        .expect("bank prepare")?;
+        .expect("bank prepare")?
+        .processor;
 
     let source_left = noise(FRAMES * lanes, 0x5EED_0003);
     let source_right = noise(FRAMES * lanes, 0x5EED_0004);

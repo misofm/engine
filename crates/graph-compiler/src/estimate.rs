@@ -308,7 +308,7 @@ pub(crate) fn effect_control_resource(
             // The banked live-control owner: `rack::LiveControlEffectBankStage::new`, which
             // `graph`'s `stage_for` builds in place of a plain `EffectBankStage` for any slot with
             // a lane.
-            let metadata = bank.processor.metadata();
+            let metadata = &bank.metadata;
             let capacity = u64::from(metadata.program_key.automation_capacity);
             let (staging, packed) = if live {
                 (

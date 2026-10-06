@@ -35,7 +35,7 @@ fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutom
 }
 
 fn state(effect: &dyn effect_contract::PreparedNativeEffect) -> Vec<u8> {
-    let sizes = effect.metadata().state_sizes;
+    let sizes = support::state_sizes();
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
     effect
@@ -731,7 +731,6 @@ fn a_ramp_onto_an_identity_boundary_lands_on_the_identity() {
 /// Asserts `parameter`'s ramp words on both channels of every lane of `bank`.
 fn assert_bank_ramp(
     bank: &dyn effect_contract::PreparedNativeEffectBank,
-    sizes_from: &dyn effect_contract::PreparedNativeEffect,
     parameter: usize,
     target: f32,
     remaining: u32,
@@ -741,7 +740,7 @@ fn assert_bank_ramp(
         .1
         .lanes();
     for track in 0..lanes {
-        let (left, right) = support::snapshot_track(bank, track, sizes_from);
+        let (left, right) = support::snapshot_track(bank, track);
         for (name, channel) in [("left", &left), ("right", &right)] {
             assert_eq!(
                 read_f32(channel, ramp_word(parameter, TARGET)).to_bits(),
@@ -821,7 +820,6 @@ fn a_both_channel_point_on_every_bank_lane_restarts_its_ramp_each_block() {
     const RELEASE: u32 = 4;
     const ATTACK: u32 = 3;
     let values = initial_values();
-    let reference = prepare(request_with_quantum(&values, 128));
     let (_, width) = support::native_bank_width().expect("a native bank width");
     let requests: Vec<_> = (0..width.lanes())
         .map(|_| request_with_quantum(&values, 128))
@@ -829,55 +827,24 @@ fn a_both_channel_point_on_every_bank_lane_restarts_its_ramp_each_block() {
     let mut bank = support::bind_bank(&requests).expect("bank must bind at this build's width");
 
     process_bank_points(bank.as_mut(), 0, 1, &[(RELEASE, 800.0)]);
-    assert_bank_ramp(
-        bank.as_ref(),
-        reference.as_ref(),
-        RELEASE as usize,
-        800.0,
-        SMOOTHING - 1,
-    );
+    assert_bank_ramp(bank.as_ref(), RELEASE as usize, 800.0, SMOOTHING - 1);
     process_bank_points(bank.as_mut(), 1, SMOOTHING as usize - 1, &[]);
-    assert_bank_ramp(
-        bank.as_ref(),
-        reference.as_ref(),
-        RELEASE as usize,
-        800.0,
-        0,
-    );
+    assert_bank_ramp(bank.as_ref(), RELEASE as usize, 800.0, 0);
     process_bank_points(
         bank.as_mut(),
         u64::from(SMOOTHING),
         1,
         &[(RELEASE, 1_600.0)],
     );
-    assert_bank_ramp(
-        bank.as_ref(),
-        reference.as_ref(),
-        RELEASE as usize,
-        1_600.0,
-        SMOOTHING - 1,
-    );
+    assert_bank_ramp(bank.as_ref(), RELEASE as usize, 1_600.0, SMOOTHING - 1);
 
     let both_values = support::values_with(&[(ATTACK as usize, 10.0)]);
-    let both_reference = prepare(request_with_quantum(&both_values, 128));
     let both_requests: Vec<_> = (0..width.lanes())
         .map(|_| request_with_quantum(&both_values, 128))
         .collect();
     let mut both =
         support::bind_bank(&both_requests).expect("bank must bind at this build's width");
     process_bank_points(both.as_mut(), 0, 1, &[(ATTACK, 20.0), (RELEASE, 600.0)]);
-    assert_bank_ramp(
-        both.as_ref(),
-        both_reference.as_ref(),
-        ATTACK as usize,
-        20.0,
-        SMOOTHING - 1,
-    );
-    assert_bank_ramp(
-        both.as_ref(),
-        both_reference.as_ref(),
-        RELEASE as usize,
-        600.0,
-        SMOOTHING - 1,
-    );
+    assert_bank_ramp(both.as_ref(), ATTACK as usize, 20.0, SMOOTHING - 1);
+    assert_bank_ramp(both.as_ref(), RELEASE as usize, 600.0, SMOOTHING - 1);
 }

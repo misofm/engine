@@ -16,8 +16,13 @@ gone.
 Factories validate static descriptors and allocate/design all processor resources off render.
 Prepared metadata fixes sample rate, quantum, quality, bypass, link mode, ports, exact integer
 latency, tail, tail over every peak (`tail_every_peak`), exact-rest bound (`rest`),
-state-section sizes, scratch bytes, and automation capacity. The compiler caches
-that metadata; graph/PDC consumers never query a live processor. The semantic `EffectProgramKey`
+state-section sizes, scratch bytes, and automation capacity. `NativeEffectFactory::prepare`
+returns it beside the processor (`PreparedEffect { processor, metadata }`), and a bound bank's
+`PreparedBankMetadata` rides beside its processor the same way (`PreparedEffectBank`). The
+processor holds no copy of the record and has no `metadata()` method: it keeps, as plain fields,
+only the values its own render path reads, because render-owned memory carries no control-only
+data (#1461). The compiler caches the returned metadata on the control side; graph/PDC consumers
+never query a live processor. The semantic `EffectProgramKey`
 contains these fields directly and is not a digest or persistence identity.
 
 The callback receives disjoint in-place planar L/R slices and optional planar sidechain slices.
@@ -100,10 +105,10 @@ It runs on the control thread, takes no parameter values (each bound holds over 
 parameter domain at that rate), and render never calls it. `QualityDescriptor` carries no tail.
 `expected_prepared_metadata`, the sole conforming metadata, copies the three values into
 `PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the program key carries them too, so
-cohorts with different bounds never share a bank. `effect-compiler` refuses a prepared effect whose
-metadata differs in any of them (`effect.metadata.mismatch`), and the conformance harness's
-`metadata.exact` compares each prepared instance's program key, which carries all three, with the
-expected one. `rest` is a `RestBound`:
+cohorts with different bounds never share a bank. `effect-compiler` refuses a prepare result whose
+metadata differs from `expected_prepared_metadata` in any field it compares, these three included
+(`effect.metadata.mismatch`), and the conformance harness's `metadata.exact` compares each prepare
+result's program key, which carries all three, with the expected one. `rest` is a `RestBound`:
 `Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
 effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
 `tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and
@@ -302,11 +307,11 @@ declared quality must have exactly the 44,100, 48,000, 88,200, and 96,000 Hz row
 other rate, including the former extended research rates 176,400, 192,000, 352,800, and
 384,000 Hz, refuses the descriptor with `Quality` (owner ruling R5, #1036). Conformance launch
 gates cover every declared row. It checks
-every declared quality/link mode, enabled/bypass, metadata immutability,
+every declared quality/link mode, enabled/bypass, exact prepare-result metadata,
 D7 output-block bounds under poisoned input and sidechain, deterministic state restore, and lane
 isolation. Separate faulty mocks exercise
-allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, changing
-latency/tail/resources, bypass latency, malformed automation, NaN propagation, partial or
+allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, a prepare result
+whose metadata misstates latency or resources, bypass latency, malformed automation, NaN propagation, partial or
 nondeterministic snapshot, and rejected restore.
 
 The harness is built from the descriptor, not from the reference mock: the prepare request uses

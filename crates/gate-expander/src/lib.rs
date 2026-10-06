@@ -30,10 +30,10 @@ use effect_contract::{
     ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use effect_runtime::envelope::attack_release_coefficient;
@@ -342,8 +342,17 @@ struct LaneTiming {
 /// A prepared gate at one lane width.
 ///
 /// `CONNECTED` selects whether the current detector words come from the sidechain.
+///
+/// It keeps only the prepared values its own methods read (issue #1461): the whole
+/// `PreparedEffectMetadata` stays on the control side, in the prepare result. The prepared bypass
+/// and link mode are already folded into `coef`.
 struct PreparedGate<L: Lane, const CONNECTED: bool> {
-    metadata: PreparedEffectMetadata,
+    /// The prepared sample rate: hold counts and one-pole coefficients, at seeding and restore.
+    sample_rate: u32,
+    /// The prepared render quantum, which bounds a bank block's frames.
+    quantum: u32,
+    /// The prepared automation capacity: a span at or past it is invalid.
+    automation_capacity: u32,
     bank_width: Option<BankWidth>,
     defaults: [[[f32; PARAMETER_COUNT]; 2]; MAX_WIDTH],
     coef: [GateCoef<L>; 2],
@@ -412,7 +421,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// Builds one prepared shape. `defaults[track][channel]` holds the validated initial values;
     /// only `[..WIDTH]` is read.
     fn new(
-        metadata: PreparedEffectMetadata,
+        metadata: &PreparedEffectMetadata,
         bank_width: Option<BankWidth>,
         defaults: [[[f32; PARAMETER_COUNT]; 2]; MAX_WIDTH],
     ) -> Option<Self> {
@@ -425,7 +434,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             return None;
         }
         let mut gate = Self {
-            metadata,
+            sample_rate: metadata.sample_rate,
+            quantum: metadata.quantum,
+            automation_capacity: metadata.automation_capacity,
             bank_width,
             defaults,
             coef: [GateCoef {
@@ -486,7 +497,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// Recomputes one lane's hold count and one-pole coefficients from its timing.
     fn rederive_lane(&mut self, channel: usize, lane: usize) -> Option<()> {
         let timing = self.timing[lane][channel];
-        let sample_rate = self.metadata.sample_rate;
+        let sample_rate = self.sample_rate;
         let hold = rounded_samples(timing.hold_ms, sample_rate)?;
         lane_set(&mut self.coef[channel].hold_samples, lane, hold as f32);
         lane_set(
@@ -569,7 +580,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                 report.invalid_spans = report.invalid_spans.saturating_add(1);
                 continue;
             };
-            let valid = span_index < self.metadata.automation_capacity as usize
+            let valid = span_index < self.automation_capacity as usize
                 && parameter_index < RAMP_COUNT
                 && span.kind == AutomationSpanKind::Point
                 && span.start_sample == first_sample
@@ -775,7 +786,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         if open.to_bits() != 0 && open.to_bits() != OPEN_WORD.to_bits() {
             return Err(state_error("effect.state.phase"));
         }
-        let hold_samples = rounded_samples(timing.hold_ms, self.metadata.sample_rate)
+        let hold_samples = rounded_samples(timing.hold_ms, self.sample_rate)
             .ok_or(state_error("effect.state.parameter"))?;
         if !integral_within(hold, hold_samples as f32) {
             return Err(state_error("effect.state.hold"));
@@ -886,10 +897,6 @@ struct LaneRestore {
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED> {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         PreparedGate::reset(self, kind);
     }
@@ -977,13 +984,6 @@ macro_rules! bank_impl {
                 true
             }
 
-            fn metadata(&self) -> PreparedBankMetadata {
-                PreparedBankMetadata {
-                    width: self.bank_width.expect("a bank is prepared with a width"),
-                    program_key: self.metadata.program_key(),
-                }
-            }
-
             fn reset(&mut self, kind: ResetKind) {
                 PreparedGate::reset(self, kind);
             }
@@ -998,7 +998,7 @@ macro_rules! bank_impl {
                     return report;
                 }
                 debug_assert_eq!(block.left.len(), block.frames as usize * <$lane>::WIDTH);
-                debug_assert!(block.frames <= self.metadata.quantum);
+                debug_assert!(block.frames <= self.quantum);
                 let mut reports = [ProcessReport::default(); MAX_WIDTH];
                 for track in 0..<$lane>::WIDTH {
                     // A padded lane carries no track, so no span is its to apply (issue #1092).
@@ -1089,7 +1089,7 @@ impl NativeEffectFactory for GateExpanderFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let values = initial_defaults(request.initial_values)?;
         // Every row of the lane table holds validated values, never zeros: only row 0 is read at
@@ -1102,21 +1102,21 @@ impl NativeEffectFactory for GateExpanderFactory {
         let invalid = EffectPrepareError {
             code: "effect.parameter.initial",
         };
-        if connected {
-            Ok(Box::new(
-                PreparedGate::<f32, true>::new(metadata, None, defaults).ok_or(invalid)?,
-            ))
+        let processor: Box<dyn PreparedNativeEffect> = if connected {
+            Box::new(PreparedGate::<f32, true>::new(&metadata, None, defaults).ok_or(invalid)?)
         } else {
-            Ok(Box::new(
-                PreparedGate::<f32, false>::new(metadata, None, defaults).ok_or(invalid)?,
-            ))
-        }
+            Box::new(PreparedGate::<f32, false>::new(&metadata, None, defaults).ok_or(invalid)?)
+        };
+        Ok(PreparedEffect {
+            processor,
+            metadata,
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         bind_bank::<true>(request)
     }
 }
@@ -1138,7 +1138,7 @@ impl NativeEffectFactory for GateExpanderFactory {
 /// padded lanes nor on which member they clone.
 fn bind_bank<const NATIVE_ONLY: bool>(
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     request.validate_shape()?;
     // Members come first (`validate_shape`), so lane 0 carries one.
     let first = request.requests[0];
@@ -1174,19 +1174,23 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     // instruction set at compile time and the workspace pins `x86-64-v3`, so an unavailable width
     // is a scalar fallback. Each arm's check is a compile-time constant, so a production build
     // never links the bank of a width it does not execute.
-    Ok(Some(effect_contract::match_bank_width!(
-        request.width,
-        |L| {
-            if NATIVE_ONLY && !executes(L::WIDTH) {
-                return Ok(None);
-            }
-            Box::new(
-                PreparedGate::<L, false>::new(metadata, width, defaults)
-                    .ok_or(invalid)?
-                    .with_active_lanes(active),
-            ) as Box<dyn PreparedNativeEffectBank>
+    let processor = effect_contract::match_bank_width!(request.width, |L| {
+        if NATIVE_ONLY && !executes(L::WIDTH) {
+            return Ok(None);
         }
-    )))
+        Box::new(
+            PreparedGate::<L, false>::new(&metadata, width, defaults)
+                .ok_or(invalid)?
+                .with_active_lanes(active),
+        ) as Box<dyn PreparedNativeEffectBank>
+    });
+    Ok(Some(PreparedEffectBank {
+        processor,
+        metadata: PreparedBankMetadata {
+            width: request.width,
+            program_key: metadata.program_key(),
+        },
+    }))
 }
 
 #[cfg(test)]
@@ -1320,14 +1324,14 @@ mod tests {
             defaults[track] = initial_defaults(set).expect("initial values");
         }
         let shared = metadata(&track_values[0]);
-        let mut bank = PreparedGate::<L, false>::new(shared, Some(width), defaults).expect("bank");
+        let mut bank = PreparedGate::<L, false>::new(&shared, Some(width), defaults).expect("bank");
         let mut control =
-            PreparedGate::<L, false>::new(shared, Some(width), defaults).expect("control bank");
+            PreparedGate::<L, false>::new(&shared, Some(width), defaults).expect("control bank");
         let mut peers: Vec<PreparedGate<f32, false>> = (0..lanes)
             .map(|track| {
                 let mut lane_defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
                 lane_defaults[0] = defaults[track];
-                PreparedGate::<f32, false>::new(shared, None, lane_defaults).expect("peer")
+                PreparedGate::<f32, false>::new(&shared, None, lane_defaults).expect("peer")
             })
             .collect();
 
@@ -1448,10 +1452,10 @@ mod tests {
             defaults[track] = initial_defaults(&track_sets[track]).expect("defaults");
         }
         let shared = metadata(&track_sets[0]);
-        let mut donor = PreparedGate::<Simd4, false>::new(shared, Some(BankWidth::Four), defaults)
+        let mut donor = PreparedGate::<Simd4, false>::new(&shared, Some(BankWidth::Four), defaults)
             .expect("internal W4 donor");
         let mut restored =
-            PreparedGate::<Simd4, false>::new(shared, Some(BankWidth::Four), defaults)
+            PreparedGate::<Simd4, false>::new(&shared, Some(BankWidth::Four), defaults)
                 .expect("internal W4 restore target");
 
         let mut prefix_left = vec![0.01_f32; PREFIX * WIDTH];
@@ -1466,7 +1470,7 @@ mod tests {
         );
         assert!(lane_get(donor.state[0].gain_db, 2) < 0.0);
 
-        let sizes = donor.metadata.state_sizes;
+        let sizes = shared.state_sizes;
         let mut payloads = Vec::new();
         for lane in 0..WIDTH {
             let mut common = vec![0; sizes.common_bytes as usize];

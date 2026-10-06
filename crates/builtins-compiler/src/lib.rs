@@ -6108,12 +6108,10 @@ mod tests {
         observations: &[],
     };
 
-    struct SidechainSum(PreparedEffectMetadata);
+    /// Reads no prepared value, so holds none (issue #1461).
+    struct SidechainSum;
 
     impl PreparedNativeEffect for SidechainSum {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            self.0
-        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let (side_left, side_right) = block.sidechain.expect("connected sidechain");
@@ -6524,7 +6522,7 @@ mod tests {
                 vec![GraphPreparedEffect {
                     id: sidechain_effect_id,
                     metadata,
-                    processor: Box::new(SidechainSum(metadata)),
+                    processor: Box::new(SidechainSum),
                     response_snapshot_declared: false,
                     native_id: "miso.test.sidechain-sum",
                 }]

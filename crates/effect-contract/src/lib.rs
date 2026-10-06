@@ -1306,6 +1306,34 @@ pub struct PreparedBankMetadata {
     pub width: BankWidth,
     pub program_key: EffectProgramKey,
 }
+/// What [`NativeEffectFactory::prepare`] returns: the processor render owns, and the metadata its
+/// preparation derived, side by side (issue #1461).
+///
+/// # Why the metadata is beside the processor and not inside it
+///
+/// Render-owned memory carries no control-only data (#1329 R5). The processor moves into render
+/// memory; the metadata never does. Every reader of the metadata -- the effect compiler's
+/// `effect.metadata.mismatch` check, the graph compiler's cohort planner and resource estimate,
+/// the prepared plan's control-side effect table -- reads this field, on the control thread. A
+/// processor keeps, as plain fields, exactly the scalars its own render path reads (sample rate,
+/// automation capacity, bypass, link mode and the like), and no copy of this record. So there is
+/// no `metadata()` method on [`PreparedNativeEffect`]: every reader sees the one value the
+/// factory returned here, which the effect compiler compares with [`expected_prepared_metadata`].
+pub struct PreparedEffect {
+    /// The prepared instance; it is what render owns.
+    pub processor: Box<dyn PreparedNativeEffect>,
+    /// The immutable prepared metadata; it stays on the control side.
+    pub metadata: PreparedEffectMetadata,
+}
+/// What [`NativeEffectFactory::bind_homogeneous_bank`] returns when it binds: the bank processor
+/// render owns, and its [`PreparedBankMetadata`] beside it, on the same terms as
+/// [`PreparedEffect`] (issue #1461).
+pub struct PreparedEffectBank {
+    /// The bound bank; it is what render owns.
+    pub processor: Box<dyn PreparedNativeEffectBank>,
+    /// The bank's width and shared program key; they stay on the control side.
+    pub metadata: PreparedBankMetadata,
+}
 /// What one `process` call observed. Every counter here counts **blocks**, never samples
 /// (decision D7): an effect classifies no individual sample, so a per-sample count would have no
 /// definition. `nonfinite_left_blocks` / `nonfinite_right_blocks` are the D7 output boundary check
@@ -1514,13 +1542,19 @@ impl<'a> EffectBankProcessBlock<'a> {
         check_window(window.len(), metadata.program_key.automation_capacity)
     }
 }
+/// Whether one span is valid on its own for a block of `frames` samples from `first`, against the
+/// effect's descriptor.
+///
+/// It takes the descriptor, not the prepared metadata, because the descriptor is all it reads and
+/// a processor holds no copy of its metadata (issue #1461): an effect calls it with its own static
+/// descriptor.
 pub fn valid_runtime_span(
     s: &PreparedAutomationSpan,
-    m: PreparedEffectMetadata,
+    descriptor: &EffectDescriptor,
     first: u64,
     frames: u32,
 ) -> bool {
-    let Some(p) = m.descriptor.parameters.get(s.parameter_index as usize) else {
+    let Some(p) = descriptor.parameters.get(s.parameter_index as usize) else {
         return false;
     };
     if !s.start_value.is_finite()
@@ -1575,7 +1609,7 @@ pub fn validate_automation_block(
     }
     let mut prior_sort_key = None;
     for (span_index, span) in spans.iter().enumerate() {
-        if !valid_runtime_span(span, metadata, first_sample, frames) {
+        if !valid_runtime_span(span, metadata.descriptor, first_sample, frames) {
             return Err(ProcessBlockError::Automation);
         }
         let sort_key = (span.start_sample, span.parameter_index, span.channel);
@@ -1800,10 +1834,14 @@ impl<'a> StatePayloadInput<'a> {
 }
 pub trait NativeEffectFactory: Send + Sync {
     fn descriptor(&self) -> &'static EffectDescriptor;
+    /// Prepares one instance, off the render thread.
+    ///
+    /// The result carries the processor and its [`PreparedEffectMetadata`] side by side
+    /// ([`PreparedEffect`]); the processor holds no copy of the metadata (issue #1461).
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError>;
+    ) -> Result<PreparedEffect, EffectPrepareError>;
 
     /// Returns this owner's optional native requested-configuration response capability.
     ///
@@ -1873,7 +1911,7 @@ pub trait NativeEffectFactory: Send + Sync {
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>;
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError>;
 }
 /// One observation reading, in the tap's declared [`unit`](ObservationDescriptor::unit).
 ///
@@ -1923,8 +1961,11 @@ pub enum ParameterAccessError {
     InvalidValue,
 }
 
+/// A prepared native effect instance: the part of a prepared effect that render owns.
+///
+/// It has no `metadata()` method. Preparation hands the metadata out beside the processor, in
+/// [`PreparedEffect`], and every reader reads it there, on the control side (issue #1461).
 pub trait PreparedNativeEffect: Send {
-    fn metadata(&self) -> PreparedEffectMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
 
@@ -2092,8 +2133,11 @@ pub trait PreparedNativeEffect: Send {
         false
     }
 }
+/// A bound homogeneous bank: the part of a bound bank that render owns.
+///
+/// Like [`PreparedNativeEffect`], it has no `metadata()` method; its [`PreparedBankMetadata`]
+/// rides beside it in [`PreparedEffectBank`] (issue #1461).
 pub trait PreparedNativeEffectBank: Send {
-    fn metadata(&self) -> PreparedBankMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
 

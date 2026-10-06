@@ -328,7 +328,8 @@ fn per_node(scenario: &Scenario) -> Planes {
         .map(|(member, values)| {
             let mut effect = TruePeakLimiterFactory
                 .prepare(request(values, scenario.link))
-                .expect("prepare");
+                .expect("prepare")
+                .processor;
             let mut left = scenario.left[member].clone();
             let mut right = scenario.right[member].clone();
             for block in 0..scenario.blocks {
@@ -379,7 +380,8 @@ fn banked(
             active_mask: &mask,
         })
         .expect("a padded request is well formed")
-        .expect("a padded limiter bank binds");
+        .expect("a padded limiter bank binds")
+        .processor;
     let mut left = vec![0.0_f32; FRAMES * lanes];
     let mut right = vec![0.0_f32; FRAMES * lanes];
     let mut output: Planes = scenario

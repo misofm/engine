@@ -286,7 +286,7 @@ release law changes.
 
 ### One leg that is inert today
 
-`self.silent_bypass == self.metadata.bypass` turns nothing red, and cannot: `bypass` is fixed at
+`self.silent_bypass == self.coefficients.bypass` turns nothing red, and cannot: `bypass` is fixed at
 preparation and there is no path that changes it, so `silent_bypass` is always equal to it. It is
 kept for parity with `compressor` and `parametric-eq`, which carry the same
 leg for the same reason, and because it is the leg that becomes load-bearing the day bypass becomes

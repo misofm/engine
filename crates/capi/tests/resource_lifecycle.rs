@@ -1056,6 +1056,17 @@ impl Budget {
 /// the EQ owners and the effect and strip IDs (14,425), and 16 bytes in each of the three
 /// provider-epoch slots (48).
 ///
+/// #1461 raised the effect bank metadata row, a structural move: a bound bank's
+/// `PreparedBankMetadata` (160 bytes on x86-64) left the bank processor, which render owns and this
+/// row never charged, for the control-side bank record `graph::GraphPreparedEffectBank`, whose
+/// size this row charges per bank. The reference session binds two eight-lane banks: 1,125 is
+/// measured on x86-64, 2 x 160 above the 805 the old ceiling (896) bounded; the ceiling is 1,125
+/// plus 10 %, rounded up to 64. The four-lane
+/// row is derived, not measured (AArch64 runs only in CI): #1304's measured 921 plus three
+/// four-lane banks x 160 is 1,401, and the ceiling is that plus 10 %, rounded up to 64. CI's
+/// `aarch64-debug` run prints the measured row. graph metadata and the two plan rows grow by the
+/// same 320 bytes inside their slack.
+///
 /// #1328 raised the effect scalar scratch row from its zero claim, a structural move: the
 /// parametric EQ now declares its two rest planes as scratch (`REST_PLANE_BYTES_PER_FRAME`, 8 bytes
 /// per frame per prepared lane: one `f32` threshold word per channel), which it had allocated at
@@ -1102,8 +1113,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "effect_bank_metadata_bytes",
         value: |report| report.effect_bank_metadata_bytes,
-        eight_lanes: 896,
-        four_lanes: 1_024,
+        eight_lanes: 1_280,
+        four_lanes: 1_600,
     },
     Budget {
         row: "builtin_bank_bytes",

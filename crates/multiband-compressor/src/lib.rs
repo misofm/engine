@@ -37,17 +37,17 @@
 //! is caught once per block by `effect_runtime::bank` (D7).
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
     ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
     ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{self, NonFiniteReport};
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, knee_coefficients};
@@ -1574,15 +1574,29 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 pub struct MultibandCompressorFactory;
 
 /// A prepared scalar multiband compressor: the `WIDTH = 1` instantiation of the one body.
+///
+/// It keeps no copy of its prepared metadata (issue #1461): the record goes back to the control
+/// side in [`PreparedEffect::metadata`], and the processor keeps only the two values its own
+/// render-owned methods read.
 pub struct PreparedMultibandCompressor {
-    metadata: PreparedEffectMetadata,
+    /// The prepared automation capacity, read by `process`.
+    automation_capacity: u32,
+    /// The prepared state payload sizes, read by `snapshot_state_payload`.
+    state_sizes: StatePayloadSizes,
     instance: Instance<f32, 1>,
 }
 
 /// A prepared homogeneous bank of `W` tracks.
+///
+/// Like the scalar form it keeps no copy of its prepared or bank metadata (issue #1461), only the
+/// values its own methods read.
 struct PreparedMultibandCompressorBank<L: Lane, const W: usize> {
-    metadata: PreparedBankMetadata,
-    effect_metadata: PreparedEffectMetadata,
+    /// The bound bank width, read by `process_bank`.
+    width: BankWidth,
+    /// The prepared automation capacity, read by `process_bank`.
+    automation_capacity: u32,
+    /// The prepared state payload sizes, read by `snapshot_track_state_payload`.
+    state_sizes: StatePayloadSizes,
     instance: Instance<L, W>,
 }
 
@@ -1623,7 +1637,7 @@ const PREPARE_FAILED: EffectPrepareError = EffectPrepareError {
 fn prepare_bank<L: Lane, const W: usize>(
     factory: &MultibandCompressorFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -1657,14 +1671,18 @@ fn prepare_bank<L: Lane, const W: usize>(
         return Ok(None);
     }
     let instance = Instance::<L, W>::new(left, right, metadata).ok_or(PREPARE_FAILED)?;
-    Ok(Some(Box::new(PreparedMultibandCompressorBank::<L, W> {
+    Ok(Some(PreparedEffectBank {
+        processor: Box::new(PreparedMultibandCompressorBank::<L, W> {
+            width: request.width,
+            automation_capacity: metadata.automation_capacity,
+            state_sizes: metadata.state_sizes,
+            instance,
+        }),
         metadata: PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
         },
-        effect_metadata: metadata,
-        instance,
-    })))
+    }))
 }
 
 impl NativeEffectFactory for MultibandCompressorFactory {
@@ -1675,17 +1693,24 @@ impl NativeEffectFactory for MultibandCompressorFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let (left, right) = initial_defaults(request.initial_values)?;
         let instance = Instance::<f32, 1>::new([left], [right], metadata).ok_or(PREPARE_FAILED)?;
-        Ok(Box::new(PreparedMultibandCompressor { metadata, instance }))
+        Ok(PreparedEffect {
+            processor: Box::new(PreparedMultibandCompressor {
+                automation_capacity: metadata.automation_capacity,
+                state_sizes: metadata.state_sizes,
+                instance,
+            }),
+            metadata,
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         request.validate_shape()?;
         effect_contract::match_bank_width!(request.width, |L, N| prepare_bank::<L, N>(
             self, request
@@ -1705,10 +1730,6 @@ fn band_aggregate_db<L: Lane, const W: usize>(side: &Side<L, W>, lane: usize) ->
 }
 
 impl PreparedNativeEffect for PreparedMultibandCompressor {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
-    }
-
     /// Issue #143 D2 / R3: the deeper of the two bands' smoother words, read for lane 0.
     fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         if tap_index != 0 {
@@ -1728,7 +1749,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         self.instance.apply_automation(
             0,
             block.automation,
-            self.metadata.automation_capacity,
+            self.automation_capacity,
             block.first_sample,
             &mut report,
         );
@@ -1752,7 +1773,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         &self,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        self.instance.snapshot(0, output, self.metadata.state_sizes)
+        self.instance.snapshot(0, output, self.state_sizes)
     }
 
     fn restore_state_payload(
@@ -1766,10 +1787,6 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
-
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         if tap_index != 0 || out.len() != W || W != L::WIDTH {
             return false;
@@ -1786,11 +1803,11 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.metadata.width);
+        let mut report = BankProcessReport::empty(self.width);
         // `EffectBankProcessBlock::new` has already validated the block's shape, its automation
         // offsets and its frame count against the quantum (#94 F11); what is left is the two
         // facts that belong to this instance rather than to the block.
-        if block.width != self.metadata.width || block.sidechain.is_some() {
+        if block.width != self.width || block.sidechain.is_some() {
             return report;
         }
         for track in 0..W {
@@ -1799,7 +1816,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
             self.instance.apply_automation(
                 track,
                 &block.automation[start..end],
-                self.effect_metadata.automation_capacity,
+                self.automation_capacity,
                 block.first_sample,
                 &mut report.reports[track],
             );
@@ -1821,8 +1838,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, W)?;
-        self.instance
-            .snapshot(track, output, self.effect_metadata.state_sizes)
+        self.instance.snapshot(track, output, self.state_sizes)
     }
 
     fn restore_track_state_payload(

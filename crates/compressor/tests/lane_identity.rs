@@ -145,8 +145,7 @@ fn bank_matches_scalar_per_lane_bits() {
         );
 
         let (scalar_state_left, scalar_state_right) = snapshot(effect.as_ref());
-        let (bank_state_left, bank_state_right) =
-            snapshot_track(bank.as_ref(), track as u32, effect.as_ref());
+        let (bank_state_left, bank_state_right) = snapshot_track(bank.as_ref(), track as u32);
         assert_eq!(
             bank_state_left, scalar_state_left,
             "track {track} left state"

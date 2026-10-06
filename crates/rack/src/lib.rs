@@ -12,7 +12,8 @@
 use effect_contract::{
     BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
     EffectProgramKey, ObservationLane, ObservationSample, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, transpose_tile_4,
+    PreparedEffectBank, PreparedNativeEffectBank, PreparedSidechainPort, SeamSide,
+    transpose_tile_4,
 };
 use engine::realtime::RenderError;
 
@@ -745,10 +746,14 @@ pub trait BankStage: Send {
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
 ///
-/// Width, quantum and the automation offsets are fixed here once (#96 F8): the render path calls
-/// no `metadata()` and performs no `checked_add`.
+/// Width, quantum and the automation offsets are fixed here once (#96 F8): the render path reads
+/// no metadata and performs no `checked_add`. The bank's [`effect_contract::PreparedBankMetadata`]
+/// is read at bind, on the control thread, and only the one value a stage method reads -- the
+/// prepared bypass -- is kept, as a plain field (issue #1461).
 pub struct EffectBankStage {
     processor: Box<dyn PreparedNativeEffectBank>,
+    /// The bank's prepared `bypass`, which the response snapshot reports.
+    bypassed: bool,
     width: BankWidth,
     quantum: u32,
     offsets: Box<[u32]>,
@@ -772,13 +777,17 @@ pub struct EffectBankStage {
 }
 
 impl EffectBankStage {
-    /// Errors with [`RackError::WidthMismatch`] if the prepared processor is not this width.
+    /// Errors with [`RackError::WidthMismatch`] if the bound bank is not this width.
     pub fn new(
-        processor: Box<dyn PreparedNativeEffectBank>,
+        bank: PreparedEffectBank,
         width: BankWidth,
         quantum: u32,
     ) -> Result<Self, RackError> {
-        if processor.metadata().width != width {
+        let PreparedEffectBank {
+            processor,
+            metadata,
+        } = bank;
+        if metadata.width != width {
             return Err(RackError::WidthMismatch);
         }
         if quantum == 0 {
@@ -789,6 +798,7 @@ impl EffectBankStage {
             .collect();
         Ok(Self {
             processor,
+            bypassed: metadata.program_key.bypass,
             width,
             quantum,
             offsets: vec![0_u32; width.lanes() as usize + 1].into_boxed_slice(),
@@ -809,7 +819,7 @@ impl BankStage for EffectBankStage {
         self.processor.copy_response_snapshot_lane(
             lane,
             effect_contract::ResponseSnapshotRequest {
-                bypassed: self.processor.metadata().program_key.bypass,
+                bypassed: self.bypassed,
                 left,
                 right,
             },
@@ -817,7 +827,7 @@ impl BankStage for EffectBankStage {
     }
 
     fn response_snapshot_bypassed(&self, _lane: usize) -> bool {
-        self.processor.metadata().program_key.bypass
+        self.bypassed
     }
 
     /// A live-control-free bank has no live channel at all, so the two live terms cannot be false
@@ -995,14 +1005,20 @@ impl LiveControlEffectBankStage {
     /// live drain's pairing rule, refused here, at bind, rather than discovered on the render
     /// thread.
     pub fn new(
-        processor: Box<dyn PreparedNativeEffectBank>,
+        bank: PreparedEffectBank,
         width: BankWidth,
         quantum: u32,
         lanes: Vec<Option<EffectControlLane>>,
         observations: Vec<Option<ObservationLane>>,
         latency: usize,
     ) -> Result<Self, RackError> {
-        if processor.metadata().width != width
+        // Issue #1461: the bank's metadata is read here, at bind, and none of it is kept; the
+        // render path reads the width, quantum and window this builds.
+        let PreparedEffectBank {
+            processor,
+            metadata,
+        } = bank;
+        if metadata.width != width
             || lanes.len() != width.lanes() as usize
             || observations.len() != width.lanes() as usize
         {
@@ -1020,7 +1036,7 @@ impl LiveControlEffectBankStage {
         // bypass from costing live-control staging.
         let live = lanes.iter().flatten().any(EffectControlLane::has_channel);
         let capacity = if live {
-            processor.metadata().program_key.automation_capacity as usize
+            metadata.program_key.automation_capacity as usize
         } else {
             0
         };
@@ -1056,7 +1072,7 @@ impl LiveControlEffectBankStage {
         // `span_index < automation_capacity` cut-off; a window of any other size would let a
         // staged twin pair straddle it (issue #1012). A slot with no live channel stages nothing.
         if live {
-            EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
+            EffectBankProcessBlock::check_automation_window(&staging, &metadata)
                 .map_err(|_| RackError::AutomationWindow)?;
         }
         Ok(Self {

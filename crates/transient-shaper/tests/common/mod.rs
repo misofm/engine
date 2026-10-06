@@ -8,8 +8,9 @@
 use effect_contract::{
     AutomationSpanKind, BankWidth, EffectPrepareError, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectBank,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+    StatePayloadOutput, StatePayloadSizes,
 };
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use lane::Backend;
@@ -94,10 +95,29 @@ pub(crate) fn request_full<'a>(
     }
 }
 
-/// Prepares a scalar product, panicking on a rejected request.
-pub(crate) fn prepare(values: &[InitialParameterValue]) -> Box<dyn PreparedNativeEffect> {
+/// Prepares a scalar product, beside the metadata its prepare reported, panicking on a rejected
+/// request.
+pub(crate) fn prepared(values: &[InitialParameterValue]) -> PreparedEffect {
     TransientShaperFactory
         .prepare(request(values))
+        .expect("prepare")
+}
+
+/// Prepares a scalar product, panicking on a rejected request.
+pub(crate) fn prepare(values: &[InitialParameterValue]) -> Box<dyn PreparedNativeEffect> {
+    prepared(values).processor
+}
+
+/// Prepares a scalar product with the rate, bypass flag and link mode spelled out, beside the
+/// metadata its prepare reported.
+pub(crate) fn prepared_with(
+    values: &[InitialParameterValue],
+    sample_rate: u32,
+    bypass: bool,
+    link_mode: LinkMode,
+) -> PreparedEffect {
+    TransientShaperFactory
+        .prepare(request_with(values, sample_rate, bypass, link_mode))
         .expect("prepare")
 }
 
@@ -108,14 +128,19 @@ pub(crate) fn prepare_with(
     bypass: bool,
     link_mode: LinkMode,
 ) -> Box<dyn PreparedNativeEffect> {
-    TransientShaperFactory
-        .prepare(request_with(values, sample_rate, bypass, link_mode))
-        .expect("prepare")
+    prepared_with(values, sample_rate, bypass, link_mode).processor
+}
+
+/// The state payload sizes the fixture request's prepare result reports (issue #1461: the
+/// processor does not report them). A snapshot of an instance with any other sizes is refused,
+/// so a drift goes red.
+pub(crate) fn state_sizes() -> StatePayloadSizes {
+    prepared(&initial_values()).metadata.state_sizes
 }
 
 /// The left and right state sections of a scalar product.
 pub(crate) fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>) {
-    let sizes = effect.metadata().state_sizes;
+    let sizes = state_sizes();
     let mut left = vec![0; sizes.left_bytes as usize];
     let mut right = vec![0; sizes.right_bytes as usize];
     effect
@@ -144,7 +169,7 @@ pub(crate) fn bank_snapshot(
 
 /// The error of a bank binding that must be rejected.
 pub(crate) fn bank_error(
-    result: Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>,
+    result: Result<Option<PreparedEffectBank>, EffectPrepareError>,
 ) -> EffectPrepareError {
     match result {
         Err(error) => error,
@@ -260,6 +285,7 @@ pub(crate) fn bind_native_bank_quantum(
                 active_mask: width.full_mask(),
             })
             .expect("bank binding")
-            .expect("the native width is available"),
+            .expect("the native width is available")
+            .processor,
     )
 }

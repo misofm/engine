@@ -16,7 +16,7 @@
 
 use effect_contract::{
     EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
-    ObservationSample, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
+    ObservationSample, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedEffect,
     PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, StatePayloadOutput,
 };
 use true_peak_limiter::{
@@ -76,12 +76,13 @@ fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
 
 /// The reduction word the in-memory state payload reports for one lane, as a second route to the same
 /// kernel state.
-fn snapshot_reduction(effect: &dyn PreparedNativeEffect) -> (f32, f32) {
-    let sizes = effect.metadata().state_sizes;
+fn snapshot_reduction(effect: &PreparedEffect) -> (f32, f32) {
+    let sizes = effect.metadata.state_sizes;
     let mut common = vec![0_u8; sizes.common_bytes as usize];
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
     effect
+        .processor
         .snapshot_state_payload(StatePayloadOutput {
             common: &mut common,
             left: &mut left,
@@ -121,10 +122,10 @@ fn render(effect: &mut dyn PreparedNativeEffect, amplitude: f32, blocks: usize) 
 fn the_limiter_reads_the_reduction_word_the_envelope_persists() {
     let values = values();
     let mut effect = TruePeakLimiterFactory.prepare(request(&values)).unwrap();
-    render(effect.as_mut(), 0.98, 64);
+    render(effect.processor.as_mut(), 0.98, 64);
 
-    let observed = observe(&*effect);
-    let (left, right) = snapshot_reduction(&*effect);
+    let observed = observe(effect.processor.as_ref());
+    let (left, right) = snapshot_reduction(&effect);
     assert_eq!(
         observed.left.to_bits(),
         left.to_bits(),
@@ -153,8 +154,8 @@ fn observing_between_blocks_does_not_move_a_single_output_sample() {
     let mut unwatched_out = Vec::new();
     for block in 0..32_u64 {
         for (effect, sink, watch) in [
-            (watched.as_mut(), &mut watched_out, true),
-            (unwatched.as_mut(), &mut unwatched_out, false),
+            (watched.processor.as_mut(), &mut watched_out, true),
+            (unwatched.processor.as_mut(), &mut unwatched_out, false),
         ] {
             let mut left: Vec<f32> = (0..128)
                 .map(|frame| if frame % 2 == 0 { 0.98 } else { -0.98 })

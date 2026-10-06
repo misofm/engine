@@ -14,7 +14,7 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedNativeEffectBank,
+    PrepareEffectBankRequest, PreparedEffectBank, PreparedNativeEffectBank,
 };
 use lane::Backend;
 use parametric_eq::ParametricEqFactory;
@@ -140,7 +140,7 @@ fn run_block(
     }
 }
 
-fn bind(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNativeEffectBank> {
+fn bind(width: BankWidth, backend: Backend, lanes: usize) -> PreparedEffectBank {
     let values_by_track: Vec<_> = (0..lanes).map(configured).collect();
     let requests: Vec<_> = values_by_track
         .iter()
@@ -157,7 +157,7 @@ fn bind(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNat
         .expect("the native width must bind")
 }
 
-fn bind_lpf(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNativeEffectBank> {
+fn bind_lpf(width: BankWidth, backend: Backend, lanes: usize) -> PreparedEffectBank {
     let values_by_track: Vec<_> = (0..lanes).map(|_| configured_lpf()).collect();
     let requests: Vec<_> = values_by_track
         .iter()
@@ -193,7 +193,7 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
             let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
             let first = (step * FRAMES) as u64;
             run_block(
-                dual.as_mut(),
+                dual.processor.as_mut(),
                 &mut dual_left,
                 &mut dual_right,
                 width,
@@ -203,7 +203,7 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
                 false,
             );
             run_block(
-                collapsed.as_mut(),
+                collapsed.processor.as_mut(),
                 &mut mono_left,
                 &mut stale,
                 width,
@@ -244,7 +244,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     for step in 0..BLOCKS {
         let collapsed_half = step < BLOCKS / 2;
         if step == BLOCKS / 2 {
-            mixed.desymmetrize_channels();
+            mixed.processor.desymmetrize_channels();
         }
         let mut never_left = block(step * FRAMES, lanes);
         let mut never_right = never_left.clone();
@@ -256,7 +256,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
         };
         let first = (step * FRAMES) as u64;
         run_block(
-            never.as_mut(),
+            never.processor.as_mut(),
             &mut never_left,
             &mut never_right,
             width,
@@ -266,7 +266,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             false,
         );
         run_block(
-            mixed.as_mut(),
+            mixed.processor.as_mut(),
             &mut mixed_left,
             &mut mixed_right,
             width,
@@ -379,13 +379,13 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_ma
         for step in 0..2 * BLOCKS {
             let collapsed_half = step < BLOCKS / 2;
             if step == BLOCKS / 2 {
-                mixed.desymmetrize_channels();
+                mixed.processor.desymmetrize_channels();
             }
             // Both channels in block 2 (collapsed); the left channel alone in block 26 (dual).
             if step == 2 || step == BLOCKS + 2 {
                 let both = step == 2;
                 let enabled = if both { after } else { before };
-                for bank in [mixed.as_mut(), never.as_mut()] {
+                for bank in [mixed.processor.as_mut(), never.processor.as_mut()] {
                     for lane in 0..lanes {
                         let target_values = configured_with_hpf(lane, enabled);
                         let mut changed = vec![false; target_values.len()];
@@ -409,7 +409,7 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_ma
             };
             let first = (step * FRAMES) as u64;
             run_block(
-                never.as_mut(),
+                never.processor.as_mut(),
                 &mut never_left,
                 &mut never_right,
                 width,
@@ -419,7 +419,7 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_ma
                 false,
             );
             run_block(
-                mixed.as_mut(),
+                mixed.processor.as_mut(),
                 &mut mixed_left,
                 &mut mixed_right,
                 width,
@@ -470,7 +470,7 @@ fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
     let mut collapsed_left = input.clone();
     let mut stale_right = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
     run_block(
-        dual.as_mut(),
+        dual.processor.as_mut(),
         &mut dual_left,
         &mut dual_right,
         width,
@@ -480,7 +480,7 @@ fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
         false,
     );
     run_block(
-        collapsed.as_mut(),
+        collapsed.processor.as_mut(),
         &mut collapsed_left,
         &mut stale_right,
         width,
@@ -529,7 +529,7 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter() {
         let mut left = vec![0.0_f32; FRAMES * lanes];
         let mut right = left.clone();
         run_block(
-            bank.as_mut(),
+            bank.processor.as_mut(),
             &mut left,
             &mut right,
             width,
@@ -540,22 +540,23 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter() {
         );
         first += FRAMES as u64;
     }
-    bank.desymmetrize_channels();
+    bank.processor.desymmetrize_channels();
     for lane in 0..lanes {
         let mut common = vec![0_u8; support::COMMON_BYTES];
         let mut left = vec![0_u8; support::LANE_BYTES];
         let mut right = vec![0_u8; support::LANE_BYTES];
-        bank.snapshot_track_state_payload(
-            lane as u32,
-            effect_contract::StatePayloadOutput::new(
-                &mut common,
-                &mut left,
-                &mut right,
-                bank.metadata().program_key.state_sizes,
+        bank.processor
+            .snapshot_track_state_payload(
+                lane as u32,
+                effect_contract::StatePayloadOutput::new(
+                    &mut common,
+                    &mut left,
+                    &mut right,
+                    bank.metadata.program_key.state_sizes,
+                )
+                .expect("state output"),
             )
-            .expect("state output"),
-        )
-        .expect("snapshot");
+            .expect("snapshot");
         assert_eq!(
             support::word(&left, support::SILENCE_WORD),
             (6.0 * FRAMES as f32).to_bits(),
@@ -580,7 +581,7 @@ fn the_collapsed_body_arms_its_joint_flush() {
     };
     let lanes = width.lanes() as usize;
     let mut bank = bind(width, backend, lanes);
-    let sizes = bank.metadata().program_key.state_sizes;
+    let sizes = bank.metadata.program_key.state_sizes;
     let band_one = support::WORDS_PER_BAND * 4;
     let snapshot = |bank: &dyn PreparedNativeEffectBank, lane: usize| {
         let mut common = vec![0_u8; support::COMMON_BYTES];
@@ -595,7 +596,7 @@ fn the_collapsed_body_arms_its_joint_flush() {
         (common, left, right)
     };
     for lane in 0..lanes {
-        let (common, mut left, mut right) = snapshot(bank.as_ref(), lane);
+        let (common, mut left, mut right) = snapshot(bank.processor.as_ref(), lane);
         for channel in [&mut left, &mut right] {
             channel[band_one..band_one + 4].copy_from_slice(&1.0e-15_f32.to_bits().to_le_bytes());
             channel[band_one + 4..band_one + 8]
@@ -603,18 +604,19 @@ fn the_collapsed_body_arms_its_joint_flush() {
             let at = support::SILENCE_WORD * 4;
             channel[at..at + 4].copy_from_slice(&4_095.0_f32.to_bits().to_le_bytes());
         }
-        bank.restore_track_state_payload(
-            lane as u32,
-            1,
-            effect_contract::StatePayloadInput::new(&common, &left, &right, sizes)
-                .expect("state input"),
-        )
-        .expect("the payload restores");
+        bank.processor
+            .restore_track_state_payload(
+                lane as u32,
+                1,
+                effect_contract::StatePayloadInput::new(&common, &left, &right, sizes)
+                    .expect("state input"),
+            )
+            .expect("the payload restores");
     }
     let mut left = vec![0.0_f32; FRAMES * lanes];
     let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
     run_block(
-        bank.as_mut(),
+        bank.processor.as_mut(),
         &mut left,
         &mut stale,
         width,
@@ -624,7 +626,7 @@ fn the_collapsed_body_arms_its_joint_flush() {
         true,
     );
     for lane in 0..lanes {
-        let (_, left, _) = snapshot(bank.as_ref(), lane);
+        let (_, left, _) = snapshot(bank.processor.as_ref(), lane);
         assert_eq!(
             [
                 support::word(&left, support::WORDS_PER_BAND),

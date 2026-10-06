@@ -12,8 +12,8 @@
 use effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPorts,
-    PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffectBank,
+    PreparedPorts, PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
 };
 use lane::Backend;
 use true_peak_limiter::{
@@ -27,28 +27,29 @@ const FRAMES: usize = 128;
 
 type LanePayload = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-fn snapshots(bank: &dyn PreparedNativeEffectBank, lanes: usize) -> Vec<LanePayload> {
-    let sizes = bank.metadata().program_key.state_sizes;
+fn snapshots(bank: &PreparedEffectBank, lanes: usize) -> Vec<LanePayload> {
+    let sizes = bank.metadata.program_key.state_sizes;
     (0..lanes)
         .map(|track| {
             let mut common = vec![0_u8; sizes.common_bytes as usize];
             let mut left = vec![0_u8; sizes.left_bytes as usize];
             let mut right = vec![0_u8; sizes.right_bytes as usize];
-            bank.snapshot_track_state_payload(
-                track as u32,
-                StatePayloadOutput::new(
-                    &mut common,
-                    &mut left,
-                    &mut right,
-                    StatePayloadSizes {
-                        common_bytes: sizes.common_bytes,
-                        left_bytes: sizes.left_bytes,
-                        right_bytes: sizes.right_bytes,
-                    },
+            bank.processor
+                .snapshot_track_state_payload(
+                    track as u32,
+                    StatePayloadOutput::new(
+                        &mut common,
+                        &mut left,
+                        &mut right,
+                        StatePayloadSizes {
+                            common_bytes: sizes.common_bytes,
+                            left_bytes: sizes.left_bytes,
+                            right_bytes: sizes.right_bytes,
+                        },
+                    )
+                    .expect("state output"),
                 )
-                .expect("state output"),
-            )
-            .expect("snapshot");
+                .expect("snapshot");
             (common, left, right)
         })
         .collect()
@@ -136,7 +137,7 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
     }
 }
 
-fn bind(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNativeEffectBank> {
+fn bind(width: BankWidth, backend: Backend, lanes: usize) -> PreparedEffectBank {
     let values = values();
     let requests: Vec<_> = (0..lanes).map(|_| request(&values)).collect();
     TruePeakLimiterFactory
@@ -272,7 +273,7 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
                 (&[], &idle)
             };
             run_block(
-                dual.as_mut(),
+                dual.processor.as_mut(),
                 &mut dual_left,
                 &mut dual_right,
                 width,
@@ -282,7 +283,7 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
                 false,
             );
             run_block(
-                collapsed.as_mut(),
+                collapsed.processor.as_mut(),
                 &mut mono_left,
                 &mut stale,
                 width,
@@ -324,9 +325,9 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     for step in 0..BLOCKS {
         let collapsed_half = step < BLOCKS / 2;
         if step == BLOCKS / 2 {
-            mixed.desymmetrize_channels();
-            let mixed_state = snapshots(mixed.as_ref(), lanes);
-            let never_state = snapshots(never.as_ref(), lanes);
+            mixed.processor.desymmetrize_channels();
+            let mixed_state = snapshots(&mixed, lanes);
+            let never_state = snapshots(&never, lanes);
             assert_populated_history_and_rings(&never_state, "at mono disengage");
             assert_eq!(
                 mixed_state, never_state,
@@ -349,7 +350,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                 (spans.as_slice(), packed.as_slice())
             });
         run_block(
-            never.as_mut(),
+            never.processor.as_mut(),
             &mut never_left,
             &mut never_right,
             width,
@@ -359,7 +360,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             false,
         );
         run_block(
-            mixed.as_mut(),
+            mixed.processor.as_mut(),
             &mut mixed_left,
             &mut mixed_right,
             width,
@@ -388,8 +389,8 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             }
             if step == BLOCKS / 2 {
                 assert_eq!(
-                    snapshots(mixed.as_ref(), lanes),
-                    snapshots(never.as_ref(), lanes),
+                    snapshots(&mixed, lanes),
+                    snapshots(&never, lanes),
                     "complete state after the first resumed dual block"
                 );
             }

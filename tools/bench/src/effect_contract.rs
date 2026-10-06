@@ -48,6 +48,7 @@ fn prepared(bypass: bool) -> Box<dyn PreparedNativeEffect> {
             },
         })
         .expect("valid bounded conformance processor")
+        .processor
 }
 
 fn audit_process(blocks: u64, markers: bool) {

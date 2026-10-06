@@ -12,8 +12,9 @@ use lane::Backend;
 use effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes,
 };
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 
@@ -121,11 +122,9 @@ pub const fn backend_for(width: BankWidth) -> Backend {
     width.backend()
 }
 
-/// Prepares a bank of `width` lanes over `requests`.
-pub fn bank(
-    width: BankWidth,
-    requests: &[PrepareEffectRequest<'_>],
-) -> Box<dyn PreparedNativeEffectBank> {
+/// Prepares a bank of `width` lanes over `requests`: the bank processor and, beside it, the bank
+/// metadata the factory returned (issue #1461: the processor keeps no copy of it).
+pub fn bank(width: BankWidth, requests: &[PrepareEffectRequest<'_>]) -> PreparedEffectBank {
     MultibandCompressorFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
             backend: backend_for(width),
@@ -169,9 +168,12 @@ pub fn process(
     );
 }
 
-/// A snapshot of one prepared scalar effect, as its three sections.
-pub fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let sizes = effect.metadata().state_sizes;
+/// A snapshot of one prepared scalar effect, as its three sections. `sizes` is the state size its
+/// preparation returned in [`effect_contract::PreparedEffect::metadata`].
+pub fn snapshot(
+    effect: &dyn PreparedNativeEffect,
+    sizes: StatePayloadSizes,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let mut sections = new_sections(sizes);
     effect
         .snapshot_state_payload(

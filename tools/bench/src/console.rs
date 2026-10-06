@@ -891,6 +891,7 @@ impl HoistArm {
                 })
                 .expect("valid eq bank request")
                 .expect("the native width must bind an eq bank")
+                .processor
             })
             .collect();
 

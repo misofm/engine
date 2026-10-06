@@ -205,11 +205,13 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
     assert_eq!(state_u32(&active.0, 5), 63);
     assert_eq!(active.1, initial_right);
 
-    let mut restored = prepare(&values);
+    let restored_prepared = prepared(&values);
+    let restored_sizes = restored_prepared.metadata.state_sizes;
+    let mut restored = restored_prepared.processor;
     restored
         .restore_state_payload(
             1,
-            StatePayloadInput::new(&[], &active.0, &active.1, restored.metadata().state_sizes)
+            StatePayloadInput::new(&[], &active.0, &active.1, restored_sizes)
                 .expect("active state"),
         )
         .expect("active restore");
@@ -394,8 +396,9 @@ fn link_modes_drive_the_detector_as_specified() {
 #[test]
 fn state_restore_validates_version_length_envelope_and_parameters() {
     let values = initial_values();
-    let mut effect = prepare(&values);
-    let sizes = effect.metadata().state_sizes;
+    let effect_prepared = prepared(&values);
+    let sizes = effect_prepared.metadata.state_sizes;
+    let mut effect = effect_prepared.processor;
     let good = snapshot(effect.as_ref());
 
     for version in [0, 2] {
@@ -538,8 +541,9 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
 #[test]
 fn a_moving_ramp_word_past_its_domain_is_refused() {
     let values = initial_values();
-    let mut effect = prepare(&values);
-    let sizes = effect.metadata().state_sizes;
+    let effect_prepared = prepared(&values);
+    let sizes = effect_prepared.metadata.state_sizes;
+    let mut effect = effect_prepared.processor;
     let parameters = TRANSIENT_SHAPER_DESCRIPTOR.parameters;
     let spans: Vec<_> = parameters
         .iter()

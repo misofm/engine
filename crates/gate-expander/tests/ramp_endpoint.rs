@@ -19,8 +19,8 @@
 use effect_contract::{
     AutomationSpanKind, InitialParameterValue, NativeEffectFactory, ParameterChannel,
     ParameterChannelPolicy, PortRole, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
-    ProcessReport, StatePayloadOutput, default_initial_values,
+    PreparedAutomationSpan, PreparedEffect, PreparedNativeEffect, PreparedPorts,
+    PreparedSidechainPort, ProcessReport, StatePayloadOutput, default_initial_values,
 };
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, PrepareEffectBankRequest,
@@ -109,8 +109,9 @@ fn request<'a>(
 
 type Payload = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-fn snapshot(effect: &dyn PreparedNativeEffect) -> Payload {
-    let sizes = effect.metadata().state_sizes;
+/// A prepared instance's whole payload, sized by the metadata its preparation derived.
+fn snapshot(prepared: &PreparedEffect) -> Payload {
+    let (effect, sizes) = (prepared.processor.as_ref(), prepared.metadata.state_sizes);
     let mut common = vec![0_u8; sizes.common_bytes as usize];
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
@@ -258,15 +259,15 @@ fn check_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWord], c
         .expect("prepares");
     let rest: Vec<_> = words
         .iter()
-        .map(|word| ramps(&snapshot(framewise.as_ref()), *word))
+        .map(|word| ramps(&snapshot(&framewise), *word))
         .collect();
     let (mut left, mut right) = (Vec::new(), Vec::new());
     for frame in 0..FRAMES {
         let first = if frame == 0 { &spans[..] } else { &[] };
-        let (l, r, _) = render(framewise.as_mut(), frame, 1, first, connected);
+        let (l, r, _) = render(framewise.processor.as_mut(), frame, 1, first, connected);
         left.extend(l);
         right.extend(r);
-        let now = snapshot(framewise.as_ref());
+        let now = snapshot(&framewise);
         for (word, rest) in words.iter().zip(&rest) {
             for (section, (rest, now)) in rest.iter().zip(ramps(&now, *word)).enumerate() {
                 let (low, high) = (rest.0.min(now.1), rest.0.max(now.1));
@@ -297,8 +298,9 @@ fn check_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWord], c
     let mut whole = factory
         .prepare(request(factory, &values, connected))
         .expect("prepares");
-    let (whole_left, whole_right, _) = render(whole.as_mut(), 0, FRAMES, &spans, connected);
-    let (whole_state, framewise_state) = (snapshot(whole.as_ref()), snapshot(framewise.as_ref()));
+    let (whole_left, whole_right, _) =
+        render(whole.processor.as_mut(), 0, FRAMES, &spans, connected);
+    let (whole_state, framewise_state) = (snapshot(&whole), snapshot(&framewise));
     for word in words {
         assert_eq!(
             ramps(&whole_state, *word),
@@ -353,12 +355,13 @@ fn check_bank_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWor
             active_mask: width.full_mask(),
         })
         .expect("binds")
-        .expect("this effect banks natively");
+        .expect("this effect banks natively")
+        .processor;
     let mut scalar = factory
         .prepare(request(factory, &values, false))
         .expect("prepares");
     let spans = move_spans(factory, mv.word.parameter, mv.target);
-    let sizes = scalar.metadata().state_sizes;
+    let sizes = scalar.metadata.state_sizes;
     for frame in 0..FRAMES {
         let first: &[PreparedAutomationSpan] = if frame == 0 { &spans } else { &[] };
         let mut offsets = vec![0_u32; lanes + 1];
@@ -379,7 +382,7 @@ fn check_bank_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWor
             )
             .expect("a well-shaped bank block"),
         );
-        let (l, r, _) = render(scalar.as_mut(), frame, 1, first, false);
+        let (l, r, _) = render(scalar.processor.as_mut(), frame, 1, first, false);
         assert_eq!(
             (left[moved].to_bits(), right[moved].to_bits()),
             (l[0].to_bits(), r[0].to_bits()),
@@ -401,7 +404,7 @@ fn check_bank_move(factory: &dyn NativeEffectFactory, mv: Move, words: &[RampWor
             .expect("sizes"),
         )
         .expect("a bank lane snapshots");
-        let scalar_payload = snapshot(scalar.as_ref());
+        let scalar_payload = snapshot(&scalar);
         for word in words {
             let bits = |payload: &Payload| {
                 ramps(payload, *word)

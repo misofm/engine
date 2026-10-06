@@ -172,4 +172,5 @@ fn prepare_delay(cross: f32) -> Box<dyn PreparedNativeEffect> {
             },
         })
         .expect("prepared two-second delay")
+        .processor
 }

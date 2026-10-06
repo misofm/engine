@@ -226,7 +226,7 @@ fn run<L: Lane, const W: usize>(case: usize, out: &mut [u32]) {
         for (lane, values) in defaults.iter_mut().enumerate() {
             *values = [ATTACK[base + lane], SUSTAIN[base + lane], MIX[base + lane]];
         }
-        let mut shaper = Shaper::<L, W>::new(metadata(case), row, defaults, defaults);
+        let mut shaper = Shaper::<L, W>::new(&metadata(case), row, defaults, defaults);
         for lane in 0..W {
             for (index, target) in RETARGET.into_iter().enumerate() {
                 shaper.left.ramps[lane][index].set_target(target, RAMP_SAMPLES);

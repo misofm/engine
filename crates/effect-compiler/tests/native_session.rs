@@ -118,25 +118,22 @@ impl NativeEffectFactory for Factory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-        Ok(Box::new(Processor {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
+        Ok(PreparedEffect {
+            processor: Box::new(Processor),
             metadata: expected_prepared_metadata(self.0, request)?,
-        }))
+        })
     }
     fn bind_homogeneous_bank(
         &self,
         _: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         Ok(None)
     }
 }
-struct Processor {
-    metadata: PreparedEffectMetadata,
-}
+/// The double's processor reads no prepared value, so it holds none (issue #1461).
+struct Processor;
 impl PreparedNativeEffect for Processor {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
-    }
     fn reset(&mut self, _: ResetKind) {}
     fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
         ProcessReport::default()

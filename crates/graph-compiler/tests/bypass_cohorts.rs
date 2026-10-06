@@ -128,11 +128,12 @@ fn todays_lowering(effects: &mut EffectPreparedSession) {
         let lane = entry.control.take().expect("a lowered bypass rides a lane");
         assert!(!lane.has_channel() && lane.bypassed());
         entry.bank_preparation.bypass = true;
-        entry.processor = entry
+        let prepared = entry
             .factory
             .prepare(entry.bank_preparation.request())
             .expect("the same request, prepared bypassed");
-        entry.metadata = entry.processor.metadata();
+        entry.processor = prepared.processor;
+        entry.metadata = prepared.metadata;
     }
 }
 
@@ -263,11 +264,12 @@ fn p1_lowering(effects: &mut EffectPreparedSession) {
         }
         assert!(entry.metadata.bypass && entry.control.is_none());
         entry.bank_preparation.bypass = false;
-        entry.processor = entry
+        let prepared = entry
             .factory
             .prepare(entry.bank_preparation.request())
             .expect("the same request, prepared enabled");
-        entry.metadata = entry.processor.metadata();
+        entry.processor = prepared.processor;
+        entry.metadata = prepared.metadata;
         entry.control = Some(Box::new(EffectControlLane::without_channel(true)));
     }
 }

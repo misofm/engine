@@ -48,7 +48,7 @@ fn prepared() -> Box<dyn PreparedNativeEffect> {
     let values = values_from([(0.0, 0.0), (0.0, 0.0), (1.0, 1.0)]);
     let mut request = support::request(&values);
     request.quantum = FRAMES as u32;
-    SoftClipFactory.prepare(request).expect("prepare")
+    SoftClipFactory.prepare(request).expect("prepare").processor
 }
 
 /// A rendered stream and the state the instance was left in.
