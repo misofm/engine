@@ -105,8 +105,9 @@ aarch64_row aarch64-linux-android
 # that cause (2,122 calls -> 16). The 16 left are scalar fills of a real length: preparation
 # constructors in `builtins`, `host-core`'s spectrum arrays, a `soft-clip` test-corpus fill, and in
 # `true-peak-limiter` three `fill(1.0)` in `ChannelState::new` and three in `clear_runtime`, which
-# also runs at a reset and on a failed block and so is reachable from render. This scan emits every product crate's iOS release assembly (as an rlib,
-# so `capi`'s cdylib is never linked and no Xcode is needed) and counts those calls per crate.
+# also runs at a reset and on a failed block and so is reachable from render. This scan emits
+# every product crate's iOS release assembly (as an rlib, so `capi`'s cdylib is never linked and no
+# Xcode is needed) and counts those calls per crate.
 # scripts/lib/aarch64-known-defects.py holds one row per affected crate with its ceiling, and
 # judges the counts: a row at zero, a count above its ceiling, a crate with calls and no row, or a
 # row for a crate outside the product closure each fail here. The defect reads fixed only when every

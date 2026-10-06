@@ -175,30 +175,30 @@ AArch64 legs. Each open entry is an expected failure, by name:
   `admitted_blocks_render_the_base_bits_without_selects` are ordinary passing tests in
   `aarch64-debug`, with no expected-failure rows. (#1049 had deleted the compressor's
   `scenario_{981,983,985,995}` pins, and their rows, as dominated.)
-- **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM lowers a stored `f32x4`
-  splat constant to `bl _memset_pattern16`, a libc call. The constants are `lane::FLUSH_EPS` (the
-  SVF flush), `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others. So this is not the SVF
-  flush alone. There are 3,494 calls across ten product crates, counted in each crate's
-  `aarch64-apple-ios` release assembly on Rust 1.97.1:
+- **Darwin `memset_pattern16` in render (#1018).** On Apple targets LLVM's loop-idiom pass
+  rewrites a loop that stores one constant `f32` pattern into `llvm.experimental.memset.pattern`,
+  which only Darwin lowers to `bl _memset_pattern16`, a libc call. #1017 counted 3,494 calls across
+  ten product crates in `aarch64-apple-ios` release assembly on Rust 1.97.1; #1112, #1328 and its
+  follow-ups lowered that to 2,122. #1451 found the cause of nearly all of them: `wide`'s `splat`
+  is `transmute([elem; N])`, rustc lowers that array repeat to a store loop, and every
+  `Lane::splat` and `Lane::zero` inlined into a kernel became such a loop. `lane` now builds its
+  splats from array literals (`crates/lane/src/wide_impl.rs`), which reach LLVM with no loop:
+  2,122 -> 16 calls, and the rows of `compressor`, `gate-expander`, `graph`,
+  `multiband-compressor`, `parametric-eq` and `transient-shaper` were deleted at zero. The 16 left
+  are scalar fills of a real length, not lane splats:
 
   | crate | calls | where |
   |---|---|---|
-  | `multiband-compressor` | 1,132 | `PreparedMultibandCompressorBank::process_bank` |
-  | `compressor` | 970 | `kernel::process_block`, `ramping_main_scalar`, `process_block_mono`, `settled_sidechain` |
-  | `transient-shaper` | 534 | `Shaper::process_block` |
-  | `builtins` | 376 | `BuiltinInputBank::process`/`process_mono`, `InputStage::process` |
-  | `gate-expander` | 181 | `PreparedGate::process_bank` |
-  | `parametric-eq` | 151 | `PreparedParametricEq::process_bank`/`process_bank_mono`, `Channel::snap_ended` |
-  | `true-peak-limiter` | 104 | `LimiterCore::process_block`, `process_bank_inner` |
-  | `soft-clip` | 22 | `Channel::process`, `PreparedSoftClipBank::process_bank` |
-  | `graph` | 20 | `runtime::bank_meter_pass`, `runtime::bank_sample_peak` |
-  | `host-core` | 4 | `spectrum::SpectrumAnalyzer::analyze`/`analyze_continuous` |
+  | `builtins` | 5 | preparation constructors: `lanes_below`'s flag fill, `InputStage::new`, `BuiltinFaderBank::new`, `FaderMuteRampBuiltins::new` |
+  | `host-core` | 4 | `SpectrumAnalyzer::analyze` and `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each |
+  | `soft-clip` | 1 | the test corpus's `fill` |
+  | `true-peak-limiter` | 6 | three `fill(1.0)` in `ChannelState::new`, three in `clear_runtime` |
 
-  Nearly every call sits in a render function, which is a realtime-policy violation on every
-  iPhone. There is no effect on `x86_64`, Linux AArch64 or `wasm32`. The expected failures are
-  `ios-asm-memset-pattern16`, one row per crate with its count as a ceiling, in
-  `scripts/lib/aarch64-known-defects.py`, scanned by `scripts/check-cross-targets.sh`. `capi` is
-  scanned as an rlib and has none.
+  Only the limiter's `clear_runtime` is reachable from render: it runs at a reset and on a failed
+  block. #1018 stays open for these rows. There is no effect on `x86_64`, Linux AArch64 or
+  `wasm32`. The expected failures are `ios-asm-memset-pattern16`, one row per crate with its count
+  as a ceiling, in `scripts/lib/aarch64-known-defects.py`, scanned by
+  `scripts/check-cross-targets.sh`. `capi` is scanned as an rlib and has none.
 - **Resolved by #1017: tests that assumed eight lanes.** The seven test-only warnings
   (`host-core/tests/fp_environment.rs`, `lane/tests/fp_env.rs`) and the tests that asserted or
   returned on `Backend::current() == Simd8` (listed in

@@ -191,6 +191,8 @@ owned by #1454.)*
   comment only)
 - *(Amendment 2.)* `scripts/check-web-audioworklet-v8-spill.py` (the dual armed depth-2 pair
   ceiling and its reason only)
+- *(Root ruling (2) on the attempt-1 verdict, batch follow-up.)* `docs/TARGET_MATRIX.md` (the #1018
+  entry's restatement only)
 - this spec
 
 ## Non-goals
@@ -243,7 +245,8 @@ owned by #1454.)*
    at or below today's ceiling, and with each row lowered or deleted as the check asks (D4). Every
    row of `IOS_MEMSET_CEILINGS` (all ten crates, not only `builtins` and `parametric-eq`) is
    re-measured after D2 and after D3, and no row is raised (Amendment 1 A2). The `builtins` and
-   `parametric-eq` counts after D3 are at or below their counts before D3 (today 71 and 48). The
+   `parametric-eq` counts after D3 are at or below their counts before D3 (40 and 47 before this
+   slice; this line first said 71 and 48, which were stale). The
    before and after count of every crate is in the PR.
 3. **iOS ceilings measured down, and browser cost within 2 % of base** *(restated by Amendment 2)*.
    (a) The iOS `memset_pattern16` ceilings only go down, as measured by gate 2. (b)
@@ -482,7 +485,8 @@ Splatting the constants does not remove the cost against P0; head against base i
 **Gate 4, V8 and native codegen: MISS (one ceiling row).** `run-wasm-gates.sh` exits 1: the EQ's
 **dual armed depth-2 pair** row carries **12** slots against its ceiling of 11 (base 11, 221
 instructions; head 12, 219). Every held row is clean. Attribution by module (spill gate run on each
-named twin): base and D2-only are identical on every row (mono armed pair 95 -> 94 instructions);
+named twin): base and D2-only carry the same slots on every row, and the same instruction counts on
+every row but the mono armed pair (95 -> 94 instructions; corrected by the batch follow-up);
 the extra slot arrives with D3 (the EQ's `FLUSH_EPS` splatted instead of carried).
 The builtins dual loop (TurboFan, `InputStage<f32x4>::process`, the loop shaped `2 streams, masked,
 unarmed, vmulps=30 vaddps=38 vsubps=8`; P0 has it inlined in `BuiltinInputBank::process`):
@@ -554,3 +558,67 @@ tree with these changes:
 Against the restated gates: gate 3 (a) holds (every ceiling fell or was deleted; none raised), and
 (b) is attempt 1's head-against-base table (largest +0.9 %, app shape round 2), for the verifier;
 gate 4 holds as restated (held rows clean, armed pair 12 at ceiling 12).
+
+## Follow-up record
+
+### Batch follow-up part B (2026-10-06, stream G; attempt 1 verdict and the root's rulings on its MINORs)
+
+Records and documentation only; no code or bit changes.
+
+**MINOR 1 -> root ruling (1): gate 4 counts carried slots; PASS.** B4's "every held row unchanged
+and clean" is the spill gate's own definition: a held row carries zero slots and its gate entry is
+not loosened. The held rows' TurboFan instruction counts did move with D3, and are recorded here
+(the verdict's measurement, the spill checker on each named twin; base reproduces the shipped
+module `a87b3ab4...`):
+
+| row | base | D2 only | head (D2 + D3) |
+|---|---|---|---|
+| dual depth-1 tail (held) | 107, 0 slots | 107 | **110**, 0 slots |
+| dual depth-2 pair (reported) | 184, 10 slots | 184 | **187**, 10 slots |
+| dual armed depth-1 tail | 127, 2 | 127 | 128, 2 |
+| dual armed depth-2 pair | 221, 11 | 221 | 219, 12 (ceiling 12, Amendment 2) |
+| mono depth-2 pair (held) | 81, 0 | 81 | **79**, 0 |
+| mono depth-1 tail (held) | 49, 0 | 49 | **52**, 0 |
+| mono depth-2 pair, masked (held) | 86, 0 | 86 | 86, 0 |
+| mono armed rows (pair / tail / masked) | 95 / 56 / 100 | 94 / 56 / 100 | 92 / 58 / 102 |
+
+The live-audio tails gain one `movq`/`movl` + `vmovq` + `vpunpcklqdq` per iteration and lose one
+stack `vmovups`: TurboFan rematerialises the splatted `FLUSH_EPS` `v128.const` inside the loop,
+where base reused the carried word. No held row gained a slot; gate 3 shows no measurable cost
+(head against base at most +0.9 % p50). The root added that rematerialisation to #1454's scope.
+
+**MINOR 2 -> root ruling (2): `docs/TARGET_MATRIX.md`'s #1018 entry restated (root-authorized).**
+It stated the refuted cause ("a stored `f32x4` splat constant") and #1017's 3,494-call table. It
+now states the loop-idiom cause, the `wide::splat` array-repeat store loop #1451 removed
+(2,122 -> 16 calls, six rows deleted at zero), and the post-#1451 table (`builtins` 5, `host-core`
+4, `soft-clip` 1, `true-peak-limiter` 6, with where each sits), naming the limiter's
+`clear_runtime` as the one render-reachable path; it agrees with `scripts/check-cross-targets.sh`,
+`scripts/lib/aarch64-known-defects.py` and `crates/lane/src/wide_impl.rs`.
+
+**MINOR 3 -> root ruling (3).** The `silence_skip_settle` outlining became #1452's undo 6
+(Amendment 1 there); #1452 measured the inlined form, found it a duplicated body (for example
+`simd128` `InputStage::process` 15,876 -> 20,902 instructions) with no render-time gain, kept the
+outlined form, and the `silence_skip_block` doc now gives that reason.
+
+**NIT 1.** `scripts/check-cross-targets.sh`'s 149-character comment line is rewrapped at 100.
+
+**NIT 2: the differential's sensitivity.** The 908-scenario harness moves 594 of 908 under a
+`REST_EPS` mutant, but it cannot see a change to `NONFINITE_LIMIT`: with `limit = 1.0` in every
+builtins body it moves 0 of 908, because no harness input lies in `[1, 1e30)`. That is no coverage
+hole: `crates/lane/tests/input_chain_elision.rs`'s frozen-body tests fail on
+`NONFINITE_LIMIT * 0.5` (four tests).
+
+**NIT 3: how the `simd128` instructions were counted, and the increases.** Attempt 1's
+per-function counts were not stated with a method. Counted as the verifier did (every instruction
+in `wasm-objdump -d`, continuation lines excluded), D2 changes the module by -480 instructions,
+and raises these functions: compressor `process_block_mono` +87 (attempt 1 listed 3,830 -> 3,811,
+a decrease, by another count), compressor `process_block` +24, graph `execute_op` +10 and
+`fold_cohort` +10, `BuiltinInputBank::new` +11, EQ `process_bank` +2. Gate 4 gates only the
+builtins and EQ frame loops, whose V8 rows are identical between base and D2-only, so these are
+descriptive.
+
+**NIT 4.** Gate 2's "(today 71 and 48)" now says 40 and 47, the base ceilings the record's table
+uses; the record's sentence "identical on every row (mono armed pair 95 -> 94 instructions)" now
+says slots are identical on every row and instruction counts on every row but the mono armed pair.
+
+Gates: `cargo fmt --all -- --check`; `bash scripts/check-cross-targets.sh` (part-B batch gates).
