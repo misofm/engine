@@ -211,3 +211,152 @@ coordinate with stream F (#1261, #1262) as #1329 does.
 ## Dependencies
 
 - *State a bounded tail and an exact-rest bound for every node* (#1329)
+
+## Attempt record
+
+### Attempt 1 (2026-10-06, branch `codex/d15-stream-g`)
+
+**What changed.** `math::tail::envelope_cascade` (#1329's crude live cascade) is replaced by
+`math::tail::live_cascade`, with `PoleDomain`, `LiveCascade`, `live_zones` / `LiveZones` /
+`PoleZone` and `pole_real`. `builtins::input_section_live_envelope` keeps its name (the export list
+in `builtins/src/lib.rs` lies outside the authorized paths) and now returns the whole
+`LiveCascade` (#1329's envelope plus the pole domain, the HPF mix row and its output rounding);
+`input_section_live_bound` and `input_section_live_cascade` read it. No kernel, law, render path or
+fixed-design bound changes. The derivation is the new "#1433: the frequency-aware cascade"
+section of `docs/derivations/1329-input-section-tail-and-rest.md` (D1, in short):
+
+* **Poles.** For any words, `R A R^-1 = (Re p) I + (Im p) J + kappa K0` exactly, so the section
+  is a complex one-pole up to `sqrt(2)|kappa|`; exact designs lie on the circle
+  `|p + i| = sqrt(2)` and their hull under its arc. A reachable word is a hull point moved by
+  `E + h` (#1407), a settled one by `h`.
+* **Zones and moves.** 146 zones of `Re p` (widths from `1e-6`, growing by 1.5 up to 0.02, from
+  each end to 0), each with certified `rho`, `||I + A||`, `||b|| + mu_input` and settled `r`,
+  `||I + A||`, `||A^2 - I||`; a frame moves `Re p` by at most `(high - low + 2 eta) / 64 + 32 u`
+  (one ramp step), or replaces the word with zero state.
+* **`Phi` (state by zone)** and **`Psi` (potential)** as least fixed points over neighbouring
+  zones; the HPF's output `1/2 (m1, m2)(I + A) s` (the TPT trapezoid form of D1) then has a
+  weighted mass that telescopes (Abel summation) to `sup Psi Phi` plus per-frame charges.
+  Zones at `Re p >= 0` are charged directly (their `Psi` would be the frequency-blind LPF's
+  `2 / (1 - rho_low)`).
+* **Settled.** From `N + 64` the LPF in `tau = sigma - e2 y_prev` (D1's `z = s - e2 v`, with
+  `b = (I - B) e2` exactly) is driven by the HPF's output change `1/2 (m1, m2)(A^2 - I) s`,
+  small at both ends of the domain; per quarter-octave zone group a four-term non-negative
+  system, with one-off joint-flush terms for either section.
+* **Rest** stays sequential (HPF, then LPF), each with `+ N_SILENCE` (the A9 term kept exactly).
+  The candidate two-level `P*` was not needed: with the frequency-aware stall, `P*` is about
+  `1.2e-7` and `R(P*)` already lies below `T_decay`, so `T_rest = T_decay` live.
+
+**Soundness finding (fixed in this attempt, recorded for #1329).** `output_rounding` has
+`|1 - c1|` and `|1 - a3|` terms, so #1329's `omega_state` at the largest words is not a supremum
+(a 2,848 Hz HPF exceeds it); #1329's envelope row absorbs that in its slack (`gamma` at 10 Hz,
+`row_correction`), but #1433 needs `omega` alone, so it takes its value at the largest words plus
+its value at the opposite corner. Gate 1(b) now checks it on every scanned design (mutation M4).
+
+**Figures (certified; 44.1 / 48 / 88.2 / 96 kHz), against #1329's crude bound and the real
+kernel.**
+
+| value | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz | crude (#1329) |
+|---|---|---|---|---|---|
+| `T_decay` | 704,010 | 699,952 | 704,018 | 699,960 | 904,785 / 899,524 / 904,795 / 899,533 |
+| `T_rest` | 704,010 | 699,952 | 704,018 | 699,960 | 1,081,764 / 1,075,575 / 1,085,641 / 1,079,792 |
+| `P*` | 1.2025e-7 | 1.1959e-7 | 1.2037e-7 | 1.2213e-7 | about 1.7e-3 |
+| `R(P*)` | 693,189 | 689,433 | 697,084 | 694,069 | -- |
+| `peak_plus_24_dbfs` | 1,067,207 | 1,061,497 | 1,071,057 | 1,065,688 | 1,264,736 / 1,257,840 / 1,268,585 / 1,262,029 |
+| `any_sanitized_input` | 2,384,997 | 2,372,008 | 2,388,800 | 2,376,147 | 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156 |
+| `R_meas` (exact frame) | 983,374 | 978,319 | 983,374 | 978,319 | -- |
+| ratio `R / R_meas` | 1.0853 | 1.0850 | 1.0892 | 1.0893 | 1.29 (44.1 kHz) |
+
+Each `R` includes `2 N_SILENCE`. `R_meas` is gate 2's: the top pair, alternating +24 dBFS input
+through the +24 dB trim for 1,000,000 frames, A9 in place, the first frame from which every
+integrator is `+-0.0` (the run repeated with its last blocks frame by frame). The real 1e29 rest
+is 2,236,997 / 2,225,069 / 2,237,005 / 2,225,077 (64-frame resolution), below
+`any_sanitized_input`; the real last `|y| >= P eps` after `N` is at most 436,362, below `T_decay`.
+
+**Independent recomputation.** `tail_contract`'s rewritten oracle (plain `f64`, no shared code:
+pole domain and mix row from first principles, zones, `Phi`, `Psi` by plain iteration, the window
+frame by frame, the settled phase in closed form) and a 60-digit decimal recomputation of the same
+derivation (`verify_1433.py`, from the module's terms as exact bit patterns; `tan` and `pi` in
+decimal) agree: the module is 18-19 frames above in `T_decay`, 17 in `R(P*)`, 18-19 in
+`peak_plus_24_dbfs`, 42-43 in `any_sanitized_input`, and `P*` within `1e-6` relative, at every
+rate, as its `1 + 2^-30` inflations predict.
+
+**Tests (new or rewritten) and their test value.**
+
+* `live_bound_covers_every_scanned_design_and_ramp_word` (gate 1): adds every scanned design and
+  every real-kernel ramp word (including per-frame disable/re-enable/retarget histories) inside
+  its zone's constants, the HPF mix row and output rounding, and the per-frame pole step
+  (largest observed 0.031233 against the stated 0.031235 at 44.1 kHz). Catches a zone constant
+  taken at the wrong end, a wrong step, an `omega` that is not a supremum (M1-M4).
+* `live_bound_carries_every_term_an_independent_recomputation_requires`: the oracle above.
+  Catches a dropped charge, a dropped `N_SILENCE`, a frequency-blind settled drive (M5-M7), which
+  the real kernel cannot see.
+* `live_bound_holds_on_the_real_kernel_at_the_domain_extreme` (gate 2): adds
+  `R_meas <= peak_plus_24_dbfs <= 1.15 R_meas` on the exact rest frame. Catches an unsound
+  tightening (rest stopped after the HPF: below the real rest, M8) and one that does not tighten
+  (the universal ball left in place: ratio 1.2142, M9).
+* `live_rest_bounds_are_within_the_restated_contract_figures` (gate 1's ceilings and #1329's
+  gate 3 restated): every value at most #1329's per rate, `R` at most 1,075,000 and 2,390,000.
+  Catches a looser settled decay (M10).
+* `live_tail_every_peak_is_the_rest_at_the_flush_floor`: rewired to `live_cascade`. Catches a
+  `T_rest` taken from the wrong rest (M11).
+
+**Mutation runs** (each applied, the named test run, the tree restored; all named tests green
+on revert):
+
+| defect | test | result |
+|---|---|---|
+| M1 zone contraction at the inner end only | live scan | RED: a 12,060 Hz HPF above its zone's contraction |
+| M2 pole step halved | live scan | RED: a ramp word moved 0.0312347 > 0.0156193 |
+| M3 `\|1 + p\|` taken at the zone's low end | live scan | RED: the 10.3 Hz HPF's `\|\|I + A\|\|` above its zone's |
+| M4 `omega_state` at the largest words only | live scan | RED: the 3,100.7 Hz HPF's mix row exceeds the live terms |
+| M5 the potential's per-frame charge dropped | oracle | RED: `T_decay` 703,120 below the recomputed 703,991 |
+| M6 the second section's `N_SILENCE` dropped | oracle | RED: `R(P*)` 689,425 below 693,172 |
+| M7 settled drive by the output, not its change | oracle | RED: `P*` 4.6e-5 against 1.2e-7 |
+| M8 rest stops after the HPF | gate 2 | RED: integrators not at rest at `N + R = 972,956` |
+| M9 the universal ball left in place at `N` | gate 2 | RED: ratio 1.2142 > 1.15 |
+| M10 settled decay at `rho_ramp` | gate 3 | RED: `peak_plus_24_dbfs <= 1_075_000` |
+| M11 `T_rest` from the +24 dBFS rest | live `T_rest` identity | RED |
+
+**Cost.** Preparation computes the live bound once per session with a live input lane: native
+(release, one pinned core, best of 50) 42 us before, 240-254 us after (zones about 85 us, the rest
+the settled zone groups, about 60 after a quarter-octave grouping that leaves `R` unchanged and
+adds about 1,100 frames to `T_decay` against per-zone systems). Browser boot with live controls
+(`web-mixing-automation-benchmark.mjs rebuild-round`, two rounds alternated, base `38ef4fe7a`
+against this attempt's final module, p50): nine-track EQ 2.219 / 2.215 ms -> 2.463 / 2.476 ms;
+sixty-four-track console 20.28 / 20.21 -> 20.55 / 20.62 ms; app shape 19.73 / 19.73 -> 20.07 /
+20.13 ms; sends 33.90 / 33.77 -> 34.19 / 34.20 ms. An audio-only boot computes no live bound. The
+shipped worklet module grows by 16,822 bytes (3,056,452 -> 3,073,274). #1457 tracks the
+preparation budget.
+
+**Wasm memory (found by the worklet chain).** A first version kept two power tables per zone
+group alive for the whole bound (about 340 KB); the browser fixture's exact `memoryBytes` then
+grew by five pages (1,376,256 -> 1,703,936, `check-browser-expected-resources.py` red). Each
+table is now built for one group and dropped, and the fixture's rows are back at their pins (the
+gate is green). The bound's peak allocation is therefore observable in that pin: a later change
+that holds more at once moves it.
+
+**Deliverable 5** does not apply: fixed-design bounds (and so every graph fixture tail token and
+digest) are unchanged; the live `T` is read, not pinned, by `live_lanes.rs` and the
+`builtins-compiler` tests.
+
+**Gates run (all green on the final tree).** `cargo fmt --all -- --check`; workspace clippy
+with and without `--all-features`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+--no-deps`; the spec's `cargo test` command for `lane`, `math`, `builtins`, `dsp-reference`;
+`test-debug-a` and `test-debug-b` (qualification.yml's commands) and `conformance_fixtures
+--check`; release `tail_contract` with the ignored gate 2 and release `filter_liveness`;
+`check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-lane-policy.sh`,
+`check-builtins-policy.sh`, `check-dsp-research.sh`; `graph_fixture --check`,
+`check-graph-determinism.sh` (100/100); `check-builtins-fixtures.sh` with the release audit;
+`audit capi`, `check-capi-abi.sh` and its self-test; `check-cross-targets.sh`; the worklet chain
+(`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py` self-test and check,
+`check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts` (after the memory fix above),
+`check-scalar-oracle-absent.py` wasm and native, `test-web-audioworklet.sh`); `run-wasm-gates.sh
+--without-v8-spill --without-native`. The debug suites and the policy scripts ran on the tree
+before the memory restructuring (a change inside `LiveBound` only); doc, clippy, fmt, release
+`tail_contract` and the browser gate were rerun after it.
+
+**Open items.** (1) The cost above, for #1457. (2) Further tightening is possible but small: a
+partition four times finer moved the prototype's `R` by 121 frames; a frequency-aware LPF before
+`N` (not taken) would mostly shrink the `sup Psi` flush charges, which only affect `P*`'s
+pre-`T_decay` part. (3) #1329's `omega_state` finding above.

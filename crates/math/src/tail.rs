@@ -779,7 +779,8 @@ pub fn pole_real(words: &SvfWords) -> f64 {
 
 /// The first zone's width at either end of the domain; widths then grow by [`ZONE_GROWTH`] up to
 /// [`ZONE_WIDEST`]. The zones only partition the domain: any partition is sound, a finer one is
-/// tighter (#1433 attempt 1 measured `R` within 200 frames of a partition four times finer).
+/// usually tighter (#1433 attempt 1's prototype put `R` 121 frames above a partition of 629 zones
+/// instead of 146, at 44.1 kHz).
 const ZONE_FIRST: f64 = 1.0e-6;
 /// See [`ZONE_FIRST`].
 const ZONE_GROWTH: f64 = 1.5;
@@ -880,14 +881,14 @@ fn zone_boundaries(first: f64, last: f64) -> Vec<f64> {
 ///   `q_k E_j [k not direct] <= Psi_k E_j - Psi_k' E_(j+1) + Psi_k' (beta_k |x_j| + F)`: the
 ///   first section's output mass telescopes against its state.
 ///
-/// Every update is made an upper bound by [`STEP_UP`] and checked again when the iteration stops,
+/// Every update is made an upper bound by `1 + 4 u64` and checked again when the iteration stops,
 /// so the stated inequalities hold for the computed values.
 ///
 /// # Errors
 ///
 /// [`TailBoundError::NotContracting`] when a zone does not contract or the domain is not inside
-/// `(-1, 1)`; [`TailBoundError::Horizon`] when the iteration does not settle within
-/// [`ZONE_PASSES`] passes.
+/// `(-1, 1)`; [`TailBoundError::Horizon`] when the iteration does not settle within 4,096
+/// passes.
 pub fn live_zones(live: &LiveCascade) -> Result<LiveZones, TailBoundError> {
     let poles = &live.poles;
     let envelope = &live.envelope;
@@ -1181,24 +1182,11 @@ impl Powers4 {
     }
 }
 
-/// One zone group's settled system, without the flush drive (for the relative tail and the
-/// decaying part of the stall) and with it (for the rest), and their powers.
-struct SettledSystem {
-    terms: SettledTerms,
-    homogeneous: Square4,
-    homogeneous_powers: Powers4,
-    output_row: [f64; 4],
-    driven: Square4,
-    driven_powers: Powers4,
-    driven_state_row: [f64; 4],
-    driven_output_row: [f64; 4],
-}
-
 /// The bound machinery of [`live_cascade`] for one cascade.
 struct LiveBound<'a> {
     live: &'a LiveCascade,
     zones: &'a LiveZones,
-    systems: Vec<SettledSystem>,
+    terms: Vec<SettledTerms>,
     ramp_frames: u64,
     law: &'a FlushLaw,
     cap: f64,
@@ -1271,30 +1259,14 @@ impl<'a> LiveBound<'a> {
                 terms.push(*candidate);
             }
         }
-        let mut bound = Self {
+        Self {
             live,
             zones,
-            systems: Vec::with_capacity(terms.len()),
+            terms,
             ramp_frames: ramp,
             law,
             cap: R_NORM * core::f64::consts::SQRT_2 * F32_MAX,
-        };
-        let f = law.per_step();
-        for terms in terms {
-            let (homogeneous, _, output_row) = bound.settled_system(&terms, 0.0);
-            let (driven, driven_state_row, driven_output_row) = bound.settled_system(&terms, f);
-            bound.systems.push(SettledSystem {
-                terms,
-                homogeneous,
-                homogeneous_powers: Powers4::new(homogeneous),
-                output_row,
-                driven,
-                driven_powers: Powers4::new(driven),
-                driven_state_row,
-                driven_output_row,
-            });
         }
-        bound
     }
 
     /// The window, frame by frame, from the bounds at `N`:
@@ -1417,8 +1389,7 @@ impl<'a> LiveBound<'a> {
         let window = self.window(g, f);
         let start = self.ramp_frames + 1;
         let mut worst = 0_u64;
-        for system in &self.systems {
-            let terms = &system.terms;
+        for terms in &self.terms {
             let u0 = self.settled_start(terms, &window, g, f);
             let first = free_decay_frames(u0[1], terms.contraction, f, limit)
                 .ok_or(TailBoundError::StallAboveRest)?;
@@ -1428,8 +1399,9 @@ impl<'a> LiveBound<'a> {
                 .and_then(|value| value.checked_add(self.law.silence_frames))
                 .filter(|value| *value < HORIZON_LIMIT)
                 .ok_or(TailBoundError::Horizon)?;
-            let at = system.driven_powers.apply(first_rested - start, &u0);
-            let sigma = dot4(&system.driven_state_row, &at).min(self.cap);
+            let (system, state_row, _) = self.settled_system(terms, f);
+            let at = Powers4::new(system).apply(first_rested - start, &u0);
+            let sigma = dot4(&state_row, &at).min(self.cap);
             let second =
                 free_decay_frames(sigma, rho, f, limit).ok_or(TailBoundError::StallAboveRest)?;
             let rested = first_rested
@@ -1509,29 +1481,25 @@ impl<'a> LiveBound<'a> {
             .rposition(|value| *value >= limit)
             .map_or(0, |frame| frame as u64 + 1);
         let start = self.ramp_frames + 1;
-        for system in &self.systems {
+        for terms in &self.terms {
             // Without the flush the constant component is unused; it is zero so that every
             // component can fall.
-            let mut u0 = self.settled_start(&system.terms, &window, gain, 0.0);
+            let mut u0 = self.settled_start(terms, &window, gain, 0.0);
             u0[3] = 0.0;
+            let (system, _, output_row) = self.settled_system(terms, 0.0);
+            let powers = Powers4::new(system);
             // A zone already falling and below the limit at the tail found so far cannot raise
             // it (from there on its bound is non-increasing).
             if let Some(pivot) = tail.checked_sub(start) {
-                let at = system.homogeneous_powers.apply(pivot, &u0);
-                let next = apply4(&system.homogeneous, &at);
+                let at = powers.apply(pivot, &u0);
+                let next = apply4(&system, &at);
                 if next.iter().zip(&at).all(|(next, now)| next <= now)
-                    && dot4(&system.output_row, &at) < limit
+                    && dot4(&output_row, &at) < limit
                 {
                     continue;
                 }
             }
-            let after = Self::settled_decay(
-                &system.homogeneous,
-                &system.homogeneous_powers,
-                &system.output_row,
-                u0,
-                limit,
-            )?;
+            let after = Self::settled_decay(&system, &powers, &output_row, u0, limit)?;
             if after > 0 {
                 tail = tail.max(start + after);
             }
@@ -1553,23 +1521,21 @@ impl<'a> LiveBound<'a> {
             .fold(0.0_f64, |sup, value| sup.max(*value));
         let start = self.ramp_frames + 1;
         let rho = self.live.envelope.rho_settled;
-        for system in &self.systems {
-            let terms = &system.terms;
+        for terms in &self.terms {
             let mut u0 = self.settled_start(terms, &window, 0.0, f);
             u0[3] = 0.0;
+            let (homogeneous, _, output_row) = self.settled_system(terms, 0.0);
+            let (driven, _, driven_row) = self.settled_system(terms, f);
             // The fixed point `U`, rounded up.
             let h_star = f / (1.0 - terms.contraction) * SLACK;
-            let tau_star =
-                (system.driven[0][1] * h_star + system.driven[0][3]) / (1.0 - rho) * SLACK;
-            let fixed = dot4(&system.driven_output_row, &[tau_star, h_star, 0.0, 1.0]);
-            let mut current = system
-                .homogeneous_powers
-                .apply(tail.saturating_sub(start), &u0);
+            let tau_star = (driven[0][1] * h_star + driven[0][3]) / (1.0 - rho) * SLACK;
+            let fixed = dot4(&driven_row, &[tau_star, h_star, 0.0, 1.0]);
+            let mut current = Powers4::new(homogeneous).apply(tail.saturating_sub(start), &u0);
             let mut peak = 0.0_f64;
             let mut frames = 0_u64;
             loop {
-                peak = peak.max(dot4(&system.output_row, &current));
-                let next = apply4(&system.homogeneous, &current);
+                peak = peak.max(dot4(&output_row, &current));
+                let next = apply4(&homogeneous, &current);
                 if next.iter().zip(&current).all(|(next, now)| next <= now) {
                     break;
                 }
