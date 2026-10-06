@@ -1272,3 +1272,231 @@ earned before the rule arms.
 - The dual depth-2 pair (reported, not held) reads masked because its compare mask spills: 15
   slots, two fewer than A8.
 - n3 is documented, not fixed (above).
+
+### Follow-up (2026-10-06, branch `codex/d15-stream-g`; root cost rulings after the attempt-5 PASS)
+
+Host: AMD EPYC 7313P (x86-64-v3), Node v22.23.2 (V8 12.4.254.21-node.56), rustc 1.97.1. Rulings:
+the attempt-5 verdict's m1-m7 and two root rulings (cost; then the four items below). Commits:
+`4264bb190` (checkpoint: EQ unarmed form, arming only lanes that hold state, m3, m4, m6),
+`6293440ff` (whole-block zero scan), `8aa7c5ab5` (spill-gate ceilings), `5b887edb9` (`track_delay`
+derivation), `37d8583f8` (floors, m5, m7, docs) and the commit that adds this record.
+
+**What changed, and why (bits unchanged throughout).**
+- **(a) The EQ has an unarmed form.** Its cascades run in two forms per block, as the builtin
+  chain's bodies do: the armed form (rest-plane threshold load and `flush_pair`'s joint term) and
+  the unarmed form (two per-word `flush`, no plane read; `lane::kernels::RestThresholds`,
+  `ArmedRest`, `UnarmedRest`). `FLUSH_EPS` is carried as a word from the prepared EQ, so neither
+  form splats it. Live audio no longer pays `flush_pair`'s joint term or the threshold load.
+- **(b) A block arms only when a lane that can arm holds state.** `lane::silence_armable_holding`
+  (exact; proof in its doc): a lane whose state is `±0.0` at block start sees only zero input up to
+  any armed frame of a block no longer than `N_SILENCE`, so the two forms agree on it. Builtins
+  (`channel_arms`, per channel) and EQ (`Channel::arms`, per channel, every section) use it.
+  `lane::kernels::svf_state_held` is the holding mask.
+- **Whole-block zero scan (root item 2).** `lane::kernels::silence_skip_block`, the counter of
+  every block whose thresholds no section reads (builtins and EQ), has three forms: live (last
+  frame non-zero on every lane; one compare, unchanged), settled (a whole-block zero scan, a load,
+  an `eq` and a `mask_and` per frame in four independent chains; when every lane is silent
+  throughout or live on its last frame the counter is `min(run + frames, 2^24)` or `+0.0`) and
+  transition (the counter's frame loop, only when a lane's silence starts inside the block). The
+  settled and transition forms are one outlined function per lane width (`silence_skip_settle`),
+  which also lowers the iOS memset counts (below).
+- **m6.** The EQ declares its two rest planes as scratch: `REST_PLANE_BYTES_PER_FRAME` = 8 bytes per
+  frame per prepared lane (one `f32` threshold per channel), in its descriptor
+  (`scratch_bytes_per_frame`), held by `the_rest_planes_are_the_scratch_the_descriptor_declares`.
+  The third (all-`+0.0`) plane the ruling counted is gone: the unarmed form reads no plane.
+
+**Root item 1: the accepted app-shape cost (recorded, not tuned).** Against the per-word build P0
+(the parent with `flush_pair` as two `flush`, the verifier's recipe), the checkpoint measured the
+64-track app-shape document at +3.5 % / +3.9 % p50 (rounds 1 / 2), above the owner's 2 %. Cause:
+the builtin chain's four vector constants are carried as words (`InputChainConstants`) for the iOS
+`memset_pattern16` ratchet (#1018), and V8 then compiles the builtins' dual loop to 218 instructions
+against 196 with splatted constants; splatting them instead raised the builtins' iOS count from 186
+to 397 `memset_pattern16` calls, which the ratchet refuses. The root accepted the cost now; #1451
+(*Let the builtins splat their chain constants without iOS memset calls*) is filed to remove the
+cause. Benchmark (descriptive; `web-mixing-automation-benchmark.mjs run`, one warmup and two
+measured rounds per module, interleaved, `taskset -c 31`, uncontrolled host, not retried; every
+output digest equal across modules):
+
+| p50 vs P0, round 1 / round 2 | A9 (`a124b40be`) | checkpoint `4264bb190` | after the scan (this tree) |
+|---|---|---|---|
+| mono console, quiet | +2.6 % / +2.5 % | +9.4 % / +1.2 % | +1.4 % / +0.5 % |
+| mono console, restated | +2.6 % / +2.0 % | +7.8 % / +0.4 % | +2.5 % / +0.9 % |
+| mono console, automated | +2.9 % / +1.9 % | +7.6 % / +0.3 % | +2.2 % / +2.3 % |
+| sixty-four-track console | +2.8 % / +3.4 % | +1.0 % / +0.4 % | +12.8 % / +2.1 % |
+| app shape | +4.8 % / +4.3 % | +3.5 % / +3.9 % | +26.1 % / +3.2 % |
+| bus-and-send console | +3.5 % / +3.2 % | +1.8 % / +0.6 % | +13.7 % / +2.6 % |
+
+The first two columns are the checkpoint's run (P0 148,873-344,506 ns; load 10.5-12.6 on 32 threads);
+the last is a second run of P0, the checkpoint and this tree (load 2.8-3.7), in which the
+checkpoint's own round 1 also read +4.5 % / +11.6 % / +5.0 % on the three 64-track documents and its
+round 2 +2.2 % / +3.7 % / +3.2 %. Round 1 of that run is disturbed on the 64-track documents for
+both the checkpoint and this tree (a verifier was building on the host); round 2 is consistent with
+the checkpoint's run. On live documents the scan cannot cost anything (their banks' last frames are
+non-zero), so the app-shape cost is the accepted #1018 one.
+
+**Root item 2: the silent-lane penalty after the scan (native, descriptive).** A scratch harness
+(not committed): the builtin input chain at `Simd8`, a 30 Hz high-pass into an 18 kHz low-pass,
+128-frame blocks, eight live lanes against seven live and one silent (`input_chain_block`, 400,000
+blocks per point); the parametric EQ bank at eight lanes (four bells and both cuts, 48 kHz,
+128-frame quantum), all live against one silent lane and against two padding lanes (200,000 blocks).
+One warmup and two measured rounds, `taskset -c 31`, one invocation per build, not retried:
+
+| silent lane / all live, round 1 / round 2 | A9 `a124b40be` | checkpoint | this tree |
+|---|---|---|---|
+| builtins, 8 lanes, one silent | 1.270 / 1.388 | 1.152 / 1.153 | 1.030 / 1.035 |
+| EQ bank, one silent lane | 1.081 / 0.981 | 1.062 / 1.046 | 0.996 / 1.009 |
+| EQ bank, two padding lanes | 1.080 / 0.996 | 1.060 / 1.048 | 0.996 / 1.009 |
+
+All live, measured rounds: builtins 1,764-1,766 ns per block, EQ bank 4,429-4,491 ns (this tree). The EQ's
+penalty is gone (within run-to-run noise). The builtins keep about 3 % (55-60 ns per block):
+attributed by a timing-only build with the scan removed (silent/live 1.001 / 1.001), so the residual
+is the scan itself, 2 x 128 frames of load, `eq` and `mask_and`, throughput-bound. Halving it would
+need a bitwise OR of sample words across frames before one compare, a new `Lane` operation; not
+done (it was not ruled and is a cross-cutting lane-op change).
+
+**Root item 2: bit identity.** One-time differential (scratch, not committed): the EQ (scalar
+effect and native bank, dual and collapsed, restores of in-band pairs and counters up to
+`16,777,100`, ramps, 128- and 8,192-frame quanta, 44.1-96 kHz) and every builtin input-chain entry
+point at `f32`, `Simd4` and `Simd8`, over nine input programs (live noise, silence, impulse then
+long silence, sparse tiny trains either side of the window, live/silence with `-0.0`, a stopping
+tone, a NaN in silence, noise with an exact zero every sixteenth sample so blocks end on a zero
+without being silent, and block-aligned silence), plus counters seeded at `16,777,000..16,777,216`
+on lanes at rest; one FNV-1a digest per scenario over every output word, state word and counter.
+Base `a124b40be` (the A9 bits) against this tree: **908 of 908 scenarios identical**. Mutants of the
+scan (each applied, harness re-run, reverted) move scenarios: select dropped (130 moved), saturation
+dropped (21), transition check dropped (548), two of the four scan chains dropped (126); dropping
+the scan's remainder frames moves none of the harness's scenarios (its block lengths leave no
+such lane) and is caught by the new g4 test.
+
+**Root item 3: the V8 spill gate's armed rows.** Reported with a ceiling equal to today's count, so
+a rise fails: dual armed tail 2 (two general-purpose words, `[rbp-0x110]`, `[rbp-0xc8]`), dual
+armed pair 11, mono armed pair 0, mono armed tail 0, mono armed masked pair 0. A ceiling row is
+checked like a held row (fails closed on a missing or ambiguous loop) and fails above its ceiling;
+the four held unarmed rows stay at zero. The dual unarmed pair stays reported (10 slots).
+`scripts/check-web-audioworklet-v8-spill.py` (rows, rule, docstring, three self-test cases).
+
+**Root item 4: `track_delay`'s zero-delay digest.** Re-pinned individually (`4264bb190`) for one
+reason: the EQ's rest planes are declared scratch, which the estimate charges in
+`declared_effect_bytes` (nine EQs at a 128-frame quantum, +9,216 bytes): `declared_effect_bytes`
+8,496 -> 17,712 and both plan-byte totals 150,631 -> 159,847, three tokens of the `estimate` row.
+Re-derived on the dumped canonical text: reversing the three tokens hashes to the A9 pin
+`bb25028730eb...ffbfc40bf` exactly. The test's comment named the A9 pin with the new pin's tail;
+corrected.
+
+**iOS `memset_pattern16` ceilings** (`scripts/lib/aarch64-known-defects.py`, lowered as the check
+asks): parametric-eq 88 -> 48 (checkpoint: `FLUSH_EPS` carried as a word in both cascade forms),
+then builtins 71 -> 40 and parametric-eq 48 -> 47 (the scan's settled and transition forms are one
+outlined function per width, so their constants are not materialised at each call site; the first
+inline cut of the scan rose to 104 and 51 and was refused by the check). Multiband 566 unchanged.
+
+**m1.** The attempt-5 re-pin of `fixtures/builtins/v1/reference/filter-response.csv` was made while
+#1427's Hazards forbade any `--write` re-pin of that file, and attempt 5's record did not
+acknowledge that order or ask root. The re-pinned content is the genuine A9 output (the verifier
+reproduced it). #1427's premise was then disproved: release builds of the same commit at two
+checkout paths 41 characters apart write byte-identical fixture trees (and so does the parent);
+the supposed second variant `d577dab4` is the output of #1328 attempts 1-3's law (an independent
+scalar twin reproduces it on 1,630 of 1,630 rows), observed through a stale build (a `git archive`
+export carries commit-time mtimes, so a shared target directory reused an older build). Root closed
+#1427 as not planned; its STREAMS rows were removed in `50103f0dc`.
+
+**m5.** Corrected: decision 15's #1328 entry and `crates/lane/src/kernels.rs` no longer say live
+audio pays nothing for the rule; they state what remains (the per-block armability test and
+last-frame compare, the silent-lane scan, the #1018 constants' browser cost). `dsp-research/filters.md`
+states rounding changes as relative to the signal: once a flush has changed a state word the two
+runs round differently, and later loud audio can differ by about one ulp of the signal (the
+verifier: `9.3e-10` at a relative `1.6e-7` with the final window, `3.7e-9` at 2,048 samples); the
+attempt-5 "up to `4.66e-10` at a relative `1e-7`" is such a change. The 1,024-sample residuals are
+search maxima: attempt 5 found `1.31e-9` / `1.33e-9` at 88.2 / 96 kHz, the verifier's independent
+`f32` simulation `1.53e-9` / `1.68e-9` (`filters.md`, `lane::SILENCE_TIME_FRAMES`'s doc). The
+conclusion (a time window, not 1,024 samples) holds either way.
+
+**m7.** Dropping the section-input term loosens the provable one-tail chain bound from `3.74e-10`
+(each section flushes once) to `3.1e-7` (-130.2 dBFS, above a 24-bit LSB); the largest change
+measured, with and without the term, at 1,024 samples and at the final window, at every rate, is
+the same (attempt 5 and the verifier's independent simulation). Recorded in `filters.md`.
+
+**Floors (re-derived after the scan, which adds no lane-op per lane-sample on live audio).** EQ
+standing inventory 27 (the value before #1328; 31 on a block that can arm, plus 5 for the rest
+plane), strip 307 (10.372 cycles/lane-sample), `floor_lane_ops(active) = 24 * active + 3` on live
+audio (153 for six or refused) and `28 * active + 3` on a block that can arm (177); builtins 69
+unchanged. `tools/bench/src/floor.rs`, `scripts/console-benchmark-record-lib.jq`,
+`scripts/test-console-benchmark.sh` (the two "costed at the wrong inventory" cases now use 307 and
+`69 + 27 + 81.5`), `docs/rulings/effect-floor-accounting.md`.
+
+**Docs.** `crates/lane/src/kernels/builtins.rs`: six links to the removed `svf_step_armable` now
+name `svf_step_when` and `channel_arms`; `svf_step_when`'s doc states both conditions for the
+unarmed form.
+
+**Tests and mutation evidence** (each mutant applied, the named tests run, reverted; the final tree
+is green):
+
+| id | mutant | red tests | verdict |
+|---|---|---|---|
+| F1 | `silence_skip_block` settled form drops the per-lane select (every lane gets the advanced count) | `g4_silence_skip_block_is_the_frame_loop`; differential: 130 of 908 scenarios move | RED |
+| F2 | settled form without the `2^24` saturation (`run + frames`) | `g4_silence_skip_block_is_the_frame_loop` only (no other `lane`, `parametric-eq` or `builtins` test); differential: 21 move | RED |
+| F3 | no transition check (settled form on every non-live block) | `g4_silence_skip_block_is_the_frame_loop`; differential: 548 move | RED |
+| F4 | the scan drops its remainder frames | `g4_silence_skip_block_is_the_frame_loop`; differential: none move | RED |
+| F5 | the scan combines two of its four chains | `g4_silence_skip_block_is_the_frame_loop`; differential: 126 move | RED |
+| F6 | spill gate ignores a row's ceiling (99) | `--self-test` (verdicts `..., 0, 0, 1`) | RED |
+| F7 | spill gate reports ceiling rows as info | `--self-test` (`..., 0, 0, 0`) | RED |
+| F8 | spill gate ceiling compared off by one (`<`) | `--self-test` (`..., 1, 1, 1`) | RED |
+| F9 | dual armed pair ceiling 10 on the real module | the gate: `FAIL dual armed depth-2 pair ... above the row's ceiling of 10` (exit 1) | RED |
+| MK | skewed cascade reads frame `i`'s threshold for every section | `g2_skewed_cascade_arms_each_section_on_its_own_frame` | RED |
+| MI | `input_chain_block` decides armability from channel 0 only | `the_right_channel_arms_its_joint_flush_alone`, `any_state_word_in_the_band_arms_the_block` | RED |
+| MW | `svf_state_held` ignores `ic2` | `any_state_word_in_the_band_arms_the_block` | RED |
+| ML | `silence_armable_holding` drops the long-block term | builtins `a_block_longer_than_the_window_arms_from_rest`, EQ `a_block_longer_than_the_window_renders_as_its_quantum_sized_parts` | RED |
+| ME | EQ arms from the left channel only | `the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band` | RED |
+| MS | EQ holding mask reads section 0 only | the same, the long-block test, `a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms`, `the_low_shelf_fixed_point_reaches_exact_rest` | RED |
+| MM | EQ collapsed body never arms | `mono_collapse::the_collapsed_body_arms_its_joint_flush` | RED |
+| MD | EQ descriptor declares no scratch (m6) | `the_rest_planes_are_the_scratch_the_descriptor_declares` | RED |
+| MG | joint test reads the first magnitude only (`a1 < rest`) | `g5_native_digests_match_pins` (the armed case) | RED |
+| MF | spill gate rows and their anchors ignore the form | `--self-test` (`..., 2, 2, 1, 1, 1`); either check alone stays green, since the other keeps the forms apart in the synthetic listing | RED |
+| -- | `silence_skip_block` always takes the transition loop | none: equivalent by construction (the loop is the reference); the scan is a cost saving | equivalent |
+
+Test value, one sentence each:
+- `g4_silence_skip_block_is_the_frame_loop` (new): a skip form that leaves a counter anywhere other
+  than the frame loop does -- a settled form that does not saturate at `2^24` (no other test reaches
+  it), drops the per-lane select, skips the transition check or loses scan frames.
+- `g2_skewed_cascade_arms_each_section_on_its_own_frame` (m3, MK): a skewed cascade that reads frame
+  `i`'s threshold for section `k` instead of frame `i - k`'s.
+- `input_chain_arming` (m3, MI; three tests): an input-chain body that decides armability from
+  channel 0 alone, a holding mask that skips a state word or section, or an armability test without
+  the long-block term.
+- EQ `exact_rest::the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band` and
+  `a_block_longer_than_the_window_renders_as_its_quantum_sized_parts`,
+  `mono_collapse::the_collapsed_body_arms_its_joint_flush`: the EQ's arming decision from one
+  channel or one section, without the long-block term, or never in the collapsed body.
+- `the_rest_planes_are_the_scratch_the_descriptor_declares` (m6): a descriptor that under-declares
+  the rest planes.
+- G5 `svf_block/armed/impulse_tails` (m4; pin added individually, reason: the only corpus case whose
+  joint test runs against armed thresholds, so `i32x4.max_u` and the armed compare are exercised on
+  wasm): a joint test that does not take the larger magnitude.
+- Spill self-test, two forms (checkpoint) and ceilings (this tree): rows that ignore the form, and a
+  ceiling that is ignored, unchecked for missing loops, or compared off by one.
+
+**Gates (this tree).**
+
+- gate-4 `cargo test --all-targets` set (14 packages, spec features, `--no-fail-fast`): 879 passed,
+  0 failed; `cargo test -p audit -p graph-compiler -p builtins-compiler -p graph -p host-core
+  -p host-web -p capi -p bench`: ok;
+- `cargo test --release -p lane -p math -p wasm-gates --features math/lane`: ok (G5 green);
+- `run-wasm-gates.sh`: exit 0 (native, simd128, V8 spill gate with the rows above; self-test 33 ok);
+- `conformance_fixtures --check`, `check-builtins-fixtures.sh` (50 files), `graph_fixture --check`,
+  `audit unfused-fma conformance` (SVF `unfused`, the silence pass included, 0 mismatches),
+  `check-graph-determinism.sh` (100/100), `check-cross-targets.sh` (builtins 40, parametric-eq 47,
+  multiband 566 `memset_pattern16` calls): ok; no fixture or digest moved beyond the
+  `track_delay` re-pin above;
+- `check-lane-policy.sh`, `check-dsp-research.sh`, `check-workspace-policy.sh`,
+  `check-realtime-policy.sh`: ok;
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` (and with the test-support
+  features), `cargo fmt --all -- --check`: ok;
+- `cargo test -p bench floor`, `test-console-benchmark.sh`: ok;
+- worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`: ok.
+
+**Open items.**
+- The builtins keep about 3 % per block in an eight-lane bank with one silent lane (the scan).
+- The app-shape browser cost (+3 % to +4 % p50 against P0) stands until #1451.
+- The multiband compressor still runs the counter and the joint flush on every frame (#1018).
+- n3 (attempt 5) stands: documented, not changed.
