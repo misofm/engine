@@ -1652,3 +1652,35 @@ not the carried words; #1451 D2 fixed the iOS cause; #1454 owns the browser gap)
 
 **Open items.** The silent-lane builtin cost (deviation (a)); the browser loop-structure cost
 (#1454); the multiband compressor's per-frame counter (#1018).
+
+### Follow-up attempt 2: verdict follow-ups (2026-10-06, branch `codex/d15-stream-g`)
+
+The follow-up attempt-2 verdict (PASS) left one MINOR and two NITs; this applies them. No audio bit
+moves.
+
+**m1: the backward scan saturates its trailing count at `2^24`.** `silence_skip_settle` counted
+`scanned` in an inferred `i32` and wrote `L::splat(scanned as f32)`, so a lane non-zero on frame `k`
+of a block of `F` frames and zero after it left `(F - 1 - k)` rounded to `f32`; the frame loop
+(`silence_block`, `run + 1` per zero frame) saturates at `2^24`. The two differed on blocks of
+`2^24 + 3` frames or longer (the verdict measured `0x4b800001` against `0x4b800000` at `2^24 + 3`),
+a legal though absurd quantum that the builtins' all-identity bodies reach; the word was
+non-canonical (the EQ's decoder refuses a count past saturation, the builtins carry it across a
+swap), and a debug build would overflow `i32` at `2^31` frames. Now `scanned: usize`, and both leave
+paths write `L::splat(scanned.min(1 << 24) as f32)`: one scalar `min` on the leave path only. For
+every block of up to `2^24 + 2` frames `scanned` is at most `2^24 + 1`, which `as f32` already rounds
+to `2^24`, so the clamp moves no bit there.
+
+Test: `crates/lane/tests/g4_flush.rs::g4_silence_skip_block_saturates_a_long_trailing_count`, one
+`f32`-width block of `2^24 + 3` frames, non-zero on frame 0 only, against the frame loop (two planes
+of 64 MiB; 1.1 s debug, 0.1 s release). Mutation run: the clamp reverted (`L::splat(scanned as
+f32)`) -> **red** (`left: 1266679809` = `0x4b800001`, `right: 1266679808`); restored -> green.
+Test value: a scan count that does not saturate where the frame loop's does; the existing
+`g4_silence_skip_block_is_the_frame_loop` blocks are at most 129 frames, so none reaches the clamp.
+
+**n1.** The `skip_lane_input` and `g4_silence_skip_block_is_the_frame_loop` docs now name the two
+forms (live, and the backward scan) and the ways a lane leaves the scan, not attempt 1's three
+forms. **n2.** The `silence_skip_block` doc states that the frame loop's trailing count on a lane
+non-zero earlier in the block saturates at `2^24` too, and that the scan's count does the same.
+
+Gates for this slice: `cargo test -p lane --test g4_flush` (debug and release, 10 passed); the
+part-B batch gates are listed with the stream G batch follow-ups.

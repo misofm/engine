@@ -308,20 +308,21 @@ pub fn silence_block<L: Lane>(
 ///
 /// The counter is left exactly where [`silence_block`] would leave it. That frame loop leaves
 /// `+0.0` on a lane that is non-zero on the block's last frame, the count of the block's trailing
-/// zero frames on a lane that is non-zero on an earlier frame, and `min(run + frames, 2^24)`
-/// ([`silence_advance`]) on a lane that is zero on every frame: `run + 1` per zero frame is exact
-/// below `2^24` and saturates there. This function finds the three cases without the counter's
-/// loop-carried add:
+/// zero frames, saturated at `2^24`, on a lane that is non-zero on an earlier frame, and
+/// `min(run + frames, 2^24)` ([`silence_advance`]) on a lane that is zero on every frame: `run + 1`
+/// per zero frame is exact below `2^24` and saturates there. This function finds the three cases
+/// without the counter's loop-carried add:
 ///
 /// 1. **Live.** The block's last frame is non-zero on every lane -- most blocks of live audio:
 ///    every counter ends at `+0.0`, read off one frame with one `mask_any`.
 /// 2. **Backward scan.** Otherwise the lanes that are zero on the last frame are followed
 ///    backwards, four frames at a time (four loads and `eq`s, three `mask_and`s, one test). A lane
 ///    that meets a non-zero frame leaves the scan with its trailing count, an exact integer found
-///    frame by frame inside that group of four. The scan stops once no lane is left, so a live
-///    lane whose block ends on a few zeros (a quiet 16-bit source) costs a group or two. A lane
-///    still in the scan after the first frame is zero throughout and takes `silence_advance`; a
-///    silent or padding lane therefore keeps the scan running over the whole block.
+///    frame by frame inside that group of four and saturated at `2^24` as the frame loop's. The
+///    scan stops once no lane is left, so a live lane whose block ends on a few zeros (a quiet
+///    16-bit source) costs a group or two. A lane still in the scan after the first frame is zero
+///    throughout and takes `silence_advance`; a silent or padding lane therefore keeps the scan
+///    running over the whole block.
 ///
 /// The live form is inlined into each caller; the scan is one outlined function per lane width
 /// (`silence_skip_settle`), because inlined at every call site it multiplies the callers' code (the
@@ -352,7 +353,8 @@ fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L
     // `trailing`: a lane that has left the scan holds its trailing count, every other lane `+0.0`.
     let mut open = ends_silent;
     let mut trailing = L::zero();
-    let mut scanned = 1;
+    // A count written from `scanned` saturates at `2^24`, as `silence_block`'s `run + 1` does.
+    let mut scanned: usize = 1;
     let mut quads = input[..(frames - 1) * L::WIDTH].rchunks_exact(4 * L::WIDTH);
     for quad in &mut quads {
         let z: [L::Mask; 4] = core::array::from_fn(|f| {
@@ -363,7 +365,7 @@ fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L
             // Some lane leaves within these four frames: resolve them latest first.
             for &zero in z.iter().rev() {
                 let leaves = L::mask_and(open, L::mask_not(zero));
-                trailing = L::select(leaves, L::splat(scanned as f32), trailing);
+                trailing = L::select(leaves, L::splat(scanned.min(1 << 24) as f32), trailing);
                 open = L::mask_and(open, zero);
                 scanned += 1;
             }
@@ -378,7 +380,7 @@ fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L
     for frame in quads.remainder().rchunks_exact(L::WIDTH) {
         let zero = L::load(frame).eq(L::zero());
         let leaves = L::mask_and(open, L::mask_not(zero));
-        trailing = L::select(leaves, L::splat(scanned as f32), trailing);
+        trailing = L::select(leaves, L::splat(scanned.min(1 << 24) as f32), trailing);
         open = L::mask_and(open, zero);
         scanned += 1;
     }

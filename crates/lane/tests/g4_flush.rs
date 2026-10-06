@@ -547,7 +547,8 @@ fn g4_silence_armable_is_exact() {
 }
 
 /// One lane's input over a block for [`skip_matches_blocks`]: `shape` picks how the lane's zeros
-/// fall in the block, so every lane mix reaches each of `silence_skip_block`'s three forms.
+/// fall in the block, so every lane mix reaches both of `silence_skip_block`'s forms (live, and the
+/// backward scan) and each way a lane leaves the scan.
 fn skip_lane_input(shape: u32, frames: usize, random: &mut Xorshift64Star) -> Vec<f32> {
     let live = |random: &mut Xorshift64Star| {
         // Never an exact zero of either sign: NaN, infinities and subnormals stay live.
@@ -639,10 +640,40 @@ fn skip_matches_blocks<L: Lane>(width_name: &str) {
 }
 
 /// `silence_skip_block` (the counter of a block no threshold is read from) leaves every lane's
-/// counter exactly where `silence_block`'s frame loop does, in each of its forms: a live last frame
-/// on every lane, a block where every lane is silent throughout or live on its last frame (counter
-/// saturation included), and a block where some lane's silence starts inside it (issue #1328).
+/// counter exactly where `silence_block`'s frame loop does, in both of its forms: a live last frame
+/// on every lane, and the backward scan, where each lane is live on the last frame, leaves the scan
+/// at a frame inside the block, or is silent throughout (counter saturation included) (issue
+/// #1328).
 #[test]
 fn g4_silence_skip_block_is_the_frame_loop() {
     lane::each_lane!(|L| skip_matches_blocks::<L>(core::any::type_name::<L>()));
+}
+
+/// The backward scan saturates a lane's trailing count at `2^24`, as the frame loop's `run + 1`
+/// does: a block of `2^24 + 3` frames, non-zero on its first frame only, leaves the counter at
+/// `2^24`, not at the unclamped `2^24 + 2` (issue #1328, follow-up attempt 2). Shorter blocks
+/// cannot tell the two apart (`2^24 + 1` rounds to `2^24` in `f32`), so the
+/// [`g4_silence_skip_block_is_the_frame_loop`] blocks never reach the clamp. One `f32`-width
+/// block: two planes of 64 MiB.
+#[test]
+fn g4_silence_skip_block_saturates_a_long_trailing_count() {
+    let frames = (1usize << 24) + 3;
+    let mut input = vec![0.0f32; frames];
+    input[0] = 1.0;
+    let mut plane = vec![0.0f32; frames];
+    let mut walked = 0.0f32;
+    silence_block::<f32>(&input, frames, &mut walked, &mut plane, 4_096.0);
+    drop(plane);
+    let mut skipped = 0.0f32;
+    silence_skip_block::<f32>(&input, frames, &mut skipped);
+    assert_eq!(
+        walked.to_bits(),
+        16_777_216.0f32.to_bits(),
+        "the frame loop saturates"
+    );
+    assert_eq!(
+        skipped.to_bits(),
+        walked.to_bits(),
+        "the backward scan is the frame loop"
+    );
 }
