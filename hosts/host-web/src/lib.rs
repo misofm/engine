@@ -1166,6 +1166,10 @@ pub const METER_VALID_LOSS: u64 = 1 << 2;
 /// intentionally independent and never supplies the track/master interval.
 pub const METER_VALID_GAIN_REDUCTION: u64 = 1 << 3;
 const METER_LOSS_SHIFT: u32 = 32;
+/// Depth of every track meter queue, named once (issue #1448 D1): one window per track per post,
+/// plus headroom for a control-side stall of a few windows. The live-control request builds each
+/// meter queue with it, and each poll caps a meter's count at entry by it.
+const METER_QUEUE_DEPTH: usize = 8;
 
 /// Byte size of [`WebMeterHeader`].
 pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeader>() as u32;
@@ -1630,6 +1634,10 @@ struct ReadyOwnership {
     /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
     /// the callback; the queue itself remains the only producer-side buffer.
     meter_pending: Box<[Option<MeterSnapshot>]>,
+    /// One count per track meter, read from its queue at each poll's entry and decremented before
+    /// each pop (issue #1448 D2). Scratch for one call: every poll sets every entry before it pops,
+    /// so delivery resets do not touch it. Allocated at preparation, sized by the meter count.
+    meter_remaining: Box<[usize]>,
     /// Host publication generation, advanced on lease transitions and detected producer resets.
     meter_generation: u64,
     /// Losses and rejected stale/mismatched windows waiting to be reported in the next complete
@@ -3450,25 +3458,37 @@ impl AudioWorkletEngineHost {
         if ready.master_count == 0 {
             return 0;
         }
-        let mut drain_budget = 1_usize;
-        for meter in &ready.meters {
-            drain_budget = drain_budget.saturating_add(meter.consumer.capacity());
+        // Issue #1448 D2: each meter's queue pops at most its own count read here, at entry, capped
+        // at the configured depth, whatever a producer on another thread publishes meanwhile. A
+        // pass that does not end the loop has cleared at least one pending slot, and the next pass
+        // either refills it (spending one count) or ends the loop at the empty-slot check, so
+        // `1 + sum(remaining)` passes always suffice: the bound never cuts a recovery short.
+        for (meter, remaining) in ready.meters.iter().zip(ready.meter_remaining.iter_mut()) {
+            *remaining = meter.consumer.available_at_entry().min(METER_QUEUE_DEPTH);
         }
-        let mut popped = 0_usize;
+        let mut passes = 1_usize;
+        for remaining in ready.meter_remaining.iter() {
+            passes = passes.saturating_add(*remaining);
+        }
         let mut windows = 0_u32;
         let mut folded_start = 0_u64;
         let mut folded_end = 0_u64;
         let mut folded = false;
-        while popped < drain_budget {
-            for index in 0..meter_count {
-                if ready.meter_pending.get(index).is_some_and(Option::is_none)
-                    && let Some(meter) = ready.meters.get_mut(index)
-                    && let Ok(snapshot) = meter.consumer.try_pop()
-                {
-                    if let Some(slot) = ready.meter_pending.get_mut(index) {
-                        *slot = Some(snapshot);
-                    }
-                    popped = popped.saturating_add(1);
+        for _ in 0..passes {
+            for ((meter, pending), remaining) in ready
+                .meters
+                .iter_mut()
+                .zip(ready.meter_pending.iter_mut())
+                .zip(ready.meter_remaining.iter_mut())
+            {
+                if pending.is_some() || *remaining == 0 {
+                    continue;
+                }
+                // On a single-consumer queue a count read at entry is a lower bound on what this
+                // consumer can pop, so a pop under a count above zero does not fail.
+                *remaining -= 1;
+                if let Ok(snapshot) = meter.consumer.try_pop() {
+                    *pending = Some(snapshot);
                 }
             }
             if ready.meter_pending.iter().any(Option::is_none) {
@@ -7112,12 +7132,17 @@ fn compile_ready(
         .ok()
         .and_then(|count| count.checked_mul(size_of::<Option<MeterSnapshot>>() as u64))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let remaining_meter_bytes = u64::try_from(meter_count)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<usize>() as u64))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let master_meter_bytes = u64::try_from(master_capacity)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<Option<MasterMeasurement>>() as u64))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let meter_delivery_bytes = pending_meter_bytes
-        .checked_add(master_meter_bytes)
+        .checked_add(remaining_meter_bytes)
+        .and_then(|bytes| bytes.checked_add(master_meter_bytes))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
@@ -7130,6 +7155,7 @@ fn compile_ready(
     report.largest_bridge_allocation_bytes = report
         .largest_bridge_allocation_bytes
         .max(pending_meter_bytes)
+        .max(remaining_meter_bytes)
         .max(master_meter_bytes);
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
@@ -7201,6 +7227,10 @@ fn compile_ready(
             .map(|_| None)
             .collect::<Vec<_>>()
             .into_boxed_slice(),
+        meter_remaining: (0..meter_count)
+            .map(|_| 0)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
         meter_generation: 0,
         meter_loss_count: 0,
         meter_snapshot_drops_seen: 0,
@@ -7235,8 +7265,7 @@ fn live_control_request(
     Some(HostLiveControlRequest {
         control_queue_depth,
         meter_period_frames,
-        // One window per track per post, plus headroom for a control-side stall of a few windows.
-        meter_queue_depth: NonZeroUsize::new(8)?,
+        meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
         meter_tap: MeterTap::PostMatrix,
         // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
         observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
