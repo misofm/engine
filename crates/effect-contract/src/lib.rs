@@ -127,10 +127,60 @@ impl ParameterId {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LatencySamples(pub u64);
+/// How long a node's output stays audible after its input stops (decision 15 D15-4(b), #1329).
+///
+/// `Finite(T)` means: for every input of peak `P >= P*` that is zero from sample `N` on, under
+/// any control history the node admits before `N` (a ramp may be in flight at `N`), and with no
+/// control event at or after `N`, `|y[n]| < P * 10^(-144/20)` for every
+/// `n >= N + latency + T`. `T` is counted beyond the node's latency, as PDC composes it.
+///
+/// `P*` is the node's **flush floor**: below it the `f32` output near the per-word state flush
+/// (`lane::FLUSH_EPS`) is no longer relative to `P`. The node states a second value of this type,
+/// its **tail over every peak** (`tail_every_peak`, `T_rest = max(T, R(P*))` with `R(P*)` the
+/// exact rest at `P*`): from `N + latency + T_rest` on the output is below `P * 10^(-144/20)` for
+/// `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. Tail reporting (PDC, the C ABI and browser
+/// reports) uses `T`; silence skipping uses [`RestSamples`], which holds for every input up to its
+/// stated peak. Every value is a certified upper bound computed on the control thread at
+/// preparation, never a pinned number.
+///
+/// `Infinite` states no bound: it is kept for nodes whose bound has not been derived yet.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum TailSamples {
     Finite(u64),
     Infinite,
+}
+
+/// How long after its input stops a node reaches exact rest (decision 15 D15-4(b), #1329 D2).
+///
+/// Under [`TailSamples`]' conditions, with input peak at most +24 dBFS (`peak_plus_24_dbfs`) or
+/// any input the input sanitizer passes, every magnitude below `1e30` (`any_sanitized_input`),
+/// from `N + latency + R` on:
+///
+/// * every output sample is `+0.0` or `-0.0` (a polarity-inverted zero is `-0.0`), and
+/// * every **signal-state word** equals, under `f32` `==`, the same word of the node's **rest
+///   state** `Z`.
+///
+/// Signal-state words are the words an input sample can reach: filter integrators, envelopes,
+/// gain smoothers, hold counters, rings and their running sums. Parameter words, ramp words,
+/// payload headers and ring cursors are not. `Z` is the state a freshly reset instance with the
+/// same parameters and settled ramps reaches after `R` zero input samples, and it is a fixed point
+/// of the node's zero-input step. `Z` need not be zero: a gate rests closed, and the true-peak
+/// limiter's rings rest at `1.0`. For the builtin input section `Z` is the reset state, every SVF
+/// integrator `+0.0`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RestSamples {
+    /// `R` for an input peak at most +24 dBFS.
+    pub peak_plus_24_dbfs: u64,
+    /// `R` for any input the input sanitizer passes (every magnitude below `1e30`).
+    pub any_sanitized_input: u64,
+}
+
+impl RestSamples {
+    /// A memoryless node: exact rest from the first sample after its latency.
+    pub const ZERO: Self = Self {
+        peak_plus_24_dbfs: 0,
+        any_sanitized_input: 0,
+    };
 }
 macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$($n=>Some(Self::$v),)+_=>None}}}}; }
 scalar_enum!(ParameterUnit {Db=1,Hz=2,Milliseconds=3,Samples=4,Linear=5,Ratio=6});

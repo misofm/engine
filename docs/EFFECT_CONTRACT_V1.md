@@ -60,6 +60,39 @@ Class-A identity, the same bits on every lane width and target, treats every NaN
 before comparing or hashing, the engine does not canonicalize NaNs at render, and finite input
 must still render finite output, with each effect's documented NaN behaviour unchanged.
 
+## Tail and exact rest
+
+Decision 15 D15-4(b) (issue #1329) gives every node's tail one meaning. For an input of peak `P`
+that is zero from sample `N` on, under any control history the node admits before `N` (a ramp may
+be in flight at `N`) and with no control event at or after it, with `eps = 10^(-144/20)`, each
+node states three values, all counted beyond its latency, all certified upper bounds computed on
+the control thread at preparation and never pinned:
+
+* **`TailSamples` -- `T_decay`, the tail.** `|y[n]| < P * eps` for every `n >= N + latency + T`,
+  for every input peak `P >= P*`. `P*`, the node's **flush floor**, is the smallest peak for which
+  the `f32` kernel's absolute deviation near the per-word state flush (`lane::FLUSH_EPS`) fits the
+  `-144 dB` budget; below it the output is no longer relative to `P`. PDC composes `T_decay` along
+  a path, and every tail report uses it (the C ABI and browser reports, #1261, #1262). `Infinite`
+  states no bound and remains for nodes whose bound has not been derived (#1378 retires it).
+* **The tail over every peak -- `T_rest = max(T_decay, R(P*))`, named `tail_every_peak`** (a
+  `TailSamples`, beside `tail` wherever `tail` is stated: `InputBuiltins`, `BuiltinChain`,
+  `builtins::InputSectionBound`). From `N + latency + T_rest` on the output is below `P * eps` for
+  `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. `R(P*)` includes the joint-flush arming
+  window `N_SILENCE` (#1328 A9), so `T_rest >= N_SILENCE` for every enabled filter section. It is
+  the exact-zero branch for low peaks only.
+* **`RestSamples` -- the exact-rest bound `R`.** With input peak at most +24 dBFS
+  (`peak_plus_24_dbfs`) or any input the input sanitizer passes, below `1e30`
+  (`any_sanitized_input`), from `N + latency + R` on every output is `+0.0` or `-0.0` and every
+  signal-state word equals, under `f32` `==`, the node's rest state `Z` (a fixed point of the
+  zero-input step; for the builtin input section the reset state, every integrator `+0.0`). Silence
+  skipping (#1107) uses this bound: it holds for every input up to its stated peak.
+
+Gain-only parts (trim, polarity, fader, mute, matrix) state `0` for all three. An absolute output
+floor in place of the exact-zero branch is refused (Amendment 3, G2): it would make the tail a
+fixed-level one, which #1328's A8 and A9 removed. Each native effect's bounds are its own slice
+(#1372-#1376), carried in its prepared metadata by #1377; until then an effect reports `Infinite`.
+The builtin input section's derivation is `docs/derivations/1329-input-section-tail-and-rest.md`.
+
 ## Parameters and automation
 
 Persisted parameter values use descriptor-declared exact-decimal lattices. This follows the

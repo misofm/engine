@@ -260,6 +260,14 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// three tokens of the `estimate` row and no other byte; reversing them in the compiled text hashes
 /// back to the A9 pin `bb250287...ffbfc40bf` (verified on the dumped canonical text).
 ///
+/// Issue #1329 states a certified finite tail for every builtin input section (D1, D4, D7): the
+/// fixture's 20 Hz high-pass into 20 kHz low-pass at 48 kHz now reports `finite:10048` where it
+/// reported `infinite`. Exactly the eighteen tokens #964 introduced move -- the nine `node` rows
+/// and the nine `tail` rows of the `post-input-builtins` nodes -- and no other byte (diffed on the
+/// dumped canonical text against the follow-up pin `bf2dfd6c...ad7b10d8b3`, which the unchanged
+/// tree reproduces). The value is the preparation's computed bound, not a pinned figure: a change
+/// to the bound's derivation moves this digest, which is the point of pinning the plan.
+///
 /// The structural off-delay gate above still proves that no zero-length delay node or ring was
 /// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
 /// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
@@ -276,7 +284,7 @@ fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
 /// the numbered #805 and #807 specs preserve their subsequent state-size derivations, and the
 /// #964 spec the builtin-tail re-pin.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "bf2dfd6c4282e2f4b0c3902becb038751de9f3a0be5e39ba1e6235ad7b10d8b3";
+    "60cae21e7692ccbdf17440c7c84f15bd1bb29c3bb2369a0d1b52a5a56fc6c362";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]

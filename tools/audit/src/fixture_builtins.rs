@@ -327,8 +327,11 @@ struct ReferenceMeter {
 // checks every public type and the queue payload boundary that can be named outside production.
 const GRAPH_NODE_BINDING_BYTES: u64 = 72;
 // #1328 A9: +24 with `InputBuiltins` (704 before). #1451: -16 with `InputBuiltins` (728 before).
-const BOXED_INPUT_ENTRY_BYTES: u64 = 712;
-const BOXED_TAIL_ENTRY_BYTES: u64 = 24;
+// #1329: +72 with `InputBuiltins` (712 before).
+const BOXED_INPUT_ENTRY_BYTES: u64 = 784;
+// #1329: a tail entry carries `effect_contract::TailSamples` (16 bytes), not the one-byte
+// `BuiltinTail` it replaced (24 before).
+const BOXED_TAIL_ENTRY_BYTES: u64 = 32;
 const BOXED_STR_BYTES: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 /// One `InputBuiltins`, 168 -> 272 at #210 phase 3: `InputStage<f32>` gained the live trim ramp
@@ -342,7 +345,9 @@ const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 // `N_SILENCE` word lands in padding the stage already had.
 // #1451: -16 (712 before): the four carried constants are splatted again and leave the
 // coefficient set.
-const INPUT_PROCESSOR_BYTES: u64 = 696;
+// #1329: +72 (696 before): the prepared design's `InputSectionBound` (two `TailSamples` and an
+// `Option<RestSamples>`) in its `OnceCell`, and the rate and two trim words it is computed from.
+const INPUT_PROCESSOR_BYTES: u64 = 768;
 /// One `StripPreparation`: the whole strip of a track -- input, fader and matrix section -- held
 /// inline in the strip vector until lowering decides whether they bind per node or as bank lanes
 /// (issue #212 for the fader and the matrix, #210 phase 3 for the input).
@@ -359,7 +364,8 @@ const INPUT_PROCESSOR_BYTES: u64 = 696;
 // #808 retains the same additional 416-byte input state inline.
 // #1328 amendment A9: +24 with the input section (1072 before).
 // #1451: -16 with the input section (1096 before).
-const STRIP_PREPARATION_BYTES: u64 = 1080;
+// #1329: +72 with the input section (1080 before).
+const STRIP_PREPARATION_BYTES: u64 = 1152;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
 // #1080 removed the controlled-activation flag #816 added, so the binding is 80 bytes again.
@@ -3520,11 +3526,11 @@ fn verify_pinned_native_resource_abi() -> Result<(), String> {
             core::mem::align_of::<(Box<str>, builtins::InputBuiltins)>(),
         ),
         (
-            "boxed BuiltinTail entry",
+            "boxed TailSamples entry",
             BOXED_TAIL_ENTRY_BYTES as usize,
             8,
-            core::mem::size_of::<(Box<str>, builtins::BuiltinTail)>(),
-            core::mem::align_of::<(Box<str>, builtins::BuiltinTail)>(),
+            core::mem::size_of::<(Box<str>, effect_contract::TailSamples)>(),
+            core::mem::align_of::<(Box<str>, effect_contract::TailSamples)>(),
         ),
         (
             "boxed TrackStage entry",
@@ -5313,7 +5319,12 @@ mod tests {
             // chain constants leaving the input section's coefficients (-16 bytes per input
             // stage, counted in the preparation strip and in the bound processor). No PCM, meter,
             // response or benchmark fixture moved.
-            "ea915297853ead10a64a263405bb885e5bfa9a2ef6b5ec1e0e5ded8b33f1cc64",
+            // Re-pinned by issue #1329: `resources.jsonl` alone moves, by the prepared tail and
+            // rest bound the input section now stores (+72 bytes per input stage, counted in the
+            // preparation strip and in the bound processor; largest allocation +72 per track) and
+            // the tail entries' `TailSamples` (+8 bytes in each of the two tail vectors). No PCM,
+            // meter, response or benchmark fixture moved.
+            "25ff9f0ff094658c2902b68818bb63cb424a80381e03265be3680cc164185f1a",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

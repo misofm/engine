@@ -18,7 +18,7 @@ use effect_contract::{
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
 
-use super::{BuiltinParameterError, BuiltinParameters, SvfSection, prepare_sections};
+use super::{BuiltinParameterError, BuiltinParameters, SvfSection, prepare_input_track};
 
 /// The fixed public magnitude floor, in dB relative to unit amplitude.
 const INPUT_FILTER_RESPONSE_FLOOR_DB: f32 = -120.0;
@@ -341,9 +341,8 @@ fn prepared_sections(
     if !is_launch_sample_rate(SampleRateHz(sample_rate_hz)) {
         return Err(InputFilterResponseError::UnsupportedSampleRate);
     }
-    let (input, _, _) = prepare_sections(sample_rate_hz, configuration)
+    let track = prepare_input_track(sample_rate_hz, &configuration)
         .map_err(InputFilterResponseError::Configuration)?;
-    let track = input.stage.lane_track(0);
     Ok([
         [track.left.hpf, track.left.lpf],
         [track.right.hpf, track.right.lpf],

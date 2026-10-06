@@ -58,9 +58,11 @@ admitted asymmetric targets. While a stage is collapsed, channel `0` is the only
 decision reads channel `1`'s frozen integrators -- the rule-3 predicate and the elision plan read
 channel `0`'s for both -- so every `Both` record applies channel `0`'s decision to both channels
 (#1407 attempt 2). Frozen input drains apply the same Left/Right/Both LIVE-latch
-rules as trim. Live-capable compiled inputs retain a conservative Infinite tail even if initially
-disabled; plain disabled inputs without console control retain FiniteZero. Storage and actual
-input work remain accounted for. Session automation syntax does not imply a render feed.
+rules as trim. Live-capable compiled inputs report the live bound
+(`builtins::input_section_live_bound`, #1329 D5, D7), a certified finite tail over every history
+of live trim, polarity and filter targets, even if initially disabled; plain inputs without console
+control report their prepared design's own certified tail (`Finite(0)` with both filters
+disabled). Storage and actual input work remain accounted for. Session automation syntax does not imply a render feed.
 
 **Class**: a *design* ruling -- what is live, at what price, and what the decision drags with it --
 rather than the null optimization measurement this directory's README describes. It is filed here
