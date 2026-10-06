@@ -40,14 +40,12 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
     "debug": [],
     "release": [
         # LANE-3 (#1019): in release the D8 `select(a > b, a, b)` folds into `fmaxnm`/`fminnm`
-        # inside `exp2_lane` and `log2_lane`, scalar and vector alike. Those instructions answer
+        # inside `exp2_lane`, scalar and vector alike (`log2_lane` passes since #1451's
+        # splat change). Those instructions answer
         # differently on NaN and signed-zero inputs. The same tests pass in the debug leg.
         ("1019", "math", "test:m2_lane_identity", "m2_exp2_lane_identity",
          "exp2_lane: scalar digest 69c5e8f5e4639e1438b6f38bce75a7267904f84501a3d89c2704146272c4942a"
          " does not match the pin"),
-        ("1019", "math", "test:m2_lane_identity", "m2_log2_lane_identity",
-         "log2_lane: width 4 differs from the scalar oracle at input 870 (NaN): 0x43c06e2d vs "
-         "0xc2fc0000"),
     ],
 }
 
