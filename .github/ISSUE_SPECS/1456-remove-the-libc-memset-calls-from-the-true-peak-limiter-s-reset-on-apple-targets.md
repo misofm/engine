@@ -120,4 +120,63 @@ lowered row); the per-lane equality test and the differential turn red if a rese
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (2026-10-06, implementer)
+
+**D1 evidence (Rust 1.97.1, `aarch64-apple-ios` release, base `b5cfd2b60`).** The crate's iOS
+assembly has 6 `bl _memset_pattern16`: three in `ChannelState::clear_runtime` and three in
+`ChannelState::new`. `-C llvm-args=-print-changed=quiet -filter-print-funcs=<both>` shows each one
+appear first in an `IR Dump After LoopIdiomRecognizePass` of that function, as
+`call void @llvm.experimental.memset.pattern.p0.f32.i64(ptr, float 1.000000e+00, i64 n, i1 false)`:
+in `clear_runtime` the loops of `required_ring.fill(1.0)`, `box_ring.fill(1.0)` and
+`prefix.fill(1.0)` (the zero fills become `llvm.memset`, lowered to `_bzero`); in `new` the
+`extend_with` store loops of `vec![1.0; n]` (`.loc` `core/src/ptr/mod.rs:1933`). The assembly at each
+`clear_runtime` site is `ldr x0, [x19, #off]; lsl x2, x8, #2; adrp/add x1, l_.memset_pattern;
+bl _memset_pattern16` (`.loc` `slice/specialize.rs:25`).
+
+**Shapes tried.** (a) `Simd4::splat(1.0)` stored per 4-word chunk plus a scalar tail: *worse*,
+6 calls in `clear_runtime` (the 16-byte vector constant is itself a memset-pattern idiom, and the
+tail loop is another). (b) The words written lane by lane at the run-time lane stride, in
+`clear_lane_runtime`'s order (one loop over lanes, two `step_by(width)` ring loops and the lane's
+`prefix` word): 0 calls in `clear_runtime`; the pass cannot prove a run-time stride contiguous.
+Chosen (b): one shape on every target, no `cfg`, no pass switch, no new attribute.
+`ChannelState::new` now allocates the three `1.0` planes zeroed (`calloc`, no store loop): the
+values `vec![1.0; n]` wrote were dead, because `new` calls `reset_to_defaults`, which writes them
+through `clear_runtime`. So the same shape removes the constructor's three too, and the row was
+deleted at zero rather than lowered to 3.
+
+**Cost (open item, not measured).** The `1.0` fills are now scalar strided stores (iOS: one
+`str w` per word; LLVM vectorises neither target's loop), where the base used libc's vectorised
+`memset_pattern16` on Apple and broadcast stores elsewhere. Worst case is 96 kHz at bank width 8:
+about 31k word stores per reset across both channels, at a reset or a failed block only, never in
+the frame loop. The four `_bzero` calls for the zero fills remain (outside this spec's D2 and
+not counted by the ratchet).
+
+**Gate 1 (PR evidence, not committed).** A temporary in-crate harness drove `LimiterCore` at `f32`,
+`Simd4` and `Simd8`, 44.1 and 96 kHz, quanta 1 and 128, `DualMono` and `Maximum`; each case runs
+five phases of `3 + 1100 / quantum` noise blocks with automation: none, `FullToDefaults`,
+`DiscontinuityKeepParameters`, a NaN input on every lane (whole D7 reset) and a NaN input on lane 0
+(per-lane D7 at widths 4 and 8; whole at width 1). The harness wrote every output word and every
+state word of both channels (each plane by bits, ramps, lane shapes, cursors, report, #990 record)
+after construction, every block and every reset. 120 phase reports, the same on both builds (every
+failure phase reported its failure). Base (`b5cfd2b60` source) and head output: 5,081,610,702 bytes
+each, `cmp` identical (sha256 `190075ad...46cc9`). The harness discriminates: a mutant that writes
+`0.5` into the last lane of `box_ring` differs at byte 3607 (the construction dump).
+
+**Gate 2.** iOS count for `true-peak-limiter` is 6 -> 0; `bash scripts/check-cross-targets.sh` PASS
+with the row deleted (builtins 5, host-core 4, soft-clip 1 remain #1018's). `clear_runtime` is
+`#[inline(never)]` and has no `bl _memset_pattern16`; no function in the crate has one.
+
+**Ratchet mutation (test value).** Putting back `self.box_ring.fill(1.0)` in place of the strided
+`box_ring` loop: limiter count 1, `judge-memset` red ("1 memset_pattern16 calls and no row: a new
+libc call in the iOS build (#1018)", rc 1). Reverted: count 0, judge green.
+
+**Gate 3.** All PASS: `cargo test --locked --all-targets -p true-peak-limiter -p conformance`
+(89 passed, including `a_lane_reset_is_the_whole_reset_at_one_lanes_stride`), the `test-debug-a`
+command (1458 passed), `conformance_fixtures -- --check`, `bash scripts/run-wasm-gates.sh`,
+`check-workspace-policy.sh`, `check-realtime-policy.sh`, `aarch64-known-defects.py --self-test`,
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`, `cargo clippy --locked
+--workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`.
+
+**Open items.** (1) `scripts/check-cross-targets.sh`'s comment above the scan still lists the
+limiter's calls among "the 16 left"; that file is outside this spec's authorized paths. (2) The
+reset cost of the scalar strided fill above has no benchmark.

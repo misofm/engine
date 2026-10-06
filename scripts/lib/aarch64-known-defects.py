@@ -64,16 +64,16 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # The rows left are scalar fills of a real length, not lane splats: `builtins` 5 (preparation
 # constructors: `lanes_below`'s flag fill, `InputStage::new`, `BuiltinFaderBank::new`,
 # `FaderMuteRampBuiltins::new`), `host-core` 4 (`SpectrumAnalyzer::analyze` and
-# `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each), `soft-clip` 1
-# (the test corpus's `fill`) and `true-peak-limiter` 6 (three `fill(1.0)` in `clear_runtime`, which
-# also runs at a reset and on a failed block, and three in `ChannelState::new`). #1452 undid the
-# shapes chosen only for this ratchet where the natural shape was better; no row moved, and the
-# limiter's `clear_runtime` stays out of line because inlining it adds three calls (6 -> 9).
+# `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each) and `soft-clip` 1
+# (the test corpus's `fill`). #1452 undid the shapes chosen only for this ratchet where the natural
+# shape was better; no row moved. #1456 deleted the `true-peak-limiter` row at zero (6 -> 0): its
+# `clear_runtime`, which also runs at a reset and on a failed block, writes its `1.0` words lane by
+# lane at the run-time lane stride, which loop-idiom cannot prove contiguous, and
+# `ChannelState::new` allocates those words zeroed because `clear_runtime` writes them.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "builtins": ("1018", 5),
     "host-core": ("1018", 4),
     "soft-clip": ("1018", 1),
-    "true-peak-limiter": ("1018", 6),
 }
 
 

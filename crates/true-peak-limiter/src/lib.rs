@@ -505,14 +505,18 @@ impl ChannelState {
     /// Allocates one channel of `width` lanes and seeds it with each lane's defaults.
     fn new(width: usize, shape: &Shape, defaults: &[[f32; PARAMETER_COUNT]], rate: u32) -> Self {
         debug_assert_eq!(defaults.len(), width);
+        // The two gain rings and `prefix` rest at `1.0`, and `reset_to_defaults` below writes those
+        // words through `clear_runtime`. They are allocated zeroed, not `vec![1.0; n]`: that macro
+        // fills with a store loop that Apple targets lower to a `memset_pattern16` libc call
+        // (#1456; see `clear_runtime`), and the value it would write is dead.
         let mut state = Self {
             width,
             history: vec![0.0; HISTORY_WORDS * width].into_boxed_slice(),
             main_ring: vec![0.0; shape.main * width].into_boxed_slice(),
-            required_ring: vec![1.0; shape.ring * width].into_boxed_slice(),
-            box_ring: vec![1.0; shape.ring * width].into_boxed_slice(),
+            required_ring: vec![0.0; shape.ring * width].into_boxed_slice(),
+            box_ring: vec![0.0; shape.ring * width].into_boxed_slice(),
             reduction: vec![0.0; width].into_boxed_slice(),
-            prefix: vec![1.0; width].into_boxed_slice(),
+            prefix: vec![0.0; width].into_boxed_slice(),
             box_sum: vec![0.0; width].into_boxed_slice(),
             phase: vec![0; width].into_boxed_slice(),
             limit: vec![LinearRamp::fixed(0.0); width].into_boxed_slice(),
@@ -640,18 +644,36 @@ impl ChannelState {
     ///
     /// Out of line (#1091): it runs at preparation, at a reset and on a failed block, never in the
     /// frame loop, and one copy serves every caller. Inlined, it is copied into
-    /// [`ChannelState::new`] as well, which adds code on every target and three more Apple
-    /// `memset_pattern16` calls for its `1.0` fills (measured in #1452, undo 4; #1456 owns those
-    /// calls).
+    /// [`ChannelState::new`] as well, which adds code on every target (measured in #1452, undo 4).
+    ///
+    /// # Why the `1.0` words are written lane by lane (#1456)
+    ///
+    /// This runs on the render thread at a reset and at the D7 recovery of a failed block, so it
+    /// must not call libc. A loop that stores one constant `f32` at unit stride -- `fill(1.0)`, and
+    /// equally a loop of `Lane::splat(1.0)` vector stores, whose 16-byte pattern is the same idiom
+    /// -- is rewritten by LLVM's loop-idiom pass into `llvm.experimental.memset.pattern`, which
+    /// Apple targets lower to `bl _memset_pattern16`. The two gain rings and `prefix` are
+    /// therefore written in [`clear_lane_runtime`](Self::clear_lane_runtime)'s order: lane by
+    /// lane, at the lane stride. That stride is the run-time `width`, so the pass cannot prove the
+    /// stores contiguous and forms no call, on any target and with no target-specific path. The
+    /// words written are the same `1.0` at the same positions. `scripts/check-cross-targets.sh`
+    /// counts the call in the iOS release assembly and fails if it returns.
     #[inline(never)]
     fn clear_runtime(&mut self, shape: &Shape) {
         debug_assert_eq!(self.main_ring.len(), shape.main * self.width);
         self.history.fill(0.0);
         self.main_ring.fill(0.0);
-        self.required_ring.fill(1.0);
-        self.box_ring.fill(1.0);
+        let width = self.width;
+        for (lane, prefix) in self.prefix.iter_mut().enumerate() {
+            for word in self.required_ring.iter_mut().skip(lane).step_by(width) {
+                *word = 1.0;
+            }
+            for word in self.box_ring.iter_mut().skip(lane).step_by(width) {
+                *word = 1.0;
+            }
+            *prefix = 1.0;
+        }
         self.reduction.fill(0.0);
-        self.prefix.fill(1.0);
         self.phase.fill(0);
         for (sum, shape) in self.box_sum.iter_mut().zip(self.lane.iter()) {
             *sum = shape.window as f32;
