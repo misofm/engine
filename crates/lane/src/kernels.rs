@@ -30,11 +30,10 @@ pub mod halfband;
 /// the same body at `L = f32` as the bank kernels do at every width.
 pub use builtins::ramp_toward;
 
-use crate::{FLUSH_EPS, Lane, flush, flush_pair_with, flush_with, silence_step};
+use crate::{Lane, flush, flush_pair, silence_step};
 
 /// Where an SVF kernel reads its per-frame rest thresholds from (issue #1328): an effect channel's
-/// **rest plane** (`&[f32]` or [`ArmedRest`], written by [`silence_block`]), or none
-/// ([`UnarmedRest`]).
+/// **rest plane** (`&[f32]`, written by [`silence_block`]), or none ([`UnarmedRest`]).
 ///
 /// With a plane a kernel runs [`svf_step`]: one threshold load per frame (per stream-frame in the
 /// cascades) and [`crate::flush_pair`]'s joint term. Without one it runs [`svf_step_when`]`(false,
@@ -47,11 +46,7 @@ use crate::{FLUSH_EPS, Lane, flush, flush_pair_with, flush_with, silence_step};
 /// per channel, plus a whole-block zero scan when a silent or padding lane shares the bank.
 ///
 /// The choice is a type, so each instantiation of a kernel holds one form's frame loop and nothing
-/// else; a caller that runs both forms instantiates its block body twice. Such a caller passes
-/// [`FLUSH_EPS`] as a word it loaded ([`ArmedRest`], [`UnarmedRest`]) rather than letting each
-/// instantiation splat it: on Apple targets each materialised splat constant is a
-/// `memset_pattern16` call (known defect #1018, whose per-crate ceilings `check-cross-targets.sh`
-/// holds).
+/// else; a caller that runs both forms instantiates its block body twice.
 pub trait RestThresholds<L: Lane>: Copy {
     /// The rest plane, or `None` when every threshold is `+0.0` and none is read.
     fn plane(&self) -> Option<&[f32]>;
@@ -59,12 +54,6 @@ pub trait RestThresholds<L: Lane>: Copy {
     /// `base / L::WIDTH`.
     #[must_use]
     fn skip(self, base: usize) -> Self;
-    /// [`FLUSH_EPS`] on every lane, for the per-word law: a splatted constant by default, the
-    /// carried word for [`ArmedRest`] and [`UnarmedRest`].
-    #[inline(always)]
-    fn flush_eps(&self) -> L {
-        L::splat(FLUSH_EPS)
-    }
 }
 
 impl<L: Lane> RestThresholds<L> for &[f32] {
@@ -79,47 +68,12 @@ impl<L: Lane> RestThresholds<L> for &[f32] {
     }
 }
 
-/// The rest plane of a block in which some lane may arm (issue #1328), with [`FLUSH_EPS`] carried
-/// as a word ([`RestThresholds::flush_eps`]). `flush_eps` must be [`FLUSH_EPS`] on every lane.
-#[derive(Clone, Copy)]
-pub struct ArmedRest<'a, L: Lane> {
-    /// The block's rest plane ([`silence_block`]).
-    pub plane: &'a [f32],
-    /// [`FLUSH_EPS`] on every lane.
-    pub flush_eps: L,
-}
-
-impl<L: Lane> RestThresholds<L> for ArmedRest<'_, L> {
-    #[inline(always)]
-    fn plane(&self) -> Option<&[f32]> {
-        Some(self.plane)
-    }
-
-    #[inline(always)]
-    fn skip(self, base: usize) -> Self {
-        Self {
-            plane: &self.plane[base..],
-            ..self
-        }
-    }
-
-    #[inline(always)]
-    fn flush_eps(&self) -> L {
-        self.flush_eps
-    }
-}
-
 /// The rest thresholds of a block in which no lane's joint flush can act (issue #1328): every
-/// threshold is `+0.0`, nothing is loaded, and each SVF step runs the per-word law alone, with
-/// [`FLUSH_EPS`] carried as a word as in [`ArmedRest`]. `flush_eps` must be [`FLUSH_EPS`] on
-/// every lane.
+/// threshold is `+0.0`, nothing is loaded, and each SVF step runs the per-word law alone.
 #[derive(Clone, Copy)]
-pub struct UnarmedRest<L: Lane> {
-    /// [`FLUSH_EPS`] on every lane.
-    pub flush_eps: L,
-}
+pub struct UnarmedRest;
 
-impl<L: Lane> RestThresholds<L> for UnarmedRest<L> {
+impl<L: Lane> RestThresholds<L> for UnarmedRest {
     #[inline(always)]
     fn plane(&self) -> Option<&[f32]> {
         None
@@ -128,11 +82,6 @@ impl<L: Lane> RestThresholds<L> for UnarmedRest<L> {
     #[inline(always)]
     fn skip(self, _base: usize) -> Self {
         self
-    }
-
-    #[inline(always)]
-    fn flush_eps(&self) -> L {
-        self.flush_eps
     }
 }
 
@@ -292,10 +241,9 @@ pub fn svf_block<L: Lane, R: RestThresholds<L>>(
     rest: R,
 ) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let flush_eps = rest.flush_eps();
     match rest.plane() {
-        Some(plane) => svf_block_form::<L, true>(io, c, s, plane, flush_eps),
-        None => svf_block_form::<L, false>(io, c, s, &[], flush_eps),
+        Some(plane) => svf_block_form::<L, true>(io, c, s, plane),
+        None => svf_block_form::<L, false>(io, c, s, &[]),
     }
 }
 
@@ -307,7 +255,6 @@ fn svf_block_form<L: Lane, const ARMED: bool>(
     c: &SvfCoef<L>,
     s: &mut SvfState<L>,
     rest: &[f32],
-    flush_eps: L,
 ) {
     let rest = if ARMED { &rest[..io.len()] } else { rest };
     let mut state = *s;
@@ -315,7 +262,7 @@ fn svf_block_form<L: Lane, const ARMED: bool>(
     for (index, frame) in io.chunks_exact_mut(L::WIDTH).enumerate() {
         let v0 = L::load(frame);
         let threshold = threshold_at::<L, ARMED>(rest, index * L::WIDTH);
-        let (v1, v2) = svf_step_when(ARMED, flush_eps, v0, nc1, c.a2, c.a3, threshold, &mut state);
+        let (v1, v2) = svf_step_when(ARMED, v0, nc1, c.a2, c.a3, threshold, &mut state);
         let y = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
         y.store(frame);
     }
@@ -719,23 +666,12 @@ fn svf_cascade_skewed_impl<
         svf_cascade_interleaved_impl(io, frames, c, s, rest, output, &mut Unobserved);
         return;
     }
-    let flush_eps = rest[0].flush_eps();
     match stream_planes(&rest) {
         None => {
-            svf_cascade_skewed_form::<L, S, D, M, false>(
-                io,
-                frames,
-                c,
-                s,
-                [&[]; S],
-                output,
-                flush_eps,
-            );
+            svf_cascade_skewed_form::<L, S, D, M, false>(io, frames, c, s, [&[]; S], output);
         }
         Some(planes) => {
-            svf_cascade_skewed_form::<L, S, D, M, true>(
-                io, frames, c, s, planes, output, flush_eps,
-            );
+            svf_cascade_skewed_form::<L, S, D, M, true>(io, frames, c, s, planes, output);
         }
     }
 }
@@ -755,7 +691,6 @@ fn svf_cascade_skewed_form<
     s: &mut [[SvfState<L>; D]; S],
     rest: [&[f32]; S],
     output: M,
-    flush_eps: L,
 ) {
     let width = L::WIDTH;
     let span = frames * width;
@@ -785,7 +720,6 @@ fn svf_cascade_skewed_form<
             // reads it in the interleaved body.
             let (v1, v2) = svf_step_when(
                 ARMED,
-                flush_eps,
                 x,
                 nc1[stream][section],
                 coefficients.a2,
@@ -942,7 +876,6 @@ fn svf_cascade_interleaved_impl<
     output: M,
     observer: &mut O,
 ) {
-    let flush_eps = rest[0].flush_eps();
     match stream_planes(&rest) {
         None => svf_cascade_interleaved_form::<L, S, D, M, O, false>(
             io,
@@ -952,10 +885,9 @@ fn svf_cascade_interleaved_impl<
             [&[]; S],
             output,
             observer,
-            flush_eps,
         ),
         Some(planes) => svf_cascade_interleaved_form::<L, S, D, M, O, true>(
-            io, frames, c, s, planes, output, observer, flush_eps,
+            io, frames, c, s, planes, output, observer,
         ),
     }
 }
@@ -978,7 +910,6 @@ fn svf_cascade_interleaved_form<
     rest: [&[f32]; S],
     output: M,
     observer: &mut O,
-    flush_eps: L,
 ) {
     let width = L::WIDTH;
     let span = frames * width;
@@ -1001,7 +932,6 @@ fn svf_cascade_interleaved_form<
                 let coefficients = &c[stream][section];
                 let (v1, v2) = svf_step_when(
                     ARMED,
-                    flush_eps,
                     x,
                     nc1[stream][section],
                     coefficients.a2,
@@ -1078,11 +1008,11 @@ fn svf_cascade_interleaved_form<
 /// follows the per-word law bit for bit.
 #[inline(always)]
 pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, rest: L, s: &mut SvfState<L>) -> (L, L) {
-    svf_step_when(true, L::splat(FLUSH_EPS), v0, nc1, a2, a3, rest, s)
+    svf_step_when(true, v0, nc1, a2, a3, rest, s)
 }
 
-/// [`svf_step`] for a caller that knows, per block, whether any lane's rest threshold can be armed,
-/// and that carries [`FLUSH_EPS`] as a word (issue #1328, amendment A9).
+/// [`svf_step`] for a caller that knows, per block, whether any lane's rest threshold can be armed
+/// (issue #1328, amendment A9).
 ///
 /// `armable = true` is [`svf_step`] bit for bit. `armable = false` is for a block in which no lane's
 /// silence counter can reach `N_SILENCE` ([`crate::silence_armable`]), so every threshold is
@@ -1091,16 +1021,10 @@ pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, rest: L, s: &mut SvfState<
 /// `flush_pair(n1, n2, +0.0)` is `(flush(n1), flush(n2))` (no magnitude and no NaN compares below
 /// `+0.0`) and a lane at rest has nothing for the joint term to zero, and four lane-ops fewer. A frame loop calls it with a block-constant `armable`, so
 /// the compiler unswitches the loop into the two forms.
-///
-/// `flush_eps` must be [`FLUSH_EPS`] on every lane. It is a parameter so that the builtin input
-/// chain, whose bodies run in both forms, can load it from its prepared coefficients
-/// ([`builtins::InputChainConstants`]) instead of splatting it in each copy: on Apple targets a
-/// splatted constant is a `memset_pattern16` call in the render function (known defect #1018).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn svf_step_when<L: Lane>(
     armable: bool,
-    flush_eps: L,
     v0: L,
     nc1: L,
     a2: L,
@@ -1115,9 +1039,9 @@ pub fn svf_step_when<L: Lane>(
     let v2 = s.ic2.add(d2);
     let (n1, n2) = (s.ic1.add(d1.add(d1)), s.ic2.add(d2.add(d2)));
     (s.ic1, s.ic2) = if armable {
-        flush_pair_with(n1, n2, rest, flush_eps)
+        flush_pair(n1, n2, rest)
     } else {
-        (flush_with(n1, flush_eps), flush_with(n2, flush_eps))
+        (flush(n1), flush(n2))
     };
     (v1, v2)
 }
@@ -1190,28 +1114,11 @@ fn svf_block_ramped_impl<L: Lane, R: RestThresholds<L>, M: SvfOutput<L>>(
     output: M,
 ) {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let flush_eps = rest.flush_eps();
     match rest.plane() {
-        Some(plane) => svf_block_ramped_form::<L, M, true>(
-            io,
-            c,
-            step,
-            ramp_frames,
-            s,
-            plane,
-            output,
-            flush_eps,
-        ),
-        None => svf_block_ramped_form::<L, M, false>(
-            io,
-            c,
-            step,
-            ramp_frames,
-            s,
-            &[],
-            output,
-            flush_eps,
-        ),
+        Some(plane) => {
+            svf_block_ramped_form::<L, M, true>(io, c, step, ramp_frames, s, plane, output)
+        }
+        None => svf_block_ramped_form::<L, M, false>(io, c, step, ramp_frames, s, &[], output),
     }
 }
 
@@ -1226,7 +1133,6 @@ fn svf_block_ramped_form<L: Lane, M: SvfOutput<L>, const ARMED: bool>(
     s: &mut SvfState<L>,
     rest: &[f32],
     output: M,
-    flush_eps: L,
 ) {
     let rest = if ARMED { &rest[..io.len()] } else { rest };
     let mut state = *s;
@@ -1234,7 +1140,7 @@ fn svf_block_ramped_form<L: Lane, M: SvfOutput<L>, const ARMED: bool>(
         let nc1 = c.c1.neg();
         let v0 = L::load(frame);
         let threshold = threshold_at::<L, ARMED>(rest, index * L::WIDTH);
-        let (v1, v2) = svf_step_when(ARMED, flush_eps, v0, nc1, c.a2, c.a3, threshold, &mut state);
+        let (v1, v2) = svf_step_when(ARMED, v0, nc1, c.a2, c.a3, threshold, &mut state);
         let wet = c.m2.fma(v2, c.m1.fma(v1, c.m0.mul(v0)));
         let y = output.choose(v0, wet, 0, 0);
         y.store(frame);

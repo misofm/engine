@@ -326,8 +326,8 @@ struct ReferenceMeter {
 // These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi`
 // checks every public type and the queue payload boundary that can be named outside production.
 const GRAPH_NODE_BINDING_BYTES: u64 = 72;
-// #1328 A9: +24 with `InputBuiltins` (704 before).
-const BOXED_INPUT_ENTRY_BYTES: u64 = 728;
+// #1328 A9: +24 with `InputBuiltins` (704 before). #1451: -16 with `InputBuiltins` (728 before).
+const BOXED_INPUT_ENTRY_BYTES: u64 = 712;
 const BOXED_TAIL_ENTRY_BYTES: u64 = 24;
 const BOXED_STR_BYTES: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
@@ -340,7 +340,9 @@ const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 // #1328 amendment A9: +24 (688 before): the input's two `f32` silence counters (8) and the
 // coefficient set's four carried `f32` constants (16, `InputChainConstants`); its `f32`
 // `N_SILENCE` word lands in padding the stage already had.
-const INPUT_PROCESSOR_BYTES: u64 = 712;
+// #1451: -16 (712 before): the four carried constants are splatted again and leave the
+// coefficient set.
+const INPUT_PROCESSOR_BYTES: u64 = 696;
 /// One `StripPreparation`: the whole strip of a track -- input, fader and matrix section -- held
 /// inline in the strip vector until lowering decides whether they bind per node or as bank lanes
 /// (issue #212 for the fader and the matrix, #210 phase 3 for the input).
@@ -356,7 +358,8 @@ const INPUT_PROCESSOR_BYTES: u64 = 712;
 /// projection uses.
 // #808 retains the same additional 416-byte input state inline.
 // #1328 amendment A9: +24 with the input section (1072 before).
-const STRIP_PREPARATION_BYTES: u64 = 1096;
+// #1451: -16 with the input section (1096 before).
+const STRIP_PREPARATION_BYTES: u64 = 1080;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
 // #1080 removed the controlled-activation flag #816 added, so the binding is 80 bytes again.
@@ -5306,7 +5309,11 @@ mod tests {
             // moves in `impulse_dft_magnitude_db` alone (565 of 1,630 rows, at most 3.2e-5 dB, at
             // probes 187 dB down) because the twin's one-second impulse now arms the joint flush
             // after `N_SILENCE` zero samples. No PCM, meter or benchmark fixture moved.
-            "a10fdfef4455f79a33c4881126a27d4a514aecd3324b840bd88811c2ef6c3f2c",
+            // Re-pinned by issue #1451: `resources.jsonl` alone moves, by the four carried `f32`
+            // chain constants leaving the input section's coefficients (-16 bytes per input
+            // stage, counted in the preparation strip and in the bound processor). No PCM, meter,
+            // response or benchmark fixture moved.
+            "ea915297853ead10a64a263405bb885e5bfa9a2ef6b5ec1e0e5ded8b33f1cc64",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

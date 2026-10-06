@@ -223,7 +223,6 @@ fn chain_coef<L: Lane>() -> InputChainCoef<L> {
             [section::<L>(52.0, true), section::<L>(18_200.0, false)],
         ],
         silence: L::splat(lane::silence_frames(48_000) as f32),
-        constants: lane::kernels::builtins::InputChainConstants::new(),
     }
 }
 
@@ -380,7 +379,6 @@ fn every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts() {
             trim: c.trim,
             section: [[identity_section::<L>(); 2]; 2],
             silence: c.silence,
-            constants: c.constants,
         };
         let mut mixed = identity;
         mixed.section[0][1] = section::<L>(17_800.0, false);

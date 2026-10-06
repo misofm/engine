@@ -17,7 +17,7 @@
 
 use crate::Lane;
 use crate::kernels::{SvfCoef, SvfState, silence_skip_block, svf_state_held, svf_step_when};
-use crate::{REST_EPS, silence_armable_holding, silence_step_hoisted};
+use crate::{silence_armable_holding, silence_step};
 
 /// Magnitude at or above which a sample is treated as non-finite by the D7 boundary policy.
 ///
@@ -527,49 +527,6 @@ pub struct InputChainCoef<L: Lane> {
     /// `N_SILENCE` at the chain's rate on every lane ([`crate::silence_frames`], issue #1328
     /// amendment A9): the input's run of zero frames that arms both sections' joint flush.
     pub silence: L,
-    /// The bodies' vector constants, carried as words ([`InputChainConstants`]).
-    pub constants: InputChainConstants<L>,
-}
-
-/// The vector constants of the input chain bodies: [`NONFINITE_LIMIT`], `1.0` (the sanitise and
-/// silence counters' step), [`crate::FLUSH_EPS`] and [`crate::REST_EPS`] on every lane.
-///
-/// Carried in the prepared coefficients and loaded once per block rather than splatted in the
-/// bodies, as the filter-ramp countdown is ([`INPUT_FILTER_LEADING_UPDATES`]): on Apple targets
-/// LLVM stores a splatted constant through a `memset_pattern16` call inside the render function
-/// (known defect #1018, whose per-crate ceilings `check-cross-targets.sh` holds), and each chain
-/// body runs in two copies, one for blocks in which some lane that holds state can arm the joint
-/// flush ([`channel_arms`]) and one for every other block (issue #1328, amendment A9). The words are the constants;
-/// [`InputChainConstants::new`] is the only constructor a caller should use.
-#[derive(Clone, Copy)]
-pub struct InputChainConstants<L: Lane> {
-    /// [`NONFINITE_LIMIT`].
-    pub limit: L,
-    /// `1.0`.
-    pub one: L,
-    /// [`crate::FLUSH_EPS`].
-    pub flush_eps: L,
-    /// [`crate::REST_EPS`].
-    pub rest_eps: L,
-}
-
-impl<L: Lane> InputChainConstants<L> {
-    /// The four constants on every lane.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            limit: L::splat(NONFINITE_LIMIT),
-            one: L::splat(1.0),
-            flush_eps: L::splat(crate::FLUSH_EPS),
-            rest_eps: L::splat(REST_EPS),
-        }
-    }
-}
-
-impl<L: Lane> Default for InputChainConstants<L> {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// The retained state of one dual-mono input chain: the integrators, indexed like
@@ -672,12 +629,10 @@ fn input_chain_block_body<L: Lane>(
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
-    let limit = c.constants.limit;
-    let one = c.constants.one;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let armed_after = c.silence;
-    let rest_on = c.constants.rest_eps;
-    let flush_eps = c.constants.flush_eps;
 
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
@@ -700,7 +655,7 @@ fn input_chain_block_body<L: Lane>(
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
             let rest = if armable {
-                silence_step_hoisted(x, &mut silence[channel], armed_after, one, rest_on)
+                silence_step(x, &mut silence[channel], armed_after)
             } else {
                 zero
             };
@@ -712,7 +667,6 @@ fn input_chain_block_body<L: Lane>(
                 let v0 = v;
                 let (v1, v2) = svf_step_when::<L>(
                     armable,
-                    flush_eps,
                     v0,
                     nc1[channel][section],
                     coefficient.a2,
@@ -833,12 +787,10 @@ fn input_chain_ramp_block_body<L: Lane>(
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
-    let limit = c.constants.limit;
-    let one = c.constants.one;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let armed_after = c.silence;
-    let rest_on = c.constants.rest_eps;
-    let flush_eps = c.constants.flush_eps;
 
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
@@ -868,7 +820,7 @@ fn input_chain_ramp_block_body<L: Lane>(
             current[channel] = trim;
             let x = L::load(frame);
             let rest = if armable {
-                silence_step_hoisted(x, &mut silence[channel], armed_after, one, rest_on)
+                silence_step(x, &mut silence[channel], armed_after)
             } else {
                 zero
             };
@@ -880,7 +832,6 @@ fn input_chain_ramp_block_body<L: Lane>(
                 let v0 = v;
                 let (v1, v2) = svf_step_when::<L>(
                     armable,
-                    flush_eps,
                     v0,
                     nc1[channel][section],
                     coefficient.a2,
@@ -946,12 +897,10 @@ fn input_chain_ramp_block_mono_body<L: Lane>(
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = c.constants.limit;
-    let one = c.constants.one;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let armed_after = c.silence;
-    let rest_on = c.constants.rest_eps;
-    let flush_eps = c.constants.flush_eps;
 
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
@@ -975,7 +924,7 @@ fn input_chain_ramp_block_mono_body<L: Lane>(
         current = trim;
         let x = L::load(frame);
         let rest = if armable {
-            silence_step_hoisted(x, &mut silence, armed_after, one, rest_on)
+            silence_step(x, &mut silence, armed_after)
         } else {
             zero
         };
@@ -987,7 +936,6 @@ fn input_chain_ramp_block_mono_body<L: Lane>(
             let v0 = v;
             let (v1, v2) = svf_step_when::<L>(
                 armable,
-                flush_eps,
                 v0,
                 nc1[section],
                 coefficient.a2,
@@ -1093,12 +1041,10 @@ fn input_chain_ramp_block_filter_body<L: Lane>(
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
-    let limit = c.constants.limit;
-    let one = c.constants.one;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let armed_after = c.silence;
-    let rest_on = c.constants.rest_eps;
-    let flush_eps = c.constants.flush_eps;
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
     let mut state = s.section;
@@ -1130,7 +1076,7 @@ fn input_chain_ramp_block_filter_body<L: Lane>(
             };
             let x = L::load(frame);
             let rest = if armable {
-                silence_step_hoisted(x, &mut silence[channel], armed_after, one, rest_on)
+                silence_step(x, &mut silence[channel], armed_after)
             } else {
                 zero
             };
@@ -1142,7 +1088,6 @@ fn input_chain_ramp_block_filter_body<L: Lane>(
                 let v0 = v;
                 let (v1, v2) = svf_step_when::<L>(
                     armable,
-                    flush_eps,
                     v0,
                     coefficient.c1.neg(),
                     coefficient.a2,
@@ -1346,12 +1291,10 @@ fn input_chain_ramp_block_filter_mono_body<L: Lane>(
     mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = c.constants.limit;
-    let one = c.constants.one;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let armed_after = c.silence;
-    let rest_on = c.constants.rest_eps;
-    let flush_eps = c.constants.flush_eps;
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
     let mut state = s.section[0];
@@ -1375,7 +1318,7 @@ fn input_chain_ramp_block_filter_mono_body<L: Lane>(
         };
         let x = L::load(frame);
         let rest = if armable {
-            silence_step_hoisted(x, &mut silence, armed_after, one, rest_on)
+            silence_step(x, &mut silence, armed_after)
         } else {
             zero
         };
@@ -1387,7 +1330,6 @@ fn input_chain_ramp_block_filter_mono_body<L: Lane>(
             let v0 = v;
             let (v1, v2) = svf_step_when::<L>(
                 armable,
-                flush_eps,
                 v0,
                 coefficient.c1.neg(),
                 coefficient.a2,
@@ -1783,7 +1725,6 @@ fn mixed_chain_block<L: Lane>(
         &mut state[0],
         &mut silence[0],
         c.silence,
-        &c.constants,
         plan.elided[0],
     );
     let (right_count, right_nonfinite) = dispatch_mixed_channel(
@@ -1793,7 +1734,6 @@ fn mixed_chain_block<L: Lane>(
         &mut state[1],
         &mut silence[1],
         c.silence,
-        &c.constants,
         plan.elided[1],
     );
     s.section = state;
@@ -1814,7 +1754,6 @@ fn dispatch_mixed_channel<L: Lane>(
     state: &mut [SvfState<L>; 2],
     silence: &mut L,
     armed_after: L,
-    constants: &InputChainConstants<L>,
     shape: [bool; 2],
 ) -> (L, L::Mask) {
     #[cfg(test)]
@@ -1831,7 +1770,6 @@ fn dispatch_mixed_channel<L: Lane>(
             state,
             silence,
             armed_after,
-            constants,
             shape,
         )
     } else {
@@ -1844,7 +1782,6 @@ fn dispatch_mixed_channel<L: Lane>(
             state,
             silence,
             armed_after,
-            constants,
             shape,
         )
     }
@@ -1861,7 +1798,6 @@ fn dispatch_mixed_shape<L: Lane>(
     state: &mut [SvfState<L>; 2],
     silence: &mut L,
     armed_after: L,
-    constants: &InputChainConstants<L>,
     shape: [bool; 2],
 ) -> (L, L::Mask) {
     match shape {
@@ -1873,7 +1809,6 @@ fn dispatch_mixed_shape<L: Lane>(
             state,
             silence,
             armed_after,
-            constants,
         ),
         [true, false] => mixed_channel_block::<L, true, false>(
             armable,
@@ -1883,7 +1818,6 @@ fn dispatch_mixed_shape<L: Lane>(
             state,
             silence,
             armed_after,
-            constants,
         ),
         [false, true] => mixed_channel_block::<L, false, true>(
             armable,
@@ -1893,7 +1827,6 @@ fn dispatch_mixed_shape<L: Lane>(
             state,
             silence,
             armed_after,
-            constants,
         ),
         [true, true] => mixed_channel_block::<L, true, true>(
             armable,
@@ -1903,7 +1836,6 @@ fn dispatch_mixed_shape<L: Lane>(
             state,
             silence,
             armed_after,
-            constants,
         ),
     }
 }
@@ -1920,12 +1852,9 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
     state: &mut [SvfState<L>; 2],
     silence: &mut L,
     armed_after: L,
-    constants: &InputChainConstants<L>,
 ) -> (L, L::Mask) {
-    let limit = constants.limit;
-    let one = constants.one;
-    let rest_on = constants.rest_eps;
-    let flush_eps = constants.flush_eps;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
@@ -1934,7 +1863,7 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let x = L::load(frame);
         let rest = if armable {
-            silence_step_hoisted(x, &mut counted, armed_after, one, rest_on)
+            silence_step(x, &mut counted, armed_after)
         } else {
             zero
         };
@@ -1948,7 +1877,6 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
             let v0 = v;
             let (v1, v2) = svf_step_when::<L>(
                 armable,
-                flush_eps,
                 v0,
                 nc1[0],
                 coefficient.a2,
@@ -1965,7 +1893,6 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
             let v0 = v;
             let (v1, v2) = svf_step_when::<L>(
                 armable,
-                flush_eps,
                 v0,
                 nc1[1],
                 coefficient.a2,
@@ -2034,12 +1961,10 @@ fn input_chain_block_mono_body<L: Lane>(
     s: &mut InputChainState<L>,
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = c.constants.limit;
-    let one = c.constants.one;
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
     let zero = L::zero();
     let armed_after = c.silence;
-    let rest_on = c.constants.rest_eps;
-    let flush_eps = c.constants.flush_eps;
 
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
@@ -2053,7 +1978,7 @@ fn input_chain_block_mono_body<L: Lane>(
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let x = L::load(frame);
         let rest = if armable {
-            silence_step_hoisted(x, &mut silence, armed_after, one, rest_on)
+            silence_step(x, &mut silence, armed_after)
         } else {
             zero
         };
@@ -2065,7 +1990,6 @@ fn input_chain_block_mono_body<L: Lane>(
             let v0 = v;
             let (v1, v2) = svf_step_when::<L>(
                 armable,
-                flush_eps,
                 v0,
                 nc1[section],
                 coefficient.a2,
@@ -2137,7 +2061,6 @@ fn mixed_chain_block_mono<L: Lane>(
         &mut state,
         &mut silence,
         c.silence,
-        &c.constants,
         plan.elided[0],
     );
     s.section[0] = state;
@@ -2328,7 +2251,6 @@ mod mixed_elision_tests {
             trim: [L::splat(1.0); 2],
             section: [[coefficient; 2]; 2],
             silence: L::splat(crate::silence_frames(48_000) as f32),
-            constants: InputChainConstants::new(),
         };
         for frames in [0, 1, 17] {
             for pairing in 0..16 {
@@ -2371,7 +2293,6 @@ mod mixed_elision_tests {
             trim: [f32::splat(1.0); 2],
             section: [[identity; 2]; 2],
             silence: crate::silence_frames(48_000) as f32,
-            constants: InputChainConstants::new(),
         };
         let plan = InputChainPlan {
             elided: [[true, true], [true, true]],

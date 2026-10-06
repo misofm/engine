@@ -104,7 +104,6 @@ fn chain_coef<L: Lane>(sections: &[[[Design; MAX_WIDTH]; 2]; 2]) -> InputChainCo
         // A short silence window (issue #1328, amendment A9), so the corpus's zero runs arm the
         // joint flush inside a block and every body's threshold is compared, armed and not.
         silence: L::splat(3.0),
-        constants: lane::kernels::builtins::InputChainConstants::new(),
     }
 }
 
@@ -730,7 +729,6 @@ fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
             trim: [L::splat(1.0); 2],
             section: [[identity; 2]; 2],
             silence: L::splat(3.0),
-            constants: lane::kernels::builtins::InputChainConstants::new(),
         };
         let plan = InputChainPlan {
             elided: [[true, true], [true, true]],

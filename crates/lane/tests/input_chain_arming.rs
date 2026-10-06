@@ -22,10 +22,10 @@
 use lane::Lane;
 use lane::kernels::SvfCoef;
 use lane::kernels::builtins::{
-    InputChainCoef, InputChainConstants, InputChainPlan, InputChainState, InputTrimRamp,
-    input_chain_block, input_chain_block_elided, input_chain_block_mono,
-    input_chain_block_mono_elided, input_chain_ramp_block, input_chain_ramp_block_filter,
-    input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono,
+    InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp, input_chain_block,
+    input_chain_block_elided, input_chain_block_mono, input_chain_block_mono_elided,
+    input_chain_ramp_block, input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
+    input_chain_ramp_block_mono,
 };
 
 /// Frames per block.
@@ -105,7 +105,6 @@ fn chain<L: Lane>(entry: Entry, window: f32) -> InputChainCoef<L> {
         trim: [L::splat(1.0); 2],
         section: [[first, second]; 2],
         silence: L::splat(window),
-        constants: InputChainConstants::new(),
     }
 }
 

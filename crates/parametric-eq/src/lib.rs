@@ -57,8 +57,8 @@ use effect_runtime::state_payload as payload;
 use effect_runtime::svf::{NORM_TOLERANCE, RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use engine::{SampleRateHz, is_launch_sample_rate};
 use lane::kernels::{
-    ArmedRest, RestThresholds, SvfCoef, SvfCoefStep, SvfState, UnarmedRest, silence_advance,
-    silence_block, silence_skip_block, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
+    RestThresholds, SvfCoef, SvfCoefStep, SvfState, UnarmedRest, silence_advance, silence_block,
+    silence_skip_block, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
     svf_cascade_interleaved_bounded, svf_cascade_interleaved_with_dry_masks_bounded,
     svf_cascade_skewed, svf_cascade_skewed_with_dry_masks, svf_state_held,
 };
@@ -2978,11 +2978,6 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// issue #1328). A block on which no lane needs the joint rule ([`Channel::arms`]) writes and
     /// reads neither: it runs the cascades' unarmed form ([`RestThresholds`]).
     rest: [Box<[f32]>; 2],
-    /// [`lane::FLUSH_EPS`] on every lane, carried as a word for the cascades' per-word flush
-    /// ([`ArmedRest`], [`UnarmedRest`]): a splatted constant in each kernel form would be a `memset_pattern16`
-    /// call on Apple targets (known defect #1018), and the EQ's kernels run in two forms (issue
-    /// #1328).
-    flush_eps: L,
 }
 
 /// `true` when the silence counter `run` of every lane has reached `N_SILENCE - 1`: on an
@@ -3137,7 +3132,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         // counters advance without a frame loop of thresholds.
         let armed_block =
             self.left.arms(frames, armed_after) || self.right.arms(frames, armed_after);
-        let flush_eps = self.flush_eps;
         let within = if armed_block {
             let [rest_left, rest_right] = &mut self.rest;
             silence_block::<L>(
@@ -3154,8 +3148,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 &mut rest_right[..words],
                 armed_after,
             );
-            let rest = [&rest_left[..words], &rest_right[..words]]
-                .map(|plane| ArmedRest { plane, flush_eps });
+            let rest = [&rest_left[..words], &rest_right[..words]];
             process_channels(
                 (&mut self.left, &mut self.right),
                 left,
@@ -3173,7 +3166,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 right,
                 frames,
                 stationary,
-                [UnarmedRest { flush_eps }; 2],
+                [UnarmedRest; 2],
             )
         };
         for (index, (channel, block)) in
@@ -3236,15 +3229,14 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             self.left.state_bits(&mut before_left);
         }
         // As in `render`: the armed form only on a block where some lane needs the joint rule.
-        let flush_eps = self.flush_eps;
         let within = if self.left.arms(frames, armed_after) {
             let plane = &mut self.rest[0][..words];
             silence_block::<L>(left, frames, &mut self.left.silence, plane, armed_after);
-            let rest = ArmedRest { plane, flush_eps };
+            let rest: &[f32] = plane;
             process_channels_mono(&mut self.left, left, frames, stationary, rest)
         } else {
             silence_skip_block::<L>(left, frames, &mut self.left.silence);
-            let rest = UnarmedRest { flush_eps };
+            let rest = UnarmedRest;
             process_channels_mono(&mut self.left, left, frames, stationary, rest)
         };
         if !within.unwrap_or_else(|| check_block::<L>(left)) {
@@ -3480,7 +3472,6 @@ fn prepare_width<L: Lane, const W: usize>(
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
             vec![0.0; metadata.quantum as usize * W].into_boxed_slice(),
         ],
-        flush_eps: L::splat(lane::FLUSH_EPS),
     })
 }
 

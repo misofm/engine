@@ -1068,7 +1068,6 @@ impl<L: Lane> InputStage<L> {
                 [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
             ],
             silence: L::splat(tracks[0].silence_frames as f32),
-            constants: lane::kernels::builtins::InputChainConstants::new(),
         };
         let state = InputChainState::default();
         // `InputChainState::default()` is `+0.0` in every word, so a bank whose designs are all

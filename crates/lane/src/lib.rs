@@ -235,15 +235,7 @@ pub const fn silence_frames(sample_rate_hz: u32) -> u32 {
 /// becomes `+0.0`.
 #[inline(always)]
 pub fn flush<L: Lane>(x: L) -> L {
-    flush_with(x, L::splat(FLUSH_EPS))
-}
-
-/// [`flush`] with [`FLUSH_EPS`] supplied by the caller as a word, `flush_eps`, which must be
-/// [`FLUSH_EPS`] on every lane: for a kernel that loads its constants from memory instead of
-/// splatting them in the frame loop (known defect #1018; [`kernels::svf_step_when`]).
-#[inline(always)]
-pub fn flush_with<L: Lane>(x: L, flush_eps: L) -> L {
-    x.andnot(x.abs().lt(flush_eps))
+    x.andnot(x.abs().lt(L::splat(FLUSH_EPS)))
 }
 
 /// One frame of an effect input's silence counter (issue #1328, amendment A9): advances the
@@ -271,17 +263,9 @@ pub fn flush_with<L: Lane>(x: L, flush_eps: L) -> L {
 /// lane whose input is live carries `+0.0`, below which no magnitude lies.
 #[inline(always)]
 pub fn silence_step<L: Lane>(x: L, run: &mut L, armed_after: L) -> L {
-    silence_step_hoisted(x, run, armed_after, L::splat(1.0), L::splat(REST_EPS))
-}
-
-/// [`silence_step`] with its two constants, `one = splat(1.0)` and `rest_on = splat(REST_EPS)`,
-/// supplied by the caller: a kernel splats them once per block, outside its frame loop, because a
-/// splat inside the loop is a `memset_pattern16` call per frame on Apple targets (#1018).
-#[inline(always)]
-pub fn silence_step_hoisted<L: Lane>(x: L, run: &mut L, armed_after: L, one: L, rest_on: L) -> L {
-    let counted = L::select(x.eq(L::zero()), run.add(one), L::zero());
+    let counted = L::select(x.eq(L::zero()), run.add(L::splat(1.0)), L::zero());
     *run = counted;
-    rest_on.andnot(counted.lt(armed_after))
+    L::splat(REST_EPS).andnot(counted.lt(armed_after))
 }
 
 /// `true` when some lane's silence counter `run` can reach `armed_after` ([`silence_frames`])
@@ -367,13 +351,7 @@ pub fn silence_armable_holding<L: Lane>(
 /// per channel by [`silence_step`]. Branch-free, one generic body at every width.
 #[inline(always)]
 pub fn flush_pair<L: Lane>(n1: L, n2: L, rest: L) -> (L, L) {
-    flush_pair_with(n1, n2, rest, L::splat(FLUSH_EPS))
-}
-
-/// [`flush_pair`] with [`FLUSH_EPS`] supplied by the caller as a word, `flush_eps`, which must be
-/// [`FLUSH_EPS`] on every lane ([`flush_with`]'s reason).
-#[inline(always)]
-pub fn flush_pair_with<L: Lane>(n1: L, n2: L, rest: L, flush_eps: L) -> (L, L) {
+    let flush_eps = L::splat(FLUSH_EPS);
     let a1 = n1.abs();
     let a2 = n2.abs();
     let joint = a1.max_u32(a2).lt(rest);
