@@ -34,7 +34,7 @@
 //!
 //! # Ramps
 //!
-//! [`write_ramp`], [`read_ramp`] and [`ramp_path_within`] carry a [`LinearRamp`] as four words,
+//! [`write_ramp`], [`read_ramp`] and [`ramp_path_inside`] carry a [`LinearRamp`] as four words,
 //! its step included, so a restored mid-flight ramp continues bit for bit (#1278).
 //!
 //! # Endianness
@@ -268,33 +268,18 @@ pub fn read_ramp(bytes: &[u8], word: usize) -> LinearRamp {
     }
 }
 
-/// Whether every value a restored ramp can take lies in `[low - slack, high + slack]`: its
+/// Whether every value a restored ramp can take lies in the closed interval `[low, high]`: its
 /// `current` and `target`, and each value its remaining steps visit before the snap to the target,
-/// iterated exactly as [`LinearRamp::next_value`] iterates them ([`ramp_path_inside`] decides it
-/// from the endpoints, issue #1409 D2).
+/// iterated exactly as [`LinearRamp::next_value`] iterates them.
 ///
-/// A ramp also needs `remaining <= max_remaining` and a
-/// finite step, and a settled ramp (`remaining == 0`) must carry the `+0.0` step that
-/// [`LinearRamp::fixed`], [`LinearRamp::snap`], [`LinearRamp::set_target`] and the last
-/// [`LinearRamp::next_value`] all write.
+/// A ramp also needs `remaining <= max_remaining` and a finite step, and a settled ramp
+/// (`remaining == 0`) must carry the `+0.0` step that [`LinearRamp::fixed`], [`LinearRamp::snap`],
+/// [`LinearRamp::set_target`] and the last [`LinearRamp::next_value`] all write.
 ///
-/// `slack` is a rounding budget for an effect whose own iterated ramps may round a few ulps past
-/// an endpoint; it is not a domain widening. The check reads nothing but its argument and allocates
-/// nothing, so a restore may run it on the render thread.
-#[must_use]
-pub fn ramp_path_within(
-    ramp: LinearRamp,
-    (low, high): (f32, f32),
-    slack: f32,
-    max_remaining: u32,
-) -> bool {
-    ramp_path_inside(ramp, (low - slack, high + slack), max_remaining)
-}
-
-/// Whether every value a restored ramp can take lies in the closed interval `[low, high]`, with
-/// the same `remaining` and step rules as [`ramp_path_within`]. For an effect whose
-/// rounding budget is one-sided: a smoother coefficient, for example, may round a few ulps above
-/// its top but never below zero, where the recurrence diverges.
+/// `[low, high]` is the word's strict domain or designed range, with no rounding budget: under the
+/// clamped law no engine ramp word leaves its endpoints (issue #1409 D2), so a word outside the
+/// range is one the engine never holds (issue #1411 D1). The check reads nothing but its argument
+/// and allocates nothing, so a restore may run it on the render thread.
 ///
 /// # Why the endpoints decide the whole path (issue #1409 D2)
 ///

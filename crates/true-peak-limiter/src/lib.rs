@@ -3956,20 +3956,6 @@ const fn state_error(code: &'static str) -> StatePayloadError {
     StatePayloadError { code }
 }
 
-/// The `[minimum, maximum]` a **moving** coefficient's path may occupy, with a 64-ulp relaxation.
-///
-/// A ramped `current` lies mathematically between two in-domain coefficients, but the iterated
-/// `current + step` of D11 rounds at each of up to 63 additions before the snap, and a ramp only a
-/// few hundred ulps long ends past an endpoint by more than four ulps: #1278 found a ceiling ramp
-/// to -24 dB whose own snapshot a four-ulp budget refused. The relaxation is that rounding budget
-/// and applies only to the values a moving ramp visits (`ramp_path_inside`): a target and a
-/// settled coefficient are designed values and are held to the unrelaxed range, so no payload can
-/// set a ceiling above the effect's own.
-fn coefficient_bounds(low: f32, high: f32) -> (f32, f32) {
-    let slack = 64.0 * f32::EPSILON;
-    (low - low.abs() * slack, high + high.abs() * slack)
-}
-
 // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// Writes one channel of one track into `bytes`, physical ring order.
 fn snapshot_lane(
@@ -4082,13 +4068,14 @@ fn read_lane(
             step: read_f32(bytes, word + 2),
             remaining: read_u32(bytes, word + 3),
         };
-        // The target and a settled current are designed values, inside the range exactly; a
-        // moving ramp's every value up to the snap stays inside the relaxed path bounds, which
-        // also bounds its step. `ramp_path_inside` checks `remaining` first, so the walk is
-        // bounded by `RAMP_UPDATES`, and a settled ramp's step must be `+0.0`.
+        // The target and a settled current are designed values, inside the range exactly. A
+        // moving current lies between two designed values under the clamped law (issue #1409
+        // D2), so it is held to the same range, with no rounding budget (issue #1411 D1).
+        // `ramp_path_inside` also bounds `remaining` by `RAMP_UPDATES`, and a settled ramp's step
+        // must be `+0.0`.
         if !(low..=high).contains(&read.target)
             || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
-            || !ramp_path_inside(read, coefficient_bounds(low, high), RAMP_UPDATES)
+            || !ramp_path_inside(read, (low, high), RAMP_UPDATES)
         {
             return Err(state_error("effect.state.parameter"));
         }
@@ -7606,7 +7593,7 @@ mod tests {
         let reference = snapshot(peer.as_ref());
         type Corruption = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
         // #1278 attempt 2: a target and a settled coefficient are held to the designed range
-        // exactly, and a moving ramp's whole path to its relaxed bounds. A finite step no longer
+        // exactly, and so is a moving ramp's current (issue #1411 D1). A finite step no longer
         // walks a moving ramp past its bounds: the clamped ramp stays between its restored
         // `current` and its target (issue #1409 D2).
         let above_ceiling = f32::from_bits(limit_coefficient(0.0).to_bits() + 1);
@@ -7697,6 +7684,123 @@ mod tests {
         // A one-byte-short section is rejected.
         let short = vec![0_u8; sizes.left_bytes as usize - 4];
         assert!(StatePayloadInput::new(&reference.0, &short, &reference.2, sizes).is_err());
+    }
+
+    /// Issue #1411 D1: a ramp word one ulp outside its range is refused even while the ramp
+    /// moves. From the effect's own snapshot with both ramps in flight (the limit coefficient from
+    /// the ceiling and the release coefficient, on both channels), each left ramp's `current` in
+    /// turn is written one ulp outside each edge of its designed range (`read_lane`'s `[low,
+    /// high]`). The restore refuses it with `effect.state.parameter` and leaves the scalar instance
+    /// and a bank track unchanged; the same payload with `current` on the edge restores. Red when
+    /// `read_lane` widens a moving coefficient's bounds (the deleted `coefficient_bounds`).
+    #[test]
+    fn a_moving_ramp_word_past_its_domain_is_refused() {
+        let values = initial_values();
+        let mut effect = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        let spans: Vec<PreparedAutomationSpan> = [(0_u32, -9.5_f32), (1, 420.0)]
+            .into_iter()
+            .flat_map(|(parameter, value)| {
+                [ParameterChannel::Left, ParameterChannel::Right]
+                    .map(|channel| point_span(0, parameter, channel, value))
+            })
+            .collect();
+        let mut left = [0.25_f32; 8];
+        let mut right = [-0.125_f32; 8];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128).expect("block"),
+        );
+        let saved = snapshot(effect.as_ref());
+        let sizes = effect.metadata().state_sizes;
+        let ramps = [
+            (
+                words::LIMIT_RAMP,
+                (limit_coefficient(-24.0), limit_coefficient(0.0)),
+            ),
+            (
+                words::RELEASE_RAMP,
+                (
+                    release_coefficient(2000.0, 48_000),
+                    release_coefficient(10.0, 48_000),
+                ),
+            ),
+        ];
+        for (word, _) in ramps {
+            assert_ne!(
+                read_u32(&saved.1, word + 3),
+                0,
+                "ramp at word {word} is in flight"
+            );
+        }
+        let with_current = |word: usize, current: f32| {
+            let mut sections = saved.clone();
+            write_f32(&mut sections.1, word, current);
+            sections
+        };
+        fn input(
+            sections: &(Vec<u8>, Vec<u8>, Vec<u8>),
+            sizes: StatePayloadSizes,
+        ) -> StatePayloadInput<'_> {
+            StatePayloadInput::new(&sections.0, &sections.1, &sections.2, sizes).expect("sizes")
+        }
+
+        let mut bank = BankWidth::for_backend(Backend::current()).map(|width| {
+            let members = vec![initial_values(); width.lanes() as usize];
+            let mut bank = bank_for(&members, LinkMode::DualMono, width, Backend::current());
+            bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, sizes))
+                .expect("the scalar snapshot restores into a bank track");
+            bank
+        });
+        let bank_saved = bank.as_ref().map(|bank| snapshot_track(bank.as_ref(), 0));
+
+        for (word, (low, high)) in ramps {
+            for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
+                let case = format!(
+                    "word {word}: current {outside:e} ({:#010x})",
+                    outside.to_bits()
+                );
+                let crafted = with_current(word, outside);
+                assert_eq!(
+                    effect
+                        .restore_state_payload(STATE_LAYOUT_VERSION, input(&crafted, sizes))
+                        .map_err(|error| error.code),
+                    Err("effect.state.parameter"),
+                    "{case}"
+                );
+                assert_eq!(snapshot(effect.as_ref()), saved, "{case}");
+                if let (Some(bank), Some(bank_saved)) = (bank.as_mut(), bank_saved.as_ref()) {
+                    assert_eq!(
+                        bank.restore_track_state_payload(
+                            0,
+                            STATE_LAYOUT_VERSION,
+                            input(&crafted, sizes)
+                        )
+                        .map_err(|error| error.code),
+                        Err("effect.state.parameter"),
+                        "bank {case}"
+                    );
+                    assert_eq!(&snapshot_track(bank.as_ref(), 0), bank_saved, "bank {case}");
+                }
+                let crafted = with_current(word, edge);
+                effect
+                    .restore_state_payload(STATE_LAYOUT_VERSION, input(&crafted, sizes))
+                    .unwrap_or_else(|error| panic!("{case}: on the edge: {}", error.code));
+                effect
+                    .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, sizes))
+                    .expect("own snapshot");
+                if let Some(bank) = bank.as_mut() {
+                    bank.restore_track_state_payload(
+                        0,
+                        STATE_LAYOUT_VERSION,
+                        input(&crafted, sizes),
+                    )
+                    .unwrap_or_else(|error| panic!("bank {case}: on the edge: {}", error.code));
+                    bank.restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, sizes))
+                        .expect("own snapshot");
+                }
+            }
+        }
     }
 
     #[test]

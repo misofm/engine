@@ -52,7 +52,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_within, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
 };
 use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
@@ -1654,11 +1654,10 @@ fn normal_or_zero(value: f32) -> bool {
 /// Reads and validates one ramp, its step carried verbatim (#1278 D2a).
 ///
 /// The payload holds the whole `LinearRamp`, so the restored ramp continues with the step the
-/// snapshotted instance carries rather than one re-derived from an iterated `current`. The target,
-/// and a settled current, must lie in `spec`'s domain; a moving ramp's every remaining value is
-/// held to that domain with a 64-ulp rounding budget (`ramp_path_within`), because a ramp toward
-/// an edge may round a few ulps past it and the effect must accept its own snapshot. Allocates
-/// nothing.
+/// snapshotted instance carries rather than one re-derived from an iterated `current`. The target
+/// and the current, moving or settled, must lie in `spec`'s strict domain (`ramp_path_inside`):
+/// the clamped law keeps every word between the ramp's start and its target (issue #1409 D2), so a
+/// word past the domain is one the engine never holds (issue #1411 D1). Allocates nothing.
 fn read_carried_ramp(
     bytes: &[u8],
     word: usize,
@@ -1666,11 +1665,9 @@ fn read_carried_ramp(
 ) -> Result<LinearRamp, StatePayloadError> {
     let read = read_ramp(bytes, word);
     let (low, high) = (spec.minimum, spec.maximum);
-    let slack = 64.0 * f32::EPSILON * low.abs().max(high.abs());
-    let current_valid = read.remaining != 0 || parameter_value_valid(spec, read.current);
-    if !current_valid
+    if !parameter_value_valid(spec, read.current)
         || !parameter_value_valid(spec, read.target)
-        || !ramp_path_within(read, (low, high), slack, RAMP_SAMPLES)
+        || !ramp_path_inside(read, (low, high), RAMP_SAMPLES)
         || (read.remaining == 0 && read.current != read.target)
     {
         return Err(state_error("effect.state.parameter"));
@@ -2788,7 +2785,7 @@ mod tests {
     /// `remaining` past the 64-sample ramp, and a settled ramp that still carries a step. (A finite
     /// step of any size no longer leaves the domain: the clamped ramp stays between its restored
     /// `current` and its target, issue #1409 D2.) Each must be refused with the effect unchanged. Red
-    /// when `read_carried_ramp` drops its `ramp_path_within` clause, which every other delay test
+    /// when `read_carried_ramp` drops its `ramp_path_inside` clause, which every other delay test
     /// survives.
     #[test]
     fn a_carried_ramp_is_refused_unless_its_whole_path_is_valid() {
@@ -2845,6 +2842,116 @@ mod tests {
                 valid,
                 "{row}: a refused restore wrote state"
             );
+        }
+    }
+
+    /// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp
+    /// moves. From the effect's own snapshot with all seven ramps in flight (each lane's feedback,
+    /// damping coefficient and mix, and the shared cross feedback), the left lane's three ramps and
+    /// the cross ramp in turn get a `current` one ulp outside each edge of their domain (the
+    /// damping ramp's is the coefficient's, `[0, damping_coefficient_max]`). The restore refuses it
+    /// with `effect.state.parameter` and leaves the effect unchanged; the same payload with
+    /// `current` on the edge restores. The delay renders per node, so there is no bank hook. Red
+    /// when `read_carried_ramp` domain-checks `current` only at rest or keeps a rounding budget.
+    #[test]
+    fn a_moving_ramp_word_past_its_domain_is_refused() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let mut spans = Vec::new();
+        for parameter in 1..=3_u32 {
+            let spec = &PARAMETER_SPECS[parameter as usize];
+            let value = spec.minimum + 0.37 * (spec.maximum - spec.minimum);
+            assert_ne!(value, spec.default, "parameter {parameter}");
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                spans.push(point(parameter, channel, 0, value));
+            }
+        }
+        let cross = &PARAMETER_SPECS[4];
+        spans.push(point(
+            4,
+            ParameterChannel::Both,
+            0,
+            cross.minimum + 0.37 * (cross.maximum - cross.minimum),
+        ));
+        let mut left = [0.25_f32; 8];
+        let mut right = [-0.125_f32; 8];
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128).expect("block"),
+        );
+        let saved = snapshot(&effect);
+        let sizes = effect.metadata.state_sizes;
+        let damping_max = damping_coefficient_max(48_000);
+        // (section: 0 common, 1 left; word of `current`; domain)
+        let words = [
+            (0_usize, 1_usize, (cross.minimum, cross.maximum)),
+            (
+                1,
+                LANE_RAMP_WORD,
+                (PARAMETER_SPECS[1].minimum, PARAMETER_SPECS[1].maximum),
+            ),
+            (1, LANE_RAMP_WORD + RAMP_WORDS, (0.0, damping_max)),
+            (
+                1,
+                LANE_RAMP_WORD + 2 * RAMP_WORDS,
+                (PARAMETER_SPECS[3].minimum, PARAMETER_SPECS[3].maximum),
+            ),
+        ];
+        for (section, word, _) in words {
+            let bytes = if section == 0 { &saved.0 } else { &saved.1 };
+            assert_ne!(
+                read_u32(bytes, word + 3),
+                0,
+                "ramp at word {word} is in flight"
+            );
+        }
+        for (section, word, (low, high)) in words {
+            for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
+                let case = format!(
+                    "section {section} word {word}: current {outside:e} ({:#010x})",
+                    outside.to_bits()
+                );
+                let with = |current: f32| {
+                    let mut sections = saved.clone();
+                    let bytes = if section == 0 {
+                        &mut sections.0
+                    } else {
+                        &mut sections.1
+                    };
+                    write_f32(bytes, word, current);
+                    sections
+                };
+                let crafted = with(outside);
+                let refused = effect.restore_state_payload(
+                    1,
+                    StatePayloadInput::new(&crafted.0, &crafted.1, &crafted.2, sizes)
+                        .expect("payload shape"),
+                );
+                assert_eq!(
+                    refused.map_err(|error| error.code),
+                    Err("effect.state.parameter"),
+                    "{case}"
+                );
+                assert_eq!(
+                    snapshot(&effect),
+                    saved,
+                    "{case}: a refused restore wrote state"
+                );
+                let crafted = with(edge);
+                effect
+                    .restore_state_payload(
+                        1,
+                        StatePayloadInput::new(&crafted.0, &crafted.1, &crafted.2, sizes)
+                            .expect("payload shape"),
+                    )
+                    .unwrap_or_else(|error| panic!("{case}: on the edge: {}", error.code));
+                effect
+                    .restore_state_payload(
+                        1,
+                        StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes)
+                            .expect("payload shape"),
+                    )
+                    .expect("own snapshot");
+            }
         }
     }
 }

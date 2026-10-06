@@ -55,7 +55,7 @@ use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_within, read_f32, read_u32, write_f32,
+    STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_inside, read_f32, read_u32, write_f32,
     write_u32,
 };
 use lane::kernels::{SvfState, ramp_toward, svf_step};
@@ -1428,21 +1428,21 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
         // and has no increment. A payload that says otherwise would have the segment driver add a
         // stale step to a resting parameter for ever.
         //
-        // #1278: the effect's own mid-ramp snapshot must restore. A moving `current` is an
-        // iterated `current + step` that may round a few ulps past a domain edge, and the step of
-        // a ramp a few ulps long near zero is subnormal, so a moving ramp is held to its whole
-        // remaining path within a 64-ulp rounding budget rather than to the strict domain.
+        // #1278: the effect's own mid-ramp snapshot must restore. The step of a ramp a few ulps
+        // long near zero is subnormal, so the step is held only to be finite. The target and the
+        // `current`, moving or settled, are held to the strict domain: the clamped law keeps every
+        // word between the ramp's start and its target (issue #1409 D2), so a word past the
+        // domain is one the engine never holds (issue #1411 D1).
         let spec = &SPECS[index + 1];
-        let slack = 64.0 * f32::EPSILON * spec.minimum.abs().max(spec.maximum.abs());
         let read = LinearRamp {
             current,
             target,
             step,
             remaining,
         };
-        if (remaining == 0 && !parameter_state_valid(index + 1, current))
+        if !parameter_state_valid(index + 1, current)
             || !parameter_state_valid(index + 1, target)
-            || !ramp_path_within(read, (spec.minimum, spec.maximum), slack, SMOOTHING_SAMPLES)
+            || !ramp_path_inside(read, (spec.minimum, spec.maximum), SMOOTHING_SAMPLES)
             || (remaining == 0 && current.to_bits() != target.to_bits())
         {
             return Err(state_error("effect.state.parameter"));

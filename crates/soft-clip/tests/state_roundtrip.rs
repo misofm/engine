@@ -467,8 +467,8 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     bad(43, 1, "effect.state.history");
     // #1071 accepts only the subnormals the effect can hold: never in the flushed `X` history,
     // never as a gain (the gains' converted range starts at -24 dB). Word 0 is the in-flight drive
-    // ramp's current: a subnormal there is outside the range and far off the ramp's own line, so
-    // the overshoot allowance (#1071 attempt 2) does not admit it.
+    // ramp's current: a subnormal there is outside the converted range, which holds an in-flight
+    // current as it holds one at rest (issue #1411 D1).
     bad(12, 1, "effect.state.history");
     bad(0, 1, "effect.state.parameter");
     // `X` may hold an infinity (an overflowed `2 * drive * x`), and `X`, `e` and dry may hold a
@@ -476,9 +476,9 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     bad(43, f32::INFINITY.to_bits(), "effect.state.history");
     bad(43, f32::NEG_INFINITY.to_bits(), "effect.state.history");
 
-    // The overshoot allowance is for in-flight ramps only (#1071 attempt 2 review, MINOR-2). An
-    // output at rest at its +24 dB top with its current one ulp above the top: a ramp at rest
-    // holds exactly its target, so this is never the effect's own word.
+    // An output at rest at its +24 dB top with its current one ulp above the top: a ramp at rest
+    // holds exactly its target, so this is never the effect's own word (#1071 attempt 2 review,
+    // MINOR-2; the in-flight case is `a_moving_ramp_word_past_its_domain_is_refused`).
     let top = values_from([(6.0, -6.0), (24.0, 3.0), (1.0, 0.5)]);
     let mut at_rest = support::snapshot(prepare(&top).as_ref());
     assert_eq!(word(&at_rest.1, 7), 0, "the output ramp is at rest");
@@ -491,8 +491,8 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
         }),
         "an output at rest one ulp above its top"
     );
-    // And `-0.0` is never a current, even on an in-flight mix ramp toward `0.0` whose line is
-    // within the tolerance of zero: a mix from 40 subnormal units to zero, 48 frames in.
+    // And `-0.0` is never a current, even on an in-flight mix ramp toward `0.0`: a mix from 40
+    // subnormal units to zero, 48 frames in.
     let subnormal = values_from([(6.0, -6.0), (0.0, 3.0), (f32::from_bits(40), 0.5)]);
     let mut source = prepare(&subnormal);
     let mut left = vec![0.25_f32; 48];
@@ -557,4 +557,117 @@ fn both_resets_are_word_exact() {
 
     effect.reset(ResetKind::FullToDefaults);
     assert_eq!(support::snapshot(effect.as_ref()), fresh);
+}
+
+/// Issue #1411 D1: a ramp word one ulp outside its converted range is refused even while the ramp
+/// moves, and even when it lies on its own ramp's line.
+///
+/// From the effect's own snapshot with all three ramps in flight (drive, output and mix, on both
+/// channels), each left ramp in turn is rewritten to a one-sample ramp onto an edge of its
+/// converted range (`target` the edge, `step` the exact one-ulp distance, `remaining` 1), with its
+/// `current` one ulp outside that edge: the point `target - remaining * step` itself, which the
+/// old overshoot allowance (#1071 attempt 2) admitted. The restore refuses it with
+/// `effect.state.parameter` and leaves the scalar instance and a bank track unchanged; the same
+/// payload with `current` on the edge restores. Red when `decode_lane_words` admits an in-flight
+/// `current` outside the converted range again.
+#[test]
+fn a_moving_ramp_word_past_its_domain_is_refused() {
+    let values = values_from([(6.0, -6.0), (0.0, 3.0), (1.0, 0.5)]);
+    let mut effect = prepare(&values);
+    let mut left: Vec<f32> = (0..8).map(|index| signal(index, 0)).collect();
+    let mut right: Vec<f32> = (0..8).map(|index| signal(index, 1)).collect();
+    let targets = [(18.0, -12.0), (-6.0, 9.0), (0.25, 0.75)];
+    let spans: Vec<_> = targets
+        .iter()
+        .enumerate()
+        .flat_map(|(parameter, (left, right))| {
+            [
+                support::point(parameter as u32, ParameterChannel::Left, *left, 0),
+                support::point(parameter as u32, ParameterChannel::Right, *right, 0),
+            ]
+        })
+        .collect();
+    process(effect.as_mut(), &mut left, &mut right, 0, &spans);
+    let saved = support::snapshot(effect.as_ref());
+    for parameter in 0..3 {
+        assert!(
+            word(&saved.1, parameter * 4 + 3) > 0,
+            "ramp {parameter} is in flight"
+        );
+    }
+    let parameters = soft_clip::SOFT_CLIP_PARAMETERS;
+    let converted = |parameter: usize, value: f32| {
+        if parameter < 2 {
+            math::db_to_gain_f32(value)
+        } else {
+            value
+        }
+    };
+    let ramp = |parameter: usize, current: f32, target: f32| {
+        let mut sections = saved.clone();
+        let base = parameter * 16;
+        for (offset, bits) in [
+            current.to_bits(),
+            target.to_bits(),
+            (target - current).to_bits(),
+            1,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sections.1[base + offset * 4..base + offset * 4 + 4]
+                .copy_from_slice(&bits.to_le_bytes());
+        }
+        sections
+    };
+
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
+    let per_lane: Vec<Vec<_>> = (0..width.lanes()).map(|_| values.to_vec()).collect();
+    let mut bank = prepare_bank(width, &per_lane).expect("bank binds");
+    bank.restore_track_state_payload(0, 1, as_input(&saved))
+        .expect("the scalar snapshot restores into a bank track");
+    let bank_saved = support::snapshot_bank(bank.as_ref(), 0);
+
+    for (parameter, row) in parameters.iter().enumerate() {
+        let low = converted(parameter, row.minimum.expect("min"));
+        let high = converted(parameter, row.maximum.expect("max"));
+        for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
+            let case = format!(
+                "ramp {parameter}: current {outside:e} ({:#010x})",
+                outside.to_bits()
+            );
+            let crafted = ramp(parameter, outside, edge);
+            assert_eq!(
+                effect.restore_state_payload(1, as_input(&crafted)),
+                Err(StatePayloadError {
+                    code: "effect.state.parameter"
+                }),
+                "{case}"
+            );
+            assert_eq!(support::snapshot(effect.as_ref()), saved, "{case}");
+            assert_eq!(
+                bank.restore_track_state_payload(0, 1, as_input(&crafted)),
+                Err(StatePayloadError {
+                    code: "effect.state.parameter"
+                }),
+                "bank {case}"
+            );
+            assert_eq!(
+                support::snapshot_bank(bank.as_ref(), 0),
+                bank_saved,
+                "bank {case}"
+            );
+            let crafted = ramp(parameter, edge, edge);
+            effect
+                .restore_state_payload(1, as_input(&crafted))
+                .unwrap_or_else(|error| panic!("{case}: on the edge: {}", error.code));
+            effect
+                .restore_state_payload(1, as_input(&saved))
+                .expect("own snapshot");
+            bank.restore_track_state_payload(0, 1, as_input(&crafted))
+                .unwrap_or_else(|error| panic!("bank {case}: on the edge: {}", error.code));
+            bank.restore_track_state_payload(0, 1, as_input(&saved))
+                .expect("own snapshot");
+        }
+    }
 }

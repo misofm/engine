@@ -200,8 +200,16 @@ the probe evidence are named exceptions for this slice, recorded in
    `EffectDifferential::assert_edge_ramps_restore`), is red again on its mutant. A mutant reverts
    #1409's clamp to the old update `current + step` (or the site's start-plus-steps form) at that
    effect's render sites, the #1409 Context numbering:
-   - delay (`crates/delay/tests/randomized.rs`): site 7, `delay_chunk` (feedback, mix, damping `g`
-     and the shared cross feedback; the parameters #1301's M18 caught);
+   - delay (`crates/delay/tests/randomized.rs`): site 2, `LinearRamp::next_value` and
+     `advance_block`'s first-frame word as the delay's `chunk_of` (and its cross ramp) reaches them
+     (feedback, mix and the shared cross feedback; the parameters #1301's M18 caught). **Root
+     correction (2026-10-05), not a weakening:** this row first named site 7, `delay_chunk`, whose
+     words are render-local copies of the ramps for one chunk and never reach the payload; the
+     snapshot writes `DelayLane::ramps` and the cross `LinearRamp`, which site 2 advances. With site
+     7 reverted the probe stays green (0 and 0, per pull request and full), so it cannot be this
+     probe's mutant; site 7 stays gated by #1409's delay `tests/ramp_endpoint.rs` (its gate 2). With
+     site 2 reverted the probe is red, 24 and 24 refusals (feedback 8, mix 8, cross feedback 8),
+     lists byte-identical (attempt 1 record);
    - compressor (`crates/compressor/tests/randomized.rs`): site 4, `RampVec::advance_where`, and
      site 2 as the compressor's `Channel::advance_ramps` reaches it (`LinearRamp::next_value` and
      `advance_block`'s first-frame word);
@@ -245,4 +253,111 @@ the probe evidence are named exceptions for this slice, recorded in
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (implementer, 2026-10-05)
+
+**Change (D1-D3, D5).** Restore only; no render code, state layout, payload word or digest table
+changed (D4).
+
+- `crates/effect-runtime/src/state_payload.rs`: `ramp_path_within` deleted; the module doc names
+  `ramp_path_inside`, whose doc now carries the `remaining`/step rules and states that `[low, high]`
+  is the strict domain or designed range with no rounding budget (#1409 D2, #1411 D1).
+- Compressor `validate_channel`: every parameter `current` is held by `parameter_state_valid`
+  (domain and `-0.0`) whether or not the ramp moves, and `ramp_path_inside` takes the strict
+  domain; the rate coefficients hold `current` to `(0, 1]` whatever `remaining`, path bounds
+  `(0.0, 1.0)`.
+- Gate `parse_lane`: the `resting &&` qualifier and the slack are gone (`ramp_path_inside`).
+- Multiband, delay `read_carried_ramp`, transient shaper `read_lane`: `current` is domain-checked
+  whatever `remaining`; `ramp_path_inside` with the strict domain.
+- Limiter: `coefficient_bounds` deleted; `read_lane` passes `(low, high)`.
+- Soft clip: `ramp_current_valid` and `ulp_at` deleted; `decode_lane_words` calls
+  `converted_value_valid` for `current`, as for the target. `converted_value_valid`'s and
+  `decode_lane_words`' docs rewritten (the "not closed under render" paragraph went with the
+  function: under the clamped law a restored in-range ramp stays in range).
+- Every comment and doc that stated the slack or the overshoot cites #1409 D2 / #1411 D1,
+  including the limiter's restore-corruption comment, the delay's
+  `a_carried_ramp_is_refused_unless_its_whole_path_is_valid` doc (now `ramp_path_inside`), the
+  compressor payload test doc of `a_coefficient_below_zero_or_above_its_design_is_refused`, three
+  comments of soft clip's `a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word`,
+  and `crates/compressor/tests/MUTATIONS.md`'s `payload` row (authorized by root after attempt 1's
+  first hand-back; it said `[0, 1 + 64 ulps]`).
+- D5: delay M18 deleted; M19 names `ramp_path_inside`. No new ledger row.
+
+**Gate 1** (`a_moving_ramp_word_past_its_domain_is_refused`, seven tests: compressor
+`tests/payload.rs`, gate `tests/state.rs`, multiband `tests/product.rs`, transient
+`tests/contract.rs`, soft clip `tests/state_roundtrip.rs`, delay and limiter `src/lib.rs` test
+modules). Each automates every ramped parameter on both channels at sample 0 (shared cross feedback
+on the delay) and renders 8 frames, asserts every ramp word is in flight, then for each ramp of the
+left section (and the delay's common cross ramp) and each edge writes `current` one ulp outside:
+`effect.state.parameter`, the scalar snapshot unchanged, and for the banking effects the same on a
+native-width bank track that first restored the scalar snapshot; `current` on the edge restores in
+both. Ramps covered: compressor 7 parameters and both rate coefficients (designed `(0, 1]`: the
+first word outside below is `0.0`, the edge word `f32::from_bits(1)`); gate 4; multiband 10;
+transient 3; delay feedback, damping coefficient `[0, damping_coefficient_max(48 kHz)]`, mix, cross
+feedback (no bank: the delay renders per node); limiter limit and release coefficients over
+`read_lane`'s bounds; soft clip drive, output (converted gains `db_to_gain_f32` of the dB edges) and
+mix, each rewritten as a one-sample ramp onto the edge (`target` the edge, `step` the exact one-ulp
+difference, `remaining` 1) so `current = target - remaining * step` lies exactly on its line, which
+the old allowance admitted.
+
+Mutation (each site's old rule restored alone, its test run, reverted; scratch script):
+
+| Site reverted | Red |
+| --- | --- |
+| compressor parameters (moving `current` exempt, 64-ulp path) | `ramp 0: current -8.000001e1 (0xc2a00001)` restores |
+| compressor coefficients (`[0, 1 + 64 ulps]`, settled-only design check) | `ramp 7: current 0e0` restores |
+| gate (`resting &&`, 64-ulp path) | `ramp 0: current -8.000001e1` restores |
+| multiband (settled-only domain, 64-ulp path) | `ramp 0: current -8.000001e1` restores |
+| delay (`remaining != 0 ||`, 64-ulp path) | `section 0 word 1: current -1e-45 (0x80000001)` (cross feedback) |
+| transient (`remaining != 0 ||`, 64-ulp path) | `ramp 0: current -1.0000001e0` restores |
+| limiter (`coefficient_bounds`) | `word 7: current 5.623413e-2 (0x3d6655c2)` |
+| soft clip (`ramp_current_valid` with `64 * ulp(2 * high)`) | `ramp 0: current 6.3095726e-2 (0x3d813855)` |
+
+All green after revert. Test value: a reader that keeps or re-adds a rounding budget, or exempts a
+moving `current` from the domain, admits a word one ulp outside it; no earlier row wrote a moving
+`current` outside the domain.
+
+**Deleted.** `ramp_path_within`, `coefficient_bounds`, `ramp_current_valid`, `ulp_at`; delay M18.
+No test was deleted.
+
+**Gate 2.** Green: the six `the_effects_own_edge_ramp_snapshots_restore` per pull request and with
+`MISO_ENGINE_RANDOMIZED_SCALE=1`, soft clip's `a_restored_near_edge_ramp_continues_bit_for_bit`
+(both runs), and every existing mid-ramp restore continuation and round-trip test (in the gate 4
+commands, debug and release). No digest table moved; no bit moved.
+
+**Gate 3** (PR evidence; mutants applied by a scratch script, one at a time, on the combined tree;
+"refused" = lines `its own snapshot is refused`):
+
+| Probe | Mutant (#1409 site reverted to `current + step`) | Per PR | Full | Lists identical | After revert |
+| --- | --- | --- | --- | --- | --- |
+| compressor | site 4 `RampVec::advance_where` and site 2 (`next_value`, `advance_block` first word) | red, 56 | red, 56 | yes | green |
+| gate | site 5 `RAMPING` prologue | red, 32 | red, 32 | yes | green |
+| multiband | site 6 `run_segment` | red, 80 | red, 80 | yes | green |
+| limiter | site 9 `RampLanes::advance` | red, 4 | red, 4 | no (see below) | green |
+| transient | site 2 | red, 24 | red, 24 | yes | green |
+| delay | site 2, through `chunk_of` (root correction above) | red, 24 | red, 24 | yes | green |
+
+Per parameter: compressor threshold, ratio, knee, attack, release, makeup, mix 8 each (two edges at
+four rates); gate threshold, ratio, range, hysteresis 8 each; multiband the ten band parameters 8
+each; transient attack amount, sustain amount, mix 8 each; delay feedback, mix, cross feedback 8
+each; limiter `ceiling` 4 (toward -24 dB from `0xc1bfffdf`, one per rate). The limiter's two lists
+name the same four ramps and differ only in the first refused sample (per pull request 62, 62, 56,
+60; full 54 at every rate): the probe stops each ramp at its first refusal, and the per-PR
+position set does not hold sample 54. Site 7 (`ramp_word` back to `value + step`) was also run: 0 and 0, green; its words are
+render-local and never reach the payload (the root correction in gate 3).
+
+**Gates.**
+- `cargo test --locked --all-targets` on the gate 4 package list: pass, debug and `--release`.
+- `MISO_ENGINE_RANDOMIZED_SCALE=1 cargo test --locked ... --test randomized` (seven crates): pass.
+- `test-debug-a` and `test-debug-b` workspace commands: pass.
+- `conformance_fixtures -- --check`: pass.
+- `check-effect-runtime-policy.sh`, `test-effect-runtime-policy.sh .`, `check-realtime-policy.sh`,
+  `check-workspace-policy.sh`: pass.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`:
+  pass.
+- `bash scripts/run-wasm-gates.sh` (native, simd128, V8 spill gate): pass.
+- Worklet chain (the readers are in the browser module): `build-web-audioworklet.sh --named-twin`,
+  `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`: pass.
+- `check-cross-targets.sh`: pass; no ceiling touched.
+
+**Open items.** None for this slice.

@@ -12,6 +12,7 @@ use effect_contract::{
 };
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 
+use compressor::COMPRESSOR_PARAMETERS;
 use support::{
     CURRENT, REMAINING, STATE_HEADER_WORDS, STATE_VERSION, STEP, TARGET, bind_bank, initial_values,
     native_bank_width, noise, prepare, ramp_word, render_scalar, request, restore, restore_track,
@@ -389,11 +390,11 @@ fn an_active_attack_restore_continues_one_partition_invariant_coefficient_path()
     );
 }
 
-/// A smoother coefficient is held to `(0, 1]` where it is a designed value (a target, a settled
-/// current) and its moving path to `[0, 1 + 64 ulps]` (#1278 attempts 2 and 3): the smoother
-/// `y += c (x - y)` diverges for every `c < 0` and freezes at `c = 0`, which no legal time designs,
-/// so no rounding budget may reach below zero. A settled release coefficient of `-1e-6` once made
-/// the gain reduction run away over seconds, and one of `0.0` held it for as long.
+/// A smoother coefficient is held to its designed range `(0, 1]`, as a target and as a current,
+/// moving or settled (#1278 attempts 2 and 3; issue #1411 dropped the moving current's 64-ulp
+/// budget): the smoother `y += c (x - y)` diverges for every `c < 0` and freezes at `c = 0`, which
+/// no legal time designs. A settled release coefficient of `-1e-6` once made the gain reduction run
+/// away over seconds, and one of `0.0` held it for as long.
 #[test]
 fn a_coefficient_below_zero_or_above_its_design_is_refused() {
     // The release coefficient ramp follows the seven parameter ramps.
@@ -439,6 +440,148 @@ fn a_coefficient_below_zero_or_above_its_design_is_refused() {
         &right,
     )
     .expect("a moving path that stays inside [0, 1] restores");
+}
+
+/// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp moves.
+///
+/// From the effect's own snapshot with every ramp in flight (all seven parameters and both rate
+/// coefficients), each ramp's `current` in turn is written one ulp outside each edge of its
+/// domain (the coefficients' designed range `(0, 1]`, whose first word outside below is `0.0`).
+/// The restore refuses it with `effect.state.parameter` and leaves the scalar instance and a bank
+/// track unchanged; the same payload with `current` on the edge restores. Red when a reader keeps
+/// a rounding budget for a moving `current`, or exempts it from the domain.
+#[test]
+fn a_moving_ramp_word_past_its_domain_is_refused() {
+    const COEFFICIENTS: usize = 2;
+    let values = initial_values();
+    let mut effect = prepare(request(&values));
+    let spans: Vec<(u64, PreparedAutomationSpan)> = COMPRESSOR_PARAMETERS
+        .iter()
+        .enumerate()
+        .flat_map(|(index, row)| {
+            let (low, high) = (row.minimum.expect("min"), row.maximum.expect("max"));
+            let value = low + 0.37 * (high - low);
+            assert_ne!(value, row.default_value, "{}", row.display_name);
+            [ParameterChannel::Left, ParameterChannel::Right]
+                .map(|channel| (0, point(index as u32, channel, value)))
+        })
+        .collect();
+    let mut left = noise(8, 0x14_11_00_01, 0.5);
+    let mut right = noise(8, 0x14_11_00_02, 0.5);
+    render_scalar(effect.as_mut(), &mut left, &mut right, 8, 128, &spans);
+    let saved = snapshot(effect.as_ref());
+    let mut words: Vec<(usize, f32, f32, f32, f32)> = COMPRESSOR_PARAMETERS
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let (low, high) = (row.minimum.expect("min"), row.maximum.expect("max"));
+            (index, low.next_down(), low, high, high.next_up())
+        })
+        .collect();
+    for index in 0..COEFFICIENTS {
+        words.push((
+            COMPRESSOR_PARAMETERS.len() + index,
+            0.0,
+            f32::from_bits(1),
+            1.0,
+            1.0_f32.next_up(),
+        ));
+    }
+    for (index, ..) in &words {
+        assert!(
+            read_u32(&saved.0, ramp_word(*index, REMAINING)) > 0,
+            "ramp {index} is in flight"
+        );
+    }
+    let with_current = |index: usize, current: f32| {
+        let mut section = saved.0.clone();
+        write_f32(&mut section, ramp_word(index, CURRENT), current);
+        section
+    };
+
+    let width = native_bank_width();
+    let mut bank = width.map(|(_, width)| {
+        let requests: Vec<_> = (0..width.lanes()).map(|_| request(&values)).collect();
+        let mut bank = bind_bank(&requests).expect("bank");
+        restore_track(
+            bank.as_mut(),
+            0,
+            STATE_VERSION,
+            &saved.0,
+            &saved.1,
+            effect.as_ref(),
+        )
+        .expect("the scalar snapshot restores into a bank track");
+        bank
+    });
+    let bank_saved = bank
+        .as_ref()
+        .map(|bank| snapshot_track(bank.as_ref(), 0, effect.as_ref()));
+
+    for (index, below, low, high, above) in words {
+        for (outside, edge) in [(below, low), (above, high)] {
+            let case = format!(
+                "ramp {index}: current {outside:e} ({:#010x})",
+                outside.to_bits()
+            );
+            let section = with_current(index, outside);
+            assert_eq!(
+                restore(effect.as_mut(), STATE_VERSION, &section, &saved.1)
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "{case}"
+            );
+            assert_eq!(snapshot(effect.as_ref()), saved, "{case}");
+            if let (Some(bank), Some(bank_saved)) = (bank.as_mut(), bank_saved.as_ref()) {
+                assert_eq!(
+                    restore_track(
+                        bank.as_mut(),
+                        0,
+                        STATE_VERSION,
+                        &section,
+                        &saved.1,
+                        effect.as_ref()
+                    )
+                    .expect_err(&case)
+                    .code,
+                    "effect.state.parameter",
+                    "bank {case}"
+                );
+                assert_eq!(
+                    &snapshot_track(bank.as_ref(), 0, effect.as_ref()),
+                    bank_saved,
+                    "bank {case}"
+                );
+            }
+            let section = with_current(index, edge);
+            restore(effect.as_mut(), STATE_VERSION, &section, &saved.1)
+                .unwrap_or_else(|error| panic!("ramp {index}: current {edge:e}: {}", error.code));
+            restore(effect.as_mut(), STATE_VERSION, &saved.0, &saved.1).expect("own snapshot");
+            if let Some(bank) = bank.as_mut() {
+                restore_track(
+                    bank.as_mut(),
+                    0,
+                    STATE_VERSION,
+                    &section,
+                    &saved.1,
+                    effect.as_ref(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("bank ramp {index}: current {edge:e}: {}", error.code)
+                });
+                restore_track(
+                    bank.as_mut(),
+                    0,
+                    STATE_VERSION,
+                    &saved.0,
+                    &saved.1,
+                    effect.as_ref(),
+                )
+                .expect("own snapshot");
+            }
+        }
+    }
 }
 
 /// Every preparation-legal parameter value survives a round trip, including a subnormal.
