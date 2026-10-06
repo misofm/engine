@@ -149,3 +149,30 @@ CI job catches today.
   and its release scale are #1407's gate 4.
 
 ## Attempt record
+
+### Attempt 1 (2026-10-06, implementer; on `codex/d15-stream-g` at `4e41b6296`)
+
+- **Change.** D1 exactly: one new step in `qualification.yml`'s `test-release`, directly after
+  `Lane and math gates ... in release` and before the loom step that sets its own
+  `CARGO_TARGET_DIR`. No new job, so no router or verdict change. `nightly.yml` and
+  `filter_liveness.rs` are not edited (D2 not triggered locally; D3).
+- **Gate 1 (local).** The D1 command exits 0 with `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs ... ok`.
+  The target now holds **15** tests, not 14: #1407's follow-up added gate 8
+  (`every_lane_steps_exactly_four_words_from_its_own_countdown`) to the same binary; all 15 pass.
+  The PR-run half of gate 1 is open until the batch push.
+- **Gate 2 (local measurement; x86-64, 32 hardware threads, release dependencies already built).**
+  - `--no-run` (the test crate and its fat-LTO link only): 13.3 s.
+  - Whole `--test filter_liveness` target (15 tests in parallel): 19.8 s wall (test harness
+    19.72 s).
+  - The sweep alone (`--exact`): 19.9 s wall; gate 8 alone: 0.1 s. The sweep stays the target's
+    critical path, so gate 8 adds no measurable wall time.
+  - The local total (about 33 s) is well inside D1's budget. The PR-run step time,
+    `test-release`'s job time and that run's slowest required job are open until the batch push;
+    D2 applies if the step exceeds 240 s or `test-release` exceeds the slowest required job.
+- **Gate 3.** `python3 -B scripts/check-ci-path-routing.py`, `python3 -B
+  scripts/test-ci-path-routing.py`, `python3 -B scripts/check-test-support-ci.py`, `python3 -B
+  scripts/test-test-support-ci.py` and `bash scripts/check-workspace-policy.sh` exit 0. Also
+  green: `python3 -B scripts/test-script-reachability.py`, `bash
+  scripts/check-artifact-evidence-leak.sh` and a YAML parse of the workflow (`actionlint` is not
+  installed on the host). The verdict's expectation table is unchanged.
+- **Gate 4.** Open until the batch push (CI cannot run locally).

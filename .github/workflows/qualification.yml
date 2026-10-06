@@ -665,6 +665,11 @@ jobs:
       # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
         run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
+      # #1407 gate 4: the release scale of the reachable-word sweep (every launch rate, quanta
+      # 1-63, 22 histories x 512 blocks). test-debug-b runs only its debug subset (48 kHz, quanta
+      # {1, 2, 7, 63}).
+      - name: Live input filter reachable-word sweep (filter_liveness) in release
+        run: cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness
       # #1044: the step above runs M3 (`m3_determinism`) with FMA on, because `.cargo/config.toml`
       # builds every x86-64 target with +avx2,+fma and `lane` refuses to compile without both. The
       # retired "Math M3 digests on an FMA-enabled build" step replaced those flags with +fma alone,
