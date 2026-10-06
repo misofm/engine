@@ -1666,14 +1666,16 @@ of a block of `F` frames and zero after it left `(F - 1 - k)` rounded to `f32`; 
 a legal though absurd quantum that the builtins' all-identity bodies reach; the word was
 non-canonical (the EQ's decoder refuses a count past saturation, the builtins carry it across a
 swap), and a debug build would overflow `i32` at `2^31` frames. Now `scanned: usize`, and both leave
-paths write `L::splat(scanned.min(1 << 24) as f32)`: one scalar `min` on the leave path only. For
-every block of up to `2^24 + 2` frames `scanned` is at most `2^24 + 1`, which `as f32` already rounds
+paths write `trailing_count::<L>(scanned)`, a small inlined helper that is
+`L::splat(core::cmp::min(scanned, 1 << 24) as f32)` (an integer `min`; `check-lane-policy.sh`
+refused the method spelling `scanned.min(..)` as a per-target float method): one scalar `min` on
+the leave path only. For every block of up to `2^24 + 2` frames `scanned` is at most `2^24 + 1`, which `as f32` already rounds
 to `2^24`, so the clamp moves no bit there.
 
 Test: `crates/lane/tests/g4_flush.rs::g4_silence_skip_block_saturates_a_long_trailing_count`, one
 `f32`-width block of `2^24 + 3` frames, non-zero on frame 0 only, against the frame loop (two planes
-of 64 MiB; 1.1 s debug, 0.1 s release). Mutation run: the clamp reverted (`L::splat(scanned as
-f32)`) -> **red** (`left: 1266679809` = `0x4b800001`, `right: 1266679808`); restored -> green.
+of 64 MiB; 1.1 s debug, 0.1 s release). Mutation run (on both spellings): the clamp reverted
+(`L::splat(scanned as f32)`) -> **red** (`left: 1266679809` = `0x4b800001`, `right: 1266679808`); restored -> green.
 Test value: a scan count that does not saturate where the frame loop's does; the existing
 `g4_silence_skip_block_is_the_frame_loop` blocks are at most 129 frames, so none reaches the clamp.
 

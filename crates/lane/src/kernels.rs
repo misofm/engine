@@ -353,7 +353,6 @@ fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L
     // `trailing`: a lane that has left the scan holds its trailing count, every other lane `+0.0`.
     let mut open = ends_silent;
     let mut trailing = L::zero();
-    // A count written from `scanned` saturates at `2^24`, as `silence_block`'s `run + 1` does.
     let mut scanned: usize = 1;
     let mut quads = input[..(frames - 1) * L::WIDTH].rchunks_exact(4 * L::WIDTH);
     for quad in &mut quads {
@@ -365,7 +364,7 @@ fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L
             // Some lane leaves within these four frames: resolve them latest first.
             for &zero in z.iter().rev() {
                 let leaves = L::mask_and(open, L::mask_not(zero));
-                trailing = L::select(leaves, L::splat(scanned.min(1 << 24) as f32), trailing);
+                trailing = L::select(leaves, trailing_count::<L>(scanned), trailing);
                 open = L::mask_and(open, zero);
                 scanned += 1;
             }
@@ -380,13 +379,21 @@ fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L
     for frame in quads.remainder().rchunks_exact(L::WIDTH) {
         let zero = L::load(frame).eq(L::zero());
         let leaves = L::mask_and(open, L::mask_not(zero));
-        trailing = L::select(leaves, L::splat(scanned.min(1 << 24) as f32), trailing);
+        trailing = L::select(leaves, trailing_count::<L>(scanned), trailing);
         open = L::mask_and(open, zero);
         scanned += 1;
     }
     let mut advanced = *run;
     silence_advance(&mut advanced, frames);
     *run = L::select(open, advanced, trailing);
+}
+
+/// A trailing count of `scanned` zero frames as a counter word: saturated at `2^24`, as
+/// [`silence_block`]'s `run + 1` saturates, so a block longer than `2^24 + 2` frames leaves the
+/// canonical word.
+#[inline(always)]
+fn trailing_count<L: Lane>(scanned: usize) -> L {
+    L::splat(core::cmp::min(scanned, 1 << 24) as f32)
 }
 
 /// Advances a silence counter over `frames` frames of exactly-zero input without a frame loop:
