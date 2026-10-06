@@ -312,3 +312,114 @@ this issue lands on `main` as it is.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-06; base `af1c55a20`)
+
+**Change** (`crates/host-core/src/spectrum.rs` only):
+
+- D1: `const SPECTRUM_RESULT_SLOTS: usize = 1;` builds the capture queue
+  (`prepare_capture_with_handle`) and the resource-estimate queue
+  (`spectrum_capture_resources_for_id_bytes`), and caps every drain.
+- D2: `cancel`, `commit_continuous` and `stop_continuous` each drain with
+  `available_at_entry().min(SPECTRUM_RESULT_SLOTS)` and a `for` of bounded pops, in place of the
+  `while`. `cancel` is that drain, then `reset_after_cancel()` (today's tail, moved unchanged).
+- D3: `try_read_continuous_record` reads the count in place, runs `for _ in 0..available` over the
+  same four arms, and returns `Warming`/`Pending` after the loop. `continuous_available_at_entry`
+  is deleted (no other caller, no test called it).
+- D4: `try_read_record` unchanged.
+- D9: private `SpectrumCaptureCollection::cancel_except(keep)`, two loops (drain, then reset), in
+  its own place after `SpectrumCaptureCollection::cancel`. `cancel` is `self.cancel_except(None)`;
+  `select` calls `self.cancel_except(Some(index))` where its loop stood.
+- Tests: `racing_capture` and `assert_drain_pops_at_most_its_entry_count` (helpers),
+  `cancel_pops_at_most_its_entry_count_while_a_producer_refills`,
+  `continuous_restart_pops_at_most_its_entry_count_while_a_producer_refills`,
+  `continuous_stop_pops_at_most_its_entry_count_while_a_producer_refills` (D7, 20,000 blocks each,
+  on `bench_support::producer::render_while_producing`, with the three ordering conditions written
+  in the helper's comments), and `collection_cancel_except_drains_every_capture_but_the_kept_one`
+  (D9). D8: no new test; `bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop`
+  already holds the shape (see the mutations below). No test was superseded.
+
+**Gate 1.** `cargo test --locked -p host-core --lib spectrum`: 41 passed. `cargo test --locked -p
+host-core`: every binary ok (lib 68 passed). `cargo test --locked -p host-web --features
+test-support`: ok (lib 186 passed, 2 ignored, as before).
+
+Mutation evidence (each applied alone to the change, then reverted; the file was restored byte for
+byte, checked with `cmp`):
+
+| Mutation | Test | Result |
+|---|---|---|
+| `cancel_except`: drain loop removed | `collection_cancel_except_drains_every_capture_but_the_kept_one` | red (capture 0 still queued) |
+| `cancel_except`: `keep` check removed from the drain loop | same | red (capture 1's record drained) |
+| `try_read_continuous_record`: stale-record arm removed | `bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop` | red |
+| `try_read_continuous_record`: post-loop status always `Pending` | same | red (`Warming` expected) |
+| each D2 drain back to `while .. try_pop().is_ok() {}` | its D7 test | red (gate 2, the parent's code) |
+
+**Gate 2** (red on the parent's code; 32-CPU host, debug test profile, `cargo test --locked -p
+host-core --lib spectrum::tests::<name>` ten times each, with only the new tests applied to
+`af1c55a20`):
+
+| Test | Failed runs of 10 | Failure |
+|---|---|---|
+| `cancel_pops_at_most_its_entry_count_while_a_producer_refills` | 1 | block 14242: popped 2, saw 1 at entry |
+| `continuous_restart_pops_at_most_its_entry_count_while_a_producer_refills` | 2 | blocks 999 and 5351: popped 2, saw 1 |
+| `continuous_stop_pops_at_most_its_entry_count_while_a_producer_refills` | 1 | block 6577: popped 2, saw 1 |
+
+On the change: 0 failed runs of 10 for each. Run time per test (20,000 blocks): 160-300 ms.
+The failure rate is low because the producer must copy a 16 KiB record into the slot between the
+drain's pop and its next emptiness check; the tests were not lengthened or tuned.
+
+**Gate 3.** Export of the change (`git ls-files` of `crates hosts tools scripts` from the working
+tree), one function marked at a time in place of its surrounding blank lines,
+`bash scripts/check-realtime-policy.sh`:
+
+- `cancel`: `realtime policy: ok (90 marked regions in 25 files)`
+- `try_read_record`: `realtime policy: ok (90 marked regions in 25 files)`
+- `commit_continuous`: `realtime policy: ok (90 marked regions in 25 files)`
+- `stop_continuous`: `realtime policy: ok (90 marked regions in 25 files)`
+- `try_read_continuous_record`: `realtime policy: ok (90 marked regions in 25 files)`
+- `cancel_except`: `realtime policy: ok (90 marked regions in 25 files)`
+- `cancel_except` only, with `1418-attempt2-check-realtime-policy.sh` (its floors are 25 files and
+  90 regions, which the one added marker meets): `realtime policy: ok (90 marked regions in 25
+  files)`.
+- Control: the same marker around `cancel` on `af1c55a20` is refused,
+  `crates/host-core/src/spectrum.rs:510: while self.consumer.try_pop().is_ok() {}` /
+  `marked realtime unbounded try_pop drain`.
+
+**Gate 4** (local; the batch's `qualification` run is still owed). Head and base built with
+`scripts/build-web-audioworklet.sh --named-twin`:
+
+- shipped module `9b2b1a0f..` (base) -> `465b78a8..` (head): ARTIFACT CHANGED, as expected.
+- `strip-wasm-names.py check`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts` (digests and exact rows agree; self-test 32 red
+  mutations), `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh`, the V8 spill
+  gate (self-test and module) and `run-wasm-gates.sh --without-v8-spill --without-native` (142
+  cases, 0 mismatches): all pass.
+- Browser legs, `npm run qualify -- --artifacts <head> --sdk-root sdk --browser <b>
+  --check-matrix --self-test-mutations`: chromium 151.0.7922.34, firefox 153.0, webkit 26.5, each
+  `all qualification gates passed`. No fixture, pin or expected digest was edited.
+- Function-level comparison of the named twins (`wasm-objdump -d`, calls mapped to normalised
+  callee names, the 1418-probes `mtr-closure-offset-cmp.py` parser): 2,694 -> 2,695 functions.
+  The only new function is `SpectrumCaptureCollection::cancel_except`. The only changed bodies are
+  `SpectrumCapture::{cancel, commit_continuous, restart_continuous, stop_continuous}` and
+  `SpectrumCaptureCollection::{cancel, select, start_continuous, start_continuous_with_hop,
+  stop_continuous, restart_continuous}` (inlining of the changed drains moved between them).
+  `try_read_continuous_record` compiled to identical code. The render closure
+  (`miso_engine_web_v1_render`, 25 functions) is identical.
+- Data section: same size (100,279 bytes); 36 bytes differ, all in the `line` field of 30
+  `core::panic::Location` records whose file is `crates/host-core/src/spectrum.rs` (line deltas
+  +2, +28, +49, +53). No column or file field changed.
+
+**Gate 5.** `cargo fmt --all -- --check`, `cargo clippy --locked -p host-core --all-targets -- -D
+warnings`, `bash scripts/check-realtime-policy.sh` (`ok (89 marked regions in 25 files)`), `bash
+scripts/check-workspace-policy.sh` and `bash scripts/check-cross-targets.sh` (PASS): all exit 0.
+AArch64 runs only in CI.
+
+*Test value.*
+- Each D7 test: red if its drain pops past the count it read at entry (the `while` chase of a
+  refilling producer); no existing test runs a producer during a drain.
+- D9's test: red if `cancel_except` skips the drain or drains the kept capture; every existing
+  collection test cancels an already-empty queue.
+- D8 (existing test): red if the rewritten read drops the stale-record arm or the post-loop
+  `Warming` status.
