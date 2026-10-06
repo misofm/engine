@@ -1166,9 +1166,9 @@ pub const METER_VALID_LOSS: u64 = 1 << 2;
 /// intentionally independent and never supplies the track/master interval.
 pub const METER_VALID_GAIN_REDUCTION: u64 = 1 << 3;
 const METER_LOSS_SHIFT: u32 = 32;
-/// Depth of every track meter queue, named once (issue #1448 D1): one window per track per post,
-/// plus headroom for a control-side stall of a few windows. The live-control request builds each
-/// meter queue with it, and each poll caps a meter's count at entry by it.
+/// Depth of every strip meter queue, track or submix, named once (issue #1448 D1): one window per
+/// strip per post, plus headroom for a control-side stall of a few windows. The live-control
+/// request builds each meter queue with it, and each poll caps a meter's count at entry by it.
 const METER_QUEUE_DEPTH: usize = 8;
 
 /// Byte size of [`WebMeterHeader`].
@@ -3443,10 +3443,11 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return 0;
         };
-        // Every index below is a `get_mut`, never a `[]`: a bounds check would put
-        // `panic_bounds_check` in this export's call graph, and this export is called from
-        // `process()`, so the shipped artifact's gate covers it exactly as it covers the render
-        // export.
+        // This function indexes with `get`/`get_mut`, never `[]`, so it adds no bounds check of its
+        // own. The one `panic_bounds_check` in this export's call graph is the slot index of the
+        // inlined SPSC `try_pop` (`slots[self.local]` in `crates/engine/src/realtime/spsc.rs`),
+        // which the ring keeps in range. This export is called from `process()`, so the shipped
+        // artifact's call-graph gate covers it exactly as it covers the render export.
         let meter_count = ready.meters.len();
         if meter_count == 0 {
             return 0;
@@ -3463,7 +3464,7 @@ impl AudioWorkletEngineHost {
         // pass that does not end the loop has cleared at least one pending slot, and the next pass
         // either refills it (spending one count) or ends the loop at the empty-slot check, so
         // `1 + sum(remaining)` passes always suffice: the bound never cuts a recovery short.
-        for (meter, remaining) in ready.meters.iter().zip(ready.meter_remaining.iter_mut()) {
+        for (meter, remaining) in ready.meters.iter().zip(&mut ready.meter_remaining) {
             *remaining = meter.consumer.available_at_entry().min(METER_QUEUE_DEPTH);
         }
         let mut passes = 1_usize;
@@ -3478,8 +3479,8 @@ impl AudioWorkletEngineHost {
             for ((meter, pending), remaining) in ready
                 .meters
                 .iter_mut()
-                .zip(ready.meter_pending.iter_mut())
-                .zip(ready.meter_remaining.iter_mut())
+                .zip(&mut ready.meter_pending)
+                .zip(&mut ready.meter_remaining)
             {
                 if pending.is_some() || *remaining == 0 {
                     continue;
