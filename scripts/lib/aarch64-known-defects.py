@@ -53,35 +53,27 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 
 # Product crate -> (owning issue, ceiling): `bl _memset_pattern16` calls in the crate's
 # `aarch64-apple-ios` release assembly, as `scripts/check-cross-targets.sh` emits it. Recorded by
-# #1017 attempt 2 on Rust 1.97.1. A stored `f32x4` splat constant lowers to a libc call on Apple
-# targets: `lane::FLUSH_EPS` and also `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others.
-# Nearly every call sits inside a render function; the register in `docs/TARGET_MATRIX.md` names
-# them. #1112 lowered six rows (builtins 376, gate-expander 181, graph 20, multiband-compressor 1132,
-# parametric-eq 146, transient-shaper 534): it removed the eight-lane instantiations from the
-# AArch64 builds, and their two-half `f32x8` splats made the same calls. #1328 lowered two more
-# (builtins 194 -> 186, parametric-eq 132 -> 122), as `check-cross-targets.sh` asked after the
-# joint SVF flush and the EQ's dry masks held in channel state, and its amendment A9 two more
-# (builtins 186 -> 71, parametric-eq 122 -> 88), as the check asked: the builtin input chain now
-# loads its bodies' vector constants from its prepared coefficients (`InputChainConstants`) and the
-# EQ reads its rest thresholds from memory, in place of splatted compares. Its follow-up lowered
-# one more (parametric-eq 88 -> 48), as the check asked: the EQ's cascades run in two forms per
-# block (armed and unarmed) and carry `lane::FLUSH_EPS` as a word from the prepared EQ
-# (`ArmedRest`, `UnarmedRest`) instead of splatting it in each kernel instantiation; and two more
-# (builtins 71 -> 40, parametric-eq 48 -> 47), as the check asked: the silence counter's skip form
-# (`lane::kernels::silence_skip_block`) keeps only its live test inline and runs its whole-block
-# scan and its frame loop in one outlined function per lane width, so their constants are no
-# longer materialised at every call site.
+# #1017 attempt 2 on Rust 1.97.1 (3,494 calls). LLVM's loop-idiom pass rewrites a loop that stores
+# one constant `f32` pattern into `llvm.experimental.memset.pattern`, which only Darwin lowers to
+# this libc call. #1112, #1328, its amendment A9 and its follow-up lowered the rows by removing
+# eight-lane AArch64 code and by carrying constants as words (2,122 calls before #1451).
+#
+# #1451 found the cause of nearly all of them: `wide`'s `splat` is `transmute([elem; N])`, rustc
+# lowers that array repeat to a store loop, and every `Lane::splat` in a kernel became such a loop.
+# `lane` now builds its splats as array literals (`crates/lane/src/wide_impl.rs`), which reach
+# LLVM with no loop: 2,122 -> 16 calls, and six rows were deleted at zero (compressor 970,
+# gate-expander 91, graph 10, multiband-compressor 566, parametric-eq 47, transient-shaper 268).
+# The rows left are scalar fills of a real length, not lane splats: `builtins` 5 (preparation
+# constructors: `lanes_below`'s flag fill, `InputStage::new`, `BuiltinFaderBank::new`,
+# `FaderMuteRampBuiltins::new`), `host-core` 4 (`SpectrumAnalyzer::analyze` and
+# `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each), `soft-clip` 1
+# (the test corpus's `fill`) and `true-peak-limiter` 6 (three `fill(1.0)` in `clear_runtime`, which
+# also runs at a reset and on a failed block, and three in `ChannelState::new`).
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 40),
-    "compressor": ("1018", 970),
-    "gate-expander": ("1018", 91),
-    "graph": ("1018", 10),
+    "builtins": ("1018", 5),
     "host-core": ("1018", 4),
-    "multiband-compressor": ("1018", 566),
-    "parametric-eq": ("1018", 47),
-    "soft-clip": ("1018", 22),
-    "transient-shaper": ("1018", 268),
-    "true-peak-limiter": ("1018", 104),
+    "soft-clip": ("1018", 1),
+    "true-peak-limiter": ("1018", 6),
 }
 
 
