@@ -159,7 +159,30 @@ Deliverables, the Authorized paths, gates 1 and 2 and the Test value above are u
 4. **GitHub sync of #1377 is pending owner permission.** No GitHub write is made for this issue
    until the owner grants it; the local spec is the record meanwhile.
 
+## Amendment 2 (root ruling, 2026-10-06)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`). Attempt 1 (`d0af9d53d`) added `tail_every_peak` and `rest` to
+`PreparedEffectMetadata`, which `graph`'s render node table holds inline
+(`runtime::NodeKind::Effect(GraphPreparedEffect)`), so the variant passed clippy's
+`large_enum_variant` limit and workspace clippy went red outside this spec's paths. Root refused
+boxing the variant or allowing the lint: control-only data must not live in render-owned memory
+(#1329 ruling R5). These rulings are binding:
+
+1. **A prerequisite slice first.** *Keep only render-read effect fields in the render node table*
+   (#1460) lands first: the render node keeps exactly the fields render reads, and
+   `PreparedEffectMetadata` lives in the prepared plan's control-side effect table keyed by node.
+   Attempt 1's commit was reverted (`23a32823a`, history kept) and is re-applied on top of #1460.
+2. **Where D3's fields live.** `tail_every_peak` and `rest` live in `PreparedEffectMetadata` in
+   that control-side table, never in the render node. This slice makes no graph change of its
+   own: the "Any graph or C ABI change" non-goal stands, and `crates/graph/src/lib.rs` stays in the
+   Authorized paths for struct literals only.
+3. **Attempts.** Attempt 1 was stopped by a blocker outside its paths and is not counted: the next
+   verified run of this slice remains attempt 1.
+
 ## Dependencies
 
 - *State a bounded tail and an exact-rest bound for every node* (#1329), for `RestSamples` and the
   definition.
+- *Keep only render-read effect fields in the render node table* (#1460), for the control-side
+  table (Amendment 2).
