@@ -43,7 +43,10 @@ use crate::{Lane, flush, flush_pair, silence_step};
 /// form once per block ([`crate::silence_armable_holding`]), so a block of live audio runs the
 /// per-word law's frame loop with no threshold and no joint term; the rule's remaining cost there
 /// is the caller's armability test and [`silence_skip_block`]'s last-frame check, once per block
-/// per channel, plus a whole-block zero scan when a silent or padding lane shares the bank.
+/// per channel. A block in which some lane ends on an exact zero (a quiet 16-bit source) adds that
+/// function's backward scan, which stops a few frames in for a live lane; it covers the whole
+/// block only when a silent or padding lane shares the bank (about 3 % of an eight-lane builtin
+/// block, natively; issue #1328's follow-up record has the numbers).
 ///
 /// The choice is a type, so each instantiation of a kernel holds one form's frame loop and nothing
 /// else; a caller that runs both forms instantiates its block body twice.
@@ -303,23 +306,25 @@ pub fn silence_block<L: Lane>(
 /// whose thresholds no section needs: one no lane's counter can arm ([`crate::silence_armable`]),
 /// or one no section runs (issue #1328, amendment A9).
 ///
-/// The counter is left exactly where [`silence_block`] would leave it, in one of three forms:
+/// The counter is left exactly where [`silence_block`] would leave it. That frame loop leaves
+/// `+0.0` on a lane that is non-zero on the block's last frame, the count of the block's trailing
+/// zero frames on a lane that is non-zero on an earlier frame, and `min(run + frames, 2^24)`
+/// ([`silence_advance`]) on a lane that is zero on every frame: `run + 1` per zero frame is exact
+/// below `2^24` and saturates there. This function finds the three cases without the counter's
+/// loop-carried add:
 ///
-/// 1. **Live.** The block's last frame is non-zero on every lane -- any block of live audio: every
-///    counter ends at `+0.0`, read off one frame with one `mask_any`.
-/// 2. **Settled.** Otherwise a whole-block zero scan (a load, an `eq` and a `mask_and` per frame,
-///    no counter and no loop-carried add) finds the lanes whose input is `±0.0` on every frame of
-///    the block. When every lane is either such a lane or non-zero on its last frame -- a bank
-///    with a silent or padding lane beside live ones, or a block of silence -- the counter is
-///    `min(run + frames, 2^24)` ([`silence_advance`]) on the silent lanes and `+0.0` on the
-///    others, which is what the frame loop computes: `run + 1` per zero frame is exact below
-///    `2^24` and saturates there, and a lane non-zero on its last frame ends at `+0.0`.
-/// 3. **Transition.** Some lane is zero on its last frame but not on every frame (its silence
-///    starts inside the block): the frame loop runs [`crate::silence_step`]'s counter, three
-///    operations per frame, with no threshold and no store.
+/// 1. **Live.** The block's last frame is non-zero on every lane -- most blocks of live audio:
+///    every counter ends at `+0.0`, read off one frame with one `mask_any`.
+/// 2. **Backward scan.** Otherwise the lanes that are zero on the last frame are followed
+///    backwards, four frames at a time (four loads and `eq`s, three `mask_and`s, one test). A lane
+///    that meets a non-zero frame leaves the scan with its trailing count, an exact integer found
+///    frame by frame inside that group of four. The scan stops once no lane is left, so a live
+///    lane whose block ends on a few zeros (a quiet 16-bit source) costs a group or two. A lane
+///    still in the scan after the first frame is zero throughout and takes `silence_advance`; a
+///    silent or padding lane therefore keeps the scan running over the whole block.
 ///
-/// The live form is inlined into each caller; the other two are one outlined function per lane
-/// width (`silence_skip_settle`). The outlining was chosen while every constant vector cost a
+/// The live form is inlined into each caller; the scan is one outlined function per lane width
+/// (`silence_skip_settle`). The outlining was chosen while every constant vector cost a
 /// `memset_pattern16` call on `aarch64-apple-ios` (#1018). #1451 removed that cause at
 /// [`Lane::splat`] and [`Lane::zero`], so a constant vector no longer makes the call; the
 /// outlining stays as it is.
@@ -339,40 +344,48 @@ pub fn silence_skip_block<L: Lane>(input: &[f32], frames: usize, run: &mut L) {
     silence_skip_settle(input, ends_silent, run);
 }
 
-/// [`silence_skip_block`]'s settled and transition forms over `input`, a whole block of
-/// `L::WIDTH`-word frames whose last frame is zero on the lanes of `ends_silent`, some lane at
-/// least.
+/// [`silence_skip_block`]'s backward scan over `input`, a whole block of `L::WIDTH`-word frames
+/// whose last frame is zero on the lanes of `ends_silent`, some lane at least.
 #[inline(never)]
 fn silence_skip_settle<L: Lane>(input: &[f32], ends_silent: L::Mask, run: &mut L) {
     let frames = input.len() / L::WIDTH;
-    // Four independent `mask_and` chains, so the scan runs at the loads' throughput instead of
-    // one `mask_and` latency per frame; `mask_and` is exact in any grouping.
-    let mut silent = [ends_silent; 4];
-    let mut quads = input.chunks_exact(4 * L::WIDTH);
+    // `open`: the lanes zero on every frame scanned so far, the last `scanned` frames.
+    // `trailing`: a lane that has left the scan holds its trailing count, every other lane `+0.0`.
+    let mut open = ends_silent;
+    let mut trailing = L::zero();
+    let mut scanned = 1;
+    let mut quads = input[..(frames - 1) * L::WIDTH].rchunks_exact(4 * L::WIDTH);
     for quad in &mut quads {
-        for (chain, frame) in silent.iter_mut().zip(quad.chunks_exact(L::WIDTH)) {
-            *chain = L::mask_and(*chain, L::load(frame).eq(L::zero()));
+        let z: [L::Mask; 4] = core::array::from_fn(|f| {
+            L::load(&quad[f * L::WIDTH..(f + 1) * L::WIDTH]).eq(L::zero())
+        });
+        let zero_on_all = L::mask_and(L::mask_and(z[0], z[1]), L::mask_and(z[2], z[3]));
+        if L::mask_any(L::mask_and(open, L::mask_not(zero_on_all))) {
+            // Some lane leaves within these four frames: resolve them latest first.
+            for &zero in z.iter().rev() {
+                let leaves = L::mask_and(open, L::mask_not(zero));
+                trailing = L::select(leaves, L::splat(scanned as f32), trailing);
+                open = L::mask_and(open, zero);
+                scanned += 1;
+            }
+            if !L::mask_any(open) {
+                *run = trailing;
+                return;
+            }
+        } else {
+            scanned += 4;
         }
     }
-    for frame in quads.remainder().chunks_exact(L::WIDTH) {
-        silent[0] = L::mask_and(silent[0], L::load(frame).eq(L::zero()));
+    for frame in quads.remainder().rchunks_exact(L::WIDTH) {
+        let zero = L::load(frame).eq(L::zero());
+        let leaves = L::mask_and(open, L::mask_not(zero));
+        trailing = L::select(leaves, L::splat(scanned as f32), trailing);
+        open = L::mask_and(open, zero);
+        scanned += 1;
     }
-    let silent = L::mask_and(
-        L::mask_and(silent[0], silent[1]),
-        L::mask_and(silent[2], silent[3]),
-    );
-    if !L::mask_any(L::mask_and(ends_silent, L::mask_not(silent))) {
-        let mut advanced = *run;
-        silence_advance(&mut advanced, frames);
-        *run = L::select(silent, advanced, L::zero());
-        return;
-    }
-    let one = L::splat(1.0);
-    let mut counted = *run;
-    for frame in input.chunks_exact(L::WIDTH) {
-        counted = L::select(L::load(frame).eq(L::zero()), counted.add(one), L::zero());
-    }
-    *run = counted;
+    let mut advanced = *run;
+    silence_advance(&mut advanced, frames);
+    *run = L::select(open, advanced, trailing);
 }
 
 /// Advances a silence counter over `frames` frames of exactly-zero input without a frame loop:
@@ -1016,13 +1029,14 @@ pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, rest: L, s: &mut SvfState<
 /// [`svf_step`] for a caller that knows, per block, whether any lane's rest threshold can be armed
 /// (issue #1328, amendment A9).
 ///
-/// `armable = true` is [`svf_step`] bit for bit. `armable = false` is for a block in which no lane's
-/// silence counter can reach `N_SILENCE` ([`crate::silence_armable`]), so every threshold is
+/// `armable = true` is [`svf_step`] bit for bit. `armable = false` is for a block in which no
+/// lane's silence counter can reach `N_SILENCE` ([`crate::silence_armable`]), so every threshold is
 /// `+0.0`, or in which every lane that can arm is at rest ([`crate::silence_armable_holding`]):
 /// step 6 is then two per-word [`flush`]es and `rest` is not read, which is the same bits, because
 /// `flush_pair(n1, n2, +0.0)` is `(flush(n1), flush(n2))` (no magnitude and no NaN compares below
-/// `+0.0`) and a lane at rest has nothing for the joint term to zero, and four lane-ops fewer. A frame loop calls it with a block-constant `armable`, so
-/// the compiler unswitches the loop into the two forms.
+/// `+0.0`) and a lane at rest has nothing for the joint term to zero, and four lane-ops fewer. A
+/// frame loop calls it with a block-constant `armable`, so the compiler unswitches the loop into
+/// the two forms.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn svf_step_when<L: Lane>(

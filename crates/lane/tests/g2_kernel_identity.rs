@@ -1190,11 +1190,11 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
 ///
 /// The skew gate above cannot see that: its signals never leave a section's state in the joint band
 /// on an arming frame. Here every section of every stream starts in the band (both words below
-/// `REST_EPS`, above `FLUSH_EPS`), the input is exactly zero, and the stream's counter arms on frame
-/// `arming` of a 16-frame block, for every `arming` the block holds. The skewed cascade, plain and
-/// with dry masks, must equal the interleaved cascade in every output and state word, and the rule
-/// must have fired (every state word `+0.0` at the end), at one and two streams and depths two and
-/// three.
+/// `REST_EPS`, above `FLUSH_EPS`), the input is exactly zero, and the stream's counter arms on
+/// frame `arming` of a 16-frame block, for every `arming` the block holds. The skewed cascade,
+/// plain and with dry masks, must equal the interleaved cascade in every output and state word, and
+/// the rule must have fired (every state word `+0.0` at the end), at one and two streams and depths
+/// two and three.
 #[test]
 fn g2_skewed_cascade_arms_each_section_on_its_own_frame() {
     let _canonical = CanonicalFpEnv::enter();

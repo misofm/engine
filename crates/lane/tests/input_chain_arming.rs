@@ -17,7 +17,8 @@
 //! * **A block longer than the window.** A lane at rest at block start that takes a tiny sample
 //!   and then a full window of zeros inside the block must arm on that frame: the exactness proof
 //!   of `silence_armable_holding` needs the block to be no longer than the window, and a decision
-//!   that dropped that term leaves the tail.
+//!   that dropped that term, or moved it by one frame, leaves the tail. The block is also exactly
+//!   one frame longer than the window, the boundary case.
 
 use lane::Lane;
 use lane::kernels::SvfCoef;
@@ -35,6 +36,9 @@ const FRAMES: usize = 32;
 const WINDOW: f32 = 40.0;
 /// The window for the long-block gate: shorter than the block.
 const SHORT_WINDOW: f32 = 8.0;
+/// The long-block gate's boundary window: the block is exactly one frame longer, so the lane's
+/// tail arms on the block's last frame, the first block length the unarmed form is not exact for.
+const BOUNDARY_WINDOW: f32 = (FRAMES - 1) as f32;
 /// `tan(pi * 30 / 48000)`: the high-pass section's prewarped gain.
 const G_30_HZ: f64 = 0.001_963_497_931_794_767_5;
 /// `tan(pi * 1000 / 48000)`: the low-pass section's prewarped gain.
@@ -286,32 +290,36 @@ fn any_state_word_in_the_band_arms_the_block() {
 }
 
 /// A block longer than the window: the channel starts at rest with a fresh counter, takes one tiny
-/// sample on frame 0 and zeros after it. Its counter reaches the window on frame `SHORT_WINDOW`, inside
+/// sample on frame 0 and zeros after it. Its counter reaches the window on frame `window`, inside
 /// the block, with the tail's state in the band: the block must arm though no lane held state at
-/// its start, and the tail must be cleared by the block's end.
+/// its start, and the tail must be cleared by the block's end. Two windows: `SHORT_WINDOW`, and
+/// `BOUNDARY_WINDOW`, where the block is exactly `window + 1` frames and the tail arms on its last
+/// frame (red if the block-length term is off by one, `frames > armed_after + 1`).
 fn a_long_block_arms_from_rest<L: Lane>(width: &str) {
-    for entry in ENTRIES {
-        for mono in [false, true] {
-            for channel in 0..if mono { 1 } else { 2 } {
-                let mut c = chain::<L>(entry, SHORT_WINDOW);
-                let mut s = InputChainState::<L>::default();
-                let mut planes = [live(), live()];
-                planes[channel] = vec![0.0; FRAMES * 8];
-                planes[channel][..L::WIDTH].fill(1.0e-15);
-                let [left, right] = &mut planes;
-                run(
-                    entry,
-                    mono,
-                    &mut left[..FRAMES * L::WIDTH],
-                    &mut right[..FRAMES * L::WIDTH],
-                    &mut c,
-                    &mut s,
-                );
-                assert!(
-                    state_bits(&s, channel).iter().all(|bits| *bits == 0),
-                    "{width}, {entry:?}, mono {mono}: channel {channel}'s tail arms inside a \
-                     block longer than the window"
-                );
+    for window in [SHORT_WINDOW, BOUNDARY_WINDOW] {
+        for entry in ENTRIES {
+            for mono in [false, true] {
+                for channel in 0..if mono { 1 } else { 2 } {
+                    let mut c = chain::<L>(entry, window);
+                    let mut s = InputChainState::<L>::default();
+                    let mut planes = [live(), live()];
+                    planes[channel] = vec![0.0; FRAMES * 8];
+                    planes[channel][..L::WIDTH].fill(1.0e-15);
+                    let [left, right] = &mut planes;
+                    run(
+                        entry,
+                        mono,
+                        &mut left[..FRAMES * L::WIDTH],
+                        &mut right[..FRAMES * L::WIDTH],
+                        &mut c,
+                        &mut s,
+                    );
+                    assert!(
+                        state_bits(&s, channel).iter().all(|bits| *bits == 0),
+                        "{width}, {entry:?}, mono {mono}, window {window}: channel {channel}'s \
+                     tail arms inside a block longer than the window"
+                    );
+                }
             }
         }
     }

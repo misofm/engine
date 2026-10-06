@@ -145,7 +145,7 @@ Applied identically to all four inventories. Each is the `Lane` trait's own defi
 | `Lane::fma(a, b, c)` | **2** | `(a * b) + c`, deliberately unfused on every backend (#163 phase 2) |
 | `flush(x)` | **3** | `x.andnot(x.abs().lt(EPS))` |
 | `flush_pair(n1, n2, rest)` | **10** | two `abs`, one `max_u32` (the larger magnitude, bit for bit), three `lt` (one against the frame's rest threshold), two `mask_or`, two `andnot` -- the joint SVF state flush of issue #1328 under amendment A9, against 6 for two `flush` (13 under amendment A8) |
-| `silence_step(x, run, armed_after)` | **5** | `eq`, `add`, `select` (the counter), `lt`, `andnot` (the rest threshold) -- once per channel-frame per effect input, whatever the section count, on a block in which some lane's counter can arm (issue #1328, amendment A9); on any other block -- every block of live audio -- the counter advances once per block (`silence_skip_block`: one load and one `mask_any` when the block's last frame is non-zero on every lane; else a whole-block zero scan, a load, an `eq` and a `mask_and` per frame, which settles the counter when every lane is silent throughout or live on its last frame; the counter's three per frame only when a lane's silence starts inside the block) and costs nothing per lane-sample on live audio. The builtin input chain and the parametric EQ work this way; the multiband compressor runs the counter and the joint flush on every frame |
+| `silence_step(x, run, armed_after)` | **5** | `eq`, `add`, `select` (the counter), `lt`, `andnot` (the rest threshold) -- once per channel-frame per effect input, whatever the section count, on a block in which some lane's counter can arm (issue #1328, amendment A9); on any other block -- every block of live audio -- the counter advances once per block (`silence_skip_block`: one load and one `mask_any` when the block's last frame is non-zero on every lane; else a backward scan from the last frame, four frames per load-`eq`-`mask_and` group and one test, that stops once every lane zero on the last frame has met a non-zero frame, a few frames for a live lane whose block ends on a few zeros and the whole block only when a lane is zero throughout, a silent or padding lane) and costs nothing per lane-sample on live audio. The builtin input chain and the parametric EQ work this way; the multiband compressor runs the counter and the joint flush on every frame |
 | `Lane::max_u32` | **1** | `vpmaxud` / `i32x4.max_u` / `umax` |
 | a load or a store | 0 in the floor | counted separately; see "the unit, and the criterion" |
 
@@ -262,8 +262,9 @@ state (issue #1328, amendment A9 and its follow-up, `silence_armable_holding`: t
 been silent for nearly `N_SILENCE` frames and a tail is still decaying) the rest plane is written
 by `silence_block`, 5 more per lane-sample, and the cascades run the armed form; on every other
 block -- every block of live audio -- they run the unarmed form, which reads no plane, and the
-counter advances once per block (`silence_skip_block`: one last-frame compare, and a whole-block
-zero scan only when some lane ends the block on a zero). Since #979 a
+counter advances once per block (`silence_skip_block`: one last-frame compare, and a backward zero
+scan when some lane ends the block on a zero, over the whole block only when a lane is silent
+throughout). Since #979 a
 dead section's state is inert when every word is `+0.0` or has a magnitude between the flush floor
 and the elision bound, and (since #1328) the pair is not both below `REST_EPS` with a word
 non-zero, which the joint flush zeroes on an armed frame (the EQ's input silent for `N_SILENCE`

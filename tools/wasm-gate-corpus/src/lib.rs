@@ -1653,10 +1653,6 @@ fn meter_peak_words(lane: usize) -> [f32; FRAMES] {
     words
 }
 
-/// Runs the sample-peak case at width `L::WIDTH`: every frame's value is the running window peak
-/// after that frame, computed by one kernel call over the block's prefix up to it, seeded with the
-/// window's peak after the previous block (`+0.0` at a window's first block, which is the seed a
-/// bank's pass uses).
 /// The armed SVF case (issue #1328): per lane, a 1 kHz low-pass `svf_block` (the corpus's
 /// coefficients) fed a tiny impulse on frame 0 and zeros after it, with a per-lane silence window.
 /// The counter resets on the impulse and arms the joint flush on the window's frame, while the
@@ -1718,6 +1714,10 @@ fn svf_armed_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
     lanes
 }
 
+/// Runs the sample-peak case at width `L::WIDTH`: every frame's value is the running window peak
+/// after that frame, computed by one kernel call over the block's prefix up to it, seeded with the
+/// window's peak after the previous block (`+0.0` at a window's first block, which is the seed a
+/// bank's pass uses).
 fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
     use lane::kernels::builtins::meter_sample_peak_block;
     let mut words = [[0.0_f32; FRAMES]; LANES];

@@ -771,9 +771,9 @@ pub fn input_chain_ramp_block<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block`]; `armable = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
-/// ([`channel_arms`]).
+/// The body of [`input_chain_ramp_block`]; `armable = false` runs no silence counter and the
+/// per-word flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the
+/// armed form ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_body<L: Lane>(
@@ -883,9 +883,9 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block_mono`]; `armable = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
-/// ([`channel_arms`]).
+/// The body of [`input_chain_ramp_block_mono`]; `armable = false` runs no silence counter and the
+/// per-word flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the
+/// armed form ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_mono_body<L: Lane>(
@@ -1020,9 +1020,9 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block_filter`]; `armable = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
-/// ([`channel_arms`]).
+/// The body of [`input_chain_ramp_block_filter`]; `armable = false` runs no silence counter and the
+/// per-word flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the
+/// armed form ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_filter_body<L: Lane>(
@@ -1272,9 +1272,9 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block_filter_mono`]; `armable = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
-/// ([`channel_arms`]).
+/// The body of [`input_chain_ramp_block_filter_mono`]; `armable = false` runs no silence counter
+/// and the per-word flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane
+/// needs the armed form ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_filter_mono_body<L: Lane>(
@@ -1948,9 +1948,9 @@ pub fn input_chain_block_mono<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_block_mono`]; `armable = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
-/// ([`channel_arms`]).
+/// The body of [`input_chain_block_mono`]; `armable = false` runs no silence counter and the
+/// per-word flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the
+/// armed form ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_block_mono_body<L: Lane>(

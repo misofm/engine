@@ -481,9 +481,9 @@ fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
 }
 
 /// Issue #1328 (the root's cost ruling, (a) and (b)): a block runs the cascades' armed form when
-/// some lane of **either** channel can arm within it and holds a non-zero integrator word in **any**
-/// section, and the unarmed form otherwise. One channel's one section is put in the joint band
-/// (`(1e-15, -1e-15)`, a pair the identity section holds on a zero input) with that channel's
+/// some lane of **either** channel can arm within it and holds a non-zero integrator word in
+/// **any** section, and the unarmed form otherwise. One channel's one section is put in the joint
+/// band (`(1e-15, -1e-15)`, a pair the identity section holds on a zero input) with that channel's
 /// counter one frame short of its window, while the other channel's input is live and its counter
 /// fresh: the first block must clear exactly that pair, for each channel and each of the six
 /// sections. Red if the block's form is decided from one channel, or from a subset of the sections'
@@ -549,12 +549,15 @@ fn the_joint_flush_arms_for_whichever_channel_and_section_holds_the_band() {
 /// opposite, and then a whole window of zeros. Prepared with an 8,192-frame quantum at 48 kHz
 /// (window 4,096), a tiny impulse through a +24 dB 10 Hz low shelf, rendered as one block, must
 /// give the bits the same input gives in 128-frame blocks, where the joint flush clears the tail
-/// on frame 4,096. Red if the decision drops the block-length term.
+/// on frame 4,096. Also at the boundary: a 4,097-frame block, one frame longer than the window,
+/// whose tail arms on its last frame, against the same 4,097 frames in 128-frame parts. Red if the
+/// decision drops the block-length term or moves it by one frame (`frames > armed_after + 1`).
 #[test]
 fn a_block_longer_than_the_window_renders_as_its_quantum_sized_parts() {
     const QUANTUM: u32 = 8_192;
+    const WINDOW_48K: usize = 4_096;
     let configured = single_section_values(EqBandKind::LowShelf, 10.0, 24.0, FRAC_1_SQRT_2, 1.0);
-    let render = |block: usize| {
+    let render = |block: usize, total: usize| {
         let mut request = request_at_rate(&configured, false, 48_000);
         request.quantum = QUANTUM;
         request.limits.maximum_scratch_bytes =
@@ -562,7 +565,7 @@ fn a_block_longer_than_the_window_renders_as_its_quantum_sized_parts() {
         let mut effect = ParametricEqFactory
             .prepare(request)
             .expect("the EQ prepares");
-        let mut left = vec![0.0_f32; QUANTUM as usize];
+        let mut left = vec![0.0_f32; total];
         left[0] = 1.0e-12;
         let mut right = left.clone();
         for (index, (left, right)) in left
@@ -570,36 +573,32 @@ fn a_block_longer_than_the_window_renders_as_its_quantum_sized_parts() {
             .zip(right.chunks_mut(block))
             .enumerate()
         {
+            let frames = left.len() as u32;
             effect.process(
-                EffectProcessBlock::new(
-                    left,
-                    right,
-                    None,
-                    (index * block) as u64,
-                    &[],
-                    block as u32,
-                )
-                .expect("block"),
+                EffectProcessBlock::new(left, right, None, (index * block) as u64, &[], frames)
+                    .expect("block"),
             );
         }
         (left, snapshot(effect.as_ref()))
     };
-    let (whole, whole_state) = render(QUANTUM as usize);
-    let (parts, parts_state) = render(FRAMES);
-    assert_eq!(
-        band_word(&parts_state.1, 0, 0) | band_word(&parts_state.1, 0, 1),
-        0,
-        "the tail is in the joint band when the window ends, and is cleared"
-    );
-    assert!(
-        whole
-            .iter()
-            .zip(&parts)
-            .all(|(a, b)| a.to_bits() == b.to_bits()),
-        "one 8,192-frame block renders the bits of its 128-frame parts"
-    );
-    assert!(
-        whole_state == parts_state,
-        "one 8,192-frame block leaves the state of its 128-frame parts"
-    );
+    for total in [QUANTUM as usize, WINDOW_48K + 1] {
+        let (whole, whole_state) = render(total, total);
+        let (parts, parts_state) = render(FRAMES, total);
+        assert_eq!(
+            band_word(&parts_state.1, 0, 0) | band_word(&parts_state.1, 0, 1),
+            0,
+            "{total} frames: the tail is in the joint band when the window ends, and is cleared"
+        );
+        assert!(
+            whole
+                .iter()
+                .zip(&parts)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "one {total}-frame block renders the bits of its 128-frame parts"
+        );
+        assert!(
+            whole_state == parts_state,
+            "one {total}-frame block leaves the state of its 128-frame parts"
+        );
+    }
 }
