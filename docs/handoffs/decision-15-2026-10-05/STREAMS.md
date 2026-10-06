@@ -264,17 +264,17 @@ rebase onto them.
 |---|---|---|---|---|
 | 1 | #1328 | Flush the SVF jointly so builtin and EQ filters reach exact rest | — | — |
 | 2 | #1451 | Let the builtins splat their chain constants without iOS memset calls | #1328 | — |
-| 3 | #1452 | Undo the iOS memset ratchet workarounds once splats are free | #1451 | — |
-| 4 | #1336 | Make the gate-expander's attack, hold and release live | — | #1279, #1280 |
-| 5 | #1337 | Make a parametric EQ band's enabled and kind live | — | #1279, #1280 |
-| 6 | #1366 | Prove the crossover designer total and share the SVF ramp stability check in effect-runtime | — | — |
-| 7 | #1339 | Give the delay a live bypass shunt | — | #1282, #1315, #1341 |
-| 8 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279, #1280 |
-| 9 | #1407 | Retarget a live input filter only through its designs and their mixtures | — | — |
-| 10 | #1428 | Run the release reachable-word sweep of the live input filter in required CI | #1407 | — |
-| 11 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
-| 12 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
-| 13 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
+| 3 | #1336 | Make the gate-expander's attack, hold and release live | — | #1279, #1280 |
+| 4 | #1337 | Make a parametric EQ band's enabled and kind live | — | #1279, #1280 |
+| 5 | #1366 | Prove the crossover designer total and share the SVF ramp stability check in effect-runtime | — | — |
+| 6 | #1339 | Give the delay a live bypass shunt | — | #1282, #1315, #1341 |
+| 7 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279, #1280 |
+| 8 | #1407 | Retarget a live input filter only through its designs and their mixtures | — | — |
+| 9 | #1428 | Run the release reachable-word sweep of the live input filter in required CI | #1407 | — |
+| 10 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
+| 11 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
+| 12 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
+| 13 | #1452 | Undo the iOS memset ratchet workarounds once splats are free | #1451, #1409 | — |
 | 14 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
 | 15 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
 | 16 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |

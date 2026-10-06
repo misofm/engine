@@ -233,7 +233,7 @@ word; the V8 spill gate turns red if a held loop spills. A test that only names 
 
 ## Dependencies
 
-#1451
+#1451; #1409 (root, 2026-10-06: a real dependency edge, not only a Hazards note, so undo 5 cannot land before #1409's final D5 shape; #1409 and #1411 merge in one pull request).
 
 ## Attempt record
 
