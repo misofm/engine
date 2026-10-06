@@ -158,6 +158,8 @@ gets its own slice (see "Non-goals").
   `hosts/host-web/src/lib.rs` for the browser), so both report the bound for every strip with a
   live input lane. `graph-compiler` takes `TailSamples` directly. Render reads
   neither value; nothing is computed or allocated on the render thread.
+  *(Amendment 5, MJ1:)* preparation computes a design bound only for a strip without a live
+  input lane; a live strip's design bound is never computed.
 - **D8. Composition is unchanged.** PDC still adds node tails along a path. Gain in other nodes is
   not folded into a node's floor; the graph extent's meaning across gain, and the tail term of a
   strip's `delay_samples` line (a pure delay, not latency), are
@@ -364,6 +366,47 @@ amended accordingly.
   this and must state whether a carried state counts as admitted history; a root-authorized edit to
   #1269's spec and its GitHub body.
 
+## Amendment 5 (root rulings, 2026-10-06, after attempt 4's verdict)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(b). Attempt 4 failed
+adversarial review (`/home/bl/misofm/submix-verdicts/1329-attempt4.md`): one MAJOR finding (MJ1,
+preparation computes every strip's design bound and discards it for a strip whose input lane is
+live, about +75 % per 64-track browser boot, where every strip is live), three MINOR findings
+(m1 the seal check's live-strip rule untested; m2 the shared-designs test blind to the right
+channel; m3 one false test-value line), five NITs and items ROOT-A to ROOT-F. Attempt 5 is the
+last permitted attempt; its scope is exactly the list below, and nothing in `crates/math` or the
+certified figures moves. D7, the authorized paths and the test value are amended accordingly.
+
+- **MJ1 (in #1329's scope: a regression this slice introduced).** Preparation computes design
+  bounds only for strips without a live input lane. The seal, the seal check, `input_bounds()` and
+  every fixture are unchanged. A counted test (a test-support counter of design-bound
+  computations) is zero when every strip is live and exactly the number of distinct designs when
+  none is, and is red on attempt 4's behaviour. The browser boot is re-measured with
+  `scripts/web-mixing-automation-benchmark.mjs rebuild-round MODULE 1` and `2` (the #1289
+  rebuild-cost proxy) for the head module against pre-#1329 `0725a8949`'s, with the target within
+  noise of pre-#1329.
+- **Root ruling A.** The browser computes no design bound; #1457's worst case is the C ABI's
+  control thread. #1457's "Where preparation runs" is amended to say so.
+- **m1.** A builtins-compiler unit test forges a live strip's entry to its design bound in both
+  `tails` and `seal.tails` and expects `builtin.prepared.tail_set` from `validate_for_session`;
+  red when the seal check skips its live rule.
+- **m2.** `each_strip_is_bounded_by_its_own_design_when_designs_are_shared` gains a strip that
+  differs from the first only in its right channel; red on a key that drops the right channel.
+- **m3.** The live `T_rest` identity's test-value line is restated truthfully (below).
+- **NITs.** The `nu` proof text in `math::tail` and the derivation's "Numerical limits" state the
+  `sqrt(2)` and the sound argument (doc text only); `STEP_UP`'s doc states the per-summand
+  argument (the constant stays `1 + 4 u` where a correct argument exists); the attempt-4 record's
+  module digest is marked as `feefbe166`'s, and the final digest is recorded at the batch boundary
+  (**root ruling D**); the superseded gate 2, 3 and 7 test-value lines are marked as superseded
+  with a pointer to their restatements (**root ruling C**); #1457's STREAMS row reference is
+  corrected.
+- **Root ruling B.** `crates/host-core/src/prepare.rs`'s `HostLiveLanes::strip_input` doc (stale
+  since attempt 3: a live input lane no longer makes the strip's builtin tail infinite) states what
+  the lane does now.
+- **Root ruling E.** `docs/rulings/effect-floor-accounting.md`'s citation of the removed
+  `InputBuiltins::tail()` is updated, marked as a citation update, not a ruling change.
+
 ## Deliverables
 
 1. `effect-contract`: D1 docs on `TailSamples`, the `RestSamples` type (D2).
@@ -427,6 +470,11 @@ amended accordingly.
   `.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md` (R8, the D2-across-swap
   statement only); the R7 issue's new spec in `.github/ISSUE_SPECS/` and its row under Stream G
   in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`
+
+- *(Amendment 5.)* `crates/host-core/src/prepare.rs` (the `HostLiveLanes::strip_input` doc only,
+  root ruling B); `docs/rulings/effect-floor-accounting.md` (the citation only, root ruling E);
+  `.github/ISSUE_SPECS/1457-cache-design-bounds-across-preparations-within-a-stated-preparation-budget.md`
+  ("Where preparation runs", root ruling A)
 
 `builtins-compiler`, `graph-compiler`, `host-core` and `fixtures` sit outside stream G's column:
 coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
@@ -552,18 +600,19 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   test computes a tail today.
 - Gate 1(b): a live bound evaluated at the wrong extreme (for example the minimum cutoff, which
   is not the slowest pole) is exceeded by a scanned design.
-- Gate 2: a bound that ignores `f32` rounding, the ramp in flight or the flush stall is violated by
+- ~~Gate 2: a bound that ignores `f32` rounding, the ramp in flight or the flush stall is violated by
   the production kernel at the worst-case input, and a state that settles at a non-reset value (a
   limit cycle the flush misses) fails the fresh-instance comparison; gate 1 only checks `f64`
-  arithmetic.
+  arithmetic.~~ *(Superseded: restated by Amendment 4, R3, below.)*
 - Gate 1(c): a `T_rest` that drops its `R(P*)` term (reports `T_decay` as the time to exact zero)
   is beaten by the real kernel at small peaks (attempt 3: 346 frames against 175 for a 1 kHz
   section); no other gate drives peaks below `P*`.
-- Gate 7: a bound that grows past the configured tail cap turns red before a plan is refused at
-  preparation.
-- Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
+- ~~Gate 7: a bound that grows past the configured tail cap turns red before a plan is refused at
+  preparation.~~ *(Superseded: restated by Amendment 4, R3, below.)*
+- ~~Gate 3: a sound but uselessly loose bound (for example a Putzer `m * rho^m` factor where the
   eigenvector bound applies) breaks the restated D15-4 figures, and an unsound one (a dropped A9
-  term) falls below the measured real rest.
+  term) falls below the measured real rest.~~ *(Superseded for the lower side: restated by
+  Amendment 4, R3, below; the upper side's claim stands.)*
 - *(Amendment 4, R3: restated after attempt 4.)* On the real kernel the crude cascade's slack
   (live `T_decay` about 905k against a last output above `P eps` near 438k; `R` 1.26M against a
   rest near 0.98M) absorbs an omitted rounding, ramp, stall or A9 term, so gate 2's real-kernel
@@ -582,15 +631,30 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
   with no discriminating claim of its own; a bound that grows, as that defect does, is red on the
   independent recomputation's upper side (`T_decay` at most the recomputed value plus 0.01 % and
   64 frames), which gate 7 alone does not see.
-- *(Amendment 4.)* The live `T_rest` identity (`live_tail_every_peak_is_the_rest_at_the_flush_floor`):
-  a live `T_rest` that drops `R(P*)` reports `T_decay`; no other test computes the live `R(P*)`.
+- ~~*(Amendment 4.)* The live `T_rest` identity (`live_tail_every_peak_is_the_rest_at_the_flush_floor`):
+  a live `T_rest` that drops `R(P*)` reports `T_decay`; no other test computes the live `R(P*)`.~~
+  *(Amendment 5, m3: that line was false.)* The live `T_rest` identity: a live `T_rest` that is not
+  exactly `max(T_decay, R(P*))` fails it. `live_bound_carries_every_term_an_independent_recomputation_requires`
+  also computes the live `R(P*)` and is also red on a `T_rest` that drops it; the identity's own
+  catch, which no other test makes, is a `T_rest` off by less than that oracle's tolerance (0.01 %
+  plus 64 frames).
 - *(Amendment 4.)* `math::tail`'s
   `the_operator_norm_bounds_the_exact_norm_of_every_near_top_design`: an operator norm whose `f64`
   evaluation cancels falls below the exact norm of a near-top design; gate 1(a)'s 2-10 % slack
   cannot see a `6e-9` error in `q`.
 - *(Amendment 4.)* `each_strip_is_bounded_by_its_own_design_when_designs_are_shared`: a design key
   that omits a term (the trim magnitude or a section's words) hands one strip another design's
-  bound when a session repeats designs.
+  bound when a session repeats designs. *(Amendment 5, m2:)* including either channel: a key that drops the
+  right channel hands the strip that differs only there the first strip's bound.
+- *(Amendment 5, MJ1.)* builtins-compiler
+  `design_bounds_are_computed_only_for_strips_without_a_live_input_lane`: a preparation that
+  computes a live strip's design bound (attempt 4's, the browser's wasted boot cost) counts six
+  computations where it must count none, and one that bounds a design once per strip rather than
+  once per distinct design counts nine where it must count six. No other test counts computations.
+- *(Amendment 5, m1.)* builtins-compiler `live_input_lane_reports_the_live_bound_and_plain_input_its_own`:
+  a seal check that takes a live strip's bound from its own seal entry, rather than requiring the
+  sealed live bound, accepts a payload and seal forged alike to the design bound. No other test
+  forges a seal entry.
 
 ## Dependencies
 
@@ -1003,7 +1067,8 @@ sharing one design 0.35-0.49 ms; the LPF at the maximum, +24 dB, 3.5 ms; the top
 +24 dB) 529-561 ms, 8.3-8.8 ms each, the worst per-design cost found; the live bound 0.04 ms. The
 worst case per preparation is therefore about 8.8 ms per distinct design, bounded only by the track
 count (65,537 distinct near-top designs: about 9.6 minutes, extrapolated). Filed as #1457, *Cache
-design bounds across preparations within a stated preparation budget* (stream G, row 19), which
+design bounds across preparations within a stated preparation budget* (stream G, row 21 of
+`STREAMS.md`'s current table; *Amendment 5:* the record said "row 19"), which
 notes that H #1332 moves browser preparation off the AudioWorklet thread.
 
 **R1, R2 (paths, gate 5).** `crates/builtins/src/filter_response.rs` is byte-identical to its
@@ -1101,7 +1166,10 @@ chain (`build-web-audioworklet.sh --named-twin` into fresh empty directories,
 `strip-wasm-names.py --self-test` and `check`, `check-web-audioworklet.sh
 --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
 `check-scalar-oracle-absent.py --wasm` and `--native`, `test-web-audioworklet.sh`). The shipped
-worklet module is `1a833326…c397d7` (3,052,846 B; attempt 3's was `e25b045d…90d9f652`): its bytes
+worklet module is `1a833326…c397d7` (3,052,846 B; attempt 3's was `e25b045d…90d9f652`; *Amendment 5,
+root ruling D:* that digest is `feefbe166`'s module, the verifier's rebuild found; `c7f7bbdfb`'s
+own record commit moved panic-location line numbers and ships `d7665dbb…6465f5`; the final
+digest is recorded at the batch boundary): its bytes
 change with the bound code linked into preparation, as `artifact-identity` will report; no audio
 bit moves (wasm G5 digests, builtins PCM fixtures, `audit capi`'s `pcm_digest`). AArch64 is
 CI-only.

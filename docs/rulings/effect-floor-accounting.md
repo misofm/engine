@@ -470,7 +470,10 @@ section's content was believed to be workload-dependent. It is not:
   arithmetic identity `(1, 0, 0)` with zero coefficients rather than a branch"*;
 * `SvfCoef`, the type the kernel sees, carries no `enabled` field at all, so the flag cannot reach
   the render path. The frame body is an unconditional `for section in 0..2`;
-* `enabled` is read in exactly one place, `InputBuiltins::tail()`, which is control plane.
+* `enabled` is read only on the control plane: when this was written, in `InputBuiltins::tail()`;
+  since #1329 removed that method, in the input section's certified bound
+  (`builtins::tail::fixed_input_bound`) and the filter-response reports (`filter_response.rs`).
+  *(Citation update, #1329 Amendment 5, root ruling E; the ruling is unchanged.)*
 
 So the section count is fixed at **two per channel** by the prepared type `[[SvfCoef<L>; 2]; 2]`,
 and the *enabled* count changes only the values in the coefficient registers. The floor is stated

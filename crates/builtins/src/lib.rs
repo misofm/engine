@@ -5599,6 +5599,15 @@ pub mod test_support {
         MatrixBuiltins, MatrixStageKernel, SvfSection, lane_read,
     };
 
+    /// How many design bounds (#1329 D4) preparation has computed on the calling thread: one
+    /// per distinct design it bounded (#1329 Amendment 5, MJ1). Thread-scoped, so a test reads
+    /// the difference across its own preparation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn fixed_input_bounds_computed() -> u64 {
+        crate::tail::FIXED_INPUT_BOUNDS.with(core::cell::Cell::get)
+    }
+
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
     ///
     /// # Errors

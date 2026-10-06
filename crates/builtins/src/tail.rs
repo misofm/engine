@@ -148,6 +148,8 @@ fn section_words(section: &SvfSection) -> SvfWords {
 /// two channels. Each channel is its trim (a gain of `|trim|` on the peak) followed by its enabled
 /// sections in order, HPF then LPF; a disabled section is the exact identity and is left out.
 pub(crate) fn fixed_input_bound(sample_rate: u32, lanes: [&InputLane; 2]) -> InputSectionBound {
+    #[cfg(any(test, feature = "test-support"))]
+    FIXED_INPUT_BOUNDS.with(|count| count.set(count.get() + 1));
     let _environment = lane::CanonicalFpEnv::enter();
     let law = input_section_flush_law(sample_rate);
     let peaks = rest_peaks();
@@ -179,6 +181,14 @@ pub(crate) fn fixed_input_bound(sample_rate: u32, lanes: [&InputLane; 2]) -> Inp
         return left;
     }
     left.max(channel(lanes[1]))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How many times [`fixed_input_bound`] ran on this thread: one per design bound computed
+    /// (#1329 Amendment 5, MJ1). Read through `crate::test_support::fixed_input_bounds_computed`.
+    pub(crate) static FIXED_INPUT_BOUNDS: core::cell::Cell<u64> =
+        const { core::cell::Cell::new(0) };
 }
 
 /// The worst-case pair of D5 at each launch rate: the HPF one `f32` below the maximum cutoff into

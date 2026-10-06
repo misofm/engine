@@ -38,7 +38,15 @@ gated figure.
 - **Where preparation runs.** On the C ABI, on the caller's control thread. In the browser it runs
   today on the AudioWorklet thread at processor construction; stream H's *Run the browser control
   plane in a Worker and keep the AudioWorklet render-only* (#1332) moves browser preparation off the
-  AudioWorklet thread, after which the browser pays the cost on a Worker.
+  AudioWorklet thread.
+  *(Amended by #1329 Amendment 5, root ruling A.)* Preparation computes a design bound only for a
+  strip without a live input lane: a live strip reports the live bound, computed once per
+  preparation (0.04 ms). The browser prepares every strip with a live input lane
+  (`HostLiveLanes::ALL`), so it computes no design bound at all; its boot cost is back to the
+  pre-#1329 figures (#1329 attempt 5's `rebuild-round` record). The worst case above therefore
+  lands on the C ABI's control thread, which prepares strips without a live input lane
+  (`HostLiveLanes::FADER_AND_MATRIX` plus effect lanes); that is the platform this issue's budget
+  binds.
 
 ## Decisions to make in this slice (root approves before implementation)
 

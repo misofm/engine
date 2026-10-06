@@ -295,17 +295,24 @@ fn fixed_design_tail_is_sound_and_within_thirty_db_of_the_exact_tail() {
 
 /// D7 and Amendment 4 R7: a session's strips are bounded once per distinct design, and each strip
 /// still gets its own design's bound. The designs differ from the first in one key term each (the
-/// HPF words, the trim magnitude, the LPF words), and the first design repeats with its polarity
-/// inverted (the same key: the bound reads the trim's magnitude).
+/// HPF words, the trim magnitude, the LPF words), the first design repeats with its polarity
+/// inverted (the same key: the bound reads the trim's magnitude), and the last strip differs from
+/// the first only in its right channel's HPF (Amendment 5, m2: the key reads both channels).
 #[test]
 fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
     let rate = 48_000;
+    let right_only = {
+        let mut strip = parameters(1_000.0, 0.0, 0.0, false);
+        strip.right.hpf_hz = 10.0;
+        strip
+    };
     let strips = [
         parameters(1_000.0, 0.0, 0.0, false),
         parameters(10.0, 0.0, 0.0, false),
         parameters(1_000.0, 0.0, 24.0, false),
         parameters(1_000.0, 2_000.0, 0.0, false),
         parameters(1_000.0, 0.0, 0.0, true),
+        right_only,
     ];
     let own: Vec<InputSectionBound> = strips
         .iter()
@@ -317,6 +324,7 @@ fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
         }
     }
     assert_eq!(own[4], own[0]);
+    assert_ne!(own[5], own[0], "the right channel must bound differently");
     assert_eq!(
         input_section_bounds(rate, strips).expect("bounds"),
         own,

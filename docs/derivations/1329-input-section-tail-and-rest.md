@@ -169,6 +169,17 @@ are the module's computed outputs, recorded as evidence; nothing pins them.
   `e(t + 1) = q e(t) + 8 u64 ||R|| (|s1| + |s2|)` added through its output row, the later
   sections' majorant recursions step up by `1 + 4 u64` per frame, and a sum of `n` non-negative
   terms is inflated by `1 + 2 n u64`.
+* The radius's `8 u64 ||R||`: one zero-input step rounds the entry `1 - 2 c1` or `1 - 2 a3`, each
+  product and the sum, so each state word errs by at most `3.01 u64 (|A_i1| |s1| + |A_i2| |s2|)`.
+  For a section of damping `k >= 0`, `c1 = t / (1 + t)` and `a3 = g a2` lie in `[0, 1)` and
+  `2 a2 <= 2 g / (1 + g^2) <= 1`, so every entry of `A` is at most `1` in magnitude. The two
+  words' error has a 2-norm of at most `sqrt(2) 3.01 u64 (|s1| + |s2|)`, and a `V`-norm of at most
+  `||R||` times that: `4.26 u64 ||R|| (|s1| + |s2|)`, below the `8 u64 ||R||` used (a margin above
+  1.8).
+* `1 + 4 u64` restores every summand of a recursion step that reaches the result through at most
+  two roundings before the product with it (`(1 - u64)^3 (1 + 4 u64) >= 1`). The radius's growth
+  term passes through three (a sum, a product, the outer addition); its relative shortfall of at
+  most `10 u64^2` is absorbed by the margin of `8 u64 ||R||` above.
 * The `1 + 2^-30` step inflation compounds: over the live bound's 0.9M-frame decay it is a factor
   of about `1 + 8.4e-4`, which lengthens the stated values by a few tens of frames (the live
   `T_decay` is 17 frames above an independent frame-by-frame recomputation without it, every

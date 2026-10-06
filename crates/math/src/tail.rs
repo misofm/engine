@@ -92,10 +92,16 @@ const SLACK: f64 = 1.0 + 1.0 / 1_073_741_824.0;
 /// The `f64` unit roundoff, `2^-53`.
 const U64: f64 = 1.0 / 9_007_199_254_740_992.0;
 
-/// One step of a non-negative recursion evaluated in `f64`, made an upper bound: a sum of at most
-/// two rounded products and one rounded addition is at least `(1 - u)^2` times its exact value,
-/// and `1 + 4u` (itself rounded once) restores it, so by induction the inflated recursion bounds
-/// the exact one at every step, however many steps it runs.
+/// One step of a non-negative recursion evaluated in `f64`, made an upper bound. Each summand of
+/// the step reaches the result through at most two roundings (a rounded product, then the
+/// rounded additions it passes through: in a left-to-right sum `(x + y) + z`, `x` and `y` pass
+/// through two additions and `z` through one), and the product with `1 + 4u` rounds once more:
+/// every summand is at least `(1 - u)^3 (1 + 4u) = 1 + u - 9u^2 + ... >= 1` times its exact
+/// value, so by induction the inflated recursion bounds the exact one at every step, however many
+/// steps it runs. The one summand with a third rounding before the product, the first section's
+/// error growth `nu (|s_1| + |s_2|)` in [`Majorants`] (a rounded sum, then a product, then the
+/// outer addition), falls short of its exact value by at most `10 u^2` relative; `nu` exceeds the
+/// step error it bounds by a factor above 1.8 ([`FIRST_STEP_ERROR`]), which absorbs it.
 const STEP_UP: f64 = 1.0 + 4.0 * U64;
 
 /// The relative error of a sum of `terms` non-negative `f64` values, as an inflation:
@@ -842,14 +848,25 @@ pub fn envelope_cascade(
 /// terms of each sum, and the triangle inequality covers the rest.
 ///
 /// **`f64` rounding.** The first section's response is computed in `f64`, so it carries an error
-/// radius `e(t) >= ||G_1(t) - computed||_V` with `e(t + 1) = q_1 e(t) + nu (|s_1| + |s_2|)`: one
-/// step rounds each entry of `A` it forms (`1 - 2 c1`, `1 - 2 a3`) and each row's two products and
-/// two additions, at most `4.01 u` times `|A| |s| + |b| x` per word, which is at most
-/// `nu = 8 u ||R||_2` per unit of `|s_1| + |s_2|` in the `V`-norm (every entry of `|A|` and `|b|` is
-/// at most `2`). The output majorant adds `gamma_1 e(t)` and the output's own rounding, at most
-/// `8 u` times its terms' magnitudes. The later sections' recursions are non-negative and step up
-/// by [`STEP_UP`] each frame, so none of the three can fall below its exact value however long it
-/// runs.
+/// radius `e(t) >= ||G_1(t) - computed||_V` with `e(t + 1) = q_1 e(t) + nu (|s_1| + |s_2|)`. At
+/// frame 0 the state is zero and the step returns `b` exactly (`2 a2` and `2 a3` scale a word by
+/// two). At every later frame the input is zero, and each word of the step is
+/// `A_i0 s_1 + A_i1 s_2` (plus an exact `+0`): the entry `1 - 2 c1` or `1 - 2 a3` rounds once
+/// (`2 a2` is exact), each product once and the sum once, so each word errs by at most
+/// `((1 + u)^3 - 1) (|A_i0| |s_1| + |A_i1| |s_2|) <= 3.01 u max|A_ij| (|s_1| + |s_2|)`. For a
+/// TPT section of damping `k >= 0` (`t = g (g + k)`, `c1 = t / (1 + t)`, `a2 = g / (1 + t)`,
+/// `a3 = g a2`), `c1` and `a3` lie in `[0, 1)` and `2 a2 <= 2 g / (1 + g^2) <= 1`, so
+/// `|1 - 2 c1|`, `|2 a2|` and `|1 - 2 a3|` are at most `1` (to within the words' own `f32`
+/// rounding, a relative `2^-24`). The error vector's two words then have a 2-norm of at most
+/// `sqrt(2) 3.01 u (|s_1| + |s_2|)`, and in the `V`-norm at most `||R||_2` times that:
+/// `4.26 u ||R||_2 (|s_1| + |s_2|)`, which `nu = 8 u ||R||_2` exceeds by a factor above 1.8. The
+/// premise is the section's: words outside these ranges need their own `nu`. The output
+/// majorant adds `gamma_1 e(t)` and the output's own rounding, at most `8 u` times its terms'
+/// magnitudes: forming `c` and `d` from the words and the output from the state rounds each term
+/// at most six times (`(1 + u)^6 - 1 <= 6.01 u`), and the remaining `1.99 u` covers this term's
+/// own evaluation. The later sections' recursions are non-negative and step up by [`STEP_UP`] each
+/// frame (its doc states the per-summand argument), so none of the three can fall below its exact
+/// value however long it runs.
 #[derive(Clone)]
 struct Majorants<'a> {
     constants: &'a [SectionConstants],
