@@ -134,8 +134,9 @@ rate, quanta 1-63, 22 histories of 512 blocks) runs in the required `qualificati
 ## Objective gates
 
 1. **The step runs the sweep.** Locally, the D1 command exits 0 and lists
-   `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs ... ok` among 15 passed
-   tests. On the batch's qualification run (PR or `main` push), the `test-release` job shows the
+   `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs ... ok` among 14 passed
+   tests (15 after #1407's follow-up added gate 8; 14 after #1329 attempt 3 deleted
+   `input_tail_is_infinite_while_a_filter_target_is_ramping` on purpose, its gate 4). On the batch's qualification run (PR or `main` push), the `test-release` job shows the
    new step passing.
 2. **It fits (D1/D2).** On the batch's qualification run (PR or `main` push): the new step's wall
    time and `test-release`'s job time, against every other required job of that run, recorded
@@ -210,7 +211,7 @@ updated. Deliverables, Authorized paths, Non-goals and gates 2-4 are amended to 
   runs M3"; after this slice and #1329's `tail_contract` step, the step above is no longer the
   lane/math step. The comment now names the `Lane and math gates ... in release` step. No step was
   moved.
-- **NITs folded.** Gate 1 says 15 passed tests; the hot-file note no longer names the closed
+- **NITs folded.** Gate 1 said 15 passed tests (now 14; see the batch note below); the hot-file note no longer names the closed
   J #1427; D1's routing sentence names every path class that routes away from `full`; the
   rust-cache hazard sentence is corrected; gates 2 and 4 name the batch's qualification run.
 - **Other release steps now in `test-release` (relevant to D2's trigger).** Beside this slice's
@@ -222,3 +223,8 @@ updated. Deliverables, Authorized paths, Non-goals and gates 2-4 are amended to 
 - **D2 not triggered by recorded measurements.** No CI run with these steps exists yet; gate 2's
   measurement is pending-CI until the batch push. Locally the added steps cost well under a
   minute against the 254 s baseline job and the 524 s slowest job.
+
+**Batch note (2026-10-06, stream G batch verdict).** The `filter_liveness` target holds 14 tests
+at `fa967fe0b`, all passing in release: #1329 attempt 3 (`11f59fa42`) deleted
+`input_tail_is_infinite_while_a_filter_target_is_ramping` by design (#1329 gate 4). Gate 1's count
+is corrected to 14; the 15 above is the count when gate 1 was first run.
