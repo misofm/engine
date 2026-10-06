@@ -4565,7 +4565,8 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
 #[doc(hidden)]
 pub mod native_staging {
     use super::{
-        WebBootOptions, WebLiveResponseRequest, WebObservationSelection, WebSpectrumRequest,
+        WebBootOptions, WebLiveResponseRequest, WebObservationSelection,
+        WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
     };
 
     /// Stage the boot options and the exact document, as `miso_engine_web_v1_boot_options_ptr`
@@ -4592,6 +4593,51 @@ pub mod native_staging {
             staging.target_id.fill(0);
             staging.target_id[..target_id.len()].copy_from_slice(target_id);
             *staging.request = request;
+        });
+    }
+
+    /// Stage a pre-boot spectrum collection: its header, entries and packed target identities,
+    /// in the order the worklet's `stageSpectrumCollectionRequest` writes them. Each pointer
+    /// export sizes its staging as it does for the worklet (its returned address does not fit a
+    /// native `u32`); this writer then stores what the worklet would write through that address.
+    /// Returns `false` when an export did not size its staging to the request.
+    pub fn spectrum_collection(
+        request: WebSpectrumCollectionRequest,
+        entries: &[WebSpectrumCollectionEntry],
+        target_ids: &[u8],
+    ) -> bool {
+        let _ = super::miso_engine_web_v1_spectrum_collection_request_ptr();
+        super::with_spectrum_staging(|slot| *slot.borrow_mut().collection_request = request);
+        let _ = super::miso_engine_web_v1_spectrum_collection_entry_ptr();
+        let staged = super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            if staging.collection_entries.len() != entries.len() {
+                return false;
+            }
+            staging.collection_entries.copy_from_slice(entries);
+            true
+        });
+        if !staged {
+            return false;
+        }
+        let _ = super::miso_engine_web_v1_spectrum_collection_target_ids_ptr();
+        super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            if staging.collection_target_ids.len() != target_ids.len() {
+                return false;
+            }
+            staging.collection_target_ids.copy_from_slice(target_ids);
+            true
+        })
+    }
+
+    /// Stage the target identity a post-boot `spectrum_select` reads, as the worklet writes it
+    /// through `miso_engine_web_v1_spectrum_target_id_ptr`.
+    pub fn spectrum_target_id(target_id: &[u8]) {
+        super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.target_id.fill(0);
+            staging.target_id[..target_id.len()].copy_from_slice(target_id);
         });
     }
 

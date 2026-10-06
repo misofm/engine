@@ -878,6 +878,14 @@ impl SpectrumCaptureCollection {
         self.selected.map(|index| self.captures[index].target())
     }
 
+    /// Return the selected entry's channel mask without cloning its target.
+    ///
+    /// The browser's audio thread reads this on every spectrum read, so it must not allocate.
+    #[must_use]
+    pub fn selected_channels(&self) -> Option<SpectrumChannels> {
+        self.selected.map(|index| self.captures[index].channels())
+    }
+
     /// Return the selected entry index in preparation order.
     #[must_use]
     pub const fn selected_index(&self) -> Option<usize> {
@@ -3293,6 +3301,28 @@ mod tests {
         collection.cancel();
         assert_eq!(collection.captures[0].consumer.available_at_entry(), 0);
         assert_eq!(collection.captures[1].consumer.available_at_entry(), 0);
+    }
+
+    #[test]
+    fn selected_channels_reports_the_selected_entrys_mask() {
+        let (_first_producer, mut first, _) = racing_capture();
+        let (_second_producer, mut second, _) = racing_capture();
+        first.channels = SpectrumChannels::Left;
+        second.target = SpectrumTarget::Output("alt-out".into());
+        second.channels = SpectrumChannels::Right;
+        let second_target = second.target.clone();
+        let mut collection = SpectrumCaptureCollection::new(vec![first, second]);
+        assert_eq!(collection.selected_channels(), None);
+
+        assert!(
+            collection
+                .select(&second_target, SpectrumChannels::Right)
+                .is_ok()
+        );
+        assert_eq!(
+            collection.selected_channels(),
+            Some(SpectrumChannels::Right)
+        );
     }
 
     #[test]

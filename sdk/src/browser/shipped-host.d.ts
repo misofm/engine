@@ -857,6 +857,14 @@ export interface MisoStatus {
   readonly memoryBytes: number;
 }
 
+/// The instance's render-locked allocator count (issue 1333 D3). Decision 15 requires zero.
+export interface MisoRenderAllocations {
+  readonly tag: "miso.renderallocations.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly count: number;
+}
+
 export interface MisoAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
@@ -897,6 +905,9 @@ export interface MisoAudioWorkletHost {
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
   status(): Promise<MisoStatus>;
+  /// Read the allocator calls this instance made in the exports its processor calls on the render
+  /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
+  renderAllocationCount(): Promise<MisoRenderAllocations>;
   /// Submit one live-control batch as a single transaction (issue 137 D1).
   command(request: MisoCommandRequest): Promise<MisoCommandAck>;
   /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).

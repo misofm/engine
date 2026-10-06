@@ -277,7 +277,7 @@ Dependent: *Run the browser control plane in a Worker and keep the AudioWorklet 
 
 ## Attempt record
 
-### Attempt 1 (implementer, branch `codex/d15-stream-h` at `6d28a80ec`) -- STOPPED, not complete
+### Pre-amendment pass (unverified; implementer, branch `codex/d15-stream-h` at `6d28a80ec`) -- STOPPED, not complete
 
 **Status.** D1, D2, D4, D5, the D3 export and worklet message, deliverables 1, 2, 4 and 5 are
 implemented and green. Deliverable 3 (the qualification gate and its mutation) and gates 4 and 5
@@ -391,3 +391,129 @@ paths (`lib.rs` is authorized for its module line and re-export only).
   comparison disabled (h1, h1a, h1b), hash stripping disabled (h1d, two cases), and the
   exact-name root disabled (h4). Test value: each D4 rule has a case that only that rule
   catches.
+
+### Attempt 1 under Amendment 1 (implementer, branch `codex/d15-stream-h` on `1e658aa65`)
+
+**Status.** The pre-amendment pass was cherry-picked without conflicts onto #1449's head, and
+A1-A4 and deliverables 3 and 6 are done. All eight objective gates pass; gate 4 passes in
+Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, with every instance reading 0.
+
+**A1.** `SpectrumCaptureCollection::selected_channels()` returns the selected entry's mask
+without cloning its target. `PreparedSpectrumCapture::channels()` uses it. The native counter
+test is phase 2 of gate 8's single `#[test]`: on a second fresh thread it boots the observation
+session with a two-entry collection (`trackPostPan:track` and `output:main-out`). It selects the
+second entry and renders. Then it requires a completed spectrum read and a completed
+spectrum-stream read, with the counter unchanged. To stage the collection natively,
+`native_staging` gains `spectrum_collection` and `spectrum_target_id`.
+
+**A2.** The host's `renderAllocationCount()` (response kind `renderAllocations`, reply fields
+`tag, requestId, result, count`, at most one in flight, `result === 0` and `count` a `u32`) is in
+the `.js`, the `.d.ts` and its mirror. `qualification.js` reads the count on every instance it
+boots, before that instance's `dispose()`. That is ten instances: four corpus segments, live
+control, both observation runs, the stall, and two new staging-read instances. Deliverable 3's
+reads were in none of the existing raw workloads, so a new workload `runStagingReadRun` boots the
+observation session with the same two-entry collection and selects `output:main-out`:
+- `oneShot`: one completed one-shot spectrum read, one observation read (one row), one track
+  response capture, then a stream start and a stream read. That stream read returns warming:
+  nothing renders after its start, but it still goes through the selected entry's
+  `channels()`.
+- `stream`: the stream starts before the render, then one completed stream-window read.
+`run.mjs` adds gate `staging-reads` (each read completed, so the counter covers real data) and
+gate `render-allocations` (exactly ten rows, every count `=== 0`). It adds the matching
+`--self-test-mutations` entries and prints the per-instance counts.
+
+**A3.** The measured rows equal the amendment's values. Each was re-pinned on its own line, for
+the same reason: boot now reserves the three stagings (D5), +17 pages.
+`simd128.initialStatus.memoryBytes` 1310720 -> 2424832, `simd128.beforeDisposeStatus.memoryBytes`
+1310720 -> 2424832, and `commandTimeline.beforeDisposeStatus.memoryBytes` 1376256 -> 2490368.
+No digest moved: `direct-oracle.mjs` asserts the PCM digests before it prints, and
+`check-browser-expected-resources.py` compared every other row exactly.
+
+**A4.** `^hosts/host-web/src/render_lock.rs:` joins the unsafe exclusion list. The header
+comment beside the list gives its reason.
+
+**Pre-amendment choices, re-checked against the spec.**
+- D2's locked set does not include `spectrum_request_*` or `spectrum_collection_*`. Kept. D2
+  names the accessors "that the worklet calls" in the post-boot sense: the paragraph after the
+  list says #1332 makes the set "the worklet's whole post-boot export set". The worklet calls
+  those accessors only in `stageSpectrumRequest` and `stageSpectrumCollectionRequest`, before
+  boot. There, `_collection_entry_ptr` and `_collection_target_ids_ptr` size and allocate the
+  collection staging by design, which decision 15 permits before boot. An audit of every export
+  the worklet calls found that each post-boot staging accessor and read is locked:
+  `observation_*`, `track_response_*`, `spectrum_target_id_*`, `spectrum_capture_*`,
+  `spectrum_stream_metadata_*`, `spectrum_read` and `spectrum_stream_read`.
+- D5: the boot exports reserve the stagings only when boot returns a handle. Kept. D5's
+  requirement is that "a booted instance never allocates a staging later", and this meets it. A
+  refused boot has no render thread to protect. Reserving on refusal would grow memory, and
+  `check-web-boot-budget.mjs` allows a typed pre-parse refusal at most one page.
+  `spectrum_staging()` stays in `reserved_after_boot` as D5 requires, although `boot_staged`
+  already touches it.
+- D4: `closure()` prefers an exact name match. Kept. D3's mandated export name has
+  `miso_engine_web_v1_render` as a prefix, so without the exact match the existing render gate
+  stops with "ambiguous export name". Self-test (h4) holds this.
+- `native_staging`: `#[doc(hidden)]`, `cfg(not(target_family = "wasm"))`. Kept. Gate 8 must stage
+  requests through the exports, but on a 64-bit host `pointer_u32` returns 0 for every staging
+  address. The writers store exactly what the worklet writes through those addresses, and the
+  module is not built into the shipped artifact.
+- `#[global_allocator]` is under `cfg(all(target_family = "wasm", not(test)))`, which is narrower
+  than D1's `cfg(target_family = "wasm")`. `src/tests.rs`'s counting allocator is
+  `#[cfg(test)]`, so a host-web unit-test build for wasm would otherwise register two allocators.
+  The shipped module is a non-test wasm build and registers the counter.
+
+**Gates run** (artifacts under `/tmp/claude-1002/h1333/`, deleted afterwards).
+1. `cargo test --locked -p host-web --lib render_lock`: pass.
+2. `bash scripts/test-web-audioworklet.sh`: pass.
+3. `build-web-audioworklet.sh --named-twin`: pass. `check-web-audioworklet.sh <out> <twin>`: pass.
+   The render-thread runs report render indirect_sites=2, meter_poll 0, and command_submit 13
+   in 5 members, with no destructor registration and no atomic wait.
+   `check-browser-expected-resources.py --artifacts`: pass after A3.
+4. `npm run qualify -- --artifacts <out> --sdk-root <repo>/sdk --browser <b> --check-matrix
+   --self-test-mutations`: pass in chromium, firefox and webkit. Each prints
+   `render-allocations: corpus-0-0=0 corpus-0-1=0 corpus-1-0=0 corpus-1-1=0 live-control=0
+   observation-armed=0 observation-disarmed=0 stall=0 staging-reads-one-shot=0
+   staging-reads-stream=0`.
+5. PR evidence: a scratch build with `let planted: Vec<u8> = Vec::with_capacity(1);` in
+   `render_next` failed the Chromium leg at `render-allocations`, with corpus 2/4/2/4, live
+   control 260, observation 32/32, stall 80, and staging reads 32/32. The plant was reverted.
+6. `check-sdk-generated.sh <out>` and `parameter-metadata -- --check <out>`: pass.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features
+   -- -D warnings`, `check-workspace-policy.sh` and `check-realtime-policy.sh`: pass.
+8. `cargo test --locked -p host-web --test render_locked_staging`: pass.
+
+Also run: `cargo test --locked -p host-web -p host-core` (all pass), `check-cross-targets.sh`
+(PASS), `check-sdk-types.sh`, `check-sdk-headless.sh <out>`, `sdk-package.sh check <out>` and
+`check-sdk-deletions.py` (all pass). The stray `sdk/dist` was deleted after the package check.
+
+**Mutation evidence.** Each mutation was applied, its test went red, and the revert went green.
+`hosts/host-web/MUTATIONS.md` has one row per mutation.
+- A1's native test: with `channels()` back to `selected_entry()`, phase 2 reads 4. Test value: it
+  catches a collection capture's spectrum read that allocates on the render thread. Before it,
+  only the SDK-path browser run could see this, and no gate read that run's count.
+- A1 in the browser: a module rebuilt with the clone failed `render-allocations` without
+  `--sdk-root`, with `staging-reads-one-shot` 4, `staging-reads-stream` 2 and every other
+  instance 0. Test value of `staging-reads` and `render-allocations` together: a staging read
+  that allocates turns them red, including the executor's `call_indirect` path. The static gate
+  cannot see either.
+- `selected_channels_reports_the_selected_entrys_mask`: reading `captures[0]` turns it red.
+  Test value: it catches an accessor that reports another entry's mask. Phase 2 selects a
+  `both` entry beside a `both` entry, so it cannot see this.
+- Gate 8 phase 1: with the response or the observation reservation removed, the count reads 7
+  or 6.
+- `render_lock` unit test: an inverted flag, no `fetch_add`, an uncounted `dealloc`, an uncounted
+  `realloc`, and a window that never clears each turn it red.
+- `needs_drop`: a `Vec<u8>` field added to `BootStaging` fails to compile on the assertion.
+- Callgraph self-test: each case goes red when its rule is disabled: (h2), (h3), (h1)/(h1a)/(h1b),
+  hash stripping (h1d), and the exact-name root (h4).
+- `run.mjs --self-test-mutations` proves `render-allocations` (one count set to 1) and
+  `staging-reads` (the one-shot read set to backpressure) red in all three browsers.
+
+**Open items (outside this slice's paths).**
+- The SDK-path instances that `sdk-response-entry.ts` creates (`?sdk=1`) do not read their
+  counts. That file is not authorized. The raw `staging-reads` workload covers the collection
+  read that the SDK's spectrum-collection instance exposed. A successor could read
+  `browser.host.renderAllocationCount()` before each SDK dispose.
+- The hermetic boot-contract test in `scripts/test-web-audioworklet.mjs` (#288) does not list
+  `runStagingReadRun` as a boot caller. That file is not authorized. The browser legs boot it
+  for real.
+- `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", does not yet name
+  `render_lock.rs`. The policy script's header comment does.

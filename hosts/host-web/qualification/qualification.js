@@ -24,6 +24,12 @@ const OBSERVATION_MASTER_TRACK_PLUS_ONE = 1n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
 const MINIMUM_STALL_MS = 100;
+// Issue #1333 D3 / Amendment 1: the staging-read rows. One 2,048-frame spectrum window is sixteen
+// blocks, the observation session's whole declared source region.
+const STAGING_READ_BLOCKS = OBSERVATION_BLOCKS;
+const STAGING_READ_FRAMES = STAGING_READ_BLOCKS * QUANTUM_FRAMES;
+const SPECTRUM_CAPTURE_BYTES = 1 << 20;
+const RESULT_OK = 0;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
 const WORKLET_URL = "/artifacts/miso-engine-v1-audio-worklet.js";
@@ -159,11 +165,23 @@ async function renderCorpusSegment(createHost, sessionDocument, descriptions) {
     if (acknowledgement.result !== 0) throw new Error("corpus prefill rejected");
   }
   const rendered = await context.startRendering();
+  const renderAllocations = await renderAllocationCount(host);
   await host.dispose();
-  return [
-    new Float32Array(rendered.getChannelData(0)),
-    new Float32Array(rendered.getChannelData(1)),
-  ];
+  return {
+    planes: [
+      new Float32Array(rendered.getChannelData(0)),
+      new Float32Array(rendered.getChannelData(1)),
+    ],
+    renderAllocations,
+  };
+}
+
+/// Issue #1333 D3 / Amendment 1 A2: this instance's render-locked allocator count, read before
+/// its dispose. Every instance has its own module and so its own counter.
+async function renderAllocationCount(host) {
+  const reply = await host.renderAllocationCount();
+  if (reply.result !== RESULT_OK) throw new Error(`render allocation count refused: ${reply.result}`);
+  return reply.count;
 }
 
 async function runCorpusQualification(createHost, sessionDocument, source) {
@@ -179,10 +197,14 @@ async function runCorpusQualification(createHost, sessionDocument, source) {
   const rest = await renderCorpusSegment(createHost, sessionDocument, source.blocks);
   const pcm = [new Float32Array(CORPUS_FRAMES), new Float32Array(CORPUS_FRAMES)];
   for (let channel = 0; channel < 2; channel += 1) {
-    pcm[channel].set(first[channel], 0);
-    pcm[channel].set(rest[channel], QUANTUM_FRAMES);
+    pcm[channel].set(first.planes[channel], 0);
+    pcm[channel].set(rest.planes[channel], QUANTUM_FRAMES);
   }
-  return { backend: "simd128", pcm };
+  return {
+    backend: "simd128",
+    pcm,
+    renderAllocations: [first.renderAllocations, rest.renderAllocations],
+  };
 }
 
 function diagnosticJson(value) {
@@ -338,6 +360,7 @@ async function runLiveControlQualification(createHost, sessionDocument) {
   for (let spin = 0; spin < 8 && meterFrames.length === 0; spin += 1) {
     await new Promise((resolve) => setTimeout(resolve, 4));
   }
+  const renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
 
@@ -369,6 +392,7 @@ async function runLiveControlQualification(createHost, sessionDocument) {
     exactRetargetedOutput: exact,
     expectedDigest: await pcmDigest(expected, LIVE_CONTROL_FRAMES),
     renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
+    renderAllocations,
   };
 }
 
@@ -443,6 +467,7 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
     await new Promise((resolve) => setTimeout(resolve, 4));
   }
+  const renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
   const values = frames.map((frame) => frame.trackGrDb[0]);
@@ -476,6 +501,7 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     firstSampleMonotonic: monotonic,
     windowsTile: tiles,
     renderedDigest: await pcmDigest(actual, OBSERVATION_FRAMES),
+    renderAllocations,
   };
 }
 
@@ -550,6 +576,7 @@ async function runStallQualification(createHost, sessionDocument) {
   const measuredStallMs = busyWait(REQUESTED_STALL_MS);
   const rendered = await rendering;
   const status = await host.status();
+  const renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
 
@@ -580,6 +607,113 @@ async function runStallQualification(createHost, sessionDocument) {
     noDesync,
     expectedDigest: await pcmDigest(expected, STALL_FRAMES),
     renderedDigest: await pcmDigest(actual, STALL_FRAMES),
+    renderAllocations,
+  };
+}
+
+/// Issue #1333 D3 / Amendment 1: the worklet's staging reads, each inside a render-locked window.
+///
+/// The observation session boots with a two-entry spectrum collection -- the track's post-pan
+/// boundary and the main output -- and selects the second entry, so each spectrum read resolves a
+/// collection's selected entry, the path that once cloned its target on every read. Two instances,
+/// because one offline render cannot both complete a one-shot window and stream one: `oneShot`
+/// reads a completed one-shot window, then an observation row, then a track response, then a
+/// stream read just after its start; `stream` renders with the stream already running and reads a
+/// completed stream window. Each reports its own count before its dispose.
+async function runStagingReadRun(createHost, sessionDocument, streaming) {
+  const context = new OfflineAudioContext(2, STAGING_READ_FRAMES, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    document: sessionDocument,
+    options: {
+      ...bootOptions(
+        STAGING_READ_FRAMES,
+        LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
+        LIVE_CONTROL_METER_BLOCKS,
+        OBSERVATION_TAPS,
+        OBSERVATION_MASTER_TRACK_PLUS_ONE,
+      ),
+      spectrum: null,
+      spectrumCollection: {
+        entries: [
+          { target: "trackPostPan", targetId: "track", channels: "both" },
+          { target: "output", targetId: "main-out", channels: "both" },
+        ],
+        maximumCaptureBytes: SPECTRUM_CAPTURE_BYTES * 2,
+      },
+    },
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+  for (let block = 0; block < STAGING_READ_BLOCKS; block += 1) {
+    const acknowledgement = await host.submitSource({
+      sourceId: "live-control-source",
+      generation: 1n,
+      startFrame: BigInt(block * QUANTUM_FRAMES),
+      sampleRateHz: SAMPLE_RATE,
+      planes: observationPlanes(block),
+      frames: QUANTUM_FRAMES,
+      endOfRegion: block === STAGING_READ_BLOCKS - 1,
+    });
+    if (acknowledgement.result !== RESULT_OK) throw new Error("staging-read prefill rejected");
+  }
+  const selected = await host.selectSpectrum({
+    target: "output", targetId: "main-out", channels: "both",
+  });
+  const run = { selectResult: selected.result };
+  if (streaming) {
+    run.streamStartResult = (await host.startSpectrumStream(0)).result;
+    await context.startRendering();
+    const read = await host.readSpectrumStream(new ArrayBuffer(SPECTRUM_CAPTURE_BYTES));
+    run.streamReadResult = read.result;
+    run.streamReadBytes = read.byteLength;
+  } else {
+    const subscribed = await host.observe({
+      subscriptions: [{
+        trackIndex: 0,
+        rack: 1,
+        effectIndex: 0,
+        tapId: OBSERVATION_TAP_ID,
+        windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+        armed: true,
+      }],
+    });
+    run.subscribeResult = subscribed.result;
+    await context.startRendering();
+    const spectrum = await host.readSpectrum({ channels: "both" });
+    run.spectrumReadResult = spectrum.result;
+    run.spectrumReadBytes = spectrum.snapshot.byteLength;
+    const observation = await host.readObservations({
+      selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
+    });
+    run.observationReadResult = observation.result;
+    run.observationRows = observation.rows.length;
+    const response = await host.captureTrackResponse({
+      trackId: "track",
+      grid: 1,
+      channels: 3,
+      points: 5,
+      minimumHz: 20,
+      maximumHz: 20_000,
+      maximumResultBytes: SPECTRUM_CAPTURE_BYTES,
+    });
+    run.trackResponseResult = response.result;
+    run.trackResponseBytes = response.snapshot.byteLength;
+    run.streamStartResult = (await host.startSpectrumStream(0)).result;
+    const read = await host.readSpectrumStream(new ArrayBuffer(SPECTRUM_CAPTURE_BYTES));
+    run.streamReadResult = read.result;
+    run.streamReadBytes = read.byteLength;
+  }
+  run.renderAllocations = await renderAllocationCount(host);
+  await host.dispose();
+  return run;
+}
+
+async function runStagingReadQualification(createHost, sessionDocument) {
+  return {
+    oneShot: await runStagingReadRun(createHost, sessionDocument, false),
+    stream: await runStagingReadRun(createHost, sessionDocument, true),
   };
 }
 
@@ -633,6 +767,8 @@ export async function runQualification() {
       liveControls: null,
       observation: null,
       stall: null,
+      stagingReads: null,
+      renderAllocations: null,
       sdkResponse,
     };
   }
@@ -689,6 +825,17 @@ export async function runQualification() {
   } catch (error) {
     throw new Error(`stall qualification failed: ${JSON.stringify({ ...error })}`);
   }
+  let stagingReads;
+  try {
+    stagingReads = await runStagingReadQualification(
+      createMisoAudioWorkletHost,
+      observationDocument,
+    );
+  } catch (error) {
+    throw new Error(`staging-read qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error,
+    })}`);
+  }
   return {
     schema: "miso.web.qualification.result.v1",
     secureContext: window.isSecureContext,
@@ -707,6 +854,20 @@ export async function runQualification() {
     liveControls: live,
     observation,
     stall,
+    stagingReads,
+    // Issue #1333 D3: every booted instance's render-locked allocator count, each read before
+    // that instance's dispose. Decision 15 requires every one to be zero.
+    renderAllocations: [
+      ...correctness.runs.flatMap((run, index) => run.renderAllocations.map((count, segment) => ({
+        workload: `corpus-${index}-${segment}`, count,
+      }))),
+      { workload: "live-control", count: live.renderAllocations },
+      { workload: "observation-armed", count: observation.armed.renderAllocations },
+      { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
+      { workload: "stall", count: stall.renderAllocations },
+      { workload: "staging-reads-one-shot", count: stagingReads.oneShot.renderAllocations },
+      { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
+    ],
     sdkResponse,
   };
 }

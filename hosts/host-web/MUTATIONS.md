@@ -543,3 +543,30 @@ module; E1 rebuilt the module with the mutation.
 | `live-controls-types.ts` | `VcaEdits` gains `solo` | `_VcaSurface` fails |
 | `live-controls-types.ts` | `VcaEdits.faderDb` accepts a `gainDb` option | `Unused '@ts-expect-error'` |
 | `live-controls-types.ts` | `VcaEdits.mute` accepts a number | `Unused '@ts-expect-error'` |
+
+## Issue #1333 — the render-locked allocation counter and the render-thread static rules
+
+Each row was applied, its test run red, and the tree restored. Rust rows ran on `x86_64`, debug
+profile; browser rows rebuilt the module with `scripts/build-web-audioworklet.sh` and ran the
+Chromium leg of `qualification/run.mjs`.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `render_lock::tests::render_lock_counts_each_entry_point_only_inside_its_own_window` | `count_if_locked` tests `!locked()` | `an unlocked thread counts nothing` fails |
+| same | `count_if_locked` never does its `fetch_add` | the in-window count of 5 fails |
+| same | `dealloc` (or `realloc`) skips `count_if_locked` | the in-window count of 5 fails |
+| same | `render_locked` never clears the flag | `the window clears the flag when it returns` |
+| `const _: () = assert!(!needs_drop::<..>())` in `ffi.rs` | add a `Vec<u8>` field to `BootStaging` | `error[E0080]`: `assertion failed: !needs_drop::<RefCell<BootStaging>>()` |
+| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserved_after_boot` | `a staging accessor allocated inside its render-locked window`: 7 |
+| same | drop `observation_staging()` from `reserved_after_boot` | the same assertion: 6 |
+| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1) | `PreparedSpectrumCapture::channels` back to `selected_entry().map(\|entry\| entry.channels)` | `a collection capture's spectrum read allocated`: 4 |
+| `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` reads `captures[0]` | `Some(Left)` where `Some(Right)` is selected |
+| `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
+| same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |
+| same, (h1)/(h1a)/(h1b) | the `INDIRECT_SITES` comparison is skipped | (h1) new site, (h1a) removed site, (h1b) changed count |
+| same, (h1d) | `unhashed` keeps the mangling hash | both (h1d) schemes |
+| same, (h4) | `closure` takes no exact-name root | (h4): `miso_engine_web_v1_render` is ambiguous with `_render_allocation_count` |
+| `qualification/run.mjs` `render-allocations` | a `Vec::with_capacity(1)` planted in `render_next` (rebuilt module) | every instance reads more than 0 (corpus 2 and 4, live control 260, stall 80, ...) and the gate fails |
+| same | `PreparedSpectrumCapture::channels` back to the clone (rebuilt module, no `--sdk-root`) | `staging-reads-one-shot` reads 4 and `staging-reads-stream` reads 2; every other instance reads 0 |
+| `qualification/run.mjs --self-test-mutations` `render-allocations` | one instance's count set to 1 | `<browser>: render-allocations` fails |
+| `qualification/run.mjs --self-test-mutations` `staging-reads` | the one-shot spectrum read's result set to backpressure (6) | `<browser>: staging-reads` fails |

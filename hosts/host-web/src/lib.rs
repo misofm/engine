@@ -1496,7 +1496,7 @@ impl PreparedSpectrumCapture {
     fn channels(&self) -> Option<SpectrumChannels> {
         match self {
             Self::Single(capture) => Some(capture.channels()),
-            Self::Collection(capture) => capture.selected_entry().map(|entry| entry.channels),
+            Self::Collection(capture) => capture.selected_channels(),
         }
     }
 }
