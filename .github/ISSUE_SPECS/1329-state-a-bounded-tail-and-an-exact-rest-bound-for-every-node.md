@@ -1173,3 +1173,93 @@ digest is recorded at the batch boundary): its bytes
 change with the bound code linked into preparation, as `artifact-identity` will report; no audio
 bit moves (wasm G5 digests, builtins PCM fixtures, `audit capi`'s `pcm_digest`). AArch64 is
 CI-only.
+
+### Attempt 5 (2026-10-06, branch `codex/d15-stream-g`, under Amendment 5; the last permitted attempt)
+
+Implementation and Amendment 5 `590201615`; this record in the commit after it. Scope exactly
+Amendment 5's list. Release measurements on this host (x86-64-v3).
+
+**MJ1.** `prepare_session_builtins_with_live_controls` passes `builtins::input_section_bounds` only
+the strips without a live input lane (in strip order) and takes the live bound for a live strip;
+a live strip's design bound is never computed. The seal, the seal check (`expected_tails`),
+`input_bounds()` and every fixture are unchanged (`check-builtins-fixtures.sh`, `graph_fixture
+--check`, `resources.jsonl` untouched). `builtins::tail::fixed_input_bound` counts its runs in a
+thread-local counter compiled only under `test` or `builtins/test-support`, read through
+`builtins::test_support::fixed_input_bounds_computed()`; the new builtins-compiler test
+`design_bounds_are_computed_only_for_strips_without_a_live_input_lane` (test-support, so
+`test-debug-a` runs it) prepares the nine-track EQ fixture with six distinct designs (eq0-eq2
+shared, eq3 HPF, eq4 LPF, eq5 trim, eq6 right HPF only, eq7-eq8 filters off) and counts 6 with no
+strip live, 0 with every strip live, 4 with eq3 and eq4 live, each preparation passing the seal
+check.
+
+Browser boot, `node --no-liftoff scripts/web-mixing-automation-benchmark.mjs rebuild-round MODULE
+1|2` (the #1289 rebuild-cost proxy: Node v22.23.2, pinned with `taskset -c 7`, 25 boots per
+document, every boot audible, 0 failed), rounds run alternately pre/head. Boot p50 in ms, round 1
+/ round 2:
+
+| module | 9-track EQ | 64-track console | 64-track app shape | 64-track sends |
+|---|---|---|---|---|
+| pre-#1329 `0725a8949` (`10a3c816…`, from a `git archive` export, deleted after) | 2.15 / 2.17 | 20.27 / 20.38 | 19.72 / 19.81 | 33.73 / 34.00 |
+| attempt 5 `590201615` (`ec1d2f66…`, 3,053,802 B) | 2.25 / 2.22 | 20.40 / 20.19 | 19.89 / 19.69 | 34.39 / 33.69 |
+| *(attempt 4 `c7f7bbdfb`, the verifier's table)* | 2.46 / 2.49 | 35.41 / 35.86 | 35.02 / 35.34 | 49.20 / 50.53 |
+
+The three 64-track documents are within noise of pre-#1329 (round-to-round spread larger than the
+difference). The 9-track document is about 0.07 ms (3 %) above pre-#1329, as in the verifier's
+patched row (2.25 / 2.23); its source is not investigated (candidates: the live bound's 0.04 ms
+and the larger module). Records kept outside the tree (scratchpad `rebuild-{pre,head}-{1,2}.json`).
+
+**m1.** `live_input_lane_reports_the_live_bound_and_plain_input_its_own` now forges the live
+strip's entry to its design bound (`InputSectionBound::ZERO`, both filters off) in `tails` and
+`seal.tails` alike and expects `builtin.prepared.tail_set` from `validate_for_session`.
+
+**m2.** `each_strip_is_bounded_by_its_own_design_when_designs_are_shared` gains a sixth strip, the
+first with only its right HPF at 10 Hz; its own bound differs from the first strip's.
+
+**m3, NITs.** Test value restated (above). `math::tail`: the `nu` text now derives `4.26 u
+||R||_2` from `|1 - 2 c1|, |2 a2|, |1 - 2 a3| <= 1` (for `k >= 0`), three roundings per word and
+the `sqrt(2)` of the 2-vector, below `nu = 8 u ||R||_2` by a factor above 1.8, and states the
+premise; `STEP_UP`'s doc gives the per-summand argument: each summand of every step reaches the
+result through at most two roundings before the product with `1 + 4u` (in `out.input[1]`, `|h|`
+and the output rounding pass two additions, `gamma_1 e` a product and one addition), so
+`(1 - u)^3 (1 + 4u) >= 1`; the one exception, the radius's growth term `nu (|s_1| + |s_2|)` (three
+roundings), falls short by at most `10 u^2` relative, which `nu`'s margin absorbs. The output
+rounding's `8 u` is stated against at most six roundings per term (`6.01 u`). The derivation's
+"Numerical limits" says the same. No constant changed. The attempt-4 digest is marked
+`feefbe166`'s; the superseded gate 2, 3 and 7 lines are struck through with a pointer; the
+#1457 row is 21. Root rulings A (#1457 "Where preparation runs"), B (`HostLiveLanes::strip_input`
+doc) and E (`effect-floor-accounting.md`'s citation, marked as a citation update) are done.
+
+**Mutation runs** (each applied in the worktree, the named test run, the file restored; RED = the
+test fails):
+
+| defect | test | result |
+|---|---|---|
+| preparation bounds every strip's design and discards the live strips' (attempt 4) | `design_bounds_are_computed_only_…` (debug) | RED: 6 against 0 (every strip live); every other builtins-compiler test GREEN |
+| `input_section_bounds` bounds once per strip, not per distinct design | `design_bounds_are_computed_only_…` | RED: 9 against 6 |
+| the seal check skips its live rule (verdict E2) | `live_input_lane_reports_…` (debug) | RED; every other builtins-compiler test GREEN |
+| the design key drops the right channel (`[lanes[0], lanes[0]]`, verdict C3) | `each_strip_is_bounded_…` | RED (`input_section_bounds` hands the sixth strip the first's bound) |
+
+**Certified figures.** None moved: release `tail_contract` prints the attempt-4 values (for
+example HPF 10 Hz into LPF 22049.48 at +24 dB 416,117; live 44.1 kHz `T_decay` 904,785, `R(P*)`
+and `T_rest` 1,081,764; the other rates as recorded). No audio bit moved: wasm G5 0 mismatches
+(143 cases, 252 comparisons), `audit capi` `pcm_digest` `cb10fbface44a3a4`, builtins fixtures
+green. No fixture or digest re-pinned.
+
+**Gates run (all green):** `cargo fmt --all -- --check`; release `tail_contract
+--include-ignored` (9 passed, 6.9 s); `cargo clippy --locked --workspace --all-targets -- -D
+warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; `cargo test
+--locked -p builtins-compiler --no-run`; `test-debug-a` (1,442 passed, 0 failed, 10 ignored) and
+`test-debug-b` (888 passed, 0 failed, 25 ignored) with `qualification.yml`'s exact commands;
+`conformance_fixtures --check`; `check-workspace-policy.sh`, `check-realtime-policy.sh`,
+`check-lane-policy.sh`, `check-builtins-policy.sh`, `check-dsp-research.sh`,
+`check-effect-contract.sh`, `check-ci-path-routing.py`; release build of `audit bench capi
+session-validator`; `audit capi` (0 allocations, 0 deallocations, 0 syscalls, 0 violations);
+`cargo test --release -p audit -p bench -p console-workload`; `check-capi-abi.sh` and
+`--self-test`; `check-scalar-oracle-absent.py --native` and `--wasm`; `graph_fixture --check`;
+`check-graph-determinism.sh`; `check-builtins-fixtures.sh`; `check-cross-targets.sh`; the worklet
+chain (`build-web-audioworklet.sh --named-twin` into recreated empty directories,
+`strip-wasm-names.py --self-test` and `check`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh`); `run-wasm-gates.sh --without-v8-spill --without-native`. The shipped
+module at `590201615` is `ec1d2f66…a58cddfb` (3,053,802 B); this record commit moves no source
+line, and the final digest is recorded at the batch boundary (root ruling D). AArch64 is CI-only.
