@@ -10,15 +10,15 @@ use crate::prng::SplitMix64;
 
 use effect_contract::{
     AutomationSpanKind, BankProcessReport, EffectDescriptor, EffectId, EffectPrepareError,
-    EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind,
-    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
-    TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
-    validate_descriptor,
+    EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples, LinkMode, LinkModeSet,
+    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
+    QualityDescriptor, ResetKind, RestBound, RestSamples, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples, default_initial_values,
+    expected_prepared_metadata, valid_runtime_span, validate_descriptor,
 };
 use engine::{LAUNCH_SAMPLE_RATES, realtime::audit};
 
@@ -87,7 +87,6 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(3),
-        tail: TailSamples::Finite(3),
         maximum_state: STATE_SIZES,
         scratch_fixed_bytes: 0,
         scratch_bytes_per_frame: 0,
@@ -99,6 +98,15 @@ const QUALITIES: [QualityDescriptor; 4] = [
     quality(LAUNCH_SAMPLE_RATES[2].0),
     quality(LAUNCH_SAMPLE_RATES[3].0),
 ];
+/// The mock's tail, tail over every peak and exact-rest bound (#1377 D1, D4): its declared
+/// three-sample tail, with no exact-rest bound stated, because its output accumulator never rests.
+fn tail_and_rest(_: u32, _: EffectQuality) -> EffectTailBound {
+    EffectTailBound {
+        tail: TailSamples::Finite(3),
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+    }
+}
 pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: MOCK_ID,
     display_name: "Conformance dual accumulator delay",
@@ -109,6 +117,7 @@ pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptor = EffectDescripto
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 
@@ -147,6 +156,9 @@ pub enum FaultKind {
     /// caught by `metadata.exact` before any audio is rendered. This one reports the contractual
     /// latency and then fails to honour it, which only the bypass reference render can see.
     BypassDelayMismatch,
+    /// #1377 gate 1: prepared metadata whose exact-rest bound is not the one the descriptor's
+    /// `tail_and_rest` states for the prepared rate and quality.
+    UndeclaredRestBound,
 }
 
 pub struct DualAccumulatorDelayFactory {
@@ -395,6 +407,9 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
         }
         if self.fault == FaultKind::ChangingTail && self.metadata_calls != 0 {
             metadata.tail = TailSamples::Infinite;
+        }
+        if self.fault == FaultKind::UndeclaredRestBound {
+            metadata.rest = RestBound::Bounded(RestSamples::ZERO);
         }
         if self.fault == FaultKind::LatencyChangingBypass && metadata.bypass {
             metadata.latency = LatencySamples(0);
@@ -1096,6 +1111,17 @@ pub fn run_effect_conformance(
                 tier.prepared_configurations += 1;
                 if effect.metadata().program_key() != expected.program_key() {
                     tier.failures.push("metadata.exact");
+                }
+                // #1377 gate 1: the prepared tail, tail over every peak and exact-rest bound are
+                // the ones the descriptor's one function states for this rate and quality,
+                // compared to the function itself rather than to `expected_prepared_metadata`.
+                let bound = (descriptor.tail_and_rest)(quality.sample_rate, quality.quality);
+                let metadata = effect.metadata();
+                if metadata.tail != bound.tail
+                    || metadata.tail_every_peak != bound.tail_every_peak
+                    || metadata.rest != bound.rest
+                {
+                    tier.failures.push("metadata.tail_bound");
                 }
                 let frames = config.quantum as usize;
                 let mut left = vec![0.0; frames];

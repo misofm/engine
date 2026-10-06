@@ -571,6 +571,8 @@ fn prepare_with_console_eligibility(
                     || metadata.ports != expected.ports
                     || metadata.latency != expected.latency
                     || metadata.tail != expected.tail
+                    || metadata.tail_every_peak != expected.tail_every_peak
+                    || metadata.rest != expected.rest
                     || metadata.state_sizes != expected.state_sizes
                     || metadata.scratch_bytes != expected.scratch_bytes
                     || metadata.automation_capacity != expected.automation_capacity
@@ -1010,6 +1012,147 @@ mod control_producer_tests {
             consumer.try_pop().expect("retained semantic record"),
             second
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_mismatch_tests {
+    use super::{EffectCompileCaps, prepare_native_session_effects};
+    use effect_contract::{
+        EffectDescriptor, EffectPrepareError, EffectProcessBlock, NativeEffectFactory,
+        NativeEffectRegistry, PrepareEffectBankRequest, PrepareEffectRequest,
+        PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
+        ResetKind, RestBound, RestSamples, StatePayloadError, StatePayloadInput,
+        StatePayloadOutput, TailSamples,
+    };
+    use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
+    use session::{CompileCaps, compile_session, parse_session_json};
+
+    /// The production EQ, whose prepared metadata `drift` then edits.
+    struct DriftingEq(fn(&mut PreparedEffectMetadata));
+    struct Drifting {
+        inner: Box<dyn PreparedNativeEffect>,
+        drift: fn(&mut PreparedEffectMetadata),
+    }
+    impl NativeEffectFactory for DriftingEq {
+        fn descriptor(&self) -> &'static EffectDescriptor {
+            &PARAMETRIC_EQ_DESCRIPTOR
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+            Ok(Box::new(Drifting {
+                inner: ParametricEqFactory.prepare(request)?,
+                drift: self.0,
+            }))
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            _: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+            Ok(None)
+        }
+    }
+    impl PreparedNativeEffect for Drifting {
+        fn metadata(&self) -> PreparedEffectMetadata {
+            let mut metadata = self.inner.metadata();
+            (self.drift)(&mut metadata);
+            metadata
+        }
+        fn reset(&mut self, kind: ResetKind) {
+            self.inner.reset(kind);
+        }
+        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+            self.inner.process(block)
+        }
+        fn snapshot_state_payload(
+            &self,
+            output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            self.inner.snapshot_state_payload(output)
+        }
+        fn restore_state_payload(
+            &mut self,
+            version: u32,
+            input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            self.inner.restore_state_payload(version, input)
+        }
+    }
+
+    /// A rest bound other than the one the processor reports.
+    fn other_rest(metadata: &mut PreparedEffectMetadata) {
+        metadata.rest = match metadata.rest {
+            RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
+            RestBound::Bounded(_) => RestBound::Unstated,
+        };
+    }
+
+    /// A tail over every peak other than the one the processor reports.
+    fn other_tail_every_peak(metadata: &mut PreparedEffectMetadata) {
+        metadata.tail_every_peak = match metadata.tail_every_peak {
+            TailSamples::Infinite => TailSamples::Finite(0),
+            TailSamples::Finite(_) => TailSamples::Infinite,
+        };
+    }
+
+    /// Gate 2 of #1377: a processor whose `rest` or `tail_every_peak` differs from
+    /// `expected_prepared_metadata`'s, which its descriptor's `tail_and_rest` states, is refused
+    /// with `effect.metadata.mismatch` and prepares no partial session; the same processor without
+    /// the drift prepares.
+    ///
+    /// Red mutations: drop either new comparison from the mismatch check.
+    #[test]
+    fn a_processor_whose_rest_or_tail_every_peak_drifts_is_refused() {
+        let model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("accepted fixture");
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled fixture");
+        let caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let prepare = |drift: fn(&mut PreparedEffectMetadata)| {
+            let registry = NativeEffectRegistry::new([
+                Box::new(DriftingEq(drift)) as Box<dyn NativeEffectFactory>
+            ])
+            .expect("registry");
+            prepare_native_session_effects(&session, &registry, caps)
+        };
+
+        let prepared = prepare(|_| {}).expect("an undrifted processor prepares");
+        assert_eq!(prepared.entries.len(), 9);
+        for (field, drift) in [
+            ("rest", other_rest as fn(&mut PreparedEffectMetadata)),
+            ("tail_every_peak", other_tail_every_peak),
+        ] {
+            let diagnostics = prepare(drift)
+                .err()
+                .unwrap_or_else(|| panic!("a drifted `{field}` prepared"));
+            assert_eq!(diagnostics.0.len(), 9, "{field}");
+            assert!(
+                diagnostics
+                    .0
+                    .iter()
+                    .all(|diagnostic| diagnostic.code == "effect.metadata.mismatch"),
+                "{field}: {:?}",
+                diagnostics.0
+            );
+        }
     }
 }
 
