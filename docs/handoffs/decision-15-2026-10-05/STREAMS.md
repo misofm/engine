@@ -276,26 +276,28 @@ rebase onto them.
 | 12 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
 | 13 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
 | 14 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
-| 15 | #1452 | Undo the iOS memset ratchet workarounds once splats are free | #1451, #1409 | — |
-| 16 | #1456 | Remove the libc memset calls from the true-peak limiter's reset on Apple targets | #1451, #1452 | — |
-| 17 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
-| 18 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
-| 19 | #1457 | Cache design bounds across preparations within a stated preparation budget | #1329 | coordinate with H #1332 |
-| 20 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
-| 21 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
-| 22 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
-| 23 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
-| 24 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
-| 25 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 26 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 27 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 28 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
-| 29 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 30 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 31 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
-| 32 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
-| 33 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
-| 34 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 15 | #1458 | Share one effect-ramp endpoint harness instead of seven copies | #1409, #1411 | — |
+| 16 | #1459 | Replay an effect ramp whose endpoint clamp acts in the wasm corpus | #1409 | — |
+| 17 | #1452 | Undo the iOS memset ratchet workarounds once splats are free | #1451, #1409 | — |
+| 18 | #1456 | Remove the libc memset calls from the true-peak limiter's reset on Apple targets | #1451, #1452 | — |
+| 19 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
+| 20 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
+| 21 | #1457 | Cache design bounds across preparations within a stated preparation budget | #1329 | coordinate with H #1332 |
+| 22 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
+| 23 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
+| 24 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
+| 25 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
+| 26 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
+| 27 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 28 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
+| 29 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 30 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
+| 31 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
+| 32 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 33 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
+| 34 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
+| 35 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
+| 36 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
 
 ## Stream H
 

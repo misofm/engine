@@ -54,9 +54,26 @@ gated figure.
 ## Objective gates (to be fixed with D1-D3)
 
 1. A rebuild of an unchanged session computes no design bound (counted).
-2. The worst-case preparation cost of the bounds, measured once on the CI runner, is within D1.
+2. **The worst case, not only typical sessions** (root ruling R1 below). The preparation cost of
+   the bounds is measured once on the CI runner for the worst case #1329 attempt 4 recorded, and
+   it is within D1's budget: distinct near-top designs (HPF one `f32` below the maximum into the
+   LPF at the maximum, +24 dB; and the 64-design family HPF 10-640 Hz into the LPF 1-64 `f32`
+   below the maximum, +24 dB) at 7-8.8 ms each, up to the track-count limit (65,537 distinct
+   near-top designs, about 9.6 minutes extrapolated on every rebuild today), on a first
+   preparation and on a rebuild. A typical session's figure is recorded beside it but never
+   stands in for it. Under D3, a session past the budget shows the D3 outcome (typed refusal or
+   the cheaper certified bound) at the measured worst case.
 3. Every reported bound is bit-identical with and without the cache (`tail_contract`'s gates stay
    green).
+
+## Root rulings
+
+### R1 (2026-10-06): the worst case is gated
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation. The gates hold
+the measured worst case (#1329 attempt 4: 7-8.8 ms per distinct near-top design; about 9.6 minutes
+extrapolated for 65,537 distinct near-top designs per rebuild) against D1's stated budget, not only
+typical sessions. Gate 2 is amended to say so.
 
 ## Non-goals
 
