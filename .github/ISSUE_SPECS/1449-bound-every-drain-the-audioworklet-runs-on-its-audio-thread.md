@@ -338,8 +338,10 @@ this issue lands on `main` as it is.
   `continuous_stop_pops_at_most_its_entry_count_while_a_producer_refills` (D7, 20,000 blocks each,
   on `bench_support::producer::render_while_producing`, with the three ordering conditions written
   in the helper's comments), and `collection_cancel_except_drains_every_capture_but_the_kept_one`
-  (D9). D8: no new test; `bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop`
-  already holds the shape (see the mutations below). No test was superseded.
+  (D9). D8: no new test; `failed_continuous_completion_drains_only_the_failed_queued_window`
+  already holds the full shape (corrected in the follow-ups below; the attempt first named
+  `bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop`, which holds only
+  the first half). No test was superseded.
 
 **Gate 1.** `cargo test --locked -p host-core --lib spectrum`: 41 passed. `cargo test --locked -p
 host-core`: every binary ok (lib 68 passed). `cargo test --locked -p host-web --features
@@ -421,5 +423,44 @@ AArch64 runs only in CI.
   refilling producer); no existing test runs a producer during a drain.
 - D9's test: red if `cancel_except` skips the drain or drains the kept capture; every existing
   collection test cancels an already-empty queue.
-- D8 (existing test): red if the rewritten read drops the stale-record arm or the post-loop
-  `Warming` status.
+- D8 (existing tests, see the follow-ups): red if the rewritten read drops the stale-record arm or
+  the post-loop `Warming` status.
+
+### Follow-ups (verifier MINOR/NIT)
+
+Test-only change in `crates/host-core/src/spectrum.rs` `mod tests`; no non-test code changed.
+
+- **MINOR-1 and MINOR-2**: `each_drain_pops_exactly_one_record_of_two_queued`, single-thread. A
+  capture around a two-slot queue holds two records; `cancel()` (armed one-shot),
+  `start_continuous()` (reaches `commit_continuous`) and `stop_continuous()` (active continuous
+  mode) each run on a fresh capture, and exactly one record must be left. It holds
+  `.min(SPECTRUM_RESULT_SLOTS)` deterministically (MINOR-1) and that each drain removes a record
+  (MINOR-2). The D7 concurrency tests are unchanged.
+- **NIT-1**: the test that holds D8's full shape (one stale pop, then `Pending`/`Warming`, then a
+  fresh record on the next read) is `failed_continuous_completion_drains_only_the_failed_queued_window`.
+  The verifier measured it red on both D3 mutations (stale-record arm removed; post-loop status
+  always `Pending`). `bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop`
+  holds only the first half and, despite its name, does not detect a chase: D3's bound is held
+  only by the realtime-policy marker (B2b-1).
+- **NIT-2**: the one-slot builder is now `capture_with_held_producer(slots)`. The D9 test and
+  `selected_channels_reports_the_selected_entrys_mask` call it; `racing_capture()` remains as a
+  one-line wrapper (`capture_with_held_producer(1)`) used only by the three D7 tests, so their
+  bodies are unchanged.
+
+Mutation evidence (each applied alone, `cargo test --locked -p host-core --lib spectrum::tests::`,
+then reverted; the file restored byte for byte, checked with `cmp`):
+
+| Mutation | New test | Assertion | Other tests red |
+|---|---|---|---|
+| `cancel` drain -> `while .. try_pop().is_ok() {}` | red | `cancel`: left 0, right 1 | D7 `cancel_..` (by chance) |
+| `cancel` drain removed | red | `cancel`: left 2, right 1 | none |
+| `commit_continuous` drain -> `while` | red | `commit_continuous`: left 0, right 1 | none |
+| `commit_continuous` drain removed | red | `commit_continuous`: left 2, right 1 | none |
+| `stop_continuous` drain -> `while` | red | `stop_continuous`: left 0, right 1 | D7 `continuous_stop_..` (by chance) |
+| `stop_continuous` drain removed | red | `stop_continuous`: left 2, right 1 | none |
+
+*Test value.* `each_drain_pops_exactly_one_record_of_two_queued`: red if any of `cancel`,
+`commit_continuous` or `stop_continuous` pops more than `min(count at entry, SPECTRUM_RESULT_SLOTS)`
+records (a `while` drain, every run, unlike the D7 tests' scheduling-dependent power) or pops none
+(a cancelled or stopped capture keeps a stale window); no existing host-core test catches either
+deterministically, and none catches a removed `cancel` or `stop_continuous` drain at all.

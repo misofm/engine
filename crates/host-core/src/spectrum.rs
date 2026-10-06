@@ -3194,15 +3194,17 @@ mod tests {
         assert_eq!(capture.consumer.available_at_entry(), 0);
     }
 
-    /// A capture around a one-slot queue whose producer the test holds, built as
+    /// A capture around a `slots`-slot queue whose producer the test holds, built as
     /// `continuous_pair` builds its pair, and a record to push into it.
-    fn racing_capture() -> (
+    fn capture_with_held_producer(
+        slots: usize,
+    ) -> (
         engine::realtime::Producer<super::SpectrumCapturedRecord>,
         SpectrumCapture,
         super::SpectrumCapturedRecord,
     ) {
         let (producer, consumer) = bounded_spsc(
-            core::num::NonZeroUsize::new(1).expect("one capture slot"),
+            core::num::NonZeroUsize::new(slots).expect("at least one capture slot"),
             QueueGeneration(0x4353_5052),
         )
         .expect("capture queue");
@@ -3224,6 +3226,62 @@ mod tests {
             dropped_captures: 0,
         };
         (producer, capture, record)
+    }
+
+    /// The one-slot capture the concurrency tests race a producer against.
+    fn racing_capture() -> (
+        engine::realtime::Producer<super::SpectrumCapturedRecord>,
+        SpectrumCapture,
+        super::SpectrumCapturedRecord,
+    ) {
+        capture_with_held_producer(1)
+    }
+
+    /// Each control-side drain pops exactly `min(available at entry, SPECTRUM_RESULT_SLOTS)`
+    /// records: one of two queued records in a two-slot queue. A `while` drain empties the queue;
+    /// a missing drain leaves both records.
+    #[test]
+    fn each_drain_pops_exactly_one_record_of_two_queued() {
+        fn queued_pair() -> (
+            engine::realtime::Producer<super::SpectrumCapturedRecord>,
+            SpectrumCapture,
+        ) {
+            let (mut producer, capture, record) = capture_with_held_producer(2);
+            assert!(producer.try_push(record).is_ok());
+            assert!(producer.try_push(record).is_ok());
+            assert_eq!(capture.consumer.available_at_entry(), 2);
+            (producer, capture)
+        }
+
+        let (_producer, mut capture) = queued_pair();
+        capture
+            .state
+            .store(ARMED, std::sync::atomic::Ordering::Release);
+        capture.cancel();
+        assert_eq!(capture.consumer.available_at_entry(), 1, "cancel");
+
+        // `start_continuous` reaches `commit_continuous` from an idle one-shot capture.
+        let (_producer, mut capture) = queued_pair();
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        assert_eq!(
+            capture.consumer.available_at_entry(),
+            1,
+            "commit_continuous"
+        );
+
+        // `stop_continuous` drains only an active continuous capture.
+        let (_producer, mut capture) = queued_pair();
+        capture
+            .mode
+            .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
+        capture
+            .shared
+            .active
+            .store(1, std::sync::atomic::Ordering::Release);
+        capture.stop_continuous();
+        assert_eq!(capture.consumer.available_at_entry(), 1, "stop_continuous");
     }
 
     /// Runs `drain` once per block while another thread refills the one-slot queue, and asserts
@@ -3282,8 +3340,8 @@ mod tests {
 
     #[test]
     fn collection_cancel_except_drains_every_capture_but_the_kept_one() {
-        let (mut first_producer, first, record) = racing_capture();
-        let (mut second_producer, mut second, _) = racing_capture();
+        let (mut first_producer, first, record) = capture_with_held_producer(1);
+        let (mut second_producer, mut second, _) = capture_with_held_producer(1);
         second.target = SpectrumTarget::Output("alt-out".into());
         let second_target = second.target.clone();
         let second_channels = second.channels;
@@ -3305,8 +3363,8 @@ mod tests {
 
     #[test]
     fn selected_channels_reports_the_selected_entrys_mask() {
-        let (_first_producer, mut first, _) = racing_capture();
-        let (_second_producer, mut second, _) = racing_capture();
+        let (_first_producer, mut first, _) = capture_with_held_producer(1);
+        let (_second_producer, mut second, _) = capture_with_held_producer(1);
         first.channels = SpectrumChannels::Left;
         second.target = SpectrumTarget::Output("alt-out".into());
         second.channels = SpectrumChannels::Right;
