@@ -4345,9 +4345,10 @@ impl BuiltinLaneSelector {
 ///
 /// # D11, once per retarget
 ///
-/// `step = (target - current) / N` at the moment the target changes, then `current += step` per
-/// sample and an exact assignment of `target` on update `N` (master plan D11). There is no
-/// division per sample and no allocation anywhere on this path.
+/// `step = (target - current) / N` at the moment the target changes, then
+/// `current = ramp_toward(current, step, target)` per sample (`current + step` held inside its
+/// endpoints, #1408) and an exact assignment of `target` on update `N` (master plan D11). There is
+/// no division per sample and no allocation anywhere on this path.
 pub struct FaderMuteRampBuiltins {
     /// The one ramped-fader body, at width one. `lane` is always `0`; the two dual-mono sides are
     /// the stage's two channels.

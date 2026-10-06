@@ -872,6 +872,12 @@ fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
 /// retarget issued while the clamped word already holds its target, so its 64 frames run the
 /// filter body's trim update). The word read back at every block end must stay inside `[-g, g]`.
 ///
+/// The word is read only at block ends, so each leg also walks the unclamped law (`current + step`
+/// per frame, the target assigned on the window's last frame) in scalar `f32` beside the bank and
+/// asserts that it passes `g` at some block end it checks, and that each retarget leg issued its
+/// retarget: a change of window, block size or retarget frame that moved every checked frame out of
+/// the overshoot stretch would otherwise leave the leg green with nothing checked.
+///
 /// Red mutation: revert the trim update of `input_chain_ramp_block`,
 /// `input_chain_ramp_block_mono`, `input_chain_ramp_block_filter`,
 /// `input_chain_ramp_block_filter_mono` or `identity_chain_ramp_block_mono` to `current + step`
@@ -909,12 +915,18 @@ fn every_trim_body_keeps_a_flip_inside_its_trim() {
         .expect("bank");
         bank.set_polarity_invert(0, BuiltinLaneSelector::Both, true, WINDOW)
             .expect("member");
+        // The unclamped law's word, walked frame by frame beside the bank.
+        let unclamped_step = (-g - g) / WINDOW as f32;
+        let mut unclamped = g;
+        let mut unclamped_passes_at_a_check = false;
+        let mut retargeted = false;
         let frames = WINDOW as usize + 64;
         let mut left = vec![0.0_f32; LONG_FLIP_BLOCK * lanes];
         let mut right = vec![0.0_f32; LONG_FLIP_BLOCK * lanes];
         let mut rendered = 0;
         while rendered < frames {
             let block = if retarget && rendered == RETARGET_AT {
+                retargeted = true;
                 bank.apply_prepared_filter(
                     0,
                     PreparedInputFilterTarget {
@@ -938,7 +950,15 @@ fn every_trim_body_keeps_a_flip_inside_its_trim() {
                     block as u32,
                 );
             }
+            for frame in rendered + 1..=rendered + block {
+                unclamped = if frame >= WINDOW as usize {
+                    -g
+                } else {
+                    unclamped + unclamped_step
+                };
+            }
             rendered += block;
+            unclamped_passes_at_a_check |= unclamped.abs() > g;
             for channel in 0..if collapsed { 1 } else { 2 } {
                 let word = bank.trim_signed(0, channel);
                 assert!(
@@ -947,6 +967,14 @@ fn every_trim_body_keeps_a_flip_inside_its_trim() {
                 );
             }
         }
+        assert!(
+            unclamped_passes_at_a_check,
+            "{name}: the unclamped law passes {g} at no checked frame, so the leg checks nothing"
+        );
+        assert_eq!(
+            retargeted, retarget,
+            "{name}: the filter retarget was issued"
+        );
         assert_eq!(
             bank.trim_signed(0, 0).to_bits(),
             (-g).to_bits(),

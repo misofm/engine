@@ -152,10 +152,10 @@ pub fn gain_mute_block<L: Lane>(io: &mut [f32], frames: usize, gain: L, mute: L:
 /// The step is `(target - start) / n`, so it has the sign of `target - start`. Round-to-nearest
 /// is monotone and `current` is representable, so `fl(current + step)` never lands on the far
 /// side of `current` from the direction of `step`. By induction from the event, every word lies
-/// between `start` and `target`; the lower bound is therefore never the active side, and the clamp
-/// only holds a word that would pass `target` at `target`. Once there, both bounds are `target`
-/// and the word stays. Without the clamp, a long ramp's accumulated rounding is bounded only by
-/// `max(|start|, |2 target - start|)`.
+/// between `start` and `target`; the bound at `current` (the start side) is therefore never the
+/// active side, and the clamp only holds a word that would pass `target` at `target`. Once there,
+/// both bounds are `target` and the word stays. Without the clamp, a long ramp's accumulated
+/// rounding is bounded only by `max(|start|, |2 target - start|)`.
 ///
 /// # Operand order is part of the contract
 ///
