@@ -129,6 +129,45 @@ rule ("never allocates or frees after boot") when it moves onto shared memory.
 - D7. Trap-on-allocate mode is not built: the counter is the gate, and a trap would end audio in
   production.
 
+## Amendment 1 (root, 2026-10-06)
+
+Attempt 1 stopped on a spec problem: the runtime counter found a real render-thread allocation, and
+D3 and the existing gates need paths outside the list below. Root ruled all four items in scope.
+This slice lands after *Bound every drain the AudioWorklet runs on its audio thread* (#1449), which
+owns the `spectrum.rs` drains; the fix in A1 is made on #1449's `spectrum.rs`.
+
+- **A1. Render-thread allocation fix.** `PreparedSpectrumCapture::channels()`
+  (`hosts/host-web/src/lib.rs`) calls `SpectrumCaptureCollection::selected_entry()`
+  (`crates/host-core/src/spectrum.rs`), which clones the selected target's `String` and drops it,
+  so `miso_engine_web_v1_spectrum_read` and `_spectrum_stream_read` allocate and free on every read
+  of a collection capture (the counter read 312-354 in the SDK's spectrum-collection instance in
+  Chromium). Add a non-cloning `selected_channels()` accessor in host-core and use it in
+  `channels()`. This is a real defect; fix it here, not in #1449. A test reads a collection
+  capture's spectrum and spectrum stream inside the locked window and asserts the counter reads 0;
+  restoring the clone makes the counter read more than 0 (mutation run in the attempt record). The
+  test lives in the gate-8 binary's single `#[test]` or in a second integration binary that also
+  registers `RenderLockedAllocator<System>` and holds one `#[test]`.
+- **A2. Reading the count through the host.** The worklet host refuses reply tags it does not
+  expect, the worklet requires increasing request IDs, and each workload runs in its own instance
+  with its own counter. The host therefore gains `renderAllocationCount()`, which sends D3's port
+  message in its request sequence; `qualification.js` calls it on every instance before that
+  instance's dispose, and gate `render-allocations` requires every read to be 0.
+- **A3. Re-pins.** D5 makes boot reserve the three stagings, so three exact `memoryBytes` rows in
+  `hosts/host-web/tests/browser-v1/expected.json` grow by 17 pages. Re-pin each row individually
+  with that reason: `simd128.initialStatus` and `simd128.beforeDisposeStatus` 1310720 -> 2424832,
+  `commandTimeline.beforeDisposeStatus` 1376256 -> 2490368. No PCM digest may move.
+- **A4. Realtime policy.** `hosts/host-web/src/render_lock.rs` joins the approved `unsafe` list in
+  `scripts/check-realtime-policy.sh` (a `GlobalAlloc` impl needs `unsafe`). Hot file: stream J's
+  realtime-policy tool later reproduces this listing.
+
+Authorized paths added by this amendment: `crates/host-core/src/spectrum.rs` (A1's accessor and its
+unit test only), `hosts/host-web/src/lib.rs` (A1's `channels()` change), a second
+`hosts/host-web/tests/*.rs` integration binary if A1's test uses one,
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`,
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`
+(A2), `hosts/host-web/tests/browser-v1/expected.json` (A3's three rows only) and
+`scripts/check-realtime-policy.sh` (A4's listing only).
+
 ## Deliverables
 
 1. `hosts/host-web/src/render_lock.rs` (D1) and its unit tests; D2 and D3 wiring in
