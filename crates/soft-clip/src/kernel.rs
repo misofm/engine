@@ -18,9 +18,9 @@
 //!    D11: the increment was computed once at event time, and the ramp advances *before* the
 //!    sample uses it. `ramp_toward` is the step added and held inside `[min(word, target),
 //!    max(word, target)]`, so no word passes its target (issue #1409). A block in which every
-//!    lane's three steps are zero takes the plain additions instead (one branch, decided before
-//!    the frame loop), which the clamp would leave unchanged, so a settled block pays no clamp
-//!    (#1409 D5).
+//!    lane's three steps are zero runs a second copy of the body that holds the three words (one
+//!    choice, made before the frame loop), so a settled block pays no ramp arithmetic (#1409 D5,
+//!    #1452 undo 5).
 //! 2. `xin = load(frame)`; push `xin` into the dry history (unflushed — see below).
 //! 3. `X = flush((drive + drive) * xin)` — `drive + drive` is exact, and is the `2 * drive` of the
 //!    brief; push `X` into the interpolation history.
@@ -184,15 +184,36 @@ pub fn soft_clip_block<L: Lane>(
     h: &mut SoftClipHistory,
 ) {
     // Issue #1409 D5: decided once per block, before the frame loop. A step of either zero sign
-    // compares equal to zero. The choice is a loop-invariant branch rather than two copies of the
-    // body: a second copy of this kernel doubles its stored splat constants, which the AArch64
-    // Apple targets lower to `memset_pattern16` calls (#1018).
+    // compares equal to zero. Each choice runs its own copy of the body, so a settled block carries
+    // no ramp arithmetic in its frame loop (#1452 undo 5).
     let zero = L::zero();
     let settled = L::mask_and(
         c.drive_step.eq(zero),
         L::mask_and(c.output_step.eq(zero), c.mix_step.eq(zero)),
     );
-    let ramping = L::mask_any(L::mask_not(settled));
+    if L::mask_any(L::mask_not(settled)) {
+        soft_clip_frames::<L, true>(io, frames, c, s, h);
+    } else {
+        soft_clip_frames::<L, false>(io, frames, c, s, h);
+    }
+}
+
+/// The frame loop of [`soft_clip_block`]: `RAMPING` advances the three ramp words by
+/// `ramp_toward` every frame; otherwise every lane's three steps are zero and the words are held.
+///
+/// Holding is what the zero-step addition it replaces did: `x + (+-0.0)` is `x` for every word a
+/// settled lane can hold, because no ramp word is ever `-0.0` (refused at preparation and restore,
+/// normalized at runtime points, never produced by `ramp_toward` or the completion snap) or
+/// non-finite.
+#[inline(always)]
+fn soft_clip_frames<L: Lane, const RAMPING: bool>(
+    io: &mut [f32],
+    frames: usize,
+    c: &SoftClipCoef<L>,
+    s: &mut SoftClipState<L>,
+    h: &mut SoftClipHistory,
+) {
+    let zero = L::zero();
     let width = L::WIDTH;
     debug_assert_eq!(io.len(), frames * width);
     debug_assert_eq!(h.x.len(), HALFBAND63_ROWS * width);
@@ -205,14 +226,10 @@ pub fn soft_clip_block<L: Lane>(
     let mut pos = h.pos as usize;
 
     for frame in io.chunks_exact_mut(width) {
-        if ramping {
+        if RAMPING {
             drive = ramp_toward(drive, c.drive_step, c.drive_target);
             output = ramp_toward(output, c.output_step, c.output_target);
             mix = ramp_toward(mix, c.mix_step, c.mix_target);
-        } else {
-            drive = drive.add(c.drive_step);
-            output = output.add(c.output_step);
-            mix = mix.add(c.mix_step);
         }
 
         let xin = L::load(frame);
