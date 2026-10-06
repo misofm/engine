@@ -16,8 +16,8 @@ use effect_contract::{
     PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
     PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
     PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
-    QualityDescriptor, ResetKind, RestBound, RestSamples, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples, default_initial_values,
+    QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, default_initial_values,
     expected_prepared_metadata, valid_runtime_span, validate_descriptor,
 };
 use engine::{LAUNCH_SAMPLE_RATES, realtime::audit};
@@ -156,9 +156,6 @@ pub enum FaultKind {
     /// caught by `metadata.exact` before any audio is rendered. This one reports the contractual
     /// latency and then fails to honour it, which only the bypass reference render can see.
     BypassDelayMismatch,
-    /// #1377 gate 1: prepared metadata whose exact-rest bound is not the one the descriptor's
-    /// `tail_and_rest` states for the prepared rate and quality.
-    UndeclaredRestBound,
 }
 
 pub struct DualAccumulatorDelayFactory {
@@ -407,9 +404,6 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
         }
         if self.fault == FaultKind::ChangingTail && self.metadata_calls != 0 {
             metadata.tail = TailSamples::Infinite;
-        }
-        if self.fault == FaultKind::UndeclaredRestBound {
-            metadata.rest = RestBound::Bounded(RestSamples::ZERO);
         }
         if self.fault == FaultKind::LatencyChangingBypass && metadata.bypass {
             metadata.latency = LatencySamples(0);
@@ -1111,17 +1105,6 @@ pub fn run_effect_conformance(
                 tier.prepared_configurations += 1;
                 if effect.metadata().program_key() != expected.program_key() {
                     tier.failures.push("metadata.exact");
-                }
-                // #1377 gate 1: the prepared tail, tail over every peak and exact-rest bound are
-                // the ones the descriptor's one function states for this rate and quality,
-                // compared to the function itself rather than to `expected_prepared_metadata`.
-                let bound = (descriptor.tail_and_rest)(quality.sample_rate, quality.quality);
-                let metadata = effect.metadata();
-                if metadata.tail != bound.tail
-                    || metadata.tail_every_peak != bound.tail_every_peak
-                    || metadata.rest != bound.rest
-                {
-                    tier.failures.push("metadata.tail_bound");
                 }
                 let frames = config.quantum as usize;
                 let mut left = vec![0.0; frames];

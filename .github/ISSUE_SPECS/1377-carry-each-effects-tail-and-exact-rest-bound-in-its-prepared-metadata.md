@@ -111,10 +111,15 @@ function body.
 
 ## Objective gates
 
-1. **Conformance**: for every effect, at every launch rate, `metadata().tail`,
-   `metadata().tail_every_peak` and `metadata().rest` of a prepared instance equal the fields of
-   `(descriptor.tail_and_rest)(rate, Normal)` (`crates/conformance`, the existing per-effect
-   conformance run).
+1. **Conformance** (as amended by the root ruling of 2026-10-06, see "Follow-up"): for every
+   effect, at every launch rate, `metadata().tail`, `metadata().tail_every_peak` and
+   `metadata().rest` of a prepared instance equal the fields of
+   `(descriptor.tail_and_rest)(rate, Normal)`. Two existing checks hold this, and no separate
+   conformance check does: the per-effect conformance run's `metadata.exact` compares the prepared
+   program key, which carries all three fields (D3), with the one from
+   `expected_prepared_metadata`; and `effect-contract`'s `tail_bound_tests` (with three
+   `graph-compiler` launch fixture tests) checks that `expected_prepared_metadata` and the program
+   key copy the function's values for each rate.
 2. **Mismatch refused**: an `effect-compiler` unit test where a processor reports a `rest`, or a
    `tail_every_peak`, different from the expected one gets `effect.metadata.mismatch`.
 3. No bit moves: the existing suites, unchanged.
@@ -127,8 +132,11 @@ function body.
 
 ## Test value
 
-- Gate 1: an effect whose prepare writes a tail or rest of its own instead of its declared function
-  is red; nothing compares metadata to a computed bound today.
+- Gate 1: an effect whose prepare writes a tail, tail over every peak or rest of its own instead
+  of its declared function is red in `metadata.exact` (D3 put the fields into the program key), and
+  a wrong `expected_prepared_metadata` is red in `tail_bound_tests` (and, for a wrong `tail`, in
+  three `graph-compiler` launch fixture tests). Before this slice nothing compared metadata to a
+  computed bound.
 - Gate 2: a compiler that stops checking `rest` or `tail_every_peak` would let a processor's value
   drift from its declared function unseen; no existing test reaches `effect.metadata.mismatch`.
 
@@ -174,7 +182,9 @@ boxing the variant or allowing the lint: control-only data must not live in rend
    `PreparedEffectMetadata` lives in the prepared plan's control-side effect table keyed by node.
    Attempt 1's commit was reverted (`23a32823a`, history kept) and is re-applied on top of #1460.
 2. **Where D3's fields live.** `tail_every_peak` and `rest` live in `PreparedEffectMetadata` in
-   that control-side table, never in the render node. This slice makes no graph change of its
+   that control-side table, never in the render node. (Note, 2026-10-06: each effect's prepared
+   processor still holds its own `PreparedEffectMetadata` copy, which render-owned memory carries;
+   *#1461* removes that copy.) This slice makes no graph change of its
    own: the "Any graph or C ABI change" non-goal stands, and `crates/graph/src/lib.rs` stays in the
    Authorized paths for struct literals only.
 3. **Attempts.** Attempt 1 was stopped by a blocker outside its paths and is not counted: the next
@@ -221,7 +231,8 @@ What landed (as in `d0af9d53d`):
   `(descriptor.tail_and_rest)(rate, quality)` (`metadata.tail_bound`), at every declared
   (launch-rate) row of every production effect; mock fault `UndeclaredRestBound` and its row in
   `every_faulty_mock_is_detected` (`crates/conformance/tests/effect_contract.rs`, one row beyond the
-  field-only list, since gate 1 lives in `crates/conformance`).
+  field-only list, since gate 1 lives in `crates/conformance`). *Removed by the follow-up (root
+  ruling, 2026-10-06): superseded, see "Follow-up".*
 - `docs/EFFECT_CONTRACT_V1.md`: where the three values come from.
 - Struct literals, field only: the listed files that needed it, plus
   `crates/effect-contract/tests/registry.rs` (ruling 3). Test doubles state their old tail,
@@ -236,6 +247,14 @@ What landed (as in `d0af9d53d`):
 | `LiveControlEffect`, `EffectNode` | 128, 24 | 128, 24 |
 | `GraphPreparedEffect` (control side) | 200 | 240 |
 | `PreparedEffectMetadata` | 104 | 144 |
+| `EffectProgramKey` | 112 | 152 |
+| `PreparedBankMetadata` | 120 | 160 |
+| `EffectDescriptor` | 112 | 120 |
+| `QualityDescriptor` | 64 | 48 |
+
+The last four rows are the verifier's x86-64 measurements (verdict n3), added by the follow-up.
+None of them is render-owned storage; `PreparedBankMetadata` is what each bank processor's
+`metadata()` returns by value.
 
 The render node table does not move. `graph-compiler`'s live-control owner charge is
 `EFFECT_RENDER_NODE_BYTES` (#1460 D4), so no resource estimate moves.
@@ -254,9 +273,10 @@ revert):
   ["metadata.changed", "metadata.exact", "reset.semantics"], not "metadata.tail_bound""). M7
   (`expected_prepared_metadata` writes `tail: Infinite`): `gate-expander --test conformance` is
   red with the check (`launch gate failures: ["metadata.tail_bound"]`) and green without it (both
-  sides of `metadata.exact` share the bad value). Candidly: an effect that writes its own values is
-  already caught by `metadata.exact` now that the program key carries them; the new check's own
-  catch is a wrong `expected_prepared_metadata`, seen on real effects.
+  sides of `metadata.exact` share the bad value). Corrected by the verdict (m1): the check has no
+  unique catch. `metadata.exact` catches an effect that writes its own value, and
+  `tail_bound_tests` (with three `graph-compiler` fixture tests for M7) catches a wrong
+  `expected_prepared_metadata`. The follow-up removed the check (root ruling, 2026-10-06).
 - Gate 2, `effect-compiler` `prepare::metadata_mismatch_tests::a_processor_whose_rest_or_tail_every_peak_drifts_is_refused`
   (production EQ wrapped so its metadata drifts; nine-track fixture; undrifted control prepares 9).
   Red on dropping the `tail_every_peak` comparison, and red on dropping the `rest` comparison (two
@@ -290,4 +310,58 @@ re-pinned.
   the prepare-time check. That copy sits in the processor's heap object, which render owns, and
   D3's two fields add 40 bytes to it. The copy predates this slice and #1460 left processors out
   of scope; whether it is control-only data in render-owned memory (#1329 ruling R5) is for root.
+  Root ruled that it is: *#1461* removes the processor's copy.
 - GitHub sync of #1377 waits for owner permission (Amendment 1, ruling 4).
+
+### Follow-up (verdict MINOR/NITs; root ruling, 2026-10-06)
+
+Attempt 1 passed (`/home/bl/misofm/submix-verdicts/1377-attempt1.md`: one MINOR, three NITs).
+
+**Root ruling (2026-10-06, binding), on verdict m1.** Remove gate 1's conformance check
+`metadata.tail_bound`, the conformance mock's `UndeclaredRestBound` fault and its row in
+`every_faulty_mock_is_detected`. They are superseded: D3 put the three values into
+`EffectProgramKey`, so `metadata.exact` refuses an effect that writes its own value, and
+`tail_bound_tests` (with three `graph-compiler` launch fixture tests) refuses a wrong
+`expected_prepared_metadata`. AGENTS.md: a change that supersedes a test deletes it. Gate 1 and
+its test value above are restated to name what covers each defect, and the attempt-1 record's
+sentence is corrected.
+
+What changed:
+
+- `crates/conformance/src/effect.rs`: the `metadata.tail_bound` comparison in
+  `run_effect_conformance`, the `UndeclaredRestBound` variant and its `metadata()` branch, and the
+  then-unused `RestSamples` import are removed. The mock's `tail_and_rest` stays (D1, D4).
+- `crates/conformance/tests/effect_contract.rs`: the `UndeclaredRestBound` row is removed.
+- `docs/EFFECT_CONTRACT_V1.md`: the harness sentence names `metadata.exact` (program key) in
+  place of `metadata.tail_bound`; n1, the opening field list names `tail_every_peak` and `rest`;
+  n2, the `tail_every_peak` bullet names `EffectTailBound`, `PreparedEffectMetadata` and
+  `EffectProgramKey`.
+- This record: n3, four rows added to the size table; Amendment 2 ruling 2 and "Open" point to
+  #1461 for each processor's own metadata copy.
+
+**The defects stay red elsewhere** (each re-run once on the follow-up tree, then reverted):
+
+- M6-style, an effect whose prepared metadata writes its own `rest`
+  (`DualAccumulatorDelay::metadata` sets `rest: Bounded(RestSamples::ZERO)` for every fault):
+  `conformance --test effect_contract` `correct_mock_passes_every_enabled_conformance_gate` red,
+  `["metadata.changed", "metadata.exact", "reset.semantics"]`.
+- M7, `expected_prepared_metadata` writes `tail: TailSamples::Infinite`: red in
+  `effect-contract` `tail_bound_tests::prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate`
+  and in `graph-compiler`'s `launch_gate_expander_fixture_retains_width_correct_banks_and_scalar_fallbacks`,
+  `launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps` and
+  `launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps` (90 passed,
+  3 failed); `gate-expander`, `soft-clip` and `transient-shaper` `--test conformance` green, as
+  expected with the check gone.
+
+Gates on the follow-up tree (both follow-ups together), all PASS: `cargo fmt --all -- --check`;
+`cargo clippy --locked --workspace --all-targets [--all-features] -- -D warnings` (both);
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; test-debug-a and test-debug-b
+with their doctest steps (the `qualification.yml` commands); `conformance_fixtures -- --check`;
+`graph_fixture --check`; `check-graph-determinism.sh`; `check-effect-contract.sh`;
+`check-workspace-policy.sh`; `check-realtime-policy.sh`; `check-lane-policy.sh`;
+`run-wasm-gates.sh --without-v8-spill --without-native`; `audit capi` (0 allocations,
+0 deallocations, 0 locks, 0 syscalls, 0 violations, `pcm_digest` `cb10fbface44a3a4`, unchanged);
+the worklet chain into fresh directories (`build-web-audioworklet.sh --named-twin`,
+`strip-wasm-names.py check`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`). No
+rendered bit, fixture, digest or resource count moved; nothing was re-pinned.

@@ -15,7 +15,8 @@ gone.
 
 Factories validate static descriptors and allocate/design all processor resources off render.
 Prepared metadata fixes sample rate, quantum, quality, bypass, link mode, ports, exact integer
-latency, tail, state-section sizes, scratch bytes, and automation capacity. The compiler caches
+latency, tail, tail over every peak (`tail_every_peak`), exact-rest bound (`rest`),
+state-section sizes, scratch bytes, and automation capacity. The compiler caches
 that metadata; graph/PDC consumers never query a live processor. The semantic `EffectProgramKey`
 contains these fields directly and is not a digest or persistence identity.
 
@@ -77,7 +78,8 @@ the control thread at preparation and never pinned:
 * **The tail over every peak -- `T_rest = max(T_decay, R(P*))`, named `tail_every_peak`** (a
   `TailSamples`, beside `tail` wherever `tail` is stated: `builtins::InputSectionBound`, which
   `builtins-compiler`'s prepared session keeps per strip beside its tail,
-  `PreparedBuiltinsSession::input_bounds`). From `N + latency + T_rest` on the output is below `P * eps` for
+  `PreparedBuiltinsSession::input_bounds`; and for a native effect `EffectTailBound`,
+  `PreparedEffectMetadata` and `EffectProgramKey`). From `N + latency + T_rest` on the output is below `P * eps` for
   `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. `R(P*)` includes the joint-flush arming
   window `N_SILENCE` (#1328 A9), so `T_rest >= N_SILENCE` for every enabled filter section. It is
   the exact-zero branch for low peaks only.
@@ -99,8 +101,9 @@ parameter domain at that rate), and render never calls it. `QualityDescriptor` c
 `expected_prepared_metadata`, the sole conforming metadata, copies the three values into
 `PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the program key carries them too, so
 cohorts with different bounds never share a bank. `effect-compiler` refuses a prepared effect whose
-metadata differs in any of them (`effect.metadata.mismatch`), and the conformance harness compares
-each prepared instance with the function itself (`metadata.tail_bound`). `rest` is a `RestBound`:
+metadata differs in any of them (`effect.metadata.mismatch`), and the conformance harness's
+`metadata.exact` compares each prepared instance's program key, which carries all three, with the
+expected one. `rest` is a `RestBound`:
 `Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
 effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
 `tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and
