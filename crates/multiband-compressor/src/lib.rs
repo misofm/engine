@@ -347,6 +347,7 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
+        tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
             // No common section. The shared codec's two-word versioned header moves `common_bytes`
             // and therefore descriptor identity, which is a coordinated change: wave-2 decision
@@ -361,17 +362,6 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         // (#94 F12).
         scratch_fixed_bytes: 0,
         scratch_bytes_per_frame: 0,
-    }
-}
-
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1373 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::EffectTailBound {
-    effect_contract::EffectTailBound {
-        tail: TailSamples::Infinite,
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
     }
 }
 
@@ -416,7 +406,6 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    tail_and_rest,
     observations: &MULTIBAND_COMPRESSOR_OBSERVATIONS,
 };
 

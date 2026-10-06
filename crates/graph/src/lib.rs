@@ -3613,11 +3613,6 @@ mod tests {
         parameters: &[],
         ports: &SUM_PORTS,
         qualities: &[],
-        tail_and_rest: |_, _| effect_contract::EffectTailBound {
-            tail: effect_contract::TailSamples::Finite(0),
-            tail_every_peak: effect_contract::TailSamples::Infinite,
-            rest: effect_contract::RestBound::Unstated,
-        },
         observations: &[],
     };
 
@@ -5185,8 +5180,6 @@ mod tests {
             },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
-            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -6605,11 +6598,6 @@ mod tests {
         parameters: &GAIN_PARAMETERS,
         ports: &SUM_PORTS,
         qualities: &[],
-        tail_and_rest: |_, _| effect_contract::EffectTailBound {
-            tail: effect_contract::TailSamples::Finite(0),
-            tail_every_peak: effect_contract::TailSamples::Infinite,
-            rest: effect_contract::RestBound::Unstated,
-        },
         observations: &[],
     };
 
@@ -6736,8 +6724,6 @@ mod tests {
             },
             latency: LatencySamples(latency),
             tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
-            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -7153,8 +7139,6 @@ mod tests {
             },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
-            rest: effect_contract::RestBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,

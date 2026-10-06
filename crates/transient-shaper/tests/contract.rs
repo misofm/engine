@@ -32,10 +32,7 @@ fn descriptor_resources_and_transactional_caps_are_frozen() {
     assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.state_layout_version, 1);
     for quality in TRANSIENT_SHAPER_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(0));
-        assert_eq!(
-            (TRANSIENT_SHAPER_DESCRIPTOR.tail_and_rest)(quality.sample_rate, quality.quality).tail,
-            TailSamples::Finite(0)
-        );
+        assert_eq!(quality.tail, TailSamples::Finite(0));
         assert_eq!(quality.maximum_state.total(), Some(112));
         assert_eq!(quality.maximum_state.common_bytes, 0);
         assert_eq!(quality.maximum_state.left_bytes, LANE_STATE_BYTES as u32);

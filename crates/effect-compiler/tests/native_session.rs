@@ -61,6 +61,7 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(7),
+        tail: TailSamples::Finite(7),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: 0,
@@ -86,11 +87,6 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    tail_and_rest: |_, _| EffectTailBound {
-        tail: TailSamples::Finite(7),
-        tail_every_peak: TailSamples::Infinite,
-        rest: RestBound::Unstated,
-    },
     observations: &[],
 };
 

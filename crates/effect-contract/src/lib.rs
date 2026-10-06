@@ -182,37 +182,6 @@ impl RestSamples {
         any_sanitized_input: 0,
     };
 }
-
-/// A native effect's exact-rest bound, as its [`EffectDescriptor::tail_and_rest`] states it
-/// (decision 15 D15-4(b), #1377 D2).
-///
-/// `Bounded(R)` states the [`RestSamples`] contract. `Unstated` states no bound: it is the
-/// effect-side counterpart of [`TailSamples::Infinite`], and it exists only while the per-effect
-/// slices (#1372-#1376) land one at a time. *Retire the Infinite tail* (#1378) depends on every one
-/// of them and removes `Unstated` together with `Infinite` in both tail fields
-/// ([`EffectTailBound::tail`] and [`EffectTailBound::tail_every_peak`]), so the end state of the
-/// sequence contains neither.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum RestBound {
-    Bounded(RestSamples),
-    Unstated,
-}
-
-/// The three bounds #1329 defines for a node, as one native effect states them at one rate and
-/// quality (#1377 D1).
-///
-/// Computed by [`EffectDescriptor::tail_and_rest`] on the control thread and copied into the
-/// prepared metadata by [`expected_prepared_metadata`]; render never computes one.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct EffectTailBound {
-    /// `T_decay`: the tail every report and PDC use ([`TailSamples`]).
-    pub tail: TailSamples,
-    /// `T_rest = max(T_decay, R(P*))`, the tail over every peak. It is `Infinite` while `rest` is
-    /// [`RestBound::Unstated`], because no `R(P*)` is derived.
-    pub tail_every_peak: TailSamples,
-    /// The exact-rest bound silence skipping uses.
-    pub rest: RestBound,
-}
 macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$($n=>Some(Self::$v),)+_=>None}}}}; }
 scalar_enum!(ParameterUnit {Db=1,Hz=2,Milliseconds=3,Samples=4,Linear=5,Ratio=6});
 scalar_enum!(ParameterDomain {Continuous=1,Boolean=2,Enumeration=3});
@@ -595,6 +564,7 @@ pub struct QualityDescriptor {
     pub quality: EffectQuality,
     pub sample_rate: u32,
     pub latency: LatencySamples,
+    pub tail: TailSamples,
     pub maximum_state: StatePayloadSizes,
     pub scratch_fixed_bytes: u64,
     pub scratch_bytes_per_frame: u64,
@@ -610,13 +580,6 @@ pub struct EffectDescriptor {
     pub parameters: &'static [ParameterDescriptor],
     pub ports: &'static [PortDescriptor],
     pub qualities: &'static [QualityDescriptor],
-    /// The effect's tail, tail over every peak and exact-rest bound at one rate and quality
-    /// (decision 15 D15-4(b), #1377 D1): the one place they are computed.
-    ///
-    /// Control plane only: [`expected_prepared_metadata`] calls it while it derives a prepared
-    /// instance's metadata, and render never calls it. It takes no parameter values, because
-    /// every bound holds over the effect's whole parameter domain at that rate (#1377 D5).
-    pub tail_and_rest: fn(sample_rate: u32, quality: EffectQuality) -> EffectTailBound,
     /// The declared observation menu (issue #143 D1). Last, and empty for every effect that
     /// declares no tap, so a zero-tap descriptor encodes byte-identically to the pre-#143 wire.
     pub observations: &'static [ObservationDescriptor],
@@ -1206,10 +1169,6 @@ pub struct PreparedEffectMetadata {
     pub ports: PreparedPorts,
     pub latency: LatencySamples,
     pub tail: TailSamples,
-    /// `T_rest`, the tail over every peak ([`EffectTailBound::tail_every_peak`]).
-    pub tail_every_peak: TailSamples,
-    /// The exact-rest bound ([`EffectTailBound::rest`]).
-    pub rest: RestBound,
     pub state_sizes: StatePayloadSizes,
     pub scratch_bytes: u64,
     pub automation_capacity: u32,
@@ -1271,10 +1230,6 @@ pub struct EffectProgramKey {
     pub ports: PreparedPorts,
     pub latency: LatencySamples,
     pub tail: TailSamples,
-    /// `T_rest`, the tail over every peak ([`EffectTailBound::tail_every_peak`]).
-    pub tail_every_peak: TailSamples,
-    /// The exact-rest bound ([`EffectTailBound::rest`]).
-    pub rest: RestBound,
     pub state_sizes: StatePayloadSizes,
     pub scratch_bytes: u64,
     pub automation_capacity: u32,
@@ -1293,8 +1248,6 @@ impl PreparedEffectMetadata {
             ports: self.ports,
             latency: self.latency,
             tail: self.tail,
-            tail_every_peak: self.tail_every_peak,
-            rest: self.rest,
             state_sizes: self.state_sizes,
             scratch_bytes: self.scratch_bytes,
             automation_capacity: self.automation_capacity,
@@ -2674,7 +2627,6 @@ pub fn expected_prepared_metadata(
         quality,
         scratch_bytes,
     } = validate_prepare_request(descriptor, request)?;
-    let bound = (descriptor.tail_and_rest)(request.sample_rate, request.quality);
     Ok(PreparedEffectMetadata {
         descriptor,
         sample_rate: request.sample_rate,
@@ -2684,9 +2636,7 @@ pub fn expected_prepared_metadata(
         link_mode: request.link_mode,
         ports: request.ports,
         latency: quality.latency,
-        tail: bound.tail,
-        tail_every_peak: bound.tail_every_peak,
-        rest: bound.rest,
+        tail: quality.tail,
         state_sizes: quality.maximum_state,
         scratch_bytes,
         automation_capacity: request.limits.maximum_automation_spans_per_block,
@@ -2776,25 +2726,18 @@ mod automation_smoothing_validity_tests {
 mod continuous_mapping_validity_tests {
     use super::{
         AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectId, EffectQuality,
-        EffectTailBound, LatencySamples, LinkModeSet, ParameterChannelPolicy, ParameterDescriptor,
-        ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
-        PortLayout, PortRole, QualityDescriptor, RestBound, SmoothingRule, StatePayloadSizes,
-        TailSamples, default_parameter_lattice, validate_descriptor,
+        LatencySamples, LinkModeSet, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+        ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
+        QualityDescriptor, SmoothingRule, StatePayloadSizes, TailSamples,
+        default_parameter_lattice, validate_descriptor,
     };
-
-    fn tail_and_rest(_: u32, _: EffectQuality) -> EffectTailBound {
-        EffectTailBound {
-            tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
-            rest: RestBound::Unstated,
-        }
-    }
 
     const fn quality(sample_rate: u32) -> QualityDescriptor {
         QualityDescriptor {
             quality: EffectQuality::Normal,
             sample_rate,
             latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
             maximum_state: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -2905,7 +2848,6 @@ mod continuous_mapping_validity_tests {
             parameters,
             ports: &PORTS,
             qualities: &QUALITIES,
-            tail_and_rest,
             observations: &[],
         }));
         validate_descriptor(descriptor).map_err(|errors| {
@@ -3004,135 +2946,6 @@ mod continuous_mapping_validity_tests {
                     }
                 }
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tail_bound_tests {
-    use super::{
-        EffectDescriptor, EffectId, EffectQuality, EffectTailBound, LatencySamples, LinkMode,
-        LinkModeSet, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectLimits,
-        PrepareEffectRequest, PreparedPorts, PreparedSidechainPort, QualityDescriptor, RestBound,
-        RestSamples, StatePayloadSizes, TailSamples, expected_prepared_metadata,
-        validate_descriptor,
-    };
-    use engine::LAUNCH_SAMPLE_RATES;
-
-    /// Distinct values per rate in every field, so a copy from the wrong field or the wrong rate
-    /// shows.
-    fn tail_and_rest(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
-        let rate = u64::from(sample_rate);
-        EffectTailBound {
-            tail: TailSamples::Finite(rate / 1000),
-            tail_every_peak: TailSamples::Finite(rate / 100),
-            rest: RestBound::Bounded(RestSamples {
-                peak_plus_24_dbfs: rate / 10,
-                any_sanitized_input: rate,
-            }),
-        }
-    }
-
-    const fn port_id(value: &'static str) -> PortId {
-        match PortId::new(value) {
-            Ok(id) => id,
-            Err(_) => panic!("valid test port ID"),
-        }
-    }
-
-    const fn quality(sample_rate: u32) -> QualityDescriptor {
-        QualityDescriptor {
-            quality: EffectQuality::Normal,
-            sample_rate,
-            latency: LatencySamples(0),
-            maximum_state: StatePayloadSizes {
-                common_bytes: 0,
-                left_bytes: 0,
-                right_bytes: 0,
-            },
-            scratch_fixed_bytes: 0,
-            scratch_bytes_per_frame: 0,
-        }
-    }
-
-    static PORTS: [PortDescriptor; 2] = [
-        PortDescriptor {
-            id: port_id("main-in"),
-            role: PortRole::MainInput,
-            required: true,
-            layout: PortLayout::DualMonoPlanar,
-        },
-        PortDescriptor {
-            id: port_id("main-out"),
-            role: PortRole::MainOutput,
-            required: true,
-            layout: PortLayout::DualMonoPlanar,
-        },
-    ];
-
-    static QUALITIES: [QualityDescriptor; 4] = [
-        quality(44_100),
-        quality(48_000),
-        quality(88_200),
-        quality(96_000),
-    ];
-
-    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
-        id: match EffectId::new("tail-bound-test") {
-            Ok(id) => id,
-            Err(_) => panic!("valid test effect ID"),
-        },
-        display_name: "Tail Bound Test",
-        contract_major: 1,
-        contract_minor: 0,
-        state_layout_version: 1,
-        supported_link_modes: LinkModeSet::DUAL_MONO,
-        parameters: &[],
-        ports: &PORTS,
-        qualities: &QUALITIES,
-        tail_and_rest,
-        observations: &[],
-    };
-
-    /// #1377 D3: the prepared metadata, and the program key a cohort is grouped by, carry the
-    /// three values the descriptor's `tail_and_rest` states for the request's own rate.
-    ///
-    /// Red mutations: `expected_prepared_metadata` calls the function at a fixed rate, or copies
-    /// one field into another, or writes `Unstated`/`Infinite` in place of the stated value;
-    /// `program_key` drops or crosses `tail_every_peak` or `rest`.
-    #[test]
-    fn prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate() {
-        validate_descriptor(&DESCRIPTOR).expect("valid test descriptor");
-        for rate in LAUNCH_SAMPLE_RATES {
-            let rate = rate.0;
-            let metadata = expected_prepared_metadata(
-                &DESCRIPTOR,
-                PrepareEffectRequest {
-                    sample_rate: rate,
-                    quantum: 128,
-                    quality: EffectQuality::Normal,
-                    bypass: false,
-                    link_mode: LinkMode::DualMono,
-                    ports: PreparedPorts {
-                        sidechain: PreparedSidechainPort::None,
-                    },
-                    initial_values: &[],
-                    limits: PrepareEffectLimits {
-                        maximum_total_state_bytes: 1024,
-                        maximum_scratch_bytes: 1024,
-                        maximum_automation_spans_per_block: 8,
-                    },
-                },
-            )
-            .expect("valid request");
-            let stated = tail_and_rest(rate, EffectQuality::Normal);
-            assert_eq!(metadata.tail, stated.tail, "{rate}");
-            assert_eq!(metadata.tail_every_peak, stated.tail_every_peak, "{rate}");
-            assert_eq!(metadata.rest, stated.rest, "{rate}");
-            let key = metadata.program_key();
-            assert_eq!(key.tail, stated.tail, "{rate}");
-            assert_eq!(key.tail_every_peak, stated.tail_every_peak, "{rate}");
-            assert_eq!(key.rest, stated.rest, "{rate}");
         }
     }
 }

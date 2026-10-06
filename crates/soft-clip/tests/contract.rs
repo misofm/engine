@@ -29,10 +29,7 @@ fn descriptor_resources_and_independent_fir_design_are_frozen() {
     assert_eq!(SOFT_CLIP_DESCRIPTOR.state_layout_version, 1);
     for quality in SOFT_CLIP_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(31));
-        assert_eq!(
-            (SOFT_CLIP_DESCRIPTOR.tail_and_rest)(quality.sample_rate, quality.quality).tail,
-            TailSamples::Finite(29)
-        );
+        assert_eq!(quality.tail, TailSamples::Finite(29));
         // Current layout: 104 effect words per channel, plus the shared codec's two header words.
         assert_eq!(quality.maximum_state.common_bytes, 8);
         assert_eq!(quality.maximum_state.left_bytes, 416);
