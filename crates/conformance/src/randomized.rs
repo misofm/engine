@@ -2657,8 +2657,9 @@ macro_rules! randomized_effect_test {
 }
 
 impl EffectDifferential<'_> {
-    /// Every refusal of the effect's **own** snapshot, taken at each sample of a ramp that
-    /// rounds past its parameter's domain edge (#1278): no seed.
+    /// Every refusal of the effect's **own** snapshot, taken at each sample of a smoothed ramp to
+    /// its parameter's domain edge whose unclamped model walk would round past that edge (#1278):
+    /// no seed.
     ///
     /// The plan-swap carry restores every lane it carries, so a restore must accept every state
     /// the effect itself reaches. A smoothed ramp iterates `ramp_toward(current, step, target)`
@@ -2666,9 +2667,9 @@ impl EffectDifferential<'_> {
     /// edge stays inside the domain and the strict restore (#1411) admits each snapshot. The
     /// unclamped walk, `current + step` with a step rounded once, can round a few ulps past the
     /// edge; this probe uses that walk only to pick moves the clamp acts on. A refusal therefore
-    /// means that a render site left a ramp word outside its endpoints (a missing or reverted
-    /// clamp), or that the restore refuses a valid snapshot; the fix is that clamp or that
-    /// validation, never a restore slack.
+    /// means that the render site whose word the snapshot holds left a ramp word outside its
+    /// endpoints (a missing or reverted clamp), or that the restore refuses a valid snapshot; the
+    /// fix is that clamp or that validation, never a restore slack.
     ///
     /// For each smoothed continuous parameter, each edge and each quality row, this finds a start
     /// value a few hundred ulps inside the edge whose unclamped `f32` walk leaves the domain,

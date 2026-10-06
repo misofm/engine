@@ -263,6 +263,12 @@ through the clamp #1408 adds for the builtins.
   `crates/conformance/src/randomized.rs`
 - Root-authorized batch follow-up (2026-10-06, ruling (1) on attempt 2's open items):
   `.github/workflows/qualification.yml`, one step in the required `test-release` job only
+- Batch follow-up part B (2026-10-06, attempt 2 verdict MINOR 1 and NITs 1-3, assigned by the
+  stream G coordinator), comments and docs only: the six over-width lines the verdict lists
+  (`crates/multiband-compressor/tests/ramp_endpoint.rs`, `crates/multiband-compressor/src/lib.rs`,
+  `crates/compressor/src/kernel.rs`, `crates/lane/src/kernels.rs`, `docs/EFFECT_CONTRACT_V1.md`)
+  and the doc comments of `crates/delay/tests/ramp_endpoint.rs`, the six probe callers above and
+  the conformance probe
 
 `crates/lane`, `crates/effect-runtime` and the effects' parameter code are stream G's column; the
 `ParameterSmoother` arm (stream J's `crates/effect-contract`), the payload refusal rows and soft
@@ -595,7 +601,9 @@ the fix is that clamp or that validation, never a restore slack. The conformance
 the unclamped walk only to pick the moves and the `k - 2 ..= k` positions.
 
 **NITs.**
-- Rewrapped to 100 columns: the `IndexedRamp` doc (`crates/lane/src/kernels.rs`), the multiband
+- Rewrapped (attempt 2 said "to 100 columns"; corrected by the batch follow-up part B: six of
+  these and nearby lines were still over 100 characters, because `rustfmt` does not wrap comments,
+  and are rewrapped there): the `IndexedRamp` doc (`crates/lane/src/kernels.rs`), the multiband
   `store_segment` and flat-path (`run_segment`) docs, and the delay unit test doc
   (`a_carried_ramp_is_refused_unless_its_whole_path_is_valid`); the two early line ends (compressor
   `advance_where`, multiband `flat_path_is_identity`) are joined.
@@ -656,3 +664,30 @@ the unclamped walk only to pick the moves and the `k - 2 ..= k` positions.
   of seven copies* (verdict NIT 5; each test keeps its mutation evidence, re-run red after the
   move) and #1459 *Replay an effect ramp whose endpoint clamp acts in the wasm corpus* (verdict
   NIT 7). Both are in STREAMS.md's Stream G table after #1411.
+
+### Batch follow-up part B (2026-10-06, stream G; attempt 2 verdict MINOR 1, NITs 1-3)
+
+Comments and docs only; no code, test logic or bit changes. (NIT 4, gate 1 at 100,000 ramps in CI,
+is the part-A follow-up above.)
+- **MINOR 1.** The six lines the verdict lists as over 100 characters are rewrapped:
+  `crates/lane/src/kernels.rs` (the `IndexedRamp` "Why it is not D11" paragraph, whose last line
+  the rewrap also brought under 100), `crates/multiband-compressor/tests/ramp_endpoint.rs:13`,
+  `crates/multiband-compressor/src/lib.rs` (flat-path doc and `store_segment`),
+  `crates/compressor/src/kernel.rs` (`advance_where`) and `docs/EFFECT_CONTRACT_V1.md` (the
+  withdrawn-rule sentence; the One-pole-99 sentence after it was rewrapped with it). Attempt 2's
+  record sentence "Rewrapped to 100 columns" is corrected in place. Lines over 100 characters that
+  predate #1409 in those files are left.
+- **NIT 1.** `crates/delay/tests/ramp_endpoint.rs`: the module doc and the `DELAY_TIME_MS` doc say
+  that feedback, damping `g` and cross feedback reach the ring (their writes are read back after
+  the window, so a defect shows in the final snapshot), and mix reaches the output.
+- **NIT 2.** The six probe callers' docs (`crates/{compressor,delay,gate-expander,
+  multiband-compressor,transient-shaper,true-peak-limiter}/tests/randomized.rs`) say the probe is
+  red when "the render site whose word the snapshot holds" leaves a word outside its endpoints;
+  the probe does not see a site whose word the scalar snapshot does not hold (delay site 7,
+  compressor site 2).
+- **NIT 3.** The conformance probe's summary line
+  (`EffectDifferential::edge_ramp_restore_violations`) says the ramp's unclamped model walk would round past the edge, not the ramp itself; its
+  refusal sentence names the render site whose word the snapshot holds.
+- Gates: `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets -- -D
+  warnings` and `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` (part-B
+  batch gates).

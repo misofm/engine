@@ -958,8 +958,8 @@ impl<L: Lane> RampVec<L> {
     /// `remaining == 1` assigns the target and clears the step, and otherwise the word advances
     /// once by `ramp_toward(current, step, target)` (the step added, held inside `[min(current,
     /// target), max(current, target)]` so it never passes its target, issue #1409) and `remaining`
-    /// counts down. Lanes outside `gate` are untouched. Returns the lanes that were in flight, which
-    /// are the lanes `next_value` would have advanced.
+    /// counts down. Lanes outside `gate` are untouched. Returns the lanes that were in flight,
+    /// which are the lanes `next_value` would have advanced.
     #[inline(always)]
     fn advance_where(&mut self, gate: L::Mask) -> L::Mask {
         let zero = L::zero();

@@ -1530,10 +1530,11 @@ pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
 /// D11, the law of the faders, matrices and effects ([`ramp_block`] and
 /// `builtins::gain_mute_ramp_block`), carries `current = ramp_toward(current, step, target)` from
 /// frame to frame, so a D11 coefficient's bits depend on the frame's history. Here `c(k)` is a pure
-/// function of `k`: the ramp vectorises over frames, any later fused or folded traversal can compute a frame's
-/// coefficients in any order, the snap frame is decided by `k` rather than by a running value, and
-/// a settled ramp is `target` exactly, so a route that has ramped and settled mixes the bits a
-/// freshly prepared plan mixes. D11 is unchanged and stays the law everywhere else.
+/// function of `k`: the ramp vectorises over frames, any later fused or folded traversal can
+/// compute a frame's coefficients in any order, the snap frame is decided by `k` rather than by a
+/// running value, and a settled ramp is `target` exactly, so a route that has ramped and settled
+/// mixes the bits a freshly prepared plan mixes. D11 is unchanged and stays the law everywhere
+/// else.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndexedRamp {
     /// `c(0)`: the coefficients the ramp starts from.

@@ -20,9 +20,10 @@ conformance::randomized_effect_test!(
 /// state the effect itself reaches -- here each sampled state of a feedback, mix or cross-feedback
 /// ramp to a domain edge, at every launch rate.
 /// Since #1409 every ramp word stays between its start and its target, so the strict restore
-/// (#1411) admits each snapshot. Red when a render site leaves a ramp word outside its endpoints at
-/// render (a missing or reverted #1409 clamp), or when the restore refuses a valid in-range
-/// snapshot. The fix is that clamp or that validation, never a restore slack.
+/// (#1411) admits each snapshot. Red when the render site whose word the snapshot holds leaves a
+/// ramp word outside its endpoints at render (a missing or reverted #1409 clamp), or when the
+/// restore refuses a valid in-range snapshot. The fix is that clamp or that validation, never a
+/// restore slack.
 #[test]
 fn the_effects_own_edge_ramp_snapshots_restore() {
     conformance::EffectDifferential::assert_edge_ramps_restore(&delay::DelayFactory);

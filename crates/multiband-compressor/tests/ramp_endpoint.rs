@@ -10,9 +10,10 @@
 //! attack and release coefficients once per segment, by its frozen design (`tests/identity.rs`,
 //! `partition_control_trajectory_preserves_ramp_positions`). On the high band's ratio and attack
 //! moves that refresh makes the one-frame and one-block outputs differ, so for those two moves the
-//! partition half compares the ramp words only; every other move compares everything. A bank of the native width, with the move on its last lane and
-//! every other lane resting at the defaults, must render the moving lane and hold its ramp words
-//! bit for bit as the scalar instance does (D4: each lane clamps toward its own target).
+//! partition half compares the ramp words only; every other move compares everything. A bank of the
+//! native width, with the move on its last lane and every other lane resting at the defaults, must
+//! render the moving lane and hold its ramp words bit for bit as the scalar instance does (D4: each
+//! lane clamps toward its own target).
 //!
 //! Test value: a render site left on (or reverted to) the unclamped update passes its target on its
 //! move; the partition half catches a site clamped in one block shape only, and the bank half a

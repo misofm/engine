@@ -5,10 +5,11 @@
 //! in-domain move, found by the issue's scan over the parameter's domain edges (for a designed
 //! word, over parameter pairs whose words are 33 to 4096 ulps apart), whose word the unclamped D11
 //! law (`current + step` before the snap) took past its target. Every move runs at the 1 ms delay
-//! time, so the taps carry signal inside the ramp window and every word reaches the ring. The move
-//! is rendered in one-frame blocks; after each, the effect's own state snapshot must hold every
-//! ramp word between its value at rest and its target. The same window rendered as one block must
-//! give the same ramp words, output and final snapshot.
+//! time, so the taps carry signal inside the ramp window: feedback, damping `g` and cross feedback
+//! reach the ring (and the damping state), and mix reaches the output. The move is rendered in
+//! one-frame blocks; after each, the effect's own state snapshot must hold every ramp word between
+//! its value at rest and its target. The same window rendered as one block must give the same ramp
+//! words, output and final snapshot.
 //!
 //! Test value: a render site left on (or reverted to) the unclamped update passes its target on its
 //! move; the partition half catches a site clamped in one block shape only. Mutation evidence is in
@@ -153,8 +154,10 @@ fn ramps(payload: &Payload, ramp: RampWord) -> Vec<(f32, f32, f32, u32)> {
 
 /// The delay time (parameter 0) every move starts at: its 1 ms minimum, 48 samples at 48 kHz. The
 /// taps then carry signal from frame 48, inside the 64-sample ramp, so feedback, damping `g` and
-/// cross feedback reach the output and the ring while they move. At the 250 ms default the taps
-/// stay silent for the whole window, and only the mix word could reach the output.
+/// cross feedback reach the ring while they move (their writes are read back 48 frames later,
+/// after the window, so a defect in them shows in the final snapshot, not the window's output).
+/// At the 250 ms default the taps stay silent for the whole window, and only the mix word, which
+/// reaches the output, would be exercised.
 const DELAY_TIME_MS: f32 = 1.0;
 
 /// The descriptor defaults, with the delay time at [`DELAY_TIME_MS`] and `parameter` at `value`,

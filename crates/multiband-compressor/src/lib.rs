@@ -898,8 +898,8 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// every `step` is `+0.0` and every lane of every `current` is finite and is not `-0.0`, which
 /// makes `ramp_toward(current, step, target)` (whose add is the identity there, and whose clamp
 /// keeps an in-range word's bits) the identity on all of them. The two exclusions matter and are
-/// the same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is `+0.0`, and a NaN is quieted by an
-/// addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
+/// the same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is `+0.0`, and a NaN is quieted by
+/// an addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
 /// than leaving it as a comment.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -1126,9 +1126,9 @@ impl<L: Lane, const W: usize> Side<L, W> {
     /// Writes a finished segment's lane values back into the scalar ramps.
     ///
     /// The lane accumulation is `ramp_toward(current, step, target)` iterated once per frame, lane
-    /// by lane, which is exactly what `LinearRamp::next_value` does at `remaining >= 2`; the segment
-    /// split guarantees no ramp reaches `remaining == 1` inside a segment, so no snap can be missed
-    /// and the state can be written back instead of replayed.
+    /// by lane, which is exactly what `LinearRamp::next_value` does at `remaining >= 2`; the
+    /// segment split guarantees no ramp reaches `remaining == 1` inside a segment, so no snap can
+    /// be missed and the state can be written back instead of replayed.
     fn store_segment(&mut self, segment: &Segment<L>, advanced: u32) {
         for index in 0..RAMP_COUNT {
             let mut values = [0.0f32; 8];

@@ -176,11 +176,11 @@ passes its target: without it, accumulated rounding carries a 64-update ramp up 
 past its target before the snap, which can leave the parameter's domain. Every word therefore lies
 between the value at the event (or at a restore) and the target, for any finite step; an in-range
 word keeps the unadjusted sum's bits, signed zeros included, and a NaN step propagates. There is
-no per-sample division anywhere in the engine. The audited rule — "linear adds `(target-current)/remaining`" — is withdrawn by
-issue #95 finding F2: it cost one integer-to-float convert and one `fdiv` per parameter per lane
-per sample for the whole length of every ramp. One-pole-99 likewise precomputes `a =
-exp(ln(0.01)/N)` and `1-a` once, then `y = a*y_previous + (1-a)*target`, and assigns the exact
-target on update `N`. `None` assigns immediately. A new target restarts from the current value.
+no per-sample division anywhere in the engine. The audited rule — "linear adds
+`(target-current)/remaining`" — is withdrawn by issue #95 finding F2: it cost one integer-to-float
+convert and one `fdiv` per parameter per lane per sample for the whole length of every ramp.
+One-pole-99 likewise precomputes `a = exp(ln(0.01)/N)` and `1-a` once, then
+`y = a*y_previous + (1-a)*target`, and assigns the exact target on update `N`. `None` assigns immediately. A new target restarts from the current value.
 
 `effect_runtime::ramp::LinearRamp` is the one render-path implementation;
 `effect_contract::ParameterSmoother` states the same law for the control plane, and
