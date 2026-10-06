@@ -267,4 +267,153 @@ and gate 4 are updated to match.
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (2026-10-06, implementer; base `045a0dbb3`, code at `6a2c5216a`)
+
+Commits: `045a0dbb3` (Amendment 1 of this spec and of #1454), `862afc03a` (undo 2), `ca57f942c`
+(undo 1), `00a0445c5` (undo 5), `271fdaca8` (undo 3, reverted: doc only), `766d6c95e` (undo 4,
+reverted: doc only), `0f7c90ba9` (undo 6, reverted: doc only), `45cf6506b` (undo 1 doc
+follow-up: a public doc linked a private constant, which `cargo doc -D warnings` refuses),
+`517b339e2` (D4 comment). Each undo was built on the commit before it. Nothing below was tuned or
+re-run, except that a scratch-example build failure in `check-cross-targets.sh` (the scratch
+differentials sat in the tree and do not build for AArch64) was re-run after they were moved out.
+
+**Outcome.** Kept: undos 2, 1 and 5. Reverted on their own measured merit (the current shape
+stays, its #1018 doc replaced by the measured reason): undos 3, 4 and 6. No rendered bit moved; no
+iOS count moved; no ceiling row moved.
+
+| undo | site | verdict | iOS count (crate) | codegen, base -> natural shape | p50 |
+|---|---|---|---|---|---|
+| 2 (#1220) | `route_mix_ramp_block` index | **kept** | graph 0 -> 0 | ramp loop: x86-64-v3 (`f32x8`) 25 -> 22, AArch64 iOS (`f32x4`) 24 -> 21, `simd128` 62 -> 57 (function 291 -> 290); worklet kernel roster 21 -> 22 vector, 0 scalar | table A |
+| 1 (#1407) | filter ramp leading word | **kept** | builtins 5 -> 5 | filter-ramp frame loops: x86-64-v3 `f32x8` dual 292/283/295 -> 287/278/290, mono 284/273 -> 278/267; `f32x4` dual 293/282/294 -> 289/279/291, mono 283/272 -> 279/267; `simd128` dual 775/709/827/757 -> 756/694/808/742, mono 447/496 -> 442/491. Functions: `simd128` `InputStage::process` 15,986 -> 15,876, `process_mono` 8,713 -> 8,685; iOS 6,977 -> 6,930, 4,067 -> 4,027; x86 `f32x8` `process_mono` 4,665 -> 4,678 (+13 outside the loops; named) | table B |
+| 5 (#1409 D5) | `soft_clip_block` two copies | **kept** | soft-clip 1 -> 1 | frame loop: x86-64-v3 `f32x8` 201 -> 187 ramping / 171 settled; `simd128` 441 -> 421 / 374. `Channel::process` grows by the second copy (named, the cost of the two bodies): `simd128` 1,548 -> 2,034, `f32` 1,056 -> 1,667; x86 `f32x8` 805 -> 960 | table C |
+| 3 (#1089) | EQ `lanes_mask` | **reverted** | parametric-eq 0 -> 0 | `recover_failed_lanes` (where it inlines): `simd128` 351 -> 360, AArch64 iOS 95 -> 104, x86-64-v3 `f32x4` 89 -> 77, `f32x8` 147 -> 126. Longer on both shipped targets | not measured, off the frame loop (D7's failing path) |
+| 4 (#1091) | limiter `clear_runtime` `#[inline(never)]` | **reverted** | true-peak-limiter 6 -> **9** (D4 refuses) | inlined into `ChannelState::new`: x86-64-v3 469 -> 570, `simd128` 948 -> 1,316; the out-of-line copy stays for the reset callers | not measured, off the frame loop |
+| 6 (A1, #1328 follow-up) | `silence_skip_settle` outlining | **reverted** | builtins 5 -> 5, parametric-eq 0 -> 0 | inlined at every call site: `simd128` `InputStage::process` 15,876 -> 20,902, `process_mono` 8,685 -> 11,248, EQ process bodies +230 to +596; x86-64-v3 `InputStage::process` `f32x4` 7,805 -> 9,615, `f32x8` 7,357 -> 9,005, `f32` 8,168 -> 11,169; iOS `f32x4` 6,930 -> 8,780. A duplicated body, not a simpler one | table D: flat |
+
+Counting: x86-64-v3 and AArch64 from `cargo rustc --release -p <crate> --lib --crate-type rlib
+--emit asm` (fat LTO, one CGU; the iOS one is `check-cross-targets.sh`'s command), instructions
+per function, and per loop as the span from a loop label to the backward branch to it (so an outer
+loop includes its inner ones); `simd128` from `wasm-objdump -d` of the worklet's named twin, every
+instruction line counted, loops from `loop` to its `end`. TurboFan: the V8 spill gate's held and
+reported rows are identical to base after every undo (every row clean; no site is in a held row).
+
+**Gate 1, no bit moves.** Five scratch differentials (examples copied into
+`crates/effect-compiler/examples/` for the run and removed again; never committed), run on each
+undo's base and head:
+- route ramp (`route_mix_ramp_block` at `f32`, `Simd4`, `Simd8`; 60,000 scenarios: random ramps,
+  lengths near `2^22`, positions before, inside and past the ramp, hostile planes);
+- `silence_skip_block` (#1328 follow-up's harness, 4,000 seeds x three widths);
+- `bitid2` (#1451's 908 scenarios; the head copy from undo 1 on drops the removed argument only);
+- all effects (#1451 verifier's harness, 6,630 scenarios), extended here with both reset kinds and,
+  from undo 5 on, automation points on the scalar and bank paths (without them no soft clip block
+  ramped);
+- new owner-level filter-ramp differential (900 scenarios: `BuiltinInputBank` at every width, dual
+  and collapsed, and the scalar `InputBuiltins`; staggered HPF/LPF retargets, disables, trim ramps,
+  lane export/import mid-ramp, blocks of 1 to 128 frames).
+
+Every one identical at every kept undo (and at the undo-6 build). Sensitivity: route mutant
+(advance `W^2/4`) moves 23,823 rows (`f32` and `Simd8`; `Simd4` unchanged, as that mutant leaves
+four lanes alone); filter floor `61` moves 861 of 900 filter rows (0 of 908 `bitid2` rows: that
+harness never ramps a filter); soft clip ramping blocks sent to the settled copy move 209 of 390
+soft-clip rows. Undo 5's bit argument: the settled copy holds the three words where the old arm
+added a zero step; `x + (+-0.0)` is `x` for every word a settled lane can hold, because no ramp
+word is ever `-0.0` (refused at preparation and restore, normalized at runtime points, never
+produced by `ramp_toward` or the snap) or non-finite. Pinned artifacts: gate 5.
+
+**Gate 2.** `check-cross-targets.sh` passes after each kept undo; counts in the table (builtins 5,
+host-core 4, soft-clip 1, true-peak-limiter 6 at head, as at base). **Gate 3.**
+`run-wasm-gates.sh` exits 0 after each kept undo; the spill gate's rows are those of base.
+
+**Gate 4, p50** (`web-mixing-automation-benchmark.mjs run`, controls
+`scratchpad/bench-controls.json`, one warmup and two measured rounds each, interleaved base,
+head, base 1, head 1, head 2, base 2; `taskset -c 31`, `node --no-liftoff`; one invocation per
+undo, not retried; every output digest equal between base and head). Modules (SHA-256 prefixes):
+base `e25b045d`, after undo 2 `d13e0003`, after undo 1 `b2cfb8a7`, after undo 5 `1ff05d10`,
+undo-6 build `a5d0b497`.
+
+**Finding for root: no browser document reaches sites 2, 1 or 5.** None of the four fixtures
+holds a soft clip; the controls move only EQ gain, compressor threshold and limiter ceiling, so no
+input filter retargets and no route coefficient ramps (the sends document's routes are live but
+static; `route_mix_ramp_block` runs with zero ramping frames). For these three undos the timing
+measures the module's layout and the host, not the site. The host was shared: another agent's
+21-core test run took load to 10 during table A. The differences swing both ways by more than 2 %
+in tables A to C; table D (the one site the documents reach) is flat. I kept undos 2, 1 and 5 on
+codegen (every changed loop shorter on every target) and on this finding, and did not re-run.
+Each is its own commit if root reads D3 otherwise.
+
+Table A, undo 2 (load 10.10 -> 8.37):
+
+| p50 | base r1 / r2 (ns) | head r1 / r2 (ns) | head vs base |
+|---|---|---|---|
+| mono console, quiet | 150,666 / 164,463 | 158,081 / 150,927 | +4.9 % / -8.2 % |
+| mono console, restated | 154,525 / 167,899 | 161,999 / 154,764 | +4.8 % / -7.8 % |
+| mono console, automated | 158,471 / 171,597 | 165,074 / 158,652 | +4.2 % / -7.5 % |
+| sixty-four-track console | 238,785 / 237,152 | 247,050 / 237,963 | +3.5 % / +0.3 % |
+| app shape | 152,531 / 152,380 | 156,168 / 152,631 | +2.4 % / +0.2 % |
+| bus-and-send console | 344,316 / 342,943 | 352,431 / 342,121 | +2.4 % / -0.2 % |
+
+Table B, undo 1 (load 4.83 -> 3.73):
+
+| p50 | base r1 / r2 (ns) | head r1 / r2 (ns) | head vs base |
+|---|---|---|---|
+| mono console, quiet | 151,068 / 150,697 | 151,288 / 150,837 | +0.1 % / +0.1 % |
+| mono console, restated | 155,165 / 154,474 | 154,323 / 154,594 | -0.5 % / +0.1 % |
+| mono console, automated | 160,255 / 158,832 | 158,341 / 158,421 | -1.2 % / -0.3 % |
+| sixty-four-track console | 239,486 / 267,149 | 245,277 / 240,628 | +2.4 % / -9.9 % |
+| app shape | 155,426 / 187,227 | 158,823 / 152,420 | +2.2 % / -18.6 % |
+| bus-and-send console | 343,905 / 382,749 | 347,862 / 344,436 | +1.2 % / -10.0 % |
+
+Table C, undo 5 (load 2.56 -> 2.03):
+
+| p50 | base r1 / r2 (ns) | head r1 / r2 (ns) | head vs base |
+|---|---|---|---|
+| mono console, quiet | 150,798 / 150,587 | 151,358 / 154,174 | +0.4 % / +2.4 % |
+| mono console, restated | 155,086 / 154,505 | 154,966 / 158,502 | -0.1 % / +2.6 % |
+| mono console, automated | 160,306 / 158,813 | 159,464 / 162,810 | -0.5 % / +2.5 % |
+| sixty-four-track console | 244,737 / 239,847 | 246,721 / 242,733 | +0.8 % / +1.2 % |
+| app shape | 155,286 / 153,272 | 156,158 / 159,374 | +0.6 % / +4.0 % |
+| bus-and-send console | 348,956 / 346,300 | 351,631 / 344,217 | +0.8 % / -0.6 % |
+
+Table D, undo 6 (inlined scan against the outlined one; load 2.70 -> 2.54):
+
+| p50 | base r1 / r2 (ns) | head r1 / r2 (ns) | head vs base |
+|---|---|---|---|
+| mono console, quiet | 150,868 / 150,808 | 151,127 / 151,608 | +0.2 % / +0.5 % |
+| mono console, restated | 154,965 / 154,895 | 155,416 / 155,667 | +0.3 % / +0.5 % |
+| mono console, automated | 158,902 / 158,883 | 159,674 / 159,554 | +0.5 % / +0.4 % |
+| sixty-four-track console | 239,606 / 238,635 | 241,931 / 240,288 | +1.0 % / +0.7 % |
+| app shape | 154,334 / 156,288 | 153,663 / 154,344 | -0.4 % / -1.2 % |
+| bus-and-send console | 345,278 / 343,715 | 343,254 / 344,988 | -0.6 % / +0.4 % |
+
+**Gate 5** (at `517b339e2`): every command in gate 5 passes except `check-lane-policy.sh`: the effect-crate
+`cargo test` (here the CI `test-debug-b` superset plus `graph`; G5, `BUILTINS_DIGESTS`, `E9_DIGESTS`,
+multiband `DIGESTS`, the soft clip and limiter corpora), the release `lane`/`math`/`wasm-gates`
+tests, `test-debug-a`, `conformance_fixtures --check`, `check-builtins-fixtures.sh`,
+`check-builtins-policy.sh`, `check-graph-determinism.sh`, `check-workspace-policy.sh`,
+`check-realtime-policy.sh`, the known-defect self-test, clippy, `cargo doc -D warnings`, fmt,
+`check-cross-targets.sh`, `run-wasm-gates.sh` and the worklet chain (build with the named twin,
+check, expected resources, V8 spill gate, `test-web-audioworklet.sh`). `check-lane-policy.sh`
+fails on `crates/builtins/tests/tail_contract.rs:161` (`mul_add` outside `crates/lane`), a line
+#1329 attempt 3 added at `6a2c5216a`, this slice's base; this slice does not touch that file. A
+final run of the five differentials at head equals base (route, skip, `bitid2`), the base of
+undo 1 (filter) and the base of undo 5 (all effects with automation).
+
+**Test value.** No test added. Two tests are edited only where they named the removed argument
+(`filter_ramp_line.rs` drops its leading-word builder; `input_chain_arming.rs` drops the argument),
+and `filter_liveness.rs`'s gate-8 doc names the new source of the leading window. Mutation: the
+filter floor at `61` turns `filter_ramp_line` and `filter_liveness` gate 8 red; the soft clip
+dispatch swap turns three `soft-clip/tests/ramp_law.rs` tests red.
+
+**For root.**
+1. **Path deviation:** `crates/lane/tests/input_chain_arming.rs` calls the two filter-ramp bodies
+   and had to lose the removed argument; it is not in Authorized paths (only `filter_ramp_line.rs`
+   is). Also the `INPUT_FILTER_LEADING_UPDATES` import line in `crates/builtins/src/lib.rs` (beside
+   the named builder and call sites), and undo 5's module doc step 1 in
+   `crates/soft-clip/src/kernel.rs` (it described the per-frame branch).
+2. **Gate 4 premise:** no browser document reaches sites 1, 2 or 5 (above). Kept on codegen.
+3. **Stale prose after undo 2 (outside the authorized paths):** "21 vector" for the route kernel in
+   `scripts/check-web-audioworklet-callgraph.py:242-245`, `scripts/check-web-audioworklet.sh:463-465`
+   and the `route_mix_settled_tail` doc in `crates/lane/src/kernels.rs`; the roster now reads 22
+   vector, 0 scalar (budget 8; the gate passes).
+4. **Pre-existing red gate:** `check-lane-policy.sh` fails at this slice's base on
+   `crates/builtins/tests/tail_contract.rs:161` (#1329 attempt 3's `mul_add`); #1329 owns it.
