@@ -80,10 +80,29 @@ pub const R_INV_NORM: f64 = 1.847_759_065_022_573_6;
 /// `kappa = ||R||_2 ||R^-1||_2 = 1 + sqrt(2)`, rounded up.
 const KAPPA: f64 = 2.414_213_562_373_095_5;
 
-/// The relative inflation applied to every bound computed in `f64`, so that the `f64` rounding
-/// of the bound's own arithmetic cannot make it optimistic (`2^-30`, far above any accumulated
-/// `f64` rounding of the sums here and far below anything that moves a sample count).
+/// The relative inflation applied to a computed constant, and to every step of a propagation, so
+/// that the `f64` rounding of that one evaluation cannot make it optimistic: `2^-30`, far above the
+/// few `f64` units of roundoff (`2^-53` each) one evaluation of a short, non-cancelling expression
+/// makes. It covers only such evaluations. Where an evaluation can cancel (the operator norm) or a
+/// rounding compounds over many steps (the impulse response, the majorant recursions, the long
+/// sums), the error is bounded explicitly instead ([`spectral_norm_bound`], [`Majorants`],
+/// [`accumulation`]).
 const SLACK: f64 = 1.0 + 1.0 / 1_073_741_824.0;
+
+/// The `f64` unit roundoff, `2^-53`.
+const U64: f64 = 1.0 / 9_007_199_254_740_992.0;
+
+/// One step of a non-negative recursion evaluated in `f64`, made an upper bound: a sum of at most
+/// two rounded products and one rounded addition is at least `(1 - u)^2` times its exact value,
+/// and `1 + 4u` (itself rounded once) restores it, so by induction the inflated recursion bounds
+/// the exact one at every step, however many steps it runs.
+const STEP_UP: f64 = 1.0 + 4.0 * U64;
+
+/// The relative error of a sum of `terms` non-negative `f64` values, as an inflation:
+/// `(n - 1) u / (1 - (n - 1) u)` at most, bounded here by `2 n u` (with `n u` far below one).
+fn accumulation(terms: u64) -> f64 {
+    1.0 + 2.0 * (terms as f64) * U64
+}
 
 /// The longest sum this module evaluates before it gives up: no bound above it is stated.
 const HORIZON_LIMIT: u64 = 1 << 26;
@@ -170,25 +189,59 @@ pub fn v_dual_norm(c: [f64; 2]) -> f64 {
     crate::sqrt(c[0] * c[0] + second * second)
 }
 
-/// The spectral norm of a 2x2 matrix.
-fn spectral_norm(m: [[f64; 2]; 2]) -> f64 {
-    let frobenius = m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[1][0] * m[1][0] + m[1][1] * m[1][1];
-    let determinant = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    let discriminant = (frobenius * frobenius - 4.0 * determinant * determinant).max(0.0);
-    crate::sqrt(0.5 * (frobenius + crate::sqrt(discriminant)))
+/// A certified upper bound on the spectral norm of a 2x2 matrix `M`, given an `f64` matrix `m` and
+/// componentwise bounds `error[i][j] >= |M_ij - m_ij|`.
+///
+/// For `m = [[a, b], [c, d]]` the singular values satisfy `s1 + s2 = sqrt((a + d)^2 + (c - b)^2)`
+/// and `s1 - s2 = sqrt((a - d)^2 + (b + c)^2)`, so `s1` is half their sum. Every operation of that
+/// form is non-cancelling (one rounded sum or difference squared, sums of squares, square roots,
+/// one sum of non-negative values), so the computed value is within `(1 +- u)^4` of the exact `s1`
+/// of `m`. The textbook form `sqrt((F + sqrt(F^2 - 4 det^2)) / 2)` is not: for a near-rotation (two
+/// almost equal singular values, every Butterworth design in the `V`-basis) `F^2 - 4 det^2`
+/// cancels, and its rounding can put the result below the exact norm by far more than `2^-30`
+/// (#1329 attempt 3, M1). The perturbation adds at most `||M - m||_2 <= ||E||_F`, the square root
+/// of the sum of the squared componentwise bounds (within `(1 +- u)^4` as computed). The two terms
+/// and their sum are inflated by `1 + 16 u`, which covers all three relative errors and the final
+/// rounding.
+fn spectral_norm_bound(m: [[f64; 2]; 2], error: [[f64; 2]; 2]) -> f64 {
+    let [[a, b], [c, d]] = m;
+    let sum = crate::sqrt((a + d) * (a + d) + (c - b) * (c - b));
+    let difference = crate::sqrt((a - d) * (a - d) + (b + c) * (b + c));
+    let perturbation = crate::sqrt(
+        error[0][0] * error[0][0]
+            + error[0][1] * error[0][1]
+            + error[1][0] * error[1][0]
+            + error[1][1] * error[1][1],
+    );
+    (0.5 * (sum + difference) + perturbation) * (1.0 + 16.0 * U64)
 }
 
-/// `||M||_V`, the operator norm `M` induces in the `V`-norm: the spectral norm of `R M R^-1`.
+/// `||M||_V`, the operator norm `M` induces in the `V`-norm, as a certified upper bound: the
+/// spectral norm of `R M R^-1` ([`spectral_norm_bound`]).
+///
+/// For `M = [[al, be], [ga, de]]` and `sqrt(2) r = 1`, `R M R^-1` is exactly
+/// `[[al + r ga, sqrt(2) be + de - al - r ga], [r ga, de - r ga]]`; the `1`s of a design's diagonal
+/// cancel in exact arithmetic, never in rounding. Each entry is evaluated in `f64` with the rounded
+/// constants `r` and `sqrt(2)`, and each entry of `M` is taken as known only to within one rounding
+/// (a caller's `1 - 2 c1`): every term passes through at most six roundings (the entry, the
+/// constant, the product, three additions), so an entry's error is at most `gamma_6` times the sum
+/// of its terms' magnitudes, bounded here by `16 u` times that sum (which also covers the bound's
+/// own rounding).
 #[must_use]
 pub fn v_operator_norm(m: [[f64; 2]; 2]) -> f64 {
-    let rm = [
-        [m[0][0] + R * m[1][0], m[0][1] + R * m[1][1]],
-        [R * m[1][0], R * m[1][1]],
+    let sqrt2 = core::f64::consts::SQRT_2;
+    let [[al, be], [ga, de]] = m;
+    let r_ga = R * ga;
+    let transformed = [[al + r_ga, sqrt2 * be + de - al - r_ga], [r_ga, de - r_ga]];
+    let magnitude = [
+        [
+            al.abs() + r_ga.abs(),
+            (sqrt2 * be).abs() + de.abs() + al.abs() + r_ga.abs(),
+        ],
+        [r_ga.abs(), de.abs() + r_ga.abs()],
     ];
-    spectral_norm([
-        [rm[0][0], -rm[0][0] + core::f64::consts::SQRT_2 * rm[0][1]],
-        [rm[1][0], -rm[1][0] + core::f64::consts::SQRT_2 * rm[1][1]],
-    ])
+    let error = magnitude.map(|row| row.map(|terms| 16.0 * U64 * terms));
+    spectral_norm_bound(transformed, error)
 }
 
 /// The sup of `2 ||[[e1, e2], [-e2, e3]]||_V` over the box `|e_i| <= box_[i]`: how much a
@@ -204,7 +257,7 @@ pub fn word_box_norm(box_: [f64; 3]) -> f64 {
         let (e1, e2, e3) = (sign(0) * box_[0], sign(1) * box_[1], sign(2) * box_[2]);
         worst = worst.max(2.0 * v_operator_norm([[e1, e2], [-e2, e3]]));
     }
-    worst * SLACK
+    worst
 }
 
 /// The rounding of the `f32` state step, as a relative bound on the next state:
@@ -229,7 +282,7 @@ pub fn state_rounding(words: [f64; 3], q: f64, beta: f64) -> (f64, f64) {
         [2.0 * k * gamma2 * a2, 2.0 * k * gamma3 * a3],
     ];
     let input = [2.0 * k * gamma3 * a2, 2.0 * k * gamma3 * a3];
-    let mu_state = R_NORM * spectral_norm(state) * R_INV_NORM + KAPPA * U * q;
+    let mu_state = R_NORM * spectral_norm_bound(state, [[0.0; 2]; 2]) * R_INV_NORM + KAPPA * U * q;
     let mu_input =
         R_NORM * crate::sqrt(input[0] * input[0] + input[1] * input[1]) + KAPPA * U * beta;
     (mu_state * SLACK, mu_input * SLACK)
@@ -294,10 +347,12 @@ pub struct SectionConstants {
 }
 
 impl SectionConstants {
-    /// The constants of one fixed section.
+    /// The constants of one fixed section. `q` is [`v_operator_norm`]'s certified bound, which
+    /// already carries its own rounding; the other norms, short non-cancelling evaluations (the
+    /// dual norm's `-c1 + sqrt(2) c2` is at most `2 gamma` in magnitude per term), carry [`SLACK`].
     #[must_use]
     pub fn of(words: &SvfWords) -> Self {
-        let q = v_operator_norm(words.a()) * SLACK;
+        let q = v_operator_norm(words.a());
         let beta = v_norm(words.b()) * SLACK;
         let (mu_state, mu_input) = state_rounding([words.c1, words.a2, words.a3], q, beta);
         let (omega_state, omega_input) = output_rounding(words);
@@ -386,7 +441,9 @@ pub struct CascadeBound {
     /// `R(P*)`: exact rest for every input peak at or below [`Self::flush_floor`].
     pub rest_at_flush_floor: u64,
     /// The exact half alone: the first frame `t0` from which the reference's impulse-response
-    /// suffix is below `eps / 2` (evidence only).
+    /// suffix is below `eps / 2` (evidence only). A live bound ([`envelope_cascade`]) has no
+    /// reference split, its decay being propagated directly on the kernel's envelope, so there it
+    /// equals [`Self::tail`].
     pub tail_reference: u64,
 }
 
@@ -782,6 +839,16 @@ pub fn envelope_cascade(
 /// in the `V`-norm (`Gbar_1 = ||G_1||_V`), its input at most `gain * peak * sum_{t > m} a_k(t)`,
 /// and its output at most `gain * peak * sum_{t > m} o(t)`, `o = a_{K+1}`: a reset only drops
 /// terms of each sum, and the triangle inequality covers the rest.
+///
+/// **`f64` rounding.** The first section's response is computed in `f64`, so it carries an error
+/// radius `e(t) >= ||G_1(t) - computed||_V` with `e(t + 1) = q_1 e(t) + nu (|s_1| + |s_2|)`: one
+/// step rounds each entry of `A` it forms (`1 - 2 c1`, `1 - 2 a3`) and each row's two products and
+/// two additions, at most `4.01 u` times `|A| |s| + |b| x` per word, which is at most
+/// `nu = 8 u ||R||_2` per unit of `|s_1| + |s_2|` in the `V`-norm (every entry of `|A|` and `|b|` is
+/// at most `2`). The output majorant adds `gamma_1 e(t)` and the output's own rounding, at most
+/// `8 u` times its terms' magnitudes. The later sections' recursions are non-negative and step up
+/// by [`STEP_UP`] each frame, so none of the three can fall below its exact value however long it
+/// runs.
 #[derive(Clone)]
 struct Majorants<'a> {
     constants: &'a [SectionConstants],
@@ -790,10 +857,19 @@ struct Majorants<'a> {
     b: [f64; 2],
     c: [f64; 2],
     d: f64,
+    /// `|m1 (1 - c1)| + |m2 a2|` and `|m1 a2| + |m2 (1 - a3)|`: the magnitudes of `c`'s terms,
+    /// and `|d|`'s, for the output rounding.
+    c_terms: [f64; 2],
+    d_terms: f64,
     first: [f64; 2],
+    /// `e(t)`, the first section's `f64` error radius in the `V`-norm.
+    first_error: f64,
     later: Vec<f64>,
     frame: u64,
 }
+
+/// `nu`: the first section's `f64` step error per unit of `|s_1| + |s_2|`, in the `V`-norm.
+const FIRST_STEP_ERROR: f64 = 8.0 * U64 * R_NORM;
 
 /// The values of one frame of [`Majorants`], written in place by [`Majorants::step`].
 struct MajorantFrame {
@@ -814,13 +890,21 @@ impl MajorantFrame {
 
 impl<'a> Majorants<'a> {
     fn new(constants: &'a [SectionConstants], words: &SvfWords) -> Self {
+        let (m0, m1, m2) = (words.m0.abs(), words.m1.abs(), words.m2.abs());
+        let (a2, a3) = (words.a2.abs(), words.a3.abs());
         Self {
             constants,
             a: words.a(),
             b: words.b(),
             c: words.c(),
             d: words.d(),
+            c_terms: [
+                m1 * (1.0 - words.c1).abs() + m2 * a2,
+                m1 * a2 + m2 * (1.0 - words.a3).abs(),
+            ],
+            d_terms: m0 + m1 * a2 + m2 * a3,
             first: [0.0, 0.0],
+            first_error: 0.0,
             later: std::vec![0.0; constants.len().saturating_sub(1)],
             frame: 0,
         }
@@ -836,22 +920,37 @@ impl<'a> Majorants<'a> {
         let impulse = if self.frame == 0 { 1.0 } else { 0.0 };
         out.input[0] = impulse;
         out.state[0] = 0.0;
-        let c = self.c;
-        out.input[1] = (c[0] * self.first[0] + c[1] * self.first[1] + self.d * impulse).abs();
+        let (c, first) = (self.c, self.first);
+        // `|h_1(t)|` as computed, plus the error radius through the output row and the output's
+        // own rounding: at least the exact `|h_1(t)|`.
+        let output_rounding = 8.0
+            * U64
+            * (self.c_terms[0] * first[0].abs()
+                + self.c_terms[1] * first[1].abs()
+                + self.d_terms * impulse);
+        out.input[1] = ((c[0] * first[0] + c[1] * first[1] + self.d * impulse).abs()
+            + output_rounding
+            + self.constants[0].gamma * self.first_error)
+            * STEP_UP;
         for i in 1..k {
             out.state[i] = self.later[i - 1];
-            out.input[i + 1] =
-                self.constants[i].gamma * out.state[i] + self.constants[i].delta * out.input[i];
+            out.input[i + 1] = (self.constants[i].gamma * out.state[i]
+                + self.constants[i].delta * out.input[i])
+                * STEP_UP;
         }
         // Advance.
         let (a, b) = (self.a, self.b);
+        self.first_error = (self.constants[0].q * self.first_error
+            + FIRST_STEP_ERROR * (first[0].abs() + first[1].abs()))
+            * STEP_UP;
         self.first = [
-            a[0][0] * self.first[0] + a[0][1] * self.first[1] + b[0] * impulse,
-            a[1][0] * self.first[0] + a[1][1] * self.first[1] + b[1] * impulse,
+            a[0][0] * first[0] + a[0][1] * first[1] + b[0] * impulse,
+            a[1][0] * first[0] + a[1][1] * first[1] + b[1] * impulse,
         ];
         for i in 1..k {
-            self.later[i - 1] =
-                self.constants[i].q * self.later[i - 1] + self.constants[i].beta * out.input[i];
+            self.later[i - 1] = (self.constants[i].q * self.later[i - 1]
+                + self.constants[i].beta * out.input[i])
+                * STEP_UP;
         }
         self.frame += 1;
     }
@@ -864,7 +963,8 @@ impl<'a> Majorants<'a> {
     /// `(I - M)^-1 m(now)`, solved by forward substitution.
     fn remainders(&self) -> (Vec<f64>, Vec<f64>) {
         let k = self.constants.len();
-        let mut current = std::vec![v_norm(self.first)];
+        // The first section's exact state is within `first_error` of the computed one.
+        let mut current = std::vec![v_norm(self.first) * SLACK + self.first_error];
         current.extend(self.later.iter().copied());
         // `alpha[i][j]`: coefficient of `Gbar_j` in `a_i` for `t >= now >= 1`.
         let mut alpha = std::vec![std::vec![0.0; k]; k + 1];
@@ -1160,10 +1260,19 @@ pub fn fixed_cascade(
             break inputs[k];
         }
     };
+    // Every sum here has at most `majorants.frame` non-negative terms (block sums, then the sum of
+    // the blocks and the remainder): their rounding is bounded by `accumulation`.
+    let summed = accumulation(majorants.frame + 1);
     // The first section's state majorant in closed form ([`Majorants::step`]).
     state_sup[0] = constants[0].beta / (1.0 - constants[0].q);
-    let state_sup: Vec<f64> = state_sup.iter().map(|value| value * SLACK).collect();
-    let input_sup: Vec<f64> = input_sup.iter().map(|value| value * SLACK).collect();
+    let state_sup: Vec<f64> = state_sup
+        .iter()
+        .map(|value| value * SLACK * summed)
+        .collect();
+    let input_sup: Vec<f64> = input_sup
+        .iter()
+        .map(|value| value * SLACK * summed)
+        .collect();
 
     // The suffix `Ref(t0) = sum_{t >= t0} o(t)` at each block start, from the back.
     let blocks = block_sums.len();
@@ -1177,7 +1286,7 @@ pub fn fixed_cascade(
     // frame more, so that it reads on the same index as the impulse-response suffix
     // `S(j) = sum_{m >= j} |h[m]|` gate 1(a) compares it with (`T_b(eps / 2) <= T`).
     let first_block = (0..=blocks)
-        .find(|&block| suffix[block] * SLACK < threshold)
+        .find(|&block| suffix[block] * SLACK * summed < threshold)
         .expect("the remainder is below the threshold");
     let t0 = if first_block == 0 {
         0
@@ -1194,7 +1303,7 @@ pub fn fixed_cascade(
         let mut first = (block + 1) * BLOCK;
         for index in (0..BLOCK).rev() {
             running += values[index];
-            if running * SLACK < threshold {
+            if running * SLACK * summed < threshold {
                 first = block * BLOCK + index;
             } else {
                 break;
@@ -1297,4 +1406,61 @@ pub fn fixed_cascade(
         rest_at_flush_floor: rest_star,
         tail_reference,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SvfWords, v_operator_norm};
+
+    /// The certified operator norm is never below the exact `||A||_V` of a near-rotation, and
+    /// within `1e-13` of it. The references are the exact norms of the kernel's own `f32` words,
+    /// evaluated in 60-digit decimal arithmetic (`R A R^-1`, then `s1` by the non-cancelling
+    /// closed form) and rounded to the nearest `f64`; a bound strictly above that `f64` is above the
+    /// exact value. The cancelling form `sqrt((F + sqrt(F^2 - 4 det^2)) / 2)` falls below the first
+    /// two by `6.0e-9` and `1.1e-9` (#1329 attempt 3, M1).
+    #[test]
+    fn the_operator_norm_bounds_the_exact_norm_of_every_near_top_design() {
+        // (c1, a2, a3) bits, exact `||A||_V` to 25 digits.
+        let rows: [([u32; 3], f64); 6] = [
+            // 44.1 kHz HPF one `f32` below the maximum: 0.9999476754147092331719515.
+            (
+                [0x3f80_0000, 0x381b_3976, 0x3f7f_fc92],
+                0.999_947_675_414_709_2,
+            ),
+            // 44.1 kHz LPF at 1 kHz: 0.9041639287076296876045586.
+            (
+                [0x3dc4_4bda, 0x3d84_2298, 0x3b96_dd23],
+                0.904_163_928_707_629_7,
+            ),
+            // 44.1 kHz LPF at the maximum: 0.9999478657377627828961350.
+            (
+                [0x3f80_0000, 0x381a_a414, 0x3f7f_fc95],
+                0.999_947_865_737_762_8,
+            ),
+            // 48 kHz LPF at the maximum: 0.9999475892230697675331340.
+            (
+                [0x3f80_0000, 0x381b_7ad0, 0x3f7f_fc90],
+                0.999_947_589_223_069_8,
+            ),
+            // 48 kHz HPF one `f32` below the maximum: 0.9999474076590467282723153.
+            (
+                [0x3f80_0000, 0x381c_040f, 0x3f7f_fc8d],
+                0.999_947_407_659_046_7,
+            ),
+            // 44.1 kHz HPF at 10 Hz: 0.9989930509006467528090886.
+            (
+                [0x3a83_fb9b, 0x3a3a_8ed5, 0x3508_16f3],
+                0.998_993_050_900_646_8,
+            ),
+        ];
+        for (bits, exact) in rows {
+            let [c1, a2, a3] = bits.map(f32::from_bits);
+            let words = SvfWords::from_f32([c1, a2, a3, 0.0, 0.0, 0.0]);
+            let bound = v_operator_norm(words.a());
+            assert!(
+                bound > exact && bound - exact < 1.0e-13,
+                "words {bits:08x?}: bound {bound:.17} against exact {exact:.17}"
+            );
+        }
+    }
 }

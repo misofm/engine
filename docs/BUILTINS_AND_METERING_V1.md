@@ -50,11 +50,13 @@ Jury check and cutoff-response gate are gone: the public cutoff domain is the fr
 table, enforced before preparation, and preparation now rejects only a coefficient that is not
 representable in `f32`. Enabled filters declare a certified finite tail, computed once on the
 control thread from the designed `f32` words, by the compiler at preparation for each distinct
-design (issue #1329, decision 15 D15-4(b)): `T_decay`
-(`InputBuiltins::tail`, the value PDC and every tail report use), the tail over every peak
-`T_rest` (`tail_every_peak`) and the exact-rest bound (`rest`, `RestSamples`). A strip whose input
-lane is live reports `builtins::input_section_live_bound`, which covers every live trim, polarity
-and filter target over the whole cutoff domain. All other builtin parts declare a zero tail and
+design (issue #1329, decision 15 D15-4(b)): `T_decay` (`tail`, the value PDC and every tail report
+use), the tail over every peak `T_rest` (`tail_every_peak`) and the exact-rest bound (`rest`,
+`RestSamples`), the three fields of `builtins::InputSectionBound`. The prepared session keeps every
+strip's bounds beside its tail, control-side (`PreparedBuiltinsSession::input_bounds`; silence
+skipping, #1107, reads them there); the render-owned input section carries none of them. A strip
+whose input lane is live reports `builtins::input_section_live_bound`, which covers every live
+trim, polarity and filter target over the whole cutoff domain. All other builtin parts declare a zero tail and
 zero latency. The meaning of each value is in `docs/EFFECT_CONTRACT_V1.md` ("Tail and exact
 rest"); the derivation is `docs/derivations/1329-input-section-tail-and-rest.md`.
 

@@ -670,6 +670,11 @@ jobs:
       # {1, 2, 7, 63}).
       - name: Live input filter reachable-word sweep (filter_liveness) in release
         run: cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness
+      # #1329 Amendment 4 (R6): the input section's tail and exact-rest gates at release scale
+      # (every launch rate; gate 2's real-kernel run at the domain extreme, which debug ignores).
+      # test-debug-b runs only the debug subset (48 kHz, a tenth of gate 1(b)'s scan).
+      - name: Input section tail and exact-rest gates (tail_contract) in release
+        run: cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract
       # #1044: the step above runs M3 (`m3_determinism`) with FMA on, because `.cargo/config.toml`
       # builds every x86-64 target with +avx2,+fma and `lane` refuses to compile without both. The
       # retired "Math M3 digests on an FMA-enabled build" step replaced those flags with +fma alone,

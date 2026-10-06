@@ -2118,7 +2118,7 @@ mod tests {
     ///
     /// * **Input section.** No polarity inversion, 0 dB trim, and both filters off: a zero cutoff
     ///   disables a filter (#808), and with both off the section's tail is `Finite(0)` rather
-    ///   than the certified tail of a filter design (`InputBuiltins::tail`, #1329).
+    ///   than the certified tail of a filter design (`builtins::input_section_bound`, #1329).
     /// * **Fader.** 0 dB and unmuted on both lanes.
     /// * **Matrix.** The explicit 2x2 identity. The canonical fixture's `pan: {left: 1, right: 1}`
     ///   is *not* one: pan values are constant-power positions, so both lanes are panned hard

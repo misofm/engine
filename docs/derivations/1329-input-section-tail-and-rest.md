@@ -10,11 +10,15 @@ Nothing here runs on the render thread.
 For an input of peak `P` that is zero from sample `N` on, with no control event at or after `N`
 (a ramp may be in flight at `N`; every builtin ramp completes by `N + 64`), and `eps = 10^(-144/20)`:
 
-| value | name in code | meaning |
+| value | name in code (`builtins::InputSectionBound`) | meaning |
 |---|---|---|
-| `T_decay` | `tail()`, `TailSamples` | `|y[n]| < P eps` for `n >= N + T_decay`, for every `P >= P*` |
-| `T_rest = max(T_decay, R(P*))` | `tail_every_peak()` | as above for `P >= P*`; exact `+-0.0` for `P < P*` |
-| `R` | `rest()`, `RestSamples` | from `N + R` every output is `+-0.0` and every integrator is `+0.0` |
+| `T_decay` | `tail`, `TailSamples` | `|y[n]| < P eps` for `n >= N + T_decay`, for every `P >= P*` |
+| `T_rest = max(T_decay, R(P*))` | `tail_every_peak` | as above for `P >= P*`; exact `+-0.0` for `P < P*` |
+| `R` | `rest`, `RestSamples` | from `N + R` every output is `+-0.0` and every integrator is `+0.0` |
+
+`builtins::input_section_bounds` computes them once per distinct design at preparation, and
+`builtins-compiler` keeps each strip's beside its tail (`PreparedBuiltinsSession::input_bounds`),
+control-side; the render-owned input section carries none of them (#1329 Amendment 4, R5).
 
 `P*` is the **flush floor**: the smallest peak for which the per-word flush's absolute deviation
 fits the `-144 dB` budget. Below it the `f32` output near `FLUSH_EPS = 1e-20` is not relative to
@@ -50,8 +54,9 @@ both mixes, `||c||_V* = sqrt(2) / sqrt(1 + t)`, `t = g (g + sqrt(2))`.
   (`gamma_n = n u / (1 - n u)`, `u = 2^-24`) gives a relative error
   `||fl(step) - (A s + b x)||_V <= mu_state ||s||_V + mu_input |x|`; the final rounding of `n1`,
   `n2` adds `u q kappa`, so at the top of the domain `mu_state = 7 u kappa = 1.0073e-6`
-  (Amendment 2). Where the kernel fuses a multiply-add (native x86-64-v3 and AArch64), it rounds
-  less, so the count stays an upper bound; Wasm SIMD rounds exactly as counted.
+  (Amendment 2). No target fuses a multiply-add: `Lane::fma` rounds the product and the sum
+  separately on every backend (`crates/lane/src/wide_impl.rs`, `scalar.rs`), so the count matches
+  the kernel's roundings exactly on every target.
 * **Output mix.** The same count for `y` gives `omega_state ||s||_V + omega_input |x|`.
 * **Per-word flush.** A word below `FLUSH_EPS` is zeroed, an absolute perturbation of less than
   `FLUSH_EPS` per word per step: `F = ||R|| sqrt(2) (FLUSH_EPS + 16 * 2^-126)` per step (the second
@@ -65,6 +70,18 @@ both mixes, `||c||_V* = sqrt(2) / sqrt(1 + t)`, `t = g (g + sqrt(2))`.
 ## D3, D4: a fixed design
 
 `math::tail::fixed_cascade`. The split is `eps / 2` for exact arithmetic and `eps / 2` for `f32`.
+
+* **The contraction `q = ||A||_V`.** In the `V`-basis, `R A R^-1` is exactly
+  `[[al + r ga, sqrt(2) be + de - al - r ga], [r ga, de - r ga]]` for `A = [[al, be], [ga, de]]`
+  (`sqrt(2) r = 1`). Its larger singular value is `s1 = (sqrt((a + d)^2 + (c - b)^2) +
+  sqrt((a - d)^2 + (b + c)^2)) / 2`, a form with no cancelling operation, so its `f64` value is
+  within `(1 +- u64)^4` of the exact `s1` of the computed entries. Each entry's own `f64` error is
+  at most `16 u64` times the sum of its terms' magnitudes (one rounding of the caller's entry, the
+  constant, the product, three additions), and moves `s1` by at most the Frobenius norm of those
+  errors. `q` is `(s1 + ||E||_F) (1 + 16 u64)`, a certified upper bound by derivation. The
+  textbook form `sqrt((F + sqrt(F^2 - 4 det^2)) / 2)` cancels for every design (the two singular
+  values are almost equal) and fell below the exact norm by up to `6.0e-9` (attempt 3, M1;
+  `math::tail`'s unit test pins six near-top designs against 60-digit references).
 
 * **Exact half, reset-aware (Amendment 2, F1).** Compare the kernel with an exact-arithmetic
   **reference** that resets each section at the same instants as the kernel (joint flush,
@@ -143,8 +160,20 @@ are the module's computed outputs, recorded as evidence; nothing pins them.
 
 ## Numerical limits
 
-* The bounds are evaluated in `f64` and inflated by `1 + 2^-30` at every accumulation, far above
-  the `f64` rounding of the sums and far below one sample.
+* Every `f64` rounding is bounded explicitly or covered by an inflation that provably exceeds it.
+  The operator norm carries its own error term (above). A short, non-cancelling evaluation of a
+  constant (`beta`, `gamma`, `|d|`, the rounding counts, the balls) and every step of a
+  propagation (the deviation recursion, the envelope propagator, its powers) is inflated by
+  `1 + 2^-30`, far above its few `2^-53` roundings. Where rounding compounds over many frames it
+  is bounded separately: the first section's `f64` impulse response carries an error radius
+  `e(t + 1) = q e(t) + 8 u64 ||R|| (|s1| + |s2|)` added through its output row, the later
+  sections' majorant recursions step up by `1 + 4 u64` per frame, and a sum of `n` non-negative
+  terms is inflated by `1 + 2 n u64`.
+* The `1 + 2^-30` step inflation compounds: over the live bound's 0.9M-frame decay it is a factor
+  of about `1 + 8.4e-4`, which lengthens the stated values by a few tens of frames (the live
+  `T_decay` is 17 frames above an independent frame-by-frame recomputation without it, every
+  rest 14 to 42 frames above; `tail_contract` checks the difference stays within 0.01 % plus 64
+  frames). It only ever lengthens a bound.
 * The longest horizon evaluated is `2^26` frames; a bound beyond it is not stated (`Infinite`, no
   rest bound). No launch-rate design comes near it.
 * Every section must contract with its rounding (`q + mu_state < 1`); every flush stall must be
@@ -163,8 +192,12 @@ reference resets with it. The bounds cap the state at the `V`-norm of finite `f3
 
 `crates/builtins/tests/tail_contract.rs`: gate 1(a) against an independent `f64` brute force to
 4,000,000 samples; 1(b) over 165,000 designs per section and the kernel's own ramp words; 1(c) and 2
-on the real kernel; 3 and 7 on the figures. The measurements are in the #1329 spec's attempt
-record.
+on the real kernel; 1(c)'s identity for the live bound; the live envelope's terms and the live
+figures against an independent frame-by-frame recomputation of this derivation (the real kernel
+cannot see an omitted rounding, ramp, stall or A9 term at the live bound: the crude cascade's
+slack absorbs each); 3 and 7 on the figures. `math::tail`'s unit test checks the operator norm
+against 60-digit references. The required CI job `test-release` runs `tail_contract` at release
+scale. The measurements are in the #1329 spec's attempt record.
 
 ## Citations
 

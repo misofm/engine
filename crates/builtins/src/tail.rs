@@ -1,9 +1,10 @@
 //! The builtin input section's certified tail and exact-rest bounds (issue #1329; decision 15
 //! D15-4(b)).
 //!
-//! Control-plane only. [`fixed_input_bound`] runs once when an input section is prepared;
-//! [`input_section_live_bound`] is called by the compiler for a strip whose input lane is live.
-//! Neither is reachable from a render path, and both allocate (through `math::tail`).
+//! Control-plane only. [`fixed_input_bound`] runs once per distinct design when a session is
+//! prepared (`crate::input_section_bounds`); [`input_section_live_bound`] is called by the compiler
+//! for a session with a live input lane. Neither is reachable from a render path, both allocate
+//! (through `math::tail`), and nothing render owns stores their results (#1329 Amendment 4, R5).
 //!
 //! Every bound is computed under the canonical floating-point environment
 //! (`lane::CanonicalFpEnv`): round to nearest with full subnormals, as on every target, whatever
@@ -87,8 +88,9 @@ impl InputSectionBound {
     }
 }
 
-/// The design a [`PreparedInputBound`] was computed for: the rate, and per channel the seven words
-/// of each section and the trim magnitude (the bound reads nothing else).
+/// What a fixed input section's bound depends on: the rate, and per channel the seven words of each
+/// section and the trim magnitude (the bound reads nothing else). `crate::input_section_bounds`
+/// computes each distinct key's bound once per preparation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct InputBoundKey {
     sample_rate: u32,
@@ -105,30 +107,6 @@ pub(crate) fn input_bound_key(sample_rate: u32, lanes: [&InputLane; 2]) -> Input
                 lane.trim_signed.abs().to_bits(),
             )
         }),
-    }
-}
-
-/// An input section's bounds computed ahead of its chain (`builtins::prepare_input_bound`), with
-/// the design they belong to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PreparedInputBound {
-    key: InputBoundKey,
-    bound: InputSectionBound,
-}
-
-impl PreparedInputBound {
-    pub(crate) fn new(key: InputBoundKey, bound: InputSectionBound) -> Self {
-        Self { key, bound }
-    }
-
-    pub(crate) fn key(&self) -> InputBoundKey {
-        self.key
-    }
-
-    /// The bounds.
-    #[must_use]
-    pub fn bound(&self) -> InputSectionBound {
-        self.bound
     }
 }
 

@@ -75,8 +75,9 @@ the control thread at preparation and never pinned:
   a path, and every tail report uses it (the C ABI and browser reports, #1261, #1262). `Infinite`
   states no bound and remains for nodes whose bound has not been derived (#1378 retires it).
 * **The tail over every peak -- `T_rest = max(T_decay, R(P*))`, named `tail_every_peak`** (a
-  `TailSamples`, beside `tail` wherever `tail` is stated: `InputBuiltins`, `BuiltinChain`,
-  `builtins::InputSectionBound`). From `N + latency + T_rest` on the output is below `P * eps` for
+  `TailSamples`, beside `tail` wherever `tail` is stated: `builtins::InputSectionBound`, which
+  `builtins-compiler`'s prepared session keeps per strip beside its tail,
+  `PreparedBuiltinsSession::input_bounds`). From `N + latency + T_rest` on the output is below `P * eps` for
   `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. `R(P*)` includes the joint-flush arming
   window `N_SILENCE` (#1328 A9), so `T_rest >= N_SILENCE` for every enabled filter section. It is
   the exact-zero branch for low peaks only.

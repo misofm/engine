@@ -42,14 +42,14 @@ pub use filter_response::{
     query_input_filter_snapshot_magnitudes_into,
 };
 pub use tail::{
-    InputSectionBound, PreparedInputBound, input_section_flush_law, input_section_live_bound,
+    InputSectionBound, input_section_flush_law, input_section_live_bound,
     input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
 };
 
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, EffectPrepareError, ResponseAnalysisError,
     ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
-    ResponseSnapshotSummary, RestSamples, TailSamples,
+    ResponseSnapshotSummary,
 };
 use lane::{
     Backend, Lane, Simd4,
@@ -3318,13 +3318,6 @@ impl<L: Lane> MatrixStage<L> {
 /// The scalar builtin input section of one track.
 pub struct InputBuiltins {
     stage: InputStage<f32>,
-    /// The prepared design's tail and exact-rest bounds (#1329 D4, D7), computed at most once, on
-    /// the control thread: stored at construction when the compiler computed them ahead
-    /// ([`prepare_input_bounds`]), otherwise on the first request. Render never reads it.
-    bound: core::cell::OnceCell<InputSectionBound>,
-    /// What the bound reads besides the prepared sections the stage keeps (`filter_initial`):
-    /// the rate and the two channels' prepared trim words.
-    design: (u32, [f32; 2]),
 }
 
 /// The scalar fader and mute section of one track.
@@ -3352,30 +3345,6 @@ impl BuiltinChain {
         parameters: BuiltinParameters,
     ) -> Result<Self, BuiltinParameterError> {
         let (input, fader_mute, matrix) = prepare_sections(sample_rate, parameters)?;
-        Ok(Self {
-            input,
-            fader_mute,
-            matrix,
-            #[cfg(test)]
-            fused_dispatches: 0,
-        })
-    }
-
-    /// [`BuiltinChain::new`] with the input section's bounds computed ahead by
-    /// [`prepare_input_bound`]: when `prepared` was computed for this sample rate and this
-    /// design, the chain stores it and computes nothing; otherwise it computes its own, exactly as
-    /// [`BuiltinChain::new`] does.
-    ///
-    /// # Errors
-    ///
-    /// The same as [`BuiltinChain::new`].
-    pub fn with_prepared_bound(
-        sample_rate: u32,
-        parameters: BuiltinParameters,
-        prepared: &PreparedInputBound,
-    ) -> Result<Self, BuiltinParameterError> {
-        let (input, fader_mute, matrix) =
-            prepare_sections_with(sample_rate, parameters, Some(prepared))?;
         Ok(Self {
             input,
             fader_mute,
@@ -3436,22 +3405,6 @@ impl BuiltinChain {
             self.fader_mute.reset();
         }
     }
-    /// The input section's `T_decay` ([`InputBuiltins::tail`]); the fader and matrix are
-    /// gain-only and add none (#1329 D6).
-    #[must_use]
-    pub fn tail(&self) -> TailSamples {
-        self.input.tail()
-    }
-    /// The input section's tail over every peak ([`InputBuiltins::tail_every_peak`]).
-    #[must_use]
-    pub fn tail_every_peak(&self) -> TailSamples {
-        self.input.tail_every_peak()
-    }
-    /// The input section's exact-rest bound ([`InputBuiltins::rest`]).
-    #[must_use]
-    pub fn rest(&self) -> Option<RestSamples> {
-        self.input.rest()
-    }
     pub fn into_sections(self) -> (InputBuiltins, FaderMuteBuiltins, MatrixBuiltins) {
         (self.input, self.fader_mute, self.matrix)
     }
@@ -3499,50 +3452,50 @@ fn prepare_input_track(
     })
 }
 
-/// Computes the input section's certified bounds (#1329 D4) for one strip's parameters, ahead of
-/// the chain that will store them: [`BuiltinChain::with_prepared_bound`] takes the result without
-/// computing it again.
+/// The certified tail and exact-rest bounds (#1329 D1, D2, D4) of the input section one strip's
+/// parameters prepare: its trim, polarity, HPF and LPF as designed, with no live input lane (a
+/// strip whose input lane is live reports [`input_section_live_bound`] instead, D5). The fader
+/// and the matrix are gain-only and add nothing (D6).
 ///
-/// The computation allocates (control plane only). A compiler whose chain construction runs under
-/// an exact retained-allocation account calls this first, outside that account.
+/// Control plane only: the computation allocates and runs in `f64`, at preparation, and nothing
+/// render owns stores its result (#1329 Amendment 4, R5). `builtins-compiler` keeps it per strip
+/// in its prepared session, beside the strip's tail.
 ///
 /// # Errors
 ///
 /// The same as [`BuiltinChain::new`] for the same parameters.
-pub fn prepare_input_bound(
+pub fn input_section_bound(
     sample_rate: u32,
     parameters: BuiltinParameters,
-) -> Result<PreparedInputBound, BuiltinParameterError> {
+) -> Result<InputSectionBound, BuiltinParameterError> {
     let track = prepare_input_track(sample_rate, &parameters)?;
-    let lanes = [&track.left, &track.right];
-    Ok(PreparedInputBound::new(
-        tail::input_bound_key(sample_rate, lanes),
-        tail::fixed_input_bound(sample_rate, lanes),
+    Ok(tail::fixed_input_bound(
+        sample_rate,
+        [&track.left, &track.right],
     ))
 }
 
-/// [`prepare_input_bound`] for every strip of a session, in order, computing each distinct design's
-/// bound once: sessions repeat designs (a default high-pass on every track), and a design's bound
-/// depends on nothing else.
+/// [`input_section_bound`] for every strip of a session, in order, computing each distinct design's
+/// bound once (#1329 Amendment 4, R7): sessions repeat designs (a default high-pass on every
+/// track), and a design's bound depends only on the rate, both channels' section words and the
+/// trim magnitudes.
 ///
 /// # Errors
 ///
-/// The first strip's error, as [`prepare_input_bound`] reports it.
-pub fn prepare_input_bounds(
+/// The first strip's error, as [`input_section_bound`] reports it.
+pub fn input_section_bounds(
     sample_rate: u32,
     strips: impl IntoIterator<Item = BuiltinParameters>,
-) -> Result<Vec<PreparedInputBound>, BuiltinParameterError> {
+) -> Result<Vec<InputSectionBound>, BuiltinParameterError> {
     let mut designs = std::collections::BTreeMap::new();
     strips
         .into_iter()
         .map(|parameters| {
             let track = prepare_input_track(sample_rate, &parameters)?;
             let lanes = [&track.left, &track.right];
-            let key = tail::input_bound_key(sample_rate, lanes);
-            let bound = *designs
-                .entry(key)
-                .or_insert_with(|| tail::fixed_input_bound(sample_rate, lanes));
-            Ok(PreparedInputBound::new(key, bound))
+            Ok(*designs
+                .entry(tail::input_bound_key(sample_rate, lanes))
+                .or_insert_with(|| tail::fixed_input_bound(sample_rate, lanes)))
         })
         .collect()
 }
@@ -3550,14 +3503,6 @@ pub fn prepare_input_bounds(
 fn prepare_sections(
     sample_rate: u32,
     parameters: BuiltinParameters,
-) -> Result<(InputBuiltins, FaderMuteBuiltins, MatrixBuiltins), BuiltinParameterError> {
-    prepare_sections_with(sample_rate, parameters, None)
-}
-
-fn prepare_sections_with(
-    sample_rate: u32,
-    parameters: BuiltinParameters,
-    prepared: Option<&PreparedInputBound>,
 ) -> Result<(InputBuiltins, FaderMuteBuiltins, MatrixBuiltins), BuiltinParameterError> {
     let track = prepare_input_track(sample_rate, &parameters)?;
     let matrix = parameters.matrix.checked()?;
@@ -3568,24 +3513,9 @@ fn prepare_sections_with(
         })
     };
     let faders = [(fader(parameters.left)?, fader(parameters.right)?)];
-    // #1329 D7: the bound computed ahead for exactly this design is stored now; otherwise the
-    // section computes its own on the first request (control thread only).
-    let lanes = [&track.left, &track.right];
-    let bound = core::cell::OnceCell::new();
-    if let Some(prepared) =
-        prepared.filter(|prepared| prepared.key() == tail::input_bound_key(sample_rate, lanes))
-    {
-        let _ = bound.set(prepared.bound());
-    }
-    let design = (
-        sample_rate,
-        [track.left.trim_signed, track.right.trim_signed],
-    );
     Ok((
         InputBuiltins {
             stage: InputStage::<f32>::new(&[track]),
-            bound,
-            design,
         },
         FaderMuteBuiltins {
             stage: FaderStage::<f32>::new(&faders),
@@ -3701,48 +3631,6 @@ impl InputBuiltins {
     pub fn reset_with_kind(&mut self, kind: BuiltinResetKind) {
         self.stage.reset_with_kind(kind);
     }
-    /// `T_decay` of the prepared design (#1329 D1, D4): from `N + T` on the output is below
-    /// `P * 10^(-144/20)` for every input peak `P` at or above the design's flush floor. Computed
-    /// at most once, on the control thread: at preparation by the compiler, or on the first
-    /// request. Never call it on the render thread.
-    ///
-    /// It is the bound of the design this section was prepared with. A strip whose input lane is
-    /// live reports [`input_section_live_bound`] instead, which covers every live trim, polarity
-    /// and filter target (D5, D7), so a live target never changes a plan's tail.
-    #[must_use]
-    pub fn tail(&self) -> TailSamples {
-        self.bound().tail
-    }
-
-    /// `T_rest = max(T_decay, R(P*))` of the prepared design, the tail over every peak (#1329
-    /// Amendment 3): from it on the output is below `P * 10^(-144/20)` for `P >= P*` and exactly
-    /// `+0.0` or `-0.0` for `P < P*`.
-    #[must_use]
-    pub fn tail_every_peak(&self) -> TailSamples {
-        self.bound().tail_every_peak
-    }
-
-    /// D2's exact-rest bound of the prepared design: from `N + R` on every output is `+0.0` or
-    /// `-0.0` and the eight SVF integrators are `+0.0`, the reset state. `None` states no bound.
-    #[must_use]
-    pub fn rest(&self) -> Option<RestSamples> {
-        self.bound().rest
-    }
-
-    /// The prepared design's bounds, computing them on the first request when the section was
-    /// not given them at construction. Control thread only: the computation allocates.
-    fn bound(&self) -> InputSectionBound {
-        *self.bound.get_or_init(|| {
-            let (sample_rate, trims) = self.design;
-            let mut track = self
-                .stage
-                .lane_track_from_sections(0, &self.stage.filter_initial);
-            track.left.trim_signed = trims[0];
-            track.right.trim_signed = trims[1];
-            tail::fixed_input_bound(sample_rate, [&track.left, &track.right])
-        })
-    }
-
     pub fn lifetime_recovered_state(&self) -> (u64, u64) {
         (
             self.stage.lifetime_recovered[0],

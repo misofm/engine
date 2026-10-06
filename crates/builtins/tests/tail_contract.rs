@@ -6,15 +6,19 @@
 //! domain extreme (gate 2) runs in release only. Evidence lines are printed with `--nocapture`.
 #![allow(missing_docs)]
 
+use builtins::INPUT_FILTER_RAMP_SAMPLES;
 use builtins::test_support::{input_section_words, input_state_words, input_trim_words};
 use builtins::{
     BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBuiltins,
-    PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz, input_section_flush_law,
-    input_section_live_bound, input_section_live_cascade, input_section_live_envelope,
-    input_section_worst_case_pair, prepare_input_filter_pair,
+    InputSectionBound, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
+    input_section_bound, input_section_bounds, input_section_flush_law, input_section_live_bound,
+    input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
+    prepare_input_filter_pair,
 };
 use effect_contract::{RestSamples, TailSamples};
-use math::tail::{CascadeBound, SectionConstants, SvfWords, TAIL_FLOOR, fixed_cascade};
+use math::tail::{
+    CascadeBound, SectionConstants, SvfWords, TAIL_FLOOR, envelope_cascade, fixed_cascade,
+};
 
 const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
@@ -53,7 +57,7 @@ fn pairs(rate: u32) -> Vec<(f32, f32)> {
     pairs
 }
 
-fn chain(rate: u32, hpf: f32, lpf: f32, trim_db: f32, polarity_invert: bool) -> BuiltinChain {
+fn parameters(hpf: f32, lpf: f32, trim_db: f32, polarity_invert: bool) -> BuiltinParameters {
     let channel = ChannelParameters {
         polarity_invert,
         trim_db,
@@ -61,19 +65,22 @@ fn chain(rate: u32, hpf: f32, lpf: f32, trim_db: f32, polarity_invert: bool) -> 
         lpf_hz: lpf,
         ..ChannelParameters::default()
     };
-    BuiltinChain::new(
-        rate,
-        BuiltinParameters {
-            left: channel,
-            right: channel,
-            ..BuiltinParameters::default()
-        },
-    )
-    .expect("valid parameters")
+    BuiltinParameters {
+        left: channel,
+        right: channel,
+        ..BuiltinParameters::default()
+    }
 }
 
 fn input(rate: u32, hpf: f32, lpf: f32, trim_db: f32, polarity_invert: bool) -> InputBuiltins {
-    chain(rate, hpf, lpf, trim_db, polarity_invert).into_input_builtins()
+    BuiltinChain::new(rate, parameters(hpf, lpf, trim_db, polarity_invert))
+        .expect("valid parameters")
+        .into_input_builtins()
+}
+
+/// The prepared bounds of one design, as preparation computes them.
+fn bound(rate: u32, hpf: f32, lpf: f32, trim_db: f32) -> InputSectionBound {
+    input_section_bound(rate, parameters(hpf, lpf, trim_db, false)).expect("valid parameters")
 }
 
 fn finite(tail: TailSamples) -> u64 {
@@ -158,7 +165,8 @@ impl SplitMix {
 
     /// Uniform in `[-1, 1)`.
     fn signed(&mut self) -> f32 {
-        ((self.next() >> 40) as f32 / (1_u64 << 24) as f32).mul_add(2.0, -1.0)
+        // `x * 2` is exact, so this rounds once, as a fused form would.
+        (self.next() >> 40) as f32 / (1_u64 << 24) as f32 * 2.0 - 1.0
     }
 }
 
@@ -256,11 +264,12 @@ fn fixed_design_tail_is_sound_and_within_thirty_db_of_the_exact_tail() {
             };
             for trim_db in [0.0, 24.0] {
                 let input = input(rate, hpf, lpf, trim_db, false);
-                let tail = finite(input.tail());
+                let prepared = bound(rate, hpf, lpf, trim_db);
+                let tail = finite(prepared.tail);
                 let Some(response) = &response else {
                     assert_eq!(tail, 0, "{rate} Hz: disabled filters have no tail");
-                    assert_eq!(input.tail_every_peak(), TailSamples::Finite(0));
-                    assert_eq!(input.rest(), Some(RestSamples::ZERO));
+                    assert_eq!(prepared.tail_every_peak, TailSamples::Finite(0));
+                    assert_eq!(prepared.rest, Some(RestSamples::ZERO));
                     continue;
                 };
                 let gain = trim_gain(&input);
@@ -284,45 +293,34 @@ fn fixed_design_tail_is_sound_and_within_thirty_db_of_the_exact_tail() {
     }
 }
 
-/// D7's ahead-of-time path: a bound computed by `prepare_input_bound` is stored only by a chain of
-/// the same design (rate, both channels' section words and trim magnitude); any other chain
-/// computes its own, so a compiler that pairs a bound with the wrong strip still reports each
-/// strip's own tail.
+/// D7 and Amendment 4 R7: a session's strips are bounded once per distinct design, and each strip
+/// still gets its own design's bound. The designs differ in one key term each (the HPF word, the
+/// trim magnitude, the LPF), and the first design repeats with its polarity inverted (the same
+/// key: the bound reads the trim's magnitude).
 #[test]
-fn a_prepared_bound_is_stored_only_for_its_own_design() {
+fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
     let rate = 48_000;
-    let parameters = |hpf: f32, trim_db: f32| {
-        let channel = ChannelParameters {
-            trim_db,
-            hpf_hz: hpf,
-            ..ChannelParameters::default()
-        };
-        BuiltinParameters {
-            left: channel,
-            right: channel,
-            ..BuiltinParameters::default()
+    let strips = [
+        parameters(1_000.0, 0.0, 0.0, false),
+        parameters(10.0, 0.0, 0.0, false),
+        parameters(1_000.0, 0.0, 24.0, false),
+        parameters(0.0, 1_000.0, 0.0, false),
+        parameters(1_000.0, 0.0, 0.0, true),
+    ];
+    let own: Vec<InputSectionBound> = strips
+        .iter()
+        .map(|strip| input_section_bound(rate, *strip).expect("bound"))
+        .collect();
+    for (index, earlier) in own.iter().enumerate().take(4) {
+        for later in &own[index + 1..4] {
+            assert_ne!(earlier, later, "the designs must bound differently");
         }
-    };
-    let own = |parameters| BuiltinChain::new(rate, parameters).expect("chain");
-    let base = parameters(1_000.0, 0.0);
-    let prepared = builtins::prepare_input_bound(rate, base).expect("prepared");
-    let reused = BuiltinChain::with_prepared_bound(rate, base, &prepared).expect("chain");
-    assert_eq!(reused.tail(), own(base).tail());
-    assert_eq!(reused.rest(), own(base).rest());
-    for other in [parameters(10.0, 0.0), parameters(1_000.0, 24.0)] {
-        let chain = BuiltinChain::with_prepared_bound(rate, other, &prepared).expect("chain");
-        assert_ne!(own(other).tail(), own(base).tail());
-        assert_eq!(chain.tail(), own(other).tail());
-        assert_eq!(chain.tail_every_peak(), own(other).tail_every_peak());
-        assert_eq!(chain.rest(), own(other).rest());
     }
-    let other_rate = BuiltinChain::new(44_100, base).expect("chain").tail();
-    assert_ne!(other_rate, own(base).tail());
+    assert_eq!(own[4], own[0]);
     assert_eq!(
-        BuiltinChain::with_prepared_bound(44_100, base, &prepared)
-            .expect("chain")
-            .tail(),
-        other_rate
+        input_section_bounds(rate, strips).expect("bounds"),
+        own,
+        "a strip took another design's bound"
     );
 }
 
@@ -440,11 +438,11 @@ fn live_bound_covers_every_scanned_design_and_ramp_word() {
             .chain(scan.iter().rev().take(4).copied());
         for hz in sampled {
             for (hpf, lpf) in [(hz, 0.0), (0.0, hz)] {
-                let own = input(rate, hpf, lpf, 24.0, false);
-                let rest = own.rest().expect("fixed rest");
+                let own = bound(rate, hpf, lpf, 24.0);
+                let rest = own.rest.expect("fixed rest");
                 assert!(
-                    finite(own.tail()) <= finite(live.tail)
-                        && finite(own.tail_every_peak()) <= finite(live.tail_every_peak)
+                    finite(own.tail) <= finite(live.tail)
+                        && finite(own.tail_every_peak) <= finite(live.tail_every_peak)
                         && rest.peak_plus_24_dbfs <= live_rest.peak_plus_24_dbfs
                         && rest.any_sanitized_input <= live_rest.any_sanitized_input,
                     "{rate} Hz HPF {hpf} LPF {lpf}: a design exceeds the live bound"
@@ -538,19 +536,20 @@ fn tail_every_peak_is_the_rest_at_the_flush_floor_and_holds_on_the_real_kernel()
                 continue;
             }
             for trim_db in [0.0, 24.0] {
-                let prepared = input(rate, hpf, lpf, trim_db, false);
-                let sections = kernel_sections(&prepared);
-                let gain = trim_gain(&prepared);
+                let kernel = input(rate, hpf, lpf, trim_db, false);
+                let sections = kernel_sections(&kernel);
+                let gain = trim_gain(&kernel);
+                let prepared = self::bound(rate, hpf, lpf, trim_db);
                 let bound: CascadeBound =
                     fixed_cascade(&sections, gain, &law, rest_peaks()).expect("bound");
                 // (i) The prepared values, and T_rest's formula.
-                assert_eq!(prepared.tail(), TailSamples::Finite(bound.tail));
+                assert_eq!(prepared.tail, TailSamples::Finite(bound.tail));
                 assert_eq!(
-                    prepared.tail_every_peak(),
+                    prepared.tail_every_peak,
                     TailSamples::Finite(bound.tail_every_peak)
                 );
                 assert_eq!(
-                    prepared.rest(),
+                    prepared.rest,
                     Some(RestSamples {
                         peak_plus_24_dbfs: bound.rest_peak,
                         any_sanitized_input: bound.rest_any,
@@ -619,6 +618,237 @@ fn tail_every_peak_is_the_rest_at_the_flush_floor_and_holds_on_the_real_kernel()
     }
 }
 
+/// Gate 1(c) for the live bound (verdict m2). The live `T_rest` is `max(T_decay, R(P*))` with
+/// `R(P*)` recomputed through the live rest bound at the peak `P*`, and at least `N_SILENCE`
+/// (every live section can be enabled, so the A9 term applies).
+#[test]
+fn live_tail_every_peak_is_the_rest_at_the_flush_floor() {
+    for rate in LAUNCH_RATES {
+        let law = input_section_flush_law(rate);
+        let cascade = input_section_live_cascade(rate).expect("launch rate");
+        let live = input_section_live_bound(rate).expect("launch rate");
+        let envelope = input_section_live_envelope(rate).expect("launch rate");
+        let p_star = cascade.flush_floor;
+        let at_floor = envelope_cascade(
+            &[envelope, envelope],
+            rest_peaks()[0],
+            &law,
+            u64::from(INPUT_FILTER_RAMP_SAMPLES),
+            [p_star, p_star],
+        )
+        .expect("live bound at the flush floor")
+        .rest_peak;
+        let t_rest = cascade.tail.max(at_floor);
+        eprintln!(
+            "1(c) live {rate} Hz: T_decay {}, P* {p_star:.4e}, R(P*) {at_floor}, T_rest {t_rest}",
+            cascade.tail
+        );
+        assert_eq!(cascade.tail_every_peak, t_rest);
+        assert_eq!(live.tail_every_peak, TailSamples::Finite(t_rest));
+        assert!(t_rest >= law.silence_frames);
+    }
+}
+
+// ---- Gate 2's terms and gate 3's A9 term, by an independent recomputation -------------------
+
+/// `2 ||[[e1, e2], [-e2, e3]]||_V` at the worst vertex of the box `|e_i| <= box_[i]`, the
+/// operator norm taken by the non-cancelling closed form on `R M R^-1` (`R = [[1, r], [0, r]]`).
+fn independent_box_norm(box_: [f64; 3]) -> f64 {
+    let r = core::f64::consts::FRAC_1_SQRT_2;
+    let mut worst = 0.0_f64;
+    for signs in 0..8_u32 {
+        let sign = |bit: u32| if signs & (1 << bit) == 0 { 1.0 } else { -1.0 };
+        let (e1, e2, e3) = (sign(0) * box_[0], sign(1) * box_[1], sign(2) * box_[2]);
+        // R M R^-1 for M = [[e1, e2], [-e2, e3]], with sqrt(2) r = 1.
+        let (a, b, c, d) = (
+            e1 - r * e2,
+            core::f64::consts::SQRT_2 * e2 + e3 - e1 + r * e2,
+            -r * e2,
+            e3 + r * e2,
+        );
+        let sum = math::sqrt((a + d) * (a + d) + (c - b) * (c - b));
+        let difference = math::sqrt((a - d) * (a - d) + (b + c) * (b + c));
+        worst = worst.max(sum + difference);
+    }
+    worst
+}
+
+/// The live bound recomputed frame by frame from the envelope, in plain `f64`, sharing no code
+/// with `math::tail`: the derivation's invariant balls, flush stall, relative decay and sequential
+/// rest (`docs/derivations/1329-input-section-tail-and-rest.md`, D5).
+#[derive(Debug)]
+struct LiveOracle {
+    t_decay: u64,
+    p_star: f64,
+    rest_at_p_star: u64,
+    rest_peak: u64,
+    rest_any: u64,
+}
+
+fn live_oracle(rate: u32) -> LiveOracle {
+    let envelope = input_section_live_envelope(rate).expect("launch rate");
+    let law = input_section_flush_law(rate);
+    let r = core::f64::consts::FRAC_1_SQRT_2;
+    let (r_norm, r_inv) = (math::sqrt(1.0 + r), 1.0 / math::sqrt(1.0 - r));
+    let f =
+        r_norm * core::f64::consts::SQRT_2 * (law.flush_eps + 16.0 * f64::from(f32::MIN_POSITIVE));
+    let peaks = rest_peaks();
+    let gain = peaks[0] * (1.0 + 1.0 / 16_777_216.0);
+    let (rr, rs) = (envelope.rho_ramp, envelope.rho_settled);
+    let (input, out_state, out_input) =
+        (envelope.input, envelope.output_state, envelope.output_input);
+    let ramp = u64::from(INPUT_FILTER_RAMP_SAMPLES);
+    // Balls per unit of `gain * P`, and from the flush drive alone.
+    let b1 = input / (1.0 - rr);
+    let b2 = input * (out_state * b1 + out_input) / (1.0 - rr);
+    let b1a = f / (1.0 - rr);
+    let b2a = (input * (out_state * b1a + f) + f) / (1.0 - rr);
+    let stall = out_state * b2a + out_input * (out_state * b1a + f) + f;
+    let p_star = stall / (TAIL_FLOOR / 2.0);
+    // The relative output bound, frame by frame, until it falls for good below `eps / 2`.
+    let (mut z1, mut z2) = (b1 * gain, b2 * gain);
+    let mut last_above = None;
+    let mut frame = 0_u64;
+    loop {
+        let rho = if frame < ramp { rr } else { rs };
+        let value = out_state * z2 + out_input * out_state * z1;
+        if value >= TAIL_FLOOR / 2.0 {
+            last_above = Some(frame);
+        }
+        let (n1, n2) = (rho * z1, rho * z2 + input * out_state * z1);
+        if frame >= ramp && n1 <= z1 && n2 <= z2 && value < TAIL_FLOOR / 2.0 {
+            break;
+        }
+        (z1, z2) = (n1, n2);
+        frame += 1;
+    }
+    let t_decay = last_above.map_or(0, |frame| frame + 1);
+    let cap = r_norm * core::f64::consts::SQRT_2 * f64::from(f32::MAX);
+    let limit = law.rest_eps / r_inv;
+    let stall_settled = f / (1.0 - rs);
+    let frames_to = |z: f64| -> u64 {
+        if z < limit {
+            0
+        } else {
+            (math::log((limit - stall_settled) / (z - stall_settled)) / math::log(rs)) as u64 + 2
+        }
+    };
+    let rest = |peak: f64| -> u64 {
+        let (mut z1, mut z2) = (
+            (b1 * gain * peak + b1a).min(cap),
+            (b2 * gain * peak + b2a).min(cap),
+        );
+        for _ in 0..ramp {
+            (z1, z2) = (rr * z1 + f, rr * z2 + input * (out_state * z1 + f) + f);
+        }
+        let first = ramp + frames_to(z1) + law.silence_frames;
+        for _ in ramp..first {
+            (z1, z2) = (rs * z1 + f, rs * z2 + input * (out_state * z1 + f) + f);
+        }
+        first + frames_to(z2) + law.silence_frames
+    };
+    LiveOracle {
+        t_decay,
+        p_star,
+        rest_at_p_star: rest(p_star),
+        rest_peak: rest(peaks[0]),
+        rest_any: rest(peaks[1]),
+    }
+}
+
+/// Gate 2's terms and gate 3's A9 term (#1329 Amendment 4, R3). The real kernel cannot show that
+/// the live bound omits the `f32` rounding, the ramp in flight, the flush stall or the A9 term:
+/// the crude cascade leaves about 540,000 samples between the live `T_decay` and the kernel's
+/// last output above `P eps`, and about 280,000 between `R` and its rest. So this test recomputes
+/// the derivation independently.
+///
+/// * The envelope's contractions carry at least the exact top design's radius, the `f32` design
+///   box `P(h)`, the state step's final rounding `kappa u rho` (Amendment 2) and, for `rho_ramp`,
+///   the ramp allowance `P(E)` with `E = 64 h + u D` (#1407).
+/// * `P*`, `T_decay`, `T_rest` and both rest bounds lie between a frame-by-frame recomputation
+///   from the envelope (plain `f64`, no shared code) and that value plus `0.01 %` and 64 frames:
+///   the module may only be more conservative, by its own rounding inflation, never optimistic,
+///   and never loose (a ramp contraction kept for the whole decay is 39 % longer).
+#[test]
+fn live_bound_carries_every_term_an_independent_recomputation_requires() {
+    let u = 1.0 / 16_777_216.0;
+    let kappa = 1.0 + core::f64::consts::SQRT_2;
+    for rate in LAUNCH_RATES {
+        let envelope = input_section_live_envelope(rate).expect("launch rate");
+        let g_max = math::tan(core::f64::consts::PI * f64::from(maximum(rate)) / f64::from(rate));
+        let radius = math::sqrt(1.0 + g_max * g_max * g_max * g_max)
+            / (1.0 + core::f64::consts::SQRT_2 * g_max + g_max * g_max);
+        let design_box = independent_box_norm([u / 2.0, u / 4.0, u / 2.0]);
+        let ramp_box = independent_box_norm([33.0 * u, 16.3 * u, 33.0 * u]);
+        let rounding = kappa * u * radius;
+        let settled = radius + design_box + rounding;
+        let ramp = settled + ramp_box;
+        eprintln!(
+            "R3 {rate} Hz: rho_settled - 1 {:.6e} (needs {:.6e}), rho_ramp - 1 {:.6e} (needs \
+             {:.6e})",
+            envelope.rho_settled - 1.0,
+            settled - 1.0,
+            envelope.rho_ramp - 1.0,
+            ramp - 1.0
+        );
+        assert!(
+            envelope.rho_settled >= settled && envelope.rho_ramp >= ramp,
+            "{rate} Hz: the live envelope omits a term the derivation requires"
+        );
+        assert!(
+            envelope.rho_ramp - ramp <= 8.0 * u * kappa,
+            "{rate} Hz: the live envelope carries more than its rounding count"
+        );
+        let oracle = live_oracle(rate);
+        let cascade = input_section_live_cascade(rate).expect("launch rate");
+        let live = input_section_live_bound(rate).expect("launch rate");
+        let rest = live.rest.expect("live rest");
+        let t_rest = oracle.t_decay.max(oracle.rest_at_p_star);
+        eprintln!(
+            "R3 {rate} Hz: recomputed T_decay {} (module {}), P* {:.6e} ({:.6e}), R(P*) {} ({}), \
+             T_rest {t_rest} ({}), peak_plus_24_dbfs {} ({}), any_sanitized_input {} ({})",
+            oracle.t_decay,
+            cascade.tail,
+            oracle.p_star,
+            cascade.flush_floor,
+            oracle.rest_at_p_star,
+            cascade.rest_at_flush_floor,
+            cascade.tail_every_peak,
+            oracle.rest_peak,
+            rest.peak_plus_24_dbfs,
+            oracle.rest_any,
+            rest.any_sanitized_input
+        );
+        assert!(
+            cascade.flush_floor >= oracle.p_star
+                && cascade.flush_floor <= oracle.p_star * 1.000_001,
+            "{rate} Hz: P* {} against the recomputed {}",
+            cascade.flush_floor,
+            oracle.p_star
+        );
+        for (name, module, recomputed) in [
+            ("T_decay", finite(live.tail), oracle.t_decay),
+            ("T_rest", finite(live.tail_every_peak), t_rest),
+            ("R(P*)", cascade.rest_at_flush_floor, oracle.rest_at_p_star),
+            (
+                "peak_plus_24_dbfs",
+                rest.peak_plus_24_dbfs,
+                oracle.rest_peak,
+            ),
+            (
+                "any_sanitized_input",
+                rest.any_sanitized_input,
+                oracle.rest_any,
+            ),
+        ] {
+            assert!(
+                module >= recomputed && module <= recomputed + recomputed / 10_000 + 64,
+                "{rate} Hz {name}: module {module} against the recomputed {recomputed}"
+            );
+        }
+    }
+}
+
 // ---- Gate 2: the live bound on the real kernel at the domain extreme -------------------------
 
 /// The extreme pair's `f64` impulse response, for the adversarial input's signs.
@@ -628,14 +858,17 @@ fn extreme_response(rate: u32, frames: usize) -> Vec<f64> {
 }
 
 /// Gate 2. At the domain extreme of D5, every launch rate, trim +24 dB, input peaks 1, +24 dBFS
-/// and `1e29`: an input that maximises the output at `N + T_decay` (the reversed signs of the
-/// impulse response there, over the last 1,000,000 samples), with a live HPF target applied 32
-/// samples before `N`; and a block-size-1 history that re-sends and alternates the worst-case
-/// pair with disable, a disable in flight at `N`. From `N + T_decay` until exact rest every output
+/// and `1e29`: the worst-case pair designed for the whole history, driven by an input that
+/// maximises the output at `N + T_decay` (the reversed signs of the impulse response there, over
+/// the last 1,000,000 samples), with a live HPF target (one `f32` lower) applied 32 samples before
+/// `N`; and a block-size-1 history that re-sends and alternates the worst-case pair with disable,
+/// a disable in flight at `N`. Every history keeps a finite state (no non-finite recovery fires,
+/// so no run is at rest by the recovery's reset). From `N + T_decay` until exact rest every output
 /// is below `P * eps`; from `N + R` on (`R` the live rest bound for the peak) every output is
-/// `+-0.0` and every integrator equals a freshly reset section's. One run inverts polarity. Also
-/// measures the fixed top pair's real rest under an alternating +24 dBFS input (gate 3's lower
-/// side).
+/// `+-0.0` and every integrator equals a freshly reset section's. One run inverts polarity: the
+/// section's output mix normalizes `-0.0`, so it shows `+0.0`, which D2 admits (#1329 Amendment
+/// 4, R4). Also measures the fixed top pair's real rest under an alternating input (gate 3's
+/// lower side).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release scale (#1329 gate 2)")]
 fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
@@ -661,8 +894,7 @@ fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
             } else {
                 rest.any_sanitized_input
             };
-            let start_hpf = if quantum_one { hpf } else { 1_000.0 };
-            let mut section = input(rate, start_hpf, lpf, 24.0, polarity_invert);
+            let mut section = input(rate, hpf, lpf, 24.0, polarity_invert);
             // x[N - 1 - i] = P sign(h[T + 1 + i]): y[N + T] = P sum |h[T + 1 + i]|.
             let mut left: Vec<f32> = (0..HISTORY)
                 .rev()
@@ -710,6 +942,11 @@ fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
                     head as u64,
                 );
             }
+            assert_eq!(
+                section.lifetime_recovered_state(),
+                (0, 0),
+                "{rate} Hz P {peak}: the history overflowed, so the run would test the recovery"
+            );
             let reset = if quantum_one {
                 input_state_words(&input(rate, 0.0, 0.0, 24.0, false))
             } else {
@@ -750,12 +987,15 @@ fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
                 "{rate} Hz P {peak}: |y| >= {floor} after N + T_decay"
             );
             assert!(measured <= r);
+            assert!(
+                quantum_one || observed.above > 0,
+                "{rate} Hz P {peak}: the history left no tail to bound"
+            );
         }
         // Gate 3's lower side: the fixed top pair's real rest under an alternating input through
         // the +24 dB trim stays at or below the certified bound, at +24 dBFS
-        // (`peak_plus_24_dbfs`) and at `1e29` (`any_sanitized_input`). At `1e29` the sign-pattern
-        // run above is already at rest by `N + 64`; the alternating drive is the one that leaves
-        // the state at its largest finite values (about `4e34`) and lets it decay.
+        // (`peak_plus_24_dbfs`) and at `1e29` (`any_sanitized_input`). The alternating drive
+        // holds the state near its largest finite values (about `4e34`) for the whole history.
         for (peak, bound) in [
             (plus_24, rest.peak_plus_24_dbfs),
             (1.0e29, rest.any_sanitized_input),
