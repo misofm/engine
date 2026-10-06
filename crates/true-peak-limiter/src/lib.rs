@@ -628,9 +628,10 @@ impl ChannelState {
     /// the first output sample is the delayed input bit for bit.
     ///
     /// Out of line (#1091): it runs at preparation, at a reset and on a failed block, never in the
-    /// frame loop, and each of its three `1.0` fills lowers to a `memset_pattern16` call on Apple
-    /// targets (#1018). One copy keeps that count where it was when the per-lane recovery moved
-    /// the call sites.
+    /// frame loop, and one copy serves every caller. Inlined, it is copied into
+    /// [`ChannelState::new`] as well, which adds code on every target and three more Apple
+    /// `memset_pattern16` calls for its `1.0` fills (measured in #1452, undo 4; #1456 owns those
+    /// calls).
     #[inline(never)]
     fn clear_runtime(&mut self, shape: &Shape) {
         debug_assert_eq!(self.main_ring.len(), shape.main * self.width);
