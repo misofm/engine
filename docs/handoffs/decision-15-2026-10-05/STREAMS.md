@@ -79,8 +79,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
-| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), G #1428 (one `test-release` step in `qualification.yml`, or a `nightly.yml` job under its D2) and J #1427 (`nightly.yml`'s checkout-path job; the release build steps of `audit-native` and `test-release`) in any order, the later slice rebases |
-| `fixtures/builtins/v1/reference/filter-response.csv` | J #1427 owns any re-pin; until it lands, no slice commits an `audit fixture-builtins --write` re-pin of this file (the written bytes depend on the checkout path) |
+| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), G #1428 (one `test-release` step in `qualification.yml`, or a `nightly.yml` job under its D2) in any order, the later slice rebases |
 
 Hot-file note (2026-10-05, after #1329 attempt 1): #1408 changes the D11 ramp law that the trim,
 fader and matrix share, in the ramp kernels and their twin. Stream B's cells (#1312, #1346) and
@@ -357,7 +356,6 @@ readers for #1411 by named exception.
 | 19 | #1422 | Run doctests in CI | — | — |
 | 20 | #1416 | Let only host-core build the live route records that hosts push | #1422 | — |
 | 21 | #1423 | Make live strip records valid by construction | #1422 | #1312, #1346 |
-| 22 | #1427 | Make release builds and fixture-builtins --write independent of the checkout path | — | — |
 
 ## Stream K
 
