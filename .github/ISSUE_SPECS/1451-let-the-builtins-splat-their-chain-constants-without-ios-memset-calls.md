@@ -13,7 +13,9 @@ vector constants from its prepared coefficients instead of splatting them, only 
 #1018). That encoding costs the shipped AudioWorklet module about 3.5 % to 3.9 % p50 on the app
 shape. After this slice the cause of the libc calls is found and removed, the chain constants are
 splatted again, the browser documents are within 2 % of the per-word build, and the iOS release
-assembly has no more `memset_pattern16` calls than today.
+assembly has no more `memset_pattern16` calls than today. *(Amended by Amendment 2: the browser
+gate is head against base, within 2 %; the gap to the per-word build is the dual loop's structure,
+owned by #1454.)*
 
 ## Context
 
@@ -23,7 +25,8 @@ assembly has no more `memset_pattern16` calls than today.
   follow-up measured against. The owner's allowance is 2 %
   (`two-percent-allowance-for-better-code`). The V8 (TurboFan) builtins dual loop is 218
   instructions against P0's 196 for the same arithmetic: the carried words occupy registers or are
-  reloaded where P0 had `v128.const` immediates.
+  reloaded where P0 had `v128.const` immediates. *(Refuted by attempt 1, Amendment 2: the gap is
+  the loop's structure since #1328, not the carried words; #1454 owns it.)*
 - **Why the constants are carried (#1328 attempt 5, A9; spec "Two forms per builtin chain body").**
   Each builtin input-chain body runs in two forms (armed and unarmed). The first cut doubled the
   bodies' splatted constants, and `check-cross-targets.sh` refused it: `memset_pattern16` calls rose
@@ -157,6 +160,11 @@ assembly has no more `memset_pattern16` calls than today.
    `IOS_MEMSET_CEILINGS` updated); `docs/TARGET_MATRIX.md` per D4.
 5. The PR evidence: the base-versus-head differential (gate 1), the timing table (gate 3), the V8
    listing counts (gate 4) and the per-crate memset counts before and after (gate 2).
+6. *(Amendment 2.)* The V8 spill gate's EQ "dual armed depth-2 pair" ceiling raised from 11 to 12
+   in `scripts/check-web-audioworklet-v8-spill.py`, with its reason in the row's comment and the
+   module doc; the stale #1018 wording in `crates/lane/src/kernels.rs` (`silence_skip_block`'s doc
+   on `silence_skip_settle`) and `scripts/check-cross-targets.sh` (the `ios-asm-memset-pattern16`
+   comment) restated to the facts after D2.
 
 ## Authorized paths
 
@@ -174,13 +182,24 @@ assembly has no more `memset_pattern16` calls than today.
 - `docs/rulings/effect-floor-accounting.md` and the floor pins (`tools/bench/src/floor.rs`,
   `scripts/console-benchmark-record-lib.jq`, `scripts/test-console-benchmark.sh`) only if D3 changes
   a lane-op count they record
+- *(Amendment 2.)* `tools/audit/src/fixture_builtins.rs` (the resources projection constants
+  `INPUT_PROCESSOR_BYTES`, `BOXED_INPUT_ENTRY_BYTES`, `STRIP_PREPARATION_BYTES` and the
+  joined-manifest identity, each value with its reason) and `tools/audit/src/builtins_graph.rs`
+  (`ACCEPTED_MANIFEST_SHA256`), for gate 6's re-pin only
+- *(Amendment 2.)* `crates/lane/src/kernels.rs` (`silence_skip_block`'s doc on the outlining, the
+  stale #1018 wording only) and `scripts/check-cross-targets.sh` (the `ios-asm-memset-pattern16`
+  comment only)
+- *(Amendment 2.)* `scripts/check-web-audioworklet-v8-spill.py` (the dual armed depth-2 pair
+  ceiling and its reason only)
 - this spec
 
 ## Non-goals
 
 - Any change to the #1328 law (joint flush, silence counter, arming), to rendered bits, to state
   records or sealed sizes.
-- The other ratchet-chosen shapes listed in D3, and an unarmed form for the multiband compressor.
+- The other ratchet-chosen shapes listed in D3, and an unarmed form for the multiband compressor
+  (#1455, Amendment 2).
+- The browser gap to P0 (#1454, Amendment 2).
 - Closing #1018 before its rows reach zero, or editing its GitHub issue body (the ruling is recorded
   on #1018 by root; Amendment 1 A2).
 - Chasing a ceiling that the D2 fix does not lower: what is left is recorded, not fixed here
@@ -226,15 +245,20 @@ assembly has no more `memset_pattern16` calls than today.
    re-measured after D2 and after D3, and no row is raised (Amendment 1 A2). The `builtins` and
    `parametric-eq` counts after D3 are at or below their counts before D3 (today 71 and 48). The
    before and after count of every crate is in the PR.
-3. **Browser cost within 2 % of P0.** `scripts/web-mixing-automation-benchmark.mjs run` on the
-   shipped module of head and of P0 (D5): one warmup and two measured rounds each, interleaved,
-   pinned to one CPU, host load average recorded before and after; not retried. p50 per render of
-   each of the four browser documents -- the mono console (its quiet, restated and automated arms),
-   the sixty-four-track console, the app shape and the bus-and-send console -- is at most +2 % of
-   P0 in both rounds. Every output digest is equal between the two modules. A miss is reported with
-   the table and the V8 listings and goes to root; it is not tuned and re-run.
-4. **V8 and native codegen.** `bash scripts/run-wasm-gates.sh` exits 0 (native, `simd128`, V8 spill
-   gate with every held row clean). The PR records the TurboFan instruction count of the builtins
+3. **iOS ceilings measured down, and browser cost within 2 % of base** *(restated by Amendment 2)*.
+   (a) The iOS `memset_pattern16` ceilings only go down, as measured by gate 2. (b)
+   `scripts/web-mixing-automation-benchmark.mjs run` on the shipped module of head and of base (the
+   tree before this slice), with P0 (D5) measured beside them for #1454: one warmup and two
+   measured rounds each, interleaved, pinned to one CPU, host load average recorded before and
+   after; not retried. p50 per render of each of the four browser documents -- the mono console
+   (its quiet, restated and automated arms), the sixty-four-track console, the app shape and the
+   bus-and-send console -- is at most +2 % of base in both rounds. Every output digest is equal
+   between the modules. A miss is reported with the table and the V8 listings and goes to root; it
+   is not tuned and re-run. The gap to P0 is not this gate; #1454 owns it.
+4. **V8 and native codegen** *(restated by Amendment 2)*. `bash scripts/run-wasm-gates.sh` exits 0
+   (native, `simd128`, V8 spill gate): every held row (the unarmed loops that run on live audio)
+   unchanged and clean, and the EQ's "dual armed depth-2 pair" at or below its new ceiling of 12
+   carried slots (was 11; reason in Amendment 2). The PR records the TurboFan instruction count of the builtins
    dual loop (head, against P0's 196 and the carried form's 218) and of each held spill row; and,
    for D2, the x86-64-v3 and `simd128` instruction counts of the builtins and EQ frame loops before
    and after (no increase, or each increase named).
@@ -299,6 +323,56 @@ sections above seem to disagree.
   filed the same day, Stream G, directly after this slice) undoes the five other ratchet-chosen shapes
   that D3 leaves (#1407, #1220, #1089, #1091, #1409 D5), each gated bit-identical. This slice does
   not touch them.
+
+## Amendment 2 (root rulings, 2026-10-06, after attempt 1's findings)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15. Attempt 1 stopped with gates 3
+and 4 missed and the spec's premise for them refuted by measurement (see "Attempt record"): D2
+removes the iOS cause (2,122 -> 16 calls), D3 is flat against base in the browser and adds one V8
+slot to one armed EQ loop, and the browser gap to P0 is the dual loop's structure since #1328, not
+the carried constants. The product outcome, the context note on the premise, gates 3 and 4, the
+deliverables, the authorized paths and the non-goals are amended accordingly.
+
+- **B1. Four paths authorized, each for one reason.**
+  - `tools/audit/src/fixture_builtins.rs`: gate 6's re-pin of `fixtures/builtins/v1/resources.jsonl`
+    cannot pass `check-builtins-fixtures.sh` unless the fixture's projection constants move with
+    it. Each value is authorized individually with its reason: `INPUT_PROCESSOR_BYTES` 712 -> 696,
+    `BOXED_INPUT_ENTRY_BYTES` 728 -> 712, `STRIP_PREPARATION_BYTES` 1096 -> 1080 (each the removed
+    `InputChainConstants`, 16 bytes per input stage, measured with `size_of`), and the
+    joined-manifest identity (the same re-pin).
+  - `tools/audit/src/builtins_graph.rs`: `ACCEPTED_MANIFEST_SHA256`, the same joined manifest's
+    identity, which changes with that re-pin.
+  - `crates/lane/src/kernels.rs` (`silence_skip_block`'s doc, at `:321-323` at attempt 1): it
+    still said that a constant vector is a `memset_pattern16` call on iOS, which D2 made false.
+  - `scripts/check-cross-targets.sh` (the `ios-asm-memset-pattern16` comment, `:101` at attempt
+    1): it still named "a stored `f32x4` splat constant" as the cause, which D1 refuted.
+  The ceiling row of `scripts/check-web-audioworklet-v8-spill.py` moves under B2.
+- **B2. Keep D3; the EQ "dual armed depth-2 pair" ceiling rises from 11 to 12.** D3 stays: the
+  carried words existed only for the ratchet, whose cause D2 removed. The one extra V8 slot (base
+  11 at 221 instructions; head 12 at 219) is in the armed form, which runs only on silent tails
+  (a block where some lane's counter can arm and that lane still holds state), where a carried
+  slot costs nothing a listener hears. The unarmed rows, the loops that run on live audio, stay
+  held at zero carried slots. This is the one ceiling raised, with its reason in the gate's code
+  comment and module doc.
+- **B3. Gate 3 restated:** the iOS `memset_pattern16` ceilings only go down (measured, gate 2),
+  and head against base p50 is at most +2 % on the four browser documents, in both rounds.
+  Attempt 1's measured head-against-base numbers are evaluated against this gate by the verifier;
+  the benchmark is not re-run.
+- **B4. Gate 4 restated:** every held (unarmed) row unchanged and clean, and the armed dual pair at
+  or below its new ceiling of 12, with the reason in B2.
+- **B5. The browser gap to P0 has its own issue.** *Bring the builtins dual loop back to P0's
+  instruction count* (#1454, Stream G, after this slice) owns it: gate p50 within +2 % of P0 on all
+  four browser documents, bits identical. #1328's record attribution (its "218 vs 196" cause) is
+  corrected by #1328's follow-up fix attempt, not by this slice.
+- **B6. Multiband compressor unarmed form.** *Give the multiband compressor an unarmed form for
+  live audio* (#1455, Stream G, after this slice): unblocked by D2, gated bit-identical with
+  codegen and p50 evidence.
+- **B7. #1018 stays open** with its 16 remaining calls. Root records the remainder on #1018
+  (GitHub). The render-reachable part, the three `fill(1.0)` calls in the limiter's
+  `ChannelState::clear_runtime` (a reset and a failed block), had no owning issue and is filed as
+  *Remove the libc memset calls from the true-peak limiter's reset on Apple targets* (#1456,
+  Stream G, after #1452).
 
 ## Attempt record
 
@@ -456,3 +530,27 @@ policies, `check-graph-determinism.sh`, the known-defect self-test, clippy, fmt.
    path).
 5. #1018 remains open with four rows (16 calls), three of them render-reachable in the limiter's
    `clear_runtime`.
+
+**Amendment 2 completion (2026-10-06, same attempt; benchmarks not re-run).** Changed:
+`scripts/check-web-audioworklet-v8-spill.py`, the dual armed depth-2 pair's ceiling 11 -> 12, with
+the reason in the row's comment and in the module doc (B2); `crates/lane/src/kernels.rs`,
+`silence_skip_block`'s doc now says the outlining was chosen for #1018 and that #1451 removed the
+cause at `Lane::splat`/`Lane::zero` (it also no longer links the private `silence_skip_settle`,
+which had made `cargo doc -D warnings` red); `scripts/check-cross-targets.sh`, the
+`ios-asm-memset-pattern16` comment states the loop-idiom cause, D2's fix (2,122 -> 16), the
+remaining scalar fills per crate and the render-reachable limiter `clear_runtime` path (B1).
+Filed: #1454 (B5), #1455 (B6), #1456 (B7); the remainder is recorded on #1018. Gates run on the
+tree with these changes:
+
+- `bash scripts/run-wasm-gates.sh`: exit 0. Every held row clean; the dual armed depth-2 pair
+  reads 12 carried slots, 219 instructions, at its ceiling of 12; the mono armed rows 0.
+- `python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test`: 33 cases ok.
+- `bash scripts/check-cross-targets.sh`: PASS; `builtins` 5, `host-core` 4, `soft-clip` 1,
+  `true-peak-limiter` 6 (the rows as lowered by D4), every other product crate 0.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: exit 0 (red before this
+  change on the private link above).
+- `cargo fmt --all -- --check`, `bash scripts/check-workspace-policy.sh`: pass.
+
+Against the restated gates: gate 3 (a) holds (every ceiling fell or was deleted; none raised), and
+(b) is attempt 1's head-against-base table (largest +0.9 %, app shape round 2), for the verifier;
+gate 4 holds as restated (held rows clean, armed pair 12 at ceiling 12).

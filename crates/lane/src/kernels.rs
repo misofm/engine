@@ -319,8 +319,10 @@ pub fn silence_block<L: Lane>(
 ///    operations per frame, with no threshold and no store.
 ///
 /// The live form is inlined into each caller; the other two are one outlined function per lane
-/// width ([`silence_skip_settle`]), so their constants are materialised once per width, not at
-/// every call site (on `aarch64-apple-ios` a constant vector is a `memset_pattern16` call, #1018).
+/// width (`silence_skip_settle`). The outlining was chosen while every constant vector cost a
+/// `memset_pattern16` call on `aarch64-apple-ios` (#1018). #1451 removed that cause at
+/// [`Lane::splat`] and [`Lane::zero`], so a constant vector no longer makes the call; the
+/// outlining stays as it is.
 #[inline(always)]
 pub fn silence_skip_block<L: Lane>(input: &[f32], frames: usize, run: &mut L) {
     if frames == 0 {
