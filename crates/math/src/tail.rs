@@ -1092,15 +1092,15 @@ impl<'a> Deviation<'a> {
 /// limit).
 ///
 /// * **Exact half.** The reference output at `N + m` is at most `gain * peak * Ref(m)`,
-///   `Ref(m) = sum_{t > m} o(t)` ([`Majorants`]), summed exactly to a horizon and closed by the
+///   `Ref(m) = sum_{t > m} o(t)` (the impulse majorants), summed exactly to a horizon and closed by the
 ///   contraction remainder. The tail is at least the first `m` with `gain * Ref(m) < eps / 2`.
 /// * **`f32` half.** The kernel's output differs from the reference's by at most
-///   `gain * peak * dev(m) + F * a` ([`Deviation`]): relative rounding plus the flush stall. For
+///   `gain * peak * dev(m) + F * a` (the deviation propagation): relative rounding plus the flush stall. For
 ///   every peak at or above `p_star = F a / (eps / 2 - gain * dev_sup)` the deviation fits the other
 ///   `eps / 2` from the tail on; below `p_star` exact rest is proven by the tail instead.
 /// * **Rest.** The kernel state of section `k` at `N` is at most
 ///   `gain * peak * (x_k + E_k) + F * E_abs_k`, capped at the `V`-norm of finite `f32` words; rest
-///   follows section by section ([`rest_frames`]).
+///   follows section by section.
 ///
 /// # Errors
 ///

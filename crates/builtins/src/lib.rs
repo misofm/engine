@@ -3377,7 +3377,7 @@ impl BuiltinChain {
         sample_rate: u32,
         parameters: BuiltinParameters,
     ) -> Result<Self, BuiltinParameterError> {
-        let (input, fader_mute, matrix) = prepare_sections(sample_rate, parameters, None)?;
+        let (input, fader_mute, matrix) = prepare_sections(sample_rate, parameters)?;
         Ok(Self {
             input,
             fader_mute,
@@ -3401,7 +3401,7 @@ impl BuiltinChain {
         prepared: &PreparedInputBound,
     ) -> Result<Self, BuiltinParameterError> {
         let (input, fader_mute, matrix) =
-            prepare_sections(sample_rate, parameters, Some(prepared))?;
+            prepare_sections_with(sample_rate, parameters, Some(prepared))?;
         Ok(Self {
             input,
             fader_mute,
@@ -3574,6 +3574,13 @@ pub fn prepare_input_bounds(
 }
 
 fn prepare_sections(
+    sample_rate: u32,
+    parameters: BuiltinParameters,
+) -> Result<(InputBuiltins, FaderMuteBuiltins, MatrixBuiltins), BuiltinParameterError> {
+    prepare_sections_with(sample_rate, parameters, None)
+}
+
+fn prepare_sections_with(
     sample_rate: u32,
     parameters: BuiltinParameters,
     prepared: Option<&PreparedInputBound>,

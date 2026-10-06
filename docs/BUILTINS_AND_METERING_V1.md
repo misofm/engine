@@ -48,8 +48,9 @@ zero, which its trailing `+ 0.0` normalizes to positive zero; the behaviour is u
 width and target, which is the property the determinism claim buys. The pre-#83 preparation-time
 Jury check and cutoff-response gate are gone: the public cutoff domain is the frozen issue-036
 table, enforced before preparation, and preparation now rejects only a coefficient that is not
-representable in `f32`. Enabled filters declare a certified finite tail, computed once at
-preparation from the designed `f32` words (issue #1329, decision 15 D15-4(b)): `T_decay`
+representable in `f32`. Enabled filters declare a certified finite tail, computed once on the
+control thread from the designed `f32` words, by the compiler at preparation for each distinct
+design (issue #1329, decision 15 D15-4(b)): `T_decay`
 (`InputBuiltins::tail`, the value PDC and every tail report use), the tail over every peak
 `T_rest` (`tail_every_peak`) and the exact-rest bound (`rest`, `RestSamples`). A strip whose input
 lane is live reports `builtins::input_section_live_bound`, which covers every live trim, polarity

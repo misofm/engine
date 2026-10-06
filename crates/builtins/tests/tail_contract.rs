@@ -751,29 +751,44 @@ fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
             );
             assert!(measured <= r);
         }
-        // Gate 3's lower side: the fixed top pair's real rest under an alternating +24 dBFS input
-        // through the +24 dB trim stays at or below the certified `peak_plus_24_dbfs`.
-        let mut top_pair = input(rate, hpf, lpf, 24.0, false);
-        let mut left: Vec<f32> = (0..HISTORY)
-            .map(|index| if index % 2 == 0 { plus_24 } else { -plus_24 })
-            .collect();
-        let mut right = left.clone();
-        process(&mut top_pair, &mut left, &mut right, 0);
-        let observed = observe_silence(
-            &mut top_pair,
-            HISTORY as u64,
-            plus_24,
-            rest.peak_plus_24_dbfs + 64,
-            &[],
-            |_, _| {},
-        );
-        let measured = observed.rest.expect("rest reached");
-        eprintln!(
-            "3 {rate} Hz: top pair real rest at +24 dBFS by {measured}, certified \
-             peak_plus_24_dbfs {}",
-            rest.peak_plus_24_dbfs
-        );
-        assert!(measured <= rest.peak_plus_24_dbfs);
+        // Gate 3's lower side: the fixed top pair's real rest under an alternating input through
+        // the +24 dB trim stays at or below the certified bound, at +24 dBFS
+        // (`peak_plus_24_dbfs`) and at `1e29` (`any_sanitized_input`). At `1e29` the sign-pattern
+        // run above is already at rest by `N + 64`; the alternating drive is the one that leaves
+        // the state at its largest finite values (about `4e34`) and lets it decay.
+        for (peak, bound) in [
+            (plus_24, rest.peak_plus_24_dbfs),
+            (1.0e29, rest.any_sanitized_input),
+        ] {
+            let mut top_pair = input(rate, hpf, lpf, 24.0, false);
+            let mut left: Vec<f32> = (0..HISTORY)
+                .map(|index| if index % 2 == 0 { peak } else { -peak })
+                .collect();
+            let mut right = left.clone();
+            process(&mut top_pair, &mut left, &mut right, 0);
+            let observed = observe_silence(
+                &mut top_pair,
+                HISTORY as u64,
+                peak,
+                bound + 64,
+                &[t_decay, bound],
+                |done, section| {
+                    if done == bound {
+                        assert!(
+                            state_is_rest(section),
+                            "{rate} Hz P {peak}: not at rest by R"
+                        );
+                    }
+                },
+            );
+            let measured = observed.rest.expect("rest reached");
+            eprintln!(
+                "3 {rate} Hz: top pair real rest at P {peak} (alternating) by {measured}, last \
+                 |y| >= P eps at {}, certified R {bound}",
+                observed.above
+            );
+            assert!(measured <= bound && observed.above <= t_decay);
+        }
     }
 }
 

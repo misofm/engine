@@ -635,3 +635,203 @@ exploration tests in release, and the real-kernel probe above.
 
 Outcome so far: Amendment 3 (root rulings, option 1). Attempt 3 resumes under it, after #1451 and
 #1328's follow-up fix (root's order); no verdict yet.
+
+#### Attempt 3, resumed under Amendment 3 and its addendum (2026-10-06)
+
+Implemented on `codex/d15-stream-g` (spec edits `1df306d97`; implementation checkpoint `11f59fa42`
+and the evidence commit after it). Release measurements on this host (x86-64-v3), every launch rate
+unless stated.
+
+**What shipped.**
+
+- `effect-contract`: D1 on `TailSamples` (with Amendment 3's peak range and exact-zero branch) and
+  D2's `RestSamples` (with `RestSamples::ZERO`).
+- `math::tail` (control plane, `f64`, `math::log` only): `fixed_cascade` (D3: the reset-aware
+  reference by impulse majorants, the `f32` deviation with relative rounding and the per-word
+  flush's absolute stall, `P*`, rest section by section with A9's `N_SILENCE`) and
+  `envelope_cascade` (D5: invariant balls through the crude cascade, 64 ramp frames, then settled
+  contraction). Each returns `T_decay` (`tail`), `T_rest` (`tail_every_peak`), both rests, `P*`
+  (`flush_floor`) and `R(P*)`.
+- `builtins::tail`: `InputSectionBound { tail, tail_every_peak, rest }`, `input_section_live_bound`,
+  `input_section_live_envelope`, `input_section_live_cascade`, `input_section_worst_case_pair`
+  (derived from `builtin_filter_cutoff_maximum_hz`: the maximum minus one `f32` into the maximum,
+  D5's table), `prepare_input_bound(s)`, `BuiltinChain::with_prepared_bound`;
+  `InputBuiltins`/`BuiltinChain::{tail, tail_every_peak, rest}`. `BuiltinTail` is deleted.
+- **Name (addendum A3):** `T_rest` is `tail_every_peak`, a `TailSamples` beside `tail` wherever
+  `tail` is stated (stated in `docs/EFFECT_CONTRACT_V1.md`, "Tail and exact rest").
+- `builtins-compiler` reports the prepared design's `T_decay`, or the live bound's for a strip
+  with a live input lane, at both D7 sites; `graph-compiler` takes `TailSamples` directly.
+- Docs: `docs/EFFECT_CONTRACT_V1.md`, `docs/BUILTINS_AND_METERING_V1.md`, `dsp-research/filters.md`,
+  `docs/derivations/1329-input-section-tail-and-rest.md`, `docs/rulings/builtins-input-liveness-d2.md`.
+
+**Decisions the implementation had to take (for Sol):**
+
+1. **`t0`, one frame conservative.** The reference output at `N + m` sums `|h|` from `m + 1`, so D1
+   needs `T >= T_b(eps / 2) - 1`; gate 1(a) asserts `T_b(eps / 2) <= T`. The exact half is stated as
+   `t0` (one frame more than D1 needs) so the gate's index and D1's agree. One sample, sound.
+2. **When the bound is computed (D7).** Computing it in every `BuiltinChain::new` broke two
+   existing invariants: the phase-two retained-allocation account
+   (`builtins-compiler/tests/allocation_tracker.rs`, three tests red: the computation's transient
+   `Vec`s are not retained storage) and test time (graph-compiler's 65,537-track debug `scale`
+   tests 16.5 s -> 531.8 s; `audit fixture-builtins` 8 s -> 6 min). Now: the compiler computes each
+   **distinct** design's bound once, before the phase-two account (`prepare_input_bounds`), and
+   the chains store it (`with_prepared_bound`, which checks the design key: rate, both channels'
+   section words and trim magnitude, and otherwise computes its own); a chain built by
+   `BuiltinChain::new` computes on the first `tail`/`tail_every_peak`/`rest` request (a
+   `OnceCell`, control thread only; render never reads it). The bound is still computed once,
+   on the control thread, never on render. Scale tests back to 16.5 s, fixture generation 8.3 s.
+   Cost per distinct design: about 145 us (canonical 20 Hz HPF into 20 kHz LPF), 7 us (18 kHz
+   LPF), up to about 10 ms at the top of the domain; the live bound about 100 us (release).
+3. **Canonical floating-point environment.** The `f64` decays underflow and raise MXCSR's
+   underflow flag, which turned `host-core/tests/fp_environment.rs`'s
+   `the_callers_word_is_restored_bit_exactly_after_every_block` red (caller's word `0xFFE0`, after
+   preparation `0xFFF0`). Every bound now runs under `lane::CanonicalFpEnv` (round to nearest, full
+   subnormals as on Wasm; the caller's word restored bit for bit).
+4. **Outside the listed paths (each a mechanical consequence, flagged here):**
+   `crates/builtins/src/filter_response.rs` reads designs through `prepare_input_track`, so the
+   allocation-free response query (`malformed_grids_shapes_and_budgets_are_atomic_and_allocation_free`)
+   computes no bound; `tools/audit/src/builtins_graph.rs` carries the joined-corpus manifest
+   identity that the `resources.jsonl` re-pin moves (as #1451 did).
+5. **`InputBuiltins` grows 72 bytes** (`OnceCell<InputSectionBound>` and the rate and two trim
+   words it is computed from; the prepared sections are the stage's own `filter_initial`).
+
+**Gate 1(a)** (`fixed_design_tail_is_sound_and_within_thirty_db_of_the_exact_tail`): 112 rows
+(4 rates x 14 enabled pairs x 2 trims), all `T_b(eps / 2) <= T_decay <= T_b(eps / 32)`; disabled
+filters report `0`, `0` and `RestSamples::ZERO`. `T_decay / T_b(eps / 2)` is 1.0000 for single
+sections and at most 1.0977 (96 kHz, 10 Hz HPF into the maximum, +24 dB: 416,484 against 379,402;
+tightness headroom 4.1 % below `T_b(eps / 32)` = 434,156, the smallest). 44.1 kHz at +24 dB, for
+example: LPF 1 kHz 203 / 203 / 232; top pair 478,315 / 450,872 / 507,413.
+
+**Gate 1(b)** (`live_bound_covers_every_scanned_design_and_ramp_word`): 165,461 to 165,473 designs
+per section per rate; every design inside the live envelope (contraction with rounding, input
+column, output row, feedthrough). The slowest design is the maximum cutoff for both sections
+(`q + mu_state - 1` = -5.1125e-5 at 44.1/88.2 kHz, -5.1403e-5 at 48/96 kHz) and the slowest HPF
+below it is the maximum minus one `f32`: the worst-case pair is confirmed. Envelope
+`rho_ramp - 1` = -3.67309e-5 / -3.70137e-5 (G4's certified margins), `rho_settled - 1` =
+-5.09193e-5 / -5.12021e-5. Sampled designs' own bounds at +24 dB never exceed the live bound.
+Ramp words read from the real kernel (consecutive designs at the top, the maximum to log-spaced
+designs and back, per-frame restarts maximum/neighbour and maximum/10 Hz): worst contraction
+-5.10228e-5 / -5.13534e-5, inside `rho_ramp`.
+
+**Gate 1(c)** (`tail_every_peak_is_the_rest_at_the_flush_floor_and_holds_on_the_real_kernel`):
+(i) for all 112 rows the prepared values equal the module's on the kernel's words, `T_rest` equals
+`max(T_decay, R(P*))` with `R(P*)` recomputed through the rest bound at the peak `P*`, and
+`T_rest >= N_SILENCE`. (ii) the real kernel at `P* , P*/10, 1e-13, 1e-20`, random and
+alternating, then silence: at rest (state checked at a block boundary exactly at `N + T_rest`) and
+last `|y| >= P eps` before `T_rest` in every row. Selected (44.1 kHz, `T_decay` / `P*` / `R(P*)` /
+`T_rest`; real last-above / rest by, 64-frame resolution): LPF 1 kHz 0 dB 175 / 8.8e-12 / 3,842 /
+3,842; 150 / 384. HPF 10 Hz into LPF 1 kHz 0 dB 18,282 / 1.6e-9 / 20,373 / 20,373; 7,696 / 7,744.
+HPF 10 Hz into the maximum +24 dB 417,748 / 5.0e-9 / 553,003 / 553,003; 363,017 / 482,112. Top
+pair +24 dB 478,315 / 9.6e-12 / 485,928 / 485,928; 406,802 / 428,736. (Attempt 3's 346 frames for
+1 kHz came from a 4,000-trial probe; the gate's four peaks measure 150.)
+
+**Gate 2** (`live_bound_holds_on_the_real_kernel_at_the_domain_extreme`, release only; ignored in
+debug): extreme pair, trim +24 dB, input `P sign(h[T + 1 + i])` over the last 1,000,000 samples,
+a live HPF retarget (maximum minus two `f32`) 32 samples before `N`. Last `|y| >= P eps` at
+366,583-366,585 (44.1/88.2 kHz) and 364,538-364,542 (48/96 kHz) against `T_decay` 904,785-904,795 /
+899,524-899,533; rest by 875,328 (`P = 1`) and 926,865 (+24 dBFS) at 44.1 kHz, 921,604 at 48 kHz,
+926,811 at 88.2 kHz, 921,549 at 96 kHz, against `peak_plus_24_dbfs` 1.26M; integrators equal the
+fresh section's (`+0.0`) at `N + R`. Inverted polarity: identical; every output after rest is
+`+0.0` (no `-0.0` is reached through an enabled section: the mix normalizes it), so the run shows
+`+-0.0` but not a `-0.0`. `P = 1e29` with the sign pattern: no output at or above `P eps` after
+`N` and at rest by `N + 64` (mechanism not investigated); the same test therefore also drives the
+fixed top pair with an alternating `+-1e29` input for 1,000,000 samples, which leaves the
+integrators near `4e34` (no recovery fires) and decays: last `|y| >= P eps` at 436,322 (44.1,
+88.2 kHz) / 433,861 (48, 96 kHz), rest by 2,237,009 / 2,225,028 / 2,237,019 / 2,225,037 against
+`any_sanitized_input` 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156 (13.4 % margin at 44.1 kHz).
+Block-size-1 history (pair/disable alternating every frame, a disable in flight at `N`): at rest
+by 64.
+
+**Gate 3:** live bounds at or below 1,270,000 and 2,590,000 (values below, unchanged from G4); the
+lower side, the fixed top pair's real rest under an alternating +24 dBFS input through +24 dB
+under A9 (in gate 2's test): 983,377 / 978,372 / 983,387 / 978,381 (44.1 / 48 / 88.2 / 96 kHz),
+below `peak_plus_24_dbfs` (before A9 attempt 2 measured 983,374 / 978,319).
+
+| rate | `T_decay` | `T_rest` | `peak_plus_24_dbfs` | `any_sanitized_input` | `P*` |
+|---|---|---|---|---|---|
+| 44.1 kHz | 904,785 | 1,081,764 | 1,264,736 | 2,583,197 | 1.735e-3 |
+| 48 kHz | 899,524 | 1,075,575 | 1,257,840 | 2,569,016 | 1.709e-3 |
+| 88.2 kHz | 904,795 | 1,085,641 | 1,268,585 | 2,587,000 | 1.736e-3 |
+| 96 kHz | 899,533 | 1,079,792 | 1,262,029 | 2,573,156 | 1.709e-3 |
+
+G4's table holds as implemented; Deliverable 7's figures need no restatement.
+
+**Gate 7** (headroom to `maximum_finite_tail_samples` = 10,000,000, per rate): `T_decay` 9,095,215
+/ 9,100,476 / 9,095,205 / 9,100,467 (91.0 %); `T_rest` 8,918,236 / 8,924,425 / 8,914,359 /
+8,920,208 (89.2 %); `peak_plus_24_dbfs` 8,735,264 / 8,742,160 / 8,731,415 / 8,737,971 (87.4 %);
+`any_sanitized_input` 7,416,803 / 7,430,984 / 7,413,000 / 7,426,844 (74.1-74.3 %).
+
+**Gate 4:** `input_tail_is_infinite_while_a_filter_target_is_ramping` deleted; the two
+`builtins-compiler` tests rewritten (`prepares_three_sections_and_each_named_meter_tap` asserts the
+fixture strip's own finite non-zero tail; `live_input_lane_reports_the_live_bound_and_plain_input_its_own`
+asserts `Finite(0)` plain and the live bound live); `live_lanes.rs` keeps the plain fixture finite
+and the EQ fixture `Infinite`, and under `HostLiveLanes::ALL` asserts `Finite(2 * live T_decay)`
+(the deepest path crosses the last track and the bus); `graph-compiler`'s
+`builtins_replace_only_the_three_internal_track_bindings` asserts the prepared finite tail on the
+node and the output.
+
+**Gate 5:** `fixtures/graph/v1/direct-route.*`: only `infinite` -> `finite:10048` on the
+post-input-builtins `node` and `tail` rows (and the derived hashes and lengths);
+`ZERO_DELAY_CANONICAL_SHA256` `bf2dfd6c…ad7b10d8b3` -> `60cae21e…fc6c362`, diffed on the dumped
+canonical text: the eighteen tail tokens are the only change. `resources.jsonl`: +160 bytes per
+track in both payload counts (72 in the strip preparation, 72 in the bank input entry, 8 in each
+of the two tail entries); **`maximum_single_allocation_bytes` also moves**, +72 per track (the
+strip vector), which the gate did not predict but which is the same size delta.
+
+**Mutation runs** (each applied, the named test run, the tree restored; RED = the test fails):
+
+| defect | test | result |
+|---|---|---|
+| fixed bound drops the trim gain | 1(a) | RED: `T_b(eps/2) 22044 > T 18948` (48 kHz, LPF 10 Hz, +24 dB) |
+| fixed bound drops the cascade's second section | 1(a) | RED: `T_b(eps/2) 334036 > T 19051` |
+| a Putzer factor `m` on the impulse majorant | 1(a) | RED: `T 22528 > T_b(eps/32) 22051` |
+| live envelope at the wrong extreme (10 Hz for the maximum) | 1(b) | RED: the design at 23,995 Hz exceeds the envelope |
+| `T_rest` drops `R(P*)` | 1(c) | RED: 175 against 3,842 |
+| A9 term dropped from every rest | 1(c)(i) | RED: `t_rest >= law.silence_frames` |
+| A9 term dropped | 2, 3 | **GREEN**: the crude cascade leaves about 330k samples between the bound and the real rest, far more than `2 N_SILENCE` |
+| live bound with one section (cascade dropped) | 2 | RED: the real kernel is not at rest by the mutated `R` |
+| a Putzer-like `ln(m)/(1 - rho)` in the rest decay | 3 | RED: `peak_plus_24_dbfs <= 1_270_000` |
+| `any_sanitized_input` stated at the +24 dBFS peak | 2 (alternating `1e29` run) | RED: `44100 Hz P 1e29: not at rest by R` |
+| both contractions lose `4e-5` of margin | 7 | RED, but through the missing bound (`rho_ramp >= 1`, no rest stated), which gate 3 also catches |
+| plain strips report `Finite(0)` (both D7 sites) | `prepares_three_sections_and_each_named_meter_tap` | RED: `Finite(0)` against `Finite(10048)` |
+| a live lane reports `Finite(0)` | `live_input_lane_reports_…`, `live_lanes.rs` | RED: `Finite(0)` against `Finite(899524)` / `Finite(1799048)` |
+| graph maps every builtin tail to `Finite(0)` | `builtins_replace_only_…`, `track_delay` digest | RED (MUTATIONS.md 964-3 #1329 recheck) |
+| graph maps every builtin tail to `Infinite` | `direct_graph_report_exposes_zero_output_latency_…` | RED (MUTATIONS.md 964-1 #1329 recheck) |
+| `with_prepared_bound` ignores the design key | `a_prepared_bound_is_stored_only_for_its_own_design` | RED: `Finite(192)` against `Finite(19051)` |
+
+Test value, against the spec's section: gates 1(a), 1(b), 1(c) as stated. Gate 2 is not
+sensitive to "a bound that ignores `f32` rounding, the ramp in flight or the flush stall": the
+crude cascade's slack (live `T_decay` about 905k against a real last-above of about 367k; `R`
+1.26M against a real rest of about 0.93M) absorbs each; it is red for a bound that drops the
+cascade. Gate 3's lower side does not catch a dropped A9 term (GREEN above); 1(c)(i) does. Gate 7
+is dominated by gate 3 for the rest bounds and by the finiteness checks for `T_decay`/`T_rest`:
+with the coupled ramp and settled margins no single-margin defect drives a finite live bound past
+10,000,000 without breaking contraction first.
+
+**Gates run (all green unless stated):** `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked
+--workspace --no-deps`; `cargo test --release -p builtins --test tail_contract` (7 tests, about 7 s; 6 in debug, gate 2 ignored, 16 s);
+the `test-debug-a` and `test-debug-b` workspace commands; `check-workspace-policy.sh`,
+`check-realtime-policy.sh` (89 regions), `check-builtins-policy.sh`, `check-dsp-research.sh`,
+`check-graph-determinism.sh` (100/100), `check-effect-contract.sh`, `check-cross-targets.sh`
+(builtins `memset_pattern16` 5, at its ceiling, unchanged), `check-builtins-fixtures.sh` with the
+release audit (50 files), `audit capi` (0 allocations, 0 syscalls, `total_violations` 0),
+`check-capi-abi.sh`, `run-wasm-gates.sh --without-v8-spill --without-native`, and the worklet chain
+(`build-web-audioworklet.sh --named-twin`, `strip-wasm-names.py check`,
+`check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py`,
+`test-web-audioworklet.sh`). The shipped worklet module's bytes change (the bound code is linked
+into preparation), as `artifact-identity` will report. AArch64 is CI-only.
+
+**Open items for root and Sol:**
+
+- `tail_contract`'s release scale (gate 2 and 1(c)(ii)) runs in no CI job: `qualification.yml` is
+  outside this slice's paths. A `test-release` step (`cargo test --locked --release -p builtins
+  --features builtins/test-support --test tail_contract`, about 19 s here with the build) would carry it, as #1428 does
+  for `filter_liveness`.
+- D2 holds for histories within one prepared plan. A swap that carries non-zero integrators into a
+  disabled (identity) section leaves them frozen (#1407 rule 4: the identity recursion keeps them,
+  the output ignores them), so its integrators never equal `Z`; whether a carried state counts as
+  "a control history the node admits" is for the swap slices (#1269) to state.
+- Gate 7's test value (above) and gate 3's lower side are weaker than the spec's "Test value"
+  claims; no gate was changed.

@@ -291,7 +291,7 @@ fn design_radius(g: f64) -> f64 {
 /// sections share it: each may be disabled or designed anywhere in the cutoff domain.
 ///
 /// * **Recursion words.** Every word is a design, the identity at rest, or within the allowance
-///   `E` ([`ramp_word_allowance`]) of the convex hull of the `f32` designs its history used
+///   `E` (the ramp word allowance below) of the convex hull of the `f32` designs its history used
 ///   (#1407); an `f32` design is within the half-ulp box `h = (u/2, u/4, u/2)` of the exact
 ///   design (`c1`, `a3 < 1`, `a2 < 1/2`). The kernel's contraction `||A(w)||_V + mu_state(w)` is
 ///   convex in the words, so over the hull it is largest at a design. The exact designs split at
