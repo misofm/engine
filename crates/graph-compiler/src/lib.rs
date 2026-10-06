@@ -3178,7 +3178,7 @@ mod tests {
                 expected_largest = expected_largest.max(lane_bytes);
                 // `graph`'s boxed `LiveControlEffect`, its staging window and its shunt.
                 // The allocator-observed retention gate covers the owner.
-                let owner = size_of::<GraphPreparedEffect>()
+                let owner = graph::EFFECT_RENDER_NODE_BYTES
                     + size_of::<Box<EffectControlLane>>()
                     + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
                     + size_of::<effect_contract::BypassShunt>()

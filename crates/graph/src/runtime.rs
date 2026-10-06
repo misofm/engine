@@ -1132,8 +1132,8 @@ pub(crate) enum NodeKind {
     },
     /// A host-supplied processor.
     Bound(Box<dyn GraphRuntimeProcessor>),
-    /// A track-local prepared native effect.
-    Effect(GraphPreparedEffect),
+    /// A track-local prepared native effect: only the fields render reads ([`EffectNode`]).
+    Effect(EffectNode),
     /// A track-local prepared native effect that live controls drive (issue #140 A).
     ///
     /// A separate variant from [`NodeKind::Effect`] on purpose, in the shape #137 D1 fixed for
@@ -1175,6 +1175,32 @@ pub(crate) struct SplitPairSlot {
     pub(crate) role: SplitPairRole,
 }
 
+/// A per-node prepared native effect as the render node table holds it: exactly the fields
+/// render reads, and nothing else.
+///
+/// The prepared metadata, the node's identity and its response facts stay in the prepared plan's
+/// control-side table (`PreparedGraphPlan::effects`, one [`GraphPreparedEffect`] per effect node,
+/// keyed by its `id`). Bind reads them there, on the control thread, and moves only the processor
+/// and the one metadata word `execute_op` passes to every block into this node. Render-owned
+/// memory carries no control-only data (#1329 ruling 5): before this split the whole
+/// `PreparedEffectMetadata` sat inline in every op of the render node table.
+pub(crate) struct EffectNode {
+    pub(crate) processor: Box<dyn PreparedNativeEffect>,
+    /// `PreparedEffectMetadata::quantum`, the block quantum `EffectProcessBlock::new` checks.
+    pub(crate) quantum: u32,
+}
+
+impl EffectNode {
+    /// Keep the render-read fields of one prepared effect. Bind-time only; the rest of the record
+    /// is dropped here, on the control thread.
+    fn new(effect: GraphPreparedEffect) -> Self {
+        Self {
+            processor: effect.processor,
+            quantum: effect.metadata.quantum,
+        }
+    }
+}
+
 /// One prepared native effect plus everything its live-control channel needs (issue #140 A).
 ///
 /// Sized once, at bind, from the effect's own prepared metadata: the staging window is exactly
@@ -1182,7 +1208,7 @@ pub(crate) struct SplitPairSlot {
 /// when it does not (issue #1100), and the shunt's delay line is exactly
 /// `PreparedEffectMetadata::latency` samples. Render allocates nothing and frees nothing.
 pub(crate) struct LiveControlEffect {
-    pub(crate) effect: GraphPreparedEffect,
+    pub(crate) effect: EffectNode,
     control: Box<EffectControlLane>,
     /// `automation_capacity` spans for a live channel, and none for a channel-less lane; only
     /// `[..staged]` is ever handed to the effect.
@@ -1241,7 +1267,7 @@ impl LiveControlEffect {
             observation,
             spans,
             shunt: BypassShunt::new(frames, latency),
-            effect,
+            effect: EffectNode::new(effect),
             control,
         }
     }
@@ -1505,7 +1531,9 @@ fn copy_scalar_response_snapshot(
             Err(error) => return Err(response_snapshot_error(error)),
         },
         NodeKind::Effect(effect) => {
-            let bypassed = effect.metadata.bypass;
+            // The prepared bypass is a control-side fact: the binding row carries it, not the
+            // render node.
+            let bypassed = binding.prepared_bypass;
             match effect
                 .processor
                 .copy_response_snapshot(OwnerSnapshotRequest {
@@ -2454,6 +2482,10 @@ pub(crate) struct ResponseOwnerBinding {
     native_id: Box<str>,
     stable_id: Box<str>,
     response_snapshot_declared: bool,
+    /// A per-node effect's prepared `bypass`, which its snapshot reports; `false` for every other
+    /// owner, whose bypass comes from its live control or its bank. It sits in the row's padding,
+    /// so the row's size is unchanged.
+    prepared_bypass: bool,
     rack: u8,
     slot: u32,
     unit: usize,
@@ -3476,7 +3508,7 @@ fn execute_op(
             })?;
         }
         NodeKind::Effect(effect) => {
-            let quantum = effect.metadata.quantum;
+            let quantum = effect.quantum;
             match op.sidechain {
                 None => {
                     let (out_left, out_right) = output_planes(arena, &mut host, output);
@@ -3542,7 +3574,7 @@ fn execute_op(
                     .apply_prepared_target(target)
                     .map_err(|_| RenderError::InvalidEnvelope)?;
             }
-            let quantum = effect.metadata.quantum;
+            let quantum = effect.quantum;
             match op.sidechain {
                 None => {
                     let (out_left, out_right) = output_planes(arena, &mut host, output);
@@ -4456,6 +4488,15 @@ pub(crate) fn bank_membership(
     membership
 }
 
+/// One response owner's prepared facts, read from the plan's control-side tables at bind.
+#[derive(Clone, Copy)]
+pub(crate) struct ResponseOwnerFacts {
+    declared: bool,
+    native_id: &'static str,
+    /// A per-node effect's prepared `bypass`; `false` for every other owner.
+    prepared_bypass: bool,
+}
+
 /// Everything a bound plan hands the runtime, consumed exactly once per node.
 pub(crate) struct RuntimeParts {
     pub(crate) routes: BTreeMap<GraphNodeId, (RouteTransform, RouteGate)>,
@@ -4486,7 +4527,7 @@ pub(crate) struct RuntimeParts {
     /// Prepared owner metadata captured before processors and banks are moved into runtime units.
     /// The runtime retains only this compact lowering map; response capture reads the same binding
     /// rows as execution and never asks a DSP stage for identity metadata.
-    response_metadata: BTreeMap<GraphNodeId, (bool, &'static str)>,
+    response_metadata: BTreeMap<GraphNodeId, ResponseOwnerFacts>,
     /// Render quantum, so a live-control-driven effect's staging and shunt are sized once, at bind.
     frames: usize,
 }
@@ -4518,14 +4559,22 @@ impl RuntimeParts {
         for effect in &effects {
             response_metadata.insert(
                 GraphNodeId::Effect(effect.id.clone()),
-                (effect.response_snapshot_declared, effect.native_id),
+                ResponseOwnerFacts {
+                    declared: effect.response_snapshot_declared,
+                    native_id: effect.native_id,
+                    prepared_bypass: effect.metadata.bypass,
+                },
             );
         }
         for bank in &banks {
             for member in &bank.members {
                 response_metadata.insert(
                     GraphNodeId::Effect(member.clone()),
-                    (bank.response_snapshot_declared, bank.native_id),
+                    ResponseOwnerFacts {
+                        declared: bank.response_snapshot_declared,
+                        native_id: bank.native_id,
+                        prepared_bypass: false,
+                    },
                 );
             }
         }
@@ -4533,17 +4582,25 @@ impl RuntimeParts {
             let declared = bank.processor.response_snapshot_declared();
             let native_id = bank.processor.response_snapshot_native_id().unwrap_or("");
             for member in &bank.members {
-                response_metadata.insert(member.clone(), (declared, native_id));
+                response_metadata.insert(
+                    member.clone(),
+                    ResponseOwnerFacts {
+                        declared,
+                        native_id,
+                        prepared_bypass: false,
+                    },
+                );
             }
         }
         for binding in &bindings {
             if let Some(processor) = binding.processor.as_ref() {
                 response_metadata.insert(
                     binding.node.clone(),
-                    (
-                        processor.response_snapshot_declared(),
-                        processor.response_snapshot_native_id().unwrap_or(""),
-                    ),
+                    ResponseOwnerFacts {
+                        declared: processor.response_snapshot_declared(),
+                        native_id: processor.response_snapshot_native_id().unwrap_or(""),
+                        prepared_bypass: false,
+                    },
                 );
             }
         }
@@ -4639,7 +4696,7 @@ impl RuntimeParts {
                 // An observation lane is only ever created alongside a control channel -- a
                 // subscription rides that queue -- so this arm is the unobserved, live-control-free
                 // path it always was, byte for byte.
-                None => NodeKind::Effect(effect),
+                None => NodeKind::Effect(EffectNode::new(effect)),
                 Some(control) => NodeKind::LiveControlEffect(Box::new(LiveControlEffect::new(
                     effect,
                     control,
@@ -6400,7 +6457,7 @@ fn response_owner_bindings(
     spec: &GraphSpec,
     op_slot: &[Option<(usize, usize)>],
     units: &[RuntimeUnit],
-    response_metadata: &BTreeMap<GraphNodeId, (bool, &'static str)>,
+    response_metadata: &BTreeMap<GraphNodeId, ResponseOwnerFacts>,
     retired: &std::collections::BTreeSet<usize>,
 ) -> Vec<ResponseOwnerBinding> {
     let mut next_slot = BTreeMap::<String, u32>::new();
@@ -6435,8 +6492,18 @@ fn response_owner_bindings(
                     member
                 }
             };
-            let (response_snapshot_declared, native_id) =
-                response_metadata.get(node).copied().unwrap_or((false, ""));
+            let ResponseOwnerFacts {
+                declared: response_snapshot_declared,
+                native_id,
+                prepared_bypass,
+            } = response_metadata
+                .get(node)
+                .copied()
+                .unwrap_or(ResponseOwnerFacts {
+                    declared: false,
+                    native_id: "",
+                    prepared_bypass: false,
+                });
             let slot = next_slot.entry(track_id.to_owned()).or_default();
             let signal_slot = *slot;
             *slot = slot.saturating_add(1);
@@ -6445,6 +6512,7 @@ fn response_owner_bindings(
                 native_id: Box::from(native_id),
                 stable_id: Box::from(stable_id),
                 response_snapshot_declared,
+                prepared_bypass,
                 rack,
                 slot: signal_slot,
                 unit,
@@ -7898,6 +7966,7 @@ mod tests {
                 native_id: Box::from("miso.test.owner"),
                 stable_id: Box::from("eq"),
                 response_snapshot_declared: true,
+                prepared_bypass: false,
                 rack: 2,
                 slot: 4,
                 unit: 0,
@@ -7989,6 +8058,7 @@ mod tests {
                 native_id: Box::from("miso.test.declared"),
                 stable_id: Box::from("declared"),
                 response_snapshot_declared: true,
+                prepared_bypass: false,
                 rack: 2,
                 slot: 0,
                 unit: 0,
