@@ -139,6 +139,8 @@ All of these are edited in the one Stream G pull request that also carries #1409
   `crates/gate-expander/tests/state.rs`, `crates/multiband-compressor/tests/product.rs`,
   `crates/transient-shaper/tests/contract.rs`, `crates/soft-clip/tests/state_roundtrip.rs`
 - `crates/delay/tests/MUTATIONS.md` (M18, M19 only)
+- `crates/compressor/tests/MUTATIONS.md` (the `payload` row only; authorized by root after attempt
+  1's first hand-back, as the Attempt record says)
 - This spec
 
 `crates/effect-runtime` is stream G's column. The effect payload readers and their refusal rows
@@ -329,7 +331,7 @@ commands, debug and release). No digest table moved; no bit moved.
 
 | Probe | Mutant (#1409 site reverted to `current + step`) | Per PR | Full | Lists identical | After revert |
 | --- | --- | --- | --- | --- | --- |
-| compressor | site 4 `RampVec::advance_where` and site 2 (`next_value`, `advance_block` first word) | red, 56 | red, 56 | yes | green |
+| compressor | site 4 `RampVec::advance_where` and site 2 (`next_value`, `advance_block` first word); the probe reaches site 4 only (site 4 alone 56 and 56, site 2 alone 0 and 0: the probe takes `Detector::Main`); #1409 gate 2's "compressor connected" move guards site 2 | red, 56 | red, 56 | yes | green |
 | gate | site 5 `RAMPING` prologue | red, 32 | red, 32 | yes | green |
 | multiband | site 6 `run_segment` | red, 80 | red, 80 | yes | green |
 | limiter | site 9 `RampLanes::advance` | red, 4 | red, 4 | no (see below) | green |
@@ -361,3 +363,16 @@ render-local and never reach the payload (the root correction in gate 3).
 - `check-cross-targets.sh`: pass; no ceiling touched.
 
 **Open items.** None for this slice.
+
+### Batch follow-up part B (2026-10-06, stream G; attempt 1 verdict NITs 1-3)
+
+Documentation only; no code, test logic or bit changes.
+- NIT 1: the Authorized paths list names `crates/compressor/tests/MUTATIONS.md` (the `payload` row,
+  root-authorized after attempt 1's first hand-back).
+- NIT 2: the compressor's gate-3 row notes that the probe reaches site 4 only (the verdict's
+  per-site runs: site 4 alone 56 and 56 refusals, site 2 alone 0 and 0) and that site 2 is guarded
+  by #1409 gate 2's "compressor connected" move.
+- NIT 3: the doc of `a_coefficient_below_zero_or_above_its_design_is_refused`
+  (`crates/compressor/tests/payload.rs`) says its rows write a target and a settled current, and
+  points at `a_moving_ramp_word_past_its_domain_is_refused` for the moving current.
+- Gates: `cargo fmt --all -- --check`; `cargo test -p compressor --test payload`.

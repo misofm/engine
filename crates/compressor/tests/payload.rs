@@ -390,9 +390,10 @@ fn an_active_attack_restore_continues_one_partition_invariant_coefficient_path()
     );
 }
 
-/// A smoother coefficient is held to its designed range `(0, 1]`, as a target and as a current,
-/// moving or settled (#1278 attempts 2 and 3; issue #1411 dropped the moving current's 64-ulp
-/// budget): the smoother `y += c (x - y)` diverges for every `c < 0` and freezes at `c = 0`, which
+/// A smoother coefficient is held to its designed range `(0, 1]`; these rows write it as a target
+/// and as a settled current (#1278 attempts 2 and 3). A moving current is held to the same range
+/// with no rounding budget (issue #1411), and `a_moving_ramp_word_past_its_domain_is_refused`
+/// writes that case. The smoother `y += c (x - y)` diverges for every `c < 0` and freezes at `c = 0`, which
 /// no legal time designs. A settled release coefficient of `-1e-6` once made the gain reduction run
 /// away over seconds, and one of `0.0` held it for as long.
 #[test]
