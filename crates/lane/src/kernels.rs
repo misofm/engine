@@ -1667,18 +1667,14 @@ pub fn route_mix_ramp_block<L: Lane>(
 
     let step = ramp.step.map(L::splat);
     let start = ramp.start.map(L::splat);
-    let offsets = L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]);
-    // Each chunk's index vector is built from a `u32` counter, not advanced by a splatted
-    // `L::WIDTH`: that splat is a constant LLVM stores through `memset_pattern16` on iOS, a libc
-    // call inside a render kernel (#1018's ratchet; the #1220 amendment). Exact either way:
+    let advance = L::splat(L::WIDTH as f32);
+    // One vector add per chunk advances every lane's index. Exact: each index is an integer below
     // `position + vectored < length <= 2^22` whenever a frame ramps.
-    let mut first = position;
+    let mut index = L::splat(position as f32).add(L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]));
     for (left, right) in left_vectors
         .chunks_exact_mut(L::WIDTH)
         .zip(right_vectors.chunks_exact_mut(L::WIDTH))
     {
-        let index = L::splat(first as f32).add(offsets);
-        first += L::WIDTH as u32;
         let ll = index.fma(step[0], start[0]);
         let lr = index.fma(step[1], start[1]);
         let rl = index.fma(step[2], start[2]);
@@ -1687,6 +1683,7 @@ pub fn route_mix_ramp_block<L: Lane>(
         let old_right = L::load(right);
         lr.fma(old_right, ll.mul(old_left)).store(left);
         rr.fma(old_right, rl.mul(old_left)).store(right);
+        index = index.add(advance);
     }
     if !left_tail.is_empty() {
         // `vectored < ramping < length`, so the sum stays below `2^22`.
