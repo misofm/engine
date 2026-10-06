@@ -671,8 +671,8 @@ expect_accept "$(printf '%s' "$session_metered" | jq -c '.bank_scatter_redirects
 # Its floor group states none: no ruling has inventoried a metered strip, and the standing strip's
 # inventory would publish the meters' cost as a gap in the strip's.
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
-    '.floor_cycles_per_lane_sample = (311 / (8 * 3.7))
-     | .percent_of_floor = (100 * (311 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    '.floor_cycles_per_lane_sample = (307 / (8 * 3.7))
+     | .percent_of_floor = (100 * (307 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'a metered row costed at the unmetered strip inventory'
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter"')" \
@@ -773,8 +773,8 @@ for count in 10 13 16; do
     strip_mutation '.source_feed = "played_planes"' 'a strip-at-N row claiming the driver-fed feed'
     strip_mutation '. + {bypass_pattern: "none", bypassed_tracks: 0}' 'a strip-at-N row carrying the bypass group'
     expect_reject "$(printf '%s' "$strip_n" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"' with_floor(5480000000; $s)
-        | .floor_cycles_per_lane_sample = (311 / (8 * 3.7))
-        | .percent_of_floor = (100 * (311 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+        | .floor_cycles_per_lane_sample = (307 / (8 * 3.7))
+        | .percent_of_floor = (100 * (307 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
         "$kind costed at the full-bank strip inventory"
     expect_reject "$(printf '%s' "$strip_n" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"' with_floor(5480000000; $s)
         | .floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter, ragged"')" \
@@ -802,8 +802,8 @@ app_mutation '.synthetic_fixture = true' 'the committed app fixture reported as 
 app_mutation '.input_signal = "odd_tracks_silent"' 'an app-shape row claiming sparse input'
 app_mutation '.tracks = 16' 'an app-shape row that is not the sixty-four-track console'
 expect_reject "$(printf '%s' "$session_floor_app" | jq -c \
-    '.floor_cycles_per_lane_sample = ((69 + 31 + 81.5) / (8 * 3.7))
-     | .percent_of_floor = (100 * ((69 + 31 + 81.5) / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    '.floor_cycles_per_lane_sample = ((69 + 27 + 81.5) / (8 * 3.7))
+     | .percent_of_floor = (100 * ((69 + 27 + 81.5) / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'an app-shape row costed as though no lane were bypassed'
 # The group is the app shape's alone, and the app layout is too.
 session_mutation '. + {bypass_pattern: "index_mod_3_is_2", bypassed_tracks: 21}' \

@@ -36,10 +36,12 @@ Both are recorded here rather than quietly worked around, because a floor that a
 expectation it cannot reproduce is not a measurement.
 
 **Current-lowering recount (#368); #805 masked stationary EQ update.** The live authorities now
-use compressor **81.5** lane-ops, limiter **129.5**, EQ **31** (27 until #1328's joint SVF flush
-added four lane-ops per section under amendment A9; 34 under amendment A8; 53 until #976 dropped
-the identity padding section), and builtins **69** (as before #1328: on live audio no section's
-joint flush can arm, so the chain runs the per-word flush; 83 under amendment A8). x86 and wasm
+use compressor **81.5** lane-ops, limiter **129.5**, EQ **27** (as before #1328: since #1328's
+follow-up a block of live audio runs the EQ's unarmed form, the per-word flush; 31 on a block that
+can arm, as all blocks paid under amendment A9 before the follow-up; 34 under amendment A8; 53
+until #976 dropped the identity padding section), and builtins **69** (as before #1328: on live
+audio no section's joint flush can arm, so the chain runs the per-word flush; 83 under amendment
+A8). x86 and wasm
 max/min are one lane-op, the shared
 stereo links retain their fractional half-op accounting, and `exp2_int_in_range` is the two-op
 synthesis established by #367. The old compressor and limiter values remain below only where they
@@ -143,7 +145,7 @@ Applied identically to all four inventories. Each is the `Lane` trait's own defi
 | `Lane::fma(a, b, c)` | **2** | `(a * b) + c`, deliberately unfused on every backend (#163 phase 2) |
 | `flush(x)` | **3** | `x.andnot(x.abs().lt(EPS))` |
 | `flush_pair(n1, n2, rest)` | **10** | two `abs`, one `max_u32` (the larger magnitude, bit for bit), three `lt` (one against the frame's rest threshold), two `mask_or`, two `andnot` -- the joint SVF state flush of issue #1328 under amendment A9, against 6 for two `flush` (13 under amendment A8) |
-| `silence_step(x, run, armed_after)` | **5** | `eq`, `add`, `select` (the counter), `lt`, `andnot` (the rest threshold) -- once per channel-frame per effect input, whatever the section count, on a block in which some lane's counter can arm (issue #1328, amendment A9); on any other block -- every block of live audio -- the counter advances once per block (`silence_skip_block`: one load and one `mask_any` when the block's last frame is non-zero on every lane, else the counter's three per frame) and costs nothing per lane-sample. The builtin input chain and the parametric EQ work this way; the multiband compressor runs the counter and the joint flush on every frame |
+| `silence_step(x, run, armed_after)` | **5** | `eq`, `add`, `select` (the counter), `lt`, `andnot` (the rest threshold) -- once per channel-frame per effect input, whatever the section count, on a block in which some lane's counter can arm (issue #1328, amendment A9); on any other block -- every block of live audio -- the counter advances once per block (`silence_skip_block`: one load and one `mask_any` when the block's last frame is non-zero on every lane; else a whole-block zero scan, a load, an `eq` and a `mask_and` per frame, which settles the counter when every lane is silent throughout or live on its last frame; the counter's three per frame only when a lane's silence starts inside the block) and costs nothing per lane-sample on live audio. The builtin input chain and the parametric EQ work this way; the multiband compressor runs the counter and the joint flush on every frame |
 | `Lane::max_u32` | **1** | `vpmaxud` / `i32x4.max_u` / `umax` |
 | a load or a store | 0 in the floor | counted separately; see "the unit, and the criterion" |
 
@@ -229,14 +231,14 @@ runs masked pairs. Per lane-sample:
 
 | item | lane-ops |
 |---|---:|
-| `svf_step`: `sub` 1, two unfused `fma` with their multiplies 6, two `add` 2, two state lines `ic + (d + d)` 4, their joint `flush_pair` 10 (issue #1328 under amendment A9, the threshold loaded from the rest plane; the two lines cost 10 with two `flush` before it, and the step 19; 26 under amendment A8) | 23 |
+| `svf_step` on live audio (the unarmed form, `svf_step_when(false, ..)`): `sub` 1, two unfused `fma` with their multiplies 6, two `add` 2, two state lines `ic + (d + d)` 4, their two per-word `flush` 6 -- the step before #1328. On a block that can arm (issue #1328, amendment A9 and its follow-up): the joint `flush_pair` 10 in place of the two `flush`, the threshold loaded from the rest plane, 23 (26 under amendment A8) | 19 |
 | output mix `m2.fma(v2, m1.fma(v1, m0.mul(x)))` | 5 |
-| **one section, select-free** (every pair of an admitted plan; a depth-1 tail with no dry lane) | **28** |
+| **one section, select-free** (every pair of an admitted plan; a depth-1 tail with no dry lane; 28 on a block that can arm) | **24** |
 | `Lane::select(dry, x, wet)` output selection (every pair of a refused or all-live plan; a depth-1 tail with a dry lane) | 1 |
-| **one section, masked** | **29** |
-| the standing fixture: its one live section, as a select-free depth-1 tail | 28 |
+| **one section, masked** (29 on a block that can arm) | **25** |
+| the standing fixture: its one live section, as a select-free depth-1 tail | 24 |
 | 4.4 boundary scan | 3 |
-| **total, standing fixture** | **31** |
+| **total, standing fixture** (31 on a block that can arm, and 5 more for the rest plane) | **27** |
 
 The block-data elision gate (`block_admits_elision`) adds four integer operations per lane-sample
 (since #980 an `xor`, an unsigned `min`, an `and` and an unsigned `max` per input word) and is not
@@ -248,16 +250,20 @@ stated per kept section. For an **admitted stationary elision plan**, the `activ
 physical sections are exactly the kept ones (#976: no identity section is kept as padding), run as
 `floor(active / 2)` select-free depth-2 passes (#977) and, when `active` is odd, one depth-1 tail:
 
-`floor_lane_ops(active) = 28 * active + 3`, for `active` in `0..=5`, plus 1 when the tail has a
+`floor_lane_ops(active) = 24 * active + 3`, for `active` in `0..=5`, plus 1 when the tail has a
 dry lane in either channel (a dedicated cut that is the last live section and off on some lanes).
+On a block that can arm it is `28 * active + 3`, and 5 more for the rest plane.
 
 A **refused** block (a `-0.0`, a non-finite word or a word above the bound in either input plane, a
 non-inert state in a dead section, a `-0.0` or non-finite state in a live one), and every block
-with all six sections live, runs all six in three masked depth-2 passes: **177**. On a block in
-which some lane's silence counter can arm (issue #1328, amendment A9: the EQ's input has been
-silent for nearly `N_SILENCE` frames) the rest plane is written by `silence_block`, 5 more per
-lane-sample; on every other block the cascades read the unarmed plane and the counter advances
-once per block. Since #979 a
+with all six sections live, runs all six in three masked depth-2 passes: **153** (177 on a block
+that can arm). On a block in which some lane's silence counter can arm while that lane still holds
+state (issue #1328, amendment A9 and its follow-up, `silence_armable_holding`: the EQ's input has
+been silent for nearly `N_SILENCE` frames and a tail is still decaying) the rest plane is written
+by `silence_block`, 5 more per lane-sample, and the cascades run the armed form; on every other
+block -- every block of live audio -- they run the unarmed form, which reads no plane, and the
+counter advances once per block (`silence_skip_block`: one last-frame compare, and a whole-block
+zero scan only when some lane ends the block on a zero). Since #979 a
 dead section's state is inert when every word is `+0.0` or has a magnitude between the flush floor
 and the elision bound, and (since #1328) the pair is not both below `REST_EPS` with a word
 non-zero, which the joint flush zeroes on an armed frame (the EQ's input silent for `N_SILENCE`
@@ -272,20 +278,24 @@ inventory must follow that implementation.
 | active physical sections | kept sections | passes | lane-ops floor |
 |---:|---:|---|---:|
 | 0 | 0 | none | 3 |
-| 1 | 1 | one depth-1 tail | 31 (32 with a dry lane) |
-| 2 | 2 | one pair | 59 |
-| 3 | 3 | one pair, one tail | 87 (88) |
-| 4 | 4 | two pairs | 115 |
-| 5 | 5 | two pairs, one tail | 143 (144) |
-| 6, or refused | 6 | three masked pairs | 177 |
+| 1 | 1 | one depth-1 tail | 27 (28 with a dry lane) |
+| 2 | 2 | one pair | 51 |
+| 3 | 3 | one pair, one tail | 75 (76) |
+| 4 | 4 | two pairs | 99 |
+| 5 | 5 | two pairs, one tail | 123 (124) |
+| 6, or refused | 6 | three masked pairs | 153 |
+
+On a block that can arm the column is 3, 31 (32), 59, 87 (88), 115, 143 (144) and 177, each with 5
+more for the rest plane.
 
 `active` counts physical sections whose current coefficient words are nonidentity for any required
 bank lane/channel; it is not a user-enabled-control count. Mono counts the selected channel. At
 the standing fixture's one active general band, `kept = 1`, the tail is select-free, and the floor
-is 31. A full six-section pass is 177. Issue #1328's joint flush added four lane-ops per section
-under amendment A9 (27 and 153 before #1328; 34 and 195 under amendment A8, whose input gate cost
-two more per section), and `tools/bench/src/floor.rs` and `scripts/console-benchmark-record-lib.jq`
-compose 31 for the standing workload. These values move with the source inventory and do not
+is 27. A full six-section pass is 153. Issue #1328's joint flush added four lane-ops per section
+under amendment A9 (31 and 177; 34 and 195 under amendment A8, whose input gate cost two more per
+section); its follow-up gave the EQ an unarmed form, so live audio is back to the values before
+#1328 and pays the four only on a block that can arm, and `tools/bench/src/floor.rs` and
+`scripts/console-benchmark-record-lib.jq` compose 27 for the standing workload. These values move with the source inventory and do not
 claim a new timing result.
 
 ### Prepared state accounting
@@ -604,7 +614,7 @@ none of which this table counts.
 `sixty_four_track_console_half_mono` render `fixtures/session/v1/console-sixty-four-track-mono.toml`,
 which is the standing fixture with its source mapping and its upstream per-channel parameters
 symmetrised. They carry the whole intended strip and are costed at the whole intended strip's
-current inventory — 311 lane-ops since #1328's amendment A9 (328 under A8), 307 since #976, 333 before it — because their fixture differs from the standing one in per-channel
+current inventory — 307 lane-ops since #1328's follow-up gave the EQ an unarmed form (311 under #1328's amendment A9 before it, 328 under A8), 307 since #976, 333 before it — because their fixture differs from the standing one in per-channel
 *values* only, and a floor is an inventory of operations, not of operands.
 
 **One question is deliberately left open**, and it is left open here rather than answered quietly in
@@ -631,21 +641,21 @@ Composed by `tools/bench/src/floor.rs` from the inventories above, restated
 independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 `console_session` record of a run whose runner could measure the core clock.
 
-The table states the inventories after issue #1328's joint SVF flush under amendment A9 (builtins
-69, EQ 31, strip 311; 69, 27 and 307 before it; 83, 34 and 328 under amendment A8), as `floor.rs`
-and the `jq` restatement compose them. They are the standing workload's: live audio, on which no
-silence counter can arm, so the builtins run the per-word flush and the EQ reads the unarmed rest
-plane.
+The table states the inventories after issue #1328's follow-up (builtins 69, EQ 27, strip 307, the
+values before #1328; 69, 31 and 311 under amendment A9 before the follow-up; 83, 34 and 328 under
+amendment A8), as `floor.rs` and the `jq` restatement compose them. They are the standing
+workload's: live audio, on which no silence counter can arm, so the builtins and the EQ both run
+their unarmed form, the per-word flush.
 
 | kernel | lane-ops | derived floor, cycles/lane-sample |
 |---|---:|---:|
 | routing component: route and master reduction (a line of the two builtins inventories; no row's floor) | 4 | 0.135 |
 | builtins chain and routing | 69 | 2.331 |
 | builtins chain, identity sections (`dispatch_only`, `gain_pan_only`, `gain_pan_ring`; the floor of the table) | 22 | 0.743 |
-| parametric EQ, one live section (a select-free depth-1 tail) | 31 | 1.047 |
+| parametric EQ, one live section (a select-free depth-1 tail) | 27 | 0.912 |
 | compressor | 81.5 | 2.753 |
 | true-peak limiter, uniform cohort | 129.5 | 4.375 |
-| the whole intended strip | 311.0 | 10.507 |
+| the whole intended strip | 307.0 | 10.372 |
 
 ### The standing table
 
@@ -769,7 +779,7 @@ finding "the compressor is at 88 % of floor and there is nothing left".
 **Historical four-section evidence.** The timing, floor and gap in this section describe
 the pre-#805 implementation. The masked stationary inventory after #805 was 53 operations
 (1.791 derived cycles at the same machine constants), 27 (0.912) since #976 dropped the
-identity padding section, 34 (1.149) under #1328's amendment A8, and 31 (1.047) since #1328's amendment A9; no new measured gap or percentage is claimed without a timing of that
+identity padding section, 34 (1.149) under #1328's amendment A8, 31 (1.047) under #1328's amendment A9, and 27 (0.912) again since #1328's follow-up gave the EQ an unarmed form for live audio; no new measured gap or percentage is claimed without a timing of that
 implementation.
 
 The EQ isolate measures 4.984 cycles/lane-sample against a 1.723 floor: 34.6 %, the best of the

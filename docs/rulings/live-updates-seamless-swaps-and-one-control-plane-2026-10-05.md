@@ -598,8 +598,15 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   by rate; 1,024 samples left a sparse-input residual above one tail's worth at every rate). While
   the effect input is live, sparse or tiny, no bit moves; in tails the change is at most one tail's
   worth (analytic bound `1.95e-13` at one +24 dB shelf, largest found `3.5e-10` at four, −189 dBFS),
-  and a block of live audio pays nothing for the rule in the builtin chain and the EQ (the
-  multiband compressor runs it on every frame). The counter rides the state payload, the
+  and on a block of live audio the builtin chain and the EQ run their unarmed form, with no
+  counter, no threshold and no joint term in any frame loop: what remains is one armability test
+  per channel per block and one compare of the block's last frame (the multiband compressor runs
+  the counter and the joint flush on every frame). A bank with a silent or padding lane beside live
+  ones also scans each channel's block for zeros (about 3 % of an eight-lane builtin block, about
+  1 % of an eight-lane EQ block, natively), and the builtin chain's constants, carried as words for
+  the iOS memset ratchet (#1018), cost about 3 % to 4 % p50 on the 64-track app-shape browser
+  document against the per-word law (#1451 removes that cause; #1328's follow-up record has the
+  numbers). The counter rides the state payload, the
   carry and the mono-collapse disengage copy. Details: #1328 Amendment 1 A9 and
   `dsp-research/filters.md`.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),

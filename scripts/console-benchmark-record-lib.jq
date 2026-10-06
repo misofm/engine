@@ -77,10 +77,11 @@ def builtins_lane_ops: 69;
 # reach the master; no row is costed at them alone, because the builtins-less plumbing row that was
 # measured a plan no host compiles and was retired.
 def builtins_identity_lane_ops: 22;
-# The EQ at the standing fixture's one live section: a select-free depth-one pass (28 since #1328's
-# joint SVF flush under amendment A9, 24 before) and the 4.4 boundary scan (3): 31 (34 under A8).
-# #976 dropped the identity padding section that used to run beside it.
-def eq_lane_ops: 31;
+# The EQ at the standing fixture's one live section: a select-free depth-one pass (24: since #1328's
+# follow-up live audio runs the EQ's unarmed form, the per-word flush, as before #1328; 28 on a
+# block that can arm) and the 4.4 boundary scan (3): 27 (31 under #1328's amendment A9 before the
+# follow-up, 34 under A8). #976 dropped the identity padding section that used to run beside it.
+def eq_lane_ops: 27;
 # Current-lowering recount (#368): max/min are one lane-op on x86 and wasm; the shared stereo
 # link contributes a fractional half-op per channel sample. exp2_int_in_range is two operations
 # after #367. These are inventories, not runtime measurements.

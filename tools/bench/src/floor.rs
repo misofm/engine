@@ -63,17 +63,19 @@ const OPS_PER_CYCLE: f64 = 3.7;
 /// `docs/rulings/effect-floor-accounting.md`, "Compressor inventory".
 const COMPRESSOR_LANE_OPS: f64 = 81.5;
 /// Required arithmetic per lane-sample, parametric-EQ stationary cascade, at the standing fixture's
-/// one live section: a select-free depth-one pass (`svf_step` 23 + output mix 5) and the 4.4
-/// boundary scan (3). Issue #976 dropped the identity padding section the depth-two pass used to
-/// run beside it; issue #1328's joint SVF flush (`flush_pair`, 10 lane-ops for the two state words
-/// under amendment A9, its threshold loaded from the rest plane, against 6 for two `flush`) raised
-/// `svf_step` from 19 to 23, so this is 31 (27 before #1328, 34 under amendment A8). The input's
-/// silence counter costs nothing per lane-sample on live audio: no counter can arm within a block
-/// of it, so the counter advances with one load and one `mask_any` per block
-/// (`lane::kernels::silence_skip_block`); on a block that can arm it is 5 more.
+/// one live section: a select-free depth-one pass (`svf_step` 19 + output mix 5) and the 4.4
+/// boundary scan (3): 27. Issue #976 dropped the identity padding section the depth-two pass used
+/// to run beside it. Issue #1328's joint SVF flush (`flush_pair`, 10 lane-ops for the two state
+/// words under amendment A9, its threshold loaded from the rest plane, against 6 for two `flush`)
+/// raised `svf_step` from 19 to 23 on every block until the follow-up gave the EQ an unarmed form:
+/// a block of live audio, on which no lane holding state can arm, runs the per-word flush
+/// (`lane::kernels::svf_step_when` with `armable = false`), so this is 27 again (31 under amendment
+/// A9 before the follow-up, 34 under amendment A8). The input's silence counter costs nothing per
+/// lane-sample on live audio: it advances once per block (`lane::kernels::silence_skip_block`, one
+/// last-frame compare); on a block that can arm the sections cost 28 and the rest plane 5 more.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "EQ inventory".
-const EQ_LANE_OPS: f64 = 31.0;
+const EQ_LANE_OPS: f64 = 27.0;
 /// Required arithmetic per lane-sample, true-peak limiter, post-round-1 uniform-cohort shape.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
@@ -648,9 +650,9 @@ input as $rust |
         // compressor inventory. The limiter's shared link has the same accounting shape.
         assert_eq!(COMPRESSOR_LANE_OPS, 81.5);
         assert_eq!(LIMITER_LANE_OPS, 129.5);
-        assert_eq!(EQ_LANE_OPS, 31.0);
+        assert_eq!(EQ_LANE_OPS, 27.0);
         let console = floor_row(Workload::SixtyFourTrackConsole).expect("derived console row");
-        let expected = (69.0 + 31.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
+        let expected = (69.0 + 27.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
         assert!((console.cycles_per_lane_sample() - expected).abs() < 1.0e-12);
         let compressor = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("compressor");
         let builtins = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("builtins");

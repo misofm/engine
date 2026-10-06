@@ -204,7 +204,7 @@ pub const REST_EPS: f32 = 1.0e-14;
 ///
 /// A time, not one frame count, because the measurement said so: at the ruling's first choice,
 /// 1,024 frames at every rate, a sparse signal whose gaps just exceed the window loses more than
-/// one tail's worth (four +24 dB 10 Hz shelves: 1.1e-9 to 1.3e-9 at the four rates, against the
+/// one tail's worth (four +24 dB 10 Hz shelves: 1.1e-9 to 1.7e-9 at the four rates, against the
 /// 3.48e-10 one tail can lose), and the window needed to bring it back to one tail is a time
 /// (about 85 ms at every rate), not a count. [`silence_frames`] derives each rate's frames; the
 /// measurement and the residual at each launch rate are in `dsp-research/filters.md` (numerical

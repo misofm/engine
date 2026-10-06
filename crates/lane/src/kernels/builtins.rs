@@ -538,8 +538,8 @@ pub struct InputChainCoef<L: Lane> {
 /// bodies, as the filter-ramp countdown is ([`INPUT_FILTER_LEADING_UPDATES`]): on Apple targets
 /// LLVM stores a splatted constant through a `memset_pattern16` call inside the render function
 /// (known defect #1018, whose per-crate ceilings `check-cross-targets.sh` holds), and each chain
-/// body runs in two copies, one for blocks in which some lane's silence counter can arm the joint
-/// flush and one for every other block (issue #1328, amendment A9). The words are the constants;
+/// body runs in two copies, one for blocks in which some lane that holds state can arm the joint
+/// flush ([`channel_arms`]) and one for every other block (issue #1328, amendment A9). The words are the constants;
 /// [`InputChainConstants::new`] is the only constructor a caller should use.
 #[derive(Clone, Copy)]
 pub struct InputChainConstants<L: Lane> {
@@ -657,8 +657,9 @@ pub fn input_chain_block<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_block`]; `ARMABLE = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+/// The body of [`input_chain_block`]; `armable = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
+/// ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_block_body<L: Lane>(
@@ -816,8 +817,9 @@ pub fn input_chain_ramp_block<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block`]; `ARMABLE = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+/// The body of [`input_chain_ramp_block`]; `armable = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
+/// ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_body<L: Lane>(
@@ -930,8 +932,9 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block_mono`]; `ARMABLE = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+/// The body of [`input_chain_ramp_block_mono`]; `armable = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
+/// ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_mono_body<L: Lane>(
@@ -1069,8 +1072,9 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block_filter`]; `ARMABLE = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+/// The body of [`input_chain_ramp_block_filter`]; `armable = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
+/// ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_filter_body<L: Lane>(
@@ -1323,8 +1327,9 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_ramp_block_filter_mono`]; `ARMABLE = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+/// The body of [`input_chain_ramp_block_filter_mono`]; `armable = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
+/// ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_ramp_block_filter_mono_body<L: Lane>(
@@ -1845,7 +1850,7 @@ fn dispatch_mixed_channel<L: Lane>(
     }
 }
 
-/// [`dispatch_mixed_channel`]'s shape choice, at a known `ARMABLE`.
+/// [`dispatch_mixed_channel`]'s shape choice, for a known `armable`.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn dispatch_mixed_shape<L: Lane>(
@@ -2016,8 +2021,9 @@ pub fn input_chain_block_mono<L: Lane>(
     }
 }
 
-/// The body of [`input_chain_block_mono`]; `ARMABLE = false` runs no silence counter and the per-word
-/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+/// The body of [`input_chain_block_mono`]; `armable = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_when`]`(false, ..)`), for a block in which no lane needs the armed form
+/// ([`channel_arms`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn input_chain_block_mono_body<L: Lane>(

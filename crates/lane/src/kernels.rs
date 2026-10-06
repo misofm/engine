@@ -41,8 +41,10 @@ use crate::{FLUSH_EPS, Lane, flush, flush_pair_with, flush_with, silence_step};
 /// ..)`: the two per-word [`flush`]es, no load and no joint term. The two forms are the same bits
 /// on a block whose thresholds are all `+0.0`, because `flush_pair(n1, n2, +0.0)` is
 /// `(flush(n1), flush(n2))`: no magnitude and no NaN compares below `+0.0`. The caller chooses the
-/// form once per block ([`crate::silence_armable_holding`]), so live audio pays the per-word law's
-/// cost and nothing for the rule.
+/// form once per block ([`crate::silence_armable_holding`]), so a block of live audio runs the
+/// per-word law's frame loop with no threshold and no joint term; the rule's remaining cost there
+/// is the caller's armability test and [`silence_skip_block`]'s last-frame check, once per block
+/// per channel, plus a whole-block zero scan when a silent or padding lane shares the bank.
 ///
 /// The choice is a type, so each instantiation of a kernel holds one form's frame loop and nothing
 /// else; a caller that runs both forms instantiates its block body twice. Such a caller passes
@@ -1084,9 +1086,10 @@ pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, rest: L, s: &mut SvfState<
 ///
 /// `armable = true` is [`svf_step`] bit for bit. `armable = false` is for a block in which no lane's
 /// silence counter can reach `N_SILENCE` ([`crate::silence_armable`]), so every threshold is
-/// `+0.0`: step 6 is then two per-word [`flush`]es and `rest` is not read, which is the same bits,
-/// because `flush_pair(n1, n2, +0.0)` is `(flush(n1), flush(n2))` (no magnitude and no NaN compares
-/// below `+0.0`), and four lane-ops fewer. A frame loop calls it with a block-constant `armable`, so
+/// `+0.0`, or in which every lane that can arm is at rest ([`crate::silence_armable_holding`]):
+/// step 6 is then two per-word [`flush`]es and `rest` is not read, which is the same bits, because
+/// `flush_pair(n1, n2, +0.0)` is `(flush(n1), flush(n2))` (no magnitude and no NaN compares below
+/// `+0.0`) and a lane at rest has nothing for the joint term to zero, and four lane-ops fewer. A frame loop calls it with a block-constant `armable`, so
 /// the compiler unswitches the loop into the two forms.
 ///
 /// `flush_eps` must be [`FLUSH_EPS`] on every lane. It is a parameter so that the builtin input
