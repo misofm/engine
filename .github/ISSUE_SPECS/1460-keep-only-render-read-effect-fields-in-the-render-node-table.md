@@ -68,6 +68,8 @@ by node. Adding a control-only field to the metadata (as #1377 does with `tail_e
   `crates/graph-compiler/src/lib.rs` (its test mirror only) (Stream A's; named exception)
 - Resource fixtures whose recorded bytes include the runtime op size, each re-pinned with its
   reason in the attempt record (the attempt record lists them)
+- `crates/host-core/src/response.rs`, its test module only (the gate-4 test; attempt 1 found that
+  no existing test reaches the prepared-bypass path)
 - `docs/handoffs/decision-15-2026-10-05/STREAMS.md` (the hot-file note and the Stream G row)
 - `.github/ISSUE_SPECS/1377-*.md` (Amendment 2), this spec
 
@@ -104,14 +106,85 @@ by node. Adding a control-only field to the metadata (as #1377 does with `tail_e
 
 ## Test value
 
-- No new test is planned. The two plausible defects are each covered by an existing test, which
-  the attempt record proves by mutation: a wrong `quantum` in `EffectNode::new` (every per-node
-  effect render refuses the block) and a wrong `prepared_bypass` source (the snapshot of a
-  prepared-bypass effect reports the wrong state or is refused). If a mutation is green, the
-  attempt adds the discriminating test and records it red on the mutation.
+- `response::tests::a_per_node_effect_snapshot_reports_its_prepared_bypass` (host-core, added in
+  attempt 1): a snapshot row whose prepared bypass comes from the wrong place (the moved field
+  filled with `false`) is red; with that mutant, every test of `graph`, `graph-compiler`,
+  `host-core`, `capi`, `host-web`, `builtins-compiler` and `effect-compiler` stayed green.
+- A wrong `quantum` in `EffectNode::new` that is smaller than the plan quantum is caught by the
+  existing graph tests (every per-node effect render refuses the block). A larger one is not
+  caught and cannot be: `EffectProcessBlock::new` uses the quantum only as an upper bound on the
+  block's frames, and the plan's blocks never exceed the prepared quantum.
 
 ## Dependencies
 
 - None open. #1377 depends on this slice.
 
 ## Attempt record
+
+### Attempt 1 (2026-10-06)
+
+Commits on `codex/d15-stream-g`: `23a32823a` (#1377 attempt 1 reverted, history kept; workspace
+clippy clean at that point), `fcb7151b7` (this spec, #1377 Amendment 2, STREAMS.md), `0427e8647`
+(implementation), `d9441fb2b` (the gate-4 test). GitHub issue #1460 was created with the spec as
+filed; this record is local until root syncs it.
+
+**What changed.** `runtime::EffectNode { processor, quantum }` is `NodeKind::Effect`'s payload and
+`LiveControlEffect::effect` (D1). `GraphPreparedEffect` keeps its shape and is documented as the
+plan's control-side record; bind reads `automation_capacity`, `latency` and the window check from
+it, as before, then moves only the processor and `quantum` (D2). `ResponseOwnerFacts` replaces the
+`(bool, &'static str)` response map value and carries `prepared_bypass` into
+`ResponseOwnerBinding` (D3). `graph::EFFECT_RENDER_NODE_BYTES` replaces
+`size_of::<GraphPreparedEffect>()` in `graph-compiler`'s live-control owner charge and its test
+mirror (D4).
+
+**Gate 2, sizes** (x86-64, `size_of`, debug and release equal; measured with a temporary test that
+was removed before the commit):
+
+| Type | Before | After |
+|---|---|---|
+| `NodeKind` | 200 | 32 |
+| `RuntimeOp` | 280 | 112 |
+| `RuntimeUnit` | 280 | 248 (the `Bank` variant now sets it) |
+| `LiveControlEffect` (boxed) | 304 | 128 |
+| `ResponseOwnerBinding` | 72 | 72 (`prepared_bypass` sits in padding) |
+| `GraphPreparedEffect` (control side, unchanged) | 200 | 200 |
+| `EffectNode` (new) | -- | 24 |
+
+**Gate 1, bit identity** (one-time, not committed). Base = `23a32823a`'s `crates/graph` and
+`crates/graph-compiler` checked out over head, rebuilt, and run beside head:
+`audit capi` gives `pcm_digest` `cb10fbface44a3a4` on both and the whole JSON record is identical
+(no resource count moved); `graph_fixture` output is byte-identical. At head:
+`graph_fixture --check`, `conformance_fixtures --check`, `check-graph-determinism.sh` (100/100),
+`check-builtins-fixtures.sh` and `check-browser-expected-resources.py --artifacts` ("expected.json
+digests and exact rows agree with the built simd128 module") pass against the committed values.
+No fixture, digest or resource count was re-pinned.
+
+**Gate 3.** `audit capi`: 0 allocations, 0 deallocations, 0 syscalls, 0 violations.
+`check-realtime-policy.sh` passes. `execute_op` reads `effect.quantum` and `effect.processor`
+inline in the op, as it read `effect.metadata.quantum` before; no pointer step was added.
+
+**Gate 4.** No render-owned struct holds `PreparedEffectMetadata`: `NodeKind` and
+`LiveControlEffect` hold `EffectNode`; the snapshot's prepared bypass reads the binding row.
+
+**Gate 5.** `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
+[--all-features] -- -D warnings` (both, no allow added); `RUSTDOCFLAGS='-D warnings' cargo doc
+--locked --workspace --no-deps`; test-debug-a and test-debug-b (the `qualification.yml`
+commands); `check-workspace-policy.sh`, `check-lane-policy.sh`; `check-capi-abi.sh` and its
+`--self-test`; `check-cross-targets.sh` (PASS, the known #1018 iOS memset rows only);
+`run-wasm-gates.sh --without-v8-spill --without-native`; the worklet chain (build into fresh
+output directories, `strip-wasm-names.py check`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh`). All pass. AArch64 runs in CI
+only.
+
+**Mutation evidence.**
+
+| Mutant | Result |
+|---|---|
+| `prepared_bypass: false` for every per-node effect (`RuntimeParts::new`) | Green on every test of `graph`, `graph-compiler`, `host-core`, `capi`, `host-web`, `builtins-compiler`, `effect-compiler`; red on the new `a_per_node_effect_snapshot_reports_its_prepared_bypass` (`left: false, right: true`); green after revert, and green on the base code |
+| `quantum: metadata.quantum / 2` in `EffectNode::new` | Red: 8+ graph tests (for example `enabled_and_bypass_pdc_align_at_launch_rates_and_quanta`, `fifty_random_dag_sessions_render_deterministic_nonsilent_pcm`) |
+| `quantum: metadata.quantum + 1` | Green, and benign (Test value) |
+
+**Open.** The GitHub body of #1460 does not carry this record or the Authorized-paths and
+Test-value updates above (one `gh issue create` was authorized). #1377 re-applies `d0af9d53d` on
+top of this slice.
