@@ -324,10 +324,9 @@ pub fn silence_block<L: Lane>(
 ///    silent or padding lane therefore keeps the scan running over the whole block.
 ///
 /// The live form is inlined into each caller; the scan is one outlined function per lane width
-/// (`silence_skip_settle`). The outlining was chosen while every constant vector cost a
-/// `memset_pattern16` call on `aarch64-apple-ios` (#1018). #1451 removed that cause at
-/// [`Lane::splat`] and [`Lane::zero`], so a constant vector no longer makes the call; the
-/// outlining stays as it is.
+/// (`silence_skip_settle`), because inlined at every call site it multiplies the callers' code (the
+/// builtins input stage's `simd128` body by about a third) for no measured render-time gain
+/// (#1452, undo 6).
 #[inline(always)]
 pub fn silence_skip_block<L: Lane>(input: &[f32], frames: usize, run: &mut L) {
     if frames == 0 {
