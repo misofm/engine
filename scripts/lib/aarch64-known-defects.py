@@ -68,7 +68,9 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # `FaderMuteRampBuiltins::new`), `host-core` 4 (`SpectrumAnalyzer::analyze` and
 # `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each), `soft-clip` 1
 # (the test corpus's `fill`) and `true-peak-limiter` 6 (three `fill(1.0)` in `clear_runtime`, which
-# also runs at a reset and on a failed block, and three in `ChannelState::new`).
+# also runs at a reset and on a failed block, and three in `ChannelState::new`). #1452 undid the
+# shapes chosen only for this ratchet where the natural shape was better; no row moved, and the
+# limiter's `clear_runtime` stays out of line because inlining it adds three calls (6 -> 9).
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "builtins": ("1018", 5),
     "host-core": ("1018", 4),
