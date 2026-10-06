@@ -116,6 +116,13 @@ render node, `LiveControlEffect`'s effect field, the response row's prepared byp
 `crates/graph-compiler/src/lib.rs`) by named exception. It lands before any stream A graph slice
 and before G #1377, which needs it (#1377 Amendment 2); A rebases onto it.
 
+Hot-file note (2026-10-06, root ruling): G #1461 (*Keep each effect processor's render memory free
+of its prepared metadata*) edits the eight effect crates' `src/lib.rs` (each prepared processor's
+metadata copy and `metadata()`), `crates/effect-contract/src/lib.rs` and
+`crates/effect-compiler/src/prepare.rs` by named exception. It lands after G #1377 and after any
+#1409-family slice already landed (#1409, #1411; #1458 if landed first), and before G #1372-#1376,
+which rebase onto it.
+
 ## Stream S0
 
 - **Coordinator scope:** Decisions and specs (root).
@@ -296,16 +303,17 @@ and before G #1377, which needs it (#1377 Amendment 2); A rebases onto it.
 | 25 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
 | 26 | #1460 | Keep only render-read effect fields in the render node table | — | — |
 | 27 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329, #1460 | — |
-| 28 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 29 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 30 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 31 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
-| 32 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 33 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 34 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
-| 35 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
-| 36 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
-| 37 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 28 | #1461 | Keep each effect processor's render memory free of its prepared metadata | #1377 | — |
+| 29 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 30 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
+| 31 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 32 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
+| 33 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
+| 34 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 35 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
+| 36 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
+| 37 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
+| 38 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
 
 ## Stream H
 
