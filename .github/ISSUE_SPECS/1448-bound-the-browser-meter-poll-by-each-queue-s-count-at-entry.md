@@ -366,3 +366,92 @@ spec is tool slice B2b-1's "#1448 guard" section.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-06, branch `codex/d15-stream-h`, parent `b55968d0d`)
+
+**Change** (`98d4a1534`). `hosts/host-web/src/lib.rs`: D1's `METER_QUEUE_DEPTH` (used by
+`live_control_request`); D2's `meter_remaining: Box<[usize]>` beside `meter_pending`, built with
+one `0` per meter in `compile_ready`, charged as `remaining_meter_bytes` (checked, the
+`web.resource.arithmetic` diagnostic) into `meter_delivery_bytes` and the largest-allocation row;
+`poll_meters`'s capacity-summed `drain_budget`/`popped` loop replaced by D2's set loop, the
+`1 + Σ remaining` passes and the guarded, pre-decremented pop. D3's checks are unchanged.
+No marker, no floor (root ruling (C)). `hosts/host-web/src/tests.rs`: `bus_meter_host` now calls
+`bus_meter_host_with(quantum, buses, 2, 64)`; D6's new test
+`meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows`.
+
+**Gate 1.** `cargo test --locked -p host-web --features test-support`: 188 passed, 2 ignored, 0
+failed (lib), plus the integration targets green. Every existing meter test unchanged and green.
+
+**Gate 2 (mutation runs, `cargo test ... --lib meter`).**
+- Mutant (a), the three `continue`s become `return 0`: the new test is red at block 11
+  (`tests.rs:5799`, "block 11: one window published", left 0, right 1);
+  `meter_lease_reacquisition_waits_for_a_clean_boundary` red at `tests.rs:5364` and
+  `meter_reacquisition_rejects_a_full_stale_queue_then_recovers` red at `tests.rs:5400`.
+- Mutant (min), mode 1 (`available = min(METER_QUEUE_DEPTH, available_at_entry + held)`,
+  `for _ in 0..available`, no per-queue guard): only the new test is red, at block 11 (the same
+  assertion, left 0, right 1); the other 16 meter tests stay green.
+- Parent (`b55968d0d`'s `lib.rs` with this `tests.rs`): all 17 meter tests green, the new test
+  among them. Head: green.
+
+**Gate 3 (D7 driver).** Scratch `vconfirm.rs` (sha256 `46d3d801…a45c`), declared from
+`tests.rs` by one line, run at the parent's `lib.rs` and at the change, then removed. Each line
+records poll index, return value, every header field in hex, every frame word's bits and the
+backlog; each run ends with the poll count, `meter_loss_count` and the published `reserved[1]`.
+The probes are the fourth review's, with modes removed; the injection driver is D7's (track 0's
+compressor kept and observed on tap 1; gain-reduction words non-zero in all three runs).
+
+| run | polls | windows published | final loss (`meter_loss_count` / published) | sha256 (parent = change) |
+|---|---|---|---|---|
+| `vc_trace_gap_backlog` | 90 | 84 | 33 / 33 | `a39eeaee…eec6` |
+| `vc_precise_trace` | 16 | 15 | 6 / 6 | `c30aefe9…190d` |
+| `vc_random_backlog` | 8000 | 7821 | 948 / 948 | `d1b55c1b…52fb` |
+| `vc_d6` scenario | 3 | 1 | 5 / 5 | `30768f33…c535` |
+| injection, meter blocks 1 | 109 | 99 | 8 / 8 | `925c6370…71820` |
+| injection, meter blocks 2 | 102 | 52 | 6 / 6 | `560fdeac…e689e64` |
+| injection, meter blocks 12 | 102 | 12 | 6 / 6 | `37454e93…f1ca063` |
+
+`diff -r` of the two output trees: identical. Discrimination check: the same driver against
+mutant (min) differs from the change in all seven files.
+
+**Gate 4.** Head build (`build-web-audioworklet.sh --named-twin`): shipped module
+`d1011340…98e4e5`; `strip-wasm-names.py check`, `check-web-audioworklet.sh
+--without-metadata-regeneration` (call graph on `meter_poll`), `check-browser-expected-resources.py
+--artifacts` (every row within budget; `expected.json` unchanged, no pin moved),
+`check-scalar-oracle-absent.py --wasm`, the V8 spill gate (self-test and module) and
+`test-web-audioworklet.sh` (private TMPDIR, left empty) all exit 0. Browser legs
+(`npm run qualify -- ... --check-matrix --self-test-mutations`, `sdk/dist` absent): chromium
+151.0.7922.34, firefox 153.0 and webkit 26.5 all pass; `render-allocations` reads 0 on every row.
+Closure comparison (`mtr-closure-offset-cmp.py`, base twin from `git archive b55968d0d`):
+
+```
+miso_engine_web_v1_render: closure 24 vs 24
+  offset-only [8] ReadyOwnership::push_master_window
+  offset-only [8] AudioWorkletEngineHost::render_next
+  offset-only [8] miso_engine_web_v1_render
+miso_engine_web_v1_command_submit: closure 80 vs 80
+  offset-only [8] admit_commands
+  offset-only [8] prepared_queue_address
+  offset-only [8] ReadyOwnership::push
+  offset-only [8] AudioWorkletEngineHost::submit_commands_inner
+miso_engine_web_v1_meter_poll: closure 25 vs 25
+  offset-only [8] ReadyOwnership::pop_master_window
+  offset-only [8] ReadyOwnership::reset_meter_delivery
+  BODY AudioWorkletEngineHost::poll_meters
+```
+
+(Names shortened from their mangled form.) No function on one side only; every delta +8. The
+render and `command_submit` lists match the spec's expected lists; the export
+`miso_engine_web_v1_render` itself is also `offset-only` +8 (it reads a `ReadyOwnership` field
+offset), which the spec's expected list did not name. The script counts 24 and 80 functions where
+the spec says 25 and 81; the sets agree on both sides. The boot/teardown functions the spec lists
+for `meter_poll` (`compile_ready`, `ffi::boot_staged`, drop glue, the collect instances,
+`project_buffers`) are not in the closure the script computes, so they do not appear.
+
+**Gate 5.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`, `bash scripts/check-realtime-policy.sh` ("89 marked regions in 25
+files", `poll_meters` unmarked) and `bash scripts/check-workspace-policy.sh` exit 0.
+
+**Test value.** `meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows` is the only test
+red on mutant (min), the lasting one-window lag at meter blocks 1.
