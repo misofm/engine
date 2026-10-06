@@ -259,6 +259,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_prepared_companion_capacity \
   miso_engine_web_v1_prepared_companion_ptr \
   miso_engine_web_v1_render \
+  miso_engine_web_v1_render_allocation_count \
   miso_engine_web_v1_response_close \
   miso_engine_web_v1_response_effect_id_capacity \
   miso_engine_web_v1_response_effect_id_ptr \
@@ -471,11 +472,19 @@ fi
 # (`EIGHT_LANE` in the analyser). The browser runs four lanes only and #1110 took eight out of the
 # wasm build, so such a name is code no browser can execute coming back; the module at `7d030945`
 # carried 29 and fails this rule.
+#
+# Issue #1333 D4: `--render-thread` adds three rules over the same closure of each of the three
+# render-thread exports below -- no thread-local destructor registration, no `memory.atomic.wait`,
+# and `call_indirect` sites exactly equal to the analyser's pinned `INDIRECT_SITES` table, each
+# entry with its reason. The direct-call gate cannot see past an indirect call (the plan executor
+# is a `Box<dyn PreparedPlanExecutor>`); the browser qualification's render-locked allocation count
+# is the proof through it, and this table makes any new dynamic dispatch on the render thread a
+# reviewed change.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
 printf '%s
 ' "$named_disassembly" |
-  python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
+  python3 -B "$callgraph" --callgraph miso_engine_web_v1_render --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
@@ -492,14 +501,15 @@ printf '%s
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
-    --trap-owner 22AudioWorkletEngineHost11poll_meters || exit 1
+    --trap-owner 22AudioWorkletEngineHost11poll_meters --render-thread || exit 1
 # `command_submit` runs in `port.onmessage`, not in `process()`, and its pan-law conversion
 # reaches `math`'s vendored argument reduction, which is full of checked indices. The
 # engine's rule for the control path is "never allocate on the render thread", so the allocation
 # half is what this export is held to -- and it is held to it absolutely.
 printf '%s
 ' "$named_disassembly" |
-  python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only || exit 1
+  python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only \
+    --render-thread || exit 1
 
 # #137 D3 amends the browser-capability ban deliberately.
 #

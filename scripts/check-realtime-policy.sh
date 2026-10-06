@@ -23,10 +23,12 @@ realtime_root="crates/engine/src/realtime"
 # (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point Control Register).
 # Issue #240's exact `boot_transient_budget.rs` fixture owns a `GlobalAlloc` forwarding wrapper so
 # it can measure the parser/model-builder high-water mark; it changes no allocation operation and
-# is the only non-FFI web-host file admitted here.
+# is one of the two non-FFI web-host files admitted here. Issue #1333's `render_lock.rs` is the
+# other: the browser module's `GlobalAlloc` forwarding wrapper, which counts allocator calls made
+# inside the worklet's render-locked windows and forwards every operation unchanged.
 # `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", carries the full justification.
 unsafe_raw="$(gate_scan_collect 'unsafe source scan' 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' '*.rs' crates hosts tools)" || exit $?
-unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/capi/tests/plan_swap_race.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/wasm-gate-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
+unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/capi/tests/plan_swap_race.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/src/render_lock.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/wasm-gate-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"
