@@ -55,10 +55,10 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter`), `docs/rulings/builtins-input-liveness-d2.md` (#808 paragraph) | G #1407 → G #1329 → F (#1268, #1262) |
 | `crates/lane/src/kernels.rs` (`ramp_block`, the `ramp_toward` re-export), `crates/effect-runtime/src/ramp.rs`, `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`), the effect ramp render bodies (compressor `RampVec`/`advance_ramps`, gate `channel_step`, multiband `Segment`/`run_segment`, delay `LaneChunk`/`CrossChunk`/`delay_chunk`, soft clip `SoftClipCoef`/`soft_clip_block`/`process`, limiter `RampLanes`) | G #1409 → A (#1279, #1280, #1282) → G (#1336, #1338, #1370); G #1455 (multiband `run_segment` and its per-segment dispatch) after #1409, in either order with #1338 (neither depends on the other), the later slice rebases |
 | `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`'s walk, `ramp_path_within`), the effect payload readers' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid`), their restore-refusal test rows (delay `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`, limiter restore corruptions, `crates/compressor/tests/payload.rs`), soft clip's overshoot restore tests (`tests/state_roundtrip.rs`, `tests/randomized.rs`), `crates/delay/tests/MUTATIONS.md` (M18, M19), the #1301 spec | J #1301 → G #1409 → G #1411 (#1409 and #1411 in one Stream G pull request); A's carry slices (#1279, #1280, #1282) and that pull request in either order, the second rebases |
-| `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → G #1377 → B (#1315, #1345) → G (#1339, #1340, #1378); F #1306 after B #1345, either order with G, the second rebases. #1377 goes first (root, 2026-10-06, #1377 Amendment 1): B and G's other slices are blocked, and #1377's edit is one comparison and one test; the later slices rebase |
+| `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → G #1377 → G #1461 → G #1462 → B (#1315, #1345) → G (#1339, #1340, #1378); F #1306 after B #1345, either order with G, the second rebases. #1377 goes first (root, 2026-10-06, #1377 Amendment 1): B and G's other slices are blocked, and #1377's edit is one comparison and one test; the later slices rebase. #1461 and #1462 follow #1377 by the same reason and land before #1372 (root, 2026-10-06) |
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1418 (two region markers around `drain_controls`) and J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346 |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
-| `crates/effect-contract/src/lib.rs` | J #1330 → G #1377; G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
+| `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 → G #1461 → G #1462 (root, 2026-10-06; both before #1372); G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
 | `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349 |
 | `crates/engine/src/realtime/plan.rs` | B #1311 → H #1400 → C #1396 → H #1381 |
 | `crates/engine/src/realtime/spsc.rs` | B (#1343, #1311) → C #1320 (`peek` only) |
@@ -304,16 +304,17 @@ which rebase onto it.
 | 26 | #1460 | Keep only render-read effect fields in the render node table | — | — |
 | 27 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329, #1460 | — |
 | 28 | #1461 | Keep each effect processor's render memory free of its prepared metadata | #1377 | — |
-| 29 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 30 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 31 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 32 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
-| 33 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 34 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 35 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
-| 36 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
-| 37 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
-| 38 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 29 | #1462 | Compute and validate each effect's tail bound once per rate and quality at registry build | #1377 | — |
+| 30 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 31 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
+| 32 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 33 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379, #1461, #1462 | — |
+| 34 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379, #1461, #1462 | — |
+| 35 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 36 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379, #1461, #1462 | — |
+| 37 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379, #1461, #1462 | — |
+| 38 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379, #1461, #1462 | — |
+| 39 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
 
 ## Stream H
 

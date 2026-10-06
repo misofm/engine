@@ -63,6 +63,29 @@ control side.
 4. The test effects updated.
 5. The PR evidence: per-effect processor sizes before and after, and the differential (gate 1).
 
+## Amendment 1 (root rulings, 2026-10-06, after #1377's verdict)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), after the #1377 verifier found this spec's scope too small
+(`/home/bl/misofm/submix-verdicts/1377-attempt1.md`, Items for ROOT 4):
+
+- **A1. Every reader moves.** Removing the processor trait's `metadata()` also reaches the bank
+  `metadata()` readers in `crates/rack/src/lib.rs` (`:781`, `:812`, `:820`, `:1005`, `:1023`,
+  `:1059` at `38ef4fe7a`) and `crates/graph/src/runtime.rs:4888`, the test implementations in
+  `crates/compressor/tests/native_points.rs`, `crates/effect-compiler/tests/native_session.rs`,
+  `crates/rack/tests/live_control_bank.rs` and `tools/console-workload/tests/paired_spans.rs`, and
+  about 45 effect-crate test files (`tests/` directories and `padding_tests.rs`) that call
+  `.metadata()` on a prepared processor. Each reads the control-side metadata (the prepare result
+  or the prepared plan's table). **No non-render accessor is kept for tests.**
+- **A2. Authorized paths widen** to those files (re-grep `metadata()` at start and list every file
+  in the attempt record), `crates/rack/src/lib.rs` and `crates/graph/src/runtime.rs` (the readers
+  only).
+- **A3. Split if large.** If the work exceeds half a working day, split before implementation:
+  slice 1 the trait, the prepare result and every production reader; slice 2 the test migrations.
+  Both keep this issue's gates.
+- **A4. Order.** #1461 is a dependency of #1372-#1376 and sits in the `effect-compiler/src/prepare.rs`
+  and `effect-contract/src/lib.rs` hot-file rows after #1377 (STREAMS updated).
+
 ## Authorized paths (named exceptions)
 
 - `crates/effect-contract/src/lib.rs` (the prepare result and the processor trait)
