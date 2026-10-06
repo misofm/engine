@@ -371,6 +371,10 @@ spec is tool slice B2b-1's "#1448 guard" section.
 
 ### Attempt 1 (implementer, 2026-10-06, branch `codex/d15-stream-h`, parent `b55968d0d`)
 
+*Verdict: FAIL on one MAJOR (the pass loop's `.zip(<fields>.iter_mut())` steps are not D2's
+`.zip(&mut <fields>)` form). The record below is kept as written; the places that Attempt 2
+corrects are marked "superseded".*
+
 **Change** (`98d4a1534`). `hosts/host-web/src/lib.rs`: D1's `METER_QUEUE_DEPTH` (used by
 `live_control_request`); D2's `meter_remaining: Box<[usize]>` beside `meter_pending`, built with
 one `0` per meter in `compile_ready`, charged as `remaining_meter_bytes` (checked, the
@@ -385,7 +389,7 @@ No marker, no floor (root ruling (C)). `hosts/host-web/src/tests.rs`: `bus_meter
 failed (lib), plus the integration targets green. Every existing meter test unchanged and green.
 
 **Gate 2 (mutation runs, `cargo test ... --lib meter`).**
-- Mutant (a), the three `continue`s become `return 0`: the new test is red at block 11
+- Mutant (a), the three `continue`s (superseded: two, see Attempt 2) become `return 0`: the new test is red at block 11
   (`tests.rs:5799`, "block 11: one window published", left 0, right 1);
   `meter_lease_reacquisition_waits_for_a_clean_boundary` red at `tests.rs:5364` and
   `meter_reacquisition_rejects_a_full_stale_queue_then_recovers` red at `tests.rs:5400`.
@@ -408,9 +412,9 @@ compressor kept and observed on tap 1; gain-reduction words non-zero in all thre
 | `vc_precise_trace` | 16 | 15 | 6 / 6 | `c30aefe9…190d` |
 | `vc_random_backlog` | 8000 | 7821 | 948 / 948 | `d1b55c1b…52fb` |
 | `vc_d6` scenario | 3 | 1 | 5 / 5 | `30768f33…c535` |
-| injection, meter blocks 1 | 109 | 99 | 8 / 8 | `925c6370…71820` |
-| injection, meter blocks 2 | 102 | 52 | 6 / 6 | `560fdeac…e689e64` |
-| injection, meter blocks 12 | 102 | 12 | 6 / 6 | `37454e93…f1ca063` |
+| injection, meter blocks 1 | 109 | 99 | 8 / 8 | `925c6370…71820` (superseded: wrong suffix, see Attempt 2) |
+| injection, meter blocks 2 | 102 | 52 | 6 / 6 | `560fdeac…e689e64` (superseded: wrong suffix, see Attempt 2) |
+| injection, meter blocks 12 | 102 | 12 | 6 / 6 | `37454e93…f1ca063` (superseded: wrong suffix, see Attempt 2) |
 
 `diff -r` of the two output trees: identical. Discrimination check: the same driver against
 mutant (min) differs from the change in all seven files.
@@ -441,11 +445,12 @@ miso_engine_web_v1_meter_poll: closure 25 vs 25
   BODY AudioWorkletEngineHost::poll_meters
 ```
 
-(Names shortened from their mangled form.) No function on one side only; every delta +8. The
-render and `command_submit` lists match the spec's expected lists; the export
-`miso_engine_web_v1_render` itself is also `offset-only` +8 (it reads a `ReadyOwnership` field
-offset), which the spec's expected list did not name. The script counts 24 and 80 functions where
-the spec says 25 and 81; the sets agree on both sides. The boot/teardown functions the spec lists
+(Names shortened from their mangled form; superseded: Attempt 2 gives the full output.) No
+function on one side only; every delta +8. The render and `command_submit` lists match the spec's
+expected lists; the export `miso_engine_web_v1_render` itself is also `offset-only` +8 (it reads a
+`ReadyOwnership` field offset), which the spec's expected list did not name (superseded: both
+claims are wrong, see Attempt 2). The script counts 24 and 80 functions where the spec says 25 and
+81; the sets agree on both sides (superseded: Attempt 2 gives the cause). The boot/teardown functions the spec lists
 for `meter_poll` (`compile_ready`, `ffi::boot_staged`, drop glue, the collect instances,
 `project_buffers`) are not in the closure the script computes, so they do not appear.
 
@@ -455,3 +460,127 @@ files", `poll_meters` unmarked) and `bash scripts/check-workspace-policy.sh` exi
 
 **Test value.** `meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows` is the only test
 red on mutant (min), the lasting one-window lag at meter blocks 1.
+
+### Attempt 2 (implementer, 2026-10-06, branch `codex/d15-stream-h`, on `a24d17768`)
+
+**Change** (`c037a87fe`, `hosts/host-web/src/lib.rs` only).
+- MAJOR-1: the set loop is `ready.meters.iter().zip(&mut ready.meter_remaining)` and the pass loop
+  is `ready.meters.iter_mut().zip(&mut ready.meter_pending).zip(&mut ready.meter_remaining)`, D2's
+  text. Checked against B1a-D8b (#1440): condition 2 (set loop, one statement, `.min(<cap>)`);
+  condition 4 (two `.zip(&mut <fields>)` steps, one `.zip(&mut <K>)`, no other adapter, pattern
+  `((meter, pending), remaining)`); condition 5 (first statement `if pending.is_some() ||
+  *remaining == 0 { continue; }`, second `*remaining -= 1;`, third holds the only pop, receiver
+  `meter.consumer`, `meter` and `remaining` named nowhere else); condition 6 (in the window `ready`
+  appears only as item 1 field paths, item 2 in the pass header, item 3 `ready.meters.get(index)`
+  in the `.all(..)` closure, item 4 the `passes` loop over `ready.meter_remaining.iter()` reading
+  only `*remaining`, and item 5 `ready.reset_meter_delivery(false);` followed by
+  `ready.meter_loss_count = 1;`, `self.meter_activation_sample = ..;`, `return 0;`; no macro in the
+  window). B1b-D1 (#1441): each `.zip` step is `&mut fields`, in its list.
+- NIT: `METER_QUEUE_DEPTH`'s comment names every strip queue, track or submix.
+- NIT: `poll_meters`'s comment said no bounds check is present. The call-graph gate reports
+  `traps=2` owned by `poll_meters`; the one `panic_bounds_check` call in its body (one at base, one
+  at head, by `wasm-objdump`) has its `Location` in the data section at
+  `crates/engine/src/realtime/spsc.rs:449:37`, the inlined `try_pop`'s `slots[self.local]`. The
+  comment now says that. No code changed for it.
+
+**Codegen of the spelling change.** A twin built from `a24d17768` (attempt 1's spelling) and one
+built from attempt 2's loops before the comment edit give the same shipped module,
+`cbec2e672ae1f05ac0a4f02540e65f9cbb0863b99c7cea7eaad284932c59be50`. With the comment edit (which
+moves later panic-location line numbers) the shipped module is
+`1dc7b08d6098226588ac03e7605f9c6f1311752c713e4846586eedcc0bf4bd21` (named twin `d4a9691e…271e`);
+`mtr-closure-offset-cmp.py` on the attempt-1 twin against it lists no differing function in any
+of the three closures (24/24, 80/80, 25/25).
+
+**Gate 1.** `cargo test --locked -p host-web --features test-support`: lib 188 passed, 2 ignored,
+0 failed; integration targets 2 + 1 + 1 passed. Every meter test unchanged and green.
+
+**Gate 2** (mutants regenerated against attempt 2's `lib.rs`, full suite, `--no-fail-fast`).
+- (a), the **two** `continue`s (gap/discontinuity block and invalid-span block; attempt 1 said
+  three) become `return 0`: 3 red, the new test at `tests.rs:5799` ("block 11: one window
+  published", left 0, right 1), `meter_lease_reacquisition_waits_for_a_clean_boundary` at `:5364`
+  and `meter_reacquisition_rejects_a_full_stale_queue_then_recovers` at `:5400`.
+- (min), mode 1: 1 red, the new test only, at `:5799` (block 11, left 0, right 1).
+- Parent: `b55968d0d`'s `lib.rs` with this `tests.rs`: all 17 meter tests green.
+
+**Gate 3** (D7 driver, `vconfirm.rs` sha256
+`46d3d80133af7b934e23485ec48d56e26ddb59e3c8cdd2a306162f73aeeaa45c`, parent `b55968d0d`'s
+`lib.rs` against attempt 2's). `diff -r` of the two output trees: identical. Full digests (parent =
+change); this corrects attempt 1's three injection rows:
+
+| run | polls | final loss (`meter_loss_count` / published) | sha256 |
+|---|---|---|---|
+| `vc_trace_gap_backlog` | 90 | 33 / 33 | `a39eeaeec70c395df4b3dc300356e6a2267c198ddc9c64ef7766d149b006eec6` |
+| `vc_precise_trace` | 16 | 6 / 6 | `c30aefe921fdca4a19c00a8242e64d1e0d0dd659cf9a9398f95a1d5153c5190d` |
+| `vc_random_backlog` | 8000 | 948 / 948 | `d1b55c1b1c9b6910d05d032840aa2aeeda3f4ff6d2b5b97c3b3a82e17aac52fb` |
+| `vc_d6` scenario | 3 | 5 / 5 | `30768f33af0ba16477a718e9dd6a5be1889ad65f57ce56102241c6962484c535` |
+| injection, meter blocks 1 | 109 | 8 / 8 | `925c6370f84b5bc1cc1a4c001443675b5af2213ea9a2368f4f268e135af1bbc3` |
+| injection, meter blocks 2 | 102 | 6 / 6 | `560fdeac49d00623364777cb97d302654f8bcee9bf18378e362b5e219a689e64` |
+| injection, meter blocks 12 | 102 | 6 / 6 | `37454e939901bea7ea27af23b6c2e3f1ca063d9b2cd7760761898c8f25d71820` |
+
+Discrimination: mutants (min) and (a) each differ from the change on all seven files.
+
+**Gate 4.** Base twin: `git archive a24d17768` with `b55968d0d`'s `lib.rs` (the change isolated
+from #1333's and #1449's follow-ups), shipped module `57bb4c3d…96a1`; head shipped module
+`1dc7b08d…bd21` (ARTIFACT CHANGED, as expected). `strip-wasm-names.py --self-test` and `check`,
+`check-web-audioworklet.sh --without-metadata-regeneration` (`meter_poll`: closure 9, traps 2, as
+at base), `check-browser-expected-resources.py --artifacts` (every row within budget; no tracked
+file changed, so no pin moved), `check-scalar-oracle-absent.py --wasm`, the V8 spill gate
+(self-test and module) and `test-web-audioworklet.sh` (private TMPDIR, left empty) exit 0. Browser
+legs (`npm run qualify -- ... --check-matrix --self-test-mutations`, `sdk/dist` deleted before and
+after): chromium 151.0.7922.34, firefox 153.0 and webkit 26.5 pass all qualification gates, and
+`render-allocations` is 0 on every row. `wasm-gates` G5/G6 were not run: `cargo tree` shows that
+`wasm-gates` and `wasm-gate-guest` do not depend on `host-web`, so this change cannot move them;
+the batch's CI runs them.
+
+Closure comparison, full output (`mtr-closure-offset-cmp.py`, sha256 `22e6a0ed…80ea`, base twin
+against head twin):
+
+```
+miso_engine_web_v1_render: closure 24 vs 24
+  offset-only [8] _RNvMs0_Cs_8host_webNtB5_14ReadyOwnership18push_master_window
+  offset-only [8] _RNvMs2_Cs_8host_webNtB5_22AudioWorkletEngineHost11render_next
+  offset-only [8] miso_engine_web_v1_render
+miso_engine_web_v1_command_submit: closure 80 vs 80
+  offset-only [8] _RNvCs_8host_web14admit_commands
+  offset-only [8] _RNvCs_8host_web22prepared_queue_address
+  offset-only [8] _RNvMs0_Cs_8host_webNtB5_14ReadyOwnership4push
+  offset-only [8] _RNvMs2_Cs_8host_webNtB5_22AudioWorkletEngineHost21submit_commands_inner
+miso_engine_web_v1_meter_poll: closure 25 vs 25
+  offset-only [8] _RNvMs0_Cs_8host_webNtB5_14ReadyOwnership17pop_master_window
+  offset-only [8] _RNvMs0_Cs_8host_webNtB5_14ReadyOwnership20reset_meter_delivery
+  BODY _RNvMs2_Cs_8host_webNtB5_22AudioWorkletEngineHost11poll_meters
+      @@ -2,9 +2,9 @@
+       local[3..5] type=i64
+      -local[6..13] type=i32
+      -local[14..15] type=i64
+      -local[16..19] type=i32
+      -local[20] type=i64
+      -local[21] type=i32
+      -local[22..23] type=f32
+      -local[24..25] type=i32
+      +local[6..14] type=i32
+      +local[15..16] type=i64
+      +local[17..18] type=i32
+```
+
+Corrections to attempt 1's reading of it:
+- `miso_engine_web_v1_render` is on the spec's render list (gate 4 names it first), so it is not a
+  deviation. It does not read a `ReadyOwnership` field: it reads `host.status()` and calls
+  `reject_output_quantum` or `render_next`. Its moved offsets (1608 and 1624, then 1616 and 1632,
+  measured on attempt 1's twins in the attempt-1 verdict's `render-export-deltas.txt`) are host
+  status fields placed after the inline `Option<ReadyOwnership>`, which grew by 8.
+- 24/80 (and 25 for `meter_poll`) against the spec's 25/81 is spec-anchor drift, not a gap: on the
+  `6d28a80ec` twins the same script counts 25/81/26. Between those twins and `b55968d0d`,
+  `__rdl_dealloc` left each closure and the dlmalloc functions became monomorphised in `host_web`
+  (#1333's allocator work), so each closure has one function less on both sides. The base and head
+  sets agree.
+- The boot/teardown functions that gate 4 names for `meter_poll` are not in that export's call
+  graph, so the script cannot list them.
+
+**Gate 5.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`, `cargo clippy --locked -p host-web --all-targets --features
+test-support -- -D warnings`, `bash scripts/check-realtime-policy.sh` ("89 marked regions in 25
+files", `poll_meters` unmarked) and `bash scripts/check-workspace-policy.sh` exit 0.
+
+**Test value.** Unchanged from attempt 1: `meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows`
+is the only test red on mutant (min), the lasting one-window lag at meter blocks 1.
