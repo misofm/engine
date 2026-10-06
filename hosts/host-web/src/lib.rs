@@ -7402,8 +7402,10 @@ pub use control_targets::{
     WebPreparedEffectCompanionRecord, WebPreparedEffectTarget,
 };
 mod ffi;
+mod render_lock;
 
 pub use ffi::*;
+pub use render_lock::RenderLockedAllocator;
 
 #[cfg(test)]
 mod tests;
