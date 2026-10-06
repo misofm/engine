@@ -104,6 +104,8 @@ three.
 ## Dependencies
 
 - *Carry each effect's tail and exact-rest bound in its prepared metadata* (#1377)
+- *Build the launch effect registry once per process and share it* (#1469): the shared registry
+  the tail derivations run behind, once per process
 - *Carry every node's tail bound in one node-neutral struct* (#1464) and *State a fixed input
   section's decay, gains and flush stall* (#1465): the carrier and the contract (#1379 Amendment 1,
   third round; D4 is restated to its H1: `D`, `G_p`, `G_t` and `sigma`, each for every sidechain
