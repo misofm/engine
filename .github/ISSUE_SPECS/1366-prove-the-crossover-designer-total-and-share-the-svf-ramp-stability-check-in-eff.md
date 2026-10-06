@@ -75,6 +75,8 @@ No rendered bit and no EQ refusal moves.
   #1337 edits other parts of this file, so rebase on whichever lands first)
 - Root-authorized batch follow-up (2026-10-06, attempt 1 verdict MINOR2):
   `.github/workflows/qualification.yml`, one step in the required `test-release` job only
+- Batch follow-up part B (2026-10-06, attempt 1 verdict NIT4, assigned by the stream G
+  coordinator): `crates/parametric-eq/tests/MUTATIONS.md`, row 18's location cell only
 
 ## Non-goals
 
@@ -185,3 +187,20 @@ contractive set; no existing test sweeps the domain.
   4.16 s (1 passed, the per-PR test filtered out by `--ignored`). The CI step time is pending-CI
   until the batch push. `check-ci-path-routing.py`, `test-ci-path-routing.py`,
   `check-test-support-ci.py`, `test-test-support-ci.py` and `check-workspace-policy.sh` exit 0.
+
+### Batch follow-up part B (2026-10-06, stream G; attempt 1 verdict MINOR1, NIT3, NIT4)
+
+Documentation only; no code, test or bit changes.
+- **MINOR1.** `crates/effect-runtime/src/svf.rs`'s module doc no longer says both effects meet
+  "the same preconditions" without qualification: `transition_norm` and `NORM_TOLERANCE` need only
+  `c1, a2, a3 < 1`, while `RAMP_PATH_NORM_TOLERANCE` also needs a ramp of at most 64 samples and a
+  step that is the remaining distance times an exact power of two (the EQ's `2^-6`), and a consumer
+  with another ramp re-derives the bound. The constant's doc gains the same preconditions, with
+  the `N`-sample condition `2^-22 + (N + 1) * 2^-23 <= 2^-12` (holds to about 2,000 samples) and
+  the note that the 30-fold margin and the `(1 + 2^-12)^64` growth figure are for 64 samples;
+  the unexplained `RAMP_SAMPLES` code span became "64 samples".
+- **NIT3.** The carry citation names `crates/parametric-eq/tests/carry.rs`.
+- **NIT4.** `crates/parametric-eq/tests/MUTATIONS.md` row 18 keeps its historical location and
+  notes that the body is now `effect_runtime::svf::transition_norm`.
+- Gates: `cargo fmt --all -- --check`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+  --no-deps` (part-B batch gates).

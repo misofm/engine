@@ -46,7 +46,7 @@ cargo test --locked -p parametric-eq --test <test binary>
 | 16 | a settled band accepts stored words that disagree with its stored parameters | `src/lib.rs` | `contract` | RED |
 | 17 | the payload header stamps invalid version 0 | `src/lib.rs` | `contract` | RED |
 | 23 | the descriptor advertises `common_bytes = 0` while the codec stamps a header | `src/lib.rs` | `contract` | RED |
-| 18 | `word_spectral_norm` drops the off-diagonal term of `M^T M` | `src/lib.rs` | `analytic` | RED |
+| 18 | `word_spectral_norm` drops the off-diagonal term of `M^T M` | `src/lib.rs` (historical: the body is now `effect_runtime::svf::transition_norm`, `crates/effect-runtime/src/svf.rs`, #1366) | `analytic` | RED |
 | 19 | the corpus reads a lane back from the mirrored AoSoA offset | `src/corpus.rs` | `determinism` | RED |
 | 20 | the bypass path renders instead of copying the dry block | `src/lib.rs` | `contract` | RED |
 | 21 | the corpus stops staggering its per-lane ramp ends | `src/corpus.rs` | `determinism` | RED |

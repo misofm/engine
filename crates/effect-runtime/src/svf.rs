@@ -1,10 +1,17 @@
 //! The SVF stability predicate shared by every effect that iterates the TPT state-variable filter.
 //!
 //! The parametric EQ checks its section designs and ramp paths with it, and the multiband
-//! compressor's crossover words satisfy the same preconditions (`c1, a2, a3 < 1`), so one
-//! definition serves both (#1366). Zavalishin, *The Art of VA Filter Design*, rev. 2.1.2, ch. 3-4
-//! (the TPT SVF); Wishnick, DAFx-14, and Laroche, JAES 55(6), 2007 (a contractive transition matrix
-//! bounds the state under arbitrary coefficient variation).
+//! compressor checks its crossover designs, so one definition serves both (#1366).
+//! [`transition_norm`] and [`NORM_TOLERANCE`] need only `c1, a2, a3 < 1`, which both effects'
+//! words satisfy. [`RAMP_PATH_NORM_TOLERANCE`] needs two more, which its derivation uses: a ramp of
+//! at most 64 samples, and a step that is the remaining distance times an exact power of two, so
+//! the scaled step lands within one rounding of the target. The parametric EQ, its only user today,
+//! ramps over 64 samples with a `2^-6` step; a consumer with a longer ramp or another step scale
+//! re-derives the bound before it uses the constant.
+//!
+//! Zavalishin, *The Art of VA Filter Design*, rev. 2.1.2, ch. 3-4 (the TPT SVF); Wishnick,
+//! DAFx-14, and Laroche, JAES 55(6), 2007 (a contractive transition matrix bounds the state under
+//! arbitrary coefficient variation).
 
 /// Spectral norm of the zero-input state transition `M = [[1-2c1, -2a2], [2a2, 1-2a3]]`, in `f64`.
 ///
@@ -39,7 +46,13 @@ pub const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 /// that line: its rounding, and a retarget that starts a new line from a rounded point, put it a
 /// few ulps off, which a design-exact limit refuses: the conformance differential found the EQ
 /// refusing its own mid-ramp snapshots, and a 10 kHz bell at Q 0.1 moving from -24 dB to +24 dB
-/// was refused at every sample (`tests/carry.rs`).
+/// was refused at every sample (`crates/parametric-eq/tests/carry.rs`).
+///
+/// Preconditions beyond `c1, a2, a3 < 1`: a ramp of at most 64 samples (the parametric EQ's
+/// `RAMP_SAMPLES`), and a step that is the remaining distance times an exact power of two (the
+/// EQ's `2^-6`). With an `N`-sample ramp the induction below needs `2^-22 + (N + 1) * 2^-23` inside
+/// the bound, which holds up to about 2,000 samples, but the 30-fold margin and the growth figure
+/// below are for 64; a consumer with another ramp re-derives them.
 ///
 /// The bound is derived, at every rate and through any chain of retargets. The norm `f` of the
 /// transition matrix is convex in the words (the matrix is affine in them) and Lipschitz with
@@ -51,6 +64,6 @@ pub const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 /// from an accepted forged start inside it. Cross-check: the largest excess measured over a grid
 /// of every band kind and frequency, gain and Q moves was `3.7e-6` (`2^-18`) at 48 kHz, and a
 /// four-rate simulation agrees. A forged path held to the bound gains at most
-/// `(1 + 2^-12)^64 < 1.016` over the at most `RAMP_SAMPLES` samples it lasts before the target's
-/// exact words snap in.
+/// `(1 + 2^-12)^64 < 1.016` over the at most 64 samples it lasts before the target's exact words
+/// snap in.
 pub const RAMP_PATH_NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_096.0;
