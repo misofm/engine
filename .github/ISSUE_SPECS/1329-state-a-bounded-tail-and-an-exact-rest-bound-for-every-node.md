@@ -416,3 +416,92 @@ real kernel, 44.1 kHz unless stated:
   values recorded in Amendment 2.
 
 Outcome: Amendment 2; #1433 filed as the successor for the tighter cascade bound.
+
+### Attempt 3 (2026-10-06, branch `codex/d15-stream-g`)
+
+**Stopped before plumbing: gate 1(a)'s tightness line is unreachable as written.** The certified
+bounds of D3 (reset-aware reference, Amendment 2 F1) and D5 (crude cascade, F2) were implemented
+as an `f64` control-plane module (`math::tail`, not committed; the work-in-progress diff is kept
+outside the tree as `1329-attempt3-wip.diff` in the session scratchpad) and measured against the
+brute-force `T_b` of gate 1(a) and against the real kernel. Two findings, the first decisive:
+
+- **F3. The real kernel exceeds the tightness line at small peaks.** Through a real
+  `InputBuiltins` (44.1 kHz, trim 0 dB, release), random and alternating inputs of peak `P` from
+  `1e-11` down to `1e-20.6`, then silence: the last output sample with `|y| >= P * eps` falls at
+  frame 346 after `N` for the 1 kHz LPF and for the 1 kHz HPF (`P = 1.26e-13`), and 353 for the
+  1 kHz-2 kHz pair, against `T_b(eps / 2)` = 175 / 176 and `T_b(eps * 2^-5)` = 203 / 199 for the
+  single sections. So D1's smallest `T` for these designs is at least 346, and no sound certified
+  tail satisfies gate 1(a)'s `tail <= T_b(eps * 2^-5)` for them. The cause is the `f32` kernel at
+  states near `FLUSH_EPS` (`1e-20`), where the output is no longer relative to `P`. The 10 Hz LPF
+  and HPF reach 4,436 (`P = 7.9e-12`) and the 10 Hz-1 kHz pair 3,764, which is `N_SILENCE` at
+  44.1 kHz: a state held in `[FLUSH_EPS, REST_EPS)` until the joint flush arms. Both are below
+  their tightness lines (20,259 and 19,770).
+- **F4. D3's `P < P*` branch makes the certified tail at least the rest bound at `P*`, which
+  includes A9's `N_SILENCE` per section.** With the per-word flush modelled as D3 prescribes (an
+  absolute `sqrt(2) * FLUSH_EPS` per step, stall `F / (1 - rho_f)` carried through each output
+  row), every enabled section gets `T >= R(P*) >= N_SILENCE`: 3,842 for a 1 kHz section at 0 dB
+  (4,182 at 48 kHz) against `T_b(eps * 2^-5)` = 203 (221). In cascades whose slow LPF follows a
+  section with a large output row, the HPF's flush stall, amplified by the LPF, raises `P*` to
+  about `5e-9`, and the rest at `P*` exceeds the tightness line by far more than `N_SILENCE`:
+
+  | 44.1 kHz pair, trim | decay part (D3 sums and rounding) | rest at `P*` | `T_b(eps/2)` / `T_b(eps/32)` |
+  |---|---|---|---|
+  | LPF 1 kHz, 0 dB | 174 | 3,842 (`P* = 8.8e-12`) | 175 / 203 |
+  | HPF 10 Hz into LPF 1 kHz, 0 dB | 18,271 | 20,373 (`P* = 1.6e-9`) | 17,482 / 19,770 |
+  | HPF 10 Hz into LPF max, 0 dB | 362,155 | 498,399 (`P* = 4.9e-9`) | 337,306 / 381,702 |
+  | HPF 1 kHz into LPF max, +24 dB | 415,269 | 462,674 (`P* = 5.6e-11`) | 381,544 / 436,558 |
+  | HPF max - 1 ulp into LPF max, 0 dB | 420,121 | 429,335 (`P* = 9.6e-12`) | 393,996 / 451,007 |
+  | HPF max - 1 ulp into LPF max, +24 dB | 478,305 | 485,928 | 450,872 / 507,413 |
+  | LPF max, +24 dB | 398,850 | 384,977 | 381,544 / 436,557 |
+
+  The decay part alone (the exact half below `eps / 2` and the relative rounding below `eps / 4`
+  from then on) is inside the tightness line for every pair of gate 1(a) at 44.1 and 48 kHz, both
+  trims; only the rest branch breaks it. (48 kHz figures follow the same pattern: 1 kHz 4,182 vs
+  221; 10 Hz into the maximum 497,585 vs 379,557.)
+
+**What does fit (measured with the same module, for the root's ruling):**
+
+- D5's live bound, crude cascade, ramp window 64, settled contraction after it, `+2 * N_SILENCE`
+  (44.1 / 48 / 88.2 / 96 kHz): `peak_plus_24_dbfs` 1,264,736 / 1,257,840 / 1,268,585 / 1,262,029;
+  `any_sanitized_input` 2,583,197 / 2,569,016 / 2,587,000 / 2,573,156 (capped at finite `f32`
+  states, below the 2.6M of "Hazards" but close); `T_live` 1,081,764 / 1,075,575 / 1,085,641 /
+  1,079,792, of which the decay part is 904,785 / 899,524 / 904,795 / 899,533 and the rest is the
+  rest at `P* = 1.7e-3` (the HPF flush stall through the crude cascade, about `5.5e-11` at the
+  output). Gate 3's lower side holds (above the measured 983,374 / 978,319). The restated D15-4
+  figures would be about 1.27M and 2.59M, not "about 1.19M and 2.5M": the crude cascade here
+  takes `beta <= 2`, `gamma <= sqrt(2)` and `|d| <= 1` as suprema over every design (closed forms
+  `beta = 2 g / sqrt(1 + t)`, `gamma = sqrt(2) / sqrt(1 + t)`, `t = g (g + sqrt(2))`, `d` in
+  `[0, 1]`), plus the #1407 allowance, the mix-ramp allowance and `|fl(k) - sqrt(2)|`.
+- Rate inflation and margin. The kernel contraction is computed without sampling: the exact
+  design radius `rho(g) = sqrt(1 + g^4) / (1 + sqrt(2) g + g^2)` is symmetric under `g -> 1/g`
+  and unimodal, so its maximum over the domain is at the maximum cutoff; the `f32` designs add
+  `P(h) = 2.16e-7` (half-ulp word box) and the ramp words `P(E) = 1.419e-5`; the state rounding is
+  `mu_state = 1.0073e-6` (`7 * 2^-24 * kappa`) for the designs above half the maximum `g` and
+  `1.120e-6` below it, where the radius is far smaller. Certified margin `1 - rho_ramp`:
+  `3.673e-5` (44.1, 88.2 kHz), `3.701e-5` (48, 96 kHz). D5's "at least `3.69e-5` (measured)" uses
+  the `f32` top design's norm instead of `rho(g_max) + P(h)`; it reproduces as `3.694e-5` and
+  `3.721e-5`. Both prove `rho_ramp < 1`; the certified figure is the one a derivation can stand
+  on, so D5's figure should read `3.67e-5` (certified).
+- The fixed-design rest bounds (+24 dBFS through +24 dB trim, top pair): 1,051,297 (44.1 kHz),
+  1,045,991 (48 kHz), against the measured real rest 983,374 / 978,319 before A9.
+- A9 observation: both builtin sections are armed by the same effect-input counter, so after the
+  HPF rests the LPF is already armed; the second `+N_SILENCE` of Amendment 2 is conservative
+  (sound, not needed). Not acted on.
+
+**Options for the root (none taken; each changes a frozen decision or a gate):**
+
+1. Keep D1 and D3 as written and amend gate 1(a)'s tightness line to apply to the decay part
+   only, stating the rest branch (`T = max(decay part, R(P*))`) as part of the contract. F3 shows
+   that any sound bound has `T` above `T_b(eps / 32)` for 1 kHz sections, so the line cannot stay
+   on the whole tail in any form.
+2. Amend D1 with an absolute floor: `|y[n]| < max(P * eps, eps_abs)`, `eps_abs` at or above twice
+   the flush stall at the output (fixed designs: stall at most about `1.6e-16`, so a floor of
+   about `3.2e-16`, -310 dBFS; the live crude cascade: stall about `5.5e-11`, floor about
+   `1.1e-10`, -199 dBFS, which #1433 would lower). The `P < P*` branch then
+   goes, `T` is the decay part, and gate 1(a) passes as written (table above). D2 is unchanged.
+3. Option 1 with a two-level `P*` (the HPF rests first, then only the LPF's own stall applies),
+   which brings the cascade rows of the table back near the decay part but still leaves every
+   enabled section at `T >= N_SILENCE`.
+
+Gates run: none of the objective gates (no production code). Measurements: the module's own
+exploration tests in release, and the real-kernel probe above.
