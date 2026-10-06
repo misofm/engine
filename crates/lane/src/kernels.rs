@@ -1705,8 +1705,9 @@ pub fn route_mix_ramp_block<L: Lane>(
 /// `f32`, which is exactly the tail `mix2x2_block::<L>` finishes with.
 ///
 /// Outlined for the same reason as [`route_mix_ramp_tail`]: inlined, `mix2x2_block`'s `f32` tail
-/// unrolls into the four-lane instantiation as 18 scalar operations beside its 21 vector ones
-/// (measured on a `wasm32` `simd128` build), one edit away from the browser's kernel-shape rule.
+/// unrolls into the four-lane instantiation as 18 scalar operations beside its 22 vector ones
+/// (measured on a `wasm32` `simd128` build after #1452's undo 2), one edit away from the browser's
+/// kernel-shape rule.
 #[inline(never)]
 fn route_mix_settled_tail(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
     // Cut both planes here too: nothing inside this outlined function proves their lengths equal,

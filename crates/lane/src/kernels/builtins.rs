@@ -1207,18 +1207,28 @@ fn filter_ramp_words<L: Lane>(
     current.m2 = word(current.m2, target.m2, step.m2);
 }
 
-/// How many of a filter ramp's 64 updates step from the current word (#1407).
+/// How many updates a filter ramp takes: the countdown a retarget writes, and the most any countdown
+/// word the filter-ramp bodies read may hold (#1407, #1452).
+///
+/// The bodies find a ramp's leading updates from the countdown alone (`FILTER_LEADING_FLOOR`),
+/// so they are exact only for a countdown of at most this many updates. The builtins' own ramp
+/// length, `builtins::INPUT_FILTER_RAMP_SAMPLES`, is tied to it by a const assertion there, and
+/// the owner's countdown loader asserts the bound in debug builds.
+pub const INPUT_FILTER_RAMP_UPDATES: u32 = 64;
+
+/// How many of a filter ramp's [`INPUT_FILTER_RAMP_UPDATES`] updates step from the current word
+/// (#1407).
 ///
 /// A frame steps from the current word when the lane's ramp countdown, after that frame's
-/// decrement, is at least `64 - INPUT_FILTER_LEADING_UPDATES`: the frames that leave a countdown
-/// of `63` down to `60`. The bodies read the countdown they already carry, so the owner passes
-/// nothing more.
+/// decrement, is at least `INPUT_FILTER_RAMP_UPDATES - INPUT_FILTER_LEADING_UPDATES`: the frames
+/// that leave a countdown of `63` down to `60`. The bodies read the countdown they already carry,
+/// so the owner passes nothing more.
 pub const INPUT_FILTER_LEADING_UPDATES: u32 = 4;
 
 /// The lowest countdown, after a frame's decrement, at which that frame still steps from the
-/// current word: `64 - INPUT_FILTER_LEADING_UPDATES`. Exact, as is every countdown word (an
-/// integer of at most 64).
-const FILTER_LEADING_FLOOR: f32 = (64 - INPUT_FILTER_LEADING_UPDATES) as f32;
+/// current word: `INPUT_FILTER_RAMP_UPDATES - INPUT_FILTER_LEADING_UPDATES`. Exact, as is every
+/// countdown word (an integer of at most [`INPUT_FILTER_RAMP_UPDATES`]).
+const FILTER_LEADING_FLOOR: f32 = (INPUT_FILTER_RAMP_UPDATES - INPUT_FILTER_LEADING_UPDATES) as f32;
 
 /// Mono-collapse form of [`input_chain_ramp_block_filter`].  Only channel zero advances; the
 /// owner mirrors its complete filter and trim records onto channel one after the block.

@@ -68,6 +68,13 @@ use lane::{
     },
 };
 
+// The filter-ramp bodies find a ramp's leading updates from its countdown, exactly only for a
+// countdown of at most `lane`'s ramp length (#1452 undo 1); a retarget writes this crate's.
+const _: () = assert!(
+    INPUT_FILTER_RAMP_SAMPLES == lane::kernels::builtins::INPUT_FILTER_RAMP_UPDATES,
+    "the builtins' filter ramp length is the lane filter-ramp bodies' ramp length"
+);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinResetKind {
     FullToPrepared,
@@ -1334,6 +1341,15 @@ impl<L: Lane> InputStage<L> {
         let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
         for (channel, channel_words) in words.iter_mut().enumerate() {
             for (section, section_words) in channel_words.iter_mut().enumerate() {
+                // A retarget writes `INPUT_FILTER_RAMP_SAMPLES` or zero, a settle only lowers the
+                // countdown and a lane import takes what an export produced, so no countdown
+                // exceeds the ramp length, which the bodies' leading window relies on (#1452).
+                debug_assert!(
+                    self.filter_remaining[channel][section]
+                        .iter()
+                        .all(|&remaining| remaining <= INPUT_FILTER_RAMP_SAMPLES),
+                    "a filter countdown exceeds the ramp length"
+                );
                 for (lane, word) in section_words.iter_mut().enumerate() {
                     *word = self.filter_remaining[channel][section][lane]
                         .min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;

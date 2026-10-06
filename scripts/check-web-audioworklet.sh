@@ -460,10 +460,10 @@ fi
 # The `--kernel-min` half of the ratchet -- the part that actually counts kernels -- rises from 8
 # to 11, by the three this wave added. It never drops. The artifact carried thirteen then; since
 # #1110 removed the eight-lane multiband body it carried twelve, a one-kernel slack. Issue #1220
-# links the live route's indexed-ramp mix, `lane::kernels::route_mix_ramp_block<f32x4>` (21 vector
-# / 0 scalar since the #1220 amendment; 22 at attempt 1), into the render path: the artifact
-# carries thirteen and the floor rises to that count, so the slack is spent and losing any one
-# kernel is red.
+# links the live route's indexed-ramp mix, `lane::kernels::route_mix_ramp_block<f32x4>` (22 vector
+# / 0 scalar since #1452's undo 2; 21 between the #1220 amendment and that undo), into the render
+# path: the artifact carries thirteen and the floor rises to that count, so the slack is spent and
+# losing any one kernel is red.
 #
 # The pattern counts four-lane kernels only (`4wide6f32x4`; it was `4wide6f32x[48]`), so an
 # eight-lane kernel can never pad the count. Eight lanes are refused outright instead: the

@@ -160,6 +160,17 @@ recorded reason.
 - `crates/true-peak-limiter/src/lib.rs` (undo 4: `clear_runtime`'s attribute and doc only)
 - `crates/soft-clip/src/kernel.rs` (undo 5: `soft_clip_block` only)
 - `scripts/lib/aarch64-known-defects.py` (the ceilings and their comment, D4)
+- *(Amendment 2, ratified.)* `crates/lane/tests/input_chain_arming.rs` (the removed argument),
+  the `INPUT_FILTER_LEADING_UPDATES` import line in `crates/builtins/src/lib.rs`, step 1 of the
+  soft clip module doc (`crates/soft-clip/src/kernel.rs`), and the section header at
+  `crates/builtins/tests/filter_liveness.rs:934`
+- *(Amendment 2, authorized.)* The stale "21 vector" prose for the route kernel:
+  `scripts/check-web-audioworklet-callgraph.py` (`SCALAR_SLACK`'s comment and the route roster
+  row's comment), `scripts/check-web-audioworklet.sh` (the `--kernel-min` comment) and the
+  `route_mix_settled_tail` doc in `crates/lane/src/kernels.rs`
+- *(Batch follow-up, verdict NIT 4.)* `crates/lane/src/kernels/builtins.rs`
+  (`INPUT_FILTER_RAMP_UPDATES` and `FILTER_LEADING_FLOOR`) and `crates/builtins/src/lib.rs` (a
+  const assertion beside the `lane` import and a `debug_assert!` in `load_filter_countdown`)
 - this spec
 
 ## Non-goals
@@ -265,6 +276,30 @@ and gate 4 are updated to match.
   - **Gates:** 1-5 as for every undo; gate 2 also covers `builtins` and `parametric-eq`, the
     crates that inline the function (a count that rises is a revert, D4).
 
+## Amendment 2 (root rulings, 2026-10-06, after attempt 1's verdict)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), on the attempt-1 verifier's items for root. It governs where
+D3 and gate 4 seem to disagree with it.
+
+- **R1. Codegen is the keep criterion for a site no benchmark document reaches.** None of the
+  four browser documents reaches undos 2, 1 or 5 (no soft clip, no input filter retarget, no route
+  coefficient ramp; attempt 1's finding, verified by the verifier). For such a site the natural
+  shape is kept when it is not worse in codegen: a shorter loop on every target, no rendered bit
+  moved and no iOS count raised. Each increase is still named (D3). **p50 is not decisive there,
+  and why:** a document that never executes the site measures only the module's layout and the
+  host, so its p50 swings both ways (tables A to C: from -18.6 % to +4.9 % on code the documents
+  never run) and is not evidence about the site; D3's "+2 % of base" clause applies to sites a
+  document reaches (table D, undo 6, is flat). Undos 2, 1 and 5 stay kept on this rule; a
+  measurement that reaches the sites would be its own tooling issue.
+- **R2. Ratified path deviations** (each forced, none changes behaviour):
+  `crates/lane/tests/input_chain_arming.rs` (compile), the `INPUT_FILTER_LEADING_UPDATES` import
+  line in `crates/builtins/src/lib.rs` (the unused-import lint), step 1 of the soft clip module doc
+  (`crates/soft-clip/src/kernel.rs`, it described the removed branch), and the section header at
+  `crates/builtins/tests/filter_liveness.rs:934` (beside the authorized gate-8 doc).
+- **R3. Authorized:** the stale "21 vector" prose for the route kernel, now 22 vector and 0 scalar,
+  in the four places the verifier found (Authorized paths).
+
 ## Attempt record
 
 ### Attempt 1 (2026-10-06, implementer; base `045a0dbb3`, code at `6a2c5216a`)
@@ -284,8 +319,8 @@ iOS count moved; no ceiling row moved.
 | undo | site | verdict | iOS count (crate) | codegen, base -> natural shape | p50 |
 |---|---|---|---|---|---|
 | 2 (#1220) | `route_mix_ramp_block` index | **kept** | graph 0 -> 0 | ramp loop: x86-64-v3 (`f32x8`) 25 -> 22, AArch64 iOS (`f32x4`) 24 -> 21, `simd128` 62 -> 57 (function 291 -> 290); worklet kernel roster 21 -> 22 vector, 0 scalar | table A |
-| 1 (#1407) | filter ramp leading word | **kept** | builtins 5 -> 5 | filter-ramp frame loops: x86-64-v3 `f32x8` dual 292/283/295 -> 287/278/290, mono 284/273 -> 278/267; `f32x4` dual 293/282/294 -> 289/279/291, mono 283/272 -> 279/267; `simd128` dual 775/709/827/757 -> 756/694/808/742, mono 447/496 -> 442/491. Functions: `simd128` `InputStage::process` 15,986 -> 15,876, `process_mono` 8,713 -> 8,685; iOS 6,977 -> 6,930, 4,067 -> 4,027; x86 `f32x8` `process_mono` 4,665 -> 4,678 (+13 outside the loops; named) | table B |
-| 5 (#1409 D5) | `soft_clip_block` two copies | **kept** | soft-clip 1 -> 1 | frame loop: x86-64-v3 `f32x8` 201 -> 187 ramping / 171 settled; `simd128` 441 -> 421 / 374. `Channel::process` grows by the second copy (named, the cost of the two bodies): `simd128` 1,548 -> 2,034, `f32` 1,056 -> 1,667; x86 `f32x8` 805 -> 960 | table C |
+| 1 (#1407) | filter ramp leading word (two commits: `ca57f942c` needs `45cf6506b` for `cargo doc -D warnings`; revert or bisect them together) | **kept** | builtins 5 -> 5 | filter-ramp frame loops: x86-64-v3 `f32x8` dual 292/283/295 -> 287/278/290, mono 284/273 -> 278/267; `f32x4` dual 293/282/294 -> 289/279/291, mono 283/272 -> 279/267; `simd128` dual 775/709/827/757 -> 756/694/808/742, mono 447/496 -> 442/491. Functions: `simd128` `InputStage::process` 15,986 -> 15,876, `process_mono` 8,713 -> 8,685; iOS 6,977 -> 6,930, 4,067 -> 4,027; x86 `f32x8` `process_mono` 4,665 -> 4,678 (+13 outside the loops; named) | table B |
+| 5 (#1409 D5) | `soft_clip_block` two copies | **kept** | soft-clip 1 -> 1 | frame loop: x86-64-v3 `f32x8` 201 -> 187 ramping / 171 settled; `simd128` 441 -> 421 / 374. `Channel::process` grows by the second copy (named, the cost of the two bodies): `simd128` 1,548 -> 2,034, `f32` 1,056 -> 1,667; x86 `f32x8` 805 -> 960. Scalar `Channel<f32>::process` (the per-node instance in the shipped worklet, when a soft clip insert does not bank; added by the batch follow-up from the verifier's measurement): ramping frame loop `simd128` 509 -> **512 (+3, named)**, settled copy 448; x86-64-v3 one latch path of the ramping loop 246 -> **247 (+1)**, settled copy 194 / 191 | table C |
 | 3 (#1089) | EQ `lanes_mask` | **reverted** | parametric-eq 0 -> 0 | `recover_failed_lanes` (where it inlines): `simd128` 351 -> 360, AArch64 iOS 95 -> 104, x86-64-v3 `f32x4` 89 -> 77, `f32x8` 147 -> 126. Longer on both shipped targets | not measured, off the frame loop (D7's failing path) |
 | 4 (#1091) | limiter `clear_runtime` `#[inline(never)]` | **reverted** | true-peak-limiter 6 -> **9** (D4 refuses) | inlined into `ChannelState::new`: x86-64-v3 469 -> 570, `simd128` 948 -> 1,316; the out-of-line copy stays for the reset callers | not measured, off the frame loop |
 | 6 (A1, #1328 follow-up) | `silence_skip_settle` outlining | **reverted** | builtins 5 -> 5, parametric-eq 0 -> 0 | inlined at every call site: `simd128` `InputStage::process` 15,876 -> 20,902, `process_mono` 8,685 -> 11,248, EQ process bodies +230 to +596; x86-64-v3 `InputStage::process` `f32x4` 7,805 -> 9,615, `f32x8` 7,357 -> 9,005, `f32` 8,168 -> 11,169; iOS `f32x4` 6,930 -> 8,780. A duplicated body, not a simpler one | table D: flat |
@@ -338,7 +373,10 @@ static; `route_mix_ramp_block` runs with zero ramping frames). For these three u
 measures the module's layout and the host, not the site. The host was shared: another agent's
 21-core test run took load to 10 during table A. The differences swing both ways by more than 2 %
 in tables A to C; table D (the one site the documents reach) is flat. I kept undos 2, 1 and 5 on
-codegen (every changed loop shorter on every target) and on this finding, and did not re-run.
+codegen (every changed loop shorter on every target but one: the scalar `Channel<f32>::process`
+ramping loop of undo 5 grows by 3 on `simd128` and by 1 on one x86-64-v3 latch path, beside a
+settled copy 12 % shorter; corrected by the batch follow-up) and on this finding, and did not
+re-run.
 Each is its own commit if root reads D3 otherwise.
 
 Table A, undo 2 (load 10.10 -> 8.37):
@@ -417,3 +455,38 @@ dispatch swap turns three `soft-clip/tests/ramp_law.rs` tests red.
    vector, 0 scalar (budget 8; the gate passes).
 4. **Pre-existing red gate:** `check-lane-policy.sh` fails at this slice's base on
    `crates/builtins/tests/tail_contract.rs:161` (#1329 attempt 3's `mul_add`); #1329 owns it.
+
+## Follow-up record
+
+### Batch follow-up part B (2026-10-06, stream G; attempt 1 verdict and Amendment 2)
+
+- **Root rulings recorded** as Amendment 2 above (R1 codegen keep criterion and why p50 is not
+  decisive for sites no document reaches; R2 the four ratified path deviations; R3 the prose fix).
+- **MINOR 1.** The undo-5 row names the scalar `Channel<f32>::process` loops (`simd128` ramping
+  509 -> 512, settled 448; x86-64-v3 latch 246 -> 247, settled 194 / 191, the verifier's
+  measurement), and the record's "every changed loop shorter on every target" sentence is
+  corrected in place. The +3 is 0.6 % of a loop whose settled sibling is 12 % shorter; undo 5 stays
+  kept under R1.
+- **NIT 1 / R3: "21 vector" -> 22, four places.** `scripts/check-web-audioworklet-callgraph.py`
+  (`SCALAR_SLACK`'s comment: 22 vector, about 88 scalar when de-vectorised; the route roster row's
+  comment and its budget expression `max(0.10 x 22, 8) = 8`), `scripts/check-web-audioworklet.sh`
+  (the `--kernel-min` comment) and the `route_mix_settled_tail` doc. Its "18 scalar" figure was
+  **re-measured**: a worklet built with `route_mix_settled_tail` marked `#[inline(always)]` (scratch,
+  reverted) reads `route-mix-ramp f32x4: vector=22 scalar=18`, a roster FAIL against its budget of
+  8, so the outlining's reason stands; the head roster reads `vector=22 scalar=0`.
+- **NIT 2.** The `filter_liveness.rs:934` header is in R2.
+- **NIT 3.** The undo-1 row notes that `ca57f942c` needs `45cf6506b`.
+- **NIT 4: `FILTER_LEADING_FLOOR` tied to the ramp length.** Undo 1's equivalence rests on every
+  filter countdown the bodies read being at most 64, which no code asserted, and the lane floor
+  spelled the ramp length as a literal `64`. Now `lane::kernels::builtins::INPUT_FILTER_RAMP_UPDATES`
+  (64) names it and `FILTER_LEADING_FLOOR` is
+  `INPUT_FILTER_RAMP_UPDATES - INPUT_FILTER_LEADING_UPDATES`; `crates/builtins/src/lib.rs` has
+  `const _: () = assert!(INPUT_FILTER_RAMP_SAMPLES == INPUT_FILTER_RAMP_UPDATES)` (compile time)
+  and `load_filter_countdown` a `debug_assert!` that every countdown is at most
+  `INPUT_FILTER_RAMP_SAMPLES` (compiled out of release builds: no render cost). No bit moves (the
+  constant's value is unchanged). Mutation runs, each alone, then restored:
+  - `INPUT_FILTER_RAMP_SAMPLES` 64 -> 65 -> `cargo build -p builtins` **fails** (E0080, "the
+    builtins' filter ramp length is the lane filter-ramp bodies' ramp length");
+  - a retarget writes `INPUT_FILTER_RAMP_SAMPLES + 1` -> debug `--test filter_liveness`: **10 of 14
+    tests panic** at the new assertion ("a filter countdown exceeds the ramp length").
+- Gates: listed with the stream G batch follow-ups (part B).
