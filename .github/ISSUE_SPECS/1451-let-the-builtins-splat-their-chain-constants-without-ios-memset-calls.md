@@ -71,7 +71,8 @@ assembly has no more `memset_pattern16` calls than today.
 - **#1018 (open; spec `.github/ISSUE_SPECS/1018-remove-the-libc-memset-calls-from-the-eq-s-svf-flush-on-apple-targets.md`).**
   Filed for the EQ's `L::splat(FLUSH_EPS)` in `svf_step`; #1017's scan widened it to the shape "a
   stored `f32x4` splat constant" in ten crates (3,494 calls at filing) and left root to rule whether
-  to widen #1018 or split. That ruling is still open; no GitHub comment records one. Its gates ask
+  to widen #1018 or split. Root ruled on 2026-10-06: widen, executed by this slice (Amendment 1
+  A2). Its gates ask
   for zero libc calls in render, class-A bits, no worklet regression and removal of the
   `docs/TARGET_MATRIX.md` register entry (`:178`). The ceilings have since fallen through the work
   in the commits that name #1018 (#1112 removed eight-lane AArch64 code; #1089, #1091, #1220,
@@ -128,8 +129,9 @@ assembly has no more `memset_pattern16` calls than today.
   row it reports below its ceiling, and delete each row that reaches zero, as the check asks. No
   row is raised. If every row reaches zero, also remove the `docs/TARGET_MATRIX.md` register entry
   and the `ios-asm-memset-pattern16` wording in `TARGET_MATRIX.md:10`, and record in this spec that
-  #1018's gates 1 and 4 are met (root closes #1018; this slice does not write to it). If some rows
-  remain, they stay #1018's, and the attempt record names the constructions D1 shows are left.
+  #1018's gates 1 and 4 are met. If some rows remain, they stay #1018's, and the attempt record
+  names the constructions D1 shows are left. Amendment 1 (A2) widens this: every row of every
+  crate is re-measured, and #1018 closes when the rows reach zero.
 - **D5. P0 is #1328's.** The base for the timing gate is the same P0 the #1328 follow-up measured
   (per-word flush law, no joint rule), built with the same recipe. If the follow-up's record does
   not name P0's tree exactly, the implementer asks root before timing; the base is not chosen after
@@ -162,9 +164,9 @@ assembly has no more `memset_pattern16` calls than today.
   D2's construction lives there)
 - `crates/lane/src/lib.rs`, `crates/lane/src/kernels.rs`, `crates/lane/src/kernels/builtins.rs`
   (D3), and `crates/lane/tests/` only where a test constructs a removed item
-- `crates/builtins/src/lib.rs` (the `InputChainConstants::new()` field of the bank's coefficients
-  only; stream A's file, named exception) and `crates/builtins/tests/` only where a test constructs
-  a removed item
+- `crates/builtins/src/lib.rs:1071` (`InputChainCoef::constants`, the `InputChainConstants::new()`
+  field of the bank's coefficients, only; stream A's file, named exception, Amendment 1 A1) and
+  `crates/builtins/tests/` only where a test constructs a removed item
 - `crates/parametric-eq/src/lib.rs` (the `flush_eps` word only) and its tests only where a test
   constructs a removed item
 - `scripts/lib/aarch64-known-defects.py` (the ceilings and their comment)
@@ -179,7 +181,11 @@ assembly has no more `memset_pattern16` calls than today.
 - Any change to the #1328 law (joint flush, silence counter, arming), to rendered bits, to state
   records or sealed sizes.
 - The other ratchet-chosen shapes listed in D3, and an unarmed form for the multiband compressor.
-- Closing #1018 or editing its GitHub issue (root does that from this slice's evidence).
+- Closing #1018 before its rows reach zero, or editing its GitHub issue body (the ruling is recorded
+  on #1018 by root; Amendment 1 A2).
+- Chasing a ceiling that the D2 fix does not lower: what is left is recorded, not fixed here
+  (Amendment 1 A2).
+- Undoing the other ratchet-chosen shapes: #1452 owns that (Amendment 1 A3).
 - Native AArch64 timing (CI-only, no funded runner).
 - Rejected alternatives:
   - An exception to the 2 % allowance for the carried form: root ruled a scheduled fix instead (D0).
@@ -214,10 +220,12 @@ assembly has no more `memset_pattern16` calls than today.
    `E9_DIGESTS`, multiband `DIGESTS`, `conformance_fixtures --check`,
    `check-builtins-fixtures.sh`, `check-graph-determinism.sh`. On AArch64 the CI legs
    (`aarch64-debug`, `aarch64-release`) pass with the same expected-failure rows as before.
-2. **iOS memset ceilings not raised.** `bash scripts/check-cross-targets.sh` passes with every row
-   at or below today's ceiling, and with each row lowered or deleted as the check asks (D4). The
-   `builtins` and `parametric-eq` counts after D3 are at or below their counts before D3 (today 71
-   and 48). The before and after count of every crate is in the PR.
+2. **iOS memset ceilings only fall.** `bash scripts/check-cross-targets.sh` passes with every row
+   at or below today's ceiling, and with each row lowered or deleted as the check asks (D4). Every
+   row of `IOS_MEMSET_CEILINGS` (all ten crates, not only `builtins` and `parametric-eq`) is
+   re-measured after D2 and after D3, and no row is raised (Amendment 1 A2). The `builtins` and
+   `parametric-eq` counts after D3 are at or below their counts before D3 (today 71 and 48). The
+   before and after count of every crate is in the PR.
 3. **Browser cost within 2 % of P0.** `scripts/web-mixing-automation-benchmark.mjs run` on the
    shipped module of head and of P0 (D5): one warmup and two measured rounds each, interleaved,
    pinned to one CPU, host load average recorded before and after; not retried. p50 per render of
@@ -260,6 +268,37 @@ constructed a removed item is updated, not added.
 ## Dependencies
 
 #1328
+
+## Amendment 1 (2026-10-06, root decision)
+
+The decision-15 root coordinator made three decisions on 2026-10-06. They govern where the
+sections above seem to disagree.
+
+- **A1. Named exception and hot file.** `crates/builtins/src/lib.rs:1071`
+  (`InputChainCoef::constants`, the `InputChainConstants::new()` field in the bank's prepared
+  coefficients) is stream A's file. This slice edits it by named exception, for D3 only (the field
+  and its construction go). Stream G's Owns line does not change. STREAMS.md's hot-file table
+  orders the edit: G #1451 before stream A's slices that edit `crates/builtins/src/lib.rs`
+  (#1277, #1327), which rebase onto it, as G #1407 and #1408 land before A in the other builtins
+  rows.
+- **A2. This slice takes #1018's open ruling: widen.** Root rules that #1018 is widened to the
+  stored-splat shape in every crate (not split), and that #1451 executes it.
+  - If D1 confirms that the cause is the splat lowering (for example `wide`'s
+    `transmute([elem; N])` array repeat, reached through `Lane::splat` in
+    `crates/lane/src/wide_impl.rs`), the one-shape fix lives in the `lane` crate and applies to
+    every crate that builds a splat through it. No crate gets its own fix.
+  - Every memset ceiling in `scripts/lib/aarch64-known-defects.py` may only go down, and each one
+    is re-measured after D2 and after D3 (gate 2).
+  - #1018 closes when every ceiling reaches 0 (the rows deleted, D4's register removal done, and
+    #1018's gates 1 and 4 met). If some do not reach 0, the attempt record names each remaining
+    crate, its count, the construction D1's method shows makes the calls, and why the D2 fix does
+    not reach it; those rows stay #1018's and #1018 stays open.
+  - The slice stays to the cause, the fix and the builtins constants (half a day). It does not
+    chase a remaining row with crate-local changes.
+- **A3. Follow-up filed.** *Undo the iOS memset ratchet workarounds once splats are free* (#1452,
+  filed the same day, Stream G, directly after this slice) undoes the five other ratchet-chosen shapes
+  that D3 leaves (#1407, #1220, #1089, #1091, #1409 D5), each gated bit-identical. This slice does
+  not touch them.
 
 ## Attempt record
 

@@ -53,3 +53,21 @@ crate, with the count above as a ceiling, in `scripts/lib/aarch64-known-defects.
 So the defect reads fixed only when every row is gone. **Root to rule:** either widen this issue
 to the stored-splat shape in every kernel, or split the remaining crates into a successor issue.
 The rows name #1018 until then.
+
+## Root ruling (2026-10-06)
+
+The decision-15 root coordinator ruled on the question above: **widen**. This issue covers the
+stored-splat shape in every crate, not only the EQ's SVF flush, and no successor issue is split
+off.
+
+- *Let the builtins splat their chain constants without iOS memset calls* (#1451, Stream G of
+  decision 15) executes the ruling. Its D1 finds the cause. If the cause is the splat lowering (for
+  example `wide`'s `transmute([elem; N])` array repeat, reached through `Lane::splat` in
+  `crates/lane/src/wide_impl.rs`), the fix has one shape, lives in the `lane` crate and applies to
+  every crate.
+- Every ceiling in `IOS_MEMSET_CEILINGS` (`scripts/lib/aarch64-known-defects.py`) may only go down,
+  and #1451 re-measures each one.
+- This issue closes when every ceiling reaches 0 and the gates above are met. If some do not, #1451
+  records what remains and why, those rows stay this issue's, and this issue stays open.
+- #1451 owns the cause, the fix and the builtins constants only. *Undo the iOS memset ratchet
+  workarounds once splats are free* (#1452, Stream G, after #1451) undoes the earlier ratchet workarounds.
