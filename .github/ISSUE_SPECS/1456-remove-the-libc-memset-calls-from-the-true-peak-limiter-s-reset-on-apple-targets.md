@@ -7,11 +7,12 @@ Code anchors verified on `codex/d15-stream-g` at `44585c80f`. Ordered after #145
 
 ## Product outcome
 
-No reset or failed-block recovery of the true-peak limiter makes a libc call on an iPhone. After
+No reset or failed-block recovery of the true-peak limiter makes a `memset_pattern16` call on an
+iPhone (restated by Amendment 1, Q3: `bzero` and `memcpy` are not #1018's defect). After
 #1451, three `bl _memset_pattern16` calls remain in the limiter's `aarch64-apple-ios` release
 assembly on a path the render thread reaches: `ChannelState::clear_runtime`, which runs at a reset
 and on a failed block. The realtime rules forbid any libc call in render. After this slice that
-path makes none, with no rendered bit moved.
+path makes none, with no rendered bit moved, and the reset's cost is measured and recorded.
 
 ## Context
 
@@ -72,7 +73,10 @@ path makes none, with no rendered bit moved.
 ## Authorized paths
 
 - `crates/true-peak-limiter/src/lib.rs` (`ChannelState::clear_runtime` and its doc; `ChannelState::new`
-  only if the same shape applies)
+  only if the same shape applies; the `L` turbofish at `clear_runtime`'s callers, Amendment 1)
+- `crates/true-peak-limiter/src/corpus.rs:228-229` (the turbofish only; Amendment 1, Q1)
+- `scripts/check-cross-targets.sh:104-108` and `docs/TARGET_MATRIX.md:186-198` (stale text;
+  Amendment 1, Q4)
 - `scripts/lib/aarch64-known-defects.py` (the `true-peak-limiter` row and the comment above it)
 - this spec
 
@@ -100,7 +104,11 @@ path makes none, with no rendered bit moved.
 2. **iOS count.** `bash scripts/check-cross-targets.sh` passes with `true-peak-limiter`'s row
    lowered, and the iOS assembly of `clear_runtime` (and every function it is inlined into) has no
    `bl _memset_pattern16`.
-3. **Workspace gates.**
+3. **Reset cost (Amendment 1).** Measured and recorded at 96 kHz, widths 8 and 4, against the
+   base; no per-block cost. (The first ruling's "not above base" was withdrawn.)
+4. **No bounds-check branch** in `clear_runtime` at f32, Simd4 and Simd8 (x86-64-v3 and
+   `aarch64-apple-ios` assembly; Amendment 1).
+5. **Workspace gates.**
    - `cargo test --locked --all-targets -p true-peak-limiter -p conformance`
    - the `test-debug-a` workspace command from `.github/workflows/qualification.yml`
    - `cargo run --locked -p conformance --example conformance_fixtures -- --check`
@@ -117,6 +125,34 @@ lowered row); the per-lane equality test and the differential turn red if a rese
 ## Dependencies
 
 #1451, #1452.
+
+### Amendment 1 (2026-10-07, root rulings after attempt 1's FAIL)
+
+Attempt 1's verdict (FAIL, one MAJOR) found that its scalar strided fill made the reset 6.8 to 7.5
+times the base, and that a vector fill through `Lane::splat` also gives 0 iOS calls. Root ruled:
+
+- **Q1. Form v7.** `clear_runtime` is generic in `L: Lane` and fills both gain rings over whole
+  `L::WIDTH` chunks with `L::splat(1.0)`, with no scalar tail. `crates/true-peak-limiter/src/corpus.rs:228-229`
+  is authorized for the turbofish this needs. A comment names the trap: `lane::Simd4::splat`
+  resolves to `wide`'s inherent `splat` (an array-repeat loop, one `memset_pattern16` per chunk);
+  write `L::splat` or `<Simd4 as Lane>::splat`.
+- **Q2.** `ChannelState::new` keeps the zeroed allocation of the three `1.0` planes: nothing reads
+  them before `clear_runtime` writes them (verified by attempt 1's verifier).
+- **Q3. Product outcome restated:** no reset or failed-block recovery of the limiter makes a
+  `memset_pattern16` call on an iPhone. `bzero` and `memcpy` are bounded, non-blocking libc memory
+  routines the compiler emits on every target; they are not #1018's defect, and no issue is filed
+  for them.
+- **Q4.** Authorized: the stale text at `scripts/check-cross-targets.sh:104-108` and
+  `docs/TARGET_MATRIX.md:186-198`.
+- **Cost gate (restated after attempt 2's first measurement).** The first ruling's gate ("reset cost
+  at 96 kHz, W8 and W4, not above base") was not met: v7 measured +14 % (W4) and +24 % (W8), and no
+  vector form the verifier measured reached base. Root chose to accept v7: the reset runs only at a
+  reset or after a failed block, never per block, and removing the render-reachable libc call is the
+  realtime-safety point of #1018. The gate is now **"measured and recorded, and no per-block
+  cost"**. No further shape probe.
+- **The `prefix` store** must carry no bounds-check branch (fixed size or whole-chunk iteration),
+  shown in x86-64-v3 and `aarch64-apple-ios` codegen at f32, Simd4 and Simd8.
+- The verdict's NIT (the `step_by` panic branch) is fixed by the same change.
 
 ## Attempt record
 
@@ -180,3 +216,74 @@ command (1458 passed), `conformance_fixtures -- --check`, `bash scripts/run-wasm
 **Open items.** (1) `scripts/check-cross-targets.sh`'s comment above the scan still lists the
 limiter's calls among "the 16 left"; that file is outside this spec's authorized paths. (2) The
 reset cost of the scalar strided fill above has no benchmark.
+
+### Attempt 2 (2026-10-07, implementer)
+
+**Change.** Form v7 (Amendment 1, Q1). `ChannelState::new`, `reset_to_defaults`,
+`reset_keeping_parameters` and `clear_runtime` take `L: Lane` (turbofish at every caller, and at
+`corpus.rs:228-229`). `clear_runtime` writes both gain rings in one loop over whole `L::WIDTH`
+chunks with `L::splat(1.0)`, and `prefix` with `reduction` in one loop over whole chunks
+(`L::splat(1.0)` and `L::zero()`), so no store has a bounds check and no scalar tail exists. The
+trap comment names `lane::Simd4::splat`. `new` keeps its zeroed planes (Q2). The doc now states
+the real mechanism: two planes per loop, which loop-idiom cannot prove free of aliasing; this is
+the pass failing to prove something, so the ratchet stays. Stale text fixed in
+`scripts/check-cross-targets.sh` and `docs/TARGET_MATRIX.md` (16 -> 10 left, none
+render-reachable) and in the comment above `IOS_MEMSET_CEILINGS`.
+
+**Gate 2 / codegen.** `aarch64-apple-ios` release: 0 `bl _memset_pattern16` in the crate (base 6).
+`clear_runtime::<f32x4>` and `::<f32>` call only `_bzero` (3 each: `history`, `main_ring`,
+`phase`) and have no panic call or branch. (There is no Simd8 on AArch64, #1112.) x86-64-v3
+release: `clear_runtime::<f32>`, `::<f32x4>` and `::<f32x8>` call only `memset` (3 each, the
+zero fills) and have no panic call. The ring loop is `stp x, x` per ring per chunk on iOS and
+`vmovups ymm` pairs at W8 on x86. Attempt 1's `step_by` panic branch and v7's first
+`prefix` bounds check (`slice_index_fail`/`panic_bounds_check`, seen before the zip) are gone.
+
+**Gate 3 / reset cost.** `LimiterCore::<L>::reset(DiscontinuityKeepParameters)`, both channels,
+x86-64-v3 release test build, `taskset` to one core, best of 7 x 20,000, ns per reset; base
+(`8fc41c5b0^` limiter source) and head alternated, 3 runs each, median shown:
+
+| width / rate | base | head | ratio |
+|---|---|---|---|
+| W1 44.1 kHz | 112 | 130 | 1.16 |
+| W1 96 kHz | 224 | 248 | 1.11 |
+| W4 44.1 kHz | 457 | 476 | 1.04 |
+| W4 96 kHz | 961 | 1,100 | 1.14 |
+| W8 44.1 kHz | 915 | 1,141 | 1.25 |
+| W8 96 kHz | 1,919 | 2,387 | 1.24 |
+
+Probable cause: base fills each ring in its own unrolled loop; v7 writes both rings in one loop,
+which is exactly what defeats loop-idiom. No vector form that the attempt 1 verifier measured
+(v5, v7, v8, v9, v10) reached base at W8 96 kHz. Root accepted the cost (Amendment 1): about
+0.5 us per bank per reset, only at a reset or a failed block, never per block. iOS cost is not
+measured (no device).
+
+**Gate 1 (PR evidence, not committed).** A temporary in-crate probe drove `LimiterCore` at f32,
+Simd4 and Simd8, 44.1 and 96 kHz, quanta 1 and 128, `DualMono` and `Maximum` (24 cases), each in
+five phases of `3 + 1100 / quantum` noise blocks with point automation every fifth block: none,
+`FullToDefaults`, `DiscontinuityKeepParameters`, a NaN on every lane (whole D7 reset) and a NaN on
+lane 0 (per-lane D7 at W4/W8). It hashed (two keyed SipHash streams) every output word and every
+state word of both channels by bits (all rings, `reduction`, `prefix`, `box_sum`, and the
+`Debug` of phase, ramps, lane shapes, lookahead bits), the cursors, the report and the link flags,
+after construction, at each phase start and after every block: 66,984 digest lines, identical
+base vs head (`cmp`) on the final code. Discrimination: a mutant writing `0.5` into the last
+`box_ring` word at W8 differs at line 11,043 (the first W8 construction).
+
+**Mutation runs (no new test; the guards are existing).**
+- Ratchet: the ring loop replaced by `required_ring.fill(1.0); box_ring.fill(1.0)`: limiter iOS
+  count 4 (2 per instantiation), `judge-memset` rc 1 ("4 memset_pattern16 calls and no row").
+  Final code: count 0, judge rc 0.
+- Ring loop `.skip(1)` (first slot not written): 8 tests red, including
+  `a_lane_reset_is_the_whole_reset_at_one_lanes_stride` and
+  `both_resets_return_the_runtime_state_to_a_silent_lane`.
+- `prefix` written `0.0` instead of `1.0`: 3 tests red (`a_lane_reset_is_the_whole_reset_at_one_lanes_stride`,
+  `a_failed_lane_is_recovered_and_reported_alone`, `a_padded_lane_stays_at_rest_through_the_lookahead`).
+All reverted; tree is the final code.
+
+**Gate 5.** PASS: `cargo fmt --all -- --check`; `cargo test --locked --all-targets -p
+true-peak-limiter -p conformance` (89 passed); `conformance_fixtures -- --check`;
+`aarch64-known-defects.py --self-test`; `check-workspace-policy.sh`; `check-realtime-policy.sh`;
+`cargo clippy --locked --workspace --all-targets -- -D warnings`; `check-cross-targets.sh`
+(limiter 0, no row; builtins 5, host-core 4, soft-clip 1); `run-wasm-gates.sh`; `test-debug-a`
+(1,458 passed). `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` FAILS on
+`crates/gate-expander/src/corpus.rs:64` (`clamped_window` links to private `RAMP_FRAMES`, from
+#1459, not this slice); the same command with `--exclude gate-expander` passes.

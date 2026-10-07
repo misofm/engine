@@ -503,7 +503,13 @@ struct ChannelState {
 
 impl ChannelState {
     /// Allocates one channel of `width` lanes and seeds it with each lane's defaults.
-    fn new(width: usize, shape: &Shape, defaults: &[[f32; PARAMETER_COUNT]], rate: u32) -> Self {
+    fn new<L: Lane>(
+        width: usize,
+        shape: &Shape,
+        defaults: &[[f32; PARAMETER_COUNT]],
+        rate: u32,
+    ) -> Self {
+        debug_assert_eq!(width, L::WIDTH);
         debug_assert_eq!(defaults.len(), width);
         // The two gain rings and `prefix` rest at `1.0`, and `reset_to_defaults` below writes those
         // words through `clear_runtime`. They are allocated zeroed, not `vec![1.0; n]`: that macro
@@ -524,7 +530,7 @@ impl ChannelState {
             lookahead_ms: vec![0.0; width].into_boxed_slice(),
             lane: vec![LaneShape::new(0, shape); width].into_boxed_slice(),
         };
-        state.reset_to_defaults(shape, defaults, rate);
+        state.reset_to_defaults::<L>(shape, defaults, rate);
         state
     }
 
@@ -591,11 +597,16 @@ impl ChannelState {
     }
 
     /// `FullToDefaults`: every runtime word cleared and every ramp snapped to the prepared value.
-    fn reset_to_defaults(&mut self, shape: &Shape, defaults: &[[f32; PARAMETER_COUNT]], rate: u32) {
+    fn reset_to_defaults<L: Lane>(
+        &mut self,
+        shape: &Shape,
+        defaults: &[[f32; PARAMETER_COUNT]],
+        rate: u32,
+    ) {
         for (lane, values) in defaults.iter().enumerate() {
             self.seed_lane_defaults(lane, shape, values, rate);
         }
-        self.clear_runtime(shape);
+        self.clear_runtime::<L>(shape);
     }
 
     /// Writes one lane's designed words from its prepared defaults: the per-lane half of
@@ -628,12 +639,12 @@ impl ChannelState {
     }
 
     /// `DiscontinuityKeepParameters`: the same runtime words, ramps snapped to their targets.
-    fn reset_keeping_parameters(&mut self, shape: &Shape) {
+    fn reset_keeping_parameters<L: Lane>(&mut self, shape: &Shape) {
         for (limit, release) in self.limit.iter_mut().zip(self.release.iter_mut()) {
             limit.snap();
             release.snap();
         }
-        self.clear_runtime(shape);
+        self.clear_runtime::<L>(shape);
     }
 
     /// Clears history, rings and the recursive word to the state a silent lane rests in.
@@ -646,34 +657,51 @@ impl ChannelState {
     /// frame loop, and one copy serves every caller. Inlined, it is copied into
     /// [`ChannelState::new`] as well, which adds code on every target (measured in #1452, undo 4).
     ///
-    /// # Why the `1.0` words are written lane by lane (#1456)
+    /// # Why the `1.0` words are written two planes per loop (#1456)
     ///
     /// This runs on the render thread at a reset and at the D7 recovery of a failed block, so it
-    /// must not call libc. A loop that stores one constant `f32` at unit stride -- `fill(1.0)`, and
-    /// equally a loop of `Lane::splat(1.0)` vector stores, whose 16-byte pattern is the same idiom
-    /// -- is rewritten by LLVM's loop-idiom pass into `llvm.experimental.memset.pattern`, which
-    /// Apple targets lower to `bl _memset_pattern16`. The two gain rings and `prefix` are
-    /// therefore written in [`clear_lane_runtime`](Self::clear_lane_runtime)'s order: lane by
-    /// lane, at the lane stride. That stride is the run-time `width`, so the pass cannot prove the
-    /// stores contiguous and forms no call, on any target and with no target-specific path. The
-    /// words written are the same `1.0` at the same positions. `scripts/check-cross-targets.sh`
-    /// counts the call in the iOS release assembly and fails if it returns.
+    /// must not call `memset_pattern16`. LLVM's loop-idiom pass rewrites a loop that stores one
+    /// constant `f32` pattern over **one** plane -- `fill(1.0)`, and equally a loop of
+    /// `L::splat(1.0)` stores over one plane -- into `llvm.experimental.memset.pattern`, which
+    /// Apple targets lower to `bl _memset_pattern16`. Here each loop stores into **two** planes:
+    /// the two gain rings together, and `prefix` together with `reduction`. The pass cannot prove
+    /// that one plane's stores do not alias the other's, so it forms no call. This is the pass
+    /// failing to prove something, not a construction that excludes the call, so
+    /// `scripts/check-cross-targets.sh` counts the call in the iOS release assembly and fails if
+    /// it returns. The stores are whole `L::WIDTH` vectors: every plane here is a whole number of
+    /// lane vectors long, so no scalar tail and no bounds check exist. One shape serves every
+    /// target. The words written are the same `1.0` and `+0.0` at the same positions.
+    ///
+    /// Cost: on x86-64-v3 this reset is 4 % to 25 % slower than per-plane `fill(1.0)` (W8 at
+    /// 96 kHz: 2.4 us against 1.9 us per bank; #1456 attempt 2). No vector form that avoided the
+    /// call reached the per-plane fill. The cost is paid only at a reset or a failed block, never
+    /// per block.
     #[inline(never)]
-    fn clear_runtime(&mut self, shape: &Shape) {
+    fn clear_runtime<L: Lane>(&mut self, shape: &Shape) {
+        debug_assert_eq!(self.width, L::WIDTH);
         debug_assert_eq!(self.main_ring.len(), shape.main * self.width);
         self.history.fill(0.0);
         self.main_ring.fill(0.0);
-        let width = self.width;
-        for (lane, prefix) in self.prefix.iter_mut().enumerate() {
-            for word in self.required_ring.iter_mut().skip(lane).step_by(width) {
-                *word = 1.0;
-            }
-            for word in self.box_ring.iter_mut().skip(lane).step_by(width) {
-                *word = 1.0;
-            }
-            *prefix = 1.0;
+        // Trap: write `L::splat` (or `<Simd4 as Lane>::splat`), never `lane::Simd4::splat`. The
+        // bare path resolves to `wide`'s own inherent `splat`, an array-repeat store loop that
+        // Apple targets lower to one `memset_pattern16` call per chunk (#1451).
+        for (required, boxed) in self
+            .required_ring
+            .chunks_exact_mut(L::WIDTH)
+            .zip(self.box_ring.chunks_exact_mut(L::WIDTH))
+        {
+            L::splat(1.0).store(required);
+            L::splat(1.0).store(boxed);
         }
-        self.reduction.fill(0.0);
+        // `prefix` and `reduction` are each one whole `L::WIDTH` chunk: no bounds check.
+        for (prefix, reduction) in self
+            .prefix
+            .chunks_exact_mut(L::WIDTH)
+            .zip(self.reduction.chunks_exact_mut(L::WIDTH))
+        {
+            L::splat(1.0).store(prefix);
+            L::zero().store(reduction);
+        }
         self.phase.fill(0);
         for (sum, shape) in self.box_sum.iter_mut().zip(self.lane.iter()) {
             *sum = shape.window as f32;
@@ -3516,8 +3544,8 @@ impl<L: Lane> LimiterCore<L> {
         }
         let shape = Shape::new(metadata.sample_rate)?;
         let rate = metadata.sample_rate;
-        let left = ChannelState::new(width, &shape, &left_defaults, rate);
-        let right = ChannelState::new(width, &shape, &right_defaults, rate);
+        let left = ChannelState::new::<L>(width, &shape, &left_defaults, rate);
+        let right = ChannelState::new::<L>(width, &shape, &right_defaults, rate);
         let gain_linked = lane_shapes_agree(&left, &right);
         Some(Self {
             coefficients: LimiterCoef::new(
@@ -3562,13 +3590,13 @@ impl<L: Lane> LimiterCore<L> {
         match kind {
             ResetKind::FullToDefaults => {
                 self.left
-                    .reset_to_defaults(&self.shape, &self.left_defaults, rate);
+                    .reset_to_defaults::<L>(&self.shape, &self.left_defaults, rate);
                 self.right
-                    .reset_to_defaults(&self.shape, &self.right_defaults, rate);
+                    .reset_to_defaults::<L>(&self.shape, &self.right_defaults, rate);
             }
             ResetKind::DiscontinuityKeepParameters => {
-                self.left.reset_keeping_parameters(&self.shape);
-                self.right.reset_keeping_parameters(&self.shape);
+                self.left.reset_keeping_parameters::<L>(&self.shape);
+                self.right.reset_keeping_parameters::<L>(&self.shape);
             }
         }
         self.cursors = Cursors::default();
@@ -3729,9 +3757,9 @@ impl<L: Lane> LimiterCore<L> {
         let rate = self.sample_rate;
         if charged == self.active {
             self.left
-                .reset_to_defaults(&shape, &self.left_defaults, rate);
+                .reset_to_defaults::<L>(&shape, &self.left_defaults, rate);
             self.right
-                .reset_to_defaults(&shape, &self.right_defaults, rate);
+                .reset_to_defaults::<L>(&shape, &self.right_defaults, rate);
             self.cursors = Cursors::default();
             return true;
         }
@@ -8667,10 +8695,10 @@ mod tests {
             let mut whole = dirty();
             whole
                 .left
-                .reset_to_defaults(&shape, &whole.left_defaults, rate);
+                .reset_to_defaults::<L>(&shape, &whole.left_defaults, rate);
             whole
                 .right
-                .reset_to_defaults(&shape, &whole.right_defaults, rate);
+                .reset_to_defaults::<L>(&shape, &whole.right_defaults, rate);
             let untouched = dirty();
             for target in 0..lanes {
                 let mut one = dirty();

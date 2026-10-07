@@ -184,7 +184,9 @@ AArch64 legs. Each open entry is an expected failure, by name:
   `Lane::splat` and `Lane::zero` inlined into a kernel became such a loop. `lane` now builds its
   splats from array literals (`crates/lane/src/wide_impl.rs`), which reach LLVM with no loop:
   2,122 -> 16 calls, and the rows of `compressor`, `gate-expander`, `graph`,
-  `multiband-compressor`, `parametric-eq` and `transient-shaper` were deleted at zero. The 16 left
+  `multiband-compressor`, `parametric-eq` and `transient-shaper` were deleted at zero. #1456
+  deleted the `true-peak-limiter` row (6 -> 0): its `clear_runtime`, which runs at a reset and on a
+  failed block, writes its `1.0` words as whole lane vectors with two planes per loop. The 10 left
   are scalar fills of a real length, not lane splats:
 
   | crate | calls | where |
@@ -192,12 +194,10 @@ AArch64 legs. Each open entry is an expected failure, by name:
   | `builtins` | 5 | preparation constructors: `lanes_below`'s flag fill, `InputStage::new`, `BuiltinFaderBank::new`, `FaderMuteRampBuiltins::new` |
   | `host-core` | 4 | `SpectrumAnalyzer::analyze` and `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each |
   | `soft-clip` | 1 | the test corpus's `fill` |
-  | `true-peak-limiter` | 6 | three `fill(1.0)` in `ChannelState::new`, three in `clear_runtime` |
 
-  Only the limiter's `clear_runtime` is reachable from render: it runs at a reset and on a failed
-  block. #1018 stays open for these rows. There is no effect on `x86_64`, Linux AArch64 or
-  `wasm32`. The expected failures are `ios-asm-memset-pattern16`, one row per crate with its count
-  as a ceiling, in `scripts/lib/aarch64-known-defects.py`, scanned by
+  None of these is reachable from render. #1018 stays open for these rows. There is no effect on
+  `x86_64`, Linux AArch64 or `wasm32`. The expected failures are `ios-asm-memset-pattern16`, one
+  row per crate with its count as a ceiling, in `scripts/lib/aarch64-known-defects.py`, scanned by
   `scripts/check-cross-targets.sh`. `capi` is scanned as an rlib and has none.
 - **Resolved by #1017: tests that assumed eight lanes.** The seven test-only warnings
   (`host-core/tests/fp_environment.rs`, `lane/tests/fp_env.rs`) and the tests that asserted or

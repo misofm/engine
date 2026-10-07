@@ -67,9 +67,9 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each) and `soft-clip` 1
 # (the test corpus's `fill`). #1452 undid the shapes chosen only for this ratchet where the natural
 # shape was better; no row moved. #1456 deleted the `true-peak-limiter` row at zero (6 -> 0): its
-# `clear_runtime`, which also runs at a reset and on a failed block, writes its `1.0` words lane by
-# lane at the run-time lane stride, which loop-idiom cannot prove contiguous, and
-# `ChannelState::new` allocates those words zeroed because `clear_runtime` writes them.
+# `clear_runtime`, which also runs at a reset and on a failed block, writes its `1.0` words as whole
+# `Lane::splat` vectors with two planes per loop, which loop-idiom cannot prove free of aliasing,
+# and `ChannelState::new` allocates those words zeroed because `clear_runtime` writes them.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
     "builtins": ("1018", 5),
     "host-core": ("1018", 4),
