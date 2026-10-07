@@ -140,4 +140,100 @@ reaches, add one test for it, which turns red if the per-block arming test is of
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (2026-10-07)
+
+Base `88c62e7f5` (stream G2 after #1458/#1459). Changed: `crates/multiband-compressor/src/lib.rs`
+and `crates/multiband-compressor/tests/product.rs` (one new test). No `crates/lane` change: the
+arming test is `Side::arms`, the builtins' `channel_arms` rule written from the two public lane
+primitives it wraps (`lane::silence_armable_holding` over `kernels::svf_state_held([a, b])`).
+
+**The change (D1).** `process_block` tests once per segment, for a non-bypassed instance, whether
+either side `arms` over the segment's length. If not, it advances each side's counter once with
+`silence_skip_block` over the segment's input (before the frame loop overwrites it) and runs
+`run_segment::<.., ARMABLE = false>`: no `silence_step` in the frame loop and both crossover
+stages on the per-word flush (`lr4_step_when(false, ..)`, a private sibling of `lr4_step`, which
+now delegates with `true`; `lr4_step`'s signature and its corpus and test callers are
+unchanged). Otherwise today's body (`ARMABLE = true`). Bypass takes `ARMABLE = true` only, so it
+gains no second body. `ARMABLE` is a fourth const generic, not a run-time flag (the spec's
+rejected alternative). The docs on `run_segment`, `lr4_step_when` and `Side::arms` state the two
+forms and why they are the same bits. `N_SILENCE`, the counter, the state record and its restore
+are unchanged.
+
+**Gate 1, no bit moved.** Scratch differential (`w1455/w1455_diff.rs`, not committed) through the
+public contract: scalar instances, `Simd4` (two banks) and `Simd8`, every link mode, bypassed and
+not, 44.1 and 96 kHz, quanta 1, 128 and 4,096; 40,000 frames of eight per-lane input shapes (stop
+on a block boundary, stop mid-block, live with short zero runs, silent throughout, live then an
+armed silence then a burst, `±0.0` alternation, subnormal input, impulses); block-rate automation
+in the live part, at the live/silent edge and in the silent tail (ramping and settled segments);
+a snapshot every 2,048 frames; and at frame 18,000 a capture and restore into a fresh instance
+with joint-band crossover words (both stages, one stage, none) and counters at `N_SILENCE - 1`,
+`N_SILENCE - q`, `N_SILENCE - q - 1`, `N_SILENCE - 2` or as counted, per lane and side. Every
+output word, report and snapshot hashed per configuration: **36 of 36 lines identical** base vs
+head. Sensitivity (each mutation of head, then reverted): always unarmed moves 18 lines, arming
+test over `frames - 1` 6, near side only 9, far side only 6, stage `a` only 3, stage `b` only 9,
+no `silence_skip_block` 18. The multiband `DIGESTS`, `conformance_fixtures --check` and the
+crate's tests pass unchanged.
+
+**Spec correction.** The multiband `DIGESTS` do not reach this dispatch: `corpus.rs` calls
+`lr4_step` with its own counter, never `process_block`. Of the seven mutations above, existing
+tests catch three (always unarmed, off by one and no `silence_skip_block`:
+`the_crossover_joint_flush_arms_after_its_inputs_silence`, `each_channel_counts_its_own_input`,
+`the_silence_counter_is_carried_and_validated`); the four that read one side or one stage only
+were green on every existing test. Hence the one test below (the spec's Test value clause).
+
+**Test value.** New `either_channel_and_either_stage_arm_the_crossover` (`tests/product.rs`):
+*red when the per-block arming test reads only one channel, or only one crossover stage, for its
+held state, which no existing test catches because each restores both channels with both stages
+banded.* Mutation runs (head mutated, test run, reverted): near side only -> red (channel 1,
+stage 0 keeps its words); far side only -> red (channel 0, stage 0); stage `a` only -> red
+(channel 0, stage 1); stage `b` only -> red (channel 0, stage 0); base `88c62e7f5` (one form) and
+head -> green.
+
+**Gate 2.** `check-cross-targets.sh` passes; no `multiband-compressor` row (rows left: builtins 5,
+host-core 4, soft-clip 1).
+
+**Gate 3.** `run-wasm-gates.sh` exits 0 (EQ rows unchanged). Worklet chain passes:
+`build-web-audioworklet.sh --named-twin` (shipped module `bf0125fe...`, 3,139,847 B; base
+`04b7c5f5...`, 3,097,126 B: **+42,721 B**, the second `run_segment` body), `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh` (empty TMPDIR after).
+
+**Gate 4, codegen** (innermost frame loop of `process_bank`, live audio = settled, non-bypassed,
+DualMono / Average / Maximum; base -> head unarmed, head armed in brackets):
+
+| target | settled (live audio) | ramping |
+|---|---|---|
+| x86-64-v3 `f32x8` (`--emit asm`, instruction lines) | 457 / 462 / 545 -> **426 / 428 / 505** (459 / 464 / 546) | 620 / 625 / 703 -> 581 / 586 / 663 (619 / 624 / 705) |
+| x86-64-v3 `f32x4` | 458 / 463 / 531 -> **424 / 424 / 494** (453 / 457 / 528) | 617 / 623 / 689 -> 584 / 587 / 650 (618 / 625 / 683) |
+| `simd128` (`wasm2wat`, instructions in the loop) | 835 / 844 / 931 -> **755 / 764 / 851** (834 / 843 / 930) | 1067 / 1076 / 1163 -> 987 / 996 / 1083 (1067 / 1076 / 1163) |
+| TurboFan, shipped module (instructions / carried slots, all 5 blocks) | 519/23, 525/24, 564/23 -> **461/14, 469/15, 502/15** (504/18, 509/18, 542/17) | 690/41, 694/40, 737/42 -> 664/44, 672/45, 719/44 (690/43, 694/44, 737/42) |
+
+Named increases: TurboFan's unarmed ramping loops carry 2 to 5 more slots than the base's ramping
+loop (they are 18 to 26 instructions shorter); the armed ramping loops carry 0 to 4 more. No
+multiband row is held by the V8 spill gate. Whole function: `process_bank<f32x8>` 5,924 -> 9,995
+x86 instructions, `<f32x4>` 7,426 -> 11,455; `simd128` `process_bank<f32x4>` 20,515 -> 27,411;
+TurboFan 14,023 -> 18,852. The scalar `process` (x86) has branching frame loops (the scalar
+branching smoother) that a loop-range count does not separate cleanly; its settled DualMono loop
+reads 515 -> 441, not used for D3.
+
+**Gate 4, p50** (scratch `w1455/w1455_bench.rs`, not committed; 48 kHz, 128-frame blocks,
+DualMono, defaults, per-block `Instant`; live and one-lane-silent: 50 warm + 2,000 timed blocks x
+2 instances; silent tail: 20 live then 400 timed silent blocks x 10 instances, through arming and
+rest). One invocation, `taskset -c 31`, load 2.1, order warmup base, warmup head, r1 base, r1 head,
+r2 head, r2 base; not retried. ns per block, r1 / r2:
+
+| lanes | live base | live head | one silent base | one silent head | silent tail base | silent tail head |
+|---|---|---|---|---|---|---|
+| scalar | 6,182 / 6,181 | **5,771 / 5,761** (-6.6 %, -6.8 %) | n/a | n/a | 6,182 / 6,172 | **5,871 / 5,841** (-5.0 %, -5.4 %) |
+| `Simd4` | 9,518 / 9,337 | **9,118 / 9,137** (-4.2 %, -2.1 %) | 9,528 / 9,328 | 9,177 / 9,178 (-3.7 %, -1.6 %) | 9,538 / 9,328 | 9,178 / 9,178 (-3.8 %, -1.6 %) |
+| `Simd8` | 10,320 / 10,310 | **9,779 / 9,789** (-5.2 %, -5.1 %) | 10,319 / 10,310 | 9,849 / 9,839 (-4.6 %) | 10,319 / 10,320 | 9,849 / 9,839 (-4.6 %, -4.7 %) |
+
+**D3 verdict: keep.** Gates 1-3 pass; the live-audio loop is shorter on x86-64-v3 (-31..-40) and
+`simd128` (-80); p50 is lower on live audio and on the silent tail at every width.
+
+**Gate 5.** Pass: the spec's `cargo test` (291 passed), `test-debug-a` (1,458 passed),
+`conformance_fixtures --check`, lane, workspace and realtime policies, the AArch64 known-defect
+self-test, clippy `-D warnings`, fmt. **`cargo doc -D warnings` fails** outside this slice,
+in `crates/gate-expander/src/corpus.rs:64` (`clamped_window` links the private `RAMP_FRAMES`, from
+#1459's `ffcbba6b7`); not this slice's file; the workspace without `gate-expander` documents
+cleanly. AArch64 legs: CI only, not run.

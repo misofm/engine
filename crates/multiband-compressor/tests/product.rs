@@ -1452,6 +1452,61 @@ fn the_crossover_joint_flush_arms_after_its_inputs_silence() {
     }
 }
 
+/// Issue #1455: a block takes the crossover's armed form when either channel, through either
+/// stage, can act on it.
+///
+/// One channel restored with one stage's two words at `±1e-15` (inside the joint band), the other
+/// stage at `+0.0` and its counter at `N_SILENCE - 1`; the other channel at rest with its counter
+/// at `+0.0`. One frame of zeros arms the held channel and every word of it is `+0.0` after it, in
+/// all four placements. Red when the per-block arming test reads one channel only, or one stage
+/// only, for its held state: that block runs the unarmed form and keeps the held words.
+#[test]
+fn either_channel_and_either_stage_arm_the_crossover() {
+    const FILTER_WORD: usize = 43;
+    const COUNTER_WORD: usize = 47;
+    const N_SILENCE_48K: f32 = 4_096.0;
+    let word = |section: &[u8], index: usize| {
+        f32::from_le_bytes(section[index * 4..index * 4 + 4].try_into().expect("word"))
+    };
+    for held_channel in 0..2 {
+        for held_stage in 0..2 {
+            let prepared = MultibandCompressorFactory
+                .prepare(request(&values()))
+                .expect("prepare");
+            let sizes = prepared.metadata.state_sizes;
+            let mut effect = prepared.processor;
+            let mut saved = snapshot(effect.as_ref(), sizes);
+            let section = if held_channel == 0 {
+                &mut saved.1
+            } else {
+                &mut saved.2
+            };
+            for (offset, value) in [1.0e-15_f32, -1.0e-15].into_iter().enumerate() {
+                let index = FILTER_WORD + 2 * held_stage + offset;
+                section[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            section[COUNTER_WORD * 4..COUNTER_WORD * 4 + 4]
+                .copy_from_slice(&(N_SILENCE_48K - 1.0).to_le_bytes());
+            restore(effect.as_mut(), 1, &saved, sizes).expect("a banded payload restores");
+            let (mut left, mut right) = (vec![0.0_f32; 1], vec![0.0_f32; 1]);
+            process(effect.as_mut(), &mut left, &mut right, 0, &[], 1);
+            let after = snapshot(effect.as_ref(), sizes);
+            let section = if held_channel == 0 {
+                &after.1
+            } else {
+                &after.2
+            };
+            let words: Vec<f32> = (0..4)
+                .map(|index| word(section, FILTER_WORD + index))
+                .collect();
+            assert!(
+                words.iter().all(|w| w.to_bits() == 0),
+                "channel {held_channel}, stage {held_stage}: an armed block leaves {words:?}"
+            );
+        }
+    }
+}
+
 /// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp moves.
 ///
 /// From the effect's own snapshot with all ten ramps in flight (both bands' threshold, ratio,

@@ -58,9 +58,9 @@ use effect_runtime::state_payload::{
     STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_inside, read_f32, read_u32, write_f32,
     write_u32,
 };
-use lane::kernels::{SvfState, ramp_toward, svf_step};
-use lane::silence_step;
+use lane::kernels::{SvfState, ramp_toward, silence_skip_block, svf_state_held, svf_step_when};
 use lane::{Lane, flush};
+use lane::{silence_armable_holding, silence_step};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
@@ -518,9 +518,24 @@ impl<L: Lane> Default for Lr4State<L> {
 /// never armed by that tap.
 #[inline(always)]
 pub fn lr4_step<L: Lane>(x: L, rest: L, c: &Lr4Coef<L>, s: &mut Lr4State<L>) -> (L, L) {
-    let (v1, lp1) = svf_step(x, c.nc1, c.a2, c.a3, rest, &mut s.a);
+    lr4_step_when(true, x, rest, c, s)
+}
+
+/// [`lr4_step`] for a caller that knows, per segment, whether either stage's joint flush can act
+/// (issue #1455): `armable = true` is [`lr4_step`]; `armable = false` runs both stages'
+/// per-word flush ([`svf_step_when`]`(false, ..)`) and does not read `rest`, which is the same
+/// bits on a segment for which [`Side::arms`] is `false`.
+#[inline(always)]
+fn lr4_step_when<L: Lane>(
+    armable: bool,
+    x: L,
+    rest: L,
+    c: &Lr4Coef<L>,
+    s: &mut Lr4State<L>,
+) -> (L, L) {
+    let (v1, lp1) = svf_step_when(armable, x, c.nc1, c.a2, c.a3, rest, &mut s.a);
     let ap = c.nk2.fma(v1, x);
-    let (_, low) = svf_step(lp1, c.nc1, c.a2, c.a3, rest, &mut s.b);
+    let (_, low) = svf_step_when(armable, lp1, c.nc1, c.a2, c.a3, rest, &mut s.b);
     (low, ap.sub(low))
 }
 
@@ -734,6 +749,23 @@ impl<L: Lane, const W: usize> Side<L, W> {
         })
     }
 
+    /// `true` when this side's crossover needs its armed form over a segment of `frames`
+    /// (issue #1455): some lane whose silence counter can reach `armed_after` within the segment
+    /// holds a recursive word other than `±0.0` in either stage, or the segment is longer than
+    /// `armed_after` (`lane::silence_armable_holding`, the builtin input chain's rule over the same
+    /// two-section cascade). `false` proves the unarmed form gives the same bits: a lane at rest
+    /// in both stages that sees only zero input keeps both stages at `±0.0`, because the second
+    /// stage's input is the first stage's low-pass tap.
+    #[inline(always)]
+    fn arms(&self, frames: usize, armed_after: L) -> bool {
+        silence_armable_holding(
+            self.silence,
+            frames,
+            armed_after,
+            svf_state_held([self.filter.a, self.filter.b]),
+        )
+    }
+
     /// Clears history. Coefficients and parameters are deliberately untouched.
     fn discontinuity_reset(&mut self) {
         self.filter = Lr4State::default();
@@ -912,9 +944,27 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// the same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is `+0.0`, and a NaN is quieted by
 /// an addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
 /// than leaving it as a comment.
+///
+/// `ARMABLE` is the fourth (issue #1455), chosen per segment by [`process_block`]. At `true` the
+/// crossover is the armed form: each side's silence counter advances frame by frame
+/// ([`silence_step`]) and both stages run the joint flush on its rest threshold. At `false` the
+/// frame loop runs no counter, and both stages run the per-word flush ([`lr4_step_when`]); the
+/// caller has already advanced each counter over the segment with [`silence_skip_block`], which
+/// leaves it where the frame loop would. The two forms give the same bits on a segment for which
+/// neither side [`Side::arms`]: there every lane's threshold is `+0.0`, or the lane holds no state
+/// for the joint term to zero (`lane::silence_armable_holding`), and `flush_pair(n1, n2, +0.0)` is
+/// `(flush(n1), flush(n2))`. A bypassed segment runs neither; [`process_block`] gives it
+/// `ARMABLE = true` as a compile-time constant, so its unarmed arm is dead code.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, const RAMPING: bool>(
+fn run_segment<
+    L: Lane,
+    const W: usize,
+    const LINK: u8,
+    const BYPASS: bool,
+    const RAMPING: bool,
+    const ARMABLE: bool,
+>(
     sides: &mut [Side<L, W>; 2],
     left: &mut [f32],
     right: &mut [f32],
@@ -953,11 +1003,28 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
             input_far.store(&mut right[frame * W..]);
             continue;
         }
-        let rest_near = silence_step(input_near, &mut silence_near, armed_after);
-        let rest_far = silence_step(input_far, &mut silence_far, armed_after);
-        let (low_near, high_near) =
-            lr4_step(input_near, rest_near, &near.coefficients, &mut filter_near);
-        let (low_far, high_far) = lr4_step(input_far, rest_far, &far.coefficients, &mut filter_far);
+        let (rest_near, rest_far) = if ARMABLE {
+            (
+                silence_step(input_near, &mut silence_near, armed_after),
+                silence_step(input_far, &mut silence_far, armed_after),
+            )
+        } else {
+            (L::zero(), L::zero())
+        };
+        let (low_near, high_near) = lr4_step_when(
+            ARMABLE,
+            input_near,
+            rest_near,
+            &near.coefficients,
+            &mut filter_near,
+        );
+        let (low_far, high_far) = lr4_step_when(
+            ARMABLE,
+            input_far,
+            rest_far,
+            &far.coefficients,
+            &mut filter_far,
+        );
         let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
         let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
 
@@ -1039,10 +1106,28 @@ fn process_block<
             instance.sides[1].band_coefficients(sample_rate),
         ];
         // A bypassed instance runs no crossover and freezes the silence counters with the filter
-        // (issue #1328, amendment A9).
+        // (issue #1328, amendment A9). Otherwise the joint flush's arithmetic runs only on a
+        // segment it can act on (issue #1455, [`Side::arms`]); on every other segment each side's
+        // counter advances once over the segment's input, before the frame loop overwrites it,
+        // and the frame loop runs the unarmed form.
+        let armable = BYPASS
+            || instance.sides[0].arms(length, armed_after)
+            || instance.sides[1].arms(length, armed_after);
+        if !armable {
+            silence_skip_block(
+                &left[position * W..(position + length) * W],
+                length,
+                &mut instance.sides[0].silence,
+            );
+            silence_skip_block(
+                &right[position * W..(position + length) * W],
+                length,
+                &mut instance.sides[1].silence,
+            );
+        }
         macro_rules! segment {
-            ($ramping:literal) => {
-                run_segment::<L, W, LINK, BYPASS, $ramping>(
+            ($ramping:literal, $armable:literal) => {
+                run_segment::<L, W, LINK, BYPASS, $ramping, $armable>(
                     &mut instance.sides,
                     &mut left[position * W..(position + length) * W],
                     &mut right[position * W..(position + length) * W],
@@ -1054,14 +1139,22 @@ fn process_block<
             };
         }
         if plan.ramping || FORCE_RAMPING {
-            segment!(true);
+            if armable {
+                segment!(true, true);
+            } else {
+                segment!(true, false);
+            }
             let advanced = length as u32;
             instance.sides[0].store_segment(&segments[0], advanced);
             instance.sides[1].store_segment(&segments[1], advanced);
         } else {
             #[cfg(debug_assertions)]
             assert!(instance.flat_path_is_identity());
-            segment!(false);
+            if armable {
+                segment!(false, true);
+            } else {
+                segment!(false, false);
+            }
             // The write-back is skipped rather than performed and discarded, and that is sound
             // for the same reason the additions are: `store_segment` would write `current` back
             // unchanged, because no lane of it moved, and would apply `saturating_sub` to a
