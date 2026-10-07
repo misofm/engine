@@ -427,15 +427,18 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
             largest_owned = largest_owned.max(bytes as u64);
         }
     }
-    // All nine owners retain the same factory Arc: charge its actual header/layout once.
+    // All nine owners share one factory Arc: its actual header/layout is charged at most once.
     let factory_bytes = core::alloc::Layout::new::<[core::sync::atomic::AtomicUsize; 2]>()
         .extend(core::alloc::Layout::for_value(shared_factory.as_ref()))
         .expect("factory layout")
         .0
         .pad_to_align()
         .size() as u64;
-    payload += factory_bytes;
-    largest_owned = largest_owned.max(factory_bytes);
+    // #1469 Amendment 1: a factory the launch registry owns is charged to no plan.
+    if !host_core::launch_registry_owns_factory(shared_factory) {
+        payload += factory_bytes;
+        largest_owned = largest_owned.max(factory_bytes);
+    }
     assert_eq!(
         prepared
             .report

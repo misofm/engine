@@ -252,6 +252,13 @@ Stop 2, option (a): host-core re-exports `launch_registry_owns_factory`, and in 
 `effect_control_browser_table_and_payload_reach_exact_budget_gate` charges its expected factory
 term only when the registry does not own the factory. A STREAMS hot-file note covers both edits.
 
+**Amendment 1, stop 3 (root, 2026-10-07), named exception.** In `crates/host-core/tests/prepare.rs`
+(`:430-446`), `effect_control_report_uses_actual_native_capacity_strings_and_owners` adds the
+factory bytes, and their effect on the largest allocation, only when the registry does not own the
+factory. Standing ruling for the rest of the batch: any test whose expected value encodes the old
+factory charge may be fixed the same way without asking again, with mutation evidence recorded
+here.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, 2026-10-07) -- checkpoint, gates incomplete (disk stop)
@@ -501,3 +508,13 @@ test formulas that charge a factory layout (`Layout::for_value(` of a factory, o
 `factory_allocation_bytes`) finds only this test, stop 2's test, and the two new unit tests. Fix
 shape, the same as stop 2: add `factory_bytes` only when
 `!host_core::launch_registry_owns_factory(shared_factory)`. Not authorized.
+
+### Attempt 1, stop 3 (2026-10-07)
+
+- `crates/host-core/tests/prepare.rs`: the factory bytes and their effect on the largest allocation
+  are counted only when `!host_core::launch_registry_owns_factory(shared_factory)`. Mutation (always
+  charge: `if true || ...`): red, 14409 != 14425. Reverted: green. No other test encodes the old
+  factory charge (see stop 3's search above).
+- test-debug-a (`--no-fail-fast`, `CARGO_INCREMENTAL=0`): pass, 125 `test result: ok`, 0 failed,
+  including `the_launch_registry_is_built_once_per_process`. Clippy `-p host-core --all-targets
+  --all-features -D warnings` and fmt: pass.
