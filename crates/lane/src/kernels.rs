@@ -101,7 +101,7 @@ fn stream_planes<L: Lane, R: RestThresholds<L>, const S: usize>(
     }))
 }
 
-/// Whether every stream of [`svf_cascade_interleaved_impl`]'s frame loop, and every armed rest
+/// Whether every stream of [`svf_cascade_interleaved_form`]'s frame loop, and every armed rest
 /// plane, still holds a whole frame: that loop's one exit test (issue #1454).
 ///
 /// The loop walks its planes by splitting one frame off the front of each per step
@@ -112,7 +112,7 @@ fn stream_planes<L: Lane, R: RestThresholds<L>, const S: usize>(
 /// `FLUSH_EPS` and `NONFINITE_LIMIT` on every frame of the depth-one tails instead of keeping them
 /// in registers. A split at a length this test has just checked has nothing left to check.
 ///
-/// [`svf_cascade_skewed_impl`] keeps its indexed form: walked the same way, its steady-state loop
+/// [`svf_cascade_skewed_form`] keeps its indexed form: walked the same way, its steady-state loop
 /// let LLVM unroll the mono pair by two and gave the armed mono pair a carried stack slot in V8
 /// (issue #1454's record), so its per-frame bounds branches stay.
 #[inline(always)]

@@ -401,3 +401,53 @@ its row), lane, builtins, workspace and realtime policies, `cargo doc` with `-D 
 fmt. AArch64 legs: CI only, not run.
 
 **Test value.** No test added, rewritten or deleted.
+
+### Batch follow-ups (stream G2 part 1, after the attempt-1 PASS)
+
+From `/home/bl/misofm/submix-verdicts/1454-attempt1.md`.
+
+- **MINOR 1 (root authorized `scripts/check-web-audioworklet-v8-spill.py`).** The dual armed
+  depth-1 tail's ceiling falls from 2 to 1, its row now says why, and the docstring's ceiling
+  sentence reads "dual tail 1, one general-purpose word" and records the fall. `run-wasm-gates.sh`
+  passes at 1 (the row reports 1 carried slot) and no longer prints "lower its ceiling" for it.
+  The dual armed depth-2 pair, not in this item, now reports 11 slots under its ceiling of 12 and
+  prints "lower its ceiling" (open item for root).
+- **MINOR 2, the x86 increase analysed.** `process_bank_mono<f32x8>` +42 (4,580 -> 4,622) is
+  static code, not per-frame cost on a real path. With the `while frames_left` loop LLVM no longer
+  reduces `svf_cascade_skewed_impl`'s `frames < D` fallback (the interleaved form at `D = 2`, at
+  most one frame) to straight-line code: head keeps it as four innermost loops of 55, 62, 63 and
+  67 instructions (about +247), offset by code that shrinks elsewhere in the function. The skewed
+  steady-state pair loops change by -2..+2 per frame (unarmed 60 -> 58, masked 62 -> 64, armed
+  72 -> 73, armed masked 75 -> 77); the depth-1 tails by -1..+3 (35 -> 36, 37 -> 40, 41 -> 40,
+  44 -> 44), and the unarmed tail loses its three `64(%rsp)` stack loads. x86-64-v3 is a benchmark
+  proxy, not a shipping target.
+- **MINOR 2, the simd128 frequency corrected.** The four out-of-line `core::array::try_from_fn`
+  instantiations are called from the dual `process_bank`'s `UnarmedRest` `interleave` inside
+  `for pass in 0..pairs` (`crates/parametric-eq/src/lib.rs:2616-2625`): once each per depth-2
+  pass, up to three passes per block (`EQ_SECTION_COUNT = 6`), so about twelve calls per block,
+  not "once each per block". Still a per-block cost, small beside the dual pair loop's -6
+  instructions per frame per pass and the dual tail's -9 per frame.
+- **NIT 1.** The attempt-1 TurboFan table omits the four dual identity-chain loops of
+  `InputStage<f32x4>::process` that FramePairs also changed (`identity_chain_block`,
+  `identity_chain_ramp_block` and two inlined copies): 40 -> 41, 86 -> 87, 51 -> 39, 84 -> 85
+  instructions, slots unchanged (0 -> 0, 6 -> 6).
+- **NIT 2.** Two V8 changes outside the rows: the held mono depth-2 pair (live audio) goes 79 ->
+  80 instructions and its loop-invariant stack reloads 10 -> 13 per frame, with no carried slot;
+  the unheld dual masked armed depth-2 pair (silent tails only, not a row) goes 14 -> 15 carried
+  slots.
+- **NIT 3.** `frames_left`'s doc (`crates/lane/src/kernels.rs`) now names the loops'
+  functions, `svf_cascade_interleaved_form` and `svf_cascade_skewed_form`, not the `_impl`
+  dispatchers.
+- **Tests.** None added, rewritten or deleted (a ceiling and doc text only).
+- **Gates.** All pass on the follow-up tree (x86_64): fmt; workspace clippy `-D warnings` with and
+  without `--all-features`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+  --exclude gate-expander` (gate-expander's own doc failure is part 2's);
+  `check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-effect-runtime-policy.sh`;
+  test-debug-a 1,462 passed, 0 failed; test-debug-b 890 passed, 0 failed; `conformance_fixtures
+  --check`; release `lane`/`math`/`wasm-gates` (G5 `g5_native_digests_match_pins`) 123 passed;
+  `run-wasm-gates.sh` (native 144 cases, wasm simd128 144 cases, 0 mismatches; V8 spill ok);
+  `check-cross-targets.sh` PASS (known-defect rows unchanged: builtins 5, host-core 4, soft-clip 1);
+  the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+  `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
+  all pass. AArch64: CI only.

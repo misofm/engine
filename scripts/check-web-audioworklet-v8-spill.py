@@ -126,8 +126,8 @@ flush, one `vpmaxud` per SVF step, which tells the forms apart) only on a block 
 silence counter can arm and that lane still holds state -- a decaying tail after the input stopped.
 Each row matches the loop of its own form and anchors a tail on the pair of its own form. The
 unarmed rows are the rows above them and are held as before. The armed rows are reported with a
-ceiling equal to the carried slots measured when the ceilings were set (dual tail 2, two
-general-purpose words; dual pair 12; every mono row 0): a row with a ceiling is checked like a
+ceiling equal to the carried slots measured when the ceilings were set (dual tail 1, one
+general-purpose word; dual pair 12; every mono row 0): a row with a ceiling is checked like a
 held row, failing closed when its loop is missing or ambiguous, and fails when V8 carries more
 slots than its ceiling; fewer passes and asks for the ceiling to be lowered. They are not held at
 zero because the armed form runs only on silent tails, where a carried slot costs nothing a
@@ -136,7 +136,9 @@ The dual pair's ceiling rose once, from 11 to 12 (issue #1451, root's Amendment 
 the EQ's `FLUSH_EPS` again in place of a carried word, after the iOS `memset_pattern16` cause was
 removed at `Lane::splat`, gave V8 one more carried slot in this armed loop only (221 -> 219
 instructions). The armed path runs only on silent tails, and every unarmed row, the loops that
-run on live audio, stays held at zero.
+run on live audio, stays held at zero. The dual tail's ceiling fell once, from 2 to 1 (issue #1454):
+the `frames_left` frame loop of `lane`'s `svf_cascade_interleaved_form` left that armed loop one
+carried general-purpose word.
 
 Loops are natural loops of the listing's control-flow graph (a back edge is a jump to a block that
 dominates its source). Blocks that make a call are left out of a loop's body: inside these kernels
@@ -226,8 +228,10 @@ LOOPS = (
     Row("mono", PAIR, streams=1, steps=2),
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
     Row("mono", "depth-2 pair, masked", streams=1, steps=2, masked=True),
+    # Ceiling 1 since #1454 (was 2): the interleaved form's `frames_left` loop left one
+    # general-purpose word in this armed loop.
     Row("dual", "armed depth-1 tail, select-free", streams=2, steps=2, held=False,
-        after=ARMED_PAIR, armed=True, ceiling=2),
+        after=ARMED_PAIR, armed=True, ceiling=1),
     # Ceiling 12 since #1451 (was 11): the splatted `FLUSH_EPS` adds one slot to this armed loop,
     # which runs only on silent tails; the unarmed rows above stay held at zero.
     Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True, ceiling=12),
