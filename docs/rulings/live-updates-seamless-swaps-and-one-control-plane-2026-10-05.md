@@ -615,8 +615,9 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   worth (analytic bound `1.95e-13` at one +24 dB shelf, largest found `3.5e-10` at four, −189 dBFS),
   and on a block of live audio the builtin chain and the EQ run their unarmed form, with no
   counter, no threshold and no joint term in any frame loop: what remains is one armability test
-  per channel per block and one compare of the block's last frame (the multiband compressor runs
-  the counter and the joint flush on every frame). A block in which some lane ends on an exact
+  per channel per block and one compare of the block's last frame (the multiband compressor tests
+  once per segment of its block and, where neither side can arm, advances the counter once per
+  segment with no silence step in its frame loop; issue #1455). A block in which some lane ends on an exact
   zero, common in quiet 16-bit sources, adds a backward scan from the last frame that stops at
   each such lane's first non-zero frame: within noise natively (an eight-lane builtin block
   1.005-1.008 of all-live, an eight-lane EQ block 0.98-1.02; before the backward scan they paid

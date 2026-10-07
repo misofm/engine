@@ -129,10 +129,13 @@ descriptive p50 show it is better.
 
 ## Test value
 
-This slice adds no new test if the existing ones turn red on a wrong form: the multiband `DIGESTS`
-cover live and silent-tail frames. If the differential shows a scenario (for example a counter that
-reaches `N_SILENCE` inside a block whose unarmed test said no lane can arm) that no existing test
-reaches, add one test for it, which turns red if the per-block arming test is off by one frame.
+The multiband `DIGESTS` (native and wasm) do not cover the per-segment dispatch: `corpus.rs`
+drives `lr4_step` with its own counter and never calls `process_block` (corrected by root after
+attempt 1's verdict). The dispatch is defended by the existing silence tests (always unarmed, off
+by one, no counter advance) and by the new product test
+`either_channel_and_either_stage_arm_the_crossover`, which turns red when the per-segment arming
+test reads one channel only or one crossover stage only. No wasm digest covers the dispatch; part 2
+of stream G2's follow-ups adds wasm coverage to a successor issue.
 
 ## Dependencies
 
@@ -237,3 +240,46 @@ self-test, clippy `-D warnings`, fmt. **`cargo doc -D warnings` fails** outside 
 in `crates/gate-expander/src/corpus.rs:64` (`clamped_window` links the private `RAMP_FRAMES`, from
 #1459's `ffcbba6b7`); not this slice's file; the workspace without `gate-expander` documents
 cleanly. AArch64 legs: CI only, not run.
+
+### Batch follow-ups (stream G2 part 1, after the attempt-1 PASS)
+
+From `/home/bl/misofm/submix-verdicts/1455-attempt1.md`.
+
+- **MINOR 1 (root authorized).** Three documents said the multiband runs the counter and the joint
+  flush on every frame. Each now states the shipped behaviour: armability is tested once per
+  segment; on a segment where neither side can arm, the counter advances once per segment and
+  the frame loop has no silence step. `dsp-research/filters.md` (the adopted law; its "a second
+  copy would double its `memset_pattern16` calls" clause is replaced by the measured iOS count
+  of 0), `docs/rulings/effect-floor-accounting.md` (the `silence_step` row) and decision 15's
+  "Root decisions after S0" (#1328 A9).
+- **MINOR 2 (root), the Test value corrected.** The spec body's Test value clause says the
+  multiband `DIGESTS` cover live and silent-tail frames. They do not cover the dispatch:
+  `corpus.rs` drives `lr4_step` with its own counter and never calls `process_block`. The new
+  product test `either_channel_and_either_stage_arm_the_crossover` does (attempt 1's record).
+  **Wasm digest coverage of the dispatch: none.** The wasm multiband digests (G5,
+  `tools/wasm-gate-corpus` `digest_multiband` -> `multiband_compressor::corpus::run_case`) are the
+  same `lr4_step` corpus. No browser document runs a multiband; the SDK's `console-evals.mjs`
+  renders an unbypassed multiband only to compare it with its bypassed render (no digest), and a
+  bypassed multiband never reaches the dispatch (`armable = BYPASS || ...`). Part 2 adds wasm
+  coverage to a successor issue.
+- **NIT 4.** `Side::silence`'s doc no longer says "Advanced on every frame": it is kept where a
+  frame-by-frame count would leave it, frame by frame on a segment where a side can arm and once
+  per segment on any other.
+- **NIT 5.** The new test's doc says "per-segment arming test" and "segment", matching the
+  dispatch (`process_block`, per segment). Doc text only; the test's code and its mutation
+  evidence (attempt 1, reproduced by the verifier) are unchanged.
+- **NIT 6.** The multiband's iOS `memset_pattern16` count (deliverable 2) is **0**, measured by
+  the verifier from the iOS release assembly; there is no multiband row in
+  `scripts/check-cross-targets.sh`, which passes on this tree with its rows unchanged.
+- **Gates.** All pass on the follow-up tree (x86_64): fmt; workspace clippy `-D warnings` with and
+  without `--all-features`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+  --exclude gate-expander` (gate-expander's own doc failure is part 2's);
+  `check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-effect-runtime-policy.sh`;
+  test-debug-a 1,462 passed, 0 failed; test-debug-b 890 passed, 0 failed; `conformance_fixtures
+  --check`; release `lane`/`math`/`wasm-gates` (G5 `g5_native_digests_match_pins`) 123 passed;
+  `run-wasm-gates.sh` (native 144 cases, wasm simd128 144 cases, 0 mismatches; V8 spill ok);
+  `check-cross-targets.sh` PASS (known-defect rows unchanged: builtins 5, host-core 4, soft-clip 1);
+  the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+  `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
+  all pass. AArch64: CI only.

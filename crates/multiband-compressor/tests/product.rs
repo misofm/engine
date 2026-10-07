@@ -1452,14 +1452,14 @@ fn the_crossover_joint_flush_arms_after_its_inputs_silence() {
     }
 }
 
-/// Issue #1455: a block takes the crossover's armed form when either channel, through either
+/// Issue #1455: a segment takes the crossover's armed form when either channel, through either
 /// stage, can act on it.
 ///
 /// One channel restored with one stage's two words at `±1e-15` (inside the joint band), the other
 /// stage at `+0.0` and its counter at `N_SILENCE - 1`; the other channel at rest with its counter
 /// at `+0.0`. One frame of zeros arms the held channel and every word of it is `+0.0` after it, in
-/// all four placements. Red when the per-block arming test reads one channel only, or one stage
-/// only, for its held state: that block runs the unarmed form and keeps the held words.
+/// all four placements. Red when the per-segment arming test reads one channel only, or one stage
+/// only, for its held state: that segment runs the unarmed form and keeps the held words.
 #[test]
 fn either_channel_and_either_stage_arm_the_crossover() {
     const FILTER_WORD: usize = 43;

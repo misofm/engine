@@ -707,8 +707,10 @@ struct Side<L: Lane, const W: usize> {
     prepared_coefficients: Lr4Coef<L>,
     filter: Lr4State<L>,
     /// The run of exactly-zero input frames per lane: this channel's silence counter, which arms
-    /// both crossover stages' joint flush (issue #1328, amendment A9). Advanced on every frame the
-    /// crossover runs; a bypassed instance runs no crossover and freezes it with the filter.
+    /// both crossover stages' joint flush (issue #1328, amendment A9). Kept where a frame-by-frame
+    /// count over the crossover's frames would leave it: frame by frame on a segment where a side
+    /// can arm, once per segment on any other (issue #1455, [`silence_skip_block`]); a bypassed
+    /// instance runs no crossover and freezes it with the filter.
     silence: L,
     /// The branching smoother's state, in dB, per band.
     gain_db: [L; 2],
