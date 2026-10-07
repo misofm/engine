@@ -146,8 +146,8 @@ def main() -> int:
         fails(f"{package}/test-support removed from test-debug-b", {package},
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
-          {"builtins-compiler", "effect-compiler", "graph", "host-core", "host-web", "protocol",
-           "rack"},
+          {"builtins-compiler", "effect-compiler", "effect-contract", "graph", "host-core", "host-web",
+           "protocol", "rack"},
           in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b", {"builtins", "lane", "parametric-eq"},
           in_b(DEBUG_B_FEATURES, "--features math/lane\n"))
@@ -159,7 +159,8 @@ def main() -> int:
     redundant = (WORKFLOW, redundant[1],
                  redundant[2].replace("effect-compiler/test-support,", "", 1))
     passes("host-core and effect-compiler still forwarded from host-web/test-support", redundant)
-    fails("host-web stops forwarding host-core/test-support", {"effect-compiler", "host-core"},
+    fails("host-web stops forwarding host-core/test-support",
+          {"effect-compiler", "effect-contract", "host-core"},
           redundant,
           ("hosts/host-web/Cargo.toml",
            'test-support = ["builtins-compiler/test-support", "host-core/test-support"]',

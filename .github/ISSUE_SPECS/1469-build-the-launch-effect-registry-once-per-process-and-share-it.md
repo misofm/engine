@@ -552,3 +552,10 @@ shape, the same as stop 2: add `factory_bytes` only when
   opens a window panics at the `expect` (`resource_lifecycle.rs:155`); reverted: green, 11/11. The
   `live_routes` warm-up's `Result` is the registry's own, so its only mutant is a registry that
   fails to build, which no test-local edit can make; it is recorded without a separate run.
+
+**Batch follow-up (root-authorized, 2026-10-07): `scripts/test-test-support-ci.py`.** #1469's
+`effect-contract/test-support` feature is forwarded by effect-compiler, host-core and host-web, so two of
+the self-test's expected sets now also name `effect-contract`: "every test-support feature removed from
+test-debug-a" (:149) and "host-web stops forwarding host-core/test-support" (the same forwarding chain, one
+case below). Before: the self-test failed at f5c98fa8d with `effect-contract` named but not expected; after:
+`python3 -B scripts/test-test-support-ci.py` passes and `check-test-support-ci.py` passes.
