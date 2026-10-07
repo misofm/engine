@@ -1227,6 +1227,8 @@ fn retained(
     live: bool,
 ) -> (u64, Vec<GraphRouteControlProducer>) {
     assert_installed();
+    // #1469: the launch registry lives for the process; build it before the window opens.
+    let _ = launch_native_effect_registry();
     let mark = current_thread_counters();
     let mut artifact = compile(model);
     let producers = if live {

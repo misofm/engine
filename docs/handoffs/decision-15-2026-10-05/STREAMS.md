@@ -152,6 +152,15 @@ metadata): `crates/rack/src/lib.rs` (the two bank stage constructors), `crates/c
 the effect crates' tests, `crates/host-core`, `crates/capi/tests/resource_lifecycle.rs` (one
 budget row), `tools/{audit,bench,console-workload}` and `docs/EFFECT_CONTRACT_V1.md`.
 
+Hot-file note (2026-10-07, root ruling, #1469 Amendment 1): G #1469 edits stream H's
+`hosts/host-web/src/tests.rs` by named exception, in one test only
+(`effect_control_browser_table_and_payload_reach_exact_budget_gate`: its expected factory term
+follows the charge rule), and `crates/host-core/src/lib.rs` (one re-export,
+`launch_registry_owns_factory`). It also adds a registry warm-up to
+`crates/capi/tests/resource_lifecycle.rs` (`warm_process_lifetime_statics`) and
+`crates/graph-compiler/tests/live_routes.rs` (`retained`). These edits come after G #1462, in
+either order with the other slices that touch these files; the later slice rebases.
+
 Hot-file note (2026-10-06, root rulings, #1379 Amendment 1): #1379 is split. G #1464 (*Carry
 every node's tail bound in one node-neutral struct*) renames `EffectTailBound` to `NodeTailBound`
 and adds the `composition` field, so it edits `crates/effect-contract/src/lib.rs`,

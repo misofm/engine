@@ -3453,7 +3453,12 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
                 core::mem::size_of_val(owner.committed()),
                 core::mem::size_of_val(owner.candidate()),
                 core::mem::size_of_val(owner.dirty()),
-                factory_layout.pad_to_align().size(),
+                // #1469 Amendment 1: a factory the launch registry owns is charged to no plan.
+                if host_core::launch_registry_owns_factory(owner.factory()) {
+                    0
+                } else {
+                    factory_layout.pad_to_align().size()
+                },
             ];
             owner_payload += allocations.iter().sum::<usize>() as u64;
             owner_largest = owner_largest.max(*allocations.iter().max().unwrap() as u64);

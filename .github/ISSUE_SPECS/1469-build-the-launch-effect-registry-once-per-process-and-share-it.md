@@ -245,6 +245,13 @@ registry's first build, the same warm-up line goes into that file's existing war
 nothing else in the file changes. If a failing file has no warm-up helper, the implementer stops
 and reports.
 
+**Amendment 1, stops 1 and 2 (root, 2026-10-07), named exceptions.** Stop 1: one warm-up line at
+the start of `retained()` in `crates/graph-compiler/tests/live_routes.rs`, before its window opens.
+Stop 2, option (a): host-core re-exports `launch_registry_owns_factory`, and in stream H's
+`hosts/host-web/src/tests.rs` (that one test only)
+`effect_control_browser_table_and_payload_reach_exact_budget_gate` charges its expected factory
+term only when the registry does not own the factory. A STREAMS hot-file note covers both edits.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, 2026-10-07) -- checkpoint, gates incomplete (disk stop)
@@ -457,3 +464,15 @@ all, because the browser's effect owners always come from the launch registry. N
 authorized.
 
 The full gates were not re-run: test-debug-a would fail on both stops.
+
+### Attempt 1, stops 1 and 2 (2026-10-07)
+
+- Stop 1: `retained()` (`crates/graph-compiler/tests/live_routes.rs`) calls
+  `launch_native_effect_registry()` before `current_thread_counters()`.
+  `route_control_resources_cover_the_allocation` run alone: red without the line ("attaching
+  retains more: 51919 against 53692"), green with it.
+- Stop 2: `crates/host-core/src/lib.rs` re-exports `launch_registry_owns_factory`. In
+  `hosts/host-web/src/tests.rs` the test charges the factory term only for a factory the registry
+  does not own. Mutation (always charge the factory term: `if false && ...`): red, 1603 != 1619.
+  Reverted: green.
+- Alone-run survey repeated on the same 388 tests (as listed above): 388 ok, 0 FAIL.
