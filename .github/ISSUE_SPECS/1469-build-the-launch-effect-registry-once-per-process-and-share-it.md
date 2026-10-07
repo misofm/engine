@@ -237,6 +237,14 @@ named exception to stream H, with a STREAMS hot-file note), and the docs. The tw
 tests in `crates/capi/tests/resource_lifecycle.rs` stay unchanged and must pass. A new test shows a
 plan's charge excludes a registry-owned factory, with a mutation run.
 
+**Amendment 1, named exceptions (root, 2026-10-07).** (1) The one-line registry warm-up in
+`warm_process_lifetime_statics()` (`crates/capi/tests/resource_lifecycle.rs`). (2) Closing the
+first-build race: every test that counts allocations around a session preparation, a live rebuild
+or an EQ preview is run alone, one test per fresh process. Where one fails because of the
+registry's first build, the same warm-up line goes into that file's existing warm-up helper and
+nothing else in the file changes. If a failing file has no warm-up helper, the implementer stops
+and reports.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, 2026-10-07) -- checkpoint, gates incomplete (disk stop)
@@ -395,3 +403,54 @@ Applied locally: 11/11 pass on three runs. It was then reverted, because
 thread-scoped allocation tests that observe a preparation window could hit the same race; none
 failed in test-debug-a. Gates after this commit (test-debug-a, the worklet chain, check-capi-abi,
 audit capi, the policies, fmt, clippy) wait for that authorization.
+
+### Attempt 1, Amendment 1 named exceptions (2026-10-07) -- implementer stop on two files
+
+**Survey.** These are the allocation-counting test files (a `GlobalAlloc` impl or
+`bench_support::alloc`) in the packages that can reach `effect-compiler` (`capi`, `graph-compiler`,
+`host-core`, `host-web`, and the `audit` and `bench` binaries, which run each audit in its own
+process). Each test was run alone, one `--exact` test per fresh process, from its package
+directory, with test-debug-a's feature set plus `host-core/control-provider`. The script is in
+scratch (`w1469/alone.sh`). Results on `603a6893a` (no new warm-up):
+  - `live_routes (test)` (graph-compiler 11 and host-core 8): 19 tests, 18 ok; FAIL: graph-compiler's `route_control_resources_cover_the_allocation`
+  - `route_activity (test)`: 1 tests, 1 ok
+  - `bypass_resources (test)`: 3 tests, 3 ok
+  - `host_core (lib)`: 74 tests, 74 ok
+  - `vca_live (test)`: 8 tests, 8 ok
+  - `successor_swap (test)`: 34 tests, 34 ok
+  - `submix_strip (test)`: 17 tests, 17 ok
+  - `host_web (lib)`: 190 tests, 189 ok; FAIL: `tests::effect_control_browser_table_and_payload_reach_exact_budget_gate`
+  - `route_mute (test)`: 13 tests, 13 ok
+  - `strip_meters (test)`: 4 tests, 4 ok
+  - `spectrum (test)`: 9 tests, 9 ok
+  - `plan_swap_race (test)`: 2 tests, 2 ok
+  - `boot_transient_budget (test)`: 2 tests, 2 ok
+  - `resource_lifecycle (test)`: 11 tests, 8 ok; FAIL: `capi_retained_bytes_charge_every_byte_the_compile_retains`, `exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly`, `tiny_control_frame_still_accounts_three_provider_counters_exactly`
+  - `render_locked_staging (test)`: 1 tests, 1 ok
+
+**capi warm-up (named exception 1).** In `warm_process_lifetime_statics()`, an EQ
+`host_core::prepare_response_preview` builds the registry before any window opens (capi has no
+`effect-compiler` dependency). Evidence: the three `resource_lifecycle` failures above are red alone
+without the line, and all 11 tests are green alone with it.
+
+**Stop 1: `crates/graph-compiler/tests/live_routes.rs` `route_control_resources_cover_the_allocation`.**
+This is the first-build race. `retained()` (`:1224`) opens a thread-scoped window around
+`compile()`, which calls `launch_native_effect_registry()` (`:323`). Run alone, the first window
+(`without`) holds the registry's first build, so `with - without` underflows ("attaching retains
+more: 51919 against 53692"). A temporary `let _ = launch_native_effect_registry();` at the top of
+the test made it green alone, and it was reverted. The file has no warm-up helper, so per the ruling
+it is not edited.
+
+**Stop 2: `hosts/host-web/src/tests.rs`
+`tests::effect_control_browser_table_and_payload_reach_exact_budget_gate` (`:3461`).** This is not
+the race. It is Amendment 1's charge change and fails in any order: the test's expected
+`owned_payload_bytes` adds the EQ owner's factory `Arc` layout ("once-retained factory"), but the
+owner's factory is the launch registry's own, which Amendment 1 charges to no plan (1603 observed
+against 1619 expected; 16 bytes). This test was not in the first test-debug-a run because that run
+came before Amendment 1. A fix must change this stream H test's expectation, for example dropping the
+factory term for a registry-owned factory. `host-web` has no `effect-compiler` dependency, so it
+needs either a re-export of `launch_registry_owns_factory` through host-core or no factory term at
+all, because the browser's effect owners always come from the launch registry. Neither is
+authorized.
+
+The full gates were not re-run: test-debug-a would fail on both stops.
