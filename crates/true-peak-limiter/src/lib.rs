@@ -654,8 +654,9 @@ impl ChannelState {
     /// the first output sample is the delayed input bit for bit.
     ///
     /// Out of line (#1091): it runs at preparation, at a reset and on a failed block, never in the
-    /// frame loop, and one copy serves every caller. Inlined, it is copied into
-    /// [`ChannelState::new`] as well, which adds code on every target (measured in #1452, undo 4).
+    /// frame loop, and one out-of-line copy per lane width serves every caller of that width.
+    /// Inlined, it is copied into [`ChannelState::new`] as well, which adds code on every target
+    /// (measured in #1452, undo 4).
     ///
     /// # Why the `1.0` words are written two planes per loop (#1456)
     ///
@@ -672,10 +673,15 @@ impl ChannelState {
     /// lane vectors long, so no scalar tail and no bounds check exist. One shape serves every
     /// target. The words written are the same `1.0` and `+0.0` at the same positions.
     ///
-    /// Cost: on x86-64-v3 this reset is 4 % to 25 % slower than per-plane `fill(1.0)` (W8 at
-    /// 96 kHz: 2.4 us against 1.9 us per bank; #1456 attempt 2). No vector form that avoided the
-    /// call reached the per-plane fill. The cost is paid only at a reset or a failed block, never
-    /// per block.
+    /// The chunks are `L::WIDTH` words, so the rings are covered only when `self.width ==
+    /// L::WIDTH`; a mismatch would leave ring words at the allocation's `0.0`. Every constructor
+    /// passes `L::WIDTH`, and the debug assertion below holds it, as the uniform kernel already
+    /// relies on.
+    ///
+    /// Cost: on x86-64-v3 this reset is slower than per-plane `fill(1.0)` -- at 96 kHz, 1.1 us
+    /// against 0.96 us per W4 bank and 2.4 us against 1.9 us per W8 bank (#1456 attempt 2 and its
+    /// verifier). No vector form that avoided the call reached the per-plane fill. The cost is
+    /// paid only at a reset or a failed block, never per block.
     #[inline(never)]
     fn clear_runtime<L: Lane>(&mut self, shape: &Shape) {
         debug_assert_eq!(self.width, L::WIDTH);

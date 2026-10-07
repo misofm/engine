@@ -11,8 +11,9 @@ No reset or failed-block recovery of the true-peak limiter makes a `memset_patte
 iPhone (restated by Amendment 1, Q3: `bzero` and `memcpy` are not #1018's defect). After
 #1451, three `bl _memset_pattern16` calls remain in the limiter's `aarch64-apple-ios` release
 assembly on a path the render thread reaches: `ChannelState::clear_runtime`, which runs at a reset
-and on a failed block. The realtime rules forbid any libc call in render. After this slice that
-path makes none, with no rendered bit moved, and the reset's cost is measured and recorded.
+and on a failed block. That call is #1018's defect (Amendment 1, Q3). After this slice that
+path makes no `memset_pattern16` call (its three `bzero`/`memset` zero fills of fixed planes
+remain; Amendment 1, Q3), with no rendered bit moved, and the reset's cost is measured and recorded.
 
 ## Context
 
@@ -246,7 +247,7 @@ x86-64-v3 release test build, `taskset` to one core, best of 7 x 20,000, ns per 
 |---|---|---|---|
 | W1 44.1 kHz | 112 | 130 | 1.16 |
 | W1 96 kHz | 224 | 248 | 1.11 |
-| W4 44.1 kHz | 457 | 476 | 1.04 |
+| W4 44.1 kHz | 457 | ~~476~~ 575-578 | ~~1.04~~ 1.26-1.28 |
 | W4 96 kHz | 961 | 1,100 | 1.14 |
 | W8 44.1 kHz | 915 | 1,141 | 1.25 |
 | W8 96 kHz | 1,919 | 2,387 | 1.24 |
@@ -287,3 +288,35 @@ true-peak-limiter -p conformance` (89 passed); `conformance_fixtures -- --check`
 (1,458 passed). `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` FAILS on
 `crates/gate-expander/src/corpus.rs:64` (`clamped_window` links to private `RAMP_FRAMES`, from
 #1459, not this slice); the same command with `--exclude gate-expander` passes.
+
+### Batch follow-ups (stream G2 part 2, 2026-10-07; verdict `1456-attempt2.md` PASS)
+
+No code or test behavior changes; no rendered bit moves (doc comments, one script comment and this
+spec only).
+
+- MINOR 1: the W4 44.1 kHz cell of the gate 3 table above did not reproduce. The verifier measured
+  453-455 -> 575-578 ns (ratio 1.26-1.28) in two binary layouts, and the mechanism agrees (at W4 the
+  head ring loop issues 16-byte stores, two planes per iteration, against base's 32-byte `fill`).
+  The cell is corrected above. The measured range over all six cells is **+11 % to +28 %**, not
+  +4 % to +25 %. The doc at `ChannelState::clear_runtime` (`crates/true-peak-limiter/src/lib.rs`) now
+  quotes only the two gated 96 kHz cells (W4 1.1 us against 0.96 us; W8 2.4 us against 1.9 us).
+  Root's acceptance did not depend on the W4 44.1 kHz cell (reset-only, never per block).
+- MINOR 2: the Product outcome now says the path makes no `memset_pattern16` call, and that its
+  three `bzero`/`memset` zero fills of fixed planes remain (Q3); the pre-Q3 sentence "the realtime
+  rules forbid any libc call in render" is gone.
+- NIT 1: the `clear_runtime` doc says one out-of-line copy per lane width (f32, f32x4 and f32x8 on
+  x86-64; f32 and f32x4 on iOS), not one copy for every caller.
+- NIT 3: the `clear_runtime` doc now states its reliance on `self.width == L::WIDTH` (a mismatch
+  would leave ring words at `0.0`), held by every constructor and the existing `debug_assert`, the
+  same coupling the uniform kernel already relies on.
+- NIT 2 (root-authorized): `scripts/check-cross-targets.sh`'s #1018 comment now justifies the ratchet
+  by the `memset_pattern16` call itself (a Darwin-only libSystem routine reached through a lazily
+  bound stub), and says that `bzero`/`memcpy` are not this defect (Q3), instead of "a libc call,
+  which the realtime rules forbid in render".
+- NIT 4: the gate 2 codegen evidence above read the per-crate **pre-link** rlib assembly. The
+  attempt 2 verifier also checked the shipped library, the post-LTO `aarch64-apple-ios` `capi`
+  staticlib: `bl _memset_pattern16` 11 (base) -> 5 (head), none in the limiter (the 5 are
+  `builtins_compiler` preparation code), and `clear_runtime::<f32>` vectorized (`stp q0, q0`). Root
+  filed **#1472** (*Measure the iOS memset_pattern16 ratchet on the shipped post-LTO capi
+  staticlib*) to make the ratchet count the shipped artifact, with per-crate attribution where the
+  assembly allows it; STREAMS row added after #1456.

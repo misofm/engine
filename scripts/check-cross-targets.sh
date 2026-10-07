@@ -99,7 +99,9 @@ aarch64_row aarch64-linux-android
 
 # --- known defect #1018, expected failures by crate: `ios-asm-memset-pattern16` -----------------
 # On Apple targets LLVM's loop-idiom pass turns a loop that stores one constant `f32` pattern into
-# `bl _memset_pattern16`: a libc call, which the realtime rules forbid in render. Until #1451 every
+# `bl _memset_pattern16`: a Darwin-only libSystem routine reached through a lazily bound stub, the
+# render-thread call #1018 forbids. (`bzero` and `memcpy` are bounded memory routines the compiler
+# emits on every target and are not this defect; #1456 Amendment 1, Q3.) Until #1451 every
 # lane splat was such a loop (`wide`'s `splat` is `transmute([elem; N])`, an array-repeat store
 # loop); #1451 builds splats from an array literal in `Lane::splat` and `Lane::zero`, which removed
 # that cause (2,122 calls -> 16). #1456 removed the `true-peak-limiter`'s 6 (16 -> 10), the only
