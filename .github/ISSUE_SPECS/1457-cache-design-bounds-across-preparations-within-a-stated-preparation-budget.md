@@ -169,3 +169,111 @@ D1's budget states it beside the design bounds.
 ## Dependencies
 
 - #1329. Coordinate with #1332 (stream H) for the browser's preparation thread.
+
+## Amendment 1 (root rulings, 2026-10-07): D1-D3, the split and restated gates
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), after a first worker stopped for D1-D3. These rulings replace
+"Decisions to make in this slice" above.
+
+- **D3 (accepted): past the budget, the live bound.** A design whose bound would exceed the
+  preparation's remaining budget reports its rate's **live bound**
+  (`builtins::input_section_live_bound`). That bound is certified for every history of trim,
+  polarity and filter targets (#1329 D5), so it holds for any fixed design, and it is never
+  `Infinite` at a launch rate.
+  - The trigger is deterministic: a per-preparation budget in **frames walked**, enforced by a
+    horizon cap in `math::tail::fixed_cascade`, charged in **strip order**.
+  - A cache entry stores its charge (the frames its computation walked). A cache hit charges the
+    same stored amount, so every reported bound, and every fallback decision, is a pure function of
+    the session: gate 3 holds (identical bits with and without the cache, and with a cold or a warm
+    cache).
+- **D1: the budget.** The frames-walked total that the CI runner covers in **20 ms** of design-bound
+  work per preparation. The spec states both numbers, the frames and the measured ms, once measured
+  (attempt record; frozen workload, one invocation, one warmup, two measured rounds). Reason:
+  preparation stays interactive for agent edits; typical sessions (about 145 us per design) bound
+  every distinct design exactly; near-top designs (7-8.8 ms each) beyond the first few take the
+  certified live bound. The budget binds both hosts (R2): it is enforced inside the shared
+  preparation (`builtins-compiler`), so it caps the C ABI's control thread and the browser's
+  preparation thread alike. #1464-#1468 rerun gates 2 and 4 against this stated budget.
+- **D2 (accepted): the cache.**
+  - A control-side cache per C ABI engine handle (`Engine`), keyed by `InputBoundKey` (which already
+    carries the rate), with an entry cap. Eviction is clear-on-full or LRU, whichever is simpler and
+    still proven by the gates. Render never reads it, and render-owned memory carries none of it.
+  - The live bound becomes a **table for the four launch rates**, checked by a test against
+    `input_section_live_bound`. This removes its cost (about 0.25-0.4 ms per browser boot with live
+    controls, about 240-254 us per native preparation, #1433) from every preparation.
+- **Split (accepted).** The browser cache and the browser "a rebuild adds nothing" clause move to
+  *Cache design bounds across browser preparations in the control Worker* (#1470), which depends
+  on #1332 (its Worker owns the cache). The worklet creates a new `WebAssembly.Instance` per
+  processor, so no browser object outlives a preparation today. The budget (D1, D3) and the
+  live-bound table (D2) still ship here and apply to the browser.
+
+### Gates restated by Amendment 1
+
+Gates 1 and 4 are restated to the C ABI and native scope; their browser halves are #1470's gates 1
+and 2. Gates 2 and 3 stand as written, with D1's budget and D3's outcome.
+
+1. A rebuild of an unchanged session through the same C ABI engine computes no design bound
+   (counted with `builtins`' `fixed_input_bounds_computed`).
+4. The native rebuild cost: the C ABI preparation of the 9-track and 64-track documents (the C ABI
+   attaches no input lane, so it bounds every distinct design) is recorded on a first preparation
+   and on a rebuild of the unchanged session; its design-bound cost is within D1's budget, and the
+   rebuild computes no design bound (gate 1). The browser's audio-only boot keeps the budget (D1)
+   and is recorded once beside R2's table; its rebuild clause is #1470's.
+5. *(New.)* The fallback is taken exactly when the budget is exhausted: a session whose distinct
+   designs' charges, summed in strip order, cross the budget reports each design's exact bound up
+   to the crossing and the live bound from the crossing on, with and without the cache. The gate is
+   red when the charge order is not strip order or when a cache hit charges anything other than
+   its stored amount.
+6. *(New.)* The live-bound table equals `input_section_live_bound` at each of the four launch rates,
+   bit for bit.
+
+### Paths this slice needs (pending root: not yet named exceptions)
+
+Stream G owns none of the C ABI or host-core paths below, and neither this spec nor STREAMS names
+them for #1457. The cache must reach both C ABI preparation sites: `compile_children` (from
+`miso_engine_v1_compile_session`, which holds the engine) and the structural-transaction rebuild
+(`prepare_runtime(.., Some(SuccessorBase))` in the session's controller), which runs on the
+**session** handle, not the engine.
+
+- `crates/capi/src/abi.rs` (`Engine`: the cache field; stream B's)
+- `crates/capi/src/ffi.rs` (`miso_engine_v1_compile_session`: hand the engine's cache to
+  `compile_children`; stream B's)
+- `crates/capi/src/runtime/compile.rs` (`compile_children`, `prepare_runtime`: thread the cache;
+  stream B's)
+- `crates/capi/src/runtime/control.rs` (the successor rebuild's `prepare_runtime` call and the
+  controller's handle on the cache; stream B's)
+- `crates/capi/include/miso_engine_v1.h` (thread-ownership notes, if a session shares its engine's
+  cache; stream B's hot file)
+- a new `crates/capi/tests/` file for gates 1, 4 and 5 (stream F's column)
+- `crates/host-core/src/prepare.rs` (`prepare_host_runtime_with_live_lanes{,_successor}` and the
+  `prepare_session_builtins*` calls: pass the cache; stream A's hot file)
+- `crates/builtins-compiler/src/lib.rs` (the design-bound call, the budget, the live-bound read;
+  stream G's #1329 tail rule, but its #1379 exception is #1464's)
+- `crates/builtins/src/lib.rs` (`input_section_bounds`: cache and budget) and
+  `crates/builtins/src/tail.rs` (the live-bound table, the charged design bound) (stream A's; the
+  hot-file row orders #1457 before #1464)
+- `crates/math/src/tail.rs` (`fixed_cascade`'s horizon cap; hot-file row with G's #1464-#1468)
+- `crates/builtins/tests/tail_contract.rs` (gates 3, 5, 6)
+
+**Design question for root (D2).** The header lets the engine and each session be driven by
+different control threads, and does not require a session to be destroyed before its engine. A
+cache "per engine" that also serves the session's rebuilds is therefore shared across threads and
+lifetimes (for example `Arc<Mutex<..>>` held by the engine and by each session it compiled), and
+the header's thread notes change. The alternatives are one cache per engine for
+`compile_session` plus one per session for its rebuilds (no sharing, no header change; gate 1's
+"rebuild of an unchanged session" is then a session transaction), or a cache owned only by the
+session. D3's stored-charge rule keeps every result a pure function of the session under any of
+them, including concurrent use.
+
+## Attempt record
+
+### Attempt 1 (2026-10-07): rulings recorded, successor filed, stopped for paths
+
+- Recorded Amendment 1 (root's rulings D1-D3, the split, gates 1 and 4 restated, gates 5 and 6
+  added).
+- Filed the successor #1470 (*Cache design bounds across browser preparations in the control
+  Worker*) with a matching local spec and a stream G row (order 22, after #1457, after H #1332).
+- Stopped before code under the worker rules: the C ABI and host-core paths above are not named
+  exceptions for #1457, and D2's owner of the session-side rebuild needs root's choice. No code,
+  measurement or mutation run yet; D1's frames and ms are still to be measured.
