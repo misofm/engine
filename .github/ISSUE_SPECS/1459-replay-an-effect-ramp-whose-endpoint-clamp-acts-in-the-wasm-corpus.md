@@ -83,3 +83,51 @@ lane kernel) turns the new case red under wasm; no existing case reaches it.
 ## Dependencies
 
 - #1409 (merged with the stream G batch).
+
+## Attempt record
+
+### Attempt 1 (2026-10-07, implementer)
+
+**Case.** `crates/gate-expander/src/corpus.rs` case 6, `dual_mono/clamped_ramp` (G5 case 124),
+pinned as the seventh row of `gate_digests.in` from the scalar oracle
+(`fb0c11e0…db147186`); `CASE_COUNT` 6 → 7, and `tools/wasm-gate-corpus` derives its count from it
+(doc updated only). No existing pin moved: `g5_native_digests_match_pins` printed case 124 only,
+equal at scalar, simd4 and simd8, before the pin was written.
+
+**The move (D1).** Every ramped word (threshold, ratio, range, hysteresis) of every lane and
+channel starts `0x21` ulps from its resting value, the offset of #1409's scan moves (threshold
+`0xc29fffdf → -80.0`, ratio `0x3f800021 → 1.0`, range `0x42bfffdf → 96.0`, hysteresis
+`0x41bfffdf → 24.0`), and ramps back to it with the control plane's own step law
+(`LinearRamp::set_target`) over a window of `40 + 3·lane + channel` samples (40..62, each lane and
+channel ending on a different frame, all inside the 64-frame ramping block). Reason for applying
+the scan's offset to each lane's own resting word rather than replaying the four scan moves
+verbatim: the scan's ratio move ends at `1.0`, where the expansion curve is zero and the threshold
+and range words cannot reach the output; per-lane resting words keep every word live in the
+curve. The input is quiet noise at an exact power of two 3 dB under each lane's re-arm level, so
+the gate closes after its hold and the curve sets the gain while the clamp acts.
+
+**Gate 1 (reach).** `corpus::tests::the_clamped_case_passes_every_target_under_the_unclamped_law`
+replays the unclamped law per lane, channel and word. All 64 words first pass their target at
+frame 34, and every window is 40..62, so the clamp acts on frames 34..window−1 (6 to 28 frames)
+of every word of every lane at every width. Test value: a case edit that leaves some lane's move
+unclamped turns it red; the digest cannot, as it would be re-pinned with the case. Mutations:
+window `66 + 3·lane + channel` → red ("window 66 ends past the ramping block"); window
+`34 + lane + channel` → red ("stays inside … over its 34-sample window"); offset `0x10` → red
+(step under half an ulp, "stays inside … over its 40-sample window"); reverted → green.
+
+**Gate 3 (red).** #1409's site-5 mutant (`let stepped = ramp.current.add(ramp.step);` in
+`kernel.rs` `channel_step`) → `g5_native_digests_match_pins` red on case 124 only, at scalar, simd4
+and simd8 (got `99502499…18ea64bb`); every other case stayed green, confirming no existing case
+reaches the clamp. Per lane output under the mutant: 15 of 16 lane-channels move (first moved
+frame 35..49); right channel of lane 0 does not move its output (its clamp acts on the ramp words,
+but the bits round away in the one-pole). Reverted → green.
+
+**Gate 2 (pins).** `cargo test --locked --release -p lane -p math -p wasm-gates --features
+math/lane` pass. `bash scripts/run-wasm-gates.sh` pass: native and wasm `simd128` legs both
+report 144 cases (was 143), 0 mismatches.
+
+**Other gates.** `cargo test --locked --release -p gate-expander` pass; `cargo fmt --all --
+--check` pass; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+pass; `scripts/check-workspace-policy.sh` pass; `scripts/check-cross-targets.sh` PASS. Realtime
+policy and the worklet chain not run: no render code and no worklet-compiled code changed (the
+corpus module is not in the worklet). AArch64 runs only in CI.
