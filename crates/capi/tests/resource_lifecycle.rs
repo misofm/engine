@@ -139,7 +139,7 @@ fn warm_process_lifetime_statics() {
     let _ = session::parse_session_json(r#"{"warm":0}"#);
     // #1469: the launch effect registry is built once per process, on first use, and lives until
     // exit; an EQ preview builds it here so no window holds that first build.
-    let _ = host_core::prepare_response_preview(host_core::ResponsePreviewRequest {
+    host_core::prepare_response_preview(host_core::ResponsePreviewRequest {
         configuration_id: 0,
         sample_rate_hz: 48_000,
         quantum_frames: 128,
@@ -151,7 +151,8 @@ fn warm_process_lifetime_statics() {
             link_mode: effect_contract::LinkMode::DualMono,
         },
         limits: host_core::ResponsePreviewLimits::default(),
-    });
+    })
+    .expect("the EQ preview builds the launch registry");
 }
 
 fn begin() {

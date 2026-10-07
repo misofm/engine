@@ -45,11 +45,5 @@ compressor.workspace = true
 parametric-eq.workspace = true
 source.workspace = true
 
-# Issue #1469 gate 1: counts registry builds through `effect-contract/test-support`'s process-global
-# counter, and classifies live deltas through `control-provider`.
-[[test]]
-name = "launch_registry_once"
-required-features = ["test-support", "control-provider"]
-
 [lints]
 workspace = true

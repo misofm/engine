@@ -395,7 +395,9 @@ This needs a root ruling or a spec amendment.
 - `effect_compiler::prepare::tests::effect_control_resources_charge_no_registry_owned_factory`
   (two owners sharing the registry's EQ factory; `owned_payload_bytes` == strings + owner payloads).
   MA (the loop charges the factory again: `if !shared_factory`): red, 3238 != 3222. MA also turns
-  three `capi` `resource_lifecycle` tests red.
+  two `capi` `resource_lifecycle` tests red (`capi_retained_bytes_charge_every_byte_the_compile_retains`
+  and `tiny_control_frame_still_accounts_three_provider_counters_exactly`; corrected in the batch
+  follow-ups: the third, `exported_c_candidates_...`, was the first-build race and was red without MA).
 - `host_core::control_preparation::tests::a_registry_owned_factory_is_charged_to_no_preparer` (the
   registry's EQ factory: 0; a preparer-owned `Arc::new(OptInEq)`: 16). MB (remove the
   predicate in `factory_allocation_bytes`): red, 16 != 0.
@@ -518,3 +520,35 @@ shape, the same as stop 2: add `factory_bytes` only when
 - test-debug-a (`--no-fail-fast`, `CARGO_INCREMENTAL=0`): pass, 125 `test result: ok`, 0 failed,
   including `the_launch_registry_is_built_once_per_process`. Clippy `-p host-core --all-targets
   --all-features -D warnings` and fmt: pass.
+
+### Batch follow-ups (stream G2 part 2, 2026-10-07; verdict `1469-attempt1.md` PASS)
+
+- **Root: the host-core policy failed (gate 1's form changed).** `scripts/check-host-core-policy.sh`
+  failed from 1977ffbf0 on (bisected by root: b5cfd2b60 rc=0, 1977ffbf0 rc=1): it allows the string
+  `control-provider` in exactly two `Cargo.toml` lines (host-core's declaration and capi's edge),
+  and the `[[test]]` entry (with its comment) added two more. The `[[test]]` entry is gone; the test
+  file is gated by `#![cfg(all(feature = "test-support", feature = "control-provider"))]`, the same
+  form as `tests/live_delta.rs`. The policy script is unchanged. In test-debug-a the binary runs its
+  one test, because capi's dependency unifies `control-provider` in (checked: `cargo test -p capi
+  -p host-core -p graph-compiler --features host-core/test-support,effect-compiler/test-support`
+  runs `launch_registry_once` with 1 test, ok); without capi it compiles to 0 tests. Evidence:
+  restoring the `[[test]]` block turns the policy red ("only host-core may declare and capi may
+  enable control-provider", rc=1); removing it again: `host-core policy: ok`. Gate 1's text above
+  (a `[[test]]` entry) is superseded by this form.
+- m1: the test-support counter `TAIL_BOUND_EVALUATIONS` and `tail_bound_evaluations()` moved above
+  `NativeEffectRegistry`'s doc block, so the doc attaches to the struct again. No behavior change.
+- n1: STREAMS.md's `crates/effect-compiler/src/prepare.rs` row now also names
+  `launch_registry_owns_factory` and the factory-charging loop of `effect_control_resources`, and the
+  #1469 hot-file note names stop 3's `crates/host-core/src/control_preparation.rs` and
+  `crates/host-core/tests/prepare.rs` and the changed charge rule for slices that rebase.
+- n2: MA's capi reach corrected above to two tests.
+- n3: both warm-ups now fail loudly. `crates/capi/tests/resource_lifecycle.rs`
+  `warm_process_lifetime_statics` ends `.expect("the EQ preview builds the launch registry")`, and
+  `crates/graph-compiler/tests/live_routes.rs` `retained` calls
+  `launch_native_effect_registry().expect("the launch registry builds")`. Test value: a later change
+  that makes the EQ preview refuse before it reaches the registry would silently drop the warm-up
+  and bring the first-build race back as flakiness; it now fails every window at once. Mutation
+  (capi warm-up `quantum_frames: 0`, a preview refused before the registry): red, every test that
+  opens a window panics at the `expect` (`resource_lifecycle.rs:155`); reverted: green, 11/11. The
+  `live_routes` warm-up's `Result` is the registry's own, so its only mutant is a registry that
+  fails to build, which no test-local edit can make; it is recorded without a separate run.

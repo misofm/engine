@@ -5,6 +5,12 @@
 //! builds a registry in it. Every registry build evaluates each launch descriptor's
 //! `tail_and_rest` once per declared quality row; a second build anywhere shows as a count above
 //! one build's rows.
+//!
+//! The counter comes from `test-support`, and live classification from `control-provider`. Only
+//! capi may enable `control-provider` (scripts/check-host-core-policy.sh), so this binary is a
+//! no-op unless capi's dependency edge unifies it in, as in test-debug-a; `tests/live_delta.rs`
+//! is gated the same way.
+#![cfg(all(feature = "test-support", feature = "control-provider"))]
 
 use std::sync::Barrier;
 

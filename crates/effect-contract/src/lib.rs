@@ -2510,11 +2510,6 @@ struct RegistryEntry {
     tail_bounds: Box<[RegisteredTailBound]>,
 }
 
-/// The native effects a host can prepare, each admitted once (issue #1330) with its tail-bound
-/// table computed and checked once (issue #1462).
-///
-/// The table is control-side memory: its entries reach a [`PreparedEffectMetadata`], never a
-/// processor.
 /// The process-wide count of `tail_and_rest` evaluations made by [`NativeEffectRegistry::new`]
 /// (issue #1469 D6). Test support only: it lets a test prove that the launch registry is built
 /// once per process.
@@ -2530,6 +2525,11 @@ pub fn tail_bound_evaluations() -> u64 {
     TAIL_BOUND_EVALUATIONS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The native effects a host can prepare, each admitted once (issue #1330) with its tail-bound
+/// table computed and checked once (issue #1462).
+///
+/// The table is control-side memory: its entries reach a [`PreparedEffectMetadata`], never a
+/// processor.
 #[derive(Default)]
 pub struct NativeEffectRegistry {
     entries: BTreeMap<&'static str, RegistryEntry>,
