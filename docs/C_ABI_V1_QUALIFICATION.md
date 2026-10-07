@@ -184,6 +184,11 @@ observes a C ABI compile and a replay of its host-core half owner by owner, and 
 from the accounting it checks. What capi allocates itself, plus the observed effect live-control
 producers (#1263), strip live-control producers (#1256), source producers, parameter catalog and
 plan state inventory (#1273), must equal `capi_retained_bytes` to the byte.
+The launch native-effect registry is built once per process (#1469) and its bytes are
+process-level: no plan or engine is charged for them. A plan is charged only what it retains, so a
+factory `Arc` the registry owns is charged to no plan (the plan's clone allocates nothing); on the
+nine-track EQ reference session this removes the EQ factory's 16-byte allocation from
+`capi_retained_bytes`.
 The session store must fit its compiled-model estimate, and the prepared plan its engine rows (a
 bound; see the test). The canonical JSON is charged once, with the compiled model in the graph cap:
 capi's epoch row no longer charges it a second time. The double-live admission is derived from the two live reports

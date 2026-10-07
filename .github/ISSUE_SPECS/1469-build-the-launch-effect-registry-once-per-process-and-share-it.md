@@ -224,6 +224,19 @@ use; no existing test counts registry builds or `tail_and_rest` evaluations acro
 - #1462 (the registry's tail table). Before #1372 in stream G, so #1372-#1376's derivations land on
   the shared registry.
 
+## Amendment 1 (root ruling, 2026-10-07): a plan is charged only what it retains
+
+Attempt 1 found that `effect_control_resources` still charged each plan the EQ control owner's
+factory `Arc` (16 bytes), which the process-lifetime registry now owns. Root ruled option (1): a
+plan is charged only what it retains. A factory `Arc` the launch registry owns is charged to no
+plan, because the plan's clone allocates nothing; the registry's bytes are process-level. Authorized
+for this slice: the factory-charging loop in `effect_control_resources`
+(`crates/effect-compiler/src/prepare.rs`), `EqTargetPreparer::factory_allocation_bytes`
+(`crates/host-core/src/control_preparation.rs`), `hosts/host-web/src/control_targets.rs:451,567` (a
+named exception to stream H, with a STREAMS hot-file note), and the docs. The two exact-equality
+tests in `crates/capi/tests/resource_lifecycle.rs` stay unchanged and must pass. A new test shows a
+plan's charge excludes a registry-owned factory, with a mutation run.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, 2026-10-07) -- checkpoint, gates incomplete (disk stop)
@@ -336,3 +349,49 @@ charge the registry once to the process instead of to each plan. The edit is in
 host-web and `EqTargetPreparer` peers (`hosts/host-web/src/control_targets.rs:451,567` add
 `factory_allocation_bytes` to an EQ workspace charge). No ceiling is loosened and no test is edited.
 This needs a root ruling or a spec amendment.
+
+### Attempt 1, Amendment 1 implementation (2026-10-07) -- checkpoint; implementer stop on one path
+
+**Changes.**
+- `crates/effect-compiler/src/prepare.rs`: `pub fn launch_registry_owns_factory(&Arc<dyn
+  NativeEffectFactory>) -> bool`, beside the static. It reads the static with `OnceLock::get` (it
+  never builds the registry; before the first build no factory can be the registry's) and compares
+  `Arc::ptr_eq` with the registry's factory for the same ID (one `Arc` clone and drop, no
+  allocation). The factory-charging loop in `effect_control_resources` skips a registry-owned
+  factory.
+- `crates/host-core/src/control_preparation.rs`: `EqTargetPreparer::factory_allocation_bytes` returns
+  0 for a registry-owned factory.
+- `hosts/host-web/src/control_targets.rs`: **no edit needed**. Its EQ workspace's factory comes from
+  `effect_compiler::parametric_eq_target_preparation_factory()`, a fresh `Arc::new` that the
+  workspace alone retains, so it is still charged at `:451` and `:567` through the amended
+  `factory_allocation_bytes`. No STREAMS note was added, because stream H's file is not touched.
+- Docs: `docs/C_ABI_V1_QUALIFICATION.md` (the registry's bytes are process-level; a registry-owned
+  factory is charged to no plan; -16 bytes on the reference session) and one sentence in
+  `docs/EFFECT_CONTRACT_V1.md`.
+
+**Tests and mutations** (applied: red; reverted: green).
+- `effect_compiler::prepare::tests::effect_control_resources_charge_no_registry_owned_factory`
+  (two owners sharing the registry's EQ factory; `owned_payload_bytes` == strings + owner payloads).
+  MA (the loop charges the factory again: `if !shared_factory`): red, 3238 != 3222. MA also turns
+  three `capi` `resource_lifecycle` tests red.
+- `host_core::control_preparation::tests::a_registry_owned_factory_is_charged_to_no_preparer` (the
+  registry's EQ factory: 0; a preparer-owned `Arc::new(OptInEq)`: 16). MB (remove the
+  predicate in `factory_allocation_bytes`): red, 16 != 0.
+- Reverted: both green. The two exact-equality capi tests (`capi_retained_bytes_charge_every_byte_the_compile_retains`,
+  `tiny_control_frame_still_accounts_three_provider_counters_exactly`) pass unchanged.
+
+**Stop: a needed path is not authorized.** `cargo test -p capi --test resource_lifecycle` now fails
+`exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly` reproducibly
+(`rejected compile provisional owners owners`: 13305 allocations, 13288 deallocations). The
+registry's first build lands inside that test's thread-scoped allocation window and stays live for
+the process. The pass in test-debug-a's earlier run was scheduling luck. The file already handles
+this class of problem: `warm_process_lifetime_statics()` (`resource_lifecycle.rs:138`) warms ahash's
+process statics before every window (AGENTS.md: count "after process statics are warmed"). The fix
+is to warm the launch registry there too. capi has no `effect-compiler` dependency, so the verified
+form is a call that reaches the registry through host-core:
+`let _ = host_core::prepare_response_preview(<EQ at 48 kHz, 128 frames, defaults>);`.
+Applied locally: 11/11 pass on three runs. It was then reverted, because
+`crates/capi/tests/resource_lifecycle.rs` is outside this slice's authorized paths. Other
+thread-scoped allocation tests that observe a preparation window could hit the same race; none
+failed in test-debug-a. Gates after this commit (test-debug-a, the worklet chain, check-capi-abi,
+audit capi, the policies, fmt, clippy) wait for that authorization.

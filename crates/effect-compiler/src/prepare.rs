@@ -225,6 +225,22 @@ pub fn launch_native_effect_registry() -> Result<&'static NativeEffectRegistry, 
 static LAUNCH_NATIVE_EFFECT_REGISTRY: OnceLock<Result<NativeEffectRegistry, RegistryError>> =
     OnceLock::new();
 
+/// Whether `factory` is the launch registry's own factory allocation (issue #1469 Amendment 1).
+///
+/// The process-lifetime registry owns that allocation, so a plan's clone of it allocates nothing
+/// and no plan is charged for it; the registry's bytes are process-level. Reads the registry only
+/// if it is already built: before the first build no factory can be the registry's, and this
+/// never builds it. Control thread only; it clones and drops one `Arc` (no allocation).
+#[must_use]
+pub fn launch_registry_owns_factory(factory: &Arc<dyn NativeEffectFactory>) -> bool {
+    let Some(Ok(registry)) = LAUNCH_NATIVE_EFFECT_REGISTRY.get() else {
+        return false;
+    };
+    registry
+        .get_shared_ascii(factory.descriptor().id.as_str())
+        .is_some_and(|shared| Arc::ptr_eq(&shared, factory))
+}
+
 // Issue #1469 D4: shared reads from several control threads need a `Send + Sync` registry.
 const _: () = {
     const fn shared_across_threads<T: Send + Sync>() {}
@@ -753,7 +769,9 @@ pub fn effect_control_resources(
                 .iter()
                 .filter_map(|prior| prior.owner.as_deref())
                 .any(|prior| Arc::ptr_eq(prior.factory(), owner.factory()));
-            if !shared_factory {
+            // #1469 Amendment 1: a factory the launch registry owns is process-level memory that
+            // the plan's clone does not allocate, so no plan is charged for it.
+            if !shared_factory && !launch_registry_owns_factory(owner.factory()) {
                 factory_payload_bytes = factory_payload_bytes
                     .checked_add(facts.factory_allocation_bytes)
                     .ok_or(EffectControlResourceError::Arithmetic)?;
@@ -1435,6 +1453,35 @@ mod owner_tests {
             production_resources.largest_owned_allocation_bytes,
             "effect".len() as u64
         );
+    }
+
+    /// #1469 Amendment 1. Red if a plan is charged for a factory the process-lifetime launch
+    /// registry owns: the two owners share the registry's EQ factory, so the charge is their
+    /// strings and owner payloads alone.
+    #[test]
+    fn effect_control_resources_charge_no_registry_owned_factory() {
+        let factory = launch_native_effect_registry()
+            .expect("launch registry")
+            .get_shared_ascii("miso.parametric-eq")
+            .expect("launch EQ");
+        assert!(launch_registry_owns_factory(&factory));
+        assert!(!launch_registry_owns_factory(
+            &(Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>)
+        ));
+        let mut producers = Vec::with_capacity(2);
+        for (track, effect) in [("track-a", "effect-a"), ("track-b", "effect-b")] {
+            producers.push(resource_producer(track, effect, Some(Arc::clone(&factory))));
+        }
+        let values = preparation().initial_values.len();
+        let owner_payload = size_of::<EffectControlOwner>() as u64
+            + (2 * (values * size_of::<InitialParameterValue>()) as u64)
+            + (values * size_of::<bool>()) as u64;
+        let strings = ["track-a", "effect-a", "track-b", "effect-b"]
+            .map(|text| text.len() as u64)
+            .into_iter()
+            .sum::<u64>();
+        let resources = effect_control_resources(&producers).expect("resource facts");
+        assert_eq!(resources.owned_payload_bytes, strings + 2 * owner_payload);
     }
 
     #[test]

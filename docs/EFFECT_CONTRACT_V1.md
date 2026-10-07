@@ -104,10 +104,12 @@ A native effect states its three values in one place, its descriptor's
 It runs on the control thread, takes no parameter values (each bound holds over the whole
 parameter domain at that rate), and render never calls it. `QualityDescriptor` carries no tail.
 `NativeEffectRegistry::new` evaluates it once per declared quality row (every launch rate of every
-declared quality) and keeps the results in its table, and nothing else calls it (#1462). There it
-checks each row: (a) `tail_every_peak >= tail`, with `Infinite` the largest; (b) `rest` is
-`Unstated` only with `tail_every_peak: Infinite`; (c) `rest` is `Bounded` only with a finite
-`tail_every_peak`. (b) and (c) together are "`rest` is `Unstated` if and only if
+declared quality) and keeps the results in its table, and nothing else calls it (#1462). The
+launch registry is built once per process (once per module instance in the browser) and shared by
+every preparation, live classification and preview; its bytes are process-level, charged to no
+plan (#1469). `new` checks each row: (a) `tail_every_peak >= tail`, with `Infinite` the largest;
+(b) `rest` is `Unstated` only with `tail_every_peak: Infinite`; (c) `rest` is `Bounded` only with
+a finite `tail_every_peak`. (b) and (c) together are "`rest` is `Unstated` if and only if
 `tail_every_peak` is `Infinite`". A row that breaks a rule refuses the registry with
 `effect.tail_bound.inconsistent`, naming the effect. `NativeEffectRegistry::tail_bound(id,
 sample_rate, quality)` reads a `RegisteredTailBound` entry (`effect.quality.unsupported` for a row
