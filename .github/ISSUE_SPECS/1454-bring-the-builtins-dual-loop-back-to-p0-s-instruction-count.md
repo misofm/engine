@@ -451,3 +451,16 @@ From `/home/bl/misofm/submix-verdicts/1454-attempt1.md`.
   `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
   `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
   all pass. AArch64: CI only.
+
+### Batch follow-ups, part 2 (stream G2, 2026-10-07; root-authorized)
+
+- **The dual armed depth-2 pair's V8 ceiling falls from 12 to 11** (part 1's open item; root
+  authorized `scripts/check-web-audioworklet-v8-spill.py`). The row's comment says why (the
+  interleaved form's `frames_left` loop gave back the slot #1451's splatted `FLUSH_EPS` had added),
+  and the docstring's ceiling sentence and table now say dual pair 11. The docstring table's dual
+  armed depth-1 tail cell, still "ceiling 2" after part 1, now says 1 (the row was already 1).
+- Evidence: `bash scripts/run-wasm-gates.sh` rc 0; the row reports "ok dual armed depth-2 pair,
+  select-free (reported, ceiling 11): 223 instructions in 5 blocks ... 11 carried slots" and no
+  longer prints "lower its ceiling". Discrimination (spill script alone on the same named twin):
+  ceiling 10: FAIL ("11 carried slots ... above the row's ceiling of 10"), rc 1; restored to 11:
+  rc 0. No test added or changed.
