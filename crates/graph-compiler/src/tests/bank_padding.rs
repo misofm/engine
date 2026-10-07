@@ -211,7 +211,7 @@ fn a_console_remainder_binds_one_padded_bank_and_an_insert_remainder_renders_per
             1_088,
             &[],
             Backend::Scalar,
-            &launch_native_effect_registry().expect("launch registry"),
+            launch_native_effect_registry().expect("launch registry"),
         )
         .unwrap_or_else(|_| panic!("{what}: the Scalar oracle compiles"));
         let oracle =
@@ -314,7 +314,7 @@ fn a_padded_bank_charges_member_metadata_per_active_member() {
         &model,
         1_088,
         &[],
-        &launch_native_effect_registry().expect("launch registry"),
+        launch_native_effect_registry().expect("launch registry"),
     )
     .graph()
     .dependency_levels

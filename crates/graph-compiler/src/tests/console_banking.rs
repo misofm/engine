@@ -384,7 +384,7 @@ fn compile_at(
         1_098,
         &[],
         dispatch,
-        &launch_native_effect_registry().expect("launch registry"),
+        launch_native_effect_registry().expect("launch registry"),
     )
 }
 

@@ -225,3 +225,80 @@ use; no existing test counts registry builds or `tail_and_rest` evaluations acro
   the shared registry.
 
 ## Attempt record
+
+### Attempt 1 (implementer, 2026-10-07) -- checkpoint, gates incomplete (disk stop)
+
+Base `34cd5d55f` (#1462 at `7a8a30f1c`/`8bb56d9b5`). Anchors re-verified on this base.
+
+**Changes.**
+- `crates/effect-compiler/src/prepare.rs`: `static LAUNCH_NATIVE_EFFECT_REGISTRY:
+  OnceLock<Result<NativeEffectRegistry, RegistryError>>`; private
+  `build_launch_native_effect_registry` (today's body, same order);
+  `launch_native_effect_registry() -> Result<&'static NativeEffectRegistry, RegistryError>`
+  (`get_or_init`, error cloned; a cached error is permanent, no reset path); a `const` `Send + Sync`
+  assertion for `NativeEffectRegistry` and `RegistryError`; the doc comment rewritten (D7).
+- `crates/effect-contract`: `[features] test-support = []`; a feature-gated process-global
+  `AtomicU64` incremented beside the one `tail_and_rest` evaluation in `NativeEffectRegistry::new`,
+  and `#[doc(hidden)] tail_bound_evaluations()`. `effect-compiler/test-support` forwards
+  `effect-contract/test-support`.
+- `crates/host-core/src/prepare.rs` and `response.rs`: the same call, now a reference (prepare.rs
+  passes `registry` instead of `&registry`; response.rs unchanged). Same error codes.
+- `crates/host-core/src/live_delta.rs`: the `Option<NativeEffectRegistry>` plumbing and
+  `load_registry` deleted; the automation branch and `parameter_records` each call
+  `launch_native_effect_registry()` at the point the `Option` was filled, with the same
+  `LiveRebuild::Structure` mapping and the same position in the refusal order. A delta that never
+  reached `load_registry` still never reaches the call. The `# Allocation` doc no longer lists the
+  registry as allocated per call.
+- Gate 1: `crates/host-core/tests/launch_registry_once.rs` (one `#[test]`), with a `[[test]]` entry
+  `required-features = ["test-support", "control-provider"]` in `crates/host-core/Cargo.toml`.
+  `control-provider` is needed for `classify_live_delta`; in test-debug-a it is on through `capi`'s
+  dependency (the same route `tests/live_delta.rs` relies on). Order: counter 0; 4 threads behind a
+  `Barrier`, each first reaching the registry directly, then preparing (rate per thread), classifying
+  an EQ gain change (reaches `parameter_records`) and an EQ console automation (reaches
+  `effect_automation_diagnostics`), previewing, and checking `ptr::eq`; then 8 rounds of preparation
+  and preview at all four launch rates plus both classifications; then `ptr::eq`, sum of
+  `qualities.len()` == 32, counter == 32.
+- `docs/EFFECT_CONTRACT_V1.md`: no line describes per-call construction; unchanged.
+- Forced callers (D2), call only: `&registry`/`&launch_native_effect_registry()...` became
+  `registry`/`launch_native_effect_registry()...` (clippy `needless_borrow`, applied by
+  `cargo clippy --fix`; every changed line was checked to be only that borrow removal) in
+  `crates/effect-compiler/tests/native_session.rs`, `crates/graph-compiler/src/lib.rs` (also the
+  three `(&registry, ...)` tuple elements of one test's `cases` array, a type error otherwise),
+  `crates/graph-compiler/src/tests/{bank_padding,console_banking}.rs`,
+  `crates/graph-compiler/tests/{bank_levels,bypass_cohorts,bypass_resources,live_routes,route_activity,route_coefficients,track_delay,vca_follow}.rs`,
+  `crates/host-core/src/control_provider.rs` (tests), `crates/host-core/tests/{live_routes,randomized,route_mute,submix_strip}.rs`,
+  `tools/console-workload/src/lib.rs`, `tools/session-validator/src/lib.rs`,
+  `tools/session-validator/tests/validate.rs`; and `tools/console-workload/tests/paired_spans.rs`
+  (`fn registry()` returns `&'static NativeEffectRegistry`). `tools/bench/src/console.rs` compiles
+  unchanged; #1462's NIT n3 (a registry built per lane in `eq_request`) is now a read of the shared
+  registry, so no per-lane build remains.
+
+**Mutation runs** (`cargo test --locked -p host-core --features test-support,control-provider --test
+launch_registry_once`; each applied: red, reverted: green). M2-M4 build an owned registry with
+`NativeEffectRegistry::new` over the eight launch factories, through a temporary `pub` wrapper of
+the private builder added only for the run.
+- M1 (entry point bypasses the `OnceLock`, builds and leaks per call): red, `ptr::eq` fails in every
+  thread.
+- M2 (`host-core/src/prepare.rs` builds its own): red, counter 1184 != 32 (32 + 36 preparations x 32).
+- M3 (`response.rs` builds its own): red, 1184 != 32 (36 previews).
+- M4 (`live_delta.rs` `parameter_records` builds its own): red, 416 != 32 (12 classifications).
+- M4b (`live_delta.rs` automation branch builds its own): red, 416 != 32.
+- M5 (racy `get()`-then-`set()` instead of `get_or_init`): red 10 of 10 runs (128 or 96 != 32), so
+  the concurrent-first-use half of the test-value sentence holds.
+- Reverted: green (0.68 s).
+
+**Gates run.**
+- `cargo build --locked --workspace --all-targets --all-features`: pass.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: pass (after the
+  `needless_borrow` call-site fixes, before `cargo fmt`; fmt then only re-wrapped lines).
+- `cargo fmt --all -- --check`: pass.
+- Gate 1 test: pass.
+
+**Not run: disk stop.** After the all-features build and clippy, `df -h /` showed 16 GB free (37 GB at
+start), under the 25 GB floor; the worktree `target/` is 64 GB (`debug` 52 GB, of which
+`incremental` 19 GB; `ci` 8.3 GB; `release` 3.5 GB). Building stopped per the worker rules. Pending:
+clippy without `--all-features`; `cargo doc` (`--exclude gate-expander`); test-debug-a/-b and
+doctests (including host-core `tests/live_delta.rs` unchanged-green and gate 1 in test-debug-a's
+output); `check-test-support-ci.py`; `check-effect-contract.sh`; `check-workspace-policy.sh`;
+`check-realtime-policy.sh`; `check-cross-targets.sh`; `run-wasm-gates.sh`; the worklet chain;
+`check-graph-determinism.sh`; `check-capi-abi.sh`; `audit capi` (pcm_digest vs `cb10fbface44a3a4`).

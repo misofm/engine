@@ -52,7 +52,7 @@ fn text(model: &SessionModel) -> Vec<String> {
     .expect("the builtins prepare");
     let effects = prepare_native_session_effects(
         &session,
-        &launch_native_effect_registry().expect("launch registry"),
+        launch_native_effect_registry().expect("launch registry"),
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 24,
             maximum_scratch_bytes: 1 << 24,

@@ -16,7 +16,7 @@ use session::{
     SidechainDeclaration,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::control::{EffectControlOwner, EffectControlOwnerError, EffectControlResourceError};
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
@@ -201,11 +201,39 @@ pub struct EffectPreparedSession {
     pub entries: Vec<EffectPreparedEntry>,
 }
 
-/// Construct the caller-injected native registry for the V1 launch effect set.
+/// The launch native-effect registry, with its tail-bound table (issue #1469, root ruling R2).
 ///
-/// Registry construction is control-plane work. Callers retain and inject the immutable registry
-/// into [`prepare_native_session_effects`]; there is no render-reachable global catalog.
-pub fn launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
+/// The registry is a process-lifetime, control-plane-only value: it is built once, on the first
+/// call (the first session preparation, live classification or response preview of the process,
+/// or of the module instance in the browser), and every later call returns the same immutable
+/// registry. No render path reaches it. Session preparation, live classification and the
+/// response preview read it here and inject it into [`prepare_native_session_effects`] and its
+/// peers; prepared plans keep their own clones of the factories they use.
+///
+/// A concurrent first call on another control thread waits for the one build and then reads the
+/// same value. A failed build is cached as well and is permanent for the process: the registry's
+/// inputs are compiled in, so a retry cannot succeed, and every call returns a clone of the same
+/// [`RegistryError`].
+pub fn launch_native_effect_registry() -> Result<&'static NativeEffectRegistry, RegistryError> {
+    LAUNCH_NATIVE_EFFECT_REGISTRY
+        .get_or_init(build_launch_native_effect_registry)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// The one launch registry of the process (issue #1469 D1). Filled at most once, off render.
+static LAUNCH_NATIVE_EFFECT_REGISTRY: OnceLock<Result<NativeEffectRegistry, RegistryError>> =
+    OnceLock::new();
+
+// Issue #1469 D4: shared reads from several control threads need a `Send + Sync` registry.
+const _: () = {
+    const fn shared_across_threads<T: Send + Sync>() {}
+    shared_across_threads::<NativeEffectRegistry>();
+    shared_across_threads::<RegistryError>();
+};
+
+/// The eight launch factories, in registry order. Called only by the static's one build.
+fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
     NativeEffectRegistry::new([
         Box::new(parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
         Box::new(compressor::CompressorFactory) as Box<dyn NativeEffectFactory>,

@@ -9,6 +9,12 @@ publish.workspace = true
 [lib]
 name = "effect_contract"
 
+[features]
+default = []
+# Issue #1469 D6: a process-global count of `tail_and_rest` evaluations in
+# `NativeEffectRegistry::new`, read by host-core's `launch_registry_once` test.
+test-support = []
+
 [dependencies]
 engine.workspace = true
 lane.workspace = true

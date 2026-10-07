@@ -2508,6 +2508,21 @@ struct RegistryEntry {
 ///
 /// The table is control-side memory: its entries reach a [`PreparedEffectMetadata`], never a
 /// processor.
+/// The process-wide count of `tail_and_rest` evaluations made by [`NativeEffectRegistry::new`]
+/// (issue #1469 D6). Test support only: it lets a test prove that the launch registry is built
+/// once per process.
+#[cfg(feature = "test-support")]
+static TAIL_BOUND_EVALUATIONS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// How many `tail_and_rest` evaluations [`NativeEffectRegistry::new`] has made in this process
+/// (issue #1469 D6). Test support only.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn tail_bound_evaluations() -> u64 {
+    TAIL_BOUND_EVALUATIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Default)]
 pub struct NativeEffectRegistry {
     entries: BTreeMap<&'static str, RegistryEntry>,
@@ -2543,6 +2558,8 @@ impl NativeEffectRegistry {
             let mut tail_bounds = Vec::with_capacity(d.qualities.len());
             for row in d.qualities {
                 let bound = (d.tail_and_rest)(row.sample_rate, row.quality);
+                #[cfg(feature = "test-support")]
+                TAIL_BOUND_EVALUATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if !tail_bound_consistent(bound) {
                     return Err(RegistryError {
                         code: "effect.tail_bound.inconsistent",

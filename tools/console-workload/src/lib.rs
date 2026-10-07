@@ -1335,7 +1335,7 @@ impl SessionRuntime {
             Vec::new()
         };
         let registry = launch_native_effect_registry().expect("launch effect registry");
-        let mut effects = prepare_native_session_effects(&session, &registry, effect_caps())
+        let mut effects = prepare_native_session_effects(&session, registry, effect_caps())
             .expect("prepared console effects");
         // Both attaches are the production entry points, called in the order a host calls them.
         // The control channel is attached for every observation arm including `Absent`, so the
@@ -2569,7 +2569,7 @@ mod tests {
         let model = console_model(workload);
         let session = compile_session(&model, compile_caps()).expect("compiled console session");
         let registry = launch_native_effect_registry().expect("launch effect registry");
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps())
+        let effects = prepare_native_session_effects(&session, registry, effect_caps())
             .expect("prepared console effects");
         let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
             .expect("prepared console builtins");
@@ -3186,7 +3186,7 @@ mod tests {
         let model = console_model(workload);
         let session = compile_session(&model, compile_caps()).expect("compiled console session");
         let registry = launch_native_effect_registry().expect("launch effect registry");
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps())
+        let effects = prepare_native_session_effects(&session, registry, effect_caps())
             .expect("prepared console effects");
         let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
             .expect("prepared console builtins");

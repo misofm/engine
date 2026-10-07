@@ -285,7 +285,7 @@ fn render_with(
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,
@@ -481,7 +481,7 @@ fn a_mixed_bypass_cohort_binds_one_bank_per_slot() {
         let registry = launch_native_effect_registry().expect("launch registry");
         let effects = prepare_native_session_effects(
             &session,
-            &registry,
+            registry,
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 30,
                 maximum_scratch_bytes: 1 << 28,
@@ -724,7 +724,7 @@ fn a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,

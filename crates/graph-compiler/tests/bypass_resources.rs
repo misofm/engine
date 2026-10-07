@@ -231,7 +231,7 @@ fn bind(model: &SessionModel, dispatch: Backend, spans: u32, live_controls: bool
     assert_installed();
     let mark = current_thread_counters();
     let mut effects =
-        prepare_native_session_effects(&session, &registry, effect_caps(spans)).expect("effects");
+        prepare_native_session_effects(&session, registry, effect_caps(spans)).expect("effects");
     let producers = live_controls.then(|| {
         attach_effect_live_controls(&mut effects, NonZeroUsize::new(8).expect("depth"))
             .expect("live controls")

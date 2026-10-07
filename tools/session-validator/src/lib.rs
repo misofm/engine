@@ -393,7 +393,7 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
     };
     if let Err(set) = prepare_native_session_effects(
         &compiled,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: u64::MAX,
             maximum_scratch_bytes: u64::MAX,

@@ -323,7 +323,7 @@ fn compile(model: &SessionModel) -> PreparedGraphBuiltinsArtifact {
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 26,
             maximum_scratch_bytes: 1 << 26,

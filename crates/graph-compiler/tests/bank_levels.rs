@@ -261,7 +261,7 @@ pub fn compile_bind_render(
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = match prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,

@@ -138,7 +138,7 @@ impl Fx {
     }
 }
 
-fn registry() -> effect_contract::NativeEffectRegistry {
+fn registry() -> &'static effect_contract::NativeEffectRegistry {
     launch_native_effect_registry().expect("launch effect registry")
 }
 

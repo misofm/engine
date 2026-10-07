@@ -1348,7 +1348,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
     let mut effects = prepare_native_session_effects(
         compiled,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: caps.maximum_effect_state_bytes,
             maximum_scratch_bytes: caps.maximum_effect_scratch_bytes,

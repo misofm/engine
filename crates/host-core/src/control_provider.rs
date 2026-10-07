@@ -685,7 +685,7 @@ mod tests {
         let registry = effect_compiler::launch_native_effect_registry().expect("registry");
         effect_compiler::prepare_native_session_effects(
             &compiled,
-            &registry,
+            registry,
             effect_compiler::EffectCompileCaps {
                 maximum_total_state_bytes: u64::MAX,
                 maximum_scratch_bytes: u64::MAX,
