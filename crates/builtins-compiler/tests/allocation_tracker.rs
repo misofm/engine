@@ -1374,8 +1374,10 @@ fn live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_inpu
             .collect()
     };
     let prepare = |controls: &[TrackControlRequest]| {
-        armed(|| prepare_session_builtins_with_live_controls(&session, &requests, controls, caps()))
-            .expect("prepare")
+        armed(|| {
+            prepare_session_builtins_with_live_controls(&session, &requests, controls, caps(), None)
+        })
+        .expect("prepare")
     };
     // Settles first-touch state for this measurement, as `settle_phase_two_first_touch` does.
     test_only_reset_phase_two_allocation_tracker();

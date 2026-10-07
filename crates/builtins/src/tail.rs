@@ -18,8 +18,9 @@
 
 use effect_contract::{RestSamples, TailSamples};
 use math::tail::{
-    CascadeBound, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords, fixed_cascade,
-    live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm, word_box_norm,
+    CascadeBound, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords,
+    fixed_cascade_within, live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm,
+    word_box_norm,
 };
 
 use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
@@ -144,16 +145,49 @@ fn section_words(section: &SvfSection) -> SvfWords {
     ])
 }
 
+/// One design's bound and its charge: the frames its computation walked (#1457 D1, D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChargedInputBound {
+    /// The design's own certified bound ([`crate::input_section_bound`]).
+    pub bound: InputSectionBound,
+    /// The frames `math::tail::fixed_cascade` walked to compute it, over both channels: what it
+    /// charges a preparation's budget, whether computed or read from an [`InputBoundCache`].
+    pub frames: u64,
+}
+
 /// D4: the bound of a prepared input section whose designs never change, the maximum over its
 /// two channels. Each channel is its trim (a gain of `|trim|` on the peak) followed by its enabled
 /// sections in order, HPF then LPF; a disabled section is the exact identity and is left out.
-pub(crate) fn fixed_input_bound(sample_rate: u32, lanes: [&InputLane; 2]) -> InputSectionBound {
+///
+/// #1457 D3: the walk takes at most `horizon` frames over both channels; `None` when it would take
+/// more. Under a horizon at or above its charge the result is the same, bit for bit.
+pub(crate) fn fixed_input_bound(
+    sample_rate: u32,
+    lanes: [&InputLane; 2],
+    horizon: u64,
+) -> Option<ChargedInputBound> {
+    let bound = fixed_input_walk(sample_rate, lanes, horizon);
     #[cfg(any(test, feature = "test-support"))]
-    FIXED_INPUT_BOUNDS.with(|count| count.set(count.get() + 1));
+    {
+        if bound.is_some() {
+            FIXED_INPUT_BOUNDS.with(|count| count.set(count.get() + 1));
+        }
+        // A stopped walk took its whole horizon: it stops only when one more frame would pass it.
+        let walked = bound.map_or(horizon, |bound| bound.frames);
+        FIXED_INPUT_FRAMES.with(|count| count.set(count.get() + walked));
+    }
+    bound
+}
+
+fn fixed_input_walk(
+    sample_rate: u32,
+    lanes: [&InputLane; 2],
+    horizon: u64,
+) -> Option<ChargedInputBound> {
     let _environment = lane::CanonicalFpEnv::enter();
     let law = input_section_flush_law(sample_rate);
     let peaks = rest_peaks();
-    let channel = |lane: &InputLane| -> InputSectionBound {
+    let channel = |lane: &InputLane, horizon: u64| -> Option<ChargedInputBound> {
         let mut sections = [section_words(&lane.hpf); 2];
         let mut count = 0;
         for section in [&lane.hpf, &lane.lpf] {
@@ -163,31 +197,146 @@ pub(crate) fn fixed_input_bound(sample_rate: u32, lanes: [&InputLane; 2]) -> Inp
             }
         }
         if count == 0 {
-            return InputSectionBound::ZERO;
+            return Some(ChargedInputBound {
+                bound: InputSectionBound::ZERO,
+                frames: 0,
+            });
         }
         let gain = f64::from(lane.trim_signed.abs());
-        fixed_cascade(&sections[..count], gain, &law, peaks)
-            .map_or(InputSectionBound::UNBOUNDED, |bound| {
+        let walk = fixed_cascade_within(&sections[..count], gain, &law, peaks, horizon)?;
+        Some(ChargedInputBound {
+            bound: walk.result.map_or(InputSectionBound::UNBOUNDED, |bound| {
                 InputSectionBound::from_cascade(&bound)
-            })
+            }),
+            frames: walk.frames,
+        })
     };
-    let left = channel(lanes[0]);
+    let left = channel(lanes[0], horizon)?;
     // The common case, two channels with the same design and trim magnitude, is bounded once.
     let same = |a: &SvfSection, b: &SvfSection| a.words() == b.words() && a.enabled == b.enabled;
     if same(&lanes[0].hpf, &lanes[1].hpf)
         && same(&lanes[0].lpf, &lanes[1].lpf)
         && lanes[0].trim_signed.abs().to_bits() == lanes[1].trim_signed.abs().to_bits()
     {
-        return left;
+        return Some(left);
     }
-    left.max(channel(lanes[1]))
+    let right = channel(lanes[1], horizon - left.frames)?;
+    Some(ChargedInputBound {
+        bound: left.bound.max(right.bound),
+        frames: left.frames + right.frames,
+    })
+}
+
+/// #1457 D1: the frames-walked budget of one preparation's design bounds, charged in strip order
+/// (`crate::input_section_bounds`): 20 ms of near-top design work on the CI-class runner (x86-64-v3,
+/// release, one pinned core), where near-top designs walk 75,500-81,000 frames per ms. Its purpose
+/// is that typical sessions bound every distinct design exactly: the 64-track console documents
+/// (64 distinct designs) fit at every launch rate. Cheaper designs walk fewer frames per ms
+/// (typical 57,000-73,000, the cheapest, a 1 kHz LPF of 513 frames, about 47,500), so a session of
+/// many cheap distinct designs can spend about 32 ms. A design past the budget reports the rate's
+/// live bound (D3). The issue's attempt record states the measurements.
+pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
+
+/// #1457 D2: the entry cap of [`InputBoundCache::new`]. The cache holds only designs with an
+/// enabled section, and such a walk takes at least 257 frames (one 256-frame block of the majorant
+/// pass and one deviation frame) unless a section does not contract, which no design in the cutoff
+/// domain does (the live bound covers them all). So one preparation computes at most
+/// `INPUT_BOUND_BUDGET_FRAMES / 257` = 5,875 designs exactly, and stops one more:
+/// the cap holds a whole preparation's designs, so a rebuild of any unchanged session is served
+/// entirely from the cache. An entry is under 256 bytes, so the cache stays under about 2 MiB.
+pub const INPUT_BOUND_CACHE_ENTRIES: usize = 8192;
+
+/// A control-side cache of input-section design bounds across preparations (#1457 D2), keyed by
+/// what a design's bound depends on (the rate, both channels' section words and trim magnitudes).
+///
+/// An entry keeps either its design's bound with its charge ([`ChargedInputBound`]), or, for a
+/// design whose walk a preparation's remaining budget stopped, the horizon it passed (its charge
+/// is above it). A hit charges the preparation's budget exactly what the computation would: the
+/// stored frames, or, when the remaining budget is at most the passed horizon, the whole remainder
+/// and the live bound, which is what the stopped walk did. So every reported bound is the same with
+/// and without the cache, cold or warm (gate 3), and a rebuild of an unchanged session walks no
+/// frame. When an insertion would pass the entry cap the cache is cleared first (clear-on-full):
+/// the cap bounds its memory, and a cleared design is computed again with the same result.
+/// Render never reads it.
+#[derive(Clone, Debug)]
+pub struct InputBoundCache {
+    entries: std::collections::BTreeMap<InputBoundKey, CachedDesign>,
+    capacity: core::num::NonZeroUsize,
+}
+
+/// One cached design (#1457 D2).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CachedDesign {
+    /// The design's bound and the frames its walk took.
+    Bound(ChargedInputBound),
+    /// The design's walk took more than this many frames (a stopped walk's horizon, above zero).
+    ChargeAbove(u64),
+}
+
+impl InputBoundCache {
+    /// An empty cache holding at most `capacity` designs.
+    #[must_use]
+    pub const fn with_capacity(capacity: core::num::NonZeroUsize) -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            capacity,
+        }
+    }
+
+    /// An empty cache holding at most [`INPUT_BOUND_CACHE_ENTRIES`] designs.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_capacity(
+            core::num::NonZeroUsize::new(INPUT_BOUND_CACHE_ENTRIES).expect("a nonzero cap"),
+        )
+    }
+
+    /// The designs cached.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no design is cached.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The entry cap.
+    #[must_use]
+    pub const fn capacity(&self) -> core::num::NonZeroUsize {
+        self.capacity
+    }
+
+    pub(crate) fn get(&self, key: &InputBoundKey) -> Option<CachedDesign> {
+        self.entries.get(key).copied()
+    }
+
+    pub(crate) fn insert(&mut self, key: InputBoundKey, value: CachedDesign) {
+        if self.entries.len() >= self.capacity.get() && !self.entries.contains_key(&key) {
+            self.entries.clear();
+        }
+        self.entries.insert(key, value);
+    }
+}
+
+impl Default for InputBoundCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// How many times [`fixed_input_bound`] ran on this thread: one per design bound computed
-    /// (#1329 Amendment 5, MJ1). Read through `crate::test_support::fixed_input_bounds_computed`.
+    /// How many design bounds [`fixed_input_bound`] computed on this thread (#1329 Amendment 5,
+    /// MJ1): one per call whose walk finished inside its horizon (#1457); a stopped walk computes
+    /// no bound. Read through `crate::test_support::fixed_input_bounds_computed`.
     pub(crate) static FIXED_INPUT_BOUNDS: core::cell::Cell<u64> =
+        const { core::cell::Cell::new(0) };
+    /// How many frames [`fixed_input_bound`]'s walks took on this thread, stopped walks included
+    /// (#1457). Read through `crate::test_support::fixed_input_frames_walked`.
+    pub(crate) static FIXED_INPUT_FRAMES: core::cell::Cell<u64> =
         const { core::cell::Cell::new(0) };
 }
 
@@ -215,6 +364,34 @@ pub fn input_section_live_bound(sample_rate: u32) -> Option<InputSectionBound> {
             InputSectionBound::from_cascade(&bound)
         }),
     )
+}
+
+/// [`input_section_live_bound`] at each launch rate, as a table (#1457 D2): the live bound depends
+/// only on the rate, so preparation reads it here and computes it nowhere (it costs about 0.25 ms
+/// per computation, #1433). `None` off the launch rates, as there.
+///
+/// The test `live_bound_table_is_the_computed_live_bound_at_every_launch_rate`
+/// (`tests/tail_contract.rs`) holds every entry equal to [`input_section_live_bound`], so a change
+/// to the derivation, the flush law or the cutoff domain turns it red until the table is restated.
+#[must_use]
+pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<InputSectionBound> {
+    const fn bound(tail: u64, every_peak: u64, rest_peak: u64, rest_any: u64) -> InputSectionBound {
+        InputSectionBound {
+            tail: TailSamples::Finite(tail),
+            tail_every_peak: TailSamples::Finite(every_peak),
+            rest: Some(RestSamples {
+                peak_plus_24_dbfs: rest_peak,
+                any_sanitized_input: rest_any,
+            }),
+        }
+    }
+    match sample_rate {
+        44_100 => Some(bound(704_010, 704_010, 1_067_207, 2_384_997)),
+        48_000 => Some(bound(699_952, 699_952, 1_061_497, 2_372_008)),
+        88_200 => Some(bound(704_018, 704_018, 1_071_057, 2_388_800)),
+        96_000 => Some(bound(699_960, 699_960, 1_065_688, 2_376_147)),
+        _ => None,
+    }
 }
 
 /// The full `math::tail` result behind [`input_section_live_bound`], with its flush floor `P*`

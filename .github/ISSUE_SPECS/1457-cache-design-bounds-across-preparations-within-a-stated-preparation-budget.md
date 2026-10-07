@@ -228,7 +228,7 @@ and 2. Gates 2 and 3 stand as written, with D1's budget and D3's outcome.
 6. *(New.)* The live-bound table equals `input_section_live_bound` at each of the four launch rates,
    bit for bit.
 
-### Paths this slice needs (pending root: not yet named exceptions)
+### Paths this slice needs (pending root: not yet named exceptions; superseded by Amendment 2)
 
 Stream G owns none of the C ABI or host-core paths below, and neither this spec nor STREAMS names
 them for #1457. The cache must reach both C ABI preparation sites: `compile_children` (from
@@ -266,6 +266,62 @@ the header's thread notes change. The alternatives are one cache per engine for
 session. D3's stored-charge rule keeps every result a pure function of the session under any of
 them, including concurrent use.
 
+## Amendment 2 (root rulings, 2026-10-07): the cache's owners, the C ABI split, D1's figure
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation, after attempt
+1 stopped for paths and the D2 owner question. These rulings replace Amendment 1's D1 and D2 where
+they differ, and its "Paths this slice needs".
+
+- **D2 owners (ruling (b)).** The engine's cache serves `miso_engine_v1_compile_session`. Each
+  session owns its own cache, seeded at compile, for its rebuilds. No mutable state is shared
+  between an engine and its sessions, and the header does not change.
+- **Split: the C ABI wiring is #1471.** Stream B's batch 1 (#1309) moves
+  `crates/capi/src/runtime/{control,compile}.rs` into a new `control-plane` crate, so this slice
+  does not edit `crates/capi`. *Wire the engine and session design-bound caches into the C ABI*
+  (#1471, after #1309 is on `main`, built on `control-plane`) owns the engine and session caches,
+  gates 1 and 4 below, and stream B's and F's paths.
+- **No parallel API (ruling (i)).** No `_and_bound_cache` public variant at any layer.
+  `builtins_compiler::prepare_session_builtins_with_live_controls` itself gains
+  `bound_cache: Option<&mut InputBoundCache>`. In `host-core` the parameter stays internal to
+  `prepare.rs` (its policy function, `prepare_host_runtime_with_live_controls_policy_and_spectrum`);
+  every public host-core entry point passes `None`, and #1471 adds the parameter once to the two
+  entry points the C ABI uses. The native gate 3 calls the policy function directly.
+- **D1 (choice (B)).** The budget is **1,510,000 frames walked**, 20 ms of near-top design work on
+  the CI-class runner. Its purpose decides: typical sessions bound every distinct design exactly.
+  Both facts are stated: about 20 ms for near-top-heavy work, and a stated worst case of about
+  **32 ms** for a session of many cheap distinct designs, both measured on the CI-class runner in
+  one invocation (attempt record). The O(strips) design-keying cost is reported beside it.
+- **Named exceptions for this slice:** `crates/host-core/src/prepare.rs`,
+  `crates/builtins/src/lib.rs`, `crates/builtins/src/tail.rs`,
+  `crates/builtins-compiler/src/lib.rs`, `crates/math/src/tail.rs`,
+  `crates/builtins/tests/tail_contract.rs`; and, only to add `None` at callers of
+  `prepare_session_builtins_with_live_controls`: the tests in `crates/graph-compiler/src/lib.rs`,
+  `crates/builtins-compiler/tests/allocation_tracker.rs`, `hosts/host-web/src/tests.rs` and
+  `crates/host-core/tests/prepare.rs` (the last two name it only in comments; no edit was needed).
+
+### Gates as of Amendment 2
+
+1. *(Moved to #1471, gate 1.)* A rebuild of an unchanged session through the C ABI computes no
+   design bound. This slice proves the mechanism below the C ABI (gate 7).
+2. The worst case is measured once (release, CI-class runner, one invocation, one warmup, two
+   rounds) at the four launch rates: the top pair, the 64-design near-top family, 65,537 distinct
+   near-top designs, typical designs and cheap designs, on a first preparation and on a rebuild
+   with a warm cache. Design-bound walking stays within the budget; the D3 outcome shows past it.
+3. Every reported bound is bit-identical with and without the cache, cold and warm, at the bound
+   level (`tail_contract`) and at the host level (the policy function's report).
+4. *(Moved: the native C ABI rebuild cost is #1471's gate 4; the browser's audio-only rebuild
+   clause is #1470's gate 2.)*
+5. The fallback is taken exactly when the budget is exhausted, red on a wrong charge order or a
+   wrong cache-hit charge.
+6. The live-bound table equals `input_section_live_bound` at the four launch rates, bit for bit.
+7. *(New.)* A preparation walks at most the budget, and a second preparation with the same cache
+   walks no frame and computes no bound, the stopped design included.
+8. *(New, D1's purpose.)* Every 64-track console document (`console-sixty-four-track.json`,
+   `console-sixty-four-track-app.json`, `console-sixty-four-track-intended.json`,
+   `console-sixty-four-track-mono.json`, `console-sixty-four-track-sends.json`) prepares with no
+   strip on the live bound at every launch rate, its walk inside the budget. Red when the budget or
+   the walk changes so that the purpose breaks (proved with a smaller budget).
+
 ## Attempt record
 
 ### Attempt 1 (2026-10-07): rulings recorded, successor filed, stopped for paths
@@ -277,3 +333,111 @@ them, including concurrent use.
 - Stopped before code under the worker rules: the C ABI and host-core paths above are not named
   exceptions for #1457, and D2's owner of the session-side rebuild needs root's choice. No code,
   measurement or mutation run yet; D1's frames and ms are still to be measured.
+
+### Attempt 1, continued (2026-10-07): implementation under Amendment 2
+
+**What changed.**
+- `math::tail::fixed_cascade_within(sections, gain, law, peaks, horizon) -> Option<CascadeWalk>`:
+  the same walk as `fixed_cascade`, counting every frame-by-frame step (the majorant pass, the replay
+  of its crossing block, the deviation walk) and stopping (`None`) when one more frame would pass
+  `horizon`. `fixed_cascade` is it with `u64::MAX`, so its result is unchanged bit for bit.
+- `builtins` (`tail.rs`, `lib.rs`): `ChargedInputBound { bound, frames }`;
+  `INPUT_BOUND_BUDGET_FRAMES = 1_510_000`; `InputBoundCache` (keyed by `InputBoundKey`, entry cap
+  `INPUT_BOUND_CACHE_ENTRIES = 8_192`, clear-on-full; an entry is a charged bound or, for a stopped
+  walk, the horizon it passed, `ChargeAbove`); `input_section_bound_charged`;
+  `input_section_bounds(rate, strips, cache)` = `input_section_bounds_within(rate, strips,
+  INPUT_BOUND_BUDGET_FRAMES, cache)`; `input_section_live_bound_table(rate)` (the live bound at the
+  four launch rates). The charge rule: each distinct design at its first strip, in strip order,
+  charges its frames; a repeat charges nothing; a cache hit charges its stored frames; a stored
+  `ChargeAbove(h)` under a remaining budget of at most `h` reports the live bound without a walk;
+  past the budget every design with an enabled filter reports the live bound without a walk. A
+  memoryless design (no filter enabled on either channel) reports `InputSectionBound::ZERO`, walks
+  nothing and is neither counted nor cached. The test-support counter `fixed_input_bounds_computed`
+  now counts finished computations only, and `fixed_input_frames_walked` counts frames walked.
+- `builtins-compiler`: `prepare_session_builtins_with_live_controls(.., bound_cache:
+  Option<&mut InputBoundCache>)`; the live strips read the table (no live-bound computation in any
+  preparation).
+- `host-core/src/prepare.rs`: the policy function's `bound_cache` parameter (every public entry
+  passes `None`) and the native gate-3 unit test. `None` added at the callers in
+  `crates/graph-compiler/src/lib.rs` (tests) and `crates/builtins-compiler/tests/allocation_tracker.rs`.
+- No render path changed. The cache and the table are control-side; nothing render owns stores
+  them. No allocation-counting window moved: the bounds are computed before the phase-two
+  observation, as before, and the table is a `const fn` (no lazy state to warm).
+
+**D1 measurement** (this box as the CI-class runner: x86-64-v3, release, `taskset -c 7`, one
+invocation, one warmup and two measured rounds, scratch probe not committed; frames walked per ms):
+
+| design (each rate) | frames | ms | frames/ms |
+|---|---|---|---|
+| top pair (HPF one `f32` below the maximum into the LPF at the maximum, +24 dB) | 525,520-528,640 | 6.42-6.83 | 77,400-81,900 |
+| LPF at the maximum, +24 dB | 448,513-451,073 | 3.37-3.59 | 125,600-133,300 |
+| 64-design near-top family (HPF 10-640 Hz into the LPF 1-64 `f32` below the maximum, +24 dB), all 64 | 26.78-26.89 M | 346-355 | 75,500-77,400 |
+| typical (20 Hz HPF into 20 kHz LPF), 256 distinct | 2.69-5.63 M | 41.5-78.9 | 64,700-71,400 |
+| cheap (1 kHz LPF), 256 distinct | 131,328-196,864 | 2.71-3.84 | 47,500-53,000 |
+
+Budget: 1,510,000 frames = 20 ms of near-top work (75,500 frames/ms). Stated worst case for many
+cheap distinct designs: about 32 ms (measured 28.6-33.4 ms below).
+
+**Gate 2** (`input_section_bounds` with a fresh `InputBoundCache`, then the same cache warm, then no
+cache; rounds 1 and 2, ms; "exact" counts strips not on the live bound):
+
+| workload | rate | first | rebuild (warm) | no cache | exact |
+|---|---|---|---|---|---|
+| 65,537 distinct near-top designs | 44.1 / 48 / 88.2 / 96 kHz | 46.3-78.5 | 26.1-47.2 | 45.2-79.8 | 3 / 65,537 |
+| 64-design near-top family | all four | 18.5-22.9 | 0.017-0.035 | 18.5-27.0 | 3 / 64 |
+| 64 typical designs | 44.1 / 48 kHz | 10.4-11.2 | 0.019-0.021 | 10.4-11.2 | 64 / 64 |
+| 64 typical designs | 88.2 / 96 kHz | 18.7-28.8 | 0.019-0.021 | 18.7-20.6 | 64 / 64 |
+| 4,096 cheap designs (1 kHz LPF family) | 44.1 / 48 kHz | 32.7-33.4 | 1.64-1.74 | — | 2,943 / 4,096 |
+| 4,096 cheap designs | 88.2 / 96 kHz | 28.6-29.2 | 1.80 | — | 1,963 / 4,096 |
+
+Design-bound walking stays within the budget (gate 7 holds the frame count exactly). The rest of
+the 65,537-strip figure is the O(strips) design keying, outside the walk: designing each strip's
+input track and its key, about 26 ms per 65,537 strips (0.4 us per strip, the warm-rebuild column);
+the first preparation adds the cache's own insertions. Before #1457 the same session cost about 9.6
+minutes per preparation (#1329, extrapolated). The 48 kHz round-2 outlier (78 ms) is noise on a
+shared box; the run was not repeated (benchmark rule).
+
+The 64-track console documents walk 610,432 (44.1 kHz), 658,816 (48 kHz), 1,157,760 (88.2 kHz) and
+1,254,016 (96 kHz) frames, the mono variant 316,480-650,816, all inside the budget (gate 8).
+
+**Tests added** (test-value sentences):
+- `tail_contract::the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` (gates 5, 3):
+  red when the charge order is not strip order, a cache hit charges other than its stored frames, a
+  repeated design charges again, the budget comparison is off by one (on a hit or on the walk), or a
+  stopped walk leaves budget for a later, cheaper design.
+- `tail_contract::a_full_bound_cache_is_cleared_and_reports_the_same_values` (gate 3, D2): red when
+  the entry cap is not enforced.
+- `tail_contract::live_bound_table_is_the_computed_live_bound_at_every_launch_rate` (gate 6): red
+  when a table entry differs from the computed live bound.
+- `builtins_compiler::tests::a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing`
+  (gate 7): red when a stopped walk's horizon is not cached, or is honoured with the wrong
+  comparison, so a rebuild walks again.
+- `builtins_compiler::tests::every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`
+  (gate 8): red when the budget or the walk's charge changes so that a typical session leaves exact
+  bounds.
+- `host_core::prepare::tests::a_design_bound_cache_changes_no_prepared_value` (gate 3, native): red
+  when a cached design's charge differs from its computed one, so the host report with a warm cache
+  differs from the one without.
+- Changed: `design_bounds_are_computed_only_for_strips_without_a_live_input_lane` (6 -> 5 and
+  4 -> 3: a memoryless design is no longer computed).
+
+**Mutation runs** (each applied alone, the named test run, then reverted):
+
+| id | mutation | test | result |
+|---|---|---|---|
+| M1 | a cache hit charges 0 frames | gate 5 | red (order [0,1,0,2], budget 512, cache warmed under `u64::MAX`) |
+| M2 | a repeated design is charged again | gate 5 | red (budget 513, no cache) |
+| M3 | a hit fits only when `frames < remaining` | gate 5 | red (budget 513, warm cache) |
+| M4 | a stored horizon is honoured only when `remaining < above` | gate 5 | green; gate 7 red (warm cache walked) |
+| M5 | `take_frame` stops one frame early | gate 5 | red (budget 513, no cache) |
+| M6 | a stopped walk leaves the remaining budget | gate 5 | red (order [3,0,1], budget 22,784; after a fourth, cheaper design was added for it) |
+| M7 | designs charged in reverse strip order | gate 5 | red (order [0,1,0,2], budget 513) |
+| M8 | a stopped walk's horizon is not cached | gate 7 | red (warm cache) |
+| M9 | no clear-on-full | cache-cap test | red (3 entries in a cache of 2) |
+| M10 | 48 kHz table `any_sanitized_input` + 1 | gate 6 | red |
+| M11 | a cache hit charges 0 frames | native gate 3 | red (warm-cache report differs) |
+| M12 | budget 950,000 | gate 8 | red (88.2 kHz: 12 strips on the live bound) |
+| M13 | every walked frame charged twice | gate 8 | red (88.2 kHz) |
+
+M4 is caught by gate 7, not gate 5: under a cold or warm cache the boundary case gives the same
+values, because a stopped walk charges the whole remainder either way; only the frames walked differ.

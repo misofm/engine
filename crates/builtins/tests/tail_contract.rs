@@ -11,11 +11,12 @@
 use builtins::INPUT_FILTER_RAMP_SAMPLES;
 use builtins::test_support::{input_section_words, input_state_words, input_trim_words};
 use builtins::{
-    BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBuiltins,
-    InputSectionBound, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
-    input_section_bound, input_section_bounds, input_section_flush_law, input_section_live_bound,
-    input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
-    prepare_input_filter_pair,
+    BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBoundCache,
+    InputBuiltins, InputSectionBound, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
+    input_section_bound, input_section_bound_charged, input_section_bounds,
+    input_section_bounds_within, input_section_flush_law, input_section_live_bound,
+    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
+    input_section_worst_case_pair, prepare_input_filter_pair,
 };
 use effect_contract::{RestSamples, TailSamples};
 use math::tail::{
@@ -337,10 +338,156 @@ fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
     assert_ne!(own[5], own[0], "the right channel must bound differently");
     assert_ne!(own[6], own[0], "the left channel must bound differently");
     assert_eq!(
-        input_section_bounds(rate, strips).expect("bounds"),
+        input_section_bounds(rate, strips, None).expect("bounds"),
         own,
         "a strip took another design's bound"
     );
+}
+
+// ---- #1457 gates 5, 3 and 6: the preparation budget, the cache and the live-bound table --------
+
+/// #1457 gate 5 (and gate 3 at the bound level): the live bound is reported exactly from the
+/// design whose charge, summed with the charges before it in strip order, crosses the budget; a
+/// design repeated later charges nothing and reports its first strip's value; and a cache, cold,
+/// warm or holding a stopped walk's horizon, changes no reported value. The budgets sit on each
+/// side of every crossing, pairs of designs run in both strip orders, and a design that passes the
+/// budget is followed by cheaper ones, which must still report the live bound.
+#[test]
+fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
+    let rate = 48_000;
+    let designs = [
+        parameters(0.0, 1_000.0, 0.0, false),
+        parameters(1_000.0, 0.0, 6.0, false),
+        parameters(1_000.0, 2_000.0, 0.0, false),
+        parameters(10.0, 0.0, 0.0, false),
+    ];
+    let charged: Vec<_> = designs
+        .iter()
+        .map(|design| input_section_bound_charged(rate, *design).expect("bound"))
+        .collect();
+    let live = input_section_live_bound_table(rate).expect("launch rate");
+    for (index, design) in charged.iter().enumerate() {
+        assert!(design.frames > 0, "design {index} walks");
+        assert_ne!(
+            design.bound, live,
+            "design {index} must bound below the live bound"
+        );
+        assert_eq!(
+            Some(design.bound),
+            input_section_bound(rate, designs[index]).ok()
+        );
+    }
+    // Strips in order, a design repeated after others; the last order puts designs cheaper than
+    // the first after it, so a budget the first passes leaves room a later one would fit.
+    let orders: [&[usize]; 4] = [&[0, 1, 0, 2], &[2, 1, 2, 0], &[1, 0], &[3, 0, 1]];
+    for order in orders {
+        let strips: Vec<BuiltinParameters> = order.iter().map(|&index| designs[index]).collect();
+        // Each design's first strip, in order, and the charges before it.
+        let mut firsts: Vec<usize> = Vec::new();
+        for &index in order {
+            if !firsts.contains(&index) {
+                firsts.push(index);
+            }
+        }
+        let mut budgets = std::vec![0, u64::MAX];
+        let mut before = 0_u64;
+        for &index in &firsts {
+            let after = before + charged[index].frames;
+            budgets.extend([after - 1, after, after + 1]);
+            before = after;
+        }
+        for budget in budgets {
+            // The reference: the first design whose cumulative charge passes the budget, and every
+            // design after it, report the live bound.
+            let mut covered = 0_u64;
+            let mut exhausted = false;
+            let mut value = std::collections::BTreeMap::new();
+            for &index in &firsts {
+                let fits = !exhausted && covered + charged[index].frames <= budget;
+                if fits {
+                    covered += charged[index].frames;
+                } else {
+                    exhausted = true;
+                }
+                value.insert(index, if fits { charged[index].bound } else { live });
+            }
+            let expected: Vec<InputSectionBound> = order.iter().map(|index| value[index]).collect();
+            let what = format!("order {order:?}, budget {budget}");
+            let none = input_section_bounds_within(rate, strips.clone(), budget, None);
+            assert_eq!(none.expect("bounds"), expected, "{what}, no cache");
+            // A cold cache, then the same cache warm.
+            let mut cache = InputBoundCache::new();
+            for pass in ["cold", "warm"] {
+                let cached =
+                    input_section_bounds_within(rate, strips.clone(), budget, Some(&mut cache));
+                assert_eq!(cached.expect("bounds"), expected, "{what}, {pass} cache");
+            }
+            // Caches warmed under every other budget: each holds stored charges and stopped
+            // walks' horizons this budget has to honour.
+            for other in [
+                0,
+                u64::MAX,
+                budget.saturating_sub(1),
+                budget.saturating_add(1),
+            ] {
+                let mut cache = InputBoundCache::new();
+                input_section_bounds_within(rate, strips.clone(), other, Some(&mut cache))
+                    .expect("bounds");
+                let cached =
+                    input_section_bounds_within(rate, strips.clone(), budget, Some(&mut cache));
+                assert_eq!(
+                    cached.expect("bounds"),
+                    expected,
+                    "{what}, cache warmed under budget {other}"
+                );
+            }
+        }
+    }
+    // The production budget leaves every one of these designs exact.
+    assert_eq!(
+        input_section_bounds(rate, designs, Some(&mut InputBoundCache::new())).expect("bounds"),
+        charged
+            .iter()
+            .map(|design| design.bound)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// #1457 gate 3 (D2): the cache's entry cap. A cache of two designs given three keeps at most two,
+/// and a design it cleared is computed again with the same value.
+#[test]
+fn a_full_bound_cache_is_cleared_and_reports_the_same_values() {
+    let rate = 48_000;
+    let designs = [
+        parameters(0.0, 1_000.0, 0.0, false),
+        parameters(1_000.0, 0.0, 6.0, false),
+        parameters(1_000.0, 2_000.0, 0.0, false),
+    ];
+    let expected = input_section_bounds(rate, designs, None).expect("bounds");
+    let mut cache = InputBoundCache::with_capacity(core::num::NonZeroUsize::new(2).expect("two"));
+    for pass in 0..3 {
+        let cached = input_section_bounds(rate, designs, Some(&mut cache)).expect("bounds");
+        assert_eq!(cached, expected, "pass {pass}");
+        assert!(cache.len() <= 2, "pass {pass}: {} entries", cache.len());
+    }
+}
+
+/// #1457 gate 6 (D2): the live-bound table preparation reads is the computed live bound at every
+/// launch rate, bit for bit, and states nothing off them.
+#[test]
+fn live_bound_table_is_the_computed_live_bound_at_every_launch_rate() {
+    for rate in LAUNCH_RATES {
+        assert_eq!(
+            input_section_live_bound_table(rate),
+            input_section_live_bound(rate),
+            "{rate} Hz"
+        );
+        assert!(input_section_live_bound_table(rate).is_some(), "{rate} Hz");
+    }
+    for rate in [8_000, 32_000, 176_400, 192_000] {
+        assert_eq!(input_section_live_bound_table(rate), None, "{rate} Hz");
+        assert_eq!(input_section_live_bound(rate), None, "{rate} Hz");
+    }
 }
 
 // ---- Gate 1(b): the live bound covers the domain ---------------------------------------------

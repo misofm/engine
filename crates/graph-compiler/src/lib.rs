@@ -11409,6 +11409,7 @@ mod tests {
                 maximum_peak_hold_frames: u32::MAX,
                 maximum_smoothing_samples: u32::MAX,
             },
+            None,
         )
         .expect("prepared console builtins");
         let registry = launch_native_effect_registry().expect("launch registry");
