@@ -152,8 +152,9 @@ pub enum FaultKind {
     /// Issue #105 E12: a bypass path that emits the dry signal without the declared PDC delay.
     ///
     /// Distinct from [`FaultKind::LatencyChangingBypass`], which lies in the metadata its prepare
-    /// result carries and is caught by `metadata.exact` before any audio is rendered. This one reports the contractual
-    /// latency and then fails to honour it, which only the bypass reference render can see.
+    /// result carries and is caught by `metadata.exact` before any audio is rendered. This one
+    /// reports the contractual latency and then fails to honour it, which only the bypass
+    /// reference render can see.
     BypassDelayMismatch,
 }
 

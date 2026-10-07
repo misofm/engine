@@ -345,12 +345,12 @@ struct LaneTiming {
 ///
 /// It keeps only the prepared values its own methods read (issue #1461): the whole
 /// `PreparedEffectMetadata` stays on the control side, in the prepare result. The prepared bypass
-/// and link mode are already folded into `coef`.
+/// and link mode are already folded into `coef`. It keeps no quantum: it has no buffer sized by
+/// one, and `EffectBankProcessBlock::new` already refuses a block longer than the quantum its
+/// caller states (issue #1461, m1).
 struct PreparedGate<L: Lane, const CONNECTED: bool> {
     /// The prepared sample rate: hold counts and one-pole coefficients, at seeding and restore.
     sample_rate: u32,
-    /// The prepared render quantum, which bounds a bank block's frames.
-    quantum: u32,
     /// The prepared automation capacity: a span at or past it is invalid.
     automation_capacity: u32,
     bank_width: Option<BankWidth>,
@@ -435,7 +435,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
         let mut gate = Self {
             sample_rate: metadata.sample_rate,
-            quantum: metadata.quantum,
             automation_capacity: metadata.automation_capacity,
             bank_width,
             defaults,
@@ -998,7 +997,6 @@ macro_rules! bank_impl {
                     return report;
                 }
                 debug_assert_eq!(block.left.len(), block.frames as usize * <$lane>::WIDTH);
-                debug_assert!(block.frames <= self.quantum);
                 let mut reports = [ProcessReport::default(); MAX_WIDTH];
                 for track in 0..<$lane>::WIDTH {
                     // A padded lane carries no track, so no span is its to apply (issue #1092).

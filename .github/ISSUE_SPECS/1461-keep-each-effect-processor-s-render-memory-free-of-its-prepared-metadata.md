@@ -265,3 +265,46 @@ confirm it there.
 passed; release `audit`/`bench`/`console-workload` tests 113 passed, 0 failed; `check-effect-contract.sh` ok
 (8 production factories, 0 failed gates); `check-workspace-policy.sh` ok; `check-realtime-policy.sh`
 ok (89 regions); `check-capi-abi.sh` ok; `check-cross-targets.sh` PASS (`ios-asm-memset-pattern16` expected failures #1018 unchanged).
+
+### Batch follow-ups (stream G2 part 1, after the attempt-1 PASS)
+
+From `/home/bl/misofm/submix-verdicts/1461-attempt1.md`.
+
+- **m1, the EQ.** `PreparedParametricEq<L, W>` no longer stores `quantum` or `width`. The bank
+  body takes its width from the const `W` (`BankWidth::for_lanes(W)`; the `else` arm, reached only
+  by a `W` no bank has, refuses the block with an empty report of the block's own width, as the
+  guard refuses a block of another width), and its quantum from the rest planes
+  (`PreparedParametricEq::quantum`, `rest[0].len() / W`, the length `prepare_width` gives them).
+  The tautological `self.width.lanes() != W` test goes with the field. `prepare_width` loses its
+  `width` argument, so its callers (the factory, the bank binder and the unit tests) pass none.
+  A const `BankWidth` evaluated at monomorphization was tried first and refused: the unit
+  tests' width-generic arms instantiate the bank trait methods for `W = 1` in a branch they never
+  take, so a post-monomorphization panic does not compile.
+- **m1, the gate-expander.** `PreparedGate::quantum` and the bank `debug_assert!(block.frames <=
+  self.quantum)` are removed: the gate has no buffer sized by a quantum, and
+  `EffectBankProcessBlock::new` already refuses a block longer than its caller's quantum. (The
+  limiter's `quantum` is another slice's crate and stays.)
+- **NIT.** `effect-compiler/src/prepare.rs`: the `FORGERIES` doc comment now sits on
+  `const FORGERIES`, not on `type Forge`. `conformance/src/effect.rs:155` and
+  `docs/EFFECT_CONTRACT_V1.md:314` (the faulty-mock list) are rewrapped to 100 columns.
+- **Tests.** No test added or rewritten: the unit tests changed only by dropping the removed
+  argument (and building a block's width from `BankWidth::for_lanes(W)` where they read the
+  field). Probe, not a gate: replacing `quantum()` with `u32::MAX` leaves every parametric-eq
+  test green, as the stored field was before; the guard's quantum term has no test of its own
+  (open item below).
+- **No rendered bit moves.** All pass on the follow-up tree (x86_64): fmt; workspace clippy `-D
+  warnings` with and without `--all-features`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked
+  --workspace --no-deps --exclude gate-expander` (gate-expander's own doc failure is part 2's);
+  `check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-effect-runtime-policy.sh`;
+  test-debug-a 1,462 passed, 0 failed; test-debug-b 890 passed, 0 failed; `conformance_fixtures
+  --check`; release `lane`/`math`/`wasm-gates` (G5 `g5_native_digests_match_pins`) 123 passed;
+  `run-wasm-gates.sh` (native 144 cases, wasm simd128 144 cases, 0 mismatches; V8 spill ok);
+  `check-cross-targets.sh` PASS (known-defect rows unchanged: builtins 5, host-core 4, soft-clip 1);
+  the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+  `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
+  all pass. AArch64: CI only.
+
+**Open item.** No test defends the EQ bank guard's `frames <= quantum` term (it was untested
+before this follow-up too; a longer block is already refused by `EffectBankProcessBlock::new`
+when its caller states the prepared quantum).

@@ -326,8 +326,8 @@ every declared quality/link mode, enabled/bypass, exact prepare-result metadata,
 D7 output-block bounds under poisoned input and sidechain, deterministic state restore, and lane
 isolation. Separate faulty mocks exercise
 allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, a prepare result
-whose metadata misstates latency or resources, bypass latency, malformed automation, NaN propagation, partial or
-nondeterministic snapshot, and rejected restore.
+whose metadata misstates latency or resources, bypass latency, malformed automation, NaN
+propagation, partial or nondeterministic snapshot, and rejected restore.
 
 The harness is built from the descriptor, not from the reference mock: the prepare request uses
 `default_initial_values`, the ports come from the descriptor's own sidechain declaration (or

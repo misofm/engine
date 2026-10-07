@@ -2944,18 +2944,14 @@ pub struct ParametricEqFactory;
 ///
 /// It holds none of its `PreparedEffectMetadata` or `PreparedBankMetadata` (issue #1461): the
 /// prepare result carries those beside it on the control side, and the instance keeps only the
-/// four values its own code reads.
+/// values its own code reads. The bank width follows from the const `W` and the prepared quantum
+/// is the rest planes' length ([`Self::quantum`]), so neither is stored (issue #1461, m1).
 struct PreparedParametricEq<L: Lane, const W: usize> {
     /// The prepared sample rate in hertz: the design functions' rate (a restore's redesign, the
     /// joint rule's silence window) and the response snapshot's report.
     sample_rate: u32,
-    /// The prepared render quantum: the bank entry guard's block-length ceiling.
-    quantum: u32,
     /// The prepared bypass: `process` and the bank body return before any section runs.
     bypass: bool,
-    /// The bank width this instance was bound at: the bank entry guard and its empty report.
-    /// The scalar instance carries `BankWidth::Four`, which no scalar path reads.
-    width: BankWidth,
     initial: [[[BandTarget; EQ_SECTION_COUNT]; 2]; W],
     /// Designed words corresponding to `initial`, retained so a full reset never redesigns.
     initial_words: [[[EqSvfWords; EQ_SECTION_COUNT]; 2]; W],
@@ -3443,7 +3439,6 @@ fn physical_targets(
 /// [`Channel::recover_failed_lanes`]).
 fn prepare_width<L: Lane, const W: usize>(
     metadata: PreparedEffectMetadata,
-    width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     active_mask: &[bool],
 ) -> Result<PreparedParametricEq<L, W>, EffectPrepareError> {
@@ -3476,9 +3471,7 @@ fn prepare_width<L: Lane, const W: usize>(
     }
     Ok(PreparedParametricEq {
         sample_rate: metadata.sample_rate,
-        quantum: metadata.quantum,
         bypass: metadata.bypass,
-        width,
         initial,
         initial_words,
         left: Channel::from_prepared(
@@ -3510,12 +3503,7 @@ impl NativeEffectFactory for ParametricEqFactory {
     ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         Ok(PreparedEffect {
-            processor: Box::new(prepare_width::<f32, 1>(
-                metadata,
-                BankWidth::Four,
-                &[request],
-                &[true],
-            )?),
+            processor: Box::new(prepare_width::<f32, 1>(metadata, &[request], &[true])?),
             metadata,
         })
     }
@@ -3580,7 +3568,6 @@ fn bind_bank(
         processor: effect_contract::match_bank_width!(request.width, |L, N| {
             Box::new(prepare_width::<L, N>(
                 metadata,
-                request.width,
                 request.requests,
                 request.active_mask,
             )?) as Box<dyn PreparedNativeEffectBank>
@@ -3905,6 +3892,12 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
 }
 
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+    /// The prepared render quantum, the bank entry guard's block-length ceiling: each rest plane
+    /// holds one word per lane per frame of it (see `prepare_width`).
+    fn quantum(&self) -> u32 {
+        (self.rest[0].len() / W) as u32
+    }
+
     /// Copies one lane's retained target words into the live response transfer record.
     ///
     /// This reads the exact words held by each channel's `Section::target`; it never redesigns a
@@ -3985,9 +3978,15 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         &mut self,
         block: EffectBankProcessBlock<'_>,
     ) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.width);
-        if !bank_block_matches(&block, self.width, self.quantum) || self.width.lanes() as usize != W
-        {
+        // The bank width is `W`'s. Only `match_bank_width!` binds a bank, at a bank width, so the
+        // `else` arm is reached only by an instance of a `W` no bank has (the one-lane scalar
+        // instance, which the contract never drives as a bank): it refuses the block as the guard
+        // below refuses a block of another width.
+        let Some(width) = BankWidth::for_lanes(W) else {
+            return BankProcessReport::empty(block.width);
+        };
+        let mut report = BankProcessReport::empty(width);
+        if !bank_block_matches(&block, width, self.quantum()) {
             return report;
         }
         if !block.automation.is_empty() {
@@ -6632,7 +6631,7 @@ mod target_application {
     /// quantum) or shrink without the declaration following, or if the declaration returns to 0.
     #[test]
     fn the_rest_planes_are_the_scratch_the_descriptor_declares() {
-        fn run<L: Lane, const W: usize>(width: BankWidth) {
+        fn run<L: Lane, const W: usize>() {
             let values: Vec<_> =
                 effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
             for quantum in [1_u32, 128, 1_000] {
@@ -6643,7 +6642,7 @@ mod target_application {
                     .expect("an unlimited scratch budget admits the EQ");
                 let requests = vec![admitted; W];
                 let prepared =
-                    prepare_width::<L, W>(metadata, width, &requests, &[true; W]).expect("prepare");
+                    prepare_width::<L, W>(metadata, &requests, &[true; W]).expect("prepare");
                 let allocated: u64 = prepared
                     .rest
                     .iter()
@@ -6669,10 +6668,10 @@ mod target_application {
                 );
             }
         }
-        run::<f32, 1>(BankWidth::Four);
-        run::<lane::Simd4, 4>(BankWidth::Four);
+        run::<f32, 1>();
+        run::<lane::Simd4, 4>();
         #[cfg(target_feature = "avx2")]
-        run::<lane::Simd8, 8>(BankWidth::Eight);
+        run::<lane::Simd8, 8>();
     }
 
     #[test]
@@ -7329,11 +7328,9 @@ mod ramping_elision {
         fn prepare(requests: &[PrepareEffectRequest<'_>], path: Path) -> Self {
             let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0])
                 .expect("metadata");
-            let width = BankWidth::for_lanes(W).unwrap_or(BankWidth::Four);
             Self {
                 eq: on_path(path, || {
-                    prepare_width::<L, W>(metadata, width, requests, &[true; W])
-                        .expect("preparation")
+                    prepare_width::<L, W>(metadata, requests, &[true; W]).expect("preparation")
                 }),
                 path,
             }
@@ -7377,7 +7374,7 @@ mod ramping_elision {
                 right,
                 None,
                 frames as u32,
-                self.eq.width,
+                BankWidth::for_lanes(W).expect("a bank arm has a bank width"),
                 first,
                 &[],
                 &offsets[..=W],
@@ -7649,10 +7646,8 @@ mod ramping_elision {
         // A shape whose designs are not all legal (a frequency past the rate's range) is not a
         // scenario; the draw moves on.
         let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0]);
-        let width = BankWidth::for_lanes(W).unwrap_or(BankWidth::Four);
         if metadata.is_err()
-            || prepare_width::<L, W>(metadata.expect("checked"), width, &requests, &[true; W])
-                .is_err()
+            || prepare_width::<L, W>(metadata.expect("checked"), &requests, &[true; W]).is_err()
         {
             return;
         }
@@ -8125,9 +8120,7 @@ mod stationary_subnormal {
         let requests = vec![request; W];
         let metadata =
             expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request).expect("metadata");
-        let width_tag = BankWidth::for_lanes(W).unwrap_or(BankWidth::Four);
-        let prepare =
-            || prepare_width::<L, W>(metadata, width_tag, &requests, &[true; W]).expect("prepared");
+        let prepare = || prepare_width::<L, W>(metadata, &requests, &[true; W]).expect("prepared");
         let lane = W - 1;
         let payload = {
             let eq = prepare();
@@ -8186,7 +8179,7 @@ mod stationary_subnormal {
                     &mut r,
                     None,
                     FRAMES as u32,
-                    width_tag,
+                    BankWidth::for_lanes(W).expect("a bank arm has a bank width"),
                     0,
                     &[],
                     &offsets[..=W],
@@ -9141,7 +9134,6 @@ mod padded_banks {
     }
 
     fn planted<L: Lane, const W: usize>() {
-        let (width, _) = width(W);
         let mut rng = Rng(0x1089_0004);
         let rate = 48_000;
         for members in 1..=W {
@@ -9156,12 +9148,7 @@ mod padded_banks {
                 let Ok(mut scalars) = initial
                     .iter()
                     .map(|values| {
-                        prepare_width::<f32, 1>(
-                            metadata,
-                            BankWidth::Four,
-                            &[request(values, rate)],
-                            &[true],
-                        )
+                        prepare_width::<f32, 1>(metadata, &[request(values, rate)], &[true])
                     })
                     .collect::<Result<Vec<_>, _>>()
                 else {
@@ -9173,13 +9160,9 @@ mod padded_banks {
                     .map(|lane| if lane < members { lane } else { victim })
                     .collect();
                 let mask: Vec<bool> = (0..W).map(|lane| lane < members).collect();
-                let mut bank = prepare_width::<L, W>(
-                    metadata,
-                    width,
-                    &requests(&initial, &member_of, rate),
-                    &mask,
-                )
-                .expect("a padded bank");
+                let mut bank =
+                    prepare_width::<L, W>(metadata, &requests(&initial, &member_of, rate), &mask)
+                        .expect("a padded bank");
                 let right = rng.chance(0.5);
                 // A general band: it has no dry select, so its output carries the poison whether
                 // the band is live or the identity (a dry cut would pass its input on instead).

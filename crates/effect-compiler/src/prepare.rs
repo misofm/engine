@@ -1125,11 +1125,11 @@ mod metadata_mismatch_tests {
         }
     }
 
-    /// One forgery per field the mismatch check compares, each a value other than the one the
-    /// descriptor and request state.
     /// One edit of a prepare result's metadata.
     type Forge = fn(&mut PreparedEffectMetadata);
 
+    /// One forgery per field the mismatch check compares, each a value other than the one the
+    /// descriptor and request state.
     const FORGERIES: [(&str, Forge); 16] = [
         ("descriptor.id", |m| {
             forged_descriptor(m, |d| {
