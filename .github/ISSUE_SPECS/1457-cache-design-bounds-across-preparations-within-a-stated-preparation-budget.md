@@ -441,3 +441,17 @@ The 64-track console documents walk 610,432 (44.1 kHz), 658,816 (48 kHz), 1,157,
 
 M4 is caught by gate 7, not gate 5: under a cold or warm cache the boundary case gives the same
 values, because a stopped walk charges the whole remainder either way; only the frames walked differ.
+
+**Gates run** (on `30a355d5d`, x86-64, `CARGO_INCREMENTAL=0`): test-debug-a (the workspace step with
+its exact `--exclude` and `--features` list) exit 0; test-debug-b's DSP step (lane ... conformance,
+`math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`) exit 0; release
+`-p lane -p math -p wasm-gates --features math/lane` exit 0; release `tail_contract` 12 passed;
+`cargo clippy --workspace --all-targets --all-features -D warnings`, `cargo fmt --check`,
+`cargo doc -D warnings --exclude gate-expander` clean; `check-workspace-policy.sh`,
+`check-realtime-policy.sh`, `check-builtins-policy.sh`, `check-cross-targets.sh`,
+`check-capi-abi.sh` ok; `target/release/audit capi`: 0 allocations, 0 syscalls, 0 violations,
+`pcm_digest` `cb10fbface44a3a4` (unchanged); worklet chain (`build-web-audioworklet.sh
+--named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh`) ok; `run-wasm-gates.sh --without-v8-spill --without-native` ok.
+AArch64 runs only in CI. `check-host-core-policy.sh` fails with "only host-core may declare and capi
+may enable control-provider" on the parent commit too (not this slice's; reported to root).
