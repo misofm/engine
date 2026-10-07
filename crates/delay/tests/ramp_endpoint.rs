@@ -2,12 +2,13 @@
 //!
 //! The render site: site 7 (`delay_chunk`, fed by `LaneChunk` and `CrossChunk`): each lane's
 //! feedback, damping coefficient `g` and mix, and the shared cross feedback.
-//! Each word has one in-domain move, found by #1409's scan, whose word the unclamped D11 law
-//! (`current + step` before the snap) took past its target. The shared harness
-//! (`conformance::ramp_endpoint`, issue #1458) renders each move in one-frame blocks and checks
-//! that the effect's own state snapshot holds every ramp word between its value at rest and its
-//! target, and that the same window rendered as one block gives the same ramp words, output and
-//! final snapshot.
+//! Each word has an in-domain move, found by #1409's scan, whose word the unclamped D11 law
+//! (`current + step` before the snap) took past its target; the mix has a second, found by
+//! #1458's scan, whose crossing frame changes an output bit (five moves, four words). The shared
+//! harness (`conformance::ramp_endpoint`, issue #1458) renders each move in one-frame blocks and
+//! checks that the effect's own state snapshot holds every ramp word between its value at rest and
+//! its target, and that the same window rendered as one block gives the same ramp words, output
+//! and final snapshot.
 //! Every move runs at the 1 ms delay time ([`DELAY_TIME_MS`]), so the taps carry signal inside the
 //! ramp window: feedback, damping `g` and cross feedback reach the ring (and the damping state),
 //! and mix reaches the output. A second mix move reaches site 2's block-start word
@@ -55,7 +56,8 @@ const WORDS: [RampWord; 4] = [
     },
 ];
 
-/// One overshooting move per word (#1409 gate 2, recorded in the issue).
+/// One overshooting move per word (#1409 gate 2), and a second mix move whose unclamped block-start
+/// word changes an output bit (#1458 fold-in); both recorded in the issues.
 const MOVES: [Move; 5] = [
     Move {
         word: WORDS[0],

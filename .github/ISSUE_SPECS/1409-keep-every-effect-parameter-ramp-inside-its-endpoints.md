@@ -517,6 +517,12 @@ included, compares output and whole snapshot.
 | site 8 `target_vector` from lane `W - 1 - lane` | soft clip bank test |
 | site 9 limiter back to `add` | limiter (limit coefficient, frame 33, `0x3d6655c2`) |
 
+*Note (#1458 correction, 2026-10-07):* the gate-2 reach of the `advance_block` first-word row was
+lost at `f6f599d84` (#1409 attempt 2, the 1 ms delay time) and of the site 8 D5 row at `00a0445c5`
+(#1452 undo 5). Both mutants stayed red elsewhere (gate 1's effect-runtime law test; soft clip's
+`tests/ramp_law.rs`), and #1458's fold-in (`88c62e7f5`) restored their gate-2 reach. See #1458's
+record, "Batch follow-ups".
+
 The scalar instance cannot see a wrong target lane (`W = 1`), which is why the bank half exists:
 the multiband wrong-lane mutant was green before it was added.
 

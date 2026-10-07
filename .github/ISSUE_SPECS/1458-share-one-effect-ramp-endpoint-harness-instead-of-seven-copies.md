@@ -42,6 +42,8 @@ it has today: each mutant that #1409's attempt record shows red stays red after 
 - **D1. Home.** A public module in `crates/conformance` (for example `conformance::ramp_endpoint`),
   behind the feature the seven crates already enable, unless a measured reason (a dependency the
   harness needs that `conformance` must not take) puts it elsewhere; the record states the reason.
+  (As built, the module is not behind a feature; the attempt 1 record, "D1, home", gives the
+  reason.)
 - **D2. Per-effect data stays in each crate.** Each `tests/ramp_endpoint.rs` keeps its moves, its
   `RampWord` layout and its effect hooks, and calls the harness. The harness takes the factory and
   the hooks as arguments; no effect name appears in it.
@@ -90,7 +92,8 @@ it has today: each mutant that #1409's attempt record shows red stays red after 
 
 ## Test value
 
-No new test behavior. A plausible defect this guards: a harness fix (or defect) applied to one copy
+The move itself adds no test behavior; the attempt 1 fold-in adds two (see the record's "Batch
+follow-ups"). A plausible defect this guards: a harness fix (or defect) applied to one copy
 only, which leaves another effect's gate weaker without any red; after this slice there is one
 copy. Gate 2's re-run proves the move kept each gate's catches.
 
@@ -132,8 +135,9 @@ effect-specific remarks, test value), `WORDS`, `MOVES` (unchanged: same words, s
 `[false, true]`, every other effect `[false]`).
 
 **Line counts.** Before: compressor 563, delay 407, gate-expander 500, multiband-compressor 591,
-soft-clip 493, transient-shaper 498, true-peak-limiter 481 (3,533). After: 162, 95, 99, 179, 83, 90,
-78 (786), plus the harness module 519; 1,305 in all.
+soft-clip 493, transient-shaper 498, true-peak-limiter 481 (3,533). After: 162, 95, 99, 180, 83, 90,
+78 (787; multiband corrected from 179 in the batch follow-ups), plus the harness module 519; 1,306
+in all.
 
 **Gate 1.** Debug and `cargo test --locked --release -p compressor -p delay -p gate-expander -p
 multiband-compressor -p soft-clip -p transient-shaper -p true-peak-limiter --test ramp_endpoint`:
@@ -246,3 +250,48 @@ All 18 rows are red, and all seven targets are green on the real code.
 - No `src` change outside `crates/conformance/src`.
 
 **Line counts after the fold-in:** harness 557, delay 107; the other six files are unchanged.
+
+### Batch follow-ups (stream G2 part 2, 2026-10-07; verdict `1458-attempt1.md` PASS)
+
+- **MINOR 1: `follows_law` no longer accepts a premature snap.** In flight, a word may now equal its
+  target only when `ramp_toward` itself reached it or the ramp has ended:
+  `same(now.0, ramp_toward(current, step, target)) || (same(now.0, target) && now.3 == 0)`. It
+  reads `remaining` only as zero or non-zero, so both encodings (gate `f32` bits, the others `u32`)
+  still work. The function doc and the module doc state the rule. This supersedes the fold-in
+  record's "the check does not catch an early snap to the target" for a mid-ramp snap; a one-sample
+  early snap at the very end changes no bit with these moves and stays gate 1's catch (verdict).
+  - Test value (`every_ramped_word_stays_inside_its_endpoints`, all seven effects): a render site
+    that snaps a ramp word to its target while the ramp still counts turns it red; with the old
+    clause the harness was green on it.
+  - Mutation runs (debug, `--test ramp_endpoint`): gate site 5 `final_sample =
+    L::splat(61.0).gt(ramp.remaining)` (snap at `remaining <= 60`): red, threshold move `0xc29fffdf
+    -> -80`, frame 4, "not one clamped D11 sample"; the same mutant with the old clause: green.
+    Limiter site 9 `stepping = self.remaining.gt(L::splat(40.0))`: red, limit coefficient move
+    `0xc1bffff6 -> -24`, frame 23; old clause: green. Reverted: all seven crates green (13 tests).
+- **MINOR 2: the #1409 correction, completed.** Cause of the delay row (`advance_block` first word):
+  `f6f599d84` (#1409 attempt 2) set the delay time to 1 ms; the verifier set the old copy back to
+  250 ms and the old mix move `0x3f7fffa0` was red again on `left output`. With a live tap, the
+  unclamped word's output bit at the crossing frame rounds away. Cause of the soft clip row (site 8
+  D5 inverted): `00a0445c5` (#1452 undo 5) replaced the settled branch's `drive.add(c.drive_step)`
+  with a hold, so the inverted choice freezes the words where it used to overshoot. Neither mutant
+  escaped the suite: the `advance_block` mutant is red in gate 1 (effect-runtime
+  `every_statement_of_the_law_stays_inside_its_endpoints_and_agrees`), and the D5 inversion is red
+  in `crates/soft-clip/tests/ramp_law.rs` (three tests). So the fold-in **restores gate-2 reach**;
+  it is not a first catch. A pointer note now sits under #1409's mutation table
+  (`.github/ISSUE_SPECS/1409-keep-every-effect-parameter-ramp-inside-its-endpoints.md`; stream G
+  owns #1409).
+- NIT 1: `crates/conformance/src/ramp_endpoint.rs`'s module doc rewrapped to 100 columns.
+- NIT 2: `crates/delay/tests/ramp_endpoint.rs`'s module doc and `MOVES` doc now say five moves for
+  four words (the mix's second move from #1458's scan); the harness module doc says "at least one
+  move per word".
+- NIT 3: multiband after the move was 180 lines, not 179 (corrected above; total 787, 1,306 with the
+  harness). The batch follow-ups changed the delay file's docs since.
+- NIT 4: the scan counts (51,198 candidates, 20,227 passing, 17,211 red on the mutant) are one-time
+  PR evidence and cannot be reproduced from this record: the 19 interior points and the geometric
+  spread were not specified and the script is deleted. What is reproducible: the new move is red on
+  the `advance_block` mutant and `0x3f7fffa0` is green on it.
+- NIT 5 (root): the Test value section now says the fold-in adds two behaviors (the frozen- and
+  premature-ramp law check and the delay block-start move).
+- NIT 6 (root): D1 now notes that the module is not behind a feature, as built, and points at the
+  reason recorded under "D1, home" (no other shared harness in `conformance` is gated, and
+  `realtime-audit` only forwards engine render-audit instrumentation this harness does not use).

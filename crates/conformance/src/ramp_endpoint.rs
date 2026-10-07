@@ -1,20 +1,21 @@
 //! The effect ramp-endpoint harness (issue #1409 gate 2; one shared copy since issue #1458).
 //!
 //! Each launch effect's `tests/ramp_endpoint.rs` names its ramped payload words ([`RampWord`]) and
-//! one in-domain move per word ([`Move`]), found by #1409's scan over the parameter's domain edges
-//! (for a designed word, over parameter pairs whose words are 33 to 4096 ulps apart), whose word
-//! the unclamped D11 law (`current + step` before the snap) took past its target. This module runs
-//! them; no effect is named here.
+//! at least one in-domain move per word ([`Move`]), found by #1409's (or #1458's) scan over the
+//! domain edges (for a designed word, over parameter pairs whose words are 33 to 4096 ulps apart),
+//! whose word the unclamped D11 law (`current + step` before the snap) took past its target. This
+//! module runs them; no effect is named here.
 //!
 //! * **[`check_every_move`].** Each move is rendered in one-frame blocks; after each, the effect's
 //!   own state snapshot must hold every ramp word between its value at rest and its target. After
 //!   the first frame, the unclamped law run from the moved word's rest value with the step the
 //!   snapshot holds must leave that interval, so the move reaches the clamp. From the second frame
 //!   on, every ramp word must be one clamped D11 sample of the word the snapshot held one frame
-//!   before, bit for bit, or its target (issue #1458 root ruling): a word that holds or stops
-//!   short while its ramp is in flight is red, which the endpoint check alone cannot see. The same window
-//!   rendered as one block must give the same ramp words and, for a [`Move::whole`] move, the same
-//!   output and final snapshot.
+//!   before, bit for bit, or its target on the sample that ends the ramp (issue #1458 root
+//!   ruling): a word that holds or stops short while its ramp is in flight, or snaps to its target
+//!   while the ramp still counts, is red, which the endpoint check alone cannot see. The same
+//!   window rendered as one block must give the same ramp words and, for a [`Move::whole`] move,
+//!   the same output and final snapshot.
 //! * **[`check_every_bank_move`]** (#1409 D4). In a bank of the native width, the last lane makes
 //!   the move while every other lane rests, so each lane's target differs. After every one-frame
 //!   block the moving lane's output and ramp words must be bit-identical to a scalar instance
@@ -323,9 +324,11 @@ fn unclamped_first_out(w0: f32, target: f32, step: f32, samples: u32) -> Option<
 /// Whether `now` is one sample of the clamped D11 law on the snapshot ramp `previous`, both as
 /// `(current, target, step, remaining)`. At rest (`remaining` all zero bits, as either encoding an
 /// effect uses, `u32` or `f32`, writes it) the word holds. In flight it either takes
-/// `lane::kernels::ramp_toward(current, step, target)` or snaps to its target (the last sample);
-/// the target never changes. So a word that holds, or stops short, while its ramp is in flight
-/// fails, unless the step is too small to move it, where `ramp_toward` holds it too.
+/// `lane::kernels::ramp_toward(current, step, target)`, or snaps to its target on the sample that
+/// ends the ramp (`remaining` is zero bits after it); the target never changes. So a word that
+/// holds, or stops short, while its ramp is in flight fails, unless the step is too small to move
+/// it, where `ramp_toward` holds it too; and a snap to the target while the ramp still counts
+/// fails (issue #1458 batch follow-ups), unless `ramp_toward` itself reached the target.
 fn follows_law(previous: (f32, f32, f32, u32), now: (f32, f32, f32, u32)) -> bool {
     let (current, target, step, remaining) = previous;
     let same = |a: f32, b: f32| a.to_bits() == b.to_bits();
@@ -335,7 +338,8 @@ fn follows_law(previous: (f32, f32, f32, u32), now: (f32, f32, f32, u32)) -> boo
     if remaining == 0 {
         return same(now.0, current);
     }
-    same(now.0, lane::kernels::ramp_toward(current, step, target)) || same(now.0, target)
+    same(now.0, lane::kernels::ramp_toward(current, step, target))
+        || (same(now.0, target) && now.3 == 0)
 }
 
 /// Runs every move of `endpoints` on `factory` once per entry of `sidechain` (the sidechain
