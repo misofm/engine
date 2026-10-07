@@ -10,7 +10,8 @@
 //! final snapshot.
 //! Every move runs at the 1 ms delay time ([`DELAY_TIME_MS`]), so the taps carry signal inside the
 //! ramp window: feedback, damping `g` and cross feedback reach the ring (and the damping state),
-//! and mix reaches the output. The delay renders per node, so it has no bank half.
+//! and mix reaches the output. A second mix move reaches site 2's block-start word
+//! (`LinearRamp::advance_block`). The delay renders per node, so it has no bank half.
 //!
 //! Test value: a render site left on (or reverted to) the unclamped update passes its target on its
 //! move; the partition half catches a site clamped in one block shape only. Mutation evidence is in
@@ -55,7 +56,7 @@ const WORDS: [RampWord; 4] = [
 ];
 
 /// One overshooting move per word (#1409 gate 2, recorded in the issue).
-const MOVES: [Move; 4] = [
+const MOVES: [Move; 5] = [
     Move {
         word: WORDS[0],
         start: f32::from_bits(0x3f733312),
@@ -77,6 +78,17 @@ const MOVES: [Move; 4] = [
     Move {
         word: WORDS[3],
         start: f32::from_bits(0x3f7fffa0),
+        target: 1.0,
+        whole: true,
+    },
+    // Issue #1458: a second mix move, one ulp below the first. In the one-frame render every frame
+    // is a block start, so the first word of `LinearRamp::advance_block` (site 2) is the word
+    // that renders; here the unclamped `current + step` it would take passes the target and
+    // changes an output bit, which the first mix move's does not. Found by a scan of candidate
+    // delay moves against that site's unclamped mutant (the issue's attempt record).
+    Move {
+        word: WORDS[2],
+        start: f32::from_bits(0x3f7fff9f),
         target: 1.0,
         whole: true,
     },

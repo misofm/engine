@@ -182,3 +182,67 @@ Both are open items for root, not defects of this slice.
 --no-deps`: pass. `check-workspace-policy.sh`, `check-conformance-boundaries.sh`,
 `check-realtime-policy.sh`: exit 0. No engine or render code changed, so `check-cross-targets.sh`
 was not run.
+
+### Attempt 1 fold-in (implementer, 2026-10-07; root ruling on open item 1)
+
+**Root ruling (2026-10-06, relayed by the stream G coordinator).** #1409's mutation record must be
+corrected, and both mutants that are green at `8fc41c5b0` get reach in this slice, in one fold-in
+commit on attempt 1, so that one verdict covers both: (a) a frozen-ramp check, so that a soft clip
+ramp that stops short of its target is red; (b) a delay move whose `current + step` crosses its
+target. Then the full #1409 table and the gates are run again.
+
+**Correction of #1409's record.** Two rows of #1409's mutation table were green on `8fc41c5b0`
+(the parent of this slice), both on the old seven copies and on the shared harness (attempt 1
+above): *site 2 `advance_block` first word* (delay) and *site 8 D5 choice inverted* (soft clip).
+The reasons are in attempt 1's record. #1409's own spec file
+(`.github/ISSUE_SPECS/1409-*.md`) is outside this slice's authorized paths, so the correction is
+recorded here only, and #1409's spec is not edited. Root decides whether #1409's record or GitHub
+issue gets a pointer.
+
+**(a) Frozen-ramp check.** This is in the shared harness, so all seven effects run it.
+`check_every_move` now checks every ramp word from the second frame on: the word must be one
+clamped D11 sample of the word that the snapshot held one frame before (`follows_law`). At rest
+(`remaining` all zero bits), the word holds. In flight, the target is unchanged, and `current` is
+bit-equal either to `lane::kernels::ramp_toward(current, step, target)` or to the target (the
+snap).
+- The check reads `remaining` only as zero or non-zero, because the effects write it in two
+  encodings: the gate expander writes it as `f32` bits, the others as `u32`. A first form that
+  modelled `remaining - 1` exactly was red on the unmutated gate expander for this reason, and it
+  was replaced.
+- The check does not catch an early snap to the target. It catches a word that holds or stops
+  short while its ramp is in flight. The endpoint check alone cannot see that defect, because a
+  frozen word stays inside its endpoints and is partition- and lane-invariant.
+
+**(b) Delay move.** A fifth delay move: mix from `0x3f7fff9f` (one ulp below the first mix move)
+to 1.0, `whole: true`. In the one-frame render every frame is a block start, so the block-start
+word of `LinearRamp::advance_block` is the word that renders. On this move, the unclamped
+`current + step` changes an output bit. It was found by a scratch scan (not committed, now
+deleted), in release, of 51,198 candidate delay moves:
+- The candidates covered all four words. The targets were each parameter's domain edges and 19
+  interior points. The starts were the target ± k ulps, k = 33..300 and a 5% geometric spread up
+  to 4096.
+- 20,227 candidates pass the harness on the real code.
+- 17,211 of those are red on the `advance_block` mutant. The first mix move `0x3f7fffa0` is not
+  one of them, and `0x3f7fff9f` is.
+
+**Mutation evidence (each mutant applied alone, the named crates' `--test ramp_endpoint` run in
+debug, then restored; `src` status clean afterwards):**
+
+| Mutant | Result |
+| --- | --- |
+| site 8 D5 choice inverted (soft clip) | was green, now **red**: drive gain, frame 1, `follows_law` (the word held at 63.095615 while remaining went 63 to 62) |
+| site 2 `advance_block` first word back to `current + step` (delay) | was green, now **red**: mix from `0x3f7fff9f` to 1, `left output` |
+| the other 16 rows of attempt 1's table | red on the same test, word and frame as before. The overshoot rows (site 2 `next_value`, sites 4, 5, 6, 8 drive and 9) now fail first at the new law check on the same frame (frame 33; transient frame 48), one assertion before the endpoint check. The bank rows and the delay site-7 rows fail on the same assertions as before |
+
+All 18 rows are red, and all seven targets are green on the real code.
+
+**Gates.**
+- Debug and `--release` `--test ramp_endpoint` for the seven effects: pass, 13 tests.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: pass.
+- `cargo fmt --all -- --check`: pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked -p conformance --no-deps`: pass.
+- `check-workspace-policy.sh`, `check-conformance-boundaries.sh` and `check-realtime-policy.sh`:
+  exit 0.
+- No `src` change outside `crates/conformance/src`.
+
+**Line counts after the fold-in:** harness 557, delay 107; the other six files are unchanged.

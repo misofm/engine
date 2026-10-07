@@ -9,7 +9,10 @@
 //! * **[`check_every_move`].** Each move is rendered in one-frame blocks; after each, the effect's
 //!   own state snapshot must hold every ramp word between its value at rest and its target. After
 //!   the first frame, the unclamped law run from the moved word's rest value with the step the
-//!   snapshot holds must leave that interval, so the move reaches the clamp. The same window
+//!   snapshot holds must leave that interval, so the move reaches the clamp. From the second frame
+//!   on, every ramp word must be one clamped D11 sample of the word the snapshot held one frame
+//!   before, bit for bit, or its target (issue #1458 root ruling): a word that holds or stops
+//!   short while its ramp is in flight is red, which the endpoint check alone cannot see. The same window
 //!   rendered as one block must give the same ramp words and, for a [`Move::whole`] move, the same
 //!   output and final snapshot.
 //! * **[`check_every_bank_move`]** (#1409 D4). In a bank of the native width, the last lane makes
@@ -317,6 +320,24 @@ fn unclamped_first_out(w0: f32, target: f32, step: f32, samples: u32) -> Option<
     })
 }
 
+/// Whether `now` is one sample of the clamped D11 law on the snapshot ramp `previous`, both as
+/// `(current, target, step, remaining)`. At rest (`remaining` all zero bits, as either encoding an
+/// effect uses, `u32` or `f32`, writes it) the word holds. In flight it either takes
+/// `lane::kernels::ramp_toward(current, step, target)` or snaps to its target (the last sample);
+/// the target never changes. So a word that holds, or stops short, while its ramp is in flight
+/// fails, unless the step is too small to move it, where `ramp_toward` holds it too.
+fn follows_law(previous: (f32, f32, f32, u32), now: (f32, f32, f32, u32)) -> bool {
+    let (current, target, step, remaining) = previous;
+    let same = |a: f32, b: f32| a.to_bits() == b.to_bits();
+    if !same(now.1, target) {
+        return false;
+    }
+    if remaining == 0 {
+        return same(now.0, current);
+    }
+    same(now.0, lane::kernels::ramp_toward(current, step, target)) || same(now.0, target)
+}
+
 /// Runs every move of `endpoints` on `factory` once per entry of `sidechain` (the sidechain
 /// connected when `true`): the one-frame endpoint check and the one-block partition comparison
 /// (module doc).
@@ -361,12 +382,28 @@ fn check_move(admitted: &Admitted, endpoints: &RampEndpoints<'_>, mv: Move, conn
         .map(|word| ramps(&snapshot(&framewise), *word))
         .collect();
     let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut previous = snapshot(&framewise);
     for frame in 0..FRAMES {
         let first = if frame == 0 { &spans[..] } else { &[] };
         let (l, r) = render(framewise.processor.as_mut(), frame, 1, first, connected);
         left.extend(l);
         right.extend(r);
         let now = snapshot(&framewise);
+        if frame > 0 {
+            for word in words {
+                let before = ramps(&previous, *word);
+                for (section, (before, now)) in
+                    before.into_iter().zip(ramps(&now, *word)).enumerate()
+                {
+                    assert!(
+                        follows_law(before, now),
+                        "{context}: frame {frame}, `{}` (section {section}) went from {before:?} \
+                         to {now:?}, not one clamped D11 sample",
+                        word.name
+                    );
+                }
+            }
+        }
         for (word, rest) in words.iter().zip(&rest) {
             for (section, (rest, now)) in rest.iter().zip(ramps(&now, *word)).enumerate() {
                 let (low, high) = (rest.0.min(now.1), rest.0.max(now.1));
@@ -389,6 +426,7 @@ fn check_move(admitted: &Admitted, endpoints: &RampEndpoints<'_>, mv: Move, conn
                 );
             }
         }
+        previous = now;
     }
     let mut whole = admitted.prepare(&values, connected);
     let (whole_left, whole_right) = render(whole.processor.as_mut(), 0, FRAMES, &spans, connected);
