@@ -427,6 +427,9 @@ scratch (`w1469/alone.sh`). Results on `603a6893a` (no new warm-up):
   - `boot_transient_budget (test)`: 2 tests, 2 ok
   - `resource_lifecycle (test)`: 11 tests, 8 ok; FAIL: `capi_retained_bytes_charge_every_byte_the_compile_retains`, `exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly`, `tiny_control_frame_still_accounts_three_provider_counters_exactly`
   - `render_locked_staging (test)`: 1 tests, 1 ok
+  - `audit (bin)` and `bench (bin)` unit tests, `--release` as in CI: 33 and 14 tests, all ok
+    alone. Each `audit` subcommand runs in its own process; `audit capi` passed earlier
+    (`pcm_digest cb10fbface44a3a4`, 0 allocations, 0 syscalls).
 
 **capi warm-up (named exception 1).** In `warm_process_lifetime_statics()`, an EQ
 `host_core::prepare_response_preview` builds the registry before any window opens (capi has no
