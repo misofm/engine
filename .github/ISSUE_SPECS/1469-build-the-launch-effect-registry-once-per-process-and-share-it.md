@@ -476,3 +476,28 @@ The full gates were not re-run: test-debug-a would fail on both stops.
   does not own. Mutation (always charge the factory term: `if false && ...`): red, 1603 != 1619.
   Reverted: green.
 - Alone-run survey repeated on the same 388 tests (as listed above): 388 ok, 0 FAIL.
+
+**Gates on `bdd57e245`** (`CARGO_INCREMENTAL=0`, disk 31-33 GB free):
+- fmt; workspace clippy `--all-targets -D warnings` with and without `--all-features`;
+  `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --exclude gate-expander`: pass.
+- test-debug-a (`--no-fail-fast`): **FAIL, 1 test**: `crates/host-core/tests/prepare.rs:446`
+  `effect_control_report_uses_actual_native_capacity_strings_and_owners` (14409 observed against
+  14425 expected, a difference of 16). Every other binary passes (124 `test result: ok`, gate 1
+  included). The test-debug-a doctests pass.
+- `check-workspace-policy.sh`, `check-realtime-policy.sh` (89 regions), `check-capi-abi.sh`: pass.
+- `audit capi`: `pcm_digest cb10fbface44a3a4`, 0 allocations, 0 deallocations, 0 syscalls.
+- Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` with an empty TMPDIR after):
+  pass. `expected.json` is unchanged.
+
+**Stop 3: `crates/host-core/tests/prepare.rs`
+`effect_control_report_uses_actual_native_capacity_strings_and_owners` (`:430-437`).** This is the same
+case as stop 2, not the race. The test's expected `owned_payload_bytes` adds the shared EQ
+factory's `Arc` layout once ("All nine owners retain the same factory Arc"), but the owners'
+factory is the launch registry's own, which Amendment 1 charges to no plan. The alone survey did
+not include the file, because it computes a layout and counts no allocations. A search for other
+test formulas that charge a factory layout (`Layout::for_value(` of a factory, or
+`factory_allocation_bytes`) finds only this test, stop 2's test, and the two new unit tests. Fix
+shape, the same as stop 2: add `factory_bytes` only when
+`!host_core::launch_registry_owns_factory(shared_factory)`. Not authorized.
