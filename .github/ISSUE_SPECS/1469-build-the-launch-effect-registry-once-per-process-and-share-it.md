@@ -294,11 +294,45 @@ the private builder added only for the run.
 - `cargo fmt --all -- --check`: pass.
 - Gate 1 test: pass.
 
-**Not run: disk stop.** After the all-features build and clippy, `df -h /` showed 16 GB free (37 GB at
-start), under the 25 GB floor; the worktree `target/` is 64 GB (`debug` 52 GB, of which
-`incremental` 19 GB; `ci` 8.3 GB; `release` 3.5 GB). Building stopped per the worker rules. Pending:
-clippy without `--all-features`; `cargo doc` (`--exclude gate-expander`); test-debug-a/-b and
-doctests (including host-core `tests/live_delta.rs` unchanged-green and gate 1 in test-debug-a's
-output); `check-test-support-ci.py`; `check-effect-contract.sh`; `check-workspace-policy.sh`;
-`check-realtime-policy.sh`; `check-cross-targets.sh`; `run-wasm-gates.sh`; the worklet chain;
-`check-graph-determinism.sh`; `check-capi-abi.sh`; `audit capi` (pcm_digest vs `cb10fbface44a3a4`).
+**Disk stop, then resumed.** After the all-features build `df -h /` showed 16 GB free; building
+stopped. The coordinator then freed `target/debug/incremental` and `target/ci` (42 GB free), and the
+gates below ran with `CARGO_INCREMENTAL=0` (disk 26 GB free at the end).
+
+**Gates, continued (base checkpoint `1977ffbf0`).**
+- clippy `--workspace --all-targets -D warnings` (no `--all-features`): pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps --exclude gate-expander`:
+  pass. `gate-expander` is excluded for the known `corpus.rs:64` failure from #1459.
+- test-debug-a (`--no-fail-fast`): **FAIL**, 2 tests in `crates/capi/tests/resource_lifecycle.rs:830`
+  (see below). All other binaries pass (124 `test result: ok`). Gate 1 runs there:
+  `the_launch_registry_is_built_once_per_process ... ok`. host-core `tests/live_delta.rs` is
+  unchanged and passes (31 tests). test-debug-a doctests: pass.
+- test-debug-b and its doctests: pass.
+- `check-test-support-ci.py`: pass (11 packages; `effect-contract/test-support: test-debug-a`).
+- `check-effect-contract.sh`, `check-workspace-policy.sh`, `check-realtime-policy.sh` (89 regions,
+  no allowlist edit), `check-capi-abi.sh`, `check-graph-determinism.sh` (100/100),
+  `check-cross-targets.sh`, `run-wasm-gates.sh`: pass.
+- `audit capi`: `pcm_digest cb10fbface44a3a4` (unchanged), 0 allocations, 0 deallocations,
+  0 syscalls.
+- Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh`): pass. No browser memory
+  figure moved, so `hosts/host-web/tests/browser-v1/expected.json` is unchanged.
+
+**Open finding: the spec does not cover a resource-charge change (implementer stop).**
+`capi_retained_bytes_charge_every_byte_the_compile_retains` and
+`tiny_control_frame_still_accounts_three_provider_counters_exactly` fail with the observed bytes 16
+below `capi_retained_bytes` (274137 against 274153, and 200459 against 200475). Cause:
+`effect_control_resources` (`crates/effect-compiler/src/prepare.rs`, the owner walk that adds
+`factory_allocation_bytes` once per `Arc` identity) charges the EQ control owner's factory `Arc`
+allocation (an `ArcInner` of the zero-sized `ParametricEqFactory`: 16 bytes) to the prepared plan.
+Before this slice the per-call registry was freed after preparation, so the owner held the last
+clone and dropping the effect producers freed those 16 bytes. Now the process-lifetime registry
+owns that allocation, so the plan no longer retains it and dropping the producers frees nothing for
+it. The charge is now 16 bytes above what the plan retains (the safe direction, but the test checks
+exact equality, which is correct for this claim). A correct fix changes the resource-accounting
+contract: for example, do not charge a factory `Arc` that the process-lifetime registry owns, or
+charge the registry once to the process instead of to each plan. The edit is in
+`effect_control_resources` (not one of the spec's authorized `prepare.rs` regions) and maybe in its
+host-web and `EqTargetPreparer` peers (`hosts/host-web/src/control_targets.rs:451,567` add
+`factory_allocation_bytes` to an EQ workspace charge). No ceiling is loosened and no test is edited.
+This needs a root ruling or a spec amendment.
