@@ -8537,6 +8537,68 @@ mod padded_banks {
         }
     }
 
+    /// Issue #1461 follow-up (root): the bank entry guard refuses a block longer than the
+    /// prepared quantum. `EffectBankProcessBlock`'s fields are public, so a caller can build one
+    /// without `EffectBankProcessBlock::new` (which checks only the quantum its caller states);
+    /// the guard is the bank's own check against the rest planes it sized at preparation.
+    ///
+    /// Test value: dropping the guard's `frames <= quantum` term lets such a block render past the
+    /// quantum its rest planes were sized for (measured: the planes change); this turns red, and no
+    /// other test builds an over-length bank block.
+    #[test]
+    fn a_bank_block_longer_than_the_prepared_quantum_is_refused() {
+        let mut rng = Rng(0x1461_0001);
+        let values = [configuration(&mut rng)];
+        let frames = QUANTUM + 1;
+        for lanes in lane_counts() {
+            let (width, _) = width(lanes);
+            let requests = requests(&values, &vec![0; lanes], 48_000);
+            let mut bank = bind(lanes, &requests, &vec![true; lanes]);
+            let mut planes = [vec![0.0_f32; frames * lanes], vec![0.0_f32; frames * lanes]];
+            let tone = sine(0.5, 0, frames, 48_000, 0.0);
+            gather(
+                &mut planes,
+                lanes,
+                &(0..lanes).collect::<Vec<_>>(),
+                &vec![[tone.clone(), tone]; lanes],
+            );
+            let offsets = vec![0_u32; lanes + 1];
+            for mono in [false, true] {
+                let before = planes.clone();
+                let [left, right] = &mut planes;
+                let block = EffectBankProcessBlock {
+                    left,
+                    right,
+                    sidechain: None,
+                    frames: frames as u32,
+                    width,
+                    first_sample: 0,
+                    automation: &[],
+                    automation_offsets: &offsets,
+                };
+                let report = if mono {
+                    bank.process_bank_mono(block)
+                } else {
+                    bank.process_bank(block)
+                };
+                assert_eq!(
+                    report,
+                    BankProcessReport::empty(width),
+                    "{lanes} lanes, mono {mono}: an over-length block was not refused"
+                );
+                for (plane, original) in planes.iter().zip(&before) {
+                    assert!(
+                        plane
+                            .iter()
+                            .zip(original)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "{lanes} lanes, mono {mono}: a refused block's planes changed"
+                    );
+                }
+            }
+        }
+    }
+
     /// Renders one block of one member through its scalar instance.
     fn render_scalar(
         effect: &mut dyn PreparedNativeEffect,

@@ -308,3 +308,34 @@ From `/home/bl/misofm/submix-verdicts/1461-attempt1.md`.
 **Open item.** No test defends the EQ bank guard's `frames <= quantum` term (it was untested
 before this follow-up too; a longer block is already refused by `EffectBankProcessBlock::new`
 when its caller states the prepared quantum).
+
+### Batch follow-ups, part 2 (stream G2, 2026-10-07; root rulings)
+
+- **The EQ bank guard's `frames <= quantum` term is reachable, so it gets a test** (part 1's open
+  item). `EffectBankProcessBlock`'s fields are all public and it is not `#[non_exhaustive]`, so a
+  caller can build a block by struct literal without `EffectBankProcessBlock::new`, and `new` itself
+  checks only the quantum its caller states, not the bank's prepared one. The guard is therefore
+  the bank's only check against the rest planes it sized at preparation, and stays a release check.
+  New test `padded_banks::a_bank_block_longer_than_the_prepared_quantum_is_refused`
+  (`crates/parametric-eq/src/lib.rs`): at every bank width, a `QUANTUM + 1`-frame block built by
+  literal, through `process_bank` and `process_bank_mono`, gives an empty report and leaves both
+  planes bit-identical.
+  - Test value: dropping the guard's quantum term lets an over-length block render past the
+    quantum the rest planes were sized for; no other test builds an over-length bank block.
+  - Mutation: the term removed: red ("4 lanes, mono false: a refused block's planes changed"; the
+    rest of the parametric-eq lib suite stays green, 50 passed); reverted: green (51 passed,
+    `cargo test -p parametric-eq --features test-support --lib`).
+- **Root-ratified named exceptions** (verdict m2). Root ratified attempt 1's edits outside the
+  authorized paths, each a minimal edit the frozen design (D1, the prepare result carrying the
+  metadata) forced:
+  - `crates/capi/tests/resource_lifecycle.rs` (stream F's file): the `effect_bank_metadata_bytes`
+    ceilings (eight lanes 1,280 from a measured 1,125; four lanes 1,600 derived from #1304's 921
+    plus three banks x 160 = 1,401, plus 10 %, rounded to 64). Stream F's later slices that touch
+    the file rebase onto this one.
+  - `crates/host-core/src/control_preparation.rs` (its test module): the `prepare` caller migration.
+  - `tools/audit` (`src/compressor.rs`, `src/delay.rs`, `src/gate_expander.rs`,
+    `src/parametric_eq.rs`) and `tools/bench` (`src/console.rs`, `src/effect_contract.rs`): the
+    `prepare`/bind caller migrations.
+  - The four-lane ceiling 1,600 is still derived, not measured: the pull request's CI
+    `aarch64-debug` run prints the measured row, and that run confirms or corrects it (open until
+    then; AArch64 runs only in CI).
