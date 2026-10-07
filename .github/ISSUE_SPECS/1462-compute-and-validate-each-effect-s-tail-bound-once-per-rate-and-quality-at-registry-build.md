@@ -312,3 +312,19 @@ From `/home/bl/misofm/submix-verdicts/1462-attempt1.md` and root's ruling R1.
   `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
   `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
   all pass. AArch64: CI only.
+
+### Batch follow-ups, part 2 (stream G2, 2026-10-07; root-authorized)
+
+- **Required diagnostics.** `scripts/check-effect-runtime-policy.sh`'s required-code list now
+  includes `effect.tail_bound.inconsistent` (raised by `NativeEffectRegistry::new`, this slice) and
+  `effect.automation.rate` (session preparation, #1335); both are in `crates/effect-contract`,
+  `crates/effect-compiler` and `docs/EFFECT_CONTRACT_V1.md`, so the gate passes.
+- **Self-test case** (`scripts/test-effect-runtime-policy.sh`, run by `qualification.yml`): for each
+  of the two codes, a temporary copy renames it everywhere the gate searches and must fail with
+  "missing diagnostic <code>"; the copy is restored and must pass again.
+  - Test value: dropping either code from the required list (or a rename of the code out of the
+    contract and its doc) escapes the gate; this case turns red on the first and the gate on the
+    second.
+  - Mutation: the two codes removed from the list: red ("effect runtime missing diagnostic
+    escaped: effect.tail_bound.inconsistent: effect runtime policy: ok"); restored: green
+    ("effect runtime policy mutations: ok"), and `check-effect-runtime-policy.sh` ok.
