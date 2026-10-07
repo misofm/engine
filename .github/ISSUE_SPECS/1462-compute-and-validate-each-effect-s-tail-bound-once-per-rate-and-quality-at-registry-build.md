@@ -47,10 +47,15 @@ inconsistent set of values is refused at registry build instead of shipping.
   point; if a caller can reach the lookup with one, it is a typed error, never a fallback call.
 - **D2. The consistency rules.** At registry build, for every launch rate and quality:
   (a) `tail_every_peak >= tail` (with `Infinite` the largest);
-  (b) `rest == RestBound::Unstated` if and only if `tail_every_peak == TailSamples::Infinite`;
-  (c) `rest == RestBound::Bounded(_)` if and only if `tail_every_peak` is finite.
-  A violation refuses the registry with a typed `RegistryError` code (for example
-  `effect.tail_bound.inconsistent`) naming the effect.
+  (b) `rest == RestBound::Unstated` only with `tail_every_peak == TailSamples::Infinite`;
+  (c) `rest == RestBound::Bounded(_)` only with a finite `tail_every_peak`;
+  (d) in a `RestBound::Bounded(rest)`, `rest.peak_plus_24_dbfs <= rest.any_sanitized_input` (the
+  bound for every sanitized input is never smaller than the bound for a peak limited to +24 dBFS).
+  (b) and (c) are the two independent directions of "`Unstated` if and only if `Infinite`" (root
+  ruling R1 after attempt 1's verdict: as first written, (b) and (c) were each that whole
+  equivalence, one proposition, so no fixture could break one without the other; (d) is the third
+  independent rule R1 adds). A violation refuses the registry with the typed `RegistryError` code
+  `effect.tail_bound.inconsistent` naming the effect.
 - **D3. Callers keep one source.** No caller calls `tail_and_rest` after registry build; the
   function remains the descriptor's statement and is evaluated only by the registry (and by the
   registry's own tests).
@@ -96,9 +101,9 @@ inconsistent set of values is refused at registry build instead of shipping.
    banks: the count equals the number of (rate, quality) pairs evaluated at registry build and does
    not grow with preparation. Red if preparation calls `tail_and_rest` again (mutant: restore the
    call in `expected_prepared_metadata`).
-2. **One red mutant per rule.** For each of D2 (a), (b) and (c), a test registry with a descriptor
-   that violates only that rule at one launch rate is refused with the D2 code; a consistent
-   descriptor is admitted. Each rule's check removed: its test is red.
+2. **One red mutant per rule.** For each of D2 (a), (b), (c) and (d), a test registry with a
+   descriptor that violates only that rule at one launch rate is refused with the D2 code; a
+   consistent descriptor is admitted. Each rule's check removed: its test is red.
 3. **No value moves.** Every effect's prepared metadata is unchanged (the existing #1377
    `tail_bound_tests`, conformance fixtures, `graph_fixture --check`); `audit capi`'s
    `pcm_digest` unchanged.
@@ -113,7 +118,8 @@ inconsistent set of values is refused at registry build instead of shipping.
 ## Test value
 
 Gate 1's test turns red if any preparation path calls `tail_and_rest` again, which no existing test
-counts. Each gate-2 test turns red if its consistency rule is dropped, which nothing checks today.
+counts. Each gate-2 test (one per D2 rule, (a) through (d)) turns red if its consistency rule is
+dropped, which nothing checks today.
 
 ## Dependencies
 
@@ -153,7 +159,7 @@ counts. Each gate-2 test turns red if its consistency rule is dropped, which not
   direction its own fixture and red mutant. A row that breaks a rule refuses the registry with
   `effect.tail_bound.inconsistent` and the effect's id.
 - **D3.** After this slice `tail_and_rest` is called only in `NativeEffectRegistry::new` and in the
-  registry's own test (`tests/registry.rs`, comparing the table with the statement). The four
+  registry's own test (`tests/tail_bound.rs`, comparing the table with the statement). The four
   descriptor-statement assertions that called it directly
   (`crates/{gate-expander,transient-shaper,soft-clip}/tests/contract.rs`, the true-peak limiter's
   descriptor test in `src/lib.rs`) read the registry entry instead.
@@ -251,3 +257,58 @@ request carries the entry. STREAMS: the `crates/graph/src/{lib,runtime}.rs` and
 is still built per call by its callers (the host-core preview, test helpers), so once #1372-#1376
 put derivations behind `tail_and_rest`, each such registry build pays them; the spec's once-per-
 registry-build contract holds, and caching a registry is out of this slice's scope.
+
+### Batch follow-ups (stream G2 part 1, after the attempt-1 PASS)
+
+From `/home/bl/misofm/submix-verdicts/1462-attempt1.md` and root's ruling R1.
+
+- **m1, the lookup's quality key.** `tests/tail_bound.rs`
+  `a_request_with_another_rows_entry_is_refused` gains one assertion: the High row at 96 kHz is
+  looked up, its entry's `quality()` is `High`, and a High request carrying it prepares. The
+  test's descriptor already declares High rows. *Red if `NativeEffectRegistry::tail_bound`
+  ignores the quality key (the High lookup returns the Normal row's entry), which no test caught
+  (verdict mutant X3).* Mutation: `.find(|row| row.sample_rate == sample_rate)` -> this test red
+  (`tail_bound.rs:194`, the `quality()` assertion); revert -> green.
+- **R1, D2 restated.** D2 and gate 2 now state (b) and (c) as the two independent directions, as
+  implemented: (b) `Unstated` only with an infinite `tail_every_peak`; (c) `Bounded` only with a
+  finite one.
+- **R1, rule (d).** `tail_bound_consistent` adds a fourth independent check: in a `Bounded` rest,
+  `peak_plus_24_dbfs <= any_sanitized_input`, refused with `effect.tail_bound.inconsistent`. D2,
+  gate 2, the Test value and `docs/EFFECT_CONTRACT_V1.md` (*Tail and exact rest*) state it. Every
+  launch effect's statement satisfies it (the launch registry builds in every test below). New
+  `tests/registry.rs` `a_rest_for_a_limited_peak_above_the_rest_for_any_input_is_refused`, its
+  fixture breaking only (d) at 96 kHz (41 against 40) beside the consistent twin. *Red if the
+  registry drops rule (d), or checks only some rows, which nothing checked before.* Mutation:
+  remove `rest_ordered` from the conjunction -> this test red alone in `effect-contract`'s
+  registry tests; revert -> green.
+- **n1.** The D3 record line now names `tests/tail_bound.rs` (the test that compares the table
+  with the statement), not `tests/registry.rs`.
+- **n2.** The response-preview behaviour note also covers an undeclared rate or quality combined
+  with a too-small `maximum_prepared_bytes`: the EQ's `prepare_response` checks `ResourceLimit`
+  first, so before this slice that request reported the limit; now it reports
+  `effect.quality.unsupported`. Still only a doubly invalid preview's code moves; the one host
+  consumer maps every owner error to `RESULT_INVALID_ARGUMENT`.
+- **n4.** `docs/EFFECT_CONTRACT_V1.md` *Tail and exact rest* is rewrapped to 100 columns. By the
+  doc's existing rule for registry-build codes (`effect.descriptor.invalid`, raised only by
+  `NativeEffectRegistry::new`, is on the frozen list), `effect.tail_bound.inconsistent` joins the
+  "Session preparation additionally freezes" list, and the doc says so. On the host path it
+  surfaces as `host.effect.registry`, as `effect.descriptor.invalid` does.
+  `scripts/check-effect-runtime-policy.sh`'s required-code list is outside this follow-up's paths
+  and is not changed (it does not list `effect.automation.rate` either).
+- **n6.** Gate 1's test mirrors the graph compiler's bank binding instead of driving it:
+  `effect-compiler`'s test replays `bank_preparation.request()` into `bind_homogeneous_bank`,
+  which is what `graph-compiler/src/banks.rs` does (it only forwards the replayed requests and pads
+  by cloning). The dependency direction keeps graph-compiler out of effect-compiler's unit tests, so
+  a new direct `tail_and_rest` call inside graph-compiler would not be counted by it.
+- **Gates.** All pass on the follow-up tree (x86_64): fmt; workspace clippy `-D warnings` with and
+  without `--all-features`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+  --exclude gate-expander` (gate-expander's own doc failure is part 2's);
+  `check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-effect-runtime-policy.sh`;
+  test-debug-a 1,462 passed, 0 failed; test-debug-b 890 passed, 0 failed; `conformance_fixtures
+  --check`; release `lane`/`math`/`wasm-gates` (G5 `g5_native_digests_match_pins`) 123 passed;
+  `run-wasm-gates.sh` (native 144 cases, wasm simd128 144 cases, 0 mismatches; V8 spill ok);
+  `check-cross-targets.sh` PASS (known-defect rows unchanged: builtins 5, host-core 4, soft-clip 1);
+  the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+  `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
+  all pass. AArch64: CI only.

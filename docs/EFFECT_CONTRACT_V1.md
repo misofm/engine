@@ -109,19 +109,22 @@ launch registry is built once per process (once per module instance in the brows
 every preparation, live classification and preview; its bytes are process-level, charged to no
 plan (#1469). `new` checks each row: (a) `tail_every_peak >= tail`, with `Infinite` the largest;
 (b) `rest` is `Unstated` only with `tail_every_peak: Infinite`; (c) `rest` is `Bounded` only with
-a finite `tail_every_peak`. (b) and (c) together are "`rest` is `Unstated` if and only if
-`tail_every_peak` is `Infinite`". A row that breaks a rule refuses the registry with
+a finite `tail_every_peak`; (d) in a `Bounded` rest, `peak_plus_24_dbfs <= any_sanitized_input`
+(the bound for every sanitized input covers the inputs whose peak is at most +24 dBFS). (b) and
+(c) together are "`rest` is `Unstated` if and only if `tail_every_peak` is `Infinite`". A row that
+breaks a rule refuses the registry with
 `effect.tail_bound.inconsistent`, naming the effect. `NativeEffectRegistry::tail_bound(id,
 sample_rate, quality)` reads a `RegisteredTailBound` entry (`effect.quality.unsupported` for a row
 the effect does not declare, never a fallback call), and every `PrepareEffectRequest` carries one
 in `tail_bound`: the effect compiler reads it once per instance into `EffectBankPreparation`, which
 replays it into every bank member's request. `expected_prepared_metadata`, the sole conforming
 metadata, refuses an entry of another effect, rate or quality (`effect.tail_bound.mismatch`) and
-copies the entry's three values into `PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the program key carries them too, so
-cohorts with different bounds never share a bank. `effect-compiler` refuses a prepare result whose
-metadata differs from `expected_prepared_metadata` in any field it compares, these three included
-(`effect.metadata.mismatch`), and the conformance harness's `metadata.exact` compares each prepare
-result's program key, which carries all three, with the expected one. `rest` is a `RestBound`:
+copies the entry's three values into `PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the
+program key carries them too, so cohorts with different bounds never share a bank.
+`effect-compiler` refuses a prepare result whose metadata differs from `expected_prepared_metadata`
+in any field it compares, these three included (`effect.metadata.mismatch`), and the conformance
+harness's `metadata.exact` compares each prepare result's program key, which carries all three,
+with the expected one. `rest` is a `RestBound`:
 `Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
 effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
 `tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and
@@ -301,6 +304,7 @@ effect.metadata.mismatch
 effect.state.invalid
 effect.third_party.unavailable_at_launch
 effect.automation.rate
+effect.tail_bound.inconsistent
 ```
 
 `effect.descriptor.invalid` is raised only by `NativeEffectRegistry::new`, once per effect type
@@ -308,7 +312,8 @@ when its factory enters the registry; `validate_prepare_request` no longer re-va
 descriptor per prepared instance (issue #1330), and because session preparation builds the
 registry before preparing any effect, a host observes the same refusal as before.
 `effect.tail_bound.inconsistent` is raised the same way, by `NativeEffectRegistry::new` alone
-(issue #1462, see *Tail and exact rest*).
+(issue #1462, see *Tail and exact rest*), so it joins the frozen list on the same terms as
+`effect.descriptor.invalid`.
 
 `effect.automation.rate` refuses a stored automation whose `inserts` or `console` target parameter
 is not `automatable` or whose `automation_rate` is not `Block` (decision 15 E1, issue #1335). Its

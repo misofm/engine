@@ -154,7 +154,8 @@ fn prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate() {
 ///
 /// Red mutations: `expected_prepared_metadata` stops comparing the entry's effect, rate or
 /// quality with the request's (each one turns one assertion red); `tail_bound` falls back to
-/// some row for an undeclared rate.
+/// some row for an undeclared rate, or ignores the quality key (the High lookup returns the
+/// Normal row's entry).
 #[test]
 fn a_request_with_another_rows_entry_is_refused() {
     let registry = registry();
@@ -187,6 +188,13 @@ fn a_request_with_another_rows_entry_is_refused() {
     );
     // The matching entry prepares.
     assert!(expected_prepared_metadata(&DESCRIPTOR, request(96_000, normal_96k)).is_ok());
+    // The lookup is keyed by quality too: the High row's entry is the High row's, and a High
+    // request with it prepares.
+    let high_96k = entry(&DESCRIPTOR, 96_000, EffectQuality::High);
+    assert_eq!(high_96k.quality(), EffectQuality::High);
+    let mut high = request(96_000, high_96k);
+    high.quality = EffectQuality::High;
+    assert!(expected_prepared_metadata(&DESCRIPTOR, high).is_ok());
     assert_eq!(
         registry
             .tail_bound(DESCRIPTOR.id, 192_000, EffectQuality::Normal)

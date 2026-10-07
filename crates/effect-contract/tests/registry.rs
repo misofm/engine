@@ -109,11 +109,28 @@ fn bounded_rest_with_infinite_peak(sample_rate: u32, _: EffectQuality) -> Effect
     )
 }
 
+/// Breaks only (d): a bounded rest whose bound for a +24 dBFS peak exceeds its bound for every
+/// sanitized input.
+fn peak_rest_above_any_input_rest(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+    at_broken_rate(
+        sample_rate,
+        EffectTailBound {
+            tail: TailSamples::Finite(5),
+            tail_every_peak: TailSamples::Finite(10),
+            rest: RestBound::Bounded(RestSamples {
+                peak_plus_24_dbfs: 41,
+                any_sanitized_input: 40,
+            }),
+        },
+    )
+}
+
 static CONSISTENT: EffectDescriptor = descriptor(1, consistent);
 static RULE_A: EffectDescriptor = descriptor(1, finite_peak_below_tail);
 static RULE_A_INFINITE: EffectDescriptor = descriptor(1, finite_peak_below_infinite_tail);
 static RULE_B: EffectDescriptor = descriptor(1, unstated_rest_with_finite_peak);
 static RULE_C: EffectDescriptor = descriptor(1, bounded_rest_with_infinite_peak);
+static RULE_D: EffectDescriptor = descriptor(1, peak_rest_above_any_input_rest);
 
 /// `descriptor` is refused with the D2 code, while its consistent twin (every row as at the
 /// other rates) is admitted, so the refusal is the broken row's.
@@ -154,4 +171,12 @@ fn an_unstated_rest_with_a_finite_tail_over_every_peak_is_refused() {
 #[test]
 fn a_bounded_rest_with_an_infinite_tail_over_every_peak_is_refused() {
     assert_refused_as_inconsistent(&RULE_C);
+}
+
+/// Issue #1462 D2 (d): in a bounded rest, `peak_plus_24_dbfs <= any_sanitized_input`.
+///
+/// Red mutation: the registry drops rule (d), or checks only the first quality row.
+#[test]
+fn a_rest_for_a_limited_peak_above_the_rest_for_any_input_is_refused() {
+    assert_refused_as_inconsistent(&RULE_D);
 }

@@ -2477,7 +2477,10 @@ impl RegisteredTailBound {
 /// * (b) [`RestBound::Unstated`] only with an infinite `tail_every_peak` (no `R(P*)` is derived,
 ///   so no `T_rest` is);
 /// * (c) [`RestBound::Bounded`] only with a finite `tail_every_peak` (a derived `R(P*)` gives a
-///   finite `T_rest`).
+///   finite `T_rest`);
+/// * (d) in a [`RestBound::Bounded`], `peak_plus_24_dbfs <= any_sanitized_input` (the bound for
+///   every sanitized input covers the inputs whose peak is at most +24 dBFS, so it cannot be the
+///   smaller of the two).
 ///
 /// `RestBound` and `TailSamples` each have exactly two variants, so "`rest` is `Unstated` if and
 /// only if `tail_every_peak` is `Infinite`" and "`rest` is `Bounded` if and only if
@@ -2493,7 +2496,11 @@ const fn tail_bound_consistent(bound: EffectTailBound) -> bool {
         || matches!(bound.tail_every_peak, TailSamples::Infinite);
     let bounded_is_finite = !matches!(bound.rest, RestBound::Bounded(_))
         || matches!(bound.tail_every_peak, TailSamples::Finite(_));
-    ordered && unstated_is_infinite && bounded_is_finite
+    let rest_ordered = match bound.rest {
+        RestBound::Bounded(rest) => rest.peak_plus_24_dbfs <= rest.any_sanitized_input,
+        RestBound::Unstated => true,
+    };
+    ordered && unstated_is_infinite && bounded_is_finite && rest_ordered
 }
 
 /// One admitted effect: its factory and its tail-bound table, one entry per declared quality row
