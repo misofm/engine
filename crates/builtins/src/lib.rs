@@ -43,10 +43,10 @@ pub use filter_response::{
 };
 use tail::CachedDesign;
 pub use tail::{
-    ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES, InputBoundCache,
-    InputSectionBound, input_section_flush_law, input_section_live_bound,
-    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
-    input_section_worst_case_pair,
+    ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES,
+    INPUT_BOUND_DESIGN_CHARGE, INPUT_BOUND_SECTION_CHARGE, InputBoundCache, InputSectionBound,
+    input_section_flush_law, input_section_live_bound, input_section_live_bound_table,
+    input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
 };
 
 use effect_contract::{
@@ -3490,8 +3490,8 @@ pub fn input_section_bound(
     Ok(input_section_bound_charged(sample_rate, parameters)?.bound)
 }
 
-/// [`input_section_bound`] with its charge: the frames its computation walks, which is what it
-/// charges a preparation's budget (#1457 D1, D3).
+/// [`input_section_bound`] with its charge: the frames its computation walks and the
+/// frame-equivalents it charges a preparation's budget (#1457 D1, D3, Amendment 3).
 ///
 /// # Errors
 ///
@@ -3507,8 +3507,22 @@ pub fn input_section_bound_charged(
     )
 }
 
-/// [`input_section_bound`] for every strip of a session, in order, under the preparation budget
-/// [`INPUT_BOUND_BUDGET_FRAMES`]: [`input_section_bounds_within`] with that budget.
+/// The input-section bound every strip of a session reports, in order, computing each distinct
+/// design's bound at most once (#1329 Amendment 4, R7) and within the preparation budget
+/// [`INPUT_BOUND_BUDGET_FRAMES`] (#1457 D1, D3).
+///
+/// Each distinct design, at its first strip in strip order, charges the budget its charge
+/// ([`input_section_bound_charged`]); a later strip with the same design reports the same value
+/// and charges nothing. While the remaining budget covers a design's charge, the design reports its
+/// own bound. A design whose charge passes the remaining budget reports the rate's live bound
+/// ([`input_section_live_bound_table`]), which is certified for every history of trim, polarity and
+/// filter targets and so for every fixed design, and the remaining budget is then spent: every
+/// later design with an enabled section reports the live bound without a walk. A memoryless design
+/// (both filters disabled on both channels) reports the zero bound and charges nothing. The result
+/// is a function of the session only.
+///
+/// `cache` (#1457 D2) keeps bounds across calls. A design it holds charges its stored charge
+/// without computing anything, so the result is the same with and without it, cold or warm.
 ///
 /// # Errors
 ///
@@ -3521,27 +3535,9 @@ pub fn input_section_bounds(
     input_section_bounds_within(sample_rate, strips, INPUT_BOUND_BUDGET_FRAMES, cache)
 }
 
-/// The input-section bound every strip of a session reports, in order, computing each distinct
-/// design's bound at most once (#1329 Amendment 4, R7) and within a budget of `budget` frames
-/// walked (#1457 D1, D3).
-///
-/// Each distinct design, at its first strip in strip order, charges the budget its charge
-/// ([`input_section_bound_charged`]); a later strip with the same design reports the same value
-/// and charges nothing. While the remaining budget covers a design's charge, the design reports its
-/// own bound. A design whose charge passes the remaining budget reports the rate's live bound
-/// ([`input_section_live_bound_table`]), which is certified for every history of trim, polarity and
-/// filter targets and so for every fixed design, and the remaining budget is then spent: every
-/// later design with an enabled section reports the live bound without a walk. A memoryless design
-/// (both filters disabled on both channels) reports the zero bound and charges nothing. The result
-/// is a function of the session and `budget` only.
-///
-/// `cache` (#1457 D2) keeps bounds across calls. A design it holds charges its stored frames
-/// without computing anything, so the result is the same with and without it, cold or warm.
-///
-/// # Errors
-///
-/// The first strip's error, as [`input_section_bound`] reports it.
-pub fn input_section_bounds_within(
+/// [`input_section_bounds`] under a budget of `budget` frame-equivalents. Only the gates choose
+/// another budget, through `test_support::input_section_bounds_within` (#1457 ruling (i)).
+fn input_section_bounds_within(
     sample_rate: u32,
     strips: impl IntoIterator<Item = BuiltinParameters>,
     budget: u64,
@@ -3577,7 +3573,7 @@ pub fn input_section_bounds_within(
                 cache.as_deref().and_then(|cache| cache.get(&key))
             };
             let charged = match cached {
-                Some(CachedDesign::Bound(hit)) => (hit.frames <= remaining).then_some(hit),
+                Some(CachedDesign::Bound(hit)) => (hit.charge <= remaining).then_some(hit),
                 // The walk passed `above` frames: under no more budget than that it stops again.
                 Some(CachedDesign::ChargeAbove(above)) if remaining <= above => None,
                 Some(CachedDesign::ChargeAbove(_)) | None => {
@@ -3595,7 +3591,7 @@ pub fn input_section_bounds_within(
                 }
             };
             let bound = if let Some(charged) = charged {
-                remaining -= charged.frames;
+                remaining -= charged.charge;
                 charged.bound
             } else {
                 remaining = 0;
@@ -5699,12 +5695,39 @@ pub mod test_support {
         crate::tail::FIXED_INPUT_BOUNDS.with(core::cell::Cell::get)
     }
 
-    /// How many frames this thread's design-bound walks have taken, stopped walks included
-    /// (#1457 D1): what preparation spent. Read the difference across one preparation.
+    /// How many frames this thread's design-bound walks have taken, stopped walks included, as
+    /// counted frame by frame by the walk itself (#1457 D1, attempt 1 MJ2). Read the difference
+    /// across one preparation.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn fixed_input_frames_walked() -> u64 {
         crate::tail::FIXED_INPUT_FRAMES.with(core::cell::Cell::get)
+    }
+
+    /// The charges, in frame-equivalents, of the design bounds this thread computed (#1457
+    /// Amendment 3): what a preparation that computes every design it bounds spends of its budget.
+    /// Read the difference across one preparation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn fixed_input_charged() -> u64 {
+        crate::tail::FIXED_INPUT_CHARGED.with(core::cell::Cell::get)
+    }
+
+    /// [`crate::input_section_bounds`] under a budget of `budget` frame-equivalents instead of
+    /// [`crate::INPUT_BOUND_BUDGET_FRAMES`]: for the gates only (#1457 ruling (i): production has
+    /// no entry point that takes a budget).
+    ///
+    /// # Errors
+    ///
+    /// The first strip's error, as [`crate::input_section_bound`] reports it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn input_section_bounds_within(
+        sample_rate: u32,
+        strips: impl IntoIterator<Item = crate::BuiltinParameters>,
+        budget: u64,
+        cache: Option<&mut crate::InputBoundCache>,
+    ) -> Result<Vec<crate::InputSectionBound>, BuiltinParameterError> {
+        super::input_section_bounds_within(sample_rate, strips, budget, cache)
     }
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.

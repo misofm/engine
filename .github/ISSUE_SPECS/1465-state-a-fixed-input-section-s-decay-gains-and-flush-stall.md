@@ -100,7 +100,7 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   input is sanitized upstream (unchanged).
 - **Citations:** as #1329: [SIMPER-SVF], [ZAVALISHIN-TPT], [ORFANIDIS-ISP], [SMITH-SASP]; N. J.
   Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed., for the rounding model.
-- **Fixtures and objective tests:** gates F1-F5. **Benchmarks:** #1457's gates 2 and 4 (F5).
+- **Fixtures and objective tests:** gates F1-F5. **Benchmarks:** #1457's gates 2 and 8 (F5).
   **Listening:** none; no rendered bit moves.
 
 ## Deliverables
@@ -182,16 +182,24 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
 - **F4. Nothing certified moves.** Every existing `tail_contract` assertion passes unchanged
   (`T_decay`, `T_rest`, both rests, `P*`, the live figures); no rendered bit moves (`audit capi`'s
   `pcm_digest`, the wasm G5 digests, the builtins PCM fixtures).
-- **F5. Budget.** #1457's gates 2 (the worst case: the top pair at +24 dB and the 64 near-top
-  designs, first preparation and rebuild) and 4 (the audio-only browser boot) pass after this
-  change, within #1457's D1 budget.
+- **F5. Budget.** #1457's gates 2 (the worst case across its design families, the top pair at +24 dB
+  and the 64 near-top designs among them, first preparation and rebuild) and 8 (every 64-track
+  console document bounded exactly at every launch rate) pass after this change, within #1457's D1
+  budget. A change to the walk's cost also reruns `target/release/examples/input_bound_budget
+  calibrate` and restates `builtins::INPUT_BOUND_DESIGN_CHARGE` and `INPUT_BOUND_SECTION_CHARGE`
+  from it (#1457 Amendment 3).
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
-  --features math/lane,builtins/test-support,lane/test-support`;
-  `cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract`;
-  #1457's gate 2 and gate 4 commands; `cargo build --locked --release -p audit &&
-  ./target/release/audit capi`; `bash scripts/check-builtins-fixtures.sh . target/release/audit`;
-  `bash scripts/run-wasm-gates.sh`; `bash scripts/check-workspace-policy.sh`;
-  `cargo clippy --locked --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`.
+  --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
+  builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
+  commands (#1457 Amendment 3: gate 2 is `cargo build --locked --release -p builtins --features
+  test-support --example input_bound_budget` and one invocation of `taskset -c <core>
+  target/release/examples/input_bound_budget`, descriptive; gate 8 is `cargo test --locked -p
+  builtins-compiler --features test-support --lib
+  every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`); `cargo build
+  --locked --release -p audit && ./target/release/audit capi`; `bash
+  scripts/check-builtins-fixtures.sh . target/release/audit`; `bash scripts/run-wasm-gates.sh`;
+  `bash scripts/check-workspace-policy.sh`; `cargo clippy --locked --workspace --all-targets -- -D
+  warnings`; `cargo fmt --all -- --check`.
 
 The attempt record carries a mutation table (each defect applied, the named test run, the file
 restored) with at least the mutants below; each is red.

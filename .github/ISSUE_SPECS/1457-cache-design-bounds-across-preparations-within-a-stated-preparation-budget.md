@@ -194,7 +194,9 @@ Made by the decision-15 root coordinator under the owner's no-shortcuts delegati
   every distinct design exactly; near-top designs (7-8.8 ms each) beyond the first few take the
   certified live bound. The budget binds both hosts (R2): it is enforced inside the shared
   preparation (`builtins-compiler`), so it caps the C ABI's control thread and the browser's
-  preparation thread alike. #1464-#1468 rerun gates 2 and 4 against this stated budget.
+  preparation thread alike. #1464-#1468 rerun gates 2 and 8 against this stated budget
+  *(corrected by Amendment 3: gate 4 moved to #1471 and #1470 in Amendment 2; the commands are
+  Amendment 3's)*.
 - **D2 (accepted): the cache.**
   - A control-side cache per C ABI engine handle (`Engine`), keyed by `InputBoundKey` (which already
     carries the rate), with an entry cap. Eviction is clear-on-full or LRU, whichever is simpler and
@@ -291,6 +293,9 @@ they differ, and its "Paths this slice needs".
   Both facts are stated: about 20 ms for near-top-heavy work, and a stated worst case of about
   **32 ms** for a session of many cheap distinct designs, both measured on the CI-class runner in
   one invocation (attempt record). The O(strips) design-keying cost is reported beside it.
+  *(Superseded by Amendment 3, MJ1: the 32 ms worst case was wrong by about 2x, because the
+  frames-only charge left each design's fixed cost uncharged; the budget is now in
+  frame-equivalents and the worst case is restated in attempt 2's record.)*
 - **Named exceptions for this slice:** `crates/host-core/src/prepare.rs`,
   `crates/builtins/src/lib.rs`, `crates/builtins/src/tail.rs`,
   `crates/builtins-compiler/src/lib.rs`, `crates/math/src/tail.rs`,
@@ -307,6 +312,8 @@ they differ, and its "Paths this slice needs".
    rounds) at the four launch rates: the top pair, the 64-design near-top family, 65,537 distinct
    near-top designs, typical designs and cheap designs, on a first preparation and on a rebuild
    with a warm cache. Design-bound walking stays within the budget; the D3 outcome shows past it.
+   *(Amendment 3: the workload is committed as `crates/builtins/examples/input_bound_budget.rs`,
+   with the cheap two-section and two-cascade families added; its command is Amendment 3's.)*
 3. Every reported bound is bit-identical with and without the cache, cold and warm, at the bound
    level (`tail_contract`) and at the host level (the policy function's report).
 4. *(Moved: the native C ABI rebuild cost is #1471's gate 4; the browser's audio-only rebuild
@@ -321,6 +328,57 @@ they differ, and its "Paths this slice needs".
    `console-sixty-four-track-mono.json`, `console-sixty-four-track-sends.json`) prepares with no
    strip on the live bound at every launch rate, its walk inside the budget. Red when the budget or
    the walk changes so that the purpose breaks (proved with a smaller budget).
+
+## Amendment 3 (root rulings, 2026-10-07): the charged budget, the stopped walk, the gate commands
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation, after attempt
+1's verdict (`/home/bl/misofm/submix-verdicts/1457-attempt1.md`: FAIL on MJ1 and MJ2).
+
+- **MJ1, option (b): charge each design's fixed cost.** Each design, and each section, is charged a
+  calibrated constant in frame-equivalents on top of the frames walked, so the budget measures the
+  real work and the stated ms is a true bound. The constants are calibrated from the measured fixed
+  cost (about 14 us per design in the verdict), per design and per section separately. Gate 2 is
+  re-measured across all design families, including the two-section families of 513- and 769-frame
+  walks that ran 58.5-63.7 ms in attempt 1; the worst case is stated as the measured maximum across
+  families, with its spread. Gate 8 must still show every 64-track console document exact at every
+  launch rate; if the new charge breaks it, the slice stops and reports with numbers, and the budget
+  constant (1,510,000) does not change without a ruling. A frame-equivalent is one near-top frame
+  on the CI-class runner (1 / 75,500 ms, D1's reference); this workstation (x86-64-v3, release, one
+  pinned core) stands in for that runner, and both the code and this spec say so.
+- **MJ2: a stopped walk reports the frames it walked.** `math::tail::fixed_cascade_within` reports
+  the frames actually walked, finished or stopped, and the test-support counter adds those, not the
+  horizon. A test asserts `walked <= budget`, and it is shown red on a majorant pass that counts
+  frames but does not stop (the verifier's X3).
+- **Gate-2 command (m4).** The gate-2 workload is committed and runnable, release, one invocation,
+  one warmup and two measured rounds, descriptive:
+  `cargo build --locked --release -p builtins --features test-support --example input_bound_budget`,
+  then `taskset -c <core> target/release/examples/input_bound_budget` (gate 2) and
+  `taskset -c <core> target/release/examples/input_bound_budget calibrate` (the charge constants).
+  Gate 8's command is `cargo test --locked -p builtins-compiler --features test-support --lib
+  every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`. Successors
+  (#1465, #1466, #1467, #1468) rerun "#1457's gates 2 and 8" with these commands, and a successor
+  that changes the walk's cost reruns the calibration and restates the constants.
+- **m3.** The cache-cap doc says a rebuild is served entirely from the cache only while the cache
+  has not been cleared. #1471's gate 1 covers an engine cache near its cap and records the memory of
+  each per-session copy at 8,192 entries.
+- **m5, ruling (i).** `input_section_bounds_within` (a caller-chosen budget) is reachable only
+  behind `test-support` (`builtins::test_support::input_section_bounds_within`): no public, ungated
+  entry point takes an arbitrary budget.
+- **n5.** #1470's spec records that the host-core policy function drops the cache on the
+  selected-meters and between-render-calls branches, which is the browser's path.
+- Also folded in: m1 (the host-core test's test value is X1), m2 (the stale docs at
+  `builtins-compiler`'s `tails` field and `builtins/src/tail.rs`'s module doc) and n1-n4.
+
+### Gates as of Amendment 3
+
+Gates 2, 3, 5, 6 and 8 stand as Amendment 2 states them; the budget is in frame-equivalents (each
+design's frames walked plus `INPUT_BOUND_DESIGN_CHARGE` and `INPUT_BOUND_SECTION_CHARGE` per
+section) and gate 8 holds the charge, not only the frames, inside the budget. Gate 7 is restated:
+
+7. A preparation walks at most the budget, counted frame by frame by the walk itself, a stopped
+   design included (red on X3: a pass that counts frames but does not stop at the horizon), and a
+   second preparation with the same cache walks no frame and computes no bound, the stopped design
+   included.
 
 ## Attempt record
 
@@ -455,3 +513,212 @@ its exact `--exclude` and `--features` list) exit 0; test-debug-b's DSP step (la
 `test-web-audioworklet.sh`) ok; `run-wasm-gates.sh --without-v8-spill --without-native` ok.
 AArch64 runs only in CI. `check-host-core-policy.sh` fails with "only host-core may declare and capi
 may enable control-provider" on the parent commit too (not this slice's; reported to root).
+
+### Attempt 2 (2026-10-07): the charged budget (Amendment 3)
+
+**What changed.**
+- `math::tail::fixed_cascade_within` now always returns a `CascadeWalk { result, frames }`:
+  `result` is `None` for a stopped walk, and `frames` counts the frames actually walked, finished
+  or stopped (MJ2). `fixed_cascade` is unchanged bit for bit. The 10-line function lost its
+  needless `too_many_lines` allow (n3).
+- `builtins` (`tail.rs`, `lib.rs`):
+  - `ChargedInputBound` gains `charge`, in frame-equivalents: the frames walked plus
+    `INPUT_BOUND_DESIGN_CHARGE` once plus `INPUT_BOUND_SECTION_CHARGE` per section walked (both
+    channels' when they differ). A design reserves its design charge, and each channel cascade its
+    section charges, before it walks; the walk's horizon is what is left. So the frames walked
+    never pass the budget, a stopped design included, and the charge of a finished design is what
+    the budget is debited, computed or from the cache.
+  - The test-support counter `fixed_input_frames_walked` adds the frames really walked (MJ2); a new
+    counter `fixed_input_charged` adds the charges of the bounds computed (gate 8 reads it).
+  - `input_section_bounds_within` is private; the gates reach it as
+    `test_support::input_section_bounds_within`, behind `test-support` (m5, ruling (i)).
+  - Docs: the budget, the two charge constants (with their calibration), the cache cap (a rebuild
+    is served entirely from the cache only while the cache has not cleared; the memory measured
+    below), the cache, and the module doc (m2) are restated. The budget's doc says this
+    workstation stood in for the CI-class runner (n2).
+- `builtins-compiler`: the `tails` field doc and the bound call's comment say what a non-live strip
+  carries past the budget and that the live bound is read from the table (m2).
+- `host-core`: the native gate-3 test's comment names its own catch (m1) and "the third design"
+  (n1); its premise reads charges.
+- `crates/builtins/examples/input_bound_budget.rs` (with a `required-features = ["test-support"]`
+  entry in `crates/builtins/Cargo.toml`): the committed gate-2 workload and the calibration
+  (Amendment 3's commands).
+- Specs: Amendment 3 here; #1465-#1468 cite "#1457's gates 2 and 8" with the commands (m4); #1470
+  records n5 and the frame-equivalent budget; #1471 records m3 (gate 1 near the cap, the memory of
+  a per-session copy) and the frame-equivalent budget.
+- No render path changed. The charge constants, the counters and the example are control-side or
+  test-only.
+
+**Calibration** (`input_bound_budget calibrate`; this workstation as the CI-class runner,
+x86-64-v3, release, `taskset -c 7`, one warmup and two measured rounds). Each design is a one-strip
+preparation with a fresh cache and no budget limit (its keying, the walk and the cache insertion);
+per class, the least-squares line of its time against its frames over the designs of a 48-step
+cutoff grid (40 Hz to the maximum, trims 0, +12 and +24 dB) that walk at most 16,384 frames.
+Intercepts in us, rounds 1 / 2 (slope in ns per frame):
+
+| rate | one cascade, one section | one cascade, two sections | two cascades, one section each | two cascades, two sections each |
+|---|---|---|---|---|
+| 44.1 kHz | 4.88 / 4.72 (8.9-9.0) | 12.48 / 11.73 (15.1) | 9.15 / 9.13 (8.9-9.0) | 19.73 / 19.69 (15.5-15.9) |
+| 48 kHz | 4.66 / 4.84 (8.8-9.4) | 11.83 / 11.80 (14.6) | 9.24 / 9.16 (8.9) | 20.02 / 19.57 (15.2-15.4) |
+| 88.2 kHz | 5.47 / 5.47 (8.3) | 13.71 / 13.71 (13.8) | 10.31 / 10.93 (8.4) | 22.70 / 22.33 (14.5-14.6) |
+| 96 kHz | 5.51 / 5.56 (8.3-8.4) | 13.57 / 13.69 (13.7) | 10.41 / 10.51 (8.4) | 22.28 / 22.24 (14.4) |
+
+- **Per design and per section, separately.** One cascade of one section is `D + S`, of two
+  sections `D + 2S`: `S` = 6.95-8.24 us and `D` = -2.8 to -2.1 us. The per-design term is negative
+  in every round at every rate: a design has no fixed cost beyond its sections', and the second
+  section of a cascade costs more than the first (the fixed cost is superlinear in a cascade's
+  sections). Two one-section cascades cost twice one, so there is no per-cascade term either.
+- **The constants.** `INPUT_BOUND_DESIGN_CHARGE = 0` (the measured per-design term, clamped at
+  zero). `INPUT_BOUND_SECTION_CHARGE = 520` frame-equivalents: the smallest per-section charge that
+  covers every class's measured fixed cost, `max(c11, c12 / 2, c2x1 / 2, c2x2 / 4)` = 13.71 / 2 =
+  6.86 us = 518 frame-equivalents at 75,500 frames per ms, rounded up. Every other class is charged
+  above its fixed cost (one section: 520 against at most 420 frame-equivalents).
+- **What the charge does not model.** The slope: a short two-section walk costs 13.7-15.1 ns per
+  frame, above the budget's 13.25 ns reference (75,500 frames per ms, measured on long near-top
+  walks). A per-frame excess cannot be a fixed charge, so the worst case below is above 20 ms; it is
+  stated, not hidden.
+
+**Gate 2** (`input_bound_budget`, same box and conditions, one invocation, the final constants:
+budget 1,510,000, design 0, section 520). "first" is `input_section_bounds` with a fresh cache,
+"rebuild" the same cache warm, "no cache" without one; "design work" is no cache less rebuild (the
+O(strips) keying taken out). Ranges over rounds 1 and 2 at the rates named; ms:
+
+| family | rates | first | rebuild | no cache | design work | frames walked | exact |
+|---|---|---|---|---|---|---|---|
+| top pair (HPF one `f32` below the maximum into the LPF at it, +24 dB) | all | 6.36-8.11 | 0.001 | 6.38-7.09 | 6.38-7.09 | 525,520-528,640 | 1 / 1 |
+| LPF at the maximum, +24 dB | all | 3.33-3.77 | 0.001 | 3.33-3.43 | 3.33-3.43 | 448,513-451,073 | 1 / 1 |
+| 64-design near-top family | all | 18.38-19.15 | 0.018 | 18.35-19.18 | 18.33-19.16 | 1,505,840 | 3 / 64 |
+| 65,537 distinct near-top designs | all | 52.93-53.35 | 22.56-23.26 | 40.92-41.67 | 18.03-18.68 | 1,506,880 | 2 / 65,537 |
+| 64 typical (20 Hz HPF + steps into a 20 kHz LPF, 0 dB) | 44.1 / 48 | 9.85-10.77 | 0.020 | 9.95-10.57 | 9.93-10.55 | 664,896 / 718,656 | 64 / 64 |
+| 64 typical | 88.2 / 96 | 17.60-19.27 | 0.020 | 17.62-19.03 | 17.60-19.01 | 1,278,528 / 1,388,352 | 64 / 64 |
+| 256 typical | all | 19.83-20.53 | 0.070-0.079 | 19.77-20.56 | 19.70-20.48 | 1,362,320-1,440,320 | 141 / 130 / 72 / 66 of 256 |
+| 4,096 one-section (1 kHz LPF + steps, 0 dB) | all | 15.21-15.81 | 1.45-1.49 | 14.83-15.53 | 13.36-14.08 | 749,760 / 900,560 | 1,461 / 1,171 of 4,096 |
+| 4,096 two-section (1 kHz HPF into 1.28 kHz LPF + steps, +24 dB) | all | 21.78-25.58 | 1.63-1.69 | 21.54-24.36 | 19.88-**22.72** | 498,636-749,275 | 972 / 834 / 834 / 731 |
+| 4,096 two-section (1.28 kHz into 5.12 kHz, +12 dB) | all | 20.79-27.67 | 1.65-2.65 | 20.28-22.63 | 18.61-20.98 | 498,636 / 641,600 | 972 / 834 |
+| 4,096 two-section (2.56 kHz into 5.12 kHz, +24 dB) | all | 18.09-20.66 | 1.65-1.66 | 17.69-20.12 | 16.04-18.46 | 498,636 | 972 |
+| 4,096 two-section (5.12 kHz into 10.24 kHz, 0 dB) | all | 16.38-18.16 | 1.55-1.63 | 16.07-17.89 | 14.46-16.34 | 498,636 | 972 |
+| 4,096 two-cascade (left 1 kHz LPF + steps, right 1 kHz HPF, 0 dB) | all | 14.78-15.58 | 1.39-1.40 | 14.58-15.46 | 13.18-14.06 | 749,760 / 900,560 | 730 / 585 |
+
+The example asserts, for every row, that first, rebuild and no cache report identical bounds,
+that the rebuild walks no frame and computes no bound, and that a preparation walks at most the
+budget.
+
+- **The stated worst case.** Design-bound work under the budget: measured maximum **22.7 ms** (the
+  1 kHz / 1.28 kHz two-section family at 88.2 kHz), spread **13.2-22.7 ms** across the families
+  (near-top 18.0-19.2 ms, typical 9.9-20.5 ms, the cheap families 13.2-22.7 ms). A whole
+  preparation of up to 4,096 strips, keying included: at most 25.6 ms (one 27.7 ms outlier, in a
+  round whose keying-only rebuild also took 2.65 ms against 1.65 ms). Attempt 1's frames-only
+  charge let the same two-section families take 48-64 ms (verdict MJ1).
+- **Beside it, outside the budget: the O(strips) keying.** 0.35 us a strip: 22.6-23.3 ms for
+  65,537 strips, 1.4-1.7 ms for 4,096. The 65,537-strip first preparation takes 11-12 ms more than
+  the same preparation without a cache although both run the same code once the budget is spent
+  (three cache insertions apart); not investigated (probably fresh page faults for the
+  per-preparation design map, which is the first large allocation of each round).
+- **Measurement history, candidly.** The calibration and gate 2 were each run more than once:
+  a gate-2 trial at a provisional section charge of 640 (before the calibration was final); one
+  invocation of both while another workload loaded the box (every workload about 1.7x slower, the
+  top pair 11.1 ms against 6.4 ms; kept in the scratch evidence, not used); the clean calibration
+  above with a gate-2 run at a section charge of 500; and, after the calibration showed that 500
+  does not cover the two-section cascade at 88.2 kHz (13.71 us against 13.25 us), the gate-2 run
+  above at 520. No number was tuned against a timing result: the constants come from the
+  calibration's fixed costs only.
+
+**Gate 8** (`every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`,
+`--nocapture`): every document exact at every rate. Charged (frames walked), margin to 1,510,000:
+
+| documents | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
+|---|---|---|---|---|
+| `console-sixty-four-track`, `-app`, `-intended`, `-sends` | 743,552 (610,432), margin 766,448 | 791,936 (658,816), margin 718,064 | 1,290,880 (1,157,760), margin 219,120 | 1,387,136 (1,254,016), margin **122,864** (92 % used) |
+| `console-sixty-four-track-mono` | 383,040 (316,480), margin 1,126,960 | 408,384 (341,824), margin 1,101,616 | 667,712 (601,152), margin 842,288 | 717,376 (650,816), margin 792,624 |
+
+The new charge adds 133,120 frame-equivalents to a stereo document (64 designs of two two-section
+cascades) and 66,560 to the mono one; gate 8 holds at every rate, the tightest at 96 kHz.
+
+**Cache memory** (a full cache of 8,192 one-section designs at 48 kHz, `bench_support`'s thread
+counters, a scratch example not committed): 2,486,520 bytes, about 304 bytes an entry (2.37 MiB).
+The attempt-1 verifier measured 2,366,400 bytes (2.26 MiB) before each entry gained its charge.
+
+**Tests** (test-value sentences: which plausible defect turns each red that no other test catches):
+- New: `tail_contract::a_design_walks_at_most_the_budget_it_is_given` (gate 7 at the bound level,
+  MJ2): red when a walk loop counts frames without stopping at its horizon (X3, the majorant pass;
+  X5, the deviation walk) or when the right channel of a two-cascade design is given the whole
+  budget instead of what the left channel's charge left (C4) or its charge is dropped (C8). X3, C4
+  and C8 turn only this test red in `tail_contract`; X3 also turns gate 7 red.
+- Changed: `tail_contract::the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` (gate 5)
+  now charges `charge`, is gated on `test-support` and asserts each design's charge exceeds its
+  frames: red when a cache hit is admitted on its frames rather than its charge (C2, unique), as
+  well as attempt 1's M3, M5 and M7.
+- Changed: `builtins_compiler::tests::a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing`
+  (gate 7): a cold preparation walks exactly the budget less the three designs' fixed charges,
+  counted for real; red on X3 (1,565,321 frames walked against 1,506,880), and uniquely on M8 (a
+  stopped design not cached) and M4 (honoured with `<`).
+- Changed: `builtins_compiler::tests::every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`
+  (gate 8) holds the charge inside the budget: red, and only it, when the section charge grows to
+  1,100 (C6) or the budget drops to 1,350,000 (C7).
+- Changed: `host_core::prepare::tests::a_design_bound_cache_changes_no_prepared_value` (native
+  gate 3): red, and only it, when the policy function hands `None` to `builtins-compiler` instead
+  of its cache (X1). Its premise now reads charges.
+
+**Mutation runs** (each applied alone in the worktree, the named suites run in debug with
+`--no-fail-fast`, then reverted; `tc` = `tail_contract`'s #1457 tests, `bc` = the three
+builtins-compiler tests above, `hc` = the host-core test):
+
+| id | mutation | red |
+|---|---|---|
+| X3 | the majorant pass counts frames but does not stop | tc: `a_design_walks_at_most_the_budget_it_is_given` (`walked <= budget`: 516,608 walked under a budget of 1,040); bc: gate 7 |
+| X5 | the deviation walk counts frames but does not stop | tc: the new test and gate 5 |
+| C1 | the sections' charge is not reserved before the walk | tc: both; bc: gate 7 |
+| C2 | a cache hit is admitted on its frames, not its charge | tc: gate 5 only |
+| C3 | a design's charge omits its section charge | tc: both; bc: gate 7 |
+| C4 | the right channel gets the whole budget, not what the left left | tc: the new test only |
+| C8 | a two-cascade design's charge omits the right channel's | tc: the new test only |
+| C9 | a stopped design leaves the remaining budget | tc: gate 5; bc: gate 7 |
+| M8 | a stopped design is not cached | bc: gate 7 only |
+| M4 | a cached stop is honoured only when `remaining < above` | bc: gate 7 only |
+| C6 | `INPUT_BOUND_SECTION_CHARGE` 1,100 | bc: gate 8 only |
+| C7 | `INPUT_BOUND_BUDGET_FRAMES` 1,350,000 | bc: gate 8 only |
+| X1 | the host-core policy function passes `None` to builtins-compiler | hc only |
+
+`INPUT_BOUND_DESIGN_CHARGE` is zero, so no test can see it reserved or not; its mechanism is the
+section charge's, which C1 and C3 cover.
+
+**Corrections to attempt 1's record** (verdict m1, n4): the host-core test's own catch is X1, not
+M11 (= M1, which gates 5 and 7 also catch); M10 (the 48 kHz table entry) is also caught by
+`live_input_lane_reports_the_live_bound_and_plain_input_its_own`, and gate 6's own catch is M10b (the
+96 kHz entry); M12 and M13 are also caught by the host-core test's premise, and gate 8's own catch
+was M12b (budget 1,200,000), now C6 and C7.
+
+**Gates run** (on the attempt-2 tree, x86-64, `CARGO_INCREMENTAL=0`):
+
+- `cargo fmt --all -- --check`; test-debug-a (`cargo test -p builtins-compiler --no-run`, the
+  workspace step with its exact `--exclude` and `--features` list, and its doctests); test-debug-b
+  (the DSP step with `math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`,
+  its doctests, `conformance_fixtures -- --check`): all exit 0.
+- Release: `-p lane -p math -p wasm-gates --features math/lane`, `filter_liveness`, `tail_contract`
+  (all four rates): exit 0. `cargo test -p builtins --test tail_contract --no-run` without
+  `test-support` compiles (the gated tests drop out).
+- `cargo clippy --workspace --all-targets -D warnings`, with and without `--all-features`: clean.
+  `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`, no exclusion: clean.
+- `target/release/audit capi`: 0 allocations, 0 deallocations, 0 locks, 0 syscalls, 0 violations,
+  `pcm_digest` `cb10fbface44a3a4` (unchanged).
+- `check-cross-targets.sh`, `check-capi-abi.sh` and `--self-test`, `run-wasm-gates.sh
+  --without-v8-spill --without-native`: ok. The worklet chain (`build-web-audioworklet.sh
+  --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts`, `check-sdk-headless.sh`,
+  `check-sdk-generated.sh`, `test-web-audioworklet.sh`) and the scalar-oracle and v8-spill
+  checks: ok.
+- Every `scripts/check-*.sh` with its CI arguments (artifact-evidence-leak, bench-policy,
+  bench-preconditions, builtins-fixtures, builtins-listening, builtins-policy,
+  conformance-boundaries, console-benchmark-fixture, console-fixtures, cross-targets, dsp-research,
+  effect-contract, effect-runtime-fixtures, effect-runtime-policy, env-vocabulary,
+  graph-determinism, graph-policy, host-core-policy, lane-policy, parametric-eq-render-contract,
+  protocol-control-policy, protocol-wasm-parity, rack-policy, realtime-audit-leak, realtime-policy,
+  sdk-types, session-policy, unfused-seal and `--self-test`, workspace-policy), every
+  `scripts/test-*.sh` self-test (the list above plus console-benchmark, gate-lib,
+  realtime-trace-validator, sdk-artifact-builder-output-contract and the three
+  `test-realtime-audit-probes.sh` legs), and the Python checks and self-tests (ci-path-routing,
+  release-shape, script-reachability, sdk-deletions, test-support-ci, npm-publish-modes,
+  session-map-shape, command-kind and command-reason vocabularies, and `--self-test` of
+  abi-layout-v1 and parameter-metadata-v1): all exit 0. (`check-host-core-policy.sh` now passes;
+  attempt 1 saw it fail on its base.)
+- AArch64 runs only in CI.

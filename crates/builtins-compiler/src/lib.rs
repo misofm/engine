@@ -387,7 +387,11 @@ pub struct PreparedBuiltinsSession {
     /// Every strip's input-section bounds as reported (#1329 D7, Amendment 4 R5), sorted by track
     /// ID: `T_decay` (the tail graph lowering reads), `T_rest` and `RestSamples` (silence skipping,
     /// #1107). Control-side: nothing render owns carries them. A strip with a live input lane
-    /// carries [`builtins::input_section_live_bound`], any other its own design's bound.
+    /// carries the rate's live bound ([`builtins::input_section_live_bound_table`]). Any other
+    /// strip carries its own design's bound while the preparation's budget covers its design, and
+    /// the live bound once it does not (#1457 D3, `builtins::INPUT_BOUND_BUDGET_FRAMES`, charged
+    /// in strip order): a non-live strip's bound is certified for its design either way, but it
+    /// is not always the design's own.
     tails: Vec<(Box<str>, InputSectionBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
@@ -3579,9 +3583,10 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         );
     }
     // #1329 D7, Amendment 4 R7: each distinct input design's certified tail and rest bound is
-    // computed here, once per preparation, before the phase-two observation: the computation
-    // allocates transient storage, which phase two's retained-allocation account must not see. A
-    // live input lane's bound depends only on the rate, so it is computed once for the session.
+    // computed here, at most once per preparation, before the phase-two observation: the
+    // computation allocates transient storage, which phase two's retained-allocation account must
+    // not see. A live input lane's bound depends only on the rate, so it is read from the table
+    // (#1457 D2) and computed nowhere.
     // Amendment 5 (MJ1): a strip whose input lane is live reports the live bound, so no design
     // bound is computed for it, so a browser boot with live controls computes none. An audio-only
     // browser boot (the SDK default) and the C ABI attach no input lane and bound every distinct
@@ -12145,7 +12150,7 @@ mod tests {
     /// #1457 D1's purpose: typical sessions bound every distinct design exactly. Each 64-track
     /// console document (`console-sixty-four-track.json`, `-app`, `-intended`, `-mono` and
     /// `-sends`, 64 distinct input designs each) prepares with no strip on the live bound at every
-    /// launch rate, its walk inside the budget.
+    /// launch rate, its charge (frames walked plus the fixed charges) inside the budget.
     #[cfg(feature = "test-support")]
     #[test]
     fn every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate() {
@@ -12189,10 +12194,12 @@ mod tests {
                 )
                 .expect("compile");
                 let frames = builtins::test_support::fixed_input_frames_walked();
+                let charged = builtins::test_support::fixed_input_charged();
                 let prepared =
                     prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), None)
                         .expect("prepare");
                 let walked = builtins::test_support::fixed_input_frames_walked() - frames;
+                let charged = builtins::test_support::fixed_input_charged() - charged;
                 let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
                 let on_live: Vec<&str> = prepared
                     .input_bounds()
@@ -12200,9 +12207,14 @@ mod tests {
                     .map(|(id, _)| id)
                     .collect();
                 assert!(
-                    on_live.is_empty() && walked < builtins::INPUT_BOUND_BUDGET_FRAMES,
-                    "{name} at {rate} Hz: {walked} of {} frames, on the live bound: {on_live:?}",
+                    on_live.is_empty() && charged <= builtins::INPUT_BOUND_BUDGET_FRAMES,
+                    "{name} at {rate} Hz: charged {charged} ({walked} frames walked) of a budget \
+                     of {}, on the live bound: {on_live:?}",
                     builtins::INPUT_BOUND_BUDGET_FRAMES
+                );
+                println!(
+                    "{name} at {rate} Hz: charged {charged} ({walked} frames walked), margin {}",
+                    builtins::INPUT_BOUND_BUDGET_FRAMES - charged
                 );
             }
         }
@@ -12210,9 +12222,10 @@ mod tests {
 
     /// #1457 D1, D2: a preparation walks at most the budget, and a warm cache walks nothing. The
     /// first three strips carry distinct near-top designs, more than the budget covers: a cold
-    /// preparation walks exactly the budget (the design that crosses it is stopped there, and every
-    /// later one walks nothing), and a second preparation with the same cache computes no bound and
-    /// walks no frame, the stopped design included, with the same prepared bounds.
+    /// preparation walks exactly the budget less the three designs' fixed charges (the design that
+    /// crosses it is stopped there, and every later one walks nothing), and a second preparation
+    /// with the same cache computes no bound and walks no frame, the stopped design included, with
+    /// the same prepared bounds.
     #[cfg(feature = "test-support")]
     #[test]
     fn a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing() {
@@ -12264,16 +12277,17 @@ mod tests {
                 builtins::test_support::fixed_input_frames_walked() - frames,
             )
         };
+        // Each design reserves its fixed charge before it walks: two sections on one cascade.
+        let fixed =
+            3 * (builtins::INPUT_BOUND_DESIGN_CHARGE + 2 * builtins::INPUT_BOUND_SECTION_CHARGE);
+        let spent = builtins::INPUT_BOUND_BUDGET_FRAMES - fixed;
         let (none, _, walked) = prepare(None);
-        assert_eq!(walked, builtins::INPUT_BOUND_BUDGET_FRAMES, "no cache");
+        assert_eq!(walked, spent, "no cache");
         let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
         assert!(none.iter().any(|(_, bound)| *bound == live), "{none:?}");
         let mut cache = InputBoundCache::new();
         let (cold, _, walked) = prepare(Some(&mut cache));
-        assert_eq!(
-            (&cold, walked),
-            (&none, builtins::INPUT_BOUND_BUDGET_FRAMES)
-        );
+        assert_eq!((&cold, walked), (&none, spent));
         let (warm, computed, walked) = prepare(Some(&mut cache));
         assert_eq!((&warm, computed, walked), (&none, 0, 0), "warm cache");
     }

@@ -129,13 +129,18 @@ values are stated together or not at all. No reported tail and no rendered bit m
 - **L5. Nothing certified moves.** Every existing `tail_contract` assertion passes unchanged; the
   live bound still states `Unstated`; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm
   G5 digests, the builtins PCM fixtures).
-- **L6. Budget.** #1457's gates 2 and 4 pass after this change, within #1457's D1 budget.
+- **L6. Budget.** #1457's gates 2 and 8 pass after this change, within #1457's D1 budget.
 - **Commands:** as slice A2 (`cargo test --locked --all-targets -p lane -p math -p builtins -p
-  dsp-reference --features math/lane,builtins/test-support,lane/test-support`;
-  `cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract`;
-  #1457's gate 2 and gate 4 commands; `audit capi`; `bash scripts/check-builtins-fixtures.sh .
-  target/release/audit`; `bash scripts/run-wasm-gates.sh`; `bash scripts/check-workspace-policy.sh`;
-  clippy with `-D warnings`; `cargo fmt --all -- --check`).
+  dsp-reference --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked
+  --release -p builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and
+  gate 8 commands (#1457 Amendment 3: gate 2 is `cargo build --locked --release -p builtins
+  --features test-support --example input_bound_budget` and one invocation of `taskset -c <core>
+  target/release/examples/input_bound_budget`, descriptive; gate 8 is `cargo test --locked -p
+  builtins-compiler --features test-support --lib
+  every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`); `audit capi`;
+  `bash scripts/check-builtins-fixtures.sh . target/release/audit`; `bash
+  scripts/run-wasm-gates.sh`; `bash scripts/check-workspace-policy.sh`; clippy with `-D warnings`;
+  `cargo fmt --all -- --check`).
 
 The attempt record carries a mutation table with at least the mutants below; each is red.
 

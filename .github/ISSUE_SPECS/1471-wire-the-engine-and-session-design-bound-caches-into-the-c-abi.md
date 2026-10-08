@@ -18,10 +18,20 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
 
 - **What #1457 ships.** In `builtins`: `InputBoundCache` (keyed by `InputBoundKey`, which carries the
   rate; entry cap `INPUT_BOUND_CACHE_ENTRIES` = 8,192, cleared when full), the per-preparation
-  budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frames walked, charged in strip order; past it a
-  design reports the rate's live bound), and `input_section_bounds(rate, strips, cache)`. A cached
-  design charges the budget its stored frames, so every prepared value is a pure function of the
-  session, with or without a cache, cold or warm. `builtins-compiler`'s
+  budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frame-equivalents, charged in strip order: each
+  design computed charges the frames it walks plus `INPUT_BOUND_DESIGN_CHARGE` and
+  `INPUT_BOUND_SECTION_CHARGE` per section, #1457 Amendment 3; past it a design reports the rate's
+  live bound), and `input_section_bounds(rate, strips, cache)`. A cached design charges the budget
+  its stored charge, so every prepared value is a pure function of the session, with or without a
+  cache, cold or warm.
+- **Cache memory and clearing (#1457 Amendment 3, attempt-1 verdict m3).** A full cache of 8,192
+  entries holds about 2.4 MiB (2,486,520 bytes measured on #1457 attempt 2, about 304 bytes an
+  entry; the attempt-1 verifier measured 2,366,400 bytes, 2.26 MiB, before each entry gained its
+  charge field). Seeding each session with a copy of the engine's cache costs up to that much per
+  session. A rebuild is served entirely from a cache only while that cache has not been cleared
+  since the session's designs were inserted: the engine's cache, which every compile on the engine
+  fills, can reach its cap and clear in the middle of a compile, and a session seeded from it then
+  lacks the designs inserted before the clear. `builtins-compiler`'s
   `prepare_session_builtins_with_live_controls` takes `bound_cache: Option<&mut InputBoundCache>`.
   In `host-core`, `prepare.rs`'s internal policy function
   (`prepare_host_runtime_with_live_controls_policy_and_spectrum`) takes the same parameter; no
@@ -66,7 +76,13 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
 1. A rebuild of an unchanged session through the C ABI computes no design bound and walks no frame
    (counted with `builtins::test_support::fixed_input_bounds_computed` and
    `fixed_input_frames_walked`); a second `miso_engine_v1_compile_session` of the same document on
-   the same engine likewise computes none.
+   the same engine likewise computes none. *(#1457 Amendment 3, m3.)* The gate includes an engine
+   cache near its cap: the session is compiled on an engine whose cache already holds enough other
+   designs that the compile's insertions pass `INPUT_BOUND_CACHE_ENTRIES` and clear it, and the
+   session's first rebuild still computes no design bound. D1's seeding (a copy of the engine's
+   cache after the compile) fails this case when the compile's insertions clear the engine's cache,
+   so the slice brings the seeding to root before implementation (for example seeding each session
+   from the compile's own designs). The per-session seed's memory is recorded beside gate 4.
 2. Every prepared value and the plan resource report are identical with and without the caches,
    cold and warm, including a session past the budget (#1457 gates 3 and 5 stay green).
 3. `target/release/audit capi` stays at 0 allocations and 0 syscalls on render; the PCM digest does

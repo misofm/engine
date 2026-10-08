@@ -85,7 +85,7 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
 - **Denormal/NaN:** unchanged.
 - **Citations:** as #1329 ([SIMPER-SVF], [ZAVALISHIN-TPT], [ORFANIDIS-ISP], [SMITH-SASP]); Higham,
   *Accuracy and Stability of Numerical Algorithms*, 2nd ed.
-- **Fixtures and objective tests:** gates 1-4. **Benchmarks:** #1457's gates (gate 4).
+- **Fixtures and objective tests:** gates 1-4. **Benchmarks:** #1457's gates 2 and 8 (gate 4).
   **Listening:** none; no rendered bit moves.
 
 ## Deliverables
@@ -145,16 +145,24 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
    `T_rest`, both rests, `P*`, `D`, `sigma`, the live figures); A2's F2(a)-(c) pass; F2(d)'s
    equality holds for the new formula; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm
    G5 digests, the builtins PCM fixtures).
-4. **Budget.** #1457's gates 2 and 4 pass, within #1457's D1 budget.
+4. **Budget.** #1457's gates 2 and 8 pass, within #1457's D1 budget. A change to the walk's cost
+   also reruns `target/release/examples/input_bound_budget calibrate` and restates
+   `builtins::INPUT_BOUND_DESIGN_CHARGE` and `INPUT_BOUND_SECTION_CHARGE` from it (#1457 Amendment
+   3).
 5. **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
-   --features math/lane,builtins/test-support,lane/test-support`;
-   `cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract`;
-   #1457's gate 2 and gate 4 commands; `bash scripts/check-builtins-fixtures.sh . target/release/audit`;
-   `bash scripts/check-workspace-policy.sh`; `cargo clippy --locked --workspace --all-targets --
-   -D warnings`; `cargo fmt --all -- --check`; if #1379 has landed, also the `test-debug-a`
-   workspace command, `bash scripts/check-graph-determinism.sh`,
-   `cargo run --locked -p graph-compiler --bin graph_fixture -- --check` and
-   `cargo test --locked --release -p host-core --test tail_composition -- --include-ignored`.
+   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
+   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
+   commands (#1457 Amendment 3: gate 2 is `cargo build --locked --release -p builtins --features
+   test-support --example input_bound_budget` and one invocation of `taskset -c <core>
+   target/release/examples/input_bound_budget`, descriptive; gate 8 is `cargo test --locked -p
+   builtins-compiler --features test-support --lib
+   every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`); `bash
+   scripts/check-builtins-fixtures.sh . target/release/audit`; `bash
+   scripts/check-workspace-policy.sh`; `cargo clippy --locked --workspace --all-targets -- -D
+   warnings`; `cargo fmt --all -- --check`; if #1379 has landed, also the `test-debug-a` workspace
+   command, `bash scripts/check-graph-determinism.sh`, `cargo run --locked -p graph-compiler --bin
+   graph_fixture -- --check` and `cargo test --locked --release -p host-core --test tail_composition
+   -- --include-ignored`.
 
 ## Test value
 

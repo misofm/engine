@@ -2119,7 +2119,8 @@ mod tests {
     /// #1457 gate 3 (native): a design-bound cache changes no prepared value. The session's first
     /// three strips carry distinct near-top designs whose charges cross the preparation budget, so
     /// the third reports the live bound; the report (the output tail included) is the same with
-    /// no cache, a cold cache and the same cache warm.
+    /// no cache, a cold cache and the same cache warm, and the cold preparation fills the cache, so
+    /// the policy function hands its cache to `builtins-compiler` rather than dropping it.
     #[test]
     fn a_design_bound_cache_changes_no_prepared_value() {
         use super::{
@@ -2200,9 +2201,9 @@ mod tests {
                 builtins::input_section_bound_charged(rate, parameters).expect("bound")
             })
             .collect();
-        let fits = charged[0].frames + charged[1].frames;
+        let fits = charged[0].charge + charged[1].charge;
         assert!(fits <= builtins::INPUT_BOUND_BUDGET_FRAMES);
-        assert!(fits + charged[2].frames > builtins::INPUT_BOUND_BUDGET_FRAMES);
+        assert!(fits + charged[2].charge > builtins::INPUT_BOUND_BUDGET_FRAMES);
         let compiled = compile_host_model(
             &model,
             caps.compile_caps(model.sources.len()).expect("caps"),
@@ -2226,7 +2227,7 @@ mod tests {
             .report
         };
         let none = prepare(None);
-        // The second design's live bound reaches the report.
+        // The third design's live bound reaches the report.
         let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
         let (TailSamples::Finite(output), TailSamples::Finite(live)) =
             (none.output_tail, live.tail)

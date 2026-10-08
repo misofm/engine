@@ -14,9 +14,9 @@ use builtins::{
     BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBoundCache,
     InputBuiltins, InputSectionBound, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
     input_section_bound, input_section_bound_charged, input_section_bounds,
-    input_section_bounds_within, input_section_flush_law, input_section_live_bound,
-    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
-    input_section_worst_case_pair, prepare_input_filter_pair,
+    input_section_flush_law, input_section_live_bound, input_section_live_bound_table,
+    input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
+    prepare_input_filter_pair,
 };
 use effect_contract::{RestSamples, TailSamples};
 use math::tail::{
@@ -352,8 +352,10 @@ fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
 /// warm or holding a stopped walk's horizon, changes no reported value. The budgets sit on each
 /// side of every crossing, pairs of designs run in both strip orders, and a design that passes the
 /// budget is followed by cheaper ones, which must still report the live bound.
+#[cfg(feature = "test-support")]
 #[test]
 fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
+    use builtins::test_support::input_section_bounds_within;
     let rate = 48_000;
     let designs = [
         parameters(0.0, 1_000.0, 0.0, false),
@@ -368,6 +370,10 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
     let live = input_section_live_bound_table(rate).expect("launch rate");
     for (index, design) in charged.iter().enumerate() {
         assert!(design.frames > 0, "design {index} walks");
+        assert!(
+            design.charge > design.frames,
+            "design {index} has a fixed charge"
+        );
         assert_ne!(
             design.bound, live,
             "design {index} must bound below the live bound"
@@ -392,7 +398,7 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
         let mut budgets = std::vec![0, u64::MAX];
         let mut before = 0_u64;
         for &index in &firsts {
-            let after = before + charged[index].frames;
+            let after = before + charged[index].charge;
             budgets.extend([after - 1, after, after + 1]);
             before = after;
         }
@@ -403,9 +409,9 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
             let mut exhausted = false;
             let mut value = std::collections::BTreeMap::new();
             for &index in &firsts {
-                let fits = !exhausted && covered + charged[index].frames <= budget;
+                let fits = !exhausted && covered + charged[index].charge <= budget;
                 if fits {
-                    covered += charged[index].frames;
+                    covered += charged[index].charge;
                 } else {
                     exhausted = true;
                 }
@@ -451,6 +457,112 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
             .map(|design| design.bound)
             .collect::<Vec<_>>()
     );
+}
+
+/// #1457 gate 7 at the bound level (attempt 1, MJ2): a design's computation walks at most the
+/// budget it is given, counted frame by frame by the walk itself, finished or stopped. A design
+/// first reserves its fixed charge (`INPUT_BOUND_DESIGN_CHARGE`), then each channel cascade
+/// reserves `INPUT_BOUND_SECTION_CHARGE` per section before it walks to the rest of the budget: a
+/// stopped cascade walks exactly what is left after its reservation, and nothing when the budget
+/// does not cover that. The right channel of a design whose channels differ gets what the left
+/// channel's charge left. The near-top pairs' majorant passes are hundreds of thousands of frames,
+/// so a pass that counted frames but did not stop at the horizon would walk far past every small
+/// budget here.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_design_walks_at_most_the_budget_it_is_given() {
+    use builtins::test_support::{fixed_input_frames_walked, input_section_bounds_within};
+    use builtins::{INPUT_BOUND_DESIGN_CHARGE, INPUT_BOUND_SECTION_CHARGE};
+    let cascade = 2 * INPUT_BOUND_SECTION_CHARGE;
+    for &rate in rates() {
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch rate");
+        let live = input_section_live_bound_table(rate).expect("launch rate");
+        let left = parameters(below(maximum), maximum, 24.0, false);
+        let right = parameters(below(below(maximum)), maximum, 12.0, false);
+        let split = BuiltinParameters {
+            left: left.left,
+            right: right.right,
+            ..left
+        };
+        let [left_alone, right_alone, split_charged] = [left, right, split]
+            .map(|design| input_section_bound_charged(rate, design).expect("bound"));
+        // A channel cascade's charge is its frames plus two sections; a design adds its own charge
+        // once, and a design whose channels differ is its two cascades.
+        assert_eq!(
+            left_alone.charge,
+            INPUT_BOUND_DESIGN_CHARGE + cascade + left_alone.frames
+        );
+        assert_eq!(
+            (split_charged.frames, split_charged.charge),
+            (
+                left_alone.frames + right_alone.frames,
+                left_alone.charge + right_alone.charge - INPUT_BOUND_DESIGN_CHARGE
+            )
+        );
+        // The frames a design of these cascades walks under `budget` when it is stopped.
+        let stopped_walk = |budget: u64, channels: &[u64]| -> u64 {
+            let mut left_over = budget.saturating_sub(INPUT_BOUND_DESIGN_CHARGE);
+            let mut walked = 0;
+            for &frames in channels {
+                let horizon = left_over.saturating_sub(cascade);
+                if horizon < frames {
+                    return walked + horizon;
+                }
+                walked += frames;
+                left_over -= cascade + frames;
+            }
+            unreachable!("the design is stopped");
+        };
+        let cases = [
+            (left, left_alone, std::vec![left_alone.frames]),
+            (
+                split,
+                split_charged,
+                std::vec![left_alone.frames, right_alone.frames],
+            ),
+        ];
+        for (design, charged, channels) in cases {
+            let fixed = INPUT_BOUND_DESIGN_CHARGE + cascade;
+            let mut budgets = std::vec![
+                1,
+                fixed - 1,
+                fixed,
+                fixed + 1,
+                fixed + 1_000,
+                charged.charge / 2,
+                charged.charge - 1,
+                charged.charge,
+            ];
+            if channels.len() == 2 {
+                budgets.extend([
+                    left_alone.charge - 1,
+                    left_alone.charge,
+                    left_alone.charge + cascade + 1_000,
+                ]);
+            }
+            for budget in budgets {
+                let what = format!(
+                    "{rate} Hz, {} channel walks, budget {budget}",
+                    channels.len()
+                );
+                let before = fixed_input_frames_walked();
+                let bounds =
+                    input_section_bounds_within(rate, [design], budget, None).expect("bounds");
+                let walked = fixed_input_frames_walked() - before;
+                assert!(walked <= budget, "{what}: walked {walked}");
+                if budget >= charged.charge {
+                    assert_eq!(
+                        (bounds[0], walked),
+                        (charged.bound, charged.frames),
+                        "{what}"
+                    );
+                } else {
+                    assert_eq!(bounds[0], live, "{what}");
+                    assert_eq!(walked, stopped_walk(budget, &channels), "{what}");
+                }
+            }
+        }
+    }
 }
 
 /// #1457 gate 3 (D2): the cache's entry cap. A cache of two designs given three keeps at most two,

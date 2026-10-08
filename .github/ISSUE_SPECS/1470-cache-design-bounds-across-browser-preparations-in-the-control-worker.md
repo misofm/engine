@@ -35,8 +35,12 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
     `input_section_live_bound`, so no preparation computes it.
   - The cache type `InputBoundCache` (keyed by `InputBoundKey`, which carries the rate), with the
     entry cap `INPUT_BOUND_CACHE_ENTRIES` = 8,192 and clear-on-full: the cap holds a whole
-    preparation's designs, so a rebuild of any unchanged session is served entirely from it.
-    Render never reads it.
+    preparation's designs, so a rebuild of an unchanged session is served entirely from it while
+    the cache has not been cleared since that session's designs were inserted (#1457 Amendment 3,
+    m3: a cache that several sessions fill can clear in the middle of a preparation). A full cache
+    holds about 2.4 MiB (2,486,520 bytes measured at 8,192 entries). Render never reads it.
+  - *(#1457 Amendment 3.)* The budget is in frame-equivalents: each design computed charges the
+    frames it walks plus `INPUT_BOUND_DESIGN_CHARGE` and `INPUT_BOUND_SECTION_CHARGE` per section.
   - **One entry point, no parallel API** (Amendment 2, ruling (i)):
     `builtins_compiler::prepare_session_builtins_with_live_controls` takes
     `bound_cache: Option<&mut InputBoundCache>`. In `host-core` the parameter is internal to
@@ -79,6 +83,15 @@ Frozen by #1457 Amendment 2 (root, 2026-10-07):
   passed through to the policy function; every other caller passes `None`. No `_and_bound_cache`
   variant. If #1471 has already added the parameter to an entry point this slice needs, it is used
   as is.
+  *(#1457 Amendment 3, attempt-1 verdict n5.)* On #1457's tree the policy function passes
+  `bound_cache` to `builtins-compiler` only on its default branch: it drops the cache on the
+  selected-meters branch (`prepare_selected_session_builtins_between_render_calls`) and on the
+  between-render-calls branch (`prepare_session_builtins_between_render_calls`). The browser
+  prepares through `prepare_host_runtime_with_selected_meters_between_render_calls`, which takes
+  one of those branches, so this slice must carry the cache through the branch the Worker's
+  preparation takes (the two `builtins-compiler` functions of those branches gain the parameter,
+  or route through `prepare_session_builtins_with_live_controls`), and gate 1 is red until it
+  does.
 - **D0b. Budget and cap.** The budget is #1457's `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frames) and
   the cap and eviction are `INPUT_BOUND_CACHE_ENTRIES` (8,192) with clear-on-full, unchanged.
 

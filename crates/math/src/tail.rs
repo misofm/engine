@@ -2082,19 +2082,21 @@ pub fn fixed_cascade(
     peaks: [f64; 2],
 ) -> Result<CascadeBound, TailBoundError> {
     fixed_cascade_within(sections, gain, law, peaks, u64::MAX)
-        .expect("no walk reaches u64::MAX frames: the horizon limit stops it first")
         .result
+        .expect("no walk reaches u64::MAX frames: the horizon limit stops it first")
 }
 
-/// What a [`fixed_cascade_within`] walk that finished inside its horizon returns: the bound (or
-/// why none is stated) and the frames the walk took.
+/// What a [`fixed_cascade_within`] walk returns: the bound (or why none is stated) when the walk
+/// finished inside its horizon, and the frames it actually walked, finished or stopped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CascadeWalk {
-    /// [`fixed_cascade`]'s result, bit for bit.
-    pub result: Result<CascadeBound, TailBoundError>,
+    /// [`fixed_cascade`]'s result, bit for bit, when the walk finished inside its horizon; `None`
+    /// when it stopped because one more frame would pass the horizon.
+    pub result: Option<Result<CascadeBound, TailBoundError>>,
     /// The frames walked: every frame-by-frame step of the majorant pass, of the replay of its
-    /// crossing block and of the deviation walk (issue #1457 D1). The closed-form steps (powers of
-    /// a step matrix, the rest bound) are not frames walked. A function of the sections, the gain,
+    /// crossing block and of the deviation walk (issue #1457 D1), counted as taken, so a stopped
+    /// walk reports what it really took. The closed-form steps (powers of a step matrix, the rest
+    /// bound) are not frames walked. For a finished walk, a function of the sections, the gain,
     /// the law and the peaks only.
     pub frames: u64,
 }
@@ -2109,26 +2111,25 @@ fn take_frame(walked: &mut u64, horizon: u64) -> bool {
     true
 }
 
-/// [`fixed_cascade`] under a horizon of `horizon` frames walked (issue #1457 D1, D3): `None` when
-/// the walk would take more than `horizon` frames, and otherwise the same result as
-/// [`fixed_cascade`], bit for bit, with the frames it walked ([`CascadeWalk::frames`]). The walk is
-/// the same whatever the horizon, so a walk that finishes takes the same frames under every horizon
-/// at or above them, and stops under every smaller one.
+/// [`fixed_cascade`] under a horizon of `horizon` frames walked (issue #1457 D1, D3). The result
+/// is `None` when the walk would take more than `horizon` frames, and otherwise the same result as
+/// [`fixed_cascade`], bit for bit; [`CascadeWalk::frames`] is the frames walked either way, never
+/// more than `horizon`. The walk is the same whatever the horizon, so a walk that finishes takes
+/// the same frames under every horizon at or above them, and stops under every smaller one.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn fixed_cascade_within(
     sections: &[SvfWords],
     gain: f64,
     law: &FlushLaw,
     peaks: [f64; 2],
     horizon: u64,
-) -> Option<CascadeWalk> {
+) -> CascadeWalk {
     let mut walked = 0_u64;
-    let result = fixed_cascade_walk(sections, gain, law, peaks, &mut walked, horizon)?;
-    Some(CascadeWalk {
+    let result = fixed_cascade_walk(sections, gain, law, peaks, &mut walked, horizon);
+    CascadeWalk {
         result,
         frames: walked,
-    })
+    }
 }
 
 #[allow(clippy::too_many_lines)]

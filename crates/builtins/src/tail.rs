@@ -1,10 +1,13 @@
 //! The builtin input section's certified tail and exact-rest bounds (issue #1329; decision 15
 //! D15-4(b)).
 //!
-//! Control-plane only. [`fixed_input_bound`] runs once per distinct design when a session is
-//! prepared (`crate::input_section_bounds`); [`input_section_live_bound`] is called by the compiler
-//! for a session with a live input lane. Neither is reachable from a render path, both allocate
-//! (through `math::tail`), and nothing render owns stores their results (#1329 Amendment 4, R5).
+//! Control-plane only. When a session is prepared (`crate::input_section_bounds`),
+//! [`fixed_input_bound`] runs at most once per distinct design, and only while the preparation's
+//! budget covers it and no [`InputBoundCache`] given to the preparation holds the design (#1457);
+//! a design past the budget reports the live bound. The compiler reads the live bound from
+//! [`input_section_live_bound_table`] and computes [`input_section_live_bound`] nowhere; the table's
+//! gate computes it. Neither computation is reachable from a render path, both allocate (through
+//! `math::tail`), and nothing render owns stores their results (#1329 Amendment 4, R5).
 //!
 //! Every bound is computed under the canonical floating-point environment
 //! (`lane::CanonicalFpEnv`): round to nearest with full subnormals, as on every target, whatever
@@ -145,49 +148,56 @@ fn section_words(section: &SvfSection) -> SvfWords {
     ])
 }
 
-/// One design's bound and its charge: the frames its computation walked (#1457 D1, D3).
+/// One design's bound and its charge (#1457 D1, D3, Amendment 3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChargedInputBound {
     /// The design's own certified bound ([`crate::input_section_bound`]).
     pub bound: InputSectionBound,
-    /// The frames `math::tail::fixed_cascade` walked to compute it, over both channels: what it
-    /// charges a preparation's budget, whether computed or read from an [`InputBoundCache`].
+    /// The frames `math::tail::fixed_cascade` walked to compute it, over both channels.
     pub frames: u64,
+    /// What it charges a preparation's budget, in frame-equivalents, whether computed or read from
+    /// an [`InputBoundCache`]: its [`frames`](Self::frames), plus [`INPUT_BOUND_DESIGN_CHARGE`]
+    /// once, plus [`INPUT_BOUND_SECTION_CHARGE`] for each enabled section it walks (both
+    /// channels' when they differ, one channel's when they are the same).
+    pub charge: u64,
 }
 
 /// D4: the bound of a prepared input section whose designs never change, the maximum over its
 /// two channels. Each channel is its trim (a gain of `|trim|` on the peak) followed by its enabled
 /// sections in order, HPF then LPF; a disabled section is the exact identity and is left out.
 ///
-/// #1457 D3: the walk takes at most `horizon` frames over both channels; `None` when it would take
-/// more. Under a horizon at or above its charge the result is the same, bit for bit.
+/// #1457 D3: the computation charges at most `budget` frame-equivalents over both channels
+/// ([`ChargedInputBound::charge`]); `None` when it would charge more. The design's fixed charge
+/// and each cascade's section charges are reserved before its walk, so the frames walked never
+/// pass the budget, a stopped design included. Under a budget at or above its charge the result is the same, bit for bit.
 pub(crate) fn fixed_input_bound(
     sample_rate: u32,
     lanes: [&InputLane; 2],
-    horizon: u64,
+    budget: u64,
 ) -> Option<ChargedInputBound> {
-    let bound = fixed_input_walk(sample_rate, lanes, horizon);
+    let (bound, walked) = fixed_input_walk(sample_rate, lanes, budget);
     #[cfg(any(test, feature = "test-support"))]
     {
-        if bound.is_some() {
+        if let Some(bound) = bound {
             FIXED_INPUT_BOUNDS.with(|count| count.set(count.get() + 1));
+            FIXED_INPUT_CHARGED.with(|count| count.set(count.get() + bound.charge));
         }
-        // A stopped walk took its whole horizon: it stops only when one more frame would pass it.
-        let walked = bound.map_or(horizon, |bound| bound.frames);
+        // The frames really walked, a stopped walk's included (#1457 attempt 1, MJ2).
         FIXED_INPUT_FRAMES.with(|count| count.set(count.get() + walked));
     }
     bound
 }
 
+/// The bound under `budget` and the frames walked, finished or stopped.
 fn fixed_input_walk(
     sample_rate: u32,
     lanes: [&InputLane; 2],
-    horizon: u64,
-) -> Option<ChargedInputBound> {
+    budget: u64,
+) -> (Option<ChargedInputBound>, u64) {
     let _environment = lane::CanonicalFpEnv::enter();
     let law = input_section_flush_law(sample_rate);
     let peaks = rest_peaks();
-    let channel = |lane: &InputLane, horizon: u64| -> Option<ChargedInputBound> {
+    let channel = |lane: &InputLane, budget: u64| -> (Option<ChargedInputBound>, u64) {
         let mut sections = [section_words(&lane.hpf); 2];
         let mut count = 0;
         for section in [&lane.hpf, &lane.lpf] {
@@ -197,67 +207,131 @@ fn fixed_input_walk(
             }
         }
         if count == 0 {
-            return Some(ChargedInputBound {
+            let zero = ChargedInputBound {
                 bound: InputSectionBound::ZERO,
                 frames: 0,
-            });
+                charge: 0,
+            };
+            return (Some(zero), 0);
         }
+        // The sections' fixed charge is reserved first: what is left is the walk's horizon.
+        let fixed = INPUT_BOUND_SECTION_CHARGE * count as u64;
+        let Some(horizon) = budget.checked_sub(fixed) else {
+            return (None, 0);
+        };
         let gain = f64::from(lane.trim_signed.abs());
-        let walk = fixed_cascade_within(&sections[..count], gain, &law, peaks, horizon)?;
-        Some(ChargedInputBound {
-            bound: walk.result.map_or(InputSectionBound::UNBOUNDED, |bound| {
+        let walk = fixed_cascade_within(&sections[..count], gain, &law, peaks, horizon);
+        let charged = walk.result.map(|result| ChargedInputBound {
+            bound: result.map_or(InputSectionBound::UNBOUNDED, |bound| {
                 InputSectionBound::from_cascade(&bound)
             }),
             frames: walk.frames,
-        })
+            charge: walk.frames + fixed,
+        });
+        (charged, walk.frames)
     };
-    let left = channel(lanes[0], horizon)?;
+    // A memoryless design (no section enabled on either channel) walks and charges nothing.
+    if lanes
+        .iter()
+        .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
+    {
+        return channel(lanes[0], 0);
+    }
+    // The design's fixed charge is reserved before either channel.
+    let Some(budget) = budget.checked_sub(INPUT_BOUND_DESIGN_CHARGE) else {
+        return (None, 0);
+    };
+    let (left, left_walked) = channel(lanes[0], budget);
+    let Some(left) = left else {
+        return (None, left_walked);
+    };
     // The common case, two channels with the same design and trim magnitude, is bounded once.
     let same = |a: &SvfSection, b: &SvfSection| a.words() == b.words() && a.enabled == b.enabled;
-    if same(&lanes[0].hpf, &lanes[1].hpf)
+    let (right, right_walked) = if same(&lanes[0].hpf, &lanes[1].hpf)
         && same(&lanes[0].lpf, &lanes[1].lpf)
         && lanes[0].trim_signed.abs().to_bits() == lanes[1].trim_signed.abs().to_bits()
     {
-        return Some(left);
-    }
-    let right = channel(lanes[1], horizon - left.frames)?;
-    Some(ChargedInputBound {
+        let none = ChargedInputBound {
+            bound: left.bound,
+            frames: 0,
+            charge: 0,
+        };
+        (Some(none), 0)
+    } else {
+        channel(lanes[1], budget - left.charge)
+    };
+    let walked = left_walked + right_walked;
+    let charged = right.map(|right| ChargedInputBound {
         bound: left.bound.max(right.bound),
         frames: left.frames + right.frames,
-    })
+        charge: INPUT_BOUND_DESIGN_CHARGE + left.charge + right.charge,
+    });
+    (charged, walked)
 }
 
-/// #1457 D1: the frames-walked budget of one preparation's design bounds, charged in strip order
-/// (`crate::input_section_bounds`): 20 ms of near-top design work on the CI-class runner (x86-64-v3,
-/// release, one pinned core), where near-top designs walk 75,500-81,000 frames per ms. Its purpose
-/// is that typical sessions bound every distinct design exactly: the 64-track console documents
-/// (64 distinct designs) fit at every launch rate. Cheaper designs walk fewer frames per ms
-/// (typical 57,000-73,000, the cheapest, a 1 kHz LPF of 513 frames, about 47,500), so a session of
-/// many cheap distinct designs can spend about 32 ms. A design past the budget reports the rate's
-/// live bound (D3). The issue's attempt record states the measurements.
+/// #1457 D1 (Amendment 3, MJ1): the fixed charge of each distinct design a preparation computes,
+/// in frame-equivalents, on top of its sections' charges and the frames it walks.
+///
+/// Calibrated with `examples/input_bound_budget.rs calibrate` (the issue's attempt record): one
+/// distinct design's whole preparation cost (its keying, the walk, the cache insertion) is fitted
+/// against its frames per design class, on walks of at most 16,384 frames. The fixed cost is the
+/// sections': at most 5.6 us for a cascade of one section, 13.7 us for a cascade of two, 10.9 us
+/// for two one-section cascades and 22.7 us for two two-section cascades. Split into a per-design
+/// and a per-section term, the per-design term is negative (-2.8 to -2.1 us), so this charge is
+/// zero and [`INPUT_BOUND_SECTION_CHARGE`] carries the whole fixed cost. A change to the walk
+/// reruns the calibration and restates both.
+pub const INPUT_BOUND_DESIGN_CHARGE: u64 = 0;
+
+/// #1457 D1 (Amendment 3, MJ1): the fixed charge of each enabled section a design's computation
+/// walks, in frame-equivalents (both channels' sections when they differ, one channel's when they
+/// are the same).
+///
+/// A frame-equivalent is the time of one near-top frame on the CI-class runner, `1 / 75,500` ms
+/// (the reference of [`INPUT_BOUND_BUDGET_FRAMES`]). The largest measured fixed cost per section is
+/// a cascade of two sections, 13.7 us (6.9 us a section, 518 frame-equivalents; the calibration's
+/// classes and rates are in the issue's attempt record), so 520 frame-equivalents bound the fixed
+/// cost of every class measured; the other classes are charged above their cost.
+pub const INPUT_BOUND_SECTION_CHARGE: u64 = 520;
+
+/// #1457 D1: the budget of one preparation's design bounds, in frame-equivalents, charged in strip
+/// order (`crate::input_section_bounds`). Each distinct design computed charges the frames it walks
+/// plus [`INPUT_BOUND_DESIGN_CHARGE`] and [`INPUT_BOUND_SECTION_CHARGE`] per section; a cache hit
+/// charges the same stored amount.
+///
+/// It is 20 ms of near-top design work (75,500 frames per ms) on the CI-class runner; this
+/// workstation (x86-64-v3, release, one pinned core) stood in for that runner. Its purpose is that
+/// typical sessions bound every distinct design exactly: the 64-track console documents (64
+/// distinct designs) fit at every launch rate. With the fixed charges the budget bounds the real
+/// work of every design family measured (gate 2, `examples/input_bound_budget.rs`), not only of
+/// near-top designs; the attempt record states the measured worst case and its spread. A design
+/// past the budget reports the rate's live bound (D3).
 pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
 
 /// #1457 D2: the entry cap of [`InputBoundCache::new`]. The cache holds only designs with an
-/// enabled section, and such a walk takes at least 257 frames (one 256-frame block of the majorant
-/// pass and one deviation frame) unless a section does not contract, which no design in the cutoff
-/// domain does (the live bound covers them all). So one preparation computes at most
-/// `INPUT_BOUND_BUDGET_FRAMES / 257` = 5,875 designs exactly, and stops one more:
-/// the cap holds a whole preparation's designs, so a rebuild of any unchanged session is served
-/// entirely from the cache. An entry is under 256 bytes, so the cache stays under about 2 MiB.
+/// enabled section, and such a design charges at least 777 frame-equivalents (a walk of at least
+/// 257 frames, one 256-frame block of the majorant pass and one deviation frame, plus one section's
+/// charge). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 777` = 1,943 designs
+/// exactly, and stops one more: the cap holds a whole preparation's designs. A rebuild of an
+/// unchanged session is served entirely from the cache only while the cache has not been cleared
+/// since that session's designs were inserted: a cache shared by several sessions (an engine's,
+/// #1471) can fill and clear in the middle of a preparation, and a cleared design is computed
+/// again, with the same result. A full cache of 8,192 entries holds about 2.4 MiB (2,486,520 bytes
+/// measured, about 304 bytes an entry; the attempt record).
 pub const INPUT_BOUND_CACHE_ENTRIES: usize = 8192;
 
 /// A control-side cache of input-section design bounds across preparations (#1457 D2), keyed by
 /// what a design's bound depends on (the rate, both channels' section words and trim magnitudes).
 ///
 /// An entry keeps either its design's bound with its charge ([`ChargedInputBound`]), or, for a
-/// design whose walk a preparation's remaining budget stopped, the horizon it passed (its charge
-/// is above it). A hit charges the preparation's budget exactly what the computation would: the
-/// stored frames, or, when the remaining budget is at most the passed horizon, the whole remainder
-/// and the live bound, which is what the stopped walk did. So every reported bound is the same with
-/// and without the cache, cold or warm (gate 3), and a rebuild of an unchanged session walks no
-/// frame. When an insertion would pass the entry cap the cache is cleared first (clear-on-full):
-/// the cap bounds its memory, and a cleared design is computed again with the same result.
-/// Render never reads it.
+/// design whose computation a preparation's remaining budget stopped, that remaining budget (its
+/// charge is above it). A hit charges the preparation's budget exactly what the computation would:
+/// the stored charge, or, when the remaining budget is at most the stored one, the whole remainder
+/// and the live bound, which is what the stopped computation did. So every reported bound is the
+/// same with and without the cache, cold or warm (gate 3), and a rebuild of an unchanged session
+/// walks no frame while the cache still holds its designs. When an insertion would pass the entry
+/// cap the cache is cleared first (clear-on-full): the cap bounds its memory, and a cleared design
+/// is computed again with the same result ([`INPUT_BOUND_CACHE_ENTRIES`] states when a rebuild is
+/// served entirely from the cache). Render never reads it.
 #[derive(Clone, Debug)]
 pub struct InputBoundCache {
     entries: std::collections::BTreeMap<InputBoundKey, CachedDesign>,
@@ -267,9 +341,10 @@ pub struct InputBoundCache {
 /// One cached design (#1457 D2).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CachedDesign {
-    /// The design's bound and the frames its walk took.
+    /// The design's bound, the frames its walk took and its charge.
     Bound(ChargedInputBound),
-    /// The design's walk took more than this many frames (a stopped walk's horizon, above zero).
+    /// The design charges more than this many frame-equivalents (the remaining budget that
+    /// stopped it, above zero).
     ChargeAbove(u64),
 }
 
@@ -337,6 +412,11 @@ thread_local! {
     /// How many frames [`fixed_input_bound`]'s walks took on this thread, stopped walks included
     /// (#1457). Read through `crate::test_support::fixed_input_frames_walked`.
     pub(crate) static FIXED_INPUT_FRAMES: core::cell::Cell<u64> =
+        const { core::cell::Cell::new(0) };
+    /// The charges of the bounds [`fixed_input_bound`] computed on this thread, in
+    /// frame-equivalents (#1457 Amendment 3). Read through
+    /// `crate::test_support::fixed_input_charged`.
+    pub(crate) static FIXED_INPUT_CHARGED: core::cell::Cell<u64> =
         const { core::cell::Cell::new(0) };
 }
 
