@@ -29,17 +29,19 @@
 //!   its live bound has spent to within one design's section charges.
 //! * **Calibrate.** Two fixed-cost measurements, separate from gate 2, that set the charge
 //!   constants. Every sample is a **batch** (root's ruling (c) of 2026-10-08 on #1465): one
-//!   preparation, with a fresh cache and no budget limit, of `BATCH` = 48 *different* designs of
-//!   one class walked back to back in strip order, as a real preparation walks each distinct
-//!   design once, so that a sample of the shortest designs (about 25-30 us a walk) lasts at least
-//!   about 1 ms; the example asserts that every design of a batch is computed. A sample of one
+//!   preparation, with a fresh cache and no budget limit, of *different* designs of one class
+//!   walked back to back in strip order, as a real preparation walks each distinct design once,
+//!   so that every sample lasts at least about 1 ms: 96 designs of one cascade of one section
+//!   (the shortest walks, about 12-14 us each), 64 of one cascade of two sections (about 20 us at
+//!   513 frames) and 48 of each two-cascade class; calibrate prints each class's shortest batch
+//!   sample. The example asserts that every design of a batch is computed. A sample of one
 //!   short walk moved the constant by about 10 % with the box's load. First, per design class (one
 //!   or two channel cascades, one or two sections each), the grid's designs ordered by the frames
-//!   each walks and cut into batches of 48 consecutive designs (the remainder folded into the last
-//!   batch), and the least-squares line of each batch's median time per design against its frames
-//!   per design: its intercept is the class's fixed cost, and `INPUT_BOUND_SECTION_CHARGE` is the
+//!   each walks and cut into batches of the class's size (the remainder folded into the last
+//!   batch; each class's fit reads at least five batches a rate), and the least-squares line of
+//!   each batch's median time per design against its frames per design: its intercept is the class's fixed cost, and `INPUT_BOUND_SECTION_CHARGE` is the
 //!   largest fixed cost per section in frame-equivalents. Then the frame classes (#1474 root
-//!   ruling: every class), each short point (typical and cheap) a batch of 48 different designs
+//!   ruling: every class), each short point (typical and cheap) a batch of 64 different designs
 //!   next to it (its HPF or LPF raised by 0.05 Hz a design, as gate 2's families step them) and
 //!   each near-top point (a walk of over 5 ms) its own single walk: the time per walked frame, net of the
 //!   fixed cost of one cascade of two sections, of long near-top walks (an HPF at 0.50-0.99 of the
@@ -425,30 +427,50 @@ fn gate_two() {
 /// it.
 const CALIBRATION_FRAMES: u64 = 16_384;
 
-/// The designs of one calibration batch (root's ruling (c) of 2026-10-08 on #1465): `BATCH`
-/// different designs of one class, walked back to back by one preparation, so that one sample of
-/// the shortest designs (about 25-30 us a walk) lasts at least about 1 ms. A class whose design
-/// count is not a multiple of `BATCH` folds the remainder into its last batch (`BATCH` to
-/// `2 BATCH - 1` designs).
+/// The designs of one calibration batch (root's ruling (c) of 2026-10-08 on #1465): a number of
+/// different designs of one class, walked back to back by one preparation, so that one sample
+/// lasts at least about 1 ms. The number is set per class from the class's shortest walks on the
+/// box of record: one cascade of one section (about 12-14 us a walk) takes `BATCH_ONE_SECTION`,
+/// one cascade of two sections and the frame classes' short points (about 20-25 us a walk at
+/// 513 frames) take `BATCH_TWO_SECTIONS`, and the two-cascade classes (about 24 us or more a walk)
+/// take `BATCH`. A class whose design count is not a multiple of its number folds the remainder
+/// into its last batch (`n` to `2 n - 1` designs).
 const BATCH: usize = 48;
+const BATCH_TWO_SECTIONS: usize = 64;
+const BATCH_ONE_SECTION: usize = 96;
 
-/// A design class of the calibration (its name and the sections it walks) and its grid at a rate:
-/// cutoffs on a 48-step geometric grid from 40 Hz to the maximum, trims of 0, +12 and +24 dB.
-fn calibration_classes(rate: u32) -> [(&'static str, u64, Vec<BuiltinParameters>); 4] {
+/// The fewest batches a class's fit reads at a rate (batches whose designs walk at most
+/// `CALIBRATION_FRAMES`).
+const FIT_BATCHES: usize = 5;
+
+/// A geometric grid of `count` cutoffs from 40 Hz to the maximum (the last one `f32` below it).
+fn cutoff_grid(top: f32, count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|step| {
+            (40.0 * math::powf(top / 40.0, step as f32 / (count - 1) as f32)).min(below(top, 1))
+        })
+        .collect()
+}
+
+/// A design class of the calibration (its name, the sections it walks and its batch size) and its
+/// grid at a rate: cutoffs on a 48-step geometric grid from 40 Hz to the maximum (a 96-step grid
+/// for one cascade of one section, so that its batches of 96 still give at least `FIT_BATCHES`
+/// batches a rate), trims of 0, +12 and +24 dB.
+fn calibration_classes(rate: u32) -> [(&'static str, u64, usize, Vec<BuiltinParameters>); 4] {
     let top = maximum(rate);
-    let cutoffs: Vec<f32> = (0..48)
-        .map(|step| (40.0 * math::powf(top / 40.0, step as f32 / 47.0)).min(below(top, 1)))
-        .collect();
+    let cutoffs = cutoff_grid(top, 48);
     let at = |index: usize| cutoffs[index % cutoffs.len()];
     let mut one = Vec::new();
     let mut two = Vec::new();
     let mut split_one = Vec::new();
     let mut split_two = Vec::new();
     for trim in [0.0_f32, 12.0, 24.0] {
-        for index in 0..cutoffs.len() {
-            let cutoff = at(index);
+        for cutoff in cutoff_grid(top, 96) {
             one.push(same(trim, 0.0, cutoff));
             one.push(same(trim, cutoff, 0.0));
+        }
+        for index in 0..cutoffs.len() {
+            let cutoff = at(index);
             for upper in index + 1..cutoffs.len() {
                 two.push(same(trim, cutoff, at(upper)));
             }
@@ -470,10 +492,10 @@ fn calibration_classes(rate: u32) -> [(&'static str, u64, Vec<BuiltinParameters>
         }
     }
     [
-        ("one cascade of one section", 1, one),
-        ("one cascade of two sections", 2, two),
-        ("two cascades of one section", 2, split_one),
-        ("two cascades of two sections", 4, split_two),
+        ("one cascade of one section", 1, BATCH_ONE_SECTION, one),
+        ("one cascade of two sections", 2, BATCH_TWO_SECTIONS, two),
+        ("two cascades of one section", 2, BATCH, split_one),
+        ("two cascades of two sections", 4, BATCH, split_two),
     ]
 }
 
@@ -524,7 +546,7 @@ fn preparation(rate: u32, designs: &[BuiltinParameters]) -> (f64, u64, u64) {
     )
 }
 
-/// One calibration batch: `BATCH` (or up to `2 BATCH - 1`) different designs of one class, each
+/// One calibration batch: `n` (or up to `2 n - 1`) different designs of one class, each
 /// sample a back-to-back preparation of all of them, and for evidence each design's single walk
 /// (a one-strip preparation of it alone) measured in the same round, right after the batch.
 struct Batch {
@@ -615,25 +637,25 @@ impl Batch {
 }
 
 /// A class's designs at a rate in batches: ordered by the frames each walks (so that a batch's
-/// designs are alike and the fit reads each batch at one length), then cut into `BATCH`
+/// designs are alike and the fit reads each batch at one length), then cut into `size`
 /// consecutive designs, the remainder folded into the last batch.
-fn batches(rate: u32, name: &str, designs: &[BuiltinParameters]) -> Vec<Batch> {
+fn batches(rate: u32, name: &str, size: usize, designs: &[BuiltinParameters]) -> Vec<Batch> {
     let mut walked: Vec<(u64, BuiltinParameters)> = designs
         .iter()
         .map(|design| (preparation(rate, std::slice::from_ref(design)).1, *design))
         .collect();
     walked.sort_by_key(|(frames, _)| *frames);
-    assert!(walked.len() >= BATCH, "{name}: fewer than {BATCH} designs");
-    let count = walked.len() / BATCH;
+    assert!(walked.len() >= size, "{name}: fewer than {size} designs");
+    let count = walked.len() / size;
     (0..count)
         .map(|index| {
             let end = if index + 1 == count {
                 walked.len()
             } else {
-                (index + 1) * BATCH
+                (index + 1) * size
             };
             Batch::new(
-                walked[index * BATCH..end]
+                walked[index * size..end]
                     .iter()
                     .map(|(_, design)| *design)
                     .collect(),
@@ -721,8 +743,8 @@ type Point = (String, Vec<BuiltinParameters>);
 
 /// The frame-class points at a rate, grouped by class and trim (#1474 root ruling: every class).
 /// Every point is one cascade of two sections, the same on both channels. A short point (typical,
-/// about 3,000-25,000 frames a walk, and cheap, 513-1,025) is measured as a batch of `BATCH` different designs
-/// of its class next to it, its HPF (typical) or LPF (cheap) raised by 0.05 Hz per design, as gate
+/// about 3,000-25,000 frames a walk, and cheap, 513-1,025) is measured as a batch of
+/// `BATCH_TWO_SECTIONS` different designs of its class next to it, its HPF (typical) or LPF (cheap) raised by 0.05 Hz per design, as gate
 /// 2's families step them. A near-top walk is long (about 400,000-530,000 frames, over 5 ms), so
 /// its point is a batch of one design, its own single walk.
 fn frame_class_points(rate: u32) -> Vec<(String, Vec<Point>)> {
@@ -753,7 +775,9 @@ fn frame_class_points(rate: u32) -> Vec<(String, Vec<Point>)> {
             for lpf in [16_000.0_f32, 18_000.0, 20_000.0] {
                 points.push((
                     format!("{hpf} Hz into {lpf} Hz"),
-                    steps(BATCH, &|step| same(trim, hpf + step as f32 * 0.05, lpf)),
+                    steps(BATCH_TWO_SECTIONS, &|step| {
+                        same(trim, hpf + step as f32 * 0.05, lpf)
+                    }),
                 ));
             }
         }
@@ -773,7 +797,9 @@ fn frame_class_points(rate: u32) -> Vec<(String, Vec<Point>)> {
         .map(|(hpf, lpf)| {
             (
                 format!("{hpf} Hz into {lpf} Hz"),
-                steps(BATCH, &|step| same(trim, hpf, lpf + step as f32 * 0.05)),
+                steps(BATCH_TWO_SECTIONS, &|step| {
+                    same(trim, hpf, lpf + step as f32 * 0.05)
+                }),
             )
         })
         .collect();
@@ -879,7 +905,7 @@ fn fixed_costs(recorded: &mut Vec<Design>) -> ([f64; 4], f64) {
         let classes = calibration_classes(rate);
         let mut measured: Vec<Vec<Batch>> = classes
             .iter()
-            .map(|(name, _, designs)| batches(rate, name, designs))
+            .map(|(name, _, size, designs)| batches(rate, name, *size, designs))
             .collect();
         // Points: the batch's longest design walk, its frames per design, its ns per design.
         let fit = |name: &str, walked: u64, label: &str, points: &[(u64, f64, f64)]| -> f64 {
@@ -888,6 +914,11 @@ fn fixed_costs(recorded: &mut Vec<Design>) -> ([f64; 4], f64) {
                 .filter(|point| point.0 <= CALIBRATION_FRAMES)
                 .map(|point| (point.1, point.2))
                 .collect();
+            assert!(
+                short.len() >= FIT_BATCHES,
+                "{rate} Hz, {name}: {} short batches, fewer than {FIT_BATCHES}",
+                short.len()
+            );
             let (intercept, slope) = line(&short);
             let (low, high) = short.iter().fold((f64::MAX, 0.0_f64), |(low, high), p| {
                 (low.min(p.0), high.max(p.0))
@@ -935,7 +966,7 @@ fn fixed_costs(recorded: &mut Vec<Design>) -> ([f64; 4], f64) {
                 round.to_string()
             };
             let mut intercepts = [0.0_f64; 4];
-            for (class, (name, walked, _)) in classes.iter().enumerate() {
+            for (class, (name, walked, _, _)) in classes.iter().enumerate() {
                 let points: Vec<(u64, f64, f64)> = measured[class]
                     .iter_mut()
                     .map(|batch| {
@@ -952,7 +983,7 @@ fn fixed_costs(recorded: &mut Vec<Design>) -> ([f64; 4], f64) {
             summary(&label, &intercepts);
         }
         let mut intercepts = [0.0_f64; 4];
-        for (class, (name, walked, _)) in classes.iter().enumerate() {
+        for (class, (name, walked, _, _)) in classes.iter().enumerate() {
             let points: Vec<(u64, f64, f64)> = measured[class]
                 .iter()
                 .map(|batch| {
@@ -1014,6 +1045,30 @@ fn calibrate() {
         shortest.what,
         shortest.count
     );
+    // Root's ruling (c): every batch sample lasts at least about 1 ms; per class, its shortest.
+    let mut shortest_per_class: Vec<&Design> = Vec::new();
+    for design in &recorded {
+        match shortest_per_class
+            .iter_mut()
+            .find(|entry| entry.class == design.class)
+        {
+            Some(entry) => {
+                if design.smallest() < entry.smallest() {
+                    *entry = design;
+                }
+            }
+            None => shortest_per_class.push(design),
+        }
+    }
+    for design in shortest_per_class {
+        println!(
+            "shortest batch sample, {}: {:.3} ms, {} ({} designs)",
+            design.class,
+            design.smallest() * 1e-6,
+            design.what,
+            design.count
+        );
+    }
     let raw = recorded
         .iter()
         .max_by(|a, b| {

@@ -32,11 +32,12 @@ on reads `sigma_t` (`CompositionBound::tail_clause`). The two differ where the f
 The share `3/4` is #1329's split: `T` certifies `eps / 2` for the exact reference and `eps / 4`
 for the relative `f32` deviation; the last quarter is the stall's. So (N2) at `k = 0`,
 `epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma_t / eps`, and
-`P* <= P^ < 2 * 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*` with #1329's flush floor
+`P* <= P^ < 2 * 10^(1/2000) (1 + 2^-20) P* < 2.0024 P*` with #1329's flush floor
 `P* = F a / (eps / 2 - g dev_core)` (`g dev_core < eps / 4` at `T`; "The stalls `sigma_p` and
 `sigma_t`" below).
 `P^` can exceed `2 P*`: the release `tail_contract` run gives `P^ >= 2 P*` on 16 of its 112 F3
-rows, with a maximum ratio of 2.0016 (88.2 kHz, 1 kHz HPF at 0 dB). Nothing #1329 certified
+rows, with a maximum ratio of 2.0016 (88.2 kHz, 1 kHz HPF at 0 dB; four more rows round to the
+same 2.0016 at four digits: 88.2 kHz, 1 kHz LPF at 0 dB, and three 48 kHz rows). Nothing #1329 certified
 changes: `T`, `T_rest`, both rests and `P*` are computed exactly as before.
 
 ## A fixed design (#1329 D4)
@@ -135,7 +136,10 @@ for each half separately.
   nothing after it (the remainder needs `t >= 1`). `H` is sound for every `t0`: the pass's
   remainder sums `w(H)` bound the half from `H` on, and the offset `o = H - T` claims nothing
   before `H`. No builtin design reaches `t0 = 0`: the threshold is at most about `0.5` (the
-  -144 dB trim floor) and `O >= ||h_1||_1 >= 1`, so `t0 >= 256`. Only `math::tail`'s own `gain`
+  -144 dB trim floor) and `O >= ||h_1||_1 >= 1`, so `t0 >= 1`. (Measured: on a grid of 2,112
+  builtin designs, at 4 rates, 11 x 11 cutoffs and 8 trims from -144 to +24 dB, 346 rows have
+  `t0 < 256` and the least is `t0 = 2`; a design whose output majorant is concentrated in its
+  first frames crosses inside block 0.) Only `math::tail`'s own `gain`
   below the trim floor reaches it (`math` test
   `the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero`).
 * deviation: the state at the walk's last frame `F_dev` (the frame from which it falls).
@@ -214,11 +218,16 @@ the walked crossings is measured in the #1465 attempt record.
   *Where a loss goes.* A loss `e` in an entry `(i, j)` of an intermediate power `G^(2^s)` reaches
   the result `G^m z` as `G^a E G^b z` with `E = e e_i e_j^T` and `a + 2^s + b = m`: two power
   factors, and proportional to the state. Its component `p` is at most
-  `1.07^2 R_pi e (R z)_j <= 1.15 n e r^2 max_q z_q`, `r < 2^123` the largest entry of `R`. A loss
-  `e` in a product of a power by the vector reaches the result through one power, at most
-  `1.07 r e`. With fewer than `2^12` roundings in all (at most 26 squarings of a `4 x 4`
-  matrix, `26 * 16 * 4` products, and 27 applications, `27 * 4 * 4`, since `m < HORIZON_LIMIT =
-  2^26`), each `e <= 2^-1075`, a carried component errs by less than
+  `1.07^2 R_pi e (R z)_j <= 1.15 n e r^2 max_q z_q`, `r < 2^123` the largest entry of `R`. The
+  computed `G^(2^s)` is used many times: it is squared into each higher power, so its loss reaches
+  the result about `m / 2^s` times, each copy at a different left exponent `a`. The bound holds for
+  the sum of the copies, because their left factors sum to at most `sum_a G^a <= R` (at most
+  `1.07 R` for the computed powers), which is the `R_pi` above. A loss `e` in a product of a power
+  by the vector reaches the result through one power, at most `1.07 r e`. With fewer than `2^12`
+  rounding sites in all (since `m < HORIZON_LIMIT = 2^26`: at most 26 squarings of a `4 x 4`
+  matrix, `26 * 16 * 4` products and `26 * 16` `SLACK` products of the entries, and 27
+  applications, `27 * 4 * 4` products and `27 * 4` `SLACK` products of the `dot`s; 2,620 sites),
+  each `e <= 2^-1075`, a carried component errs by less than
   `2^12 2^-1075 (2^3 2^246 max z + 2^124) = 2^-814 max z + 2^-939`.
   *The states.* Per unit of `g X`, with #1329's builtin constants (`beta_k <= 2`,
   `gamma_k <= 1.42`, `|d_k| <= 1`) and the verified gap: the reference's majorant state has
@@ -265,10 +274,14 @@ deviation at every frame, so it serves (N1) and, a fortiori, (N2) (#1484 S-D5). 
 the common value. `P^ = 4 sigma_t / eps >= 4 F a / eps >= P*` because
 `eps / 2 - g dev_core >= eps / 4` (#1329's `T` puts `g dev_core` below `eps / 4`). Above:
 `P* >= 2 F a / eps` (`g dev_core >= 0`), and `ceil_mB` adds less than one millibel plus
-`|x| 2^-30 + 2^-30`, so `sigma < 10^(1/2000) (1 + 2^-29) F a` and
-`P^ < 2 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*`. The bound `2 P*` itself does not hold: when
+`|x| 2^-30 + 2^-30` millibels, `x = 2000 log10(F a)` the level in millibels. Every positive finite
+`f64` has `|x| < 650,000` mB (from about -646,600 mB at `2^-1074` to about +616,500 mB at the
+largest `f64`; the stalls themselves are at about -33,000 to -76,000 mB), so the margin is below
+`650,001 2^-30 < 6.1 10^-4` mB and multiplies the level by at most
+`10^(6.1 10^-4 / 2000) < 1 + 7 10^-7 < 1 + 2^-20`. So `sigma < 10^(1/2000) (1 + 2^-20) F a` and
+`P^ < 2 10^(1/2000) (1 + 2^-20) P* = 2.0023059 P* < 2.0024 P*`. The bound `2 P*` itself does not hold: when
 `g dev_core` is very small, `P*` is near `2 F a / eps` and the millibel rounding alone lifts `P^`
-above `2 P*` (16 of 112 F3 rows, at most 2.0016).
+above `2 P*` (16 of 112 F3 rows, at most 2.0016, which five rows reach at four digits).
 
 ### A channel with its filters disabled
 

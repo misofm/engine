@@ -3147,7 +3147,11 @@ mod tests {
     /// least gain with `t0 > 0` and checks the 64 gains below it (one `f64` step each), where any such
     /// tie lies: from `T + crossing(k)` on, the walked majorant suffix (a lower bound of what the
     /// reference half bounds) is below `h 10^-k`. These gains are below the builtin trim floor; only
-    /// `math::tail`'s own `gain` reaches them.
+    /// `math::tail`'s own `gain` reaches them. A tie is seen from outside by the frames walked: the
+    /// replay walks one more block, so a `t0 = 0` gain that walks as many frames as the least gain
+    /// with `t0 > 0` (whose crossing is in the first block, a gain one `f64` step away) replayed the
+    /// first block. The test requires a tie in the two designs that have one (`BAND_HPFS[1]`, and
+    /// `LOW_LPF` into `TOP_LPF`), so that it cannot lose its power silently.
     #[test]
     fn the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero() {
         let law = FlushLaw {
@@ -3155,14 +3159,18 @@ mod tests {
             rest_eps: 1.0e-14,
             silence_frames: 2_400,
         };
-        let designs: [std::vec::Vec<SvfWords>; 4] = [
-            std::vec![words(LOW_LPF)],
-            std::vec![words(BAND_HPFS[1])],
-            std::vec![words(BAND_HPFS[2])],
-            std::vec![words(BAND_HPFS[0]), words(LOW_LPF)],
+        // Each design and whether it has a tie among its 64 gains.
+        let designs: [(std::vec::Vec<SvfWords>, bool); 5] = [
+            (std::vec![words(LOW_LPF)], false),
+            (std::vec![words(BAND_HPFS[1])], true),
+            (std::vec![words(BAND_HPFS[2])], false),
+            (std::vec![words(BAND_HPFS[0]), words(LOW_LPF)], false),
+            (std::vec![words(LOW_LPF), words(TOP_LPF)], true),
         ];
         let peaks = [16.0, 1.0e30];
-        for sections in &designs {
+        for (sections, tied) in &designs {
+            let frames =
+                |gain: f64| fixed_cascade_within(sections, gain, &law, peaks, u64::MAX).frames;
             let bound = |gain: f64| fixed_cascade(sections, gain, &law, peaks).expect("a bound");
             // The `t0 = 0` boundary: `t0 = 0` at `low`, `t0 > 0` at `high`.
             let (mut low, mut high) = (1.0e-30_f64, 1.0_f64);
@@ -3182,6 +3190,17 @@ mod tests {
             let gains: std::vec::Vec<f64> = (0..64)
                 .map(|step| f64::from_bits(low.to_bits() - step))
                 .collect();
+            assert!(bound(high).tail_reference < super::BLOCK as u64);
+            let replayed = frames(high);
+            let ties = gains
+                .iter()
+                .filter(|&&gain| bound(gain).tail_reference == 0 && frames(gain) == replayed)
+                .count();
+            assert!(
+                !tied || ties > 0,
+                "{} section(s): no tie among the 64 gains below the boundary {high:e}",
+                sections.len()
+            );
             let checks: std::vec::Vec<(f64, u64, super::HalfCertificate)> = gains
                 .iter()
                 .filter_map(|&gain| {

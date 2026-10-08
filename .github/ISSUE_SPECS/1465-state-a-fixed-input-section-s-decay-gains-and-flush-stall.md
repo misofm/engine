@@ -47,9 +47,11 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
 - **The share `3/4`** is #1329's split: `T_decay` certifies `eps / 2` for the exact reference and
   `eps / 4` for the relative rounding; the last quarter is the stall's. So (N2) at `k = 0`,
   `epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma / eps`, and #1329's own floor `P*`
-  satisfies `P* <= P^ < 2 * 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*` (the millibel rounding of
-  `sigma` can lift `P^` above `2 P*`: 16 of the 112 F3 rows, at most 2.0016). Nothing #1329
-  certified changes.
+  satisfies `P* <= P^ < 2 * 10^(1/2000) (1 + 2^-20) P* = 2.0023059 P* < 2.0024 P*` (`ceil_mB`'s
+  margin `|x| 2^-30 + 2^-30` mB multiplies the level by less than `1 + 2^-20`, because every
+  positive finite `f64` has `|x| < 650,000` mB; the stalls are at about -33,000 to -76,000 mB). The
+  millibel rounding of `sigma` can lift `P^` above `2 P*`: 16 of the 112 F3 rows, at most 2.0016.
+  Nothing #1329 certified changes.
 - **`dev_core` and `dev_loud`.** `dev_core` is #1329's deviation supremum from `T_decay` on; it
   feeds `P*`. `dev_loud` is the output deviation while the input is loud (`Deviation::at_end`'s
   fixed point), per unit of `|trim| P`; it bounds the deviation at every frame. `G_p` uses
@@ -817,6 +819,13 @@ stay above.
 | Fold-in 2 | per-design median, one walk a sample | 21.5 ns / 470 |
 | The verifier's descriptive run (load 2.15-2.33) | as fold-in 2 | 23.5 ns / 420 |
 | This follow-up (below) | per-batch median, 48 different designs a batch | **17.0 ns / 550** |
+| Fold-in 1's gate 2 (charge 210, 48.5 ns) | the value gate 2's samples need | 30.0 ns (29.87) |
+| Fold-in 2's gate 2 (charge 470, 21.5 ns) | the value gate 2's medians need | 19.0 ns (18.523) |
+| The attempt-1 addendum's descriptive gate 2 on `55a92ec11` (charge 470) | as fold-in 2's gate 2 | 19.0 ns (18.887) |
+| Follow-up 2's gate 2 (charge 550, 17.0 ns; below) | as fold-in 2's gate 2 | 16.5 ns (16.289) |
+| The follow-up verifier's descriptive calibrate (load 1.95-2.48) | per-batch median, 48 a batch | 17.5 ns / 540 |
+| The follow-up verifier's descriptive gate 2 (charge 550) | as fold-in 2's gate 2 | 16.5 ns (16.367) |
+| Follow-up 3's descriptive calibrate (load 2.21-3.26; below) | per-batch median, 96 / 64 / 48 a batch | 17.0 ns / 560 |
 
 ### Attempt 1 follow-up 2: root's ruling (c) (2026-10-08, implementer)
 
@@ -913,3 +922,70 @@ least 257 + 550 = 807, so at most 1,510,000 / 807 = 1,871 designs a preparation;
 holds them); the figures of #1468 (`:153-154`), #1470 (`:28-36`, `:50`), #1471 (`:21`) and the
 #1474 note. The verifier NIT (59.06-61.16 ms, not 60.36-61.16 ms, in the second fold-in's gate 2)
 is fixed above.
+
+### Attempt 1 follow-up 3: the follow-up verdict's MINOR 1-3 and NITs (2026-10-08, implementer)
+
+The follow-up verdict (PASS, `/home/bl/misofm/submix-verdicts/1465-followups.md`) had three
+MINORs and four NITs. No engine code changed: the example, one `math` test, the two derivations'
+text and this spec.
+
+- **MINOR 1, the 1 ms floor** (`crates/builtins/examples/input_bound_budget.rs`). The batch size
+  is now per class, so that every batch sample of every class lasts at least about 1 ms: one
+  cascade of one section **96 designs a batch** (on its own 96-step cutoff grid, so 576 designs a
+  rate in 6 batches, of which the fit reads 5), one cascade of two sections **64** (52 batches a
+  rate) and the frame classes' short points (typical and cheap) **64**, the two-cascade classes
+  48 (unchanged). Root's condition stays: each batch is N different designs of one class, one real
+  preparation, no cache hit (asserted), the same frames as the designs' single walks (asserted).
+  The fit now asserts that it reads at least 5 batches a rate (`FIT_BATCHES`). The doc's "about
+  25-30 us a walk" is now the measured about 12-14 us (one section). Calibrate prints each class's
+  shortest batch sample.
+- **Descriptive calibrate (not the figure of record; ruling (a) leaves that to the batch
+  verifier's run; no constant changed).** One invocation, `taskset -c 7`, one warmup and five
+  measured rounds, no retry; 96 s; `/proc/loadavg` before 2.21 2.95 3.26, after 2.50 2.83 3.18;
+  exit 0. 888 batches of 30,216 designs. **Shortest batch sample per class:** one cascade of one
+  section **1.163 ms** (44.1 kHz, batch 0, 96 designs); of two sections **1.289 ms** (48 kHz,
+  batch 10, 64); two cascades of one section **1.092 ms** (44.1 kHz, batch 1, 48; the shortest of
+  all); of two sections 2.025 ms; cheap two-section 1.293-1.303 ms (64); typical 4.300-4.563 ms
+  (64); near-top 5.126-5.788 ms (single walks). Result: **17.0 ns** (committed 17.0), section charge
+  **560** (largest per-batch-median fixed cost per section 9.40 us, 553.0 frame-equivalents;
+  committed 550). Binding batch: 88.2 kHz, one cascade of two sections, batch 27 (64 designs),
+  58,482 ns a design, 2,337.0 + 560 x 2 = 3,457.0 charged frame-equivalents, 16.917 ns. The
+  one-section median fits are 7.44-8.29 us (5 of 6 batches a rate); the two-section ones
+  16.44-18.80 us (8.22-9.40 us a section). Batch against single walks: min 0.9858, median 1.0000,
+  max 1.0412 (102 of 888 below 1); the summed single-walk medians need 16.872 ns at charge 560.
+  Largest raw sample 2.374 x its batch's median (a near-top single walk). The charge (560 against
+  550) is one ten above the committed value at this load; it is recorded, not applied.
+- **MINOR 2, the `P^` factor.** `(1 + 2^-29)` was true only for `|x| <= 1,736` mB; the stalls are
+  at -33,000 to -76,000 mB. Now `(1 + 2^-20)` with its reason (every positive finite `f64` has
+  `|x| < 650,000` mB, so the margin is below `6.1 10^-4` mB and the factor below `1 + 7 10^-7`):
+  `2 10^(1/2000) (1 + 2^-20) = 2.0023059 < 2.0024` (derivation's contract and "The stalls", this
+  spec's contract section).
+- **MINOR 3, `t0`.** The derivation now says `t0 >= 1`, with the verifier's measured fact: on a
+  2,112-design builtin grid, 346 rows have `t0 < 256` and the least is `t0 = 2`.
+- **NIT, the underflow step.** The derivation now states that a loss in `G^(2^s)` reaches the
+  result about `m / 2^s` times, at different left exponents, and that their left factors sum to at
+  most `sum_a G^a <= R` (1.07 R computed), so the per-site bound holds for the sum. The count of
+  rounding sites now includes the `SLACK` products: 1,664 + 416 + 432 + 108 = 2,620 < `2^12`.
+- **NIT, the new `math` test's power.** `the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero`
+  now also checks `LOW_LPF` into `TOP_LPF`, and asserts that the two designs with a tie have one.
+  A tie is seen from the frames walked (`fixed_cascade_within`): the replay walks one more block,
+  so a `t0 = 0` gain that walks as many frames as the least gain with `t0 > 0` (whose `t0` is in
+  block 0) replayed block 0. A temporary probe (not committed) counted **7 ties for `BAND_HPFS[1]`
+  and 1 for `LOW_LPF` into `TOP_LPF`**, 0 for the other three, which agrees with the verifier's
+  probe. **Mutation** (`if t0 == 0` at the anchor back to `if first_block == 0`): red, `gain
+  2.854376257044066e-8: the walked suffix 1.10524550631239e0 from frame 0 (k = 1) is not below
+  1.1052455073417926e-1`. With `BAND_HPFS[1]` also removed from the list, the second tie design
+  alone turns it red: `gain 9.63951849914951e-9: the walked suffix 3.2694918653119522e0 from frame
+  0 (k = 1) is not below 3.272763608098662e-1`. Reverted: green.
+- **NIT, the runs table.** The gate-2 runs and the verifiers' descriptive runs are now rows of
+  "Every run's value so far".
+- **NIT, F3.** The derivation notes that four more rows round to the same 2.0016 at four digits
+  (88.2 kHz, 1 kHz LPF at 0 dB, and three 48 kHz rows).
+
+**Gates.** `cargo test --locked --release -p builtins --features builtins/test-support --test
+tail_contract -- --test-threads=1`: 17 passed. `cargo test --locked -p math`: all passed (lib 8).
+`cargo test --locked -p builtins --features test-support --lib`: 15 passed. `cargo test --locked -p
+builtins-compiler --features test-support --lib`: 57 passed. `cargo fmt --all -- --check`: clean.
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean.
+`scripts/check-workspace-policy.sh`: ok. Not run: `scripts/check-cross-targets.sh` (no engine code
+changed: an example, a `#[cfg(test)]` test and prose).
