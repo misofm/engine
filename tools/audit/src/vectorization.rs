@@ -67,6 +67,10 @@ fn probe_sum2_simd8(
     sum2_block::<lane::Simd8>(out, a, b);
 }
 
+// The rest plane's words stay opaque (`black_box`) but the typed rebind keeps its static length,
+// as in the gain probe: the kernel's once-per-block `&rest[..io.len()]` is then provably in range,
+// so no `slice_index_fail` call enters the captured body (issue #1481). In production the plane's
+// length is a runtime value and that check stays, outside the frame loop.
 #[cfg(target_feature = "avx2")]
 #[inline(never)]
 fn probe_svf_simd8(
@@ -75,12 +79,13 @@ fn probe_svf_simd8(
     state: &mut SvfState<lane::Simd8>,
     rest: &[f32; PROBE_FRAMES * 8],
 ) {
+    let rest: &[f32; PROBE_FRAMES * 8] = black_box(rest);
     svf_block::<lane::Simd8, &[f32]>(
         io,
         PROBE_FRAMES,
         black_box(coefficients),
         black_box(state),
-        black_box(rest),
+        rest,
     );
 }
 
@@ -102,6 +107,7 @@ fn probe_sum2_simd4(
     sum2_block::<lane::Simd4>(out, a, b);
 }
 
+// Same rationale as the 8-lane (AVX2) SVF probe above: opaque words, static length (#1481).
 #[cfg(target_feature = "neon")]
 #[inline(never)]
 fn probe_svf_simd4(
@@ -110,12 +116,13 @@ fn probe_svf_simd4(
     state: &mut SvfState<lane::Simd4>,
     rest: &[f32; PROBE_FRAMES * 4],
 ) {
+    let rest: &[f32; PROBE_FRAMES * 4] = black_box(rest);
     svf_block::<lane::Simd4, &[f32]>(
         io,
         PROBE_FRAMES,
         black_box(coefficients),
         black_box(state),
-        black_box(rest),
+        rest,
     );
 }
 

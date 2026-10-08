@@ -113,3 +113,61 @@ for a real call in the body, and green only with the fix.
 - A test that greps source or prose is refused.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: under two hours.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-08, branch `codex/d15-batch-misc` on `ae8b09318`)
+
+**Changes.**
+- D1: `probe_svf_simd8` and `probe_svf_simd4` (`tools/audit/src/vectorization.rs`) rebind
+  `black_box(rest)` to `&[f32; PROBE_FRAMES * W]` and pass that to `svf_block::<_, &[f32]>`, as the
+  gain probe does (#372). The coefficients and state stay behind `black_box`; `#[inline(never)]`
+  stays. `crates/lane` is not changed.
+- D2: the allowlist is not changed.
+- D3: `nightly.yml`'s step "Generate report and run red mutations" loses `continue-on-error: true`;
+  its comment now says a red run fails the job and `failure-notice` reports it. The file's header
+  comment (`:6-8`) said the job "carries `continue-on-error: true` ... it cannot fail a build by
+  construction", which D3 makes false; it is rewritten to the same effect as the step comment.
+  This is three comment lines outside the step and is flagged for the verdict. The job's `name:`
+  keeps "(non-blocking)": it is still not a required check.
+- D5: `scripts/test-test-support-ci.py:149` and `:152` rewrapped to at most 100 columns; no
+  behaviour change.
+
+**D4 (unarmed form).** `svf_block_form::<L, false>` is a production instantiation:
+`parametric-eq` calls `process_channels(..., [UnarmedRest; 2])` (`crates/parametric-eq/src/lib.rs:3191`)
+and `process_channels_mono(..., UnarmedRest)` (`:3261`), which reach `svf_block::<L, R>` (`:1663`).
+The report does not cover the unarmed form: the only SVF probe passes `&[f32]`, the armed form. The
+fixed probe still reaches the armed form's loop (objdump below: the per-frame rest load
+`vcmplt_oqps (%rax,%rdx,4)` is in the loop), so no unarmed probe is added (out of scope per D4).
+
+**Gate 1.** `bash scripts/run-native-vectorization-report.sh` with the fix:
+`{"schema_version":1,"kind":"native_vectorization","subject":"release_probe_instantiations_of_production_kernels","status":"pass","backend":"x86_64-avx2","artifact_sha256":"164ec10c2e1eb481c75df9bbdc92f0e0fd147069f2e0d422f1c5b2b00f6b58c1","disassembly_sha256":"60620970e629bc534a2e15017e7416dad6f5057e0783df74892db0fd18830f8b","allowlist_sha256":"6f8bc61e61f63e2f94f1191d6cd750da5138b73fc7ef122720babe3f68e1cc5f","kernel_rules":3,"failures":[]}`
+(two separate builds gave the same artifact digest). `bash scripts/test-native-vectorization-report.sh
+target/release/audit`: `native vectorization red mutations: ok`.
+
+**Gate 2 (the fix is the cause).** Without D1 (tree at `ae8b09318`): `"status":"fail"`,
+`"failures":["recursive-svf / probe_svf_simd8: forbidden call 'call|callq' is present"]`. With D1:
+pass (gate 1). D1 is the only source change between the two runs.
+
+**Gate 3 (the rule still bites).** With D1 in place, the probe body was given a call to an
+`#[inline(never)] fn mutation_out_of_line(io: &mut [f32]) { black_box(io); }` before the kernel:
+`"status":"fail"`, `"failures":["recursive-svf / probe_svf_simd8: forbidden call 'call|callq' is
+present"]`. Mutation reverted; the next run passed (gate 1's JSON above is that run).
+
+**Objdump of the fixed `probe_svf_simd8`** (`llvm-objdump -d`, 0 `call` lines in the body): the
+prologue loads the six coefficients and the state into `ymm` registers, then the frame loop
+`dc360..dc3f4` is `vmovups` load, `vsubps`/`vmulps`/`vaddps` steps, `vandps`/`vpmaxud`, two
+`vcmplt_oqps` (one against the rest plane in memory, `(%rax,%rdx,4)`), `vorps`/`vandnps` flush,
+`vmovups` store, `addq $0x8,%rdx; cmpq $0x100,%rdx; jne`. No `slice_index_fail` comparison or call
+remains before the loop.
+
+**Gate 4.** `cargo clippy --locked -p audit --all-targets -- -D warnings`: ok.
+`cargo fmt --all -- --check`: ok. `python3 scripts/check-ci-path-routing.py`: "ci path-routing
+workflow contract passed". `python3 -B scripts/test-ci-path-routing.py`: passed.
+`python3 -B scripts/test-test-support-ci.py`: "test-support CI coverage mutation tests passed".
+`bash scripts/check-workspace-policy.sh`: ok. `cargo test --locked -p audit vectorization`: 13 passed.
+
+**Gate 5.** Open: needs the first nightly after the batch lands on `main`.
+
+**Not run.** The NEON report (`probe_svf_simd4`): no AArch64 runner here; the change is the same
+rebind as the AVX2 probe.

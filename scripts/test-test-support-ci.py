@@ -146,10 +146,11 @@ def main() -> int:
         fails(f"{package}/test-support removed from test-debug-b", {package},
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
-          {"builtins-compiler", "effect-compiler", "effect-contract", "graph", "host-core", "host-web",
-           "protocol", "rack"},
+          {"builtins-compiler", "effect-compiler", "effect-contract", "graph", "host-core",
+           "host-web", "protocol", "rack"},
           in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
-    fails("every test-support feature removed from test-debug-b", {"builtins", "lane", "parametric-eq"},
+    fails("every test-support feature removed from test-debug-b",
+          {"builtins", "lane", "parametric-eq"},
           in_b(DEBUG_B_FEATURES, "--features math/lane\n"))
 
     # Forwarding is modelled from the manifests, not from the feature list's spelling: host-web
