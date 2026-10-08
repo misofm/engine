@@ -78,20 +78,28 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
 
 ### Lane intrinsics
 
-- `crates/lane/src/softfma.rs` (issue 083): the first lane file that carries unsafe -- the wasm
-  `simd128` promote/demote intrinsics of the software FMA, and the `x86` MXCSR read/write that gate
-  G6 uses to prove hardware flush-to-zero is inert under the D7 flush law (`_mm_getcsr`/
-  `_mm_setcsr` are used rather than the inline assembly their deprecation note recommends). No
-  `Lane` value or vector type escapes the crate as unsafe.
+- `crates/lane/src/softfma.rs` (issue 083): the `x86_64` MXCSR helpers `read_mxcsr` and
+  `write_mxcsr`, whose two unsafe blocks call `_mm_getcsr` and `_mm_setcsr`. Their `SAFETY`
+  comments state that both are sound on any SSE host (SSE2 is baseline on `x86_64` and required by
+  the crate's x86-64-v3 compile guard) and that a written value is a word previously read, with at
+  most the FTZ and DAZ bits changed. The deprecated intrinsics are used rather than the inline
+  assembly their deprecation note recommends. They have two users: gate G6, which proves that
+  hardware flush-to-zero is inert under the D7 flush law, and `fpenv.rs`, which reaches the `x86`
+  control word only through them, at every native `x86` render entry. (The helpers' own doc
+  comments still say "never called from a render path"; that text is older than #146 and is not
+  true on `x86`.) Until #163 phase 2 (`477dc15ee`) the file also held the software FMA and its
+  wasm `simd128` promote/demote intrinsics; that phase retired the emulation, and the file kept its
+  name because the policy files name its path. No `Lane` value or vector type escapes the crate as
+  unsafe.
 - `crates/lane/src/fpenv.rs` (issue 146): the canonical floating-point environment that every
   native render entry pins.
 
-`fpenv.rs` is the one allowlisted file that **is** reachable from a render path, deliberately --
-pinning the environment is the render entry's first act and unpinning it is its last -- and it is
-three register accesses and two empty assembly blocks, with no memory operand, no call and no
-branch. It carries unsafe for two reasons, and both are inline assembly -- the workspace's only
-inline assembly, and the reason the softfma entry above says "rather than the inline assembly their
-deprecation note recommends" and this one does not.
+`fpenv.rs` is reachable from a render path deliberately -- pinning the environment is the render
+entry's first act and unpinning it is its last -- and it is three register accesses and two empty
+assembly blocks, with no memory operand, no call and no branch. It carries unsafe for two reasons,
+and both are inline assembly -- the workspace's only inline assembly, and the reason the softfma
+entry above says "rather than the inline assembly their deprecation note recommends" and this one
+does not.
 
 First, AArch64's `mrs`/`msr FPCR` pair, because the standard library exposes no stable FPCR
 intrinsic (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point Control
@@ -116,12 +124,19 @@ explicitly and both have a mutation test proving a third lane file does not inhe
 ### C-ABI and browser-ABI boundaries
 
 - `crates/capi/src/ffi.rs` (issue 022): the raw C-pointer ownership boundary of the exported
-  `miso_engine_v1_*` entries. Each dereference carries a `SAFETY` comment that names the caller's
-  pointer contract and the capacity check made before the write.
+  `miso_engine_v1_*` entries. Each unsafe operation carries a `SAFETY` comment that names what it
+  relies on: the caller's pointer or handle contract, the size or capacity check made before a
+  write, the live-kind check on the shared `HandleHeader` prefix before a concrete handle is
+  borrowed, the disjointness of raw field projections, or the `Box::into_raw`/`Box::from_raw`
+  ownership transfer between create and destroy.
 - `hosts/host-web/src/ffi.rs` (issue 024): the raw Wasm32 handle, pointer and slice boundary of the
   `miso_engine_web_v1_*` exports. Each unsafe block carries a `SAFETY` comment that names the
   bounds check or the liveness it relies on; the module carries no `catch_unwind`, because the
-  target and the release profile abort on panic.
+  target and the release profile abort on panic. The file has a second, test-only unsafe owner:
+  the `#[cfg(test)]` module `live_response_ffi_tests` registers `CountingAllocator` as the unit-test
+  binary's `#[global_allocator]` (added by `708036a76`). It forwards every operation unchanged to
+  `System` and counts successful operations in thread-local counters, only while armed; its
+  `SAFETY` comments state that forwarding, not a bounds check or a liveness.
 - `crates/capi/tests/plan_swap_race.rs` (#1042, #1273): calls the exported C entries from a control
   thread while a render thread swaps plans. Its unsafe is the C calls themselves, each with the
   handle and storage contract stated beside it; the allocator it runs under is
@@ -152,7 +167,9 @@ explicitly and both have a mutation test proving a third lane file does not inhe
 ### Test-only counting allocators
 
 Each is an `unsafe impl GlobalAlloc` that forwards every request to `System` unchanged and adds only
-audit counters, in a `tests/` file that no production target links.
+audit counters, in a file or module that no production target links: the three below are `tests/`
+files, and `hosts/host-web/src/ffi.rs`'s `#[cfg(test)]` `CountingAllocator` (above) is the one in a
+`src/` file.
 
 - `crates/builtins-compiler/tests/allocation_tracker.rs` (issue 007): `TrackingAllocator` records
   the builtin compiler's phase-two allocations, on the armed thread only, so they can be compared
@@ -164,12 +181,13 @@ audit counters, in a `tests/` file that no production target links.
   `PARSE_TRANSIENT_MULTIPLIER`.
 
 Four further entries on the allowlist carry no unsafe code today:
-`crates/soft-clip/tests/allocation.rs`, `crates/transient-shaper/tests/allocation.rs`,
-`crates/true-peak-limiter/tests/allocation.rs` and
-`crates/multiband-compressor/tests/no_alloc_render.rs`. Each once owned a counting allocator; each
-now reads `bench_support::alloc`'s thread-scoped counters instead (the wrappers were removed by
-`568ad4087`, #1046's `cb4898437`, `a6da0cade` and `39c4651b1` respectively). Their entries are
-stale, and nothing here approves new unsafe code in them.
+`crates/soft-clip/tests/allocation.rs` (#91), `crates/transient-shaper/tests/allocation.rs` (#92),
+`crates/true-peak-limiter/tests/allocation.rs` (#90) and
+`crates/multiband-compressor/tests/no_alloc_render.rs` (issue 018, re-landed under audit #94).
+Each once owned a counting allocator; each now reads `bench_support::alloc`'s thread-scoped
+counters instead (the wrappers were removed by `568ad4087`, #1046's `cb4898437`, `a6da0cade` and
+`39c4651b1` respectively). Their entries are stale, and nothing here approves new unsafe code in
+them.
 
 ### Tool-only allocators and guests
 
@@ -181,19 +199,50 @@ stale, and nothing here approves new unsafe code in them.
 - `tools/wasm-gate-guest/src/lib.rs` (#83, gate G5): the `cdylib` guest of the cross-target digest
   harness. Exporting a function from a `cdylib` needs `#[unsafe(no_mangle)]` under edition 2024,
   and there is no safe spelling of it. Its exports take and return `u32`, carry no pointer and no
-  import, and it holds no `unsafe` block, `fn` or `impl`.
+  import, and it holds no `unsafe` block, `fn` or `impl`. Its entry in this gate is therefore inert,
+  like the four stale entries above: the gate's pattern never matches `#[unsafe(no_mangle)]`. The
+  approval that does bind is `scripts/check-bench-policy.sh`'s exact set of
+  `#![allow(unsafe_code)]` files under `tools/`.
+
+### Render-path reachability
+
+Approved unsafe code that runs on a render thread, per entry:
+
+- `spsc.rs`: yes. Its push and pop unsafe sites lie inside the gate's marked render regions; render
+  drains event and control rings and exchanges plans through them.
+- `disjoint.rs`: yes. Its raw-slice borrows lie inside its marked region, and the sequential
+  executor forms its combined multi-buffer and stereo borrows through them.
+- `fpenv.rs`: yes, at every native render entry, on both `x86_64` and AArch64. On wasm its guard is
+  a zero-sized value with no code.
+- `softfma.rs`: yes, on `x86_64` only, through `fpenv.rs`.
+- `crates/capi/src/ffi.rs`: yes. `miso_engine_v1_render_f32_planar` dereferences the plan handle
+  and the output descriptor through unsafe blocks before it renders.
+- `hosts/host-web/src/ffi.rs`: yes. The body of `miso_engine_web_v1_render` holds no unsafe block,
+  but the render-locked staging exports the worklet calls on its render thread
+  (`spectrum_read`, `spectrum_stream_read` and `track_response_capture`) reach the bounds-checked
+  record copies `copy_live_record` and `read_live_record`. Its `CountingAllocator` is test-only.
+- `render_lock.rs`: its allocator methods sit under every allocator call the module makes, so they
+  run on the render thread only if render calls the allocator -- which is exactly what they count
+  and what qualification asserts never happens. `render_locked` itself is safe code.
+- Every other entry is test or tool code. `plan_swap_race.rs` and `tools/audit/src/capi.rs` call
+  the C render entry from a thread of their own, but their own unsafe is the caller side of the C
+  contract.
 
 ### Retired exceptions
 
-The source-policy checker originally accepted unsafe syntax in exactly four source files:
-`crates/engine/src/realtime/spsc.rs`, `tools/audit/src/realtime.rs`, `tools/audit/src/protocol.rs`
-and `tools/bench/src/protocol.rs`. Issue 005 had permitted the protocol audit and the protocol
-benchmark; `tools/audit/src/realtime.rs` was a test-only realtime audit allocator. #104 phase B
-(`d9a66a952`) replaced the audit tools' allocators with `tools/bench-support/src/alloc.rs`, so
+The source-policy checker's first allowlist (`68ff477e4`) accepted unsafe syntax in exactly five
+source files, although its failure message said "four": `crates/engine/src/realtime/spsc.rs` and
+the tools now at `tools/audit/src/realtime.rs`, `tools/audit/src/protocol.rs` and
+`tools/bench/src/protocol.rs`, plus the native-effect contract bench's `main.rs`. Issue 005 had
+permitted the protocol audit and the protocol benchmark; `tools/audit/src/realtime.rs` was a
+test-only realtime audit allocator, and the effect contract bench carried its own audited
+allocator. #104 phase B (`d9a66a952`) replaced the audit tools' and the effect contract bench's
+allocators with `tools/bench-support/src/alloc.rs` and removed their entries, so
 `tools/audit/src/realtime.rs` and `tools/audit/src/protocol.rs` contain no unsafe code and are off
-the allowlist. #1075 retired the BTLV-versus-FlatBuffers benchmark under owner ruling R9 (only real
-host paths are benchmarked): `tools/bench/src/protocol.rs`, its unsafe exemption and `tools/bench`'s
-`flatbuffers` dependency are gone. #1033 removed `tools/native-pcm-runner` and its exemption.
+the allowlist (#136 later folded the effect contract bench into the collapsed tool packages). #1075
+retired the BTLV-versus-FlatBuffers benchmark under owner ruling R9 (only real host paths are
+benchmarked): `tools/bench/src/protocol.rs`, its unsafe exemption and `tools/bench`'s `flatbuffers`
+dependency are gone. #1033 removed `tools/native-pcm-runner` and its exemption.
 
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or
 render-reachable dependency.
