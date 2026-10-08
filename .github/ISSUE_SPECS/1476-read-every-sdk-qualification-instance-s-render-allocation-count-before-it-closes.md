@@ -119,3 +119,69 @@ an instance closes without its read (gate 4).
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-08, base `859fb98a8`)
+
+Change:
+- `sdk-response-entry.ts`: `createSdkEngine(workload, () => createEngine({...}))` is the one way
+  the entry makes an engine (all seven `createEngine` sites); it counts the instance and records
+  its label. `closeSdkEngine(browser)` is the one way it closes one: it reads
+  `browser.host.renderAllocationCount()`, pushes `{ workload, count }` (a nonzero `result` is a
+  refusal), then calls `browser.close()`; a second call for the same instance does nothing (the
+  spectrum-query and SDK-observation bodies close mid-flow and again in `finally`). D3: each body
+  gained `catch (error) { throw sdkEngineFailed(browser, error); }`, which records the body's
+  first error; after one, a failed read is attached to that error as
+  `renderAllocationReadFailures` and not thrown, so the body's error propagates. The returned
+  object carries `renderAllocations` and `renderAllocationInstances`; the registry resets at the
+  start of `runSdkResponseQualification`. Labels: `spectrum-query:<target>`,
+  `spectrum-query-closed`, `spectrum-continuous-hop-<hop>`, `spectrum-collection`,
+  `track-response-subscription`, `resident-observation`, `sdk-observation`, and
+  `live-bypass:authored-<bypass>[:live-<target>-<bypass|lift>]`. The headless engine has no row.
+  In the continuous-spectrum region (#1480's) only the `createEngine` line, its closing `}));`,
+  the added `catch` and the close line changed.
+- `run.mjs`: frozen `SDK_RENDER_ALLOCATION_WORKLOADS` (17 labels, read order);
+  `validateSdkRenderAllocations` (gate `sdk-render-allocations`: array, length equals
+  `renderAllocationInstances`, labels equal the frozen list, every `count` 0, the message names
+  each nonzero row), called first in `validateSdkResponse`; mutations `sdk-render-allocations`
+  (row 0 `count = 1`) and `sdk-render-allocations-missing` (row 1 removed); a stdout line
+  `<browser>: sdk-render-allocations: <workload>=<count> ...`.
+- `MUTATIONS.md`: four rows (gate 3, gate 4, the two self-test mutations).
+
+Read timing: for the offline instances the read follows `startRendering()`; the two live
+`AudioContext` instances (`spectrum-collection`, `spectrum-continuous-hop-1024`) keep rendering
+until close, so their read is immediately before close and covers every quantum up to it.
+
+Evidence (local, SDK source-bundle mode, no `sdk/dist`; artifact built by
+`scripts/build-web-audioworklet.sh --named-twin ...`, module `37274bf1...`):
+- Gate 1: `npm run qualify -- --artifacts <artifacts> --sdk-root <sdk> --browser <b> --check-matrix
+  --self-test-mutations` exits 0 in chromium 151.0.7922.34, firefox 153.0 and webkit 26.5. Each log
+  prints `<b>: sdk-render-allocations:` with all 17 rows `=0` (and the ten raw rows `=0`).
+- Gate 2 (temporary uncommitted print in `mutationProofs`, all three browsers): `sdk-render-allocations`
+  red with `<b>: sdk-render-allocations: an SDK worklet instance allocated on its render thread:
+  resident-observation=1`; `sdk-render-allocations-missing` red with `<b>: sdk-render-allocations:
+  an SDK instance closed without its render allocation read: 16 rows for 17 instances`.
+- Gate 3: planted `drop(std::hint::black_box(Vec::<u8>::with_capacity(1)))` in
+  `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (`crates/effect-contract/src/live.rs`),
+  rebuilt the module. Path: the render thread's control drain applying a live bypass record. Why no
+  raw workload reaches it: the raw workloads' only `command()` records are `COMMAND_MATRIX`
+  (live-control, stall) and their other control is `observe()` (Observe records); none submits a
+  bypass. Chromium with the SDK leg: red, `chromium: sdk-render-allocations: an SDK worklet instance
+  allocated on its render thread: live-bypass:authored-none:live-desk-hi-bypass=2
+  live-bypass:authored-none:live-ins-mid-bypass=2 live-bypass:authored-desk-hi:live-desk-hi-lift=2
+  live-bypass:authored-ins-mid:live-ins-mid-lift=2` (2 = one record per dual-mono lane; the three
+  authored-only renders stay 0). `render-allocations` precedes it in `validate` and passed; the same
+  planted module without `--sdk-root` passes with all ten raw rows `=0`. Reverted (the clean module
+  above): both green (gate 1).
+- Gate 4: both `closeSdkEngine(closedBrowser)` calls replaced by `closedBrowser.close()`
+  (one instance): chromium red, `chromium: sdk-render-allocations: an SDK instance closed without
+  its render allocation read: 16 rows for 17 instances`. Restored.
+- Gate 5: `bash scripts/check-workspace-policy.sh` ok; the `sdk` job's checks
+  (`check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh`, `sdk-package.sh check`) exit 0; the `sdk/dist` they left was deleted.
+- No engine source or worklet artifact changed, so the worklet chain was not rerun.
+
+Test value: `sdk-render-allocations` is red when a render-locked path only an SDK instance reaches
+allocates (gate 3, which `render-allocations` passes), and red on the length check when an
+instance closes without its read (gate 4).
