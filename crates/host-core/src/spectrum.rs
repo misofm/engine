@@ -866,7 +866,8 @@ impl SpectrumCaptureCollection {
             .map(|capture| (capture.target(), capture.channels()))
     }
 
-    /// Build the owned entry that `select` returns on the control thread.
+    /// Build the owned entry that `select` returns. Like selection, this is control-side and runs
+    /// between render calls.
     fn owned_entry(&self, index: usize) -> Option<SpectrumCaptureCollectionEntry> {
         self.entry(index)
             .map(|(target, channels)| SpectrumCaptureCollectionEntry {

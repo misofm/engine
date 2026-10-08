@@ -122,7 +122,7 @@ also calls `self.entry(index)`. Attempt 1 of the first run stopped on this defec
   `channels()` (D2); a new private `owned_entry(index)` builds the owned
   `SpectrumCaptureCollectionEntry` from `entry`'s pair, and both `select` sites call it. `select`'s
   signature and behaviour are unchanged; its one clone of the target is the same clone as before,
-  on the control thread; no allocation is added.
+  control-side, between render calls; no allocation is added.
   `crates/host-core/tests/spectrum.rs`: the two assertions compare `entry(i)` with
   `Some((&track_x.target, track_x.channels))`. `hosts/host-web/MUTATIONS.md`: the phase-2 row
   records D3's mutation (D3).
@@ -156,3 +156,10 @@ also calls `self.entry(index)`. Attempt 1 of the first run stopped on this defec
   Some((TrackPostInputBuiltins("eq1"), Stereo))`); the lib unit test
   `explicit_collection_start_uses_the_checked_hop` also goes red, through `select`. Reverted: 9
   passed.
+
+### Follow-ups (2026-10-08, after the attempt 1 PASS)
+
+- **NIT1.** `owned_entry`'s doc and this record said "on the control thread". Both now use the
+  struct doc's wording: control-side, between render calls. Doc-only change; no code moved.
+- **Gates.** `cargo fmt --all -- --check`: clean. `cargo clippy --locked -p host-core --all-targets
+  -- -D warnings`: clean. `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
