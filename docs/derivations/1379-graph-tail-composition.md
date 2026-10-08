@@ -646,10 +646,14 @@ the trim, `g L_1 L_2` +48.0 dB), and the window frames' own outputs (`g max O_j`
 are below their settled continuation (`g max C_c`), which sets `W*` at every launch rate.
 
 **On the kernel.** The bound is loose: the exact supremum of the late part over every input
-`|x| <= 1` from `N` (the time-varying cascade's row `l1`, gate L2's oracle) is close to the settled
-pair's `l1` (+35.0 dB with the trim for the 10 Hz HPF into the top LPF at 44.1 kHz) and at most
-+35.6 dB on gate L2's scanned ramp histories, so the kernel does not show the window term that the
-bound carries. The two frequency-blind steps
+`|x| <= 1` from `N` (the time-varying cascade's row `l1`, gate L2's oracle) is close to the largest
+settled pair's `l1` and at most +35.6 dB on gate L2's scanned histories, so the kernel does not
+show the window term that the bound carries. The largest settled pair is not the 10 Hz HPF into
+the top LPF (3.53 at 44.1 kHz, +35.0 dB with the trim, and less at the other rates): over a
+61-point logarithmic grid of HPF cutoffs into the top LPF (and a coarser grid of both cutoffs),
+the largest settled `l1` is about 3.798, +35.59 dB with the trim at every launch rate, for an HPF
+near 150 Hz (44.1 kHz), 174 Hz (48 kHz), 287 Hz (88.2 kHz) and 342 Hz (96 kHz) into the top LPF
+(a scan of the #1467 attempt-2 record). The two frequency-blind steps
 (`sum` of the second section over the window, and the tau system's `rho_settled` after it) set
 `W*`; tightening them is #1485's. `G_t` is still far below `G_p` (+144.2 dB), whose
 `sup Psi Phi` term a history of any length builds.
@@ -711,7 +715,8 @@ which must increase strictly in `k`, and `D_inf` against the settled contraction
 (nothing certified moves) and the refusal test (a capped or NaN window and a carry outside its
 rounding argument give no values); the measurements are in the #1466 attempt
 record. The tail gain and the statement: #1467's L2 (`G_t` at least the exact row-`l1` supremum of
-the time-varying cascade, by an adjoint oracle, over a stated scan of ramp histories), L3' (`G_t`
+the time-varying cascade, by an adjoint oracle, over a stated scan of histories whose words are
+recorded from the real kernel), L3' (`G_t`
 against the plain-`f64` recomputation of "The live tail gain"), L5' (the statement is the
 accessors rounded up, with `G_t <= G_p` and `sigma_t <= sigma_p` raw and in millibels) and the
 statement's own unit test (equality admissible, a tail value above its peak value refused); the
