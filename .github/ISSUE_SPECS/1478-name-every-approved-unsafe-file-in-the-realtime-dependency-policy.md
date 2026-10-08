@@ -269,3 +269,25 @@ Docs job (`qualification.yml`, "DSP research corpus and listening-evidence packe
 3. The gate's own header comment (`scripts/check-realtime-policy.sh:19-23`) says `fpenv.rs`'s one
    unsafe site is the `mrs`/`msr` pair; the file also has the empty `asm!` barrier (`:326`).
    Gate edits are a non-goal here.
+
+## Closure (root, 2026-10-08)
+
+Both attempts failed review (`/home/bl/misofm/submix-verdicts/1478-attempt1.md`,
+`1478-attempt2.md`) and the two-attempt budget is spent. Root's ruling (1), verbatim:
+
+> (1) #1478: rescope once. Revert its two doc commits in this batch (main gets no unverified policy
+> text; keep the verdicts as evidence) and file a new bounded stream J issue: "Correct the realtime
+> dependency policy's unsafe-ownership statements" — coverage of the 19 allowlisted paths as
+> attempt 2 had it, plus explicit decisions for M1 (ffi.rs reachability: render-locked exports
+> reach only copy_live_record), M2 (state exactly which exports run inside render_locked, after the
+> H issue below lands, or name the exception until then), M3 (the x86 MXCSR description:
+> memory-operand STMXCSR/LDMXCSR, and the write_mxcsr SAFETY premise restated to what fpenv
+> actually writes) and (a) softfma.rs's stale comments and SAFETY premise; each claim checked
+> against code by its verifier. Close #1478 as superseded by it once filed (pending owner
+> permission for any body edit; a close comment is fine).
+
+`docs/REALTIME_DEPENDENCY_POLICY.md` is restored to its `a059cdd03` content, which reverts
+`859fb98a8` and `e403684d9`. The attempt record above stays as evidence. Successor: #1489
+(*Correct the realtime dependency policy's unsafe-ownership statements*). The M2 code gap is
+stream H's #1488; the stale allowlist entries are #1438's Amendment (root, 2026-10-08). GitHub
+#1478 was closed on 2026-10-08 with a superseded-by comment; its body is not edited.
