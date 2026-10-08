@@ -25,7 +25,9 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   stalls in `f32` when `|u - e| < ulp(e) / (2k)`. With `u = 0` a stall above `FLUSH_EPS` would be a
   state that never rests.
 - The home for the values is `tail_and_rest` (#1377); the contract and `RestSamples` are #1329's;
-  the composition values (`D`, `G_p`, `G_t`, `sigma`) are #1379 Amendment 1's H1 contract, carried
+  the composition values (`D`, `G_p`, `G_t`, `sigma_p`, `sigma_t`) are #1379 Amendment 1's H1
+  contract (#1484 split the stall into the peak stall `sigma_p`, every frame, (N1), and the tail stall
+  `sigma_t`, from the node's tail on, (N2)), carried
   by `CompositionBound::Stated` in `NodeTailBound` (#1464; contract text in
   `docs/handoffs/decision-15-2026-10-05/1379-amendment1-design.md`, H1).
 - **Root ruling (2026-10-06, #1379 Amendment 1, third round).** This slice needs only the carrier
@@ -70,9 +72,9 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
   compressor, `max(makeup_max, 1)` over the parameter domain (its output is
   `(mix g + 1 - mix) x` with `0 <= g <= makeup`), and for the limiter `0 dB` (`g <= 1`), each
   times `(1 + u)` per rounded product on the output's chain (`u = 2^-24`), rounded up to millibels;
-  after silence the output is `g x` with the same bound, so `G_t = G_p`. `stall`: the underflow
-  allowance of the output's chain (`2^-126` per rounded operation, rounded up into
-  `FlushStall::Level`), as #1379 H3 states for gain-only nodes. Each value holds for every sidechain
+  after silence the output is `g x` with the same bound, so `G_t = G_p`. `sigma_p` and `sigma_t`, both from
+  one value: the underflow allowance of the output's chain (`2^-126` per rounded operation, rounded
+  up into `FlushStall::Level`), as #1379 H3 states for gain-only nodes, so `sigma_t = sigma_p`. Each value holds for every sidechain
   input (H1's quantifier): a sidechain feeds only the detector, so `g <= makeup` and `g <= 1` hold
   whatever it carries.
 
@@ -110,7 +112,7 @@ rest. Today both declare `Infinite`, which makes every plan that holds one repor
    samples of seeded noise and their outputs agree under `==`.
 3. **Composition** (both effects, every rate): the stated `peak_gain` equals D4's formula
    recomputed in the test, and over gate 1's runs (sidechain connected with full-scale noise, and
-   unconnected) every output sample satisfies `|y| <= g_p max|x| + sigma`.
+   unconnected) every output sample satisfies `|y| <= g_p max|x| + sigma_p` (N1).
 4. **Recompute**: the helper's value for each word is checked against a brute-force `f32`
    iteration of that word's recurrence from `E_max` with zero input, counted until it equals its
    value in `Z` (with `B` that count:

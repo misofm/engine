@@ -81,10 +81,10 @@ the control thread at preparation and never pinned:
   a path, and every tail report uses it (the C ABI and browser reports, #1261, #1262). `Infinite`
   states no bound and remains for nodes whose bound has not been derived (#1378 retires it).
 * **The tail over every peak -- `T_rest = max(T_decay, R(P*))`, named `tail_every_peak`** (a
-  `TailSamples`, beside `tail` wherever `tail` is stated: `builtins::InputSectionBound`, which
+  `TailSamples`, beside `tail` wherever `tail` is stated: `NodeTailBound`, which
   `builtins-compiler`'s prepared session keeps per strip beside its tail,
-  `PreparedBuiltinsSession::input_bounds`; and for a native effect `EffectTailBound`,
-  `PreparedEffectMetadata` and `EffectProgramKey`). From `N + latency + T_rest` on the output is below `P * eps` for
+  `PreparedBuiltinsSession::input_bounds`, and which a native effect states; and for a native
+  effect `PreparedEffectMetadata` and `EffectProgramKey`). From `N + latency + T_rest` on the output is below `P * eps` for
   `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. `R(P*)` includes the joint-flush arming
   window `N_SILENCE` (#1328 A9), so `T_rest >= N_SILENCE` for every enabled filter section. It is
   the exact-zero branch for low peaks only.
@@ -95,12 +95,64 @@ the control thread at preparation and never pinned:
   zero-input step; for the builtin input section the reset state, every integrator `+0.0`). Silence
   skipping (#1107) uses this bound: it holds for every input up to its stated peak.
 
+Every node, a native effect or a builtin input section, states its bound in one struct,
+`effect_contract::NodeTailBound { tail, tail_every_peak, rest, composition }` (#1379 Amendment 1
+H2, #1464). `NodeTailBound::max` is the bound of a node whose two channels are bounded by its
+operands: each tail is `Infinite` if either is, else the larger; `rest` is `Unstated` if either is,
+else each peak's bound is the larger; `composition` as below.
+
+`composition` is a `CompositionBound`: `Stated { decay, peak_gain, tail_gain, peak_stall,
+tail_stall }`, the five values #1379 composes through gain (#1379 Amendment 1 H1 as amended by
+#1484), stated together or not at all, or `Unstated` until the node's
+own slice derives them (#1378 retires it). Today the builtin input section with its filters
+disabled states them, and so does one with a fixed design when its walk finishes within the
+preparation budget and both halves of its decay certificate are verified (#1465), and so does the
+live input section (#1466, #1467: `D`, `G_p` and both stalls over every admitted history, and a
+`G_t` derived for an input that arrives at or after `N`, about 52 dB below its `G_p`), which a fixed
+design over the budget reports (`docs/derivations/1379-graph-tail-composition.md`); a fixed design
+with no verified certificate, and every other node, states `Unstated`. With a node's
+latency `L`, input `x`, output `y`, `N` the first sample of silence, `g_p = 10^(G_p/2000)` and
+`g_t = 10^(G_t/2000)` the linear gains (`0` for `Zero`) and `sigma_p`, `sigma_t` the two stalls'
+linear levels (`0` for `Zero`), each value is a certified upper bound at the node's rate, over its parameter domain
+or its prepared design, computed on the control thread; a stereo node states the maximum over its
+two channels, and a node with a sidechain states each value for every sidechain input:
+
+| field | type | symbol | unit | meaning |
+|---|---|---|---|---|
+| `decay` | `TailDecay(u64)` | `D` | samples per further 20 dB | (N2) |
+| `peak_gain` | `PeakGain` | `G_p` | millibels, rounded up, or `Zero` | (N1) |
+| `tail_gain` | `PeakGain` | `G_t` | millibels, rounded up, or `Zero`; `G_t <= G_p` | gain to an input that arrives at or after `N`, (N2) |
+| `peak_stall` | `FlushStall` | `sigma_p` | millibels re 1.0, rounded up (`Level`), or `Zero` | absolute flush stall at the output at every frame, (N1) |
+| `tail_stall` | `FlushStall` | `sigma_t` | millibels re 1.0, rounded up (`Level`), or `Zero`; `sigma_t <= sigma_p` | absolute flush stall at the output from the node's tail on, (N2) |
+
+* **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted control history:
+  `|y[n]| <= g_p X + sigma_p` for every `n`.
+* **(N2) Tail at every decade.** With no control event at or after `N`: if `|x[n]| <= X` for all
+  `n` and `|x[n]| <= epsilon` for every `n >= M` (some `M >= N`), then for every integer `k >= 0`
+  and every `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`.
+* **(N3) Rest.** `RestSamples`, read with "zero from `M`" (`M >= N`).
+
+(N2) at `k = 0`, `epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma_t / eps`. (N2)'s
+frames are a subset of (N1)'s, so `sigma_t <= sigma_p`; a node whose flush part is smaller from its
+tail on (the live input section: its pre-`N` analysis amplifies the flush floor by 55-61 dB) states
+the smaller value for (N2) and keeps the every-frame value for (N1). The fixed input section states
+`sigma_p = sigma_t = ceil_mB(F a)`, and one with its filters disabled states both as one underflow.
+The stalls are read only through `CompositionBound::peak_clause`, (N1)'s pair `(G_p, sigma_p)`, and
+`CompositionBound::tail_clause`, (N2)'s triple `(D, G_t, sigma_t)`; both are `None` for
+`Unstated`. Every use that bounds a signal at every frame reads the first, every use from the
+node's tail on the second.
+
+`PeakGain::Zero` is a node whose output is exactly `+-0.0` for every input; it and
+`FlushStall::Zero` order below every level. A negative `Millibels` is an attenuation.
+`NodeTailBound::max` takes each of the five values by maximum when both sides state them, each
+stall by its own maximum and never from the other stall, and is `Unstated` when either side is not.
+
 Gain-only parts (trim, polarity, fader, mute, matrix) state `0` for all three. An absolute output
 floor in place of the exact-zero branch is refused (Amendment 3, G2): it would make the tail a
 fixed-level one, which #1328's A8 and A9 removed.
 
-A native effect states its three values in one place, its descriptor's
-`tail_and_rest(sample_rate, quality) -> EffectTailBound { tail, tail_every_peak, rest }` (#1377).
+A native effect states its bound in one place, its descriptor's
+`tail_and_rest(sample_rate, quality) -> NodeTailBound` (#1377, #1464).
 It runs on the control thread, takes no parameter values (each bound holds over the whole
 parameter domain at that rate), and render never calls it. `QualityDescriptor` carries no tail.
 `NativeEffectRegistry::new` evaluates it once per declared quality row (every launch rate of every
@@ -111,7 +163,10 @@ plan (#1469). `new` checks each row: (a) `tail_every_peak >= tail`, with `Infini
 (b) `rest` is `Unstated` only with `tail_every_peak: Infinite`; (c) `rest` is `Bounded` only with
 a finite `tail_every_peak`; (d) in a `Bounded` rest, `peak_plus_24_dbfs <= any_sanitized_input`
 (the bound for every sanitized input covers the inputs whose peak is at most +24 dBFS). (b) and
-(c) together are "`rest` is `Unstated` if and only if `tail_every_peak` is `Infinite`". A row that
+(c) together are "`rest` is `Unstated` if and only if `tail_every_peak` is `Infinite`". A
+`Stated` composition adds three (#1464, #1484): (e) `tail` is finite, (f) `tail_gain <= peak_gain`,
+with `Zero` below every `Millibels`, and (g) `tail_stall <= peak_stall`, with `Zero` below every
+`Level`. A row that
 breaks a rule refuses the registry with
 `effect.tail_bound.inconsistent`, naming the effect. `NativeEffectRegistry::tail_bound(id,
 sample_rate, quality)` reads a `RegisteredTailBound` entry (`effect.quality.unsupported` for a row
@@ -119,12 +174,12 @@ the effect does not declare, never a fallback call), and every `PrepareEffectReq
 in `tail_bound`: the effect compiler reads it once per instance into `EffectBankPreparation`, which
 replays it into every bank member's request. `expected_prepared_metadata`, the sole conforming
 metadata, refuses an entry of another effect, rate or quality (`effect.tail_bound.mismatch`) and
-copies the entry's three values into `PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the
-program key carries them too, so cohorts with different bounds never share a bank.
-`effect-compiler` refuses a prepare result whose metadata differs from `expected_prepared_metadata`
-in any field it compares, these three included (`effect.metadata.mismatch`), and the conformance
-harness's `metadata.exact` compares each prepare result's program key, which carries all three,
-with the expected one. `rest` is a `RestBound`:
+copies the entry's four values into `PreparedEffectMetadata::{tail, tail_every_peak, rest,
+composition}`; the program key carries them too, so cohorts with different bounds never share a
+bank. `effect-compiler` refuses a prepare result whose metadata differs from
+`expected_prepared_metadata` in any field it compares, these four included
+(`effect.metadata.mismatch`), and the conformance harness's `metadata.exact` compares each prepare
+result's program key, which carries all four, with the expected one. `rest` is a `RestBound`:
 `Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
 effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
 `tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and

@@ -106,6 +106,30 @@ const U64: f64 = 1.0 / 9_007_199_254_740_992.0;
 /// step error it bounds by a factor above 1.8 ([`FIRST_STEP_ERROR`]), which absorbs it.
 const STEP_UP: f64 = 1.0 + 4.0 * U64;
 
+/// `tau = 2^-600`, the certified flush of the fixed-cascade walk (issue #1474). Every non-negative
+/// radius and majorant the walk propagates (the first section's error radius, the later sections'
+/// state majorants, the input and output majorants of each frame, the deviation components) is
+/// rounded **up** to `tau` when it falls below it, and a word of the first section's signed state
+/// below `tau` in magnitude is flushed to zero with `tau` added to its error radius (each column of
+/// `R` has a 2-norm of one, so a flushed word's `V`-norm is its magnitude). So no propagated
+/// quantity is subnormal, and the walk's cost per frame does not depend on the design (#1474's
+/// diagnosis: subnormal operands made a band of near-top designs about 1.8 times as slow).
+///
+/// **Underflow.** [`STEP_UP`]'s and [`SLACK`]'s relative arguments assume no result underflows. A
+/// product whose result is subnormal errs by an absolute `2^-1075` at most (a sum or difference
+/// that underflows is exact). Every floored value is at least the value it bounds: if that value
+/// is at most `tau`, the floor covers it; if it is above `tau`, the evaluation's relative margin
+/// (at least `u - 9 u^2` of [`STEP_UP`], `2^-31` of [`SLACK`]) is at least `2^-54 tau = 2^-654`,
+/// far above the at most `2 r 2^-1075` that `r` roundings can lose to underflow for any `r` below
+/// `2^420`. A word of the first state that is not flushed is at least `tau` in magnitude, so the
+/// step error `nu (|s_1| + |s_2|)` keeps its margin of `3.7 u64 ||R|| tau` over the relative error
+/// it bounds, above the at most `4 ||R|| 2^-1075` its four products can lose to underflow. The
+/// derivation (`docs/derivations/1329-input-section-tail-and-rest.md`) states the closing terms.
+const TAU: f64 = f64::from_bits((1023 - 600) << 52);
+
+/// `2^-500`: a state word at or above it has a normal square ([`Majorants::remainders`]).
+const SQUARE_SAFE: f64 = f64::from_bits((1023 - 500) << 52);
+
 /// The relative error of a sum of `terms` non-negative `f64` values, as an inflation:
 /// `(n - 1) u / (1 - (n - 1) u)` at most, bounded here by `2 n u` (with `n u` far below one).
 fn accumulation(terms: u64) -> f64 {
@@ -454,6 +478,12 @@ pub struct CascadeBound {
     /// reference split, its decay being propagated directly on the kernel's envelope, so there it
     /// equals [`Self::tail`].
     pub tail_reference: u64,
+    /// The raw values of #1379 Amendment 1 H1 for a fixed cascade (issue #1465), which the caller
+    /// rounds into millibels. `None` for a live bound ([`live_cascade`]; its values are
+    /// [`live_cascade_composition`]'s, issues #1466 and #1467), for the empty cascade (its caller
+    /// states a gain-only section's values), and for a cascade no decay certificate is verified
+    /// for.
+    pub composition: Option<CascadeComposition>,
 }
 
 impl CascadeBound {
@@ -466,7 +496,203 @@ impl CascadeBound {
         flush_floor: 0.0,
         rest_at_flush_floor: 0,
         tail_reference: 0,
+        composition: None,
     };
+}
+
+/// A fixed cascade's composition values before rounding (#1379 Amendment 1 H1, H3; issue #1465;
+/// `docs/derivations/1379-graph-tail-composition.md`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CascadeComposition {
+    /// `D`: from `N + T + k D` on, for every `k >= 0`, the input-relative output is below
+    /// `(3/4) eps 10^-k` per unit of `gain * peak` (H1 (N2)).
+    pub decay: u64,
+    /// The certificate `D` is read from, with the crossings `T(k)` it certifies.
+    pub certificate: DecayCertificate,
+    /// `O = SLACK accumulation(n) sum_t o(t)`: the reference's output majorant over every frame, an
+    /// upper bound of the cascade's `l1` norm for every reset pattern.
+    pub output_majorant: f64,
+    /// `dev_loud`: the relative output deviation's fixed point while the input is loud
+    /// (`Deviation::at_end`), per unit of `gain * peak`; it bounds the deviation at every frame.
+    pub dev_loud: f64,
+    /// `gain (1 + u) (O + dev_loud)`, the linear peak and tail gain (H1 (N1), (N2)).
+    pub peak_gain: f64,
+    /// `F a`: the absolute flush stall at the output, at every frame.
+    pub stall: f64,
+}
+
+/// One half of the decay certificate (#1465): the bound `B lambda^i` on the half's value `offset +
+/// i` frames after `T`, read as the crossings of `h 10^-k`. `transient` and `decade` are upper
+/// bounds of `ln(B / h) / (-ln lambda)` and `ln 10 / (-ln lambda)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HalfCertificate {
+    /// The certificate's rate: a positive `v` with `G v <= lambda v` was verified.
+    pub lambda: f64,
+    /// Frames from `T` to the certificate's anchor (`0` when anchored at `T`).
+    pub offset: u64,
+    /// `a`, at least `ln(B / h) / (-ln lambda)`.
+    pub transient: f64,
+    /// `b`, at least `ln 10 / (-ln lambda)`.
+    pub decade: f64,
+}
+
+/// `x + |x| 2^-40`: at least the exact sum or product of non-negative-ish `f64` operands whose
+/// result is `x` (a few roundings of `2^-53` each).
+fn rounded_up(x: f64, magnitude: f64) -> f64 {
+    x + magnitude * (1.0 / 1_099_511_627_776.0)
+}
+
+impl HalfCertificate {
+    /// Frames after `T` from which this half is below `h 10^-k`: `offset` plus the first integer
+    /// above `a + k b` (`0` when that is negative).
+    #[must_use]
+    pub fn crossing(&self, k: u64) -> u64 {
+        let scaled = k as f64 * self.decade;
+        let sum = rounded_up(self.transient + scaled, self.transient.abs() + scaled);
+        if sum < 0.0 {
+            self.offset
+        } else {
+            self.offset + crate::floor(sum) as u64 + 1
+        }
+    }
+
+    /// `D_h = offset + floor(max(a, 0) + b) + 1`: `T + k D_h` is at or after every crossing
+    /// `T + crossing(k)`, `k >= 1`.
+    #[must_use]
+    pub fn decay(&self) -> u64 {
+        let sum = self.transient.max(0.0) + self.decade;
+        self.offset + crate::floor(rounded_up(sum, sum)) as u64 + 1
+    }
+}
+
+/// The decay certificate of a fixed cascade (#1465): the exact reference's half (threshold
+/// `eps / 2`) and the relative deviation's half (`eps / 4`), each anchored at `T`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecayCertificate {
+    /// The reference half.
+    pub reference: HalfCertificate,
+    /// The relative deviation half.
+    pub deviation: HalfCertificate,
+}
+
+impl DecayCertificate {
+    /// `T(k) - T`: frames after `T` from which the input-relative output is below
+    /// `(3/4) eps 10^-k` per unit of `gain * peak`; `0` for `k = 0` (#1329's `T`).
+    #[must_use]
+    pub fn crossing(&self, k: u64) -> u64 {
+        if k == 0 {
+            0
+        } else {
+            self.reference.crossing(k).max(self.deviation.crossing(k))
+        }
+    }
+
+    /// `D = max(D_ref, D_dev)`.
+    #[must_use]
+    pub fn decay(&self) -> u64 {
+        self.reference.decay().max(self.deviation.decay())
+    }
+
+    /// `D_inf = max_h ceil(b_h)`: the certificate's asymptotic frames per decade.
+    #[must_use]
+    pub fn asymptotic_decay(&self) -> u64 {
+        -crate::floor(-self.reference.decade.max(self.deviation.decade)) as u64
+    }
+
+    /// The larger of the two rates.
+    #[must_use]
+    pub fn lambda(&self) -> f64 {
+        self.reference.lambda.max(self.deviation.lambda)
+    }
+
+    /// `T_lambda - T`: frames after `T` from which the certificate's own bound is below the
+    /// `k = 0` floor.
+    #[must_use]
+    pub fn floor_crossing(&self) -> u64 {
+        self.reference.crossing(0).max(self.deviation.crossing(0))
+    }
+}
+
+/// The live cascade's composition values before rounding (#1379 Amendment 1 H1 as #1484 amended
+/// it, H3's live row; issue #1466, slice B1; `docs/derivations/1379-graph-tail-composition.md`,
+/// "The live input section"): the decay `D`, the peak gain and both stalls, per unit of the
+/// input's peak `X` with the largest trim word's magnitude and its rounding included, and the
+/// tail gain `G_t` (issue #1467, slice B2; the derivation's "The live tail gain"), per unit of
+/// the late input's peak. [`live_cascade_composition`] computes them; the caller rounds them up
+/// into millibels and states all five together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveComposition {
+    /// `D`: for every `k >= 1`, from `M + T + k D` on the relative output bound is below
+    /// `(eps / 2) 10^-k` per unit of the peak (`T` the live `T_decay`, `M` the first frame of the
+    /// silence); the largest of the groups' `D_c`.
+    pub decay: u64,
+    /// One decay certificate per settled zone group (the groups [`live_cascade`] reads, in its
+    /// order), each anchored at `T`, or at the window's end when `T` lies in the window.
+    pub groups: Vec<HalfCertificate>,
+    /// `g_p`: the output at any frame of any admitted history is at most
+    /// `peak_gain X + peak_stall` (H1 (N1)). The window's first frame with zero current input,
+    /// relative part, plus the current input through both sections' feedthroughs.
+    pub peak_gain: f64,
+    /// `g_t`: the part of the output that an input from `M >= N` on produces is at most
+    /// `tail_gain epsilon` at every frame from `M` (H1 (N2)), `epsilon` that input's peak:
+    /// `g W* + g L_1 L_2`, the window input's part (the 64 frames a ramp may still be in flight,
+    /// and its settled continuation over every group) and the settled input's part (both
+    /// sections' settled designs, every zone).
+    pub tail_gain: f64,
+    /// `sigma_p`: the flush part of the output bound with the tail at frame `0`, which bounds the
+    /// flush part at every frame (H1 (N1)).
+    pub peak_stall: f64,
+    /// `sigma_t`: the flush part of the output bound from `T` on (H1 (N2)); the smaller of
+    /// [`live_cascade`]'s stall from `T` and [`Self::peak_stall`], so never above it.
+    pub tail_stall: f64,
+}
+
+impl LiveComposition {
+    /// `T(k) - T`: frames after `T` from which every group's certified relative bound is below
+    /// `(eps / 2) 10^-k` per unit of the peak; `0` for `k = 0` (`T` itself).
+    #[must_use]
+    pub fn crossing(&self, k: u64) -> u64 {
+        if k == 0 {
+            0
+        } else {
+            self.groups
+                .iter()
+                .map(|group| group.crossing(k))
+                .max()
+                .unwrap_or(0)
+        }
+    }
+
+    /// `D_inf = max_c ceil(b_c)`: the certificates' asymptotic frames per decade.
+    #[must_use]
+    pub fn asymptotic_decay(&self) -> u64 {
+        let decade = self
+            .groups
+            .iter()
+            .map(|group| group.decade)
+            .fold(0.0_f64, f64::max);
+        -crate::floor(-decade) as u64
+    }
+
+    /// The largest of the groups' rates.
+    #[must_use]
+    pub fn lambda(&self) -> f64 {
+        self.groups
+            .iter()
+            .map(|group| group.lambda)
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// `T_lambda - T`: frames after `T` from which every certificate's own bound is below the
+    /// `k = 0` threshold.
+    #[must_use]
+    pub fn floor_crossing(&self) -> u64 {
+        self.groups
+            .iter()
+            .map(|group| group.crossing(0))
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// Per-section suprema of the kernel over every word a control history can reach.
@@ -694,6 +920,12 @@ pub struct LiveCascade {
     /// [`output_rounding`]'s `omega_state` over the first section's words: the output mix's
     /// rounding relative to the state.
     pub first_output_rounding: f64,
+    /// The supremum of `||(m1, m2)||_V*` over the second section's mix words: its output row on
+    /// the state is `1/2 (m1, m2) (I + A)` too. Read only by the live tail gain (issue #1467),
+    /// whose settled input term bounds the second section by its own zone.
+    pub second_mix_row: f64,
+    /// [`output_rounding`]'s `omega_state` over the second section's words.
+    pub second_output_rounding: f64,
 }
 
 /// One zone of pole positions: every reachable word whose `Re p` lies in `[low, high]`, with its
@@ -1094,6 +1326,12 @@ struct LiveWindow {
     energy: f64,
     /// The cascade's output bound at each window frame.
     outputs: Vec<f64>,
+    /// Whether a state bound above took the cap (the `V`-norm of finite `f32` words) instead of
+    /// its propagated value (a NaN value counts as capped). A capped value bounds the kernel's
+    /// state but not one part of the split by drive
+    /// (`docs/derivations/1379-graph-tail-composition.md`, "(P1)"), so the composition values read
+    /// only an uncapped window (issue #1466).
+    capped: bool,
 }
 
 /// The settled-phase terms of one zone a first section's settled design can lie in (or of the
@@ -1141,6 +1379,16 @@ fn multiply4(a: &Square4, b: &Square4) -> Square4 {
             (a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j]) * SLACK
         })
     })
+}
+
+/// The larger of `a` and `b`, or a NaN when either is one: a fold with it carries a NaN to the
+/// caller's cap, where `f64::max` would drop it (issue #1467's arrival window).
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
 }
 
 /// `row . v`, inflated by [`SLACK`].
@@ -1293,15 +1541,20 @@ impl<'a> LiveBound<'a> {
         let output_coefficient = (half_row * zones.largest_sum_norm + omega) * SLACK;
         let state =
             |charge: f64, direct_sum: f64, feedthrough: f64, rounding: f64, flush_sum: f64| {
-                ((envelope.input
+                (envelope.input
                     * (half_row * (potential + charge + direct_sum) + feedthrough + rounding)
                     + flush_sum)
-                    * SLACK)
-                    .min(self.cap)
+                    * SLACK
             };
+        let mut capped = false;
+        let mut cap = |value: f64| {
+            // A NaN counts as capped: `NaN.min(cap)` would continue as the cap, unflagged.
+            capped |= value >= self.cap || value.is_nan();
+            value.min(self.cap)
+        };
         let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
         for frame in 0..=self.ramp_frames {
-            let sigma = state(charge, direct_sum, feedthrough, rounding, flush_sum);
+            let sigma = cap(state(charge, direct_sum, feedthrough, rounding, flush_sum));
             outputs.push(
                 (envelope.output_state * sigma
                     + envelope.output_input * (output_coefficient * energy + f)
@@ -1317,10 +1570,13 @@ impl<'a> LiveBound<'a> {
                 energy = (rho * energy + f) * SLACK;
             }
         }
+        let state = cap(state(charge, direct_sum, feedthrough, rounding, flush_sum));
+        let energy = cap(energy);
         LiveWindow {
-            state: state(charge, direct_sum, feedthrough, rounding, flush_sum),
-            energy: energy.min(self.cap),
+            state,
+            energy,
             outputs,
+            capped,
         }
     }
 
@@ -1379,6 +1635,124 @@ impl<'a> LiveBound<'a> {
             2.0 * terms.output * h * SLACK,
             1.0,
         ]
+    }
+
+    /// The window input's part of the live tail gain (issue #1467; the derivation's "The live tail
+    /// gain", (W)): an input of at most `g` on the window's first `ramp_frames` frames and zero
+    /// state before them. At window frame `j` the first section's state in zone `k` is at most
+    /// `Phi^(j)_k g`, with `Phi^(0) = 0` and
+    /// `Phi^(j+1)_k = max_{i in nb(k)} (rho_i Phi^(j)_i + beta_i [j < ramp_frames])` (`j` frames
+    /// from zero, not [`live_zones`]' fixed point over every history); its output is at most the
+    /// largest `(1/2 |m| q_k + omega) Phi^(j)_k g` plus the feedthrough; the second section is
+    /// propagated frequency-blind with `rho_ramp`, as in [`Self::window`]. Returns the outputs at
+    /// the window's `ramp_frames + 1` frames, the second section's state after them and the first
+    /// section's at the last of them, the shape [`Self::settled_start`] reads.
+    fn arrival_window(&self, g: f64) -> LiveWindow {
+        let envelope = &self.live.envelope;
+        let zones = &self.zones.zones;
+        let rho = envelope.rho_ramp;
+        let half_row = 0.5 * self.live.first_mix_row;
+        let omega = self.live.first_output_rounding;
+        // `1/2 |m| q_k + omega` per zone.
+        let rows: Vec<f64> = zones
+            .iter()
+            .map(|zone| (half_row * zone.sum_norm + omega) * SLACK)
+            .collect();
+        let mut phi = std::vec![0.0_f64; zones.len()];
+        let mut sigma = 0.0_f64;
+        let mut energy = 0.0_f64;
+        let mut capped = false;
+        let mut cap = |value: f64| {
+            // A NaN counts as capped, as in [`Self::window`].
+            capped |= value >= self.cap || value.is_nan();
+            value.min(self.cap)
+        };
+        let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
+        for frame in 0..=self.ramp_frames {
+            let input = if frame < self.ramp_frames { g } else { 0.0 };
+            let state_output = rows
+                .iter()
+                .zip(&phi)
+                .fold(0.0_f64, |sup, (row, phi)| nan_max(sup, row * phi * SLACK));
+            let first = (state_output * g * SLACK + envelope.output_input * input) * SLACK;
+            outputs.push(cap((envelope.output_state * sigma
+                + envelope.output_input * first)
+                * SLACK));
+            sigma = cap((rho * sigma + envelope.input * first) * SLACK);
+            if frame == self.ramp_frames {
+                energy = cap(phi.iter().fold(0.0_f64, |sup, phi| nan_max(sup, *phi)) * g * SLACK);
+            } else {
+                // `Phi^(j+1)` from `Phi^(j)`: this frame (`j < ramp_frames`) carries the input.
+                phi = zones
+                    .iter()
+                    .map(|zone| {
+                        (zone.first_neighbour..=zone.last_neighbour)
+                            .map(|i| (zones[i].contraction * phi[i] + zones[i].input) * STEP_UP)
+                            .fold(0.0_f64, nan_max)
+                    })
+                    .collect();
+            }
+        }
+        LiveWindow {
+            state: sigma,
+            energy,
+            outputs,
+            capped,
+        }
+    }
+
+    /// The window input's part after the window (the derivation's (W), "After the window"): per
+    /// settled group, the supremum over every frame of the relative settled system's output from
+    /// [`Self::arrival_window`]'s end. The state is stepped (each step rounded up) until the
+    /// computed next state is componentwise at most the current one; from there every later exact
+    /// state is at most it, so the outputs read so far bound every frame.
+    fn arrival_continuation(&self, window: &LiveWindow, g: f64) -> Result<f64, TailBoundError> {
+        let mut peak = 0.0_f64;
+        for terms in &self.terms {
+            let mut current = self.settled_start(terms, window, g, 0.0);
+            // Without the flush the constant component is unused (as in [`Self::tail`]).
+            current[3] = 0.0;
+            let (system, _, output_row) = self.settled_system(terms, 0.0);
+            let mut frames = 0_u64;
+            loop {
+                peak = peak.max(dot4(&output_row, &current));
+                let next = apply4(&system, &current);
+                if next.iter().zip(&current).all(|(next, now)| next <= now) {
+                    break;
+                }
+                current = next;
+                frames += 1;
+                if frames >= HORIZON_LIMIT {
+                    return Err(TailBoundError::Horizon);
+                }
+            }
+        }
+        Ok(peak)
+    }
+
+    /// `L_1 L_2` (the derivation's (Z)): per unit of the settled input's peak, the largest output
+    /// of the cascade at fixed words from zero state, each section bounded by the zone its
+    /// settled design lies in: `L(k) = (1/2 |m| q_k^s + omega) beta_k / (1 - r_k) + delta`, the
+    /// largest over the zones with settled designs, and at least `delta` (the identity), with
+    /// each section's own mix row and output rounding.
+    fn settled_input_gain(&self) -> f64 {
+        let live = self.live;
+        let delta = live.envelope.output_input;
+        let first_row = 0.5 * live.first_mix_row;
+        let second_row = 0.5 * live.second_mix_row;
+        let (mut first, mut second) = (delta, delta);
+        for zone in &self.zones.zones {
+            let Some(settled) = zone.settled else {
+                continue;
+            };
+            let state = zone.input / (1.0 - settled.contraction) * SLACK;
+            let section = |row: f64, omega: f64| {
+                (((row * settled.sum_norm + omega) * SLACK * state) * SLACK + delta) * SLACK
+            };
+            first = first.max(section(first_row, live.first_output_rounding));
+            second = second.max(section(second_row, live.second_output_rounding));
+        }
+        first * second * SLACK
     }
 
     /// `R` for one input scale `g = gain * peak`: the first section rests (its state bound below
@@ -1490,10 +1864,11 @@ impl<'a> LiveBound<'a> {
             .ok_or(TailBoundError::Horizon)
     }
 
-    /// `T_decay`: the first frame from which the relative output bound (per unit of the peak,
-    /// without the flush) stays below `TAIL_FLOOR / 2`, over the window and every zone.
-    fn tail(&self, gain: f64) -> Result<u64, TailBoundError> {
-        let limit = TAIL_FLOOR / 2.0;
+    /// The first frame from which the relative output bound (per unit of the peak, without the
+    /// flush) stays below `limit`, over the window and every zone: `T_decay` at
+    /// `limit = TAIL_FLOOR / 2`, and the directly searched crossing of a lower decade
+    /// ([`live_cascade_crossing`], issue #1466).
+    fn tail(&self, gain: f64, limit: f64) -> Result<u64, TailBoundError> {
         let window = self.window(gain, 0.0);
         let mut tail = window
             .outputs
@@ -1569,6 +1944,102 @@ impl<'a> LiveBound<'a> {
         }
         Ok(stall * SLACK)
     }
+
+    /// The composition values of the cascade (issues #1466 and #1467; the derivation's "The live
+    /// input section" and "The live tail gain"), for the input scale `gain` (the largest trim
+    /// word's magnitude times `1 + u`) and the live `T_decay` `tail`. `None` when a window state
+    /// bound the values read took the cap (the tail gain's window included), a group's start or
+    /// step is outside the carry's rounding argument, a group's certificate is not verified, or `D`
+    /// is not below [`HORIZON_LIMIT`].
+    fn composition(&self, gain: f64, tail: u64) -> Result<Option<LiveComposition>, TailBoundError> {
+        let envelope = &self.live.envelope;
+        let relative = self.window(gain, 0.0);
+        let flush = self.window(0.0, self.law.per_step());
+        // (P1): a capped state bound bounds the kernel, not one part of the split by drive.
+        if relative.capped || flush.capped {
+            return Ok(None);
+        }
+        // (N1): the window's first frame bounds the output at any frame of any admitted history
+        // with the current input zero (P2); the current input adds `delta g X` through the first
+        // section's feedthrough, and that through the second's.
+        let feedthrough = envelope.output_input * envelope.output_input * gain * SLACK;
+        let peak_gain = (relative.outputs[0] + feedthrough) * SLACK;
+        let peak_stall = self.stall(0)?;
+        let tail_stall = self.stall(tail)?.min(peak_stall);
+        // (N2): one certificate per group on its relative system, anchored at `T` (or at the
+        // window's end, `offset` frames after `T`).
+        let start = self.ramp_frames + 1;
+        let (steps, offset) = match tail.checked_sub(start) {
+            Some(steps) => (steps, 0),
+            None => (0, start - tail),
+        };
+        let log_threshold = crate::log(TAIL_FLOOR / 2.0);
+        let mut groups = Vec::with_capacity(self.terms.len());
+        for terms in &self.terms {
+            // The relative system on `(tau, H, X)`: without the flush its constant component is
+            // zero and decoupled.
+            let (system, _, output_row) = self.settled_system(terms, 0.0);
+            let step = SquareMatrix {
+                n: 3,
+                m: (0..3)
+                    .flat_map(|i| (0..3).map(move |j| system[i][j]))
+                    .collect(),
+            };
+            let start_state = self.settled_start(terms, &relative, gain, 0.0);
+            // The carry's rounding argument (the derivation's "Rounding" of the live part):
+            // off-diagonal entries at most `8`, start components at most `2^132`.
+            let bounded_step = (0..3).all(|i| (0..3).all(|j| i == j || step.m[i * 3 + j] <= 8.0));
+            let bounded_start = start_state[..3]
+                .iter()
+                .all(|value| *value <= LIVE_STATE_LIMIT);
+            if !(bounded_step && bounded_start) {
+                return Ok(None);
+            }
+            // Carried to `T`, every component rounded up to at least `tau` (a positive start for
+            // the certificate).
+            let state: Vec<f64> = carry(&step, steps, &start_state[..3])
+                .into_iter()
+                .map(|value| value.max(TAU))
+                .collect();
+            let half = HalfSystem {
+                step: &step,
+                // `H` reads only itself, `tau` reads `H`, `X` only itself.
+                order: &[1, 0, 2],
+                state: &state,
+                row: &output_row[..3],
+                log_threshold,
+                offset,
+            };
+            let Some(certificate) = half.certificate() else {
+                return Ok(None);
+            };
+            groups.push(certificate);
+        }
+        let decay = groups.iter().map(HalfCertificate::decay).max().unwrap_or(1);
+        if decay >= HORIZON_LIMIT {
+            return Ok(None);
+        }
+        // (N2)'s `epsilon` part (issue #1467): the late input's window part, through the window
+        // and its settled continuation, plus its settled part, per unit of its peak.
+        let arrival = self.arrival_window(gain);
+        if arrival.capped {
+            return Ok(None);
+        }
+        let window_part = arrival
+            .outputs
+            .iter()
+            .fold(0.0_f64, |sup, value| sup.max(*value))
+            .max(self.arrival_continuation(&arrival, gain)?);
+        let tail_gain = (window_part + gain * self.settled_input_gain() * SLACK) * SLACK;
+        Ok(Some(LiveComposition {
+            decay,
+            groups,
+            peak_gain,
+            tail_gain,
+            peak_stall,
+            tail_stall,
+        }))
+    }
 }
 
 /// One settled zone group of [`live_cascade`]'s rest at one input scale, with the quantities the
@@ -1618,6 +2089,50 @@ pub fn live_cascade_groups(
     let zones = live_cascade_zones(live)?;
     let bound = LiveBound::new(live, &zones, law, ramp_frames);
     bound.group_rests(gain * (1.0 + U) * peak)
+}
+
+/// The composition values of a live cascade (issues #1466 and #1467; #1379 Amendment 1 H1, H3's
+/// live row; `docs/derivations/1379-graph-tail-composition.md`, "The live input section" and "The
+/// live tail gain"): its decay `D`, linear peak and tail gains and linear peak and tail stalls, for
+/// the trim word's magnitude `gain` (as [`live_cascade`]). `Ok(None)` when the values are not
+/// certified (a capped window, a group outside the carry's rounding argument or with no verified
+/// certificate). The caller rounds them up into millibels and states the five together.
+///
+/// # Errors
+///
+/// As [`live_cascade`].
+pub fn live_cascade_composition(
+    live: &LiveCascade,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+) -> Result<Option<LiveComposition>, TailBoundError> {
+    let zones = live_cascade_zones(live)?;
+    let bound = LiveBound::new(live, &zones, law, ramp_frames);
+    let gain = gain * (1.0 + U);
+    let tail = bound.tail(gain, TAIL_FLOOR / 2.0)?;
+    bound.composition(gain, tail)
+}
+
+/// The frame (from the first frame of the silence) from which [`live_cascade`]'s relative output
+/// bound stays below `(TAIL_FLOOR / 2) 10^-decades` per unit of the peak, searched directly as
+/// `T_decay` is (`decades = 0` gives `T_decay`): evidence that the certified `D` of
+/// [`live_cascade_composition`] covers the module's own crossings (issue #1466, L4).
+///
+/// # Errors
+///
+/// As [`live_cascade`].
+pub fn live_cascade_crossing(
+    live: &LiveCascade,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+    decades: u64,
+) -> Result<u64, TailBoundError> {
+    let zones = live_cascade_zones(live)?;
+    let bound = LiveBound::new(live, &zones, law, ramp_frames);
+    let limit = TAIL_FLOOR / 2.0 * crate::pow(10.0, -(decades as f64));
+    bound.tail(gain * (1.0 + U), limit)
 }
 
 /// [`live_zones`], after checking that both of the envelope's contractions are below `1` (a NaN
@@ -1671,7 +2186,7 @@ pub fn live_cascade(
     // `gain` is the trim word's magnitude; the kernel's `fl(x * trim)` is at most `(1 + u)` times
     // the product.
     let gain = gain * (1.0 + U);
-    let tail = bound.tail(gain)?;
+    let tail = bound.tail(gain, TAIL_FLOOR / 2.0)?;
     let p_star = bound.stall(tail)? / (TAIL_FLOOR / 2.0) * SLACK;
     let rest_star = bound.rest(gain * p_star)?;
     let rest_peak = bound.rest(gain * peaks[0])?;
@@ -1684,6 +2199,7 @@ pub fn live_cascade(
         flush_floor: p_star,
         rest_at_flush_floor: rest_star,
         tail_reference: tail,
+        composition: None,
     })
 }
 
@@ -1797,31 +2313,56 @@ impl<'a> Majorants<'a> {
             * (self.c_terms[0] * first[0].abs()
                 + self.c_terms[1] * first[1].abs()
                 + self.d_terms * impulse);
-        out.input[1] = ((c[0] * first[0] + c[1] * first[1] + self.d * impulse).abs()
+        // Every non-negative majorant is rounded up to [`TAU`] (issue #1474).
+        out.input[1] = (((c[0] * first[0] + c[1] * first[1] + self.d * impulse).abs()
             + output_rounding
             + self.constants[0].gamma * self.first_error)
-            * STEP_UP;
+            * STEP_UP)
+            .max(TAU);
         for i in 1..k {
             out.state[i] = self.later[i - 1];
-            out.input[i + 1] = (self.constants[i].gamma * out.state[i]
+            out.input[i + 1] = ((self.constants[i].gamma * out.state[i]
                 + self.constants[i].delta * out.input[i])
-                * STEP_UP;
+                * STEP_UP)
+                .max(TAU);
         }
         // Advance.
         let (a, b) = (self.a, self.b);
-        self.first_error = (self.constants[0].q * self.first_error
+        self.first_error = ((self.constants[0].q * self.first_error
             + FIRST_STEP_ERROR * (first[0].abs() + first[1].abs()))
-            * STEP_UP;
+            * STEP_UP)
+            .max(TAU);
         self.first = [
             a[0][0] * first[0] + a[0][1] * first[1] + b[0] * impulse,
             a[1][0] * first[0] + a[1][1] * first[1] + b[1] * impulse,
         ];
+        self.flush_first();
         for i in 1..k {
-            self.later[i - 1] = (self.constants[i].q * self.later[i - 1]
+            self.later[i - 1] = ((self.constants[i].q * self.later[i - 1]
                 + self.constants[i].beta * out.input[i])
-                * STEP_UP;
+                * STEP_UP)
+                .max(TAU);
         }
         self.frame += 1;
+    }
+
+    /// The certified flush of the first section's signed state (issue #1474): a word below [`TAU`]
+    /// in magnitude is set to zero, and `tau` per flushed word is added to the error radius, rounded
+    /// up. Each column of `R` has a 2-norm of one, so the flushed part's `V`-norm is at most the
+    /// flushed words' magnitudes, each below `tau`: the radius still covers the exact state. The
+    /// sum of two normal values rounds once and the product with [`STEP_UP`] once more, so each
+    /// summand keeps at least `(1 - u)^2 (1 + 4u) >= 1` times its value.
+    fn flush_first(&mut self) {
+        let mut flushed = 0.0;
+        for word in &mut self.first {
+            if *word != 0.0 && word.abs() < TAU {
+                *word = 0.0;
+                flushed += TAU;
+            }
+        }
+        if flushed > 0.0 {
+            self.first_error = (self.first_error + flushed) * STEP_UP;
+        }
     }
 
     /// Closed-form remainders `sum_{t >= now}` of every state majorant, every input majorant and
@@ -1831,36 +2372,94 @@ impl<'a> Majorants<'a> {
     /// `m(t + 1) <= M m(t)` with `M` lower triangular and non-negative; the sums are
     /// `(I - M)^-1 m(now)`, solved by forward substitution.
     fn remainders(&self) -> (Vec<f64>, Vec<f64>) {
-        let k = self.constants.len();
-        // The first section's exact state is within `first_error` of the computed one.
-        let mut current = std::vec![v_norm(self.first) * SLACK + self.first_error];
-        current.extend(self.later.iter().copied());
-        // `alpha[i][j]`: coefficient of `Gbar_j` in `a_i` for `t >= now >= 1`.
-        let mut alpha = std::vec![std::vec![0.0; k]; k + 1];
-        alpha[1][0] = self.constants[0].gamma;
-        for i in 1..k {
-            let (earlier, later) = alpha.split_at_mut(i + 1);
-            for (next, previous) in later[0].iter_mut().zip(&earlier[i]).take(i) {
-                *next = self.constants[i].delta * previous;
-            }
-            later[0][i] = self.constants[i].gamma;
-        }
-        // Solve `(I - M) s = current`: `s_0 = current_0 / (1 - q_0)`,
-        // `s_i = (current_i + beta_i sum_j alpha[i][j] s_j) / (1 - q_i)`.
-        let mut sums = std::vec![0.0; k];
-        for i in 0..k {
-            let drive: f64 = if i == 0 {
-                0.0
-            } else {
-                self.constants[i].beta * (0..i).map(|j| alpha[i][j] * sums[j]).sum::<f64>()
-            };
-            sums[i] = (current[i] + drive) / (1.0 - self.constants[i].q) * SLACK;
-        }
-        let inputs: Vec<f64> = (0..=k)
-            .map(|i| (0..k).map(|j| alpha[i][j] * sums[j]).sum::<f64>() * SLACK)
-            .collect();
-        (sums, inputs)
+        remainder_sums(self.constants, &self.current())
     }
+
+    /// `m(now)`: the first section's state norm plus its error radius, then the later sections'
+    /// state majorants.
+    fn current(&self) -> Vec<f64> {
+        majorant_vector(self.first, self.first_error, &self.later)
+    }
+
+    /// The walk's raw state at the current frame, appended to `record` (issue #1465): the first
+    /// section's two words and error radius, then the later majorants.
+    fn record(&self, record: &mut Vec<f64>) {
+        record.extend_from_slice(&self.first);
+        record.push(self.first_error);
+        record.extend_from_slice(&self.later);
+    }
+}
+
+/// `m(now)` from a frame's raw majorant state ([`Majorants::record`]'s layout).
+fn majorant_vector(first: [f64; 2], first_error: f64, later: &[f64]) -> Vec<f64> {
+    // The first section's exact state is within `first_error` of the computed one. `v_norm`
+    // squares the words, and below `2^-500` both squares can underflow (issue #1474), so a
+    // state that small is bounded by `|s_1| + |s_2|` instead (each column of `R` has a 2-norm
+    // of one); a larger word's square is normal and the smaller one's share is below `u`.
+    let norm = if first.iter().all(|word| word.abs() < SQUARE_SAFE) {
+        (first[0].abs() + first[1].abs()) * SLACK
+    } else {
+        v_norm(first) * SLACK
+    };
+    let mut current = std::vec![norm + first_error];
+    current.extend(later.iter().copied());
+    current
+}
+
+/// [`Majorants::remainders`] from `current = m(now)`, `now >= 1`.
+fn remainder_sums(constants: &[SectionConstants], current: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let k = constants.len();
+    // `alpha[i][j]`: coefficient of `Gbar_j` in `a_i` for `t >= now >= 1`.
+    let mut alpha = std::vec![std::vec![0.0; k]; k + 1];
+    alpha[1][0] = constants[0].gamma;
+    for i in 1..k {
+        let (earlier, later) = alpha.split_at_mut(i + 1);
+        for (next, previous) in later[0].iter_mut().zip(&earlier[i]).take(i) {
+            *next = constants[i].delta * previous;
+        }
+        later[0][i] = constants[i].gamma;
+    }
+    // Solve `(I - M) s = current`: `s_0 = current_0 / (1 - q_0)`,
+    // `s_i = (current_i + beta_i sum_j alpha[i][j] s_j) / (1 - q_i)`.
+    let mut sums = std::vec![0.0; k];
+    for i in 0..k {
+        let drive: f64 = if i == 0 {
+            0.0
+        } else {
+            constants[i].beta * (0..i).map(|j| alpha[i][j] * sums[j]).sum::<f64>()
+        };
+        sums[i] = (current[i] + drive) / (1.0 - constants[i].q) * SLACK;
+    }
+    let inputs: Vec<f64> = (0..=k)
+        .map(|i| (0..k).map(|j| alpha[i][j] * sums[j]).sum::<f64>() * SLACK)
+        .collect();
+    (sums, inputs)
+}
+
+/// The majorant state's step for `t >= 1` as a matrix, and its output row (issue #1465): `M` with
+/// `M_ii = q_i`, `M_ij = beta_i alpha_i,j` (`j < i`), and `alpha = alpha_{K+1}`, the coefficients of
+/// `o(t)` on `m(t)`, as [`Majorants::remainders`] solves `(I - M) s = m(now)`. Every product is
+/// inflated by [`SLACK`], so each entry is at least the exact product of the computed constants.
+fn majorant_step(constants: &[SectionConstants]) -> (SquareMatrix, Vec<f64>) {
+    let k = constants.len();
+    let mut alpha = std::vec![std::vec![0.0; k]; k + 1];
+    alpha[1][0] = constants[0].gamma;
+    for i in 1..k {
+        let (earlier, later) = alpha.split_at_mut(i + 1);
+        for (next, previous) in later[0].iter_mut().zip(&earlier[i]).take(i) {
+            *next = constants[i].delta * previous * SLACK;
+        }
+        later[0][i] = constants[i].gamma;
+    }
+    let mut m = std::vec![0.0; k * k];
+    for i in 0..k {
+        m[i * k + i] = constants[i].q;
+        for j in 0..i {
+            m[i * k + j] = constants[i].beta * alpha[i][j] * SLACK;
+        }
+    }
+    let row = alpha.swap_remove(k);
+    (SquareMatrix { n: k, m }, row)
 }
 
 /// A non-negative square matrix, row major.
@@ -1915,6 +2514,154 @@ fn power_apply(matrix: &SquareMatrix, mut steps: u64, z: &[f64]) -> Vec<f64> {
     result
 }
 
+/// [`power_apply`] carried to a later frame and rounded up by [`TAU`] per component (issue #1465):
+/// an underflowing product of the powers loses at most `2^-1075`, and the losses of one power are
+/// far below `tau` (`docs/derivations/1379-graph-tail-composition.md`, "Rounding").
+fn carry(matrix: &SquareMatrix, steps: u64, z: &[f64]) -> Vec<f64> {
+    if steps == 0 {
+        return z.to_vec();
+    }
+    power_apply(matrix, steps, z)
+        .into_iter()
+        .map(|value| value + TAU)
+        .collect()
+}
+
+/// `2^132`: the largest start component the live certificate's carry accepts (issue #1466; the
+/// derivation's "Rounding" of the live part). An uncapped live start lies far below it (about
+/// `2^24` per unit of the peak at the launch rates); the carry's error bound needs it.
+const LIVE_STATE_LIMIT: f64 = f64::from_bits((1023 + 132) << 52);
+
+/// `2^-30`: the absolute margin on a difference of two logarithms (each within one ulp of at
+/// most `745`) and on the relative rounding of a threshold.
+const LOG_MARGIN: f64 = 1.0 / 1_073_741_824.0;
+
+/// The rates a half's certificate may take: `lambda_j = rho + (1 - rho) 2^(-j/2)`,
+/// `j = 1..=CERTIFICATE_RATES`.
+const CERTIFICATE_RATES: u32 = 32;
+
+/// The coarse step of the search over `j`, and the neighbourhood refined around the coarse best.
+const CERTIFICATE_STEP: u32 = 4;
+
+/// One half of the decay law as a non-negative linear system (issue #1465;
+/// `docs/derivations/1379-graph-tail-composition.md`, "`D`: the closed form"): the half's value
+/// `offset + i` frames after `T` is at most `row . step^i state`.
+struct HalfSystem<'a> {
+    /// The non-negative step `G`, lower triangular in `order`.
+    step: &'a SquareMatrix,
+    order: &'a [usize],
+    /// The state at the anchor, every component at least `tau`.
+    state: &'a [f64],
+    row: &'a [f64],
+    /// `log(h)`, the half's threshold at `k = 0`.
+    log_threshold: f64,
+    /// Frames from `T` to the anchor.
+    offset: u64,
+}
+
+impl HalfSystem<'_> {
+    /// The least contraction certificate at the rate `lambda`, and its bound
+    /// `B = row . v + tau`: a `v >= state` with `G v <= lambda v`, so
+    /// `row . G^i state <= B lambda^i` for every `i`. `v` (scratch of `G`'s size) is found by
+    /// forward substitution in `order`, `v_p = max(z_p, s_p / (lambda - G_pp))` with `s_p` the
+    /// already-set part of `(G v)_p`, inflated so that the check passes on the computed values.
+    /// `None` when `lambda` is not above a diagonal entry or the computed `v` fails the check
+    /// `fl(dot(G_p, v) SLACK) <= fl(lambda v_p)`, which proves `(G v)_p < lambda v_p` exactly (the
+    /// derivation's "The verification").
+    fn bound(&self, lambda: f64, v: &mut [f64]) -> Option<f64> {
+        let g = self.step;
+        let n = g.n;
+        v.fill(0.0);
+        for &p in self.order {
+            let gap = lambda - g.m[p * n + p] * SLACK * SLACK * SLACK;
+            if gap.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+                return None;
+            }
+            let set = (0..n)
+                .filter(|&q| q != p)
+                .map(|q| g.m[p * n + q] * v[q])
+                .sum::<f64>()
+                * SLACK;
+            v[p] = self.state[p].max(set * SLACK / gap * SLACK);
+        }
+        let holds = (0..n).all(|p| dot(&g.m[p * n..(p + 1) * n], v) * SLACK <= lambda * v[p]);
+        holds.then(|| dot(self.row, v) + TAU)
+    }
+
+    /// The certificate at `lambda_j = rho + (1 - rho) 2^(-j/2)`; `None` when it is not verified or
+    /// its `D_h` is not below [`HORIZON_LIMIT`].
+    fn at_rate(&self, rho: f64, j: u32, v: &mut [f64]) -> Option<HalfCertificate> {
+        // `2^(-j/2)`: exact for even `j`, one rounded product for odd `j` (any `lambda` is valid
+        // once it is verified).
+        let mut scale = crate::exp2(-f64::from(j / 2));
+        if j % 2 == 1 {
+            scale *= core::f64::consts::FRAC_1_SQRT_2;
+        }
+        let lambda = rho + (1.0 - rho) * scale;
+        if lambda.partial_cmp(&1.0) != Some(core::cmp::Ordering::Less) {
+            return None;
+        }
+        let bound = self.bound(lambda, v)?;
+        let rate = -crate::log(lambda) / SLACK;
+        if rate.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+            return None;
+        }
+        // `a` rounded up: a quotient is inflated or deflated by `SLACK` by its sign.
+        let ratio = (crate::log(bound) - self.log_threshold + LOG_MARGIN) / rate;
+        let certificate = HalfCertificate {
+            lambda,
+            offset: self.offset,
+            transient: if ratio >= 0.0 {
+                ratio * SLACK
+            } else {
+                ratio / SLACK
+            },
+            decade: core::f64::consts::LN_10 * SLACK / rate * SLACK,
+        };
+        let finite = certificate.transient.is_finite() && certificate.decade.is_finite();
+        let below = certificate.transient.max(0.0) + certificate.decade < HORIZON_LIMIT as f64;
+        (finite && below && certificate.decay() < HORIZON_LIMIT).then_some(certificate)
+    }
+
+    /// Over the rates `lambda_j` above `G`'s largest diagonal entry `rho`, the verified certificate
+    /// with the least `D_h`, the first on ties, searched at every [`CERTIFICATE_STEP`]-th `j` and
+    /// then at every `j` within that step of the coarse best (the search only chooses among
+    /// verified certificates, so it affects `D`'s tightness, never its soundness). `None` when no
+    /// rate is verified.
+    fn certificate(&self) -> Option<HalfCertificate> {
+        let n = self.step.n;
+        let rho = (0..n)
+            .map(|p| self.step.m[p * n + p])
+            .fold(0.0_f64, f64::max);
+        let mut v = std::vec![0.0; n];
+        let mut best: Option<(u64, u32, HalfCertificate)> = None;
+        let mut consider = |j: u32, best: &mut Option<(u64, u32, HalfCertificate)>| {
+            if let Some(certificate) = self.at_rate(rho, j, &mut v) {
+                let decay = certificate.decay();
+                let better = match best {
+                    Some((least, at, _)) => decay < *least || (decay == *least && j < *at),
+                    None => true,
+                };
+                if better {
+                    *best = Some((decay, j, certificate));
+                }
+            }
+        };
+        for j in (CERTIFICATE_STEP..=CERTIFICATE_RATES).step_by(CERTIFICATE_STEP as usize) {
+            consider(j, &mut best);
+        }
+        let centre = best.map_or(CERTIFICATE_STEP, |(_, j, _)| j);
+        let low = centre.saturating_sub(CERTIFICATE_STEP - 1).max(1);
+        let high = (centre + CERTIFICATE_STEP - 1).min(CERTIFICATE_RATES);
+        for j in low..=high {
+            if j % CERTIFICATE_STEP != 0 {
+                consider(j, &mut best);
+            }
+        }
+        best.map(|(_, _, certificate)| certificate)
+    }
+}
+
 /// The deviation of the `f32` kernel from the reset-aware reference, per unit of `gain * peak`
 /// (relative) and from the flush alone (absolute), propagated after the input's end.
 ///
@@ -1939,6 +2686,9 @@ struct Deviation<'a> {
     /// scratch before it).
     previous_error: Vec<f64>,
     previous_reference: Vec<f64>,
+    /// `dev_loud` (issue #1465): [`Self::at_end`]'s output deviation, the last section's
+    /// `difference` at the fixed point, inflated by [`SLACK`]; `0` for a probe.
+    loud_output: f64,
 }
 
 impl<'a> Deviation<'a> {
@@ -1966,6 +2716,7 @@ impl<'a> Deviation<'a> {
             previous_reference: std::vec![0.0; k],
             error,
             reference: state_sup.to_vec(),
+            loud_output: difference * SLACK,
         }
     }
 
@@ -2008,6 +2759,16 @@ impl<'a> Deviation<'a> {
         difference * SLACK
     }
 
+    /// The certified flush of the walked deviation (issue #1474): every component below [`TAU`]
+    /// is rounded up to it. Kept out of [`Self::step`], so [`Self::linear_map`] stays the linear
+    /// step. The floored step `max(L x, tau)` is monotone, so once it falls it falls for good,
+    /// as the linear one does.
+    fn floor(&mut self) {
+        for value in self.error.iter_mut().chain(&mut self.reference) {
+            *value = value.max(TAU);
+        }
+    }
+
     /// The current state `(E_1..E_K, x_1..x_K)`.
     fn state(&self) -> Vec<f64> {
         self.error.iter().chain(&self.reference).copied().collect()
@@ -2027,6 +2788,7 @@ impl<'a> Deviation<'a> {
                 reference: std::vec![0.0; k],
                 previous_error: std::vec![0.0; k],
                 previous_reference: std::vec![0.0; k],
+                loud_output: 0.0,
             };
             if j < k {
                 probe.error[j] = 1.0;
@@ -2164,7 +2926,9 @@ fn fixed_cascade_walk(
     let mut block_sums = Vec::new();
     let mut state_sup = std::vec![0.0; k];
     let mut input_sup = std::vec![0.0; k + 1];
-    let remainder = loop {
+    // With the remainder, the pass's last remainder sums `w(H)`: the reference certificate's
+    // anchor when `t0 = 0` (issue #1465).
+    let (remainder, pass_end_sums) = loop {
         if majorants.frame >= HORIZON_LIMIT {
             return Some(Err(TailBoundError::Horizon));
         }
@@ -2189,7 +2953,7 @@ fn fixed_cascade_walk(
                 state_sup[i] += states[i];
                 input_sup[i] += inputs[i];
             }
-            break inputs[k];
+            break (inputs[k], states);
         }
     };
     // Every sum here has at most `majorants.frame` non-negative terms (block sums, then the sum of
@@ -2220,19 +2984,27 @@ fn fixed_cascade_walk(
     let first_block = (0..=blocks)
         .find(|&block| suffix[block] * SLACK * summed < threshold)
         .expect("the remainder is below the threshold");
+    // The majorant state at `t0`, read from the replay (issue #1465): the replay records each
+    // frame's raw state before its step, and the state after the last one, so no frame is walked
+    // for it.
+    let width = k + 2;
+    let mut record = Vec::new();
     let t0 = if first_block == 0 {
         0
     } else {
         let block = first_block - 1;
         let mut replay = checkpoints[block].clone();
         let mut values = Vec::with_capacity(BLOCK);
+        record.reserve((BLOCK + 1) * width);
         for _ in 0..BLOCK {
             if !take_frame(walked, horizon) {
                 return None;
             }
+            replay.record(&mut record);
             replay.step(&mut frame);
             values.push(frame.input[k]);
         }
+        replay.record(&mut record);
         let mut running = suffix[block + 1];
         let mut first = (block + 1) * BLOCK;
         for index in (0..BLOCK).rev() {
@@ -2246,6 +3018,19 @@ fn fixed_cascade_walk(
         first as u64
     };
     let tail_reference = t0;
+    // The reference certificate's anchor `(A, w(A))`: `t0` from the replay's record, or the pass's
+    // last frame when `t0 = 0` (the remainder needs `now >= 1`). The test is on `t0`, not on
+    // `first_block`: the block sum and the replay's running sum are rounded in different orders, so
+    // `first_block = 1` with `t0 = 0` occurs (a rounding tie at the threshold), and frame 0's record
+    // is the state before the impulse, which bounds nothing after it.
+    let (reference_anchor, reference_sums) = if t0 == 0 {
+        (majorants.frame, pass_end_sums)
+    } else {
+        let at = (t0 as usize - (first_block - 1) * BLOCK) * width;
+        let raw = &record[at..at + width];
+        let current = majorant_vector([raw[0], raw[1]], raw[2], &raw[3..]);
+        (t0, remainder_sums(&constants, &current).0)
+    };
 
     // The `f32` half: the relative deviation, frame by frame from `N`, until it is falling for
     // good below its share; the flush's stall sets `p_star`.
@@ -2253,6 +3038,7 @@ fn fixed_cascade_walk(
     let f = law.per_step();
     let stall = f * absolute_output;
     let mut deviation = Deviation::at_end(&constants, &state_sup, &input_sup);
+    deviation.floor();
     // The relative deviation must fall below half of its share (`eps / 4`) for good, leaving the
     // other half for the flush stall at `p_star`. The propagated system is non-negative, so once
     // every component falls it falls for good.
@@ -2266,7 +3052,8 @@ fn fixed_cascade_walk(
         if !take_frame(walked, horizon) {
             return None;
         }
-        let value = deviation.step();
+        let value = deviation.step().max(TAU);
+        deviation.floor();
         values.push(value);
         if value >= quarter {
             tail_deviation = frame + 1;
@@ -2337,6 +3124,62 @@ fn fixed_cascade_walk(
         let rest_star = rest_frames(&envelopes, &kernel_state(p_star), law, 0)?;
         let rest_peak = rest_frames(&envelopes, &kernel_state(peaks[0]), law, 0)?;
         let rest_any = rest_frames(&envelopes, &kernel_state(peaks[1]), law, 0)?;
+
+        // #1465: the composition values (`docs/derivations/1379-graph-tail-composition.md`). Each
+        // half's state is carried to `T` by powers of its step when its anchor is at or before
+        // `T`; the certificate covers every `k >= 1` from there. No frame is walked.
+        let (majorant, alpha) = majorant_step(&constants);
+        let (reference_offset, reference_state) = if reference_anchor <= tail_decay {
+            (
+                0,
+                carry(&majorant, tail_decay - reference_anchor, &reference_sums),
+            )
+        } else {
+            (reference_anchor - tail_decay, reference_sums.clone())
+        };
+        let (deviation_offset, deviation_state) = if frame <= tail_decay {
+            (0, carry(&step, tail_decay - frame, &deviation.state()))
+        } else {
+            (frame - tail_decay, deviation.state())
+        };
+        // `M` is lower triangular in section order; `linear_map`'s state is `(E_1..E_K,
+        // x_1..x_K)`, lower triangular in the order `x_1, E_1, x_2, E_2, ...`.
+        let reference_order: Vec<usize> = (0..k).collect();
+        let deviation_order: Vec<usize> = (0..k).flat_map(|i| [k + i, i]).collect();
+        let reference = HalfSystem {
+            step: &majorant,
+            order: &reference_order,
+            state: &reference_state,
+            row: &alpha,
+            log_threshold: crate::log(threshold),
+            offset: reference_offset,
+        }
+        .certificate();
+        let deviation_half = HalfSystem {
+            step: &step,
+            order: &deviation_order,
+            state: &deviation_state,
+            row: &row,
+            log_threshold: crate::log(quarter),
+            offset: deviation_offset,
+        }
+        .certificate();
+        let composition = reference.zip(deviation_half).map(|(reference, deviation)| {
+            let certificate = DecayCertificate {
+                reference,
+                deviation,
+            };
+            let output_majorant = input_sup[k];
+            let dev_loud = at_end.loud_output;
+            CascadeComposition {
+                decay: certificate.decay(),
+                certificate,
+                output_majorant,
+                dev_loud,
+                peak_gain: gain * (output_majorant + dev_loud),
+                stall,
+            }
+        });
         Ok(CascadeBound {
             tail: tail_decay,
             tail_every_peak: tail_decay.max(rest_star),
@@ -2345,6 +3188,7 @@ fn fixed_cascade_walk(
             flush_floor: p_star,
             rest_at_flush_floor: rest_star,
             tail_reference,
+            composition,
         })
     };
     Some(finish())
@@ -2352,7 +3196,231 @@ fn fixed_cascade_walk(
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushLaw, SvfWords, fixed_cascade, fixed_cascade_within, v_operator_norm};
+    use super::{
+        Deviation, FlushLaw, MajorantFrame, Majorants, STEP_UP, SectionConstants, SvfWords, TAU,
+        U64, fixed_cascade, fixed_cascade_within, v_norm, v_operator_norm,
+    };
+
+    /// The `f32` words `[c1, a2, a3, m0, m1, m2]` of a 48 kHz design (the builtin section design,
+    /// `builtins::test_support::section_words`).
+    fn words(bits: [u32; 6]) -> SvfWords {
+        SvfWords::from_f32(bits.map(f32::from_bits))
+    }
+
+    /// The HPF at 0.778, 0.80 and 0.74 of the 48 kHz maximum (18,671.559, 19,199.547 and
+    /// 17,759.582 Hz): the near-top band of #1474, where the first section's error radius (0.778)
+    /// or its state and radius (0.80, 0.74) stayed subnormal for the whole majorant pass.
+    const BAND_HPFS: [[u32; 6]; 3] = [
+        [
+            0x3f6b_715e,
+            0x3e62_2581,
+            0x3f1b_7ced,
+            0x3f80_0000,
+            0xbfb5_04f3,
+            0xbf80_0000,
+        ],
+        [
+            0x3f6e_ba8d,
+            0x3e54_99cd,
+            0x3f23_9020,
+            0x3f80_0000,
+            0xbfb5_04f3,
+            0xbf80_0000,
+        ],
+        [
+            0x3f65_5a61,
+            0x3e76_4aa0,
+            0x3f0e_469e,
+            0x3f80_0000,
+            0xbfb5_04f3,
+            0xbf80_0000,
+        ],
+    ];
+
+    /// The LPF at the 48 kHz maximum (23,999.434 Hz).
+    const TOP_LPF: [u32; 6] = [0x3f80_0000, 0x381b_7ad0, 0x3f7f_fc90, 0, 0, 0x3f80_0000];
+
+    /// A 300 Hz low-pass at 44.1 kHz.
+    const LOW_LPF: [u32; 6] = [0x3cf3_e39f, 0x3ca9_e351, 0x39e8_6719, 0, 0, 0x3f80_0000];
+
+    /// A subnormal value: what the unflushed walk propagated in the band.
+    const SUBNORMAL: f64 = 1.0e-310;
+
+    /// Issue #1474 gate 5: a non-negative radius or majorant below `tau` propagates as `tau`, never
+    /// below it. The exact values these bound are positive (`q e`, `beta a`, `gamma Gbar`), so a
+    /// flush that rounds down, keeps the subnormal, or flushes to zero is below `tau` here.
+    #[test]
+    fn a_non_negative_majorant_below_tau_propagates_as_tau() {
+        // A second section with `beta < 1` and `|d| < 1` (a 300 Hz low-pass at 44.1 kHz), so that
+        // `beta tau` and `|d| tau` are below `tau` and only the floor lifts them.
+        let sections = [words(BAND_HPFS[0]), words(LOW_LPF)];
+        let constants: [SectionConstants; 2] = [
+            SectionConstants::of(&sections[0]),
+            SectionConstants::of(&sections[1]),
+        ];
+        assert!(constants[1].beta < 0.5 && constants[1].delta < 0.5);
+        let mut majorants = Majorants::new(&constants, &sections[0]);
+        majorants.frame = 1;
+        majorants.first_error = SUBNORMAL;
+        majorants.later[0] = SUBNORMAL;
+        let mut frame = MajorantFrame::new(2);
+        majorants.step(&mut frame);
+        assert_eq!(
+            majorants.first_error, TAU,
+            "the first section's error radius"
+        );
+        assert_eq!(
+            majorants.later[0], TAU,
+            "the second section's state majorant"
+        );
+        assert_eq!(
+            frame.input[1..],
+            [TAU, TAU],
+            "the input and output majorants"
+        );
+
+        let mut deviation = Deviation {
+            constants: &constants,
+            error: std::vec![SUBNORMAL; 2],
+            reference: std::vec![SUBNORMAL; 2],
+            previous_error: std::vec![0.0; 2],
+            previous_reference: std::vec![0.0; 2],
+            loud_output: 0.0,
+        };
+        deviation.step();
+        deviation.floor();
+        assert_eq!(deviation.state(), [TAU; 4], "the deviation components");
+    }
+
+    /// Issue #1474 gate 5: a word of the first section's signed state below `tau` is flushed to
+    /// zero and `tau` enters the error radius, so the radius still covers the exact state; a word
+    /// at or above `tau` is kept. Red when the state is flushed without the addition (the radius
+    /// then falls short of the flushed state), when it is rounded up to `tau` instead of flushed,
+    /// when words above `tau` are flushed with only `tau` added, or when two flushed words add only
+    /// one `tau` (the words `(0.9 tau, 0.9 tau)` have a `V`-norm of about `1.66 tau`).
+    #[test]
+    fn the_first_state_below_tau_is_flushed_to_zero_and_its_magnitude_enters_the_radius() {
+        let section = words(BAND_HPFS[1]);
+        let constants = [SectionConstants::of(&section)];
+        let mut majorants = Majorants::new(&constants, &section);
+        majorants.frame = 1;
+        let state = [0.75 * TAU, -0.5 * TAU];
+        majorants.first = state;
+        majorants.first_error = 4.0 * TAU;
+        let a = section.a();
+        let next = [
+            a[0][0] * state[0] + a[0][1] * state[1],
+            a[1][0] * state[0] + a[1][1] * state[1],
+        ];
+        assert!(next.iter().all(|word| *word != 0.0 && word.abs() < TAU));
+        majorants.step(&mut MajorantFrame::new(1));
+        assert_eq!(majorants.first, [0.0, 0.0], "flushed to zero");
+        // The exact state is within `q e + nu (|s_1| + |s_2|)` of the unflushed `next`, and the
+        // flush moved the computed state by `||next||_V`.
+        // `||next||_V`, scaled by `2^600` so that its squares do not underflow.
+        let flushed = v_norm(next.map(|word| word / TAU)) * TAU;
+        let propagated = constants[0].q * 4.0 * TAU;
+        assert!(
+            majorants.first_error >= propagated + flushed,
+            "radius {:e} against {:e}",
+            majorants.first_error,
+            propagated + flushed
+        );
+
+        // Two words just below `tau`: the flushed `V`-norm is above one `tau`, so the flush must
+        // add `tau` for each word.
+        let both = [0.9 * TAU, 0.9 * TAU];
+        majorants.first = both;
+        majorants.first_error = 4.0 * TAU;
+        majorants.flush_first();
+        let flushed = v_norm(both.map(|word| word / TAU)) * TAU;
+        assert_eq!(majorants.first, [0.0, 0.0], "both words flushed");
+        assert!(
+            majorants.first_error >= 4.0 * TAU + flushed,
+            "radius {:e} against {:e} for two flushed words",
+            majorants.first_error,
+            4.0 * TAU + flushed
+        );
+
+        let kept = [2.0 * TAU, -3.0 * TAU];
+        majorants.first = kept;
+        majorants.first_error = 4.0 * TAU;
+        majorants.flush_first();
+        assert_eq!(
+            (majorants.first, majorants.first_error),
+            (kept, 4.0 * TAU),
+            "words at or above tau"
+        );
+    }
+
+    /// Issue #1474: a first state too small for `v_norm`'s squares still enters the closed-form
+    /// remainder at its `V`-norm or more. Red when the remainder takes `v_norm` of this state (words
+    /// near `1e-170`, above `tau`): both squares round to zero and the state drops out of the sum.
+    #[test]
+    fn a_tiny_first_state_still_enters_the_remainder() {
+        let section = words(BAND_HPFS[0]);
+        let constants = [SectionConstants::of(&section)];
+        let mut majorants = Majorants::new(&constants, &section);
+        let state = [3.0e-170, -2.0e-170];
+        majorants.first = state;
+        majorants.first_error = 0.0;
+        let exact = v_norm(state.map(|word| word / TAU)) * TAU;
+        let (sums, _) = majorants.remainders();
+        assert!(
+            sums[0] >= exact / (1.0 - constants[0].q),
+            "{:e} against {:e}",
+            sums[0],
+            exact / (1.0 - constants[0].q)
+        );
+    }
+
+    /// Issue #1474 gate 5: the derivation's underflow condition holds on the band designs. After
+    /// every frame of each band design's majorant pass (as long as its real walk), every
+    /// propagated quantity is at least `tau` and every word of the first state is zero or at least
+    /// `tau` in magnitude, so a rounding that underflows loses at most `2^-1075` against a relative
+    /// margin of at least `2^-54 tau`. Red when the radius's floor or the state's flush is removed,
+    /// or when the flush runs before the state's step instead of after it: the band then leaves a
+    /// quantity below `tau` at the end of a frame. (The deviation walk of these designs is six
+    /// frames far above `tau`; its floor is checked by the first test.)
+    #[test]
+    fn the_band_designs_walk_with_every_propagated_quantity_at_least_tau() {
+        // `r` roundings lose at most `2 r 2^-1075`; the relative margin is at least `2^-54 tau`.
+        let underflow = 2.0 * 64.0 * f64::from_bits(1);
+        assert!(underflow < (U64 - 9.0 * U64 * U64) * TAU / 1.0e100);
+        assert!(STEP_UP > 1.0 && TAU.is_normal());
+        let law = FlushLaw {
+            flush_eps: 1.0e-20,
+            rest_eps: 1.0e-14,
+            silence_frames: 2_400,
+        };
+        for hpf in BAND_HPFS {
+            let sections = [words(hpf), words(TOP_LPF)];
+            let constants: [SectionConstants; 2] = [
+                SectionConstants::of(&sections[0]),
+                SectionConstants::of(&sections[1]),
+            ];
+            let walked =
+                fixed_cascade_within(&sections, 15.848_932, &law, [15.848_932, 1.0e6], u64::MAX);
+            assert!(walked.frames > 400_000, "{hpf:08x?}: a long near-top walk");
+            let mut majorants = Majorants::new(&constants, &sections[0]);
+            let mut frame = MajorantFrame::new(2);
+            for _ in 0..walked.frames {
+                majorants.step(&mut frame);
+                let at_least_tau = |value: f64| value >= TAU;
+                assert!(
+                    majorants
+                        .first
+                        .iter()
+                        .all(|word| *word == 0.0 || word.abs() >= TAU)
+                        && at_least_tau(majorants.first_error)
+                        && majorants.later.iter().all(|value| at_least_tau(*value))
+                        && frame.input[1..].iter().all(|value| at_least_tau(*value)),
+                    "{hpf:08x?}: frame {}",
+                    majorants.frame
+                );
+            }
+        }
+    }
 
     /// Issue #1457 (attempt 2 verdict, m2): a walk under every horizon from zero past its length
     /// takes at most that horizon, exactly the horizon when it stops, and finishes with
@@ -2446,6 +3514,107 @@ mod tests {
                 bound > exact && bound - exact < 1.0e-13,
                 "words {bits:08x?}: bound {bound:.17} against exact {exact:.17}"
             );
+        }
+    }
+
+    /// Issue #1465 (verdict MINOR 2): the reference certificate is sound where the module's `t0` is
+    /// 0. The forward block sum and the replay's backward running sum round in different orders, so
+    /// at a gain whose threshold falls between them the crossing block is the first one and `t0` is
+    /// still 0; frame 0's record is the state before the impulse. For each design, the test finds the
+    /// least gain with `t0 > 0` and checks the 64 gains below it (one `f64` step each), where any such
+    /// tie lies: from `T + crossing(k)` on, the walked majorant suffix (a lower bound of what the
+    /// reference half bounds) is below `h 10^-k`. These gains are below the builtin trim floor; only
+    /// `math::tail`'s own `gain` reaches them. A tie is seen from outside by the frames walked: the
+    /// replay walks one more block, so a `t0 = 0` gain that walks as many frames as the least gain
+    /// with `t0 > 0` (whose crossing is in the first block, a gain one `f64` step away) replayed the
+    /// first block. The test requires a tie in the two designs that have one (`BAND_HPFS[1]`, and
+    /// `LOW_LPF` into `TOP_LPF`), so that it cannot lose its power silently.
+    #[test]
+    fn the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero() {
+        let law = FlushLaw {
+            flush_eps: 1.0e-20,
+            rest_eps: 1.0e-14,
+            silence_frames: 2_400,
+        };
+        // Each design and whether it has a tie among its 64 gains.
+        let designs: [(std::vec::Vec<SvfWords>, bool); 5] = [
+            (std::vec![words(LOW_LPF)], false),
+            (std::vec![words(BAND_HPFS[1])], true),
+            (std::vec![words(BAND_HPFS[2])], false),
+            (std::vec![words(BAND_HPFS[0]), words(LOW_LPF)], false),
+            (std::vec![words(LOW_LPF), words(TOP_LPF)], true),
+        ];
+        let peaks = [16.0, 1.0e30];
+        for (sections, tied) in &designs {
+            let frames =
+                |gain: f64| fixed_cascade_within(sections, gain, &law, peaks, u64::MAX).frames;
+            let bound = |gain: f64| fixed_cascade(sections, gain, &law, peaks).expect("a bound");
+            // The `t0 = 0` boundary: `t0 = 0` at `low`, `t0 > 0` at `high`.
+            let (mut low, mut high) = (1.0e-30_f64, 1.0_f64);
+            assert_eq!(bound(low).tail_reference, 0);
+            assert!(bound(high).tail_reference > 0);
+            while f64::from_bits(low.to_bits() + 1) < high {
+                let middle = (low * high).sqrt().clamp(
+                    f64::from_bits(low.to_bits() + 1),
+                    f64::from_bits(high.to_bits() - 1),
+                );
+                if bound(middle).tail_reference == 0 {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let gains: std::vec::Vec<f64> = (0..64)
+                .map(|step| f64::from_bits(low.to_bits() - step))
+                .collect();
+            assert!(bound(high).tail_reference < super::BLOCK as u64);
+            let replayed = frames(high);
+            let ties = gains
+                .iter()
+                .filter(|&&gain| bound(gain).tail_reference == 0 && frames(gain) == replayed)
+                .count();
+            assert!(
+                !tied || ties > 0,
+                "{} section(s): no tie among the 64 gains below the boundary {high:e}",
+                sections.len()
+            );
+            let checks: std::vec::Vec<(f64, u64, super::HalfCertificate)> = gains
+                .iter()
+                .filter_map(|&gain| {
+                    let bound = bound(gain);
+                    let reference = bound.composition?.certificate.reference;
+                    Some((gain, bound.tail, reference))
+                })
+                .collect();
+            assert!(!checks.is_empty(), "no certificate at the boundary");
+            let last = checks
+                .iter()
+                .map(|(_, tail, reference)| tail + reference.crossing(3))
+                .max()
+                .expect("a check");
+            let constants: std::vec::Vec<SectionConstants> =
+                sections.iter().map(SectionConstants::of).collect();
+            let mut majorants = Majorants::new(&constants, &sections[0]);
+            let mut frame = MajorantFrame::new(constants.len());
+            let mut values = std::vec::Vec::new();
+            for _ in 0..=last {
+                majorants.step(&mut frame);
+                values.push(frame.input[constants.len()]);
+            }
+            for (gain, tail, reference) in checks {
+                let threshold = super::TAIL_FLOOR / 2.0 / (gain * (1.0 + super::U));
+                let mut line = threshold;
+                for k in 1..=3_u64 {
+                    line /= 10.0;
+                    let from = tail + reference.crossing(k);
+                    let suffix: f64 = values[from as usize..].iter().sum();
+                    assert!(
+                        suffix < line,
+                        "gain {gain:e}: the walked suffix {suffix:e} from frame {from} (k = {k}) \
+                         is not below {line:e}"
+                    );
+                }
+            }
         }
     }
 }

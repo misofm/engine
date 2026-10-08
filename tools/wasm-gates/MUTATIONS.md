@@ -150,11 +150,14 @@ in crates/lane/src/wide_impl.rs is not D8 on this target
 {"schema_version":1,"kind":"wasm_gates","leg":"wasm","backend":1,"minmax_lowering_mismatches":144,"mismatches":[]}
 ```
 
-The line that matters is the one that stayed green: **all 331 corpus digest comparisons still
-matched their pins under the mutation, on every leg.** The swapped lowering differs from D8 only on
-ties and unordered pairs, and rule 2 of the corpus is that no NaN reaches a digest, so the frozen
-corpus cannot see this defect. That is the whole reason the count exists beside the digests rather
-than as another case in them.
+The line that mattered then was the one that stayed green: **all 331 corpus digest comparisons
+still matched their pins under the mutation, on every leg.** The swapped lowering differs from D8
+only on ties and unordered pairs, and at that time no NaN reached a digest, so the frozen corpus
+could not see this defect. That is why the count exists beside the digests rather than as another
+case in them. Since issue #1473 the delegated `runtime/ramp_toward` case (98) hashes NaN as one
+fixed token and moves under a swapped lowering too (its verifier: wasm `Lane::min` arm swapped,
+`minmax_lowering_mismatches: 36` and case 98 red at simd4), but only at its own points; the count
+remains the check over every ordered pair of the pool.
 
 ## `f64` lanes (issue #949): the exactness count and the lowering pin
 

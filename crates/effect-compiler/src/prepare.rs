@@ -632,6 +632,7 @@ fn prepare_with_console_eligibility(
                     || metadata.tail != expected.tail
                     || metadata.tail_every_peak != expected.tail_every_peak
                     || metadata.rest != expected.rest
+                    || metadata.composition != expected.composition
                     || metadata.state_sizes != expected.state_sizes
                     || metadata.scratch_bytes != expected.scratch_bytes
                     || metadata.automation_capacity != expected.automation_capacity
@@ -1080,10 +1081,11 @@ mod control_producer_tests {
 mod metadata_mismatch_tests {
     use super::{EffectCompileCaps, prepare_native_session_effects};
     use effect_contract::{
-        EffectDescriptor, EffectId, EffectPrepareError, EffectQuality, LatencySamples, LinkMode,
-        NativeEffectFactory, NativeEffectRegistry, PortId, PrepareEffectBankRequest,
-        PrepareEffectRequest, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
-        PreparedSidechainPort, RestBound, RestSamples, TailSamples,
+        CompositionBound, EffectDescriptor, EffectId, EffectPrepareError, EffectQuality,
+        FlushStall, LatencySamples, LinkMode, NativeEffectFactory, NativeEffectRegistry, PeakGain,
+        PortId, PrepareEffectBankRequest, PrepareEffectRequest, PreparedEffect, PreparedEffectBank,
+        PreparedEffectMetadata, PreparedSidechainPort, RestBound, RestSamples, TailDecay,
+        TailSamples,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use session::{CompileCaps, compile_session, parse_session_json};
@@ -1130,7 +1132,7 @@ mod metadata_mismatch_tests {
 
     /// One forgery per field the mismatch check compares, each a value other than the one the
     /// descriptor and request state.
-    const FORGERIES: [(&str, Forge); 16] = [
+    const FORGERIES: [(&str, Forge); 17] = [
         ("descriptor.id", |m| {
             forged_descriptor(m, |d| {
                 d.id = EffectId::new("forged.effect").expect("a valid effect id");
@@ -1183,6 +1185,18 @@ mod metadata_mismatch_tests {
             m.rest = match m.rest {
                 RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
                 RestBound::Bounded(_) => RestBound::Unstated,
+            };
+        }),
+        ("composition", |m| {
+            m.composition = match m.composition {
+                CompositionBound::Unstated => CompositionBound::Stated {
+                    decay: TailDecay(0),
+                    peak_gain: PeakGain::Zero,
+                    tail_gain: PeakGain::Zero,
+                    peak_stall: FlushStall::Zero,
+                    tail_stall: FlushStall::Zero,
+                },
+                CompositionBound::Stated { .. } => CompositionBound::Unstated,
             };
         }),
         ("state_sizes", |m| {
@@ -2061,11 +2075,11 @@ mod tail_bound_count_tests {
     use super::{EffectCompileCaps, prepare_native_session_effects};
     use core::sync::atomic::{AtomicUsize, Ordering};
     use effect_contract::{
-        AutomationRate, BankWidth, EffectDescriptor, EffectId, EffectPrepareError,
-        EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples, LinkModeSet,
-        NativeEffectFactory, NativeEffectRegistry, ParameterChannelPolicy, ParameterDescriptor,
-        ParameterDomain, ParameterId, ParameterLattice, ParameterMapping, ParameterUnit,
-        PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+        AutomationRate, BankWidth, CompositionBound, EffectDescriptor, EffectId,
+        EffectPrepareError, EffectProcessBlock, EffectQuality, LatencySamples, LinkModeSet,
+        NativeEffectFactory, NativeEffectRegistry, NodeTailBound, ParameterChannelPolicy,
+        ParameterDescriptor, ParameterDomain, ParameterId, ParameterLattice, ParameterMapping,
+        ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
         PrepareEffectRequest, PreparedEffect, PreparedEffectBank, PreparedNativeEffect,
         ProcessReport, QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError,
         StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
@@ -2076,13 +2090,14 @@ mod tail_bound_count_tests {
     /// Every evaluation of [`counted`]; only this module's effect states it.
     static EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
 
-    const TAIL: EffectTailBound = EffectTailBound {
+    const TAIL: NodeTailBound = NodeTailBound {
         tail: TailSamples::Finite(7),
         tail_every_peak: TailSamples::Infinite,
         rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
     };
 
-    fn counted(_: u32, _: EffectQuality) -> EffectTailBound {
+    fn counted(_: u32, _: EffectQuality) -> NodeTailBound {
         EVALUATIONS.fetch_add(1, Ordering::SeqCst);
         TAIL
     }

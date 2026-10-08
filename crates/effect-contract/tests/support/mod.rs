@@ -75,17 +75,18 @@ const QUALITIES: [QualityDescriptor; 4] = [
 ];
 
 /// The launch effects' statement today: a finite tail, no exact-rest bound.
-pub(crate) fn unstated(_: u32, _: EffectQuality) -> EffectTailBound {
-    EffectTailBound {
+pub(crate) fn unstated(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
         tail: TailSamples::Finite(0),
         tail_every_peak: TailSamples::Infinite,
         rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
     }
 }
 
 pub(crate) const fn descriptor(
     contract_major: u16,
-    tail_and_rest: fn(u32, EffectQuality) -> EffectTailBound,
+    tail_and_rest: fn(u32, EffectQuality) -> NodeTailBound,
 ) -> EffectDescriptor {
     EffectDescriptor {
         id: EFFECT_ID,

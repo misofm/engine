@@ -86,10 +86,11 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    tail_and_rest: |_, _| EffectTailBound {
+    tail_and_rest: |_, _| NodeTailBound {
         tail: TailSamples::Finite(7),
         tail_every_peak: TailSamples::Infinite,
         rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
     },
     observations: &[],
 };

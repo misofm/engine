@@ -44,13 +44,13 @@ pub use filter_response::{
 use tail::CachedDesign;
 pub use tail::{
     ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES,
-    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, InputSectionBound, input_section_flush_law,
-    input_section_live_bound, input_section_live_bound_table, input_section_live_cascade,
-    input_section_live_envelope, input_section_worst_case_pair,
+    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, input_section_flush_law, input_section_live_bound,
+    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
+    input_section_worst_case_pair,
 };
 
 use effect_contract::{
-    BankWidth, ChannelSymmetryWitness, EffectPrepareError, ResponseAnalysisError,
+    BankWidth, ChannelSymmetryWitness, EffectPrepareError, NodeTailBound, ResponseAnalysisError,
     ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
     ResponseSnapshotSummary,
 };
@@ -3486,7 +3486,7 @@ fn prepare_input_track(
 pub fn input_section_bound(
     sample_rate: u32,
     parameters: BuiltinParameters,
-) -> Result<InputSectionBound, BuiltinParameterError> {
+) -> Result<NodeTailBound, BuiltinParameterError> {
     Ok(input_section_bound_charged(sample_rate, parameters)?.bound)
 }
 
@@ -3518,7 +3518,9 @@ pub fn input_section_bound_charged(
 /// ([`input_section_live_bound_table`]), which is certified for every history of trim, polarity and
 /// filter targets and so for every fixed design, and the remaining budget is then spent: every
 /// later design with an enabled section reports the live bound without a walk. A memoryless design
-/// (both filters disabled on both channels) reports the zero bound and charges nothing. The result
+/// (both filters disabled on both channels) reports its own bound, as [`input_section_bound`] does
+/// (a zero tail and its trim-only composition, #1465), whatever the remaining budget, and charges
+/// nothing. The result
 /// is a function of the session only.
 ///
 /// `cache` (#1457 D2) keeps bounds across calls. A design it holds charges its stored charge
@@ -3531,7 +3533,7 @@ pub fn input_section_bounds(
     sample_rate: u32,
     strips: impl IntoIterator<Item = BuiltinParameters>,
     cache: Option<&mut InputBoundCache>,
-) -> Result<Vec<InputSectionBound>, BuiltinParameterError> {
+) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
     input_section_bounds_within(sample_rate, strips, INPUT_BOUND_BUDGET_FRAMES, cache)
 }
 
@@ -3542,9 +3544,8 @@ fn input_section_bounds_within(
     strips: impl IntoIterator<Item = BuiltinParameters>,
     budget: u64,
     mut cache: Option<&mut InputBoundCache>,
-) -> Result<Vec<InputSectionBound>, BuiltinParameterError> {
-    let fallback =
-        input_section_live_bound_table(sample_rate).unwrap_or(InputSectionBound::UNBOUNDED);
+) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
+    let fallback = input_section_live_bound_table(sample_rate).unwrap_or(NodeTailBound::UNBOUNDED);
     let mut remaining = budget;
     let mut designs = std::collections::BTreeMap::new();
     strips
@@ -3556,14 +3557,16 @@ fn input_section_bounds_within(
             if let Some(bound) = designs.get(&key) {
                 return Ok(*bound);
             }
-            // A memoryless design (both filters disabled on both channels) has the zero bound and
-            // walks nothing, so it is neither computed, charged nor cached.
+            // A memoryless design (both filters disabled on both channels) has no tail and walks
+            // nothing, so it is neither computed, charged nor cached; it states its gain-only
+            // composition (#1465), as `input_section_bound` does.
             if lanes
                 .iter()
                 .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
             {
-                designs.insert(key, InputSectionBound::ZERO);
-                return Ok(InputSectionBound::ZERO);
+                let bound = tail::memoryless_input_bound(lanes);
+                designs.insert(key, bound);
+                return Ok(bound);
             }
             // A spent budget walks nothing more: every other design reports the live bound
             // without a walk.
@@ -5726,7 +5729,7 @@ pub mod test_support {
         strips: impl IntoIterator<Item = crate::BuiltinParameters>,
         budget: u64,
         cache: Option<&mut crate::InputBoundCache>,
-    ) -> Result<Vec<crate::InputSectionBound>, BuiltinParameterError> {
+    ) -> Result<Vec<effect_contract::NodeTailBound>, BuiltinParameterError> {
         super::input_section_bounds_within(sample_rate, strips, budget, cache)
     }
 

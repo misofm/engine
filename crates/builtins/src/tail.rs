@@ -19,77 +19,139 @@
 //! designed `f32` words (D4), and for a live input lane the per-section suprema over every word a
 //! control history can reach (D5).
 
-use effect_contract::{RestSamples, TailSamples};
+use effect_contract::{
+    CompositionBound, FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay,
+    TailSamples,
+};
 use math::tail::{
-    CascadeBound, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords,
-    fixed_cascade_within, live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm,
-    word_box_norm,
+    CascadeBound, CascadeComposition, EnvelopeSection, FlushLaw, LiveCascade, LiveComposition,
+    PoleDomain, SvfWords, fixed_cascade_within, live_cascade, live_cascade_composition,
+    output_rounding, state_rounding, v_dual_norm, v_norm, word_box_norm,
 };
 
 use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
 use crate::{BUTTERWORTH_K, InputLane, SvfSection, builtin_filter_cutoff_maximum_hz, db_gain};
 
-/// The tail and exact-rest bounds of one builtin input section (#1329 D1, D2, Amendment 3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InputSectionBound {
-    /// `T_decay`: the tail every tail report uses (PDC, the C ABI, the browser). Valid for every
-    /// input peak at or above the section's flush floor `P*`.
-    pub tail: TailSamples,
-    /// `T_rest = max(T_decay, R(P*))`: the tail over every peak. From it on the output is below
-    /// `P * 10^(-144/20)` for `P >= P*` and exactly zero for `P < P*`.
-    pub tail_every_peak: TailSamples,
-    /// D2's exact-rest bound, the one silence skipping uses (#1107). `None` states no bound.
-    pub rest: Option<RestSamples>,
+/// A builtin input section's bound from a cascade's: its tail, tail over every peak and exact-rest
+/// bound (#1329 D1, D2, Amendment 3), and its composition (#1379 Amendment 1 H1, H3; #1465): a
+/// fixed design states the cascade's values rounded up into millibels; a live cascade carries
+/// none (its composition is [`live_stated_composition`]'s, #1466 and #1467).
+fn bound_from_cascade(bound: &CascadeBound) -> NodeTailBound {
+    NodeTailBound {
+        tail: TailSamples::Finite(bound.tail),
+        tail_every_peak: TailSamples::Finite(bound.tail_every_peak),
+        rest: RestBound::Bounded(RestSamples {
+            peak_plus_24_dbfs: bound.rest_peak,
+            any_sanitized_input: bound.rest_any,
+        }),
+        composition: bound
+            .composition
+            .as_ref()
+            .map_or(CompositionBound::Unstated, stated_composition),
+    }
 }
 
-impl InputSectionBound {
-    /// A memoryless section (both filters disabled): trim and polarity have no tail.
-    pub const ZERO: Self = Self {
-        tail: TailSamples::Finite(0),
-        tail_every_peak: TailSamples::Finite(0),
-        rest: Some(RestSamples::ZERO),
-    };
-
-    /// No bound stated: what a section reports if the derivation cannot bound it.
-    pub const UNBOUNDED: Self = Self {
-        tail: TailSamples::Infinite,
-        tail_every_peak: TailSamples::Infinite,
-        rest: None,
-    };
-
-    fn from_cascade(bound: &CascadeBound) -> Self {
-        Self {
-            tail: TailSamples::Finite(bound.tail),
-            tail_every_peak: TailSamples::Finite(bound.tail_every_peak),
-            rest: Some(RestSamples {
-                peak_plus_24_dbfs: bound.rest_peak,
-                any_sanitized_input: bound.rest_any,
-            }),
-        }
+/// #1465 F-D3, F-D4: a fixed design's `D`, `G_p = G_t = ceil_mB(|trim| (1 + u) (O + dev_loud))` and
+/// `sigma_p = sigma_t = ceil_mB(F a)`, each from a value computed by rounded operations. `F a`
+/// bounds the flush part at every frame, so it is both stalls (issue #1484 S-D5).
+fn stated_composition(composition: &CascadeComposition) -> CompositionBound {
+    let gain = PeakGain::Millibels(ceil_millibels(composition.peak_gain, Rounding::Computed));
+    let stall = FlushStall::Level(ceil_millibels(composition.stall, Rounding::Computed));
+    CompositionBound::Stated {
+        decay: TailDecay(composition.decay),
+        peak_gain: gain,
+        tail_gain: gain,
+        peak_stall: stall,
+        tail_stall: stall,
     }
+}
 
-    /// The componentwise maximum: the bound of a section whose channels are bounded by `self` and
-    /// `other` (D4: max over left and right).
-    #[must_use]
-    pub fn max(self, other: Self) -> Self {
-        let tail = |left: TailSamples, right: TailSamples| match (left, right) {
-            (TailSamples::Finite(left), TailSamples::Finite(right)) => {
-                TailSamples::Finite(left.max(right))
-            }
-            _ => TailSamples::Infinite,
-        };
-        Self {
-            tail: tail(self.tail, other.tail),
-            tail_every_peak: tail(self.tail_every_peak, other.tail_every_peak),
-            rest: match (self.rest, other.rest) {
-                (Some(left), Some(right)) => Some(RestSamples {
-                    peak_plus_24_dbfs: left.peak_plus_24_dbfs.max(right.peak_plus_24_dbfs),
-                    any_sanitized_input: left.any_sanitized_input.max(right.any_sanitized_input),
-                }),
-                _ => None,
-            },
-        }
+/// #1467 L-D7: the live input section's statement, each value computed by rounded operations
+/// (`math::tail::live_cascade_composition`; `docs/derivations/1379-graph-tail-composition.md`,
+/// "The live tail gain `G_t` and the statement"): `decay = D`, `peak_gain = ceil_mB(G_p)`,
+/// `tail_gain = ceil_mB(G_t)`, `peak_stall = ceil_mB(sigma_p)`, `tail_stall = ceil_mB(sigma_t)`.
+/// The effect registry's `tail_gain <= peak_gain` (#1464) and rule (g), `tail_stall <=
+/// peak_stall` (#1484), never see this bound, so they are checked here on the stated millibels:
+/// `Unstated` when either fails, equality admissible.
+fn live_stated_composition(composition: &LiveComposition) -> CompositionBound {
+    let peak_gain = ceil_millibels(composition.peak_gain, Rounding::Computed);
+    let tail_gain = ceil_millibels(composition.tail_gain, Rounding::Computed);
+    let peak_stall = ceil_millibels(composition.peak_stall, Rounding::Computed);
+    let tail_stall = ceil_millibels(composition.tail_stall, Rounding::Computed);
+    if tail_gain > peak_gain || tail_stall > peak_stall {
+        return CompositionBound::Unstated;
     }
+    CompositionBound::Stated {
+        decay: TailDecay(composition.decay),
+        peak_gain: PeakGain::Millibels(peak_gain),
+        tail_gain: PeakGain::Millibels(tail_gain),
+        peak_stall: FlushStall::Level(peak_stall),
+        tail_stall: FlushStall::Level(tail_stall),
+    }
+}
+
+/// Whether a linear value handed to [`ceil_millibels`] is exactly the value it states, or a value
+/// computed by rounded operations, which may lie a few `2^-53` below it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Rounding {
+    Exact,
+    Computed,
+}
+
+/// `ceil_mB(g) = ceil(2000 log10 g)` (#1465 F-D3), with `math::log`, so every target computes the
+/// same value, and rounded up: `x = 2000 log(g) / ln 10` carries a few `2^-53` relative errors (the
+/// logarithm within one ulp, the product and the quotient), and a computed `g` a few more. The
+/// ceiling is taken of `x + |x| 2^-30`, plus `2^-30` mB for a computed `g`; an exact `g = 1` stays
+/// `0` (`log(1) = 0` exactly). `g` is positive and finite.
+fn ceil_millibels(g: f64, rounding: Rounding) -> i32 {
+    const MARGIN: f64 = 1.0 / 1_073_741_824.0;
+    let x = 2000.0 * math::log(g) / core::f64::consts::LN_10;
+    let absolute = match rounding {
+        Rounding::Exact => 0.0,
+        Rounding::Computed => MARGIN,
+    };
+    let up = x + x.abs() * MARGIN + absolute;
+    let ceiling = -math::floor(-up);
+    assert!(
+        ceiling.is_finite() && ceiling.abs() < f64::from(i32::MAX),
+        "a millibel value of a finite positive gain"
+    );
+    ceiling as i32
+}
+
+/// `2^-126`, the smallest normal `f32`: one rounded operation's underflow.
+const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.0;
+
+/// #1465 F-D3: a channel with both filters disabled is `y = fl(x trim)`: no tail (`D = 0`, rest
+/// `ZERO`), `G_p = G_t = ceil_mB(|trim|)` when the product is exact (a power-of-two trim, 0 dB
+/// included, up to underflow) and `ceil_mB(|trim| (1 + u))` otherwise, and both stalls
+/// (`sigma_p = sigma_t`) one underflow.
+fn memoryless_channel(lane: &InputLane) -> NodeTailBound {
+    let trim = lane.trim_signed.abs();
+    let power_of_two = trim.is_normal() && trim.to_bits() & 0x007f_ffff == 0;
+    let gain = if power_of_two {
+        ceil_millibels(f64::from(trim), Rounding::Exact)
+    } else {
+        ceil_millibels(f64::from(trim) * (1.0 + U), Rounding::Computed)
+    };
+    let stall = FlushStall::Level(ceil_millibels(UNDERFLOW, Rounding::Exact));
+    NodeTailBound {
+        composition: CompositionBound::Stated {
+            decay: TailDecay(0),
+            peak_gain: PeakGain::Millibels(gain),
+            tail_gain: PeakGain::Millibels(gain),
+            peak_stall: stall,
+            tail_stall: stall,
+        },
+        ..NodeTailBound::ZERO
+    }
+}
+
+/// The bound of a design with both filters disabled on both channels: the maximum over the two
+/// channels of [`memoryless_channel`]. Preparation reports it without a walk or a charge
+/// (`crate::input_section_bounds`), as [`fixed_input_bound`] does.
+pub(crate) fn memoryless_input_bound(lanes: [&InputLane; 2]) -> NodeTailBound {
+    memoryless_channel(lanes[0]).max(memoryless_channel(lanes[1]))
 }
 
 /// What a fixed input section's bound depends on: the rate, and per channel the seven words of each
@@ -152,7 +214,7 @@ fn section_words(section: &SvfSection) -> SvfWords {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChargedInputBound {
     /// The design's own certified bound ([`crate::input_section_bound`]).
-    pub bound: InputSectionBound,
+    pub bound: NodeTailBound,
     /// The frames `math::tail::fixed_cascade` walked to compute it, over both channels.
     pub frames: u64,
     /// What it charges a preparation's budget, in frame-equivalents, whether computed or read from
@@ -211,7 +273,7 @@ fn fixed_input_walk(
         }
         if count == 0 {
             let zero = ChargedInputBound {
-                bound: InputSectionBound::ZERO,
+                bound: memoryless_channel(lane),
                 frames: 0,
                 charge: 0,
             };
@@ -225,20 +287,24 @@ fn fixed_input_walk(
         let gain = f64::from(lane.trim_signed.abs());
         let walk = fixed_cascade_within(&sections[..count], gain, &law, peaks, horizon);
         let charged = walk.result.map(|result| ChargedInputBound {
-            bound: result.map_or(InputSectionBound::UNBOUNDED, |bound| {
-                InputSectionBound::from_cascade(&bound)
-            }),
+            bound: result.map_or(NodeTailBound::UNBOUNDED, |bound| bound_from_cascade(&bound)),
             frames: walk.frames,
             charge: walk.frames + fixed,
         });
         (charged, walk.frames)
     };
-    // A memoryless design (no section enabled on either channel) walks and charges nothing.
+    // A memoryless design (no section enabled on either channel) walks and charges nothing; it
+    // states the larger of its two channels' gains.
     if lanes
         .iter()
         .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
     {
-        return channel(lanes[0], 0);
+        let memoryless = ChargedInputBound {
+            bound: memoryless_input_bound(lanes),
+            frames: 0,
+            charge: 0,
+        };
+        return (Some(memoryless), 0);
     }
     let (left, left_walked) = channel(lanes[0], budget);
     let Some(left) = left else {
@@ -270,39 +336,68 @@ fn fixed_input_walk(
 
 /// #1457 D1 (Amendments 3 and 4): the fixed charge of each enabled section a design's computation
 /// walks, in frame-equivalents (both channels' sections when they differ, one channel's when they
-/// are the same). A design has no fixed cost of its own beyond its sections' (the calibration's
-/// per-design term is negative at every rate), so it carries no other charge.
+/// are the same). A design carries no other charge: its sections' charges cover every measured
+/// class's fixed cost: the charge is the largest of every class's fixed cost divided by its
+/// sections (the per-design term of #1465's per-batch-median fits is negative, -1.93 to -1.44 us).
 ///
-/// A frame-equivalent is 23.5 ns on the CI-class runner: the time of one frame of the slowest frame
-/// class measured, rounded up. That class is the near-top band, an HPF at about 0.73-0.87 of the
-/// maximum cutoff into the LPF at the maximum, whose walk costs 21-23.2 ns a frame, against about
-/// 12-15 ns for every other design measured; so every frame walked costs at most one
-/// frame-equivalent. The largest measured fixed cost per section is a cascade of two sections at
-/// 88.2 kHz, 13.55 us (6.78 us a section, 288.3 frame-equivalents), so 290 frame-equivalents bound
-/// the fixed cost of every class measured. Calibrated with `examples/input_bound_budget.rs
-/// calibrate`; the classes, rates and runs are in the issue's attempt record. A change to the walk
-/// reruns the calibration and restates the frame-equivalent and this charge.
-pub const INPUT_BOUND_SECTION_CHARGE: u64 = 290;
+/// A frame-equivalent is 18.0 ns on the CI-class runner (root's second ruling of 2026-10-08,
+/// #1465, sampled as root's ruling (c) of the same day states, with root's measurement margin of
+/// the same day): the computed per-design-median bound times 1.05, rounded up to a half
+/// nanosecond. The computed bound is the binding value of the smallest value on a half-nanosecond
+/// grid such that every design's median work, of the calibration and of gate 2 (five measured
+/// samples each), is at most its charged frame-equivalents (frames walked plus this charge per
+/// section) times the frame-equivalent. The margin applies to the whole charged work (the
+/// coordinator's fix of 2026-10-08): this charge is the largest fixed cost per section times 1.05,
+/// in frame-equivalents, rounded up to a ten, so every design's median work is at most its charged
+/// frame-equivalents times 18.0 ns / 1.05. The computation is deterministic and interference only
+/// adds time, so a median bounds the cost the budget states, while one preempted sample does not
+/// set the constant. The margin is for the run-to-run spread on a shared host: the recorded runs'
+/// binding values are 16.960, 17.164, 16.917 and 16.909 ns, and gate 2's worst median shares of the
+/// earlier 25.67 ms budget 95.8 %, 96.3 %, 96.7 %, 97.2 % and 98.7 %, and of 27.18 ms 95.2 %. A
+/// calibration sample is a batch: one preparation of 48 to 96 different designs of one class (the
+/// class's batch size in `examples/input_bound_budget.rs`), walked back to back as a real
+/// preparation walks each distinct design once, so that a sample of short walks (about 12-30 us
+/// each) is not one short interval whose noise moved the constant by about 10 % with the box's
+/// load; "every design" is then every batch, at its median per design against its charge per
+/// design. The figure of record is the stream G batch 3 verifier's run (root's ruling of
+/// 2026-10-08, #1465): its binding batch, 64 cascades of two sections of the 96 kHz grid (2,493
+/// frames a design), has a median of 61,767 ns a design, 16.909 ns a charged frame-equivalent of
+/// 2,493 + 580 x 2 = 3,653; gate 2's medians needed 17.138 ns (the 4,096 cheap two-section
+/// designs, 1 kHz into 1.28 kHz, +24 dB, 88.2 kHz), and 17.138 ns x 1.05 = 17.995 ns, so 18.0 ns.
+/// The largest per-batch-median fixed cost per section is 9.79 us (a two-section cascade at
+/// 96 kHz); 1.05 x 9.79 us / 18.0 ns = 571.1 frame-equivalents, so 580 (rounded up to a ten;
+/// 580 x 18.0 ns / 1.05 = 9.94 us) bounds the fixed cost of every class measured with the margin.
+/// (Without the margin on the charge, a raised frame-equivalent lowers the charge, and the binding
+/// batch keeps less than 5 %: the earlier run's 9.34 us gave 520 instead of 550.) At 18.0 ns and
+/// 580 the binding batch's charge allows 3,653 x 18.0 ns / 1.05 = 62,623 ns of median work against
+/// its 61,767 ns, 1.39 % left past the margin. Net of the fixed cost, the slowest class's slowest
+/// point takes 17.34 ns a frame (median of five; descriptive). Calibrated with
+/// `examples/input_bound_budget.rs calibrate` and confirmed against every gate-2 family; the
+/// classes, rates and runs, and every earlier run's value, are in #1474's and #1465's attempt
+/// records. A change to the walk reruns the calibration and restates the frame-equivalent and this
+/// charge.
+pub const INPUT_BOUND_SECTION_CHARGE: u64 = 580;
 
 /// #1457 D1: the budget of one preparation's design bounds, in frame-equivalents, charged in strip
 /// order (`crate::input_section_bounds`). Each distinct design computed charges the frames it walks
 /// plus [`INPUT_BOUND_SECTION_CHARGE`] per section; a cache hit charges the same stored amount.
 ///
-/// At 23.5 ns a frame-equivalent ([`INPUT_BOUND_SECTION_CHARGE`]) it is 35.5 ms of design-bound
+/// At 18.0 ns a frame-equivalent ([`INPUT_BOUND_SECTION_CHARGE`]) it is 27.18 ms of design-bound
 /// work on the CI-class runner; this workstation (x86-64-v3, release, one pinned core) stood in
 /// for that runner. Its purpose is that typical sessions bound every distinct design exactly: the
 /// 64-track console documents (64 distinct designs) fit at every launch rate. Every frame and every
-/// section is charged at or above its measured cost, so the budget bounds the real work of every
-/// design family measured (gate 2, `examples/input_bound_budget.rs`), the slowest frame class
-/// included; the attempt record states the measured worst case and its spread. A design past the
+/// section is charged at or above its measured median cost, so the budget bounds the median real
+/// work of every design family measured (gate 2, `examples/input_bound_budget.rs`), the slowest
+/// frame class included; the attempt record states the measured worst case, its spread and the
+/// largest raw sample. A design past the
 /// budget reports the rate's live bound (D3).
 pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
 
 /// #1457 D2: the entry cap of [`InputBoundCache::new`]. The cache holds only designs with an
-/// enabled section, and such a design charges at least 547 frame-equivalents (a walk of at least
+/// enabled section, and such a design charges at least 837 frame-equivalents (a walk of at least
 /// 257 frames, one 256-frame block of the majorant pass and one deviation frame, plus one section's
-/// charge). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 547` = 2,760 designs
-/// exactly, and stops one more: the cap holds a whole preparation's designs. A rebuild of an
+/// charge of 580). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 837` = 1,804
+/// designs exactly, and stops one more: the cap holds a whole preparation's designs. A rebuild of an
 /// unchanged session is served entirely from the cache only while the cache has not been cleared
 /// since that session's designs were inserted: a cache shared by several sessions (an engine's,
 /// #1471) can fill and clear in the middle of a preparation, and a cleared design is computed
@@ -427,40 +522,80 @@ pub const fn input_section_worst_case_pair(sample_rate: u32) -> Option<(f32, f32
 /// anywhere up to +24 dB, and any history of 64-frame filter ramps (#1407), at any block size.
 /// The HPF-to-LPF cascade is bounded frequency-aware (#1433, `math::tail::live_cascade`).
 /// `None` off the launch rates (only a launch rate has a cutoff domain).
+///
+/// Its composition states all five values of #1379 Amendment 1 H1 (#1466, #1467,
+/// `live_stated_composition`), or `Unstated` when they are not certified.
 #[must_use]
-pub fn input_section_live_bound(sample_rate: u32) -> Option<InputSectionBound> {
+pub fn input_section_live_bound(sample_rate: u32) -> Option<NodeTailBound> {
     let terms = input_section_live_envelope(sample_rate)?;
     Some(
-        live_bound(sample_rate, &terms).map_or(InputSectionBound::UNBOUNDED, |bound| {
-            InputSectionBound::from_cascade(&bound)
+        live_bound(sample_rate, &terms).map_or(NodeTailBound::UNBOUNDED, |bound| NodeTailBound {
+            // An error is deliberately `Unstated`, as `Ok(None)` is: no values are certified.
+            composition: live_composition(sample_rate, &terms)
+                .ok()
+                .flatten()
+                .map_or(CompositionBound::Unstated, |composition| {
+                    live_stated_composition(&composition)
+                }),
+            ..bound_from_cascade(&bound)
         }),
     )
 }
 
 /// [`input_section_live_bound`] at each launch rate, as a table (#1457 D2): the live bound depends
 /// only on the rate, so preparation reads it here and computes it nowhere (it costs about 0.25 ms
-/// per computation, #1433). `None` off the launch rates, as there.
+/// per computation, #1433, and its composition about 0.5 ms more, #1466 and #1467). `None` off
+/// the launch rates, as there.
 ///
 /// The test `live_bound_table_is_the_computed_live_bound_at_every_launch_rate`
 /// (`tests/tail_contract.rs`) holds every entry equal to [`input_section_live_bound`], so a change
 /// to the derivation, the flush law or the cutoff domain turns it red until the table is restated.
+/// Each entry's composition is the statement (#1467): `D`, then `G_p`, `G_t`, `sigma_p` and
+/// `sigma_t` in millibels.
 #[must_use]
-pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<InputSectionBound> {
-    const fn bound(tail: u64, every_peak: u64, rest_peak: u64, rest_any: u64) -> InputSectionBound {
-        InputSectionBound {
+pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<NodeTailBound> {
+    const fn bound(
+        [tail, every_peak, rest_peak, rest_any]: [u64; 4],
+        decay: u64,
+        [peak_gain, tail_gain, peak_stall, tail_stall]: [i32; 4],
+    ) -> NodeTailBound {
+        NodeTailBound {
             tail: TailSamples::Finite(tail),
             tail_every_peak: TailSamples::Finite(every_peak),
-            rest: Some(RestSamples {
+            rest: RestBound::Bounded(RestSamples {
                 peak_plus_24_dbfs: rest_peak,
                 any_sanitized_input: rest_any,
             }),
+            composition: CompositionBound::Stated {
+                decay: TailDecay(decay),
+                peak_gain: PeakGain::Millibels(peak_gain),
+                tail_gain: PeakGain::Millibels(tail_gain),
+                peak_stall: FlushStall::Level(peak_stall),
+                tail_stall: FlushStall::Level(tail_stall),
+            },
         }
     }
     match sample_rate {
-        44_100 => Some(bound(704_010, 704_010, 1_067_207, 2_384_997)),
-        48_000 => Some(bound(699_952, 699_952, 1_061_497, 2_372_008)),
-        88_200 => Some(bound(704_018, 704_018, 1_071_057, 2_388_800)),
-        96_000 => Some(bound(699_960, 699_960, 1_065_688, 2_376_147)),
+        44_100 => Some(bound(
+            [704_010, 704_010, 1_067_207, 2_384_997],
+            46_678,
+            [14_424, 9_242, -23_379, -28_841],
+        )),
+        48_000 => Some(bound(
+            [699_952, 699_952, 1_061_497, 2_372_008],
+            46_421,
+            [14_416, 9_242, -23_312, -28_846],
+        )),
+        88_200 => Some(bound(
+            [704_018, 704_018, 1_071_057, 2_388_800],
+            46_678,
+            [14_426, 9_242, -22_765, -28_840],
+        )),
+        96_000 => Some(bound(
+            [699_960, 699_960, 1_065_688, 2_376_147],
+            46_421,
+            [14_417, 9_242, -22_696, -28_828],
+        )),
         _ => None,
     }
 }
@@ -484,6 +619,21 @@ fn live_bound(
         &input_section_flush_law(sample_rate),
         u64::from(INPUT_FILTER_RAMP_SAMPLES),
         rest_peaks(),
+    )
+}
+
+/// The raw composition values behind [`input_section_live_bound`]'s statement, at the same trim,
+/// flush law and ramp as [`live_bound`].
+fn live_composition(
+    sample_rate: u32,
+    terms: &LiveCascade,
+) -> Result<Option<LiveComposition>, math::tail::TailBoundError> {
+    let _environment = lane::CanonicalFpEnv::enter();
+    live_cascade_composition(
+        terms,
+        f64::from(max_trim_gain()),
+        &input_section_flush_law(sample_rate),
+        u64::from(INPUT_FILTER_RAMP_SAMPLES),
     )
 }
 
@@ -558,11 +708,13 @@ fn design_radius(g: f64) -> f64 {
 ///   which moves `Re p = -1 + O(1 / g)` by below `1e-15`). A ramp word lies within `E + h` of the
 ///   exact designs' hull, a settled word (an `f32` design) within `h`. The rounding counts are
 ///   the ones above.
-/// * **First section's mix row.** The HPF's mix words are `theta (-k, -1)` (`theta` in `[0, 1]`,
+/// * **Each section's mix row.** The HPF's mix words are `theta (-k, -1)` (`theta` in `[0, 1]`,
 ///   a crossfade toward or from the identity) within the mix allowance, so
 ///   `||(m1, m2)||_V* <= ||(-k, -1)||_V* + ` the allowance box's largest dual norm; the box term
-///   (above `1e-6`) and the final `1 + 2^-30` cover this evaluation's few `f64` roundings. Its
-///   output rounding on the state is the output row's supremum `omega_state`.
+///   (above `1e-6`) and the final `1 + 2^-30` cover this evaluation's few `f64` roundings. The
+///   LPF's are `theta (0, 1)` the same way, `||(0, 1)||_V* = sqrt(2)` (#1467's settled input
+///   term reads it). Each section's output rounding on the state is the output row's supremum
+///   `omega_state`, which is over every word of either section.
 #[must_use]
 pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
     let _environment = lane::CanonicalFpEnv::enter();
@@ -672,12 +824,67 @@ pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
         mix_box = mix_box.max(v_dual_norm([mix[1] * sign(1), mix[2] * sign(2)]));
     }
     let first_mix_row = (v_dual_norm([-k, -1.0]) + mix_box) * (1.0 + 1.0 / 1_073_741_824.0);
-    // The first section's output rounding on the state is the supremum above.
-    let first_output_rounding = omega_state;
+    // The second section's mix words are `theta (0, 0, 1)` toward or from the identity
+    // `(1, 0, 0)` within the same allowance (#1467): `||(0, 1)||_V* = sqrt(2)`, which
+    // `first_mix_row` does not cover (`||(-k, -1)||_V*` with `k = fl(sqrt(2))` is below it).
+    let second_mix_row = (v_dual_norm([0.0, 1.0]) + mix_box) * (1.0 + 1.0 / 1_073_741_824.0);
+    // Each section's output rounding on the state is the supremum above, over every word.
     Some(LiveCascade {
         envelope,
         poles,
         first_mix_row,
-        first_output_rounding,
+        first_output_rounding: omega_state,
+        second_mix_row,
+        second_output_rounding: omega_state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A live composition with the given raw gains and stalls (`D` and the certificates do not
+    /// enter the statement's checks).
+    fn composition(gains: [f64; 2], stalls: [f64; 2]) -> LiveComposition {
+        LiveComposition {
+            decay: 46_678,
+            groups: std::vec::Vec::new(),
+            peak_gain: gains[0],
+            tail_gain: gains[1],
+            peak_stall: stalls[0],
+            tail_stall: stalls[1],
+        }
+    }
+
+    /// #1467 L5': the live statement's own `tail_gain <= peak_gain` and rule (g)
+    /// (`tail_stall <= peak_stall`), on the stated millibels. Equal values are admissible and
+    /// stated; a tail gain or a tail stall one millibel above its peak value states nothing.
+    #[test]
+    fn the_live_statement_admits_equality_and_refuses_a_tail_value_above_its_peak_value() {
+        let (gain, stall) = (1.629_239e7, 2.041_952e-12);
+        let stated = live_stated_composition(&composition([gain, gain], [stall, stall]));
+        let CompositionBound::Stated {
+            peak_gain,
+            tail_gain,
+            peak_stall,
+            tail_stall,
+            ..
+        } = stated
+        else {
+            panic!("equal gains and stalls are admissible: {stated:?}");
+        };
+        assert_eq!((peak_gain, peak_stall), (tail_gain, tail_stall));
+        // One millibel up: `10^(1/2000)`.
+        let up = 1.001_152;
+        assert_eq!(
+            live_stated_composition(&composition([gain, gain * up], [stall, stall])),
+            CompositionBound::Unstated,
+            "a tail gain above the peak gain"
+        );
+        assert_eq!(
+            live_stated_composition(&composition([gain, gain], [stall, stall * up])),
+            CompositionBound::Unstated,
+            "a tail stall above the peak stall"
+        );
+    }
 }

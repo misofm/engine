@@ -68,11 +68,12 @@ const QUALITIES: [QualityDescriptor; 4] = [
     quality(88_200),
     quality(96_000),
 ];
-fn tail_and_rest(_: u32, _: EffectQuality) -> EffectTailBound {
-    EffectTailBound {
+fn tail_and_rest(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
         tail: TailSamples::Finite(0),
         tail_every_peak: TailSamples::Infinite,
         rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
     }
 }
 static DESCRIPTOR: EffectDescriptor = EffectDescriptor {

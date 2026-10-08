@@ -3,8 +3,9 @@
 //! The wasm leg needs a built `wasm32-unknown-unknown` artifact and therefore lives in
 //! `scripts/run-wasm-gates.sh` and the `wasm-guests` CI job. What runs here, in `test-release`, is
 //! everything that can be checked in-process: that the pins still describe the corpus at every
-//! width, that the corpus carries no NaN into a digest (master plan D5 excludes NaN payloads
-//! because wasm canonicalises them), that no two cases are the same computation, and that the
+//! width, that the lane corpus carries no NaN payload into a digest (master plan D5 excludes NaN
+//! payloads because wasm canonicalises them; the delegated `runtime/ramp_toward` case hashes NaN
+//! only as one fixed token, issue #1473), that no two cases are the same computation, and that the
 //! `lane_fma` case actually separates a fused evaluation from an unfused one.
 //!
 //! Without the last of those, a green wasm run would only prove that both targets computed

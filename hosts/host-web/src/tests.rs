@@ -6939,10 +6939,11 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         parameters: &[],
         ports: &[],
         qualities: &[],
-        tail_and_rest: |_, _| effect_contract::EffectTailBound {
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
             tail: effect_contract::TailSamples::Finite(0),
             tail_every_peak: effect_contract::TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
         },
         observations: &MENU,
     };

@@ -22,13 +22,22 @@
 //! `[-160, 24]` dB for a level, `[1e-9, 1e4]` for an amplitude — and the directed edge points that
 //! sit exactly on a knee boundary are prepended so a knee-width change cannot hide in the noise.
 //!
-//! # No NaN
+//! # No NaN payload
 //!
-//! The determinism claim excludes NaN payloads (wasm canonicalises them), so every case is
-//! NaN-free by construction: levels are finite, amplitudes are positive normals, and
-//! `exp2_lane`/`log2_lane` clamp their arguments. `tests/determinism.rs` checks that.
+//! The determinism claim excludes NaN payloads (wasm canonicalises the NaN an arithmetic operation
+//! produces, master plan D5), so every case but one is NaN-free by construction: levels are finite,
+//! amplitudes are positive normals, and `exp2_lane`/`log2_lane` clamp their arguments.
+//!
+//! The one exception is `ramp_toward` (issue #1473). Its contract includes that a NaN `next`
+//! passes through rather than being hidden, and a lowering that hid it would otherwise be beyond
+//! every pin. `current + step` with a NaN `step` is arithmetic, so its payload may differ by
+//! target; the case therefore replaces every NaN result word with one fixed token,
+//! [`NAN_TOKEN`], before it is hashed. Its pin depends on which points are NaN, never on a
+//! payload. `tests/determinism.rs` checks that every other case is NaN-free and that this case
+//! emits NaN only as the token.
 
 use lane::Lane;
+use lane::kernels::ramp_toward;
 
 use crate::dynamics::{GainComputerCoef, gain_delta_db, gain_from_db, level_db};
 use crate::envelope::{
@@ -40,7 +49,7 @@ use crate::envelope::{
 pub const POINTS: usize = 1 << 16;
 
 /// Number of corpus cases.
-pub const CASE_COUNT: usize = 9;
+pub const CASE_COUNT: usize = 10;
 
 /// Human-readable name of each case, indexed by case number.
 pub const CASE_NAMES: [&str; CASE_COUNT] = [
@@ -53,7 +62,41 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
     "rms_follow",
     "hysteresis_open",
     "hysteresis_hold",
+    "ramp_toward",
 ];
+
+/// The word that stands for every NaN result of the `ramp_toward` case: the canonical quiet NaN,
+/// `0x7fc0_0000`. Only that case emits it (see "No NaN payload" above).
+pub const NAN_TOKEN: u32 = 0x7fc0_0000;
+
+/// The `ramp_toward` case's directed `current` values: both zeros, and finite values on either
+/// side of them.
+const RAMP_CURRENT: [f32; 5] = [0.0, -0.0, 1.0, -1.0, 0.25];
+
+/// The `ramp_toward` case's directed `step` values: both zeros (so `next` keeps or changes the
+/// sign of a zero `current`), steps that land inside, on and beyond a unit endpoint, and NaN, from
+/// which `next` is NaN. The NaN is built from its bits, so every target reads the same input, and
+/// its payload is not [`NAN_TOKEN`]'s: a native `current + step` keeps it, so a case that hashed
+/// payloads instead of the token would fail `tests/determinism.rs` natively, not only under wasm.
+const RAMP_STEP: [f32; 9] = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    0.5,
+    -0.5,
+    2.0,
+    -2.0,
+    f32::from_bits(0x7fd0_1473),
+];
+
+/// The `ramp_toward` case's directed `target` values: both zeros, so `current` and `target` can be
+/// zeros of opposite sign, and finite values that put `next` inside, on and beyond the endpoint.
+const RAMP_TARGET: [f32; 6] = [0.0, -0.0, 1.0, -1.0, 0.25, 0.75];
+
+/// Directed points of the `ramp_toward` case: every `(current, step, target)` triple of the three
+/// tables above.
+const RAMP_DIRECTED: usize = RAMP_CURRENT.len() * RAMP_STEP.len() * RAMP_TARGET.len();
 
 /// `xorshift64*`. Integer-only, so every target builds the same sequence.
 struct Rng(u64);
@@ -101,6 +144,28 @@ fn level_point(rng: &mut Rng, index: usize) -> f32 {
     // 184_001 values at a milli-dB step covers [-160, 24] inclusive; `steps as f32` is exact.
     let steps = (rng.next() % 184_001) as u32;
     -160.0 + steps as f32 * 0.001
+}
+
+/// One `(current, step, target)` point of the `ramp_toward` case, from a raw integer draw.
+///
+/// The first [`RAMP_DIRECTED`] points are the directed triples, where operand order decides the
+/// result bits. The rest are ordinary points on a `2^-16` grid: `current` and `target` in
+/// `[-2, 2]`, and a `step` in `[-1, 1]` that leaves `next` inside the range on some points and
+/// beyond the target on others, so the clamp and the unclamped law both carry the digest.
+fn ramp_point(rng: &mut Rng, index: usize) -> [f32; 3] {
+    if index < RAMP_DIRECTED {
+        let target = index % RAMP_TARGET.len();
+        let step = (index / RAMP_TARGET.len()) % RAMP_STEP.len();
+        let current = index / (RAMP_TARGET.len() * RAMP_STEP.len());
+        return [RAMP_CURRENT[current], RAMP_STEP[step], RAMP_TARGET[target]];
+    }
+    // 262_145 and 131_073 grid points: every value is an integer below `2^24` times `2^-16`, and
+    // the offset is exact, so the conversion is exact on every target.
+    let mut grid = |points: u64| (rng.next() % points) as u32 as f32 * (1.0 / 65_536.0);
+    let current = grid(262_145) - 2.0;
+    let step = grid(131_073) - 1.0;
+    let target = grid(262_145) - 2.0;
+    [current, step, target]
 }
 
 /// One positive normal amplitude in roughly `[2^-30, 2^13]`, from a raw integer draw.
@@ -209,6 +274,20 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 },
             );
         }
+        9 => {
+            map_case::<L, _, _>(
+                out,
+                |index| ramp_point(&mut rng, index),
+                |current, step, target| ramp_toward(current, step, target),
+            );
+            // D5: a NaN's payload is not part of the claim, only that the point is NaN. An integer
+            // test on the bits, so no target's float semantics decide it.
+            for word in out.iter_mut() {
+                if *word & 0x7fff_ffff > 0x7f80_0000 {
+                    *word = NAN_TOKEN;
+                }
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -246,9 +325,10 @@ where
 /// Pinned SHA-256 of each case's result words, little-endian, in case order.
 ///
 /// A regression guard and the cross-target reference, not an oracle: what makes the values
-/// *correct* is `tests/dynamics.rs` against the `f64` form of equation 4 and `tests/envelope.rs`
-/// against an `f64` one-pole. These pins were produced by this crate on `x86_64` and are checked
-/// at all three widths.
+/// *correct* is `tests/dynamics.rs` against the `f64` form of equation 4, `tests/envelope.rs`
+/// against an `f64` one-pole, and, for `ramp_toward`, `lane`'s `tests/ramp_endpoint.rs`, which
+/// states the clamp's in-range and NaN bits directly. These pins were produced by this crate on
+/// `x86_64` and are checked at all three widths.
 pub const D1_DIGESTS: [[u8; 32]; CASE_COUNT] = [
     // gain_delta_db_hard_knee
     [
@@ -303,5 +383,11 @@ pub const D1_DIGESTS: [[u8; 32]; CASE_COUNT] = [
         0x7d, 0x19, 0xbd, 0xe4, 0xc6, 0x83, 0xc8, 0xe2, 0xd7, 0x2f, 0x76, 0x12, 0xca, 0xd1, 0x84,
         0xed, 0x8e, 0x1f, 0xc7, 0x12, 0x54, 0x7d, 0xa9, 0xca, 0x95, 0x5b, 0xc9, 0x52, 0x8a, 0xad,
         0xaa, 0xce,
+    ],
+    // ramp_toward
+    [
+        0xae, 0x13, 0x40, 0x91, 0x5e, 0x1d, 0x83, 0xc3, 0xb9, 0xe1, 0x34, 0xd2, 0x4f, 0x4a, 0x3a,
+        0xe9, 0x62, 0x95, 0x46, 0x70, 0x72, 0x86, 0x7a, 0xe8, 0xe9, 0xf6, 0xad, 0xf6, 0x97, 0xf2,
+        0x4d, 0xe6,
     ],
 ];
