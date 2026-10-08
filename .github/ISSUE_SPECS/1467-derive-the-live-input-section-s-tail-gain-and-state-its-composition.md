@@ -47,12 +47,17 @@ drives, so the decomposition at `M` is linear.
   most 64 ramp frames (words in the convex hull of the designs plus #1407's allowance), then meets
   the settled design's response, over every settled group, plus the deviation it drives, with the
   trim word of +24 dB. Rounded up to millibels with `math::log`.
-- **L-D7. State all five.** `input_section_live_bound` returns `CompositionBound::Stated` with B1's
-  `D` and `G_p`, `sigma_p` as `peak_stall` and `sigma_t` as `tail_stall`, each as B1 (#1466)
-  computes it and rounded up to millibels, and this slice's `G_t`. `G_t <= G_p` holds (else the
-  slice stops and reports: the registry rule would refuse it). `sigma_t <= sigma_p` holds too (else
-  the slice stops and reports), and this slice gates it itself (L5'): rule (g) runs only in the
-  effect registry (`NativeEffectRegistry::new`), and an input section is not a registry row.
+- **L-D7. State all five, in millibels** (root's ruling of 2026-10-08: the millibel rounding moves
+  here; #1466's L-D2 and L-D3 state raw linear values). `input_section_live_bound` returns
+  `CompositionBound::Stated` with `decay` B1's `D`, and with each gain and stall rounded UP to
+  millibels by the module's `ceil_mB` (`math::log`; `docs/derivations/1379-graph-tail-composition.md`,
+  "Numerical limits"): `peak_gain = ceil_mB(G_p)`, `tail_gain = ceil_mB(G_t)` (this slice's),
+  `peak_stall = Level(ceil_mB(sigma_p))` and `tail_stall = Level(ceil_mB(sigma_t))`, `G_p`,
+  `sigma_p` and `sigma_t` as B1 (#1466) computes them raw. `G_t <= G_p` holds (else the slice stops
+  and reports: the registry rule would refuse it). `sigma_t <= sigma_p` holds too, raw and in
+  millibels (else the slice stops and reports), and this slice gates it itself (L5'): rule (g) runs
+  only in the effect registry (`NativeEffectRegistry::new`), and an input section is not a registry
+  row.
 - **L-D8. Cost** within #1457's D1 budget.
 
 ## DSP evidence (AGENTS.md)
@@ -154,3 +159,68 @@ The attempt record carries a mutation table with at least the mutants below; eac
 - Named exceptions: `STREAMS.md` (#1379 Amendment 1, H8).
 
 ## Attempt record
+
+### Root ruling, 2026-10-08 (applied to L-D7)
+
+The millibel rounding (`ceil_mB`, rounded up) of both stalls and of both gains moves into this
+slice's L-D7; #1466's L-D2 and L-D3 state raw linear values, and this slice states the millibel
+composition. L-D7 above is edited accordingly. (The GitHub body sync is handled separately.)
+
+### Attempt 1 (2026-10-08, implementer): STOPPED before code, spec defect in L2
+
+Worktree `codex/d15-stream-g3` at `ff9bdbc28`. Anchors re-verified: `input_section_live_bound`
+(`crates/builtins/src/tail.rs:489`, `Unstated` through `bound_from_cascade`),
+`input_section_live_bound_table` (`:505`, `Unstated`, held equal to the computed bound by
+`live_bound_table_is_the_computed_live_bound_at_every_launch_rate`), `LiveComposition` /
+`live_cascade_composition` (`crates/math/src/tail.rs:622`, `:1949`), #1466's L1/L3/L4 gates in
+`tail_contract.rs`. No code was written: L2's stated test value cannot be met, so the slice stops
+as the brief requires.
+
+**The defect.** L2 (and the Test value and the first Hazard) require a real-kernel drive that turns
+the mutant "`G_t` from the settled designs alone (the ramp window omitted)" red. No drive can. The
+largest output any input from `N` on can give at frame `n` of a word sequence is the row `l1`
+`sum_m |h(n, m)|` of the time-varying system with zero state at `N` (an exact supremum over every
+input with `|x| <= 1`). Computed in `f64` by a backward (adjoint) recursion over the cascade's
+4-state step, with #1407's mixtures as linear word interpolation (a scratch program outside the
+tree, not committed), 44.1 kHz, worst-case pair, HPF moved from its maximum toward 10 Hz, before
+the trim:
+
+| ramp start | sup over `n <= 30,000` | at `n = 300,000` (window share) |
+|---|---|---|
+| `N - 1` | 3.3021 | 3.5287 (`1.1e-9`) |
+| `N - 32` | 3.3021 | 3.5287 (`5.3e-10`) |
+| `N - 63` | — | 3.5287 (`1.7e-11`) |
+
+3.5287 is the settled pair's own `l1` (10 Hz HPF into the top LPF; #1379 H9's 3.51). The input that
+arrives during the window contributes at most 1.94 at any frame and has decayed to `1e-9` by the
+time the settled response reaches its `l1`; the supremum over every drive equals the settled
+design's `l1`. So even a mutant equal to the *exact* settled `l1` of the very design L2 settles to
+is never beaten, and any sound settled-only value (at least the supremum of the settled `l1` over
+every design, with its own slack) is further above. A wider scan (HPF and LPF each ramping between
+the top, 1 kHz, 10 Hz, identity and top-to-8..21.9 kHz designs, ramp start `N - 1` to `N - 48`)
+gives a window-only row `l1` of at most 2.63 (LPF top to 21.5 kHz), always below 3.5287. The
+`f32` deviation is about `1e-6` relative and changes nothing. The state a post-`N` input builds in
+at most 64 ramp frames is real in a *bound* that ignores frequency, not on the kernel.
+
+**What a sound `G_t` from #1433's machinery measures** (per unit of the input's peak, trim word of
++24 dB included; a scratch test, not committed): the window term with zero state at `M` and 65
+frames of any reachable word is about +108.3 dB with the frequency-blind second-section sum and
++88.5 dB with #1433's potential (65 frame charges `K` and direct-zone charges); the settled term
+(the per-zone section bound `(1/2 |m| q_k + omega) beta_k / (1 - r_k) + delta`, squared for the
+cascade) is +48.0 dB, at every launch rate. So a derived `G_t` is about 88.5 dB, 56 dB below
+`G_p` (144.2 dB) and 53.5 dB above the exact supremum (+35.0 dB = 3.5287 times the trim); the
+"settled only" mutant (+48 dB) stays 13 dB above anything the kernel can produce.
+
+**What root must decide (proposals, not applied):**
+1. Rewrite or drop L2. With `G_t` about +88.5 dB and the kernel's supremum +35.0 dB, L2 can only
+   turn red for a defect that loses more than about 53.5 dB: dropping the window term alone
+   (+48 dB left) or the trim alone (+64.5 dB left) stays green; dropping both (+24 dB) is red. No
+   single plausible defect is known that L2 alone catches, so under AGENTS.md's test-value rule
+   L2 either names a mutant confirmed red by a run or is removed; the window-term mutant is
+   defended by L3' only (its own test value already says so).
+2. Delete the first Hazard's second sentence ("The state that a post-`N` input builds during the
+   ramp window can exceed it; L2 is built so that this mutant is red") or restate it as a property
+   of the bound, not of the kernel.
+3. Optionally record the expected magnitudes above in the Product outcome ("differ by tens of dB"
+   holds: about 56 dB) and note the window term's looseness (about 53 dB over the kernel's
+   supremum) as a tightening follow-up beside #1485.
