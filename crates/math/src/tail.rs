@@ -479,9 +479,10 @@ pub struct CascadeBound {
     /// equals [`Self::tail`].
     pub tail_reference: u64,
     /// The raw values of #1379 Amendment 1 H1 for a fixed cascade (issue #1465), which the caller
-    /// rounds into millibels. `None` for a live bound ([`live_cascade`]; slices B1 and B2 derive
-    /// its values), for the empty cascade (its caller states a gain-only section's values), and
-    /// for a cascade no decay certificate is verified for.
+    /// rounds into millibels. `None` for a live bound ([`live_cascade`]; its values are
+    /// [`live_cascade_composition`]'s, issues #1466 and #1467), for the empty cascade (its caller
+    /// states a gain-only section's values), and for a cascade no decay certificate is verified
+    /// for.
     pub composition: Option<CascadeComposition>,
 }
 
@@ -615,9 +616,10 @@ impl DecayCertificate {
 /// The live cascade's composition values before rounding (#1379 Amendment 1 H1 as #1484 amended
 /// it, H3's live row; issue #1466, slice B1; `docs/derivations/1379-graph-tail-composition.md`,
 /// "The live input section"): the decay `D`, the peak gain and both stalls, per unit of the
-/// input's peak `X` with the largest trim word's magnitude and its rounding included.
-/// [`live_cascade_composition`] computes them. The live tail gain `G_t` is slice B2's (issue
-/// #1467), and no bound states these values until it is derived beside them.
+/// input's peak `X` with the largest trim word's magnitude and its rounding included, and the
+/// tail gain `G_t` (issue #1467, slice B2; the derivation's "The live tail gain"), per unit of
+/// the late input's peak. [`live_cascade_composition`] computes them; the caller rounds them up
+/// into millibels and states all five together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveComposition {
     /// `D`: for every `k >= 1`, from `M + T + k D` on the relative output bound is below
@@ -631,6 +633,12 @@ pub struct LiveComposition {
     /// `peak_gain X + peak_stall` (H1 (N1)). The window's first frame with zero current input,
     /// relative part, plus the current input through both sections' feedthroughs.
     pub peak_gain: f64,
+    /// `g_t`: the part of the output that an input from `M >= N` on produces is at most
+    /// `tail_gain epsilon` at every frame from `M` (H1 (N2)), `epsilon` that input's peak:
+    /// `g W* + g L_1 L_2`, the window input's part (the 64 frames a ramp may still be in flight,
+    /// and its settled continuation over every group) and the settled input's part (both
+    /// sections' settled designs, every zone).
+    pub tail_gain: f64,
     /// `sigma_p`: the flush part of the output bound with the tail at frame `0`, which bounds the
     /// flush part at every frame (H1 (N1)).
     pub peak_stall: f64,
@@ -912,6 +920,12 @@ pub struct LiveCascade {
     /// [`output_rounding`]'s `omega_state` over the first section's words: the output mix's
     /// rounding relative to the state.
     pub first_output_rounding: f64,
+    /// The supremum of `||(m1, m2)||_V*` over the second section's mix words: its output row on
+    /// the state is `1/2 (m1, m2) (I + A)` too. Read only by the live tail gain (issue #1467),
+    /// whose settled input term bounds the second section by its own zone.
+    pub second_mix_row: f64,
+    /// [`output_rounding`]'s `omega_state` over the second section's words.
+    pub second_output_rounding: f64,
 }
 
 /// One zone of pole positions: every reachable word whose `Re p` lies in `[low, high]`, with its
@@ -1613,6 +1627,124 @@ impl<'a> LiveBound<'a> {
         ]
     }
 
+    /// The window input's part of the live tail gain (issue #1467; the derivation's "The live tail
+    /// gain", (W)): an input of at most `g` on the window's first `ramp_frames` frames and zero
+    /// state before them. At window frame `j` the first section's state in zone `k` is at most
+    /// `Phi^(j)_k g`, with `Phi^(0) = 0` and
+    /// `Phi^(j+1)_k = max_{i in nb(k)} (rho_i Phi^(j)_i + beta_i [j < ramp_frames])` (`j` frames
+    /// from zero, not [`live_zones`]' fixed point over every history); its output is at most the
+    /// largest `(1/2 |m| q_k + omega) Phi^(j)_k g` plus the feedthrough; the second section is
+    /// propagated frequency-blind with `rho_ramp`, as in [`Self::window`]. Returns the outputs at
+    /// the window's `ramp_frames + 1` frames, the second section's state after them and the first
+    /// section's at the last of them, the shape [`Self::settled_start`] reads.
+    fn arrival_window(&self, g: f64) -> LiveWindow {
+        let envelope = &self.live.envelope;
+        let zones = &self.zones.zones;
+        let rho = envelope.rho_ramp;
+        let half_row = 0.5 * self.live.first_mix_row;
+        let omega = self.live.first_output_rounding;
+        // `1/2 |m| q_k + omega` per zone.
+        let rows: Vec<f64> = zones
+            .iter()
+            .map(|zone| (half_row * zone.sum_norm + omega) * SLACK)
+            .collect();
+        let mut phi = std::vec![0.0_f64; zones.len()];
+        let mut sigma = 0.0_f64;
+        let mut energy = 0.0_f64;
+        let mut capped = false;
+        let mut cap = |value: f64| {
+            // A NaN counts as capped, as in [`Self::window`].
+            capped |= value >= self.cap || value.is_nan();
+            value.min(self.cap)
+        };
+        let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
+        for frame in 0..=self.ramp_frames {
+            let input = if frame < self.ramp_frames { g } else { 0.0 };
+            let state_output = rows
+                .iter()
+                .zip(&phi)
+                .fold(0.0_f64, |sup, (row, phi)| sup.max(row * phi * SLACK));
+            let first = (state_output * g * SLACK + envelope.output_input * input) * SLACK;
+            outputs.push(cap((envelope.output_state * sigma
+                + envelope.output_input * first)
+                * SLACK));
+            sigma = cap((rho * sigma + envelope.input * first) * SLACK);
+            if frame == self.ramp_frames {
+                energy = cap(phi.iter().fold(0.0_f64, |sup, phi| sup.max(*phi)) * g * SLACK);
+            } else {
+                // `Phi^(j+1)` from `Phi^(j)`: this frame (`j < ramp_frames`) carries the input.
+                phi = zones
+                    .iter()
+                    .map(|zone| {
+                        (zone.first_neighbour..=zone.last_neighbour)
+                            .map(|i| (zones[i].contraction * phi[i] + zones[i].input) * STEP_UP)
+                            .fold(0.0_f64, f64::max)
+                    })
+                    .collect();
+            }
+        }
+        LiveWindow {
+            state: sigma,
+            energy,
+            outputs,
+            capped,
+        }
+    }
+
+    /// The window input's part after the window (the derivation's (W), "After the window"): per
+    /// settled group, the supremum over every frame of the relative settled system's output from
+    /// [`Self::arrival_window`]'s end. The state is stepped (each step rounded up) until the
+    /// computed next state is componentwise at most the current one; from there every later exact
+    /// state is at most it, so the outputs read so far bound every frame.
+    fn arrival_continuation(&self, window: &LiveWindow, g: f64) -> Result<f64, TailBoundError> {
+        let mut peak = 0.0_f64;
+        for terms in &self.terms {
+            let mut current = self.settled_start(terms, window, g, 0.0);
+            // Without the flush the constant component is unused (as in [`Self::tail`]).
+            current[3] = 0.0;
+            let (system, _, output_row) = self.settled_system(terms, 0.0);
+            let mut frames = 0_u64;
+            loop {
+                peak = peak.max(dot4(&output_row, &current));
+                let next = apply4(&system, &current);
+                if next.iter().zip(&current).all(|(next, now)| next <= now) {
+                    break;
+                }
+                current = next;
+                frames += 1;
+                if frames >= HORIZON_LIMIT {
+                    return Err(TailBoundError::Horizon);
+                }
+            }
+        }
+        Ok(peak)
+    }
+
+    /// `L_1 L_2` (the derivation's (Z)): per unit of the settled input's peak, the largest output
+    /// of the cascade at fixed words from zero state, each section bounded by the zone its
+    /// settled design lies in: `L(k) = (1/2 |m| q_k^s + omega) beta_k / (1 - r_k) + delta`, the
+    /// largest over the zones with settled designs, and at least `delta` (the identity), with
+    /// each section's own mix row and output rounding.
+    fn settled_input_gain(&self) -> f64 {
+        let live = self.live;
+        let delta = live.envelope.output_input;
+        let first_row = 0.5 * live.first_mix_row;
+        let second_row = 0.5 * live.second_mix_row;
+        let (mut first, mut second) = (delta, delta);
+        for zone in &self.zones.zones {
+            let Some(settled) = zone.settled else {
+                continue;
+            };
+            let state = zone.input / (1.0 - settled.contraction) * SLACK;
+            let section = |row: f64, omega: f64| {
+                (((row * settled.sum_norm + omega) * SLACK * state) * SLACK + delta) * SLACK
+            };
+            first = first.max(section(first_row, live.first_output_rounding));
+            second = second.max(section(second_row, live.second_output_rounding));
+        }
+        first * second * SLACK
+    }
+
     /// `R` for one input scale `g = gain * peak`: the first section rests (its state bound below
     /// `REST_EPS` per word, plus `N_SILENCE`), then the second, from its bound at that frame.
     fn rest(&self, g: f64) -> Result<u64, TailBoundError> {
@@ -1803,11 +1935,12 @@ impl<'a> LiveBound<'a> {
         Ok(stall * SLACK)
     }
 
-    /// The composition values of the cascade (issue #1466; the derivation's "The live input
-    /// section"), for the input scale `gain` (the largest trim word's magnitude times `1 + u`)
-    /// and the live `T_decay` `tail`. `None` when a window state bound the values read took the
-    /// cap, a group's start or step is outside the carry's rounding argument, a group's
-    /// certificate is not verified, or `D` is not below [`HORIZON_LIMIT`].
+    /// The composition values of the cascade (issues #1466 and #1467; the derivation's "The live
+    /// input section" and "The live tail gain"), for the input scale `gain` (the largest trim
+    /// word's magnitude times `1 + u`) and the live `T_decay` `tail`. `None` when a window state
+    /// bound the values read took the cap (the tail gain's window included), a group's start or
+    /// step is outside the carry's rounding argument, a group's certificate is not verified, or `D`
+    /// is not below [`HORIZON_LIMIT`].
     fn composition(&self, gain: f64, tail: u64) -> Result<Option<LiveComposition>, TailBoundError> {
         let envelope = &self.live.envelope;
         let relative = self.window(gain, 0.0);
@@ -1876,10 +2009,23 @@ impl<'a> LiveBound<'a> {
         if decay >= HORIZON_LIMIT {
             return Ok(None);
         }
+        // (N2)'s `epsilon` part (issue #1467): the late input's window part, through the window
+        // and its settled continuation, plus its settled part, per unit of its peak.
+        let arrival = self.arrival_window(gain);
+        if arrival.capped {
+            return Ok(None);
+        }
+        let window_part = arrival
+            .outputs
+            .iter()
+            .fold(0.0_f64, |sup, value| sup.max(*value))
+            .max(self.arrival_continuation(&arrival, gain)?);
+        let tail_gain = (window_part + gain * self.settled_input_gain() * SLACK) * SLACK;
         Ok(Some(LiveComposition {
             decay,
             groups,
             peak_gain,
+            tail_gain,
             peak_stall,
             tail_stall,
         }))
@@ -1935,13 +2081,12 @@ pub fn live_cascade_groups(
     bound.group_rests(gain * (1.0 + U) * peak)
 }
 
-/// The composition values of a live cascade (issue #1466; #1379 Amendment 1 H1, H3's live row;
-/// `docs/derivations/1379-graph-tail-composition.md`, "The live input section"): its decay `D`,
-/// linear peak gain and linear peak and tail stalls, for the trim word's magnitude `gain` (as
-/// [`live_cascade`]). `Ok(None)` when the values are not certified (a capped window, a group
-/// outside the carry's rounding argument or with no verified certificate). Evidence for the
-/// gates: no bound states these values until the live tail gain is derived beside them (issue
-/// #1467).
+/// The composition values of a live cascade (issues #1466 and #1467; #1379 Amendment 1 H1, H3's
+/// live row; `docs/derivations/1379-graph-tail-composition.md`, "The live input section" and "The
+/// live tail gain"): its decay `D`, linear peak and tail gains and linear peak and tail stalls, for
+/// the trim word's magnitude `gain` (as [`live_cascade`]). `Ok(None)` when the values are not
+/// certified (a capped window, a group outside the carry's rounding argument or with no verified
+/// certificate). The caller rounds them up into millibels and states the five together.
 ///
 /// # Errors
 ///

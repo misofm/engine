@@ -106,10 +106,11 @@ tail_stall }`, the five values #1379 composes through gain (#1379 Amendment 1 H1
 #1484), stated together or not at all, or `Unstated` until the node's
 own slice derives them (#1378 retires it). Today the builtin input section with its filters
 disabled states them, and so does one with a fixed design when its walk finishes within the
-preparation budget and both halves of its decay certificate are verified (#1465,
-`docs/derivations/1379-graph-tail-composition.md`); a fixed design over the budget (it reports the
-live bound) or with no verified certificate, and every other node, the live input section included,
-states `Unstated`. With a node's
+preparation budget and both halves of its decay certificate are verified (#1465), and so does the
+live input section (#1466, #1467: `D`, `G_p` and both stalls over every admitted history, and a
+`G_t` derived for an input that arrives at or after `N`, about 52 dB below its `G_p`), which a fixed
+design over the budget reports (`docs/derivations/1379-graph-tail-composition.md`); a fixed design
+with no verified certificate, and every other node, states `Unstated`. With a node's
 latency `L`, input `x`, output `y`, `N` the first sample of silence, `g_p = 10^(G_p/2000)` and
 `g_t = 10^(G_t/2000)` the linear gains (`0` for `Zero`) and `sigma_p`, `sigma_t` the two stalls'
 linear levels (`0` for `Zero`), each value is a certified upper bound at the node's rate, over its parameter domain

@@ -1101,6 +1101,13 @@ struct LiveOracle {
     peak_gain: f64,
     peak_stall: f64,
     tail_stall: f64,
+    /// #1467's tail gain (`docs/derivations/1379-graph-tail-composition.md`, "The live tail gain
+    /// `G_t`"): `W* + g L_1 L_2`, with its parts as evidence: the window's largest output
+    /// (`max O_j`), the settled continuation's (`max C_c`) and the settled input's `g L_1 L_2`.
+    tail_gain: f64,
+    tail_window: f64,
+    tail_continuation: f64,
+    tail_settled: f64,
 }
 
 /// One zone group's rest ([`math::tail::LiveGroupRest`]): `r`, `c_y`, `c_d`, the window's
@@ -1197,6 +1204,15 @@ fn live_oracle(rate: u32) -> LiveOracle {
         terms.first_mix_row
     );
     let half_row = 0.5 * mix_row;
+    // #1467: the LPF's mix row `theta (0, 1)` plus the same allowance, and its output rounding on
+    // the state (the module's supremum over every word, as `omega`).
+    let second_row = dual([0.0, 1.0]) + mix_box;
+    assert!(
+        terms.second_mix_row >= second_row && terms.second_output_rounding >= omega,
+        "{rate} Hz: the module's second mix row {} is below the derivation's {second_row}",
+        terms.second_mix_row
+    );
+    let half_second_row = 0.5 * second_row;
 
     // The box's image on the pole: `Re p`, `|p|` and `kappa`.
     let shift = |b: [f64; 3]| {
@@ -1567,6 +1583,62 @@ fn live_oracle(rate: u32) -> LiveOracle {
     }
     // `sigma_t`: the smaller of the stall from `T_decay` and the stall at every frame.
     let tail_stall = stall.min(peak_stall);
+    // #1467 `G_t`, per unit of the late input's peak. (W): `Phi^(j)` from zero over 64 input
+    // frames, the window frame by frame with the HPF's output from the largest
+    // `(1/2 |m| q_k + omega) Phi^(j)_k`, the LPF frequency-blind; then per group the relative
+    // settled system from the window's end, frame by frame until it falls.
+    let mut phi_j = vec![0.0_f64; n];
+    let mut lpf = 0.0_f64;
+    let mut tail_window = 0.0_f64;
+    let mut energy_end = 0.0_f64;
+    for frame in 0..=ramp {
+        let input = if frame < ramp { gain } else { 0.0 };
+        let first = (0..n)
+            .map(|i| (half_row * zones[i].q + omega) * phi_j[i])
+            .fold(0.0_f64, f64::max)
+            * gain
+            + oi * input;
+        tail_window = tail_window.max(os * lpf + oi * first);
+        lpf = rr * lpf + iota * first;
+        if frame == ramp {
+            energy_end = phi_j.iter().copied().fold(0.0_f64, f64::max) * gain;
+        } else {
+            phi_j = (0..n)
+                .map(|kz| {
+                    neighbours[kz]
+                        .iter()
+                        .map(|&i| zones[i].rho * phi_j[i] + zones[i].beta)
+                        .fold(0.0_f64, f64::max)
+                })
+                .collect();
+        }
+    }
+    let mut tail_continuation = 0.0_f64;
+    for t in &groups {
+        let a_h = rs * t.cd + mu_settled * t.cy + mu_x * t.cy * t.r;
+        let h0 = energy_end.min(t.phi[0] * gain);
+        let (mut tau, mut h, mut x) = (lpf + t.cy * h0, h0, 2.0 * t.cy * h0);
+        loop {
+            tail_continuation =
+                tail_continuation.max(os * (tau + t.cy * h + x) + oi * t.cy * t.r * h);
+            let next = (rs * tau + a_h * h, t.r * h, rs.max(t.r) * x);
+            if next.0 <= tau && next.1 <= h && next.2 <= x {
+                break;
+            }
+            (tau, h, x) = next;
+        }
+    }
+    // (Z): each section bounded by its settled design's zone, the largest over the zones.
+    let (mut l_1, mut l_2) = (oi, oi);
+    for z in &zones {
+        if let Some((rz, qs, _)) = z.settled {
+            let state = z.beta / (1.0 - rz);
+            l_1 = l_1.max((half_row * qs + omega) * state + oi);
+            l_2 = l_2.max((half_second_row * qs + omega) * state + oi);
+        }
+    }
+    let tail_settled = gain * l_1 * l_2;
+    let tail_gain = tail_window.max(tail_continuation) + tail_settled;
     // `D`: per group, the relative state carried to `T_decay` in closed form, then the
     // certificate `v_H = z_H`, `v_tau = max(z_tau, a_H v_H / (lambda - rho_s))`, `v_X = z_X` at
     // every rate `lambda_j = rho + (1 - rho) 2^(-j/2)`, `j = 1..=32`, `rho` the largest diagonal
@@ -1618,6 +1690,10 @@ fn live_oracle(rate: u32) -> LiveOracle {
         peak_gain,
         peak_stall,
         tail_stall,
+        tail_gain,
+        tail_window,
+        tail_continuation,
+        tail_settled,
     }
 }
 
@@ -1881,8 +1957,20 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
             composition.decay,
             oracle.decay
         );
+        // #1467 L3': `G_t` against the recomputation of "The live tail gain `G_t`".
+        eprintln!(
+            "L3' {rate} Hz: G_t {:.9e} ({:.9e}: window {:.6e}, continuation {:.6e}, settled input \
+             {:.6e}), {:.3} dB",
+            composition.tail_gain,
+            oracle.tail_gain,
+            oracle.tail_window,
+            oracle.tail_continuation,
+            oracle.tail_settled,
+            20.0 * math::log10(composition.tail_gain)
+        );
         for (name, module, recomputed) in [
             ("G_p", composition.peak_gain, oracle.peak_gain),
+            ("G_t", composition.tail_gain, oracle.tail_gain),
             ("sigma_p", composition.peak_stall, oracle.peak_stall),
             ("sigma_t", composition.tail_stall, oracle.tail_stall),
         ] {
@@ -2822,6 +2910,401 @@ fn live_composition_refuses_a_capped_window_and_an_unbounded_carry() {
         assert!(
             matches!(composition, Ok(None)),
             "{rate} Hz: a carry outside its rounding argument gave {composition:?}"
+        );
+    }
+}
+
+// ---- #1467: the live tail gain and the statement (L2, L5'; L3' above) -------------------------
+
+/// The cascade of one frame as one 4-state system, `z' = A z + b x`, `y = c . z + d x`, with
+/// `z = (s_hpf, s_lpf)` and the HPF's output the LPF's input, in exact (`f64`) arithmetic.
+#[derive(Clone, Copy)]
+struct CascadeFrame {
+    a: [[f64; 4]; 4],
+    b: [f64; 4],
+    c: [f64; 4],
+    d: f64,
+}
+
+fn cascade_frame(hpf: &SvfWords, lpf: &SvfWords) -> CascadeFrame {
+    let (a1, b1, c1, d1) = (hpf.a(), hpf.b(), hpf.c(), hpf.d());
+    let (a2, b2, c2, d2) = (lpf.a(), lpf.b(), lpf.c(), lpf.d());
+    CascadeFrame {
+        a: [
+            [a1[0][0], a1[0][1], 0.0, 0.0],
+            [a1[1][0], a1[1][1], 0.0, 0.0],
+            [b2[0] * c1[0], b2[0] * c1[1], a2[0][0], a2[0][1]],
+            [b2[1] * c1[0], b2[1] * c1[1], a2[1][0], a2[1][1]],
+        ],
+        b: [b1[0], b1[1], b2[0] * d1, b2[1] * d1],
+        c: [d2 * c1[0], d2 * c1[1], c2[0], c2[1]],
+        d: d2 * d1,
+    }
+}
+
+fn apply_frame(a: &[[f64; 4]; 4], z: &[f64; 4]) -> [f64; 4] {
+    core::array::from_fn(|i| a[i][0] * z[0] + a[i][1] * z[1] + a[i][2] * z[2] + a[i][3] * z[3])
+}
+
+fn row_times(row: &[f64; 4], a: &[[f64; 4]; 4]) -> [f64; 4] {
+    core::array::from_fn(|j| {
+        row[0] * a[0][j] + row[1] * a[1][j] + row[2] * a[2][j] + row[3] * a[3][j]
+    })
+}
+
+fn dot_frame(row: &[f64; 4], z: &[f64; 4]) -> f64 {
+    row[0] * z[0] + row[1] * z[1] + row[2] * z[2] + row[3] * z[3]
+}
+
+fn square_frame(a: &[[f64; 4]; 4]) -> [[f64; 4]; 4] {
+    core::array::from_fn(|i| core::array::from_fn(|j| (0..4).map(|k| a[i][k] * a[k][j]).sum()))
+}
+
+/// `A^steps z`, by squaring.
+fn power_apply_frame(a: &[[f64; 4]; 4], mut steps: u64, z: &[f64; 4]) -> [f64; 4] {
+    let (mut power, mut result) = (*a, *z);
+    while steps > 0 {
+        if steps & 1 == 1 {
+            result = apply_frame(&power, &result);
+        }
+        power = square_frame(&power);
+        steps >>= 1;
+    }
+    result
+}
+
+/// The words `(1 - w) from + w to`, all six (#1407: a live retarget moves the recursion only
+/// through designs and their mixtures; a disable or enable mixes toward or from the identity).
+fn mixture(from: &SvfWords, to: &SvfWords, w: f64) -> SvfWords {
+    let mix = |a: f64, b: f64| (1.0 - w) * a + w * b;
+    SvfWords {
+        c1: mix(from.c1, to.c1),
+        a2: mix(from.a2, to.a2),
+        a3: mix(from.a3, to.a3),
+        m0: mix(from.m0, to.m0),
+        m1: mix(from.m1, to.m1),
+        m2: mix(from.m2, to.m2),
+    }
+}
+
+/// Bounds of a free response of the fixed cascade `frame` (zero input) from the state
+/// `z = (s_hpf, s_lpf)`, by each section's `V`-norm contraction (`math::tail::v_operator_norm`,
+/// an upper bound of `||A||_V`): `(sup_t |y(t)|, sum_t |y(t)|)`. With `q` each section's
+/// contraction, `gamma = ||c||_V*`, `beta = ||b||_V`: `|y_1(t)| <= gamma_1 q_1^t ||s_1||`,
+/// `||s_2(t)|| <= q_2^t ||s_2|| + beta_2 sum_{i < t} q_2^(t - 1 - i) |y_1(i)|`, and
+/// `|y(t)| <= gamma_2 ||s_2(t)|| + |d_2| |y_1(t)|`. A section with a zero output row and input
+/// column (the identity) contributes no state term.
+fn free_response_bounds(hpf: &SvfWords, lpf: &SvfWords, z: &[f64; 4]) -> (f64, f64) {
+    use math::tail::{v_dual_norm, v_norm};
+    let (s1, s2) = (v_norm([z[0], z[1]]), v_norm([z[2], z[3]]));
+    let (gamma1, gamma2) = (v_dual_norm(hpf.c()), v_dual_norm(lpf.c()));
+    let beta2 = v_norm(lpf.b());
+    let d2 = lpf.d().abs();
+    let first = if gamma1 == 0.0 { 0.0 } else { gamma1 * s1 };
+    let q1 = v_operator_norm(hpf.a());
+    let q2 = v_operator_norm(lpf.a());
+    assert!(first == 0.0 || q1 < 1.0, "a contracting first section");
+    let second_state = if gamma2 == 0.0 && beta2 == 0.0 {
+        0.0
+    } else {
+        assert!(q2 < 1.0, "a contracting second section");
+        s2 + beta2 * first / (1.0 - q2)
+    };
+    let sup = gamma2 * second_state + d2 * first;
+    let first_sum = if first == 0.0 {
+        0.0
+    } else {
+        first / (1.0 - q1)
+    };
+    let second_sum = if gamma2 == 0.0 && beta2 == 0.0 {
+        0.0
+    } else {
+        (s2 + beta2 * first_sum) / (1.0 - q2)
+    };
+    (sup, gamma2 * second_sum + d2 * first_sum)
+}
+
+/// #1467 L2's oracle: the exact supremum, over every frame `n >= N` and every input with
+/// `|x| <= 1` from `N` on (zero state at `N`), of the time-varying cascade's output, for the
+/// words `words(j)` at frame `N + j`, fixed from frame `N + ramp` on. At frame `n` that supremum
+/// is the row `l1` `sum_m |h(n, m)|` (the input `sign h(n, m)` attains it), computed by the
+/// backward (adjoint) recursion: inside the ramp the row `c_n A_(n-1) ... A_(m+1)` frame by frame;
+/// after it `h(n, m) = c A^(n - ramp) v_m` for each ramp input `m` (`v_m` its state at the ramp's
+/// end) with the row `c A^i` stepped forward, plus the fixed system's partial `l1`. Frames are
+/// computed exactly up to where every rigorous remainder (`free_response_bounds` from the states
+/// there) is below `1e-12`; beyond, the supremum is at most the partial `l1` plus both
+/// remainders, which the returned value includes. Returns `(supremum, remainder)`; `record` sees
+/// each exactly computed row `(n - N, l1)`.
+fn exact_row_supremum(
+    words: &dyn Fn(usize) -> (SvfWords, SvfWords),
+    ramp: usize,
+    record: &mut dyn FnMut(usize, f64),
+) -> (f64, f64) {
+    const CHECK: usize = 65_536;
+    const REMAINDER: f64 = 1.0e-12;
+    let frames: Vec<CascadeFrame> = (0..=ramp)
+        .map(|j| {
+            let (hpf, lpf) = words(j);
+            cascade_frame(&hpf, &lpf)
+        })
+        .collect();
+    let (settled_hpf, settled_lpf) = words(ramp);
+    let settled = frames[ramp];
+    let mut supremum = 0.0_f64;
+    // Inside the ramp: rows by the backward recursion.
+    for n in 0..ramp {
+        let mut row = frames[n].c;
+        let mut l1 = frames[n].d.abs();
+        for m in (0..n).rev() {
+            l1 += dot_frame(&row, &frames[m].b).abs();
+            row = row_times(&row, &frames[m].a);
+        }
+        record(n, l1);
+        supremum = supremum.max(l1);
+    }
+    // Each ramp input's state at the ramp's end.
+    let columns: Vec<[f64; 4]> = (0..ramp)
+        .map(|m| {
+            let mut z = frames[m].b;
+            for frame in &frames[m + 1..ramp] {
+                z = apply_frame(&frame.a, &z);
+            }
+            z
+        })
+        .collect();
+    // From the ramp's end: `row = c A^(n - ramp)`, the partial `l1` of the fixed system.
+    let mut row = settled.c;
+    let mut partial = settled.d.abs();
+    let mut window_remainder = f64::INFINITY;
+    let mut steps = 0_usize;
+    loop {
+        if window_remainder > REMAINDER {
+            let window: f64 = columns.iter().map(|v| dot_frame(&row, v).abs()).sum();
+            record(ramp + steps, window + partial);
+            supremum = supremum.max(window + partial);
+        }
+        partial += dot_frame(&row, &settled.b).abs();
+        row = row_times(&row, &settled.a);
+        steps += 1;
+        if steps.is_multiple_of(CHECK) {
+            if window_remainder > REMAINDER {
+                // Past this frame each column's output is a free response from its state here.
+                window_remainder = columns
+                    .iter()
+                    .map(|v| {
+                        let z = power_apply_frame(&settled.a, steps as u64, v);
+                        free_response_bounds(&settled_hpf, &settled_lpf, &z).0
+                    })
+                    .sum();
+            }
+            // The fixed system's terms not yet summed: the free response from `A^steps b`.
+            let z = power_apply_frame(&settled.a, steps as u64, &settled.b);
+            let partial_remainder = free_response_bounds(&settled_hpf, &settled_lpf, &z).1;
+            if window_remainder <= REMAINDER && partial_remainder <= REMAINDER {
+                let remainder = window_remainder + partial_remainder;
+                return (supremum.max(partial + remainder), remainder);
+            }
+            assert!(steps < 64 * CHECK, "the oracle's frames do not converge");
+        }
+    }
+}
+
+/// The output at frame `n` of a unit impulse at frame `m <= n` (zero state before it), through the
+/// kernel's equations (as [`impulse_response`]) with the words `words(j)` at frame `j`, in `f64`.
+fn forward_response(words: &dyn Fn(usize) -> (SvfWords, SvfWords), m: usize, n: usize) -> f64 {
+    let mut state = [[0.0_f64; 2]; 2];
+    let mut out = 0.0;
+    for frame in m..=n {
+        let (hpf, lpf) = words(frame);
+        let mut x = if frame == m { 1.0 } else { 0.0 };
+        for (words, state) in [hpf, lpf].iter().zip(state.iter_mut()) {
+            let v3 = x - state[1];
+            let d1 = -words.c1 * state[0] + words.a2 * v3;
+            let d2 = words.a3 * v3 + words.a2 * state[0];
+            let v1 = state[0] + d1;
+            let v2 = state[1] + d2;
+            state[0] += 2.0 * d1;
+            state[1] += 2.0 * d2;
+            x = words.m0 * x + words.m1 * v1 + words.m2 * v2;
+        }
+        out = x;
+    }
+    out
+}
+
+/// #1467 L2. The live tail gain is at least the exact supremum of the late input's part on the
+/// time-varying cascade. With zero state at `N`, the whole output from `N` on is the part `G_t`
+/// bounds (H1), and its supremum over every input `|x| <= 1` from `N` is the row-`l1` supremum
+/// ([`exact_row_supremum`]) times the trim word of +24 dB; an input from `M > N` is one of these
+/// with zeros before `M`, so it covers every `M`. The scan, at every launch rate:
+///
+/// * a ramp of the HPF between every ordered pair of `{10 Hz, 100 Hz, 1 kHz, 10 kHz, the
+///   worst-case HPF (one `f32` below the maximum), the identity}`, the LPF at the maximum; and a
+///   ramp of the LPF between every ordered pair of `{10 Hz, 100 Hz, 1 kHz, 10 kHz, the maximum,
+///   the identity}`, the HPF at 10 Hz;
+/// * each ramp's control event at `N - s`, `s` in `{1, 16, 32, 48, 62}` (its word at `N - s + i`
+///   the mixture with weight `min(i + 1, 64) / 64` on the target, so 62, 47, 31, 15 and 1 ramp
+///   frames remain after `N`);
+/// * every settled pair of those designs (no ramp in flight).
+///
+/// It covers those histories only: the words of #1407's linear mixtures in exact arithmetic (no
+/// `f32` word rounding, no rounding deviation, no rule-3 reset), one section moving at a time.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release scale (#1467 L2)")]
+fn live_tail_gain_covers_the_exact_supremum_of_a_late_input_over_the_scanned_ramps() {
+    let trim = f64::from(math::pow(10.0, 24.0 / 20.0) as f32);
+    for &rate in rates() {
+        let (_, _, tail_gain, _, _) = composition_values(
+            input_section_live_bound(rate).expect("launch rate"),
+            "live bound",
+        );
+        let g_t = linear(tail_gain);
+        let (worst_hpf, top) = input_section_worst_case_pair(rate).expect("launch rate");
+        let hpf_points = [10.0, 100.0, 1_000.0, 10_000.0, worst_hpf, 0.0];
+        let lpf_points = [10.0, 100.0, 1_000.0, 10_000.0, top, 0.0];
+        let design = |section: usize, hz: f32| design_words(rate, section, hz);
+        let mut worst = (0.0_f64, String::new());
+        let mut largest_remainder = 0.0_f64;
+        let mut histories = 0;
+        let mut check = |what: String, sup: (f64, f64)| {
+            histories += 1;
+            largest_remainder = largest_remainder.max(sup.1);
+            let reached = trim * sup.0;
+            assert!(
+                reached <= g_t,
+                "{rate} Hz {what}: the exact supremum {reached:e} exceeds g_t {g_t:e}"
+            );
+            if reached > worst.0 {
+                worst = (reached, what);
+            }
+        };
+        for section in 0..2 {
+            let points = if section == 0 { hpf_points } else { lpf_points };
+            let other = if section == 0 {
+                design(1, top)
+            } else {
+                design(0, 10.0)
+            };
+            for &from in &points {
+                for &to in &points {
+                    if from == to {
+                        continue;
+                    }
+                    let (start, end) = (design(section, from), design(section, to));
+                    for s in [1_usize, 16, 32, 48, 62] {
+                        let words = |j: usize| {
+                            let w = ((s + j + 1).min(64)) as f64 / 64.0;
+                            let moving = mixture(&start, &end, w);
+                            if section == 0 {
+                                (moving, other)
+                            } else {
+                                (other, moving)
+                            }
+                        };
+                        check(
+                            format!("section {section} {from} Hz -> {to} Hz at N - {s}"),
+                            exact_row_supremum(&words, 63 - s, &mut |_, _| {}),
+                        );
+                    }
+                }
+            }
+        }
+        for &hpf in &hpf_points {
+            for &lpf in &lpf_points {
+                let pair = (design(0, hpf), design(1, lpf));
+                check(
+                    format!("settled {hpf} Hz into {lpf} Hz"),
+                    exact_row_supremum(&|_| pair, 0, &mut |_, _| {}),
+                );
+            }
+        }
+        // The oracle against independent brute force: a settled pair's supremum is its impulse
+        // response's `l1` (the partial sums only rise); and on a ramp history, the rows inside
+        // and after the ramp are the sums of `|y(n)|` over unit impulses at every earlier frame,
+        // each run forward through the kernel's equations with the frame's words.
+        let pair = [design(0, 10.0), design(1, top)];
+        let settled = exact_row_supremum(&|_| (pair[0], pair[1]), 0, &mut |_, _| {}).0;
+        let brute = l1(&impulse_response(&pair, 2_000_000));
+        assert!(
+            (settled - brute).abs() <= 1.0e-9 * brute,
+            "{rate} Hz: the oracle's settled supremum {settled} against the impulse response's \
+             l1 {brute}"
+        );
+        let (start, end) = (design(0, 10.0), design(0, 100.0));
+        let words = |j: usize| {
+            (
+                mixture(&start, &end, ((2 + j).min(64)) as f64 / 64.0),
+                pair[1],
+            )
+        };
+        let mut rows = [0.0_f64; 2];
+        exact_row_supremum(&words, 62, &mut |n, value| match n {
+            40 => rows[0] = value,
+            200 => rows[1] = value,
+            _ => {}
+        });
+        for (index, n) in [40_usize, 200].into_iter().enumerate() {
+            let forward: f64 = (0..=n).map(|m| forward_response(&words, m, n).abs()).sum();
+            assert!(
+                (rows[index] - forward).abs() <= 1.0e-12 * forward.max(1.0),
+                "{rate} Hz: the oracle's row at N + {n} {} against the forward sum {forward}",
+                rows[index]
+            );
+        }
+        eprintln!(
+            "L2 {rate} Hz: settled 10 Hz into the maximum {settled:.10} (impulse response l1 \
+             {brute:.10}); ramp rows at N + 40 and N + 200 {:.10} {:.10}",
+            rows[0], rows[1]
+        );
+        eprintln!(
+            "L2 {rate} Hz: {histories} histories; largest trim x supremum {:.6e} ({:.2} dB, {}), \
+             g_t {g_t:.6e} ({:.2} dB), margin {:.2} dB; largest remainder {largest_remainder:.1e}",
+            worst.0,
+            20.0 * math::log10(worst.0),
+            worst.1,
+            20.0 * math::log10(g_t),
+            20.0 * math::log10(g_t / worst.0)
+        );
+    }
+}
+
+/// #1467 L5'. The live bound states all five values: `decay` is the accessor's `D`, and each gain
+/// and stall is the accessor's raw value rounded up to millibels (at least `ceil(2000 log10)` of
+/// it and at most that of the value one part in a million above, which covers the module's
+/// rounding margin); and the two orders the registry would check, which never sees this bound:
+/// `tail_gain <= peak_gain` and `tail_stall <= peak_stall` (#1484 rule (g)), raw and in millibels,
+/// at every launch rate.
+#[test]
+fn live_bound_states_the_composition_rounded_up_with_its_orders() {
+    for &rate in rates() {
+        let composition = live_composition(rate);
+        let (decay, peak_gain, tail_gain, peak_stall, tail_stall) = composition_values(
+            input_section_live_bound(rate).expect("launch rate"),
+            "live bound",
+        );
+        eprintln!(
+            "L5' {rate} Hz: D {decay}, G_p {peak_gain} mB, G_t {tail_gain} mB, sigma_p {peak_stall} \
+             mB, sigma_t {tail_stall} mB"
+        );
+        assert_eq!(decay, composition.decay, "{rate} Hz: D");
+        for (name, stated, raw) in [
+            ("G_p", peak_gain, composition.peak_gain),
+            ("G_t", tail_gain, composition.tail_gain),
+            ("sigma_p", peak_stall, composition.peak_stall),
+            ("sigma_t", tail_stall, composition.tail_stall),
+        ] {
+            assert!(
+                ceil_mb(raw) <= stated && stated <= ceil_mb(raw * (1.0 + 1.0e-6)),
+                "{rate} Hz {name}: stated {stated} mB is not the raw {raw:e} rounded up"
+            );
+        }
+        assert!(
+            composition.tail_gain <= composition.peak_gain && tail_gain <= peak_gain,
+            "{rate} Hz: G_t above G_p"
+        );
+        assert!(
+            composition.tail_stall <= composition.peak_stall && tail_stall <= peak_stall,
+            "{rate} Hz: sigma_t above sigma_p"
         );
     }
 }

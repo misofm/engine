@@ -24,9 +24,9 @@ use effect_contract::{
     TailSamples,
 };
 use math::tail::{
-    CascadeBound, CascadeComposition, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords,
-    fixed_cascade_within, live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm,
-    word_box_norm,
+    CascadeBound, CascadeComposition, EnvelopeSection, FlushLaw, LiveCascade, LiveComposition,
+    PoleDomain, SvfWords, fixed_cascade_within, live_cascade, live_cascade_composition,
+    output_rounding, state_rounding, v_dual_norm, v_norm, word_box_norm,
 };
 
 use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
@@ -34,8 +34,8 @@ use crate::{BUTTERWORTH_K, InputLane, SvfSection, builtin_filter_cutoff_maximum_
 
 /// A builtin input section's bound from a cascade's: its tail, tail over every peak and exact-rest
 /// bound (#1329 D1, D2, Amendment 3), and its composition (#1379 Amendment 1 H1, H3; #1465): a
-/// fixed design states the cascade's values rounded up into millibels; a live bound states none
-/// yet (`math::tail` returns none for it; #1466 and #1467 derive it).
+/// fixed design states the cascade's values rounded up into millibels; a live cascade carries
+/// none (its composition is [`live_stated_composition`]'s, #1466 and #1467).
 fn bound_from_cascade(bound: &CascadeBound) -> NodeTailBound {
     NodeTailBound {
         tail: TailSamples::Finite(bound.tail),
@@ -63,6 +63,30 @@ fn stated_composition(composition: &CascadeComposition) -> CompositionBound {
         tail_gain: gain,
         peak_stall: stall,
         tail_stall: stall,
+    }
+}
+
+/// #1467 L-D7: the live input section's statement, each value computed by rounded operations
+/// (`math::tail::live_cascade_composition`; `docs/derivations/1379-graph-tail-composition.md`,
+/// "The live tail gain `G_t` and the statement"): `decay = D`, `peak_gain = ceil_mB(G_p)`,
+/// `tail_gain = ceil_mB(G_t)`, `peak_stall = ceil_mB(sigma_p)`, `tail_stall = ceil_mB(sigma_t)`.
+/// The effect registry's `tail_gain <= peak_gain` (#1464) and rule (g), `tail_stall <=
+/// peak_stall` (#1484), never see this bound, so they are checked here on the stated millibels:
+/// `Unstated` when either fails, equality admissible.
+fn live_stated_composition(composition: &LiveComposition) -> CompositionBound {
+    let peak_gain = ceil_millibels(composition.peak_gain, Rounding::Computed);
+    let tail_gain = ceil_millibels(composition.tail_gain, Rounding::Computed);
+    let peak_stall = ceil_millibels(composition.peak_stall, Rounding::Computed);
+    let tail_stall = ceil_millibels(composition.tail_stall, Rounding::Computed);
+    if tail_gain > peak_gain || tail_stall > peak_stall {
+        return CompositionBound::Unstated;
+    }
+    CompositionBound::Stated {
+        decay: TailDecay(composition.decay),
+        peak_gain: PeakGain::Millibels(peak_gain),
+        tail_gain: PeakGain::Millibels(tail_gain),
+        peak_stall: FlushStall::Level(peak_stall),
+        tail_stall: FlushStall::Level(tail_stall),
     }
 }
 
@@ -485,25 +509,42 @@ pub const fn input_section_worst_case_pair(sample_rate: u32) -> Option<(f32, f32
 /// anywhere up to +24 dB, and any history of 64-frame filter ramps (#1407), at any block size.
 /// The HPF-to-LPF cascade is bounded frequency-aware (#1433, `math::tail::live_cascade`).
 /// `None` off the launch rates (only a launch rate has a cutoff domain).
+///
+/// Its composition states all five values of #1379 Amendment 1 H1 (#1466, #1467,
+/// [`live_stated_composition`]), or `Unstated` when they are not certified.
 #[must_use]
 pub fn input_section_live_bound(sample_rate: u32) -> Option<NodeTailBound> {
     let terms = input_section_live_envelope(sample_rate)?;
     Some(
-        live_bound(sample_rate, &terms)
-            .map_or(NodeTailBound::UNBOUNDED, |bound| bound_from_cascade(&bound)),
+        live_bound(sample_rate, &terms).map_or(NodeTailBound::UNBOUNDED, |bound| NodeTailBound {
+            composition: live_composition(sample_rate, &terms)
+                .ok()
+                .flatten()
+                .map_or(CompositionBound::Unstated, |composition| {
+                    live_stated_composition(&composition)
+                }),
+            ..bound_from_cascade(&bound)
+        }),
     )
 }
 
 /// [`input_section_live_bound`] at each launch rate, as a table (#1457 D2): the live bound depends
 /// only on the rate, so preparation reads it here and computes it nowhere (it costs about 0.25 ms
-/// per computation, #1433). `None` off the launch rates, as there.
+/// per computation, #1433, and its composition about 0.5 ms more, #1466 and #1467). `None` off
+/// the launch rates, as there.
 ///
 /// The test `live_bound_table_is_the_computed_live_bound_at_every_launch_rate`
 /// (`tests/tail_contract.rs`) holds every entry equal to [`input_section_live_bound`], so a change
 /// to the derivation, the flush law or the cutoff domain turns it red until the table is restated.
+/// Each entry's composition is the statement (#1467): `D`, then `G_p`, `G_t`, `sigma_p` and
+/// `sigma_t` in millibels.
 #[must_use]
 pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<NodeTailBound> {
-    const fn bound(tail: u64, every_peak: u64, rest_peak: u64, rest_any: u64) -> NodeTailBound {
+    const fn bound(
+        [tail, every_peak, rest_peak, rest_any]: [u64; 4],
+        decay: u64,
+        [peak_gain, tail_gain, peak_stall, tail_stall]: [i32; 4],
+    ) -> NodeTailBound {
         NodeTailBound {
             tail: TailSamples::Finite(tail),
             tail_every_peak: TailSamples::Finite(every_peak),
@@ -511,14 +552,36 @@ pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<NodeTail
                 peak_plus_24_dbfs: rest_peak,
                 any_sanitized_input: rest_any,
             }),
-            composition: CompositionBound::Unstated,
+            composition: CompositionBound::Stated {
+                decay: TailDecay(decay),
+                peak_gain: PeakGain::Millibels(peak_gain),
+                tail_gain: PeakGain::Millibels(tail_gain),
+                peak_stall: FlushStall::Level(peak_stall),
+                tail_stall: FlushStall::Level(tail_stall),
+            },
         }
     }
     match sample_rate {
-        44_100 => Some(bound(704_010, 704_010, 1_067_207, 2_384_997)),
-        48_000 => Some(bound(699_952, 699_952, 1_061_497, 2_372_008)),
-        88_200 => Some(bound(704_018, 704_018, 1_071_057, 2_388_800)),
-        96_000 => Some(bound(699_960, 699_960, 1_065_688, 2_376_147)),
+        44_100 => Some(bound(
+            [704_010, 704_010, 1_067_207, 2_384_997],
+            46_678,
+            [14_424, 9_242, -23_379, -28_841],
+        )),
+        48_000 => Some(bound(
+            [699_952, 699_952, 1_061_497, 2_372_008],
+            46_421,
+            [14_416, 9_242, -23_312, -28_846],
+        )),
+        88_200 => Some(bound(
+            [704_018, 704_018, 1_071_057, 2_388_800],
+            46_678,
+            [14_426, 9_242, -22_765, -28_840],
+        )),
+        96_000 => Some(bound(
+            [699_960, 699_960, 1_065_688, 2_376_147],
+            46_421,
+            [14_417, 9_242, -22_696, -28_828],
+        )),
         _ => None,
     }
 }
@@ -542,6 +605,21 @@ fn live_bound(
         &input_section_flush_law(sample_rate),
         u64::from(INPUT_FILTER_RAMP_SAMPLES),
         rest_peaks(),
+    )
+}
+
+/// The raw composition values behind [`input_section_live_bound`]'s statement, at the same trim,
+/// flush law and ramp as [`live_bound`].
+fn live_composition(
+    sample_rate: u32,
+    terms: &LiveCascade,
+) -> Result<Option<LiveComposition>, math::tail::TailBoundError> {
+    let _environment = lane::CanonicalFpEnv::enter();
+    live_cascade_composition(
+        terms,
+        f64::from(max_trim_gain()),
+        &input_section_flush_law(sample_rate),
+        u64::from(INPUT_FILTER_RAMP_SAMPLES),
     )
 }
 
@@ -616,11 +694,13 @@ fn design_radius(g: f64) -> f64 {
 ///   which moves `Re p = -1 + O(1 / g)` by below `1e-15`). A ramp word lies within `E + h` of the
 ///   exact designs' hull, a settled word (an `f32` design) within `h`. The rounding counts are
 ///   the ones above.
-/// * **First section's mix row.** The HPF's mix words are `theta (-k, -1)` (`theta` in `[0, 1]`,
+/// * **Each section's mix row.** The HPF's mix words are `theta (-k, -1)` (`theta` in `[0, 1]`,
 ///   a crossfade toward or from the identity) within the mix allowance, so
 ///   `||(m1, m2)||_V* <= ||(-k, -1)||_V* + ` the allowance box's largest dual norm; the box term
-///   (above `1e-6`) and the final `1 + 2^-30` cover this evaluation's few `f64` roundings. Its
-///   output rounding on the state is the output row's supremum `omega_state`.
+///   (above `1e-6`) and the final `1 + 2^-30` cover this evaluation's few `f64` roundings. The
+///   LPF's are `theta (0, 1)` the same way, `||(0, 1)||_V* = sqrt(2)` (#1467's settled input
+///   term reads it). Each section's output rounding on the state is the output row's supremum
+///   `omega_state`, which is over every word of either section.
 #[must_use]
 pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
     let _environment = lane::CanonicalFpEnv::enter();
@@ -730,12 +810,67 @@ pub fn input_section_live_envelope(sample_rate: u32) -> Option<LiveCascade> {
         mix_box = mix_box.max(v_dual_norm([mix[1] * sign(1), mix[2] * sign(2)]));
     }
     let first_mix_row = (v_dual_norm([-k, -1.0]) + mix_box) * (1.0 + 1.0 / 1_073_741_824.0);
-    // The first section's output rounding on the state is the supremum above.
-    let first_output_rounding = omega_state;
+    // The second section's mix words are `theta (0, 0, 1)` toward or from the identity
+    // `(1, 0, 0)` within the same allowance (#1467): `||(0, 1)||_V* = sqrt(2)`, which
+    // `first_mix_row` does not cover (`||(-k, -1)||_V*` with `k = fl(sqrt(2))` is below it).
+    let second_mix_row = (v_dual_norm([0.0, 1.0]) + mix_box) * (1.0 + 1.0 / 1_073_741_824.0);
+    // Each section's output rounding on the state is the supremum above, over every word.
     Some(LiveCascade {
         envelope,
         poles,
         first_mix_row,
-        first_output_rounding,
+        first_output_rounding: omega_state,
+        second_mix_row,
+        second_output_rounding: omega_state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A live composition with the given raw gains and stalls (`D` and the certificates do not
+    /// enter the statement's checks).
+    fn composition(gains: [f64; 2], stalls: [f64; 2]) -> LiveComposition {
+        LiveComposition {
+            decay: 46_678,
+            groups: std::vec::Vec::new(),
+            peak_gain: gains[0],
+            tail_gain: gains[1],
+            peak_stall: stalls[0],
+            tail_stall: stalls[1],
+        }
+    }
+
+    /// #1467 L5': the live statement's own `tail_gain <= peak_gain` and rule (g)
+    /// (`tail_stall <= peak_stall`), on the stated millibels. Equal values are admissible and
+    /// stated; a tail gain or a tail stall one millibel above its peak value states nothing.
+    #[test]
+    fn the_live_statement_admits_equality_and_refuses_a_tail_value_above_its_peak_value() {
+        let (gain, stall) = (1.629_239e7, 2.041_952e-12);
+        let stated = live_stated_composition(&composition([gain, gain], [stall, stall]));
+        let CompositionBound::Stated {
+            peak_gain,
+            tail_gain,
+            peak_stall,
+            tail_stall,
+            ..
+        } = stated
+        else {
+            panic!("equal gains and stalls are admissible: {stated:?}");
+        };
+        assert_eq!((peak_gain, peak_stall), (tail_gain, tail_stall));
+        // One millibel up: `10^(1/2000)`.
+        let up = 1.001_152;
+        assert_eq!(
+            live_stated_composition(&composition([gain, gain * up], [stall, stall])),
+            CompositionBound::Unstated,
+            "a tail gain above the peak gain"
+        );
+        assert_eq!(
+            live_stated_composition(&composition([gain, gain], [stall, stall * up])),
+            CompositionBound::Unstated,
+            "a tail stall above the peak stall"
+        );
+    }
 }

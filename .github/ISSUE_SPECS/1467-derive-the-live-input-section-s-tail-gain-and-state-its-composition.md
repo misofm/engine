@@ -99,8 +99,14 @@ drives, so the decomposition at `M` is linear.
 
 ## Hazards
 
-- **`G_t` is not the settled design's response alone.** The state that a post-`N` input builds
-  during the ramp window can exceed it; L2 is built so that this mutant is red.
+- **`G_t` is not the settled design's response alone.** In the bound, the state that a post-`N`
+  input builds during the ramp window exceeds the settled designs' response: the window term and
+  its settled continuation (about +92.4 dB with the trim) lie 44.4 dB above the settled input's term
+  (+48.0 dB), so a `G_t` from the settled designs alone is not the derived bound, and L3' is red for
+  it. (Root's amendment of 2026-10-08 restates this sentence as a property of the bound; the earlier
+  text, "The state that a post-`N` input builds during the ramp window can exceed it; L2 is built so
+  that this mutant is red", is superseded: on the real kernel no drive exceeds the settled pair's
+  `l1`, attempt 1's stop.)
 - **The `f32` deviation does not split linearly between two runs**, so `G_t` is not measured as a
   difference of two renders: L2 starts from an exactly zero state, where the whole output is the
   part `G_t` bounds.
@@ -109,14 +115,21 @@ drives, so the decomposition at `M` is linear.
 
 `crates/builtins/tests/tail_contract.rs`, release, every launch rate.
 
-- **L2. Live tail gain on the real kernel.** A real live section, trim +24 dB, both sections
+- **L2. Live tail gain against the exact supremum (root's amendment of 2026-10-08).** A test-only
+  adjoint oracle in `tail_contract.rs` computes the exact row-`l1` supremum of the time-varying
+  live cascade over every input `|x| <= 1` from `N` on, with zero state at `N` (the backward
+  recursion over #1407's word mixtures, in `f64`), for a stated scan of ramp histories; the stated
+  `G_t` must be at least the trim word of +24 dB times that supremum, on every scanned history, at
+  every launch rate. Red mutant: a `G_t` below the supremum (trim and window both omitted). The
+  attempt record states the scan, what it covers, and the mutation runs. (Superseded text, the
+  first L2: "Live tail gain on the real kernel. A real live section, trim +24 dB, both sections
   designed at the worst-case pair (`input_section_worst_case_pair(rate)`), whose state is exactly
-  zero (it has rested; the gate checks it). The HPF target is moved from its maximum toward 10 Hz at
-  `N - 32` (also `N - 63` and `N - 1`) with zero input, then from `N` an input of peak `1e-6`:
-  alternating during the ramp window, then the worst-sign pattern of the settled 10 Hz design. Every
-  output sample from `N` on is at most `g_t 1e-6 + sigma_p` (an every-frame bound, so the peak
-  stall). The drive is chosen so that the "settled design only" mutant below is red; the slice
-  records the drive and the margin.
+  zero (it has rested; the gate checks it). The HPF target is moved from its maximum toward 10 Hz
+  at `N - 32` (also `N - 63` and `N - 1`) with zero input, then from `N` an input of peak `1e-6`:
+  alternating during the ramp window, then the worst-sign pattern of the settled 10 Hz design.
+  Every output sample from `N` on is at most `g_t 1e-6 + sigma_p` (an every-frame bound, so the
+  peak stall). The drive is chosen so that the "settled design only" mutant below is red; the slice
+  records the drive and the margin." No drive can make that mutant red; attempt 1's stop.)
 - **L3'. Independent recomputation.** `live_bound_carries_every_term_an_independent_recomputation_requires`
   gains `G_t`: it lies between a plain-`f64` recomputation of L-D6 in the test and that value plus
   1 mB.
@@ -139,13 +152,62 @@ The attempt record carries a mutation table with at least the mutants below; eac
 
 ## Test value
 
-- L2: a `G_t` from the settled designs alone (the ramp window omitted) is beaten by the state a
-  post-`N` input builds during the window; B1's L1 drives a pre-`N` history and cannot separate
-  `G_t` from `G_p`.
-- L3': a `G_t` that drops a ramp-window term or a settled group falls below the recomputation; the
-  real kernel's slack cannot see it.
-- L5': a statement that crosses `peak_gain` and `tail_gain`, or sets `tail_gain = peak_gain`,
-  disagrees with the accessors; nothing else checks the statement before #1379 reads it.
+(Restated by the attempt under root's amendment of 2026-10-08; each claim is a mutation run in the
+Attempt record. The earlier text is quoted and superseded at the end of this section.)
+
+- L2: a derivation error that puts `G_t` below the exact supremum of the late input's part on the
+  scanned histories, mirrored into the recomputation so that L3' agrees with it (trim and window
+  both omitted, mirrored: `g_t` 15.87 against `trim x supremum` 60.12), is red only here. It does
+  not defend the window term: a `G_t` from the settled designs alone (+48.0 dB) stays 12.4 dB above
+  the scan's largest supremum (+35.6 dB).
+- L3': a `G_t` that drops the window term (settled input only), the window's settled continuation,
+  the settled input's term, or the window input's feedthrough, or a second-section mix row that
+  omits the low-pass row (`first_mix_row` in its place), leaves the recomputation's 1 mB band or
+  its mix-row check; for a dropped window term L3' is the only red gate (L2 and L5' stay green, the
+  table test aside, which pins any changed value and is restated with a deliberate change). A
+  dropped settled group is red only when it is the group that sets the continuation's supremum
+  (the other groups do not set `W*`), and dropping the window frames' own outputs is an equivalent
+  mutant at the launch rates (the continuation is larger there).
+- L5': a statement that crosses `peak_gain` and `tail_gain`, sets `tail_gain = peak_gain`, or
+  swaps the stalls disagrees with the accessors rounded up; a composition whose tail stall lies
+  above its peak stall (raw, within one millibel) is red at its raw order; nothing else checks the
+  statement before #1379 reads it, except the table test's pin.
+- The statement's unit test (`crates/builtins/src/tail.rs`): a check that refuses equal gains or
+  equal stalls (`>=` for `>`) or a statement without the check is red; it pins the equality
+  boundary, which no launch value reaches (the stalls are 54.6-61.3 dB apart, the gains 51.7 dB).
+
+Superseded text: "L2: a `G_t` from the settled designs alone (the ramp window omitted) is beaten by
+the state a post-`N` input builds during the window; B1's L1 drives a pre-`N` history and cannot
+separate `G_t` from `G_p`." (false on the kernel; attempt 1's stop) and "L3': a `G_t` that drops a
+ramp-window term or a settled group falls below the recomputation; the real kernel's slack cannot
+see it." (a dropped settled group is red only when it binds).
+
+## Amendment (root, 2026-10-08)
+
+Root's ruling on attempt 1's stop (L2's test value cannot be met on the real kernel):
+
+1. **L2 becomes a soundness gate against a committed adjoint oracle.** The exact row-`l1`
+   supremum of the time-varying live cascade over inputs `|x| <= 1` from `N` on, computed by the
+   backward (adjoint) recursion with #1407's word mixtures, lives as a test-only oracle in
+   `crates/builtins/tests/tail_contract.rs`. The stated `G_t` must be at least that exact
+   supremum (times the trim word) over the scanned ramp histories, at every launch rate. Red
+   mutant: a `G_t` below the supremum (trim and window both omitted), with its mutation run. The
+   record states the scan precisely (which ramps, which start offsets, which designs), why it
+   covers the ramp space it claims, and claims no more than it covers. The record also states that
+   L3' is the unique catch for a dropped window term, with its mutation run. The old L2 text
+   ("Live tail gain on the real kernel ...") is superseded (Objective gates, L2).
+2. **The first Hazard's second sentence** is restated as a property of the bound, not of the
+   kernel (Hazards).
+3. **The live `G_t` tightening** (the window term's looseness against the kernel's supremum) is
+   folded into #1485, not this slice. This slice does not edit #1485.
+
+Standing rulings applied: the derivation and the composition are written, with the full proof,
+before the code (`docs/derivations/1379-graph-tail-composition.md`, "The live tail gain `G_t` and
+the statement"); this slice gates `sigma_t <= sigma_p` raw and in millibels with a red mutant and
+pins the equality boundary where it is admissible (the statement's own check, which admits
+equality); every test-value claim is true and proved by a mutation run; byte re-pins are
+individual, each with its reason; render-owned memory carries no control-only data and no parallel
+API variant is added.
 
 ## Dependencies
 
@@ -224,3 +286,141 @@ cascade) is +48.0 dB, at every launch rate. So a derived `G_t` is about 88.5 dB,
 3. Optionally record the expected magnitudes above in the Product outcome ("differ by tens of dB"
    holds: about 56 dB) and note the window term's looseness (about 53 dB over the kernel's
    supremum) as a tightening follow-up beside #1485.
+
+### Attempt 1, restarted under root's amendment (2026-10-08, implementer)
+
+Root's amendment is recorded above ("Amendment (root, 2026-10-08)"); the old L2 text and the first
+Hazard's second sentence are kept and marked superseded where they stood. Anchors re-verified on
+`codex/d15-stream-g3` at `215dbfda5`: as in the stop record above.
+
+**Proof first.** `docs/derivations/1379-graph-tail-composition.md`, new section "The live tail gain
+`G_t` and the statement (issue #1467, slice B2)", written before the code: (P3) the decomposition
+at `M` is linear at the kernel level (each relative rounding perturbation split in proportion to
+the parts' own drives, the flush part to its own part; every #1433 per-frame inequality then holds
+for each part, so the late part's supremum is what `G_t` must bound); (W) the window input's part
+(the late input on `M ..= M + 63`): a finite-horizon zone bound `Phi^(j)` from zero state, the
+first section's output `max_k (1/2 |m| q_k + omega) Phi^(j)_k`, the second section
+frequency-blind, then #1433's relative settled system from `M + 65` (the same 65-frame window)
+stepped until it falls, per group; (Z) the settled input's part (from `M + 64`, words fixed):
+`L_1 L_2`, each section bounded by its settled design's zone with its own mix row; `G_t =
+ceil_mB((g W* + g L_1 L_2) SLACK)`; the statement with its own `tail_gain <= peak_gain` and rule
+(g) check on the stated millibels (equality admissible).
+
+**Changed.**
+- `crates/math/src/tail.rs`: `LiveComposition::tail_gain`; `LiveCascade::second_mix_row` and
+  `second_output_rounding` (the LPF's mix row is not covered by `first_mix_row`: with the `f32`
+  word `k`, `||(-k, -1)||_V*` is `2.4e-8` below `||(0, 1)||_V* = sqrt(2)`); `LiveBound::
+  arrival_window`, `arrival_continuation`, `settled_input_gain`; `composition` computes the tail
+  gain last (after every existing refusal; a capped arrival window refuses too). No other value
+  moves: `T`, the rests, `P*`, `D`, `G_p`, `sigma_p`, `sigma_t` are bit-identical (L3, L4 and the
+  table's tail and rest entries unchanged).
+- `crates/builtins/src/tail.rs`: the envelope's two new fields; `live_stated_composition` (L-D7)
+  and `live_composition`; `input_section_live_bound` states it; `input_section_live_bound_table`
+  re-pinned (below); a unit test of the statement's check.
+- `crates/builtins/tests/tail_contract.rs`: L2 (`live_tail_gain_covers_the_exact_supremum_of_a_late_input_over_the_scanned_ramps`,
+  with its oracle `exact_row_supremum`, `forward_response`, `free_response_bounds`), L3' (`live_oracle`
+  recomputes `G_t` and checks the module's second mix row; the recomputation test compares `G_t`),
+  L5' (`live_bound_states_the_composition_rounded_up_with_its_orders`).
+- `docs/derivations/1379-graph-tail-composition.md` (the B2 section, the introduction, B1's
+  pointers, the gates); `docs/EFFECT_CONTRACT_V1.md` (the live section states the five values).
+- `STREAMS.md` has no status column for this row; unchanged. #1485 not edited.
+
+**Re-pins** (individual): `input_section_live_bound_table`'s `composition` at each launch rate,
+`Unstated` to `Stated { decay, peak_gain, tail_gain, peak_stall, tail_stall }` = 44.1 kHz
+`(46,678; 14,424, 9,242, -23,379, -28,841)`, 48 kHz `(46,421; 14,416, 9,242, -23,312, -28,846)`,
+88.2 kHz `(46,678; 14,426, 9,242, -22,765, -28,840)`, 96 kHz `(46,421; 14,417, 9,242, -22,696,
+-28,828)`. Reason: this slice states the live composition (L-D7); the table test holds the table
+equal to the computed bound. The tail and rest entries do not move. No byte pin moves: the
+statement changes a value of an existing field (`NodeTailBound` is unchanged in size); the browser
+expected resources check passed unchanged (`builtinRetainedBytes` not touched; source budget 3,358
+of 3,648); the memory fixture is not touched.
+
+**Values** (release; `mB` stated): `g_t` raw 4.174511e4 / 4.174672e4 / 4.175823e4 / 4.175878e4
+(+92.41 / +92.41 / +92.42 / +92.42 dB), `G_t = 9,242` mB at every rate, 51.7-51.8 dB below `G_p`.
+Parts (L3' recomputation, 44.1 kHz): window frames 2.7809e4 (+88.9 dB), continuation 4.1494e4
+(+92.36 dB, sets `W*` at every rate), settled input `g L_1 L_2` 2.5126e2 (+48.0 dB; `L_1 = L_2 =
+3.98`). Cost: `live_cascade_composition` 0.46-0.76 ms per rate (one probe run); preparation never
+computes it.
+
+**Gates.**
+- L2 (release, every launch rate). The scan, per rate (336 histories): (a) a ramp of the HPF
+  between every ordered pair of `{10 Hz, 100 Hz, 1 kHz, 10 kHz, the worst-case HPF, the identity}`
+  with the LPF at the maximum, and of the LPF between every ordered pair of `{10 Hz, 100 Hz, 1 kHz,
+  10 kHz, the maximum, the identity}` with the HPF at 10 Hz (60 ramps); (b) each with its control
+  event at `N - s`, `s` in `{1, 16, 32, 48, 62}` (62, 47, 31, 15, 1 ramp frames after `N`; the word
+  at `N - s + i` the exact mixture with weight `min(i + 1, 64) / 64`); (c) the 36 settled pairs.
+  What it covers: those histories, in exact arithmetic, one section moving at a time, from the
+  given endpoints, every input `|x| <= 1` from `N` (so every `M >= N`), every frame (exact rows
+  until both rigorous remainders are below `1e-12`, then the partial `l1` plus the remainders). It
+  does not cover other endpoints, both sections moving, restarts, rule-3 resets, `f32` word
+  rounding or the rounding deviation; it claims no more. Why these: the endpoints span the cutoff
+  domain by decades plus its slowest designs and the identity (the disable/enable mixtures), and
+  the offsets span the ramp's position at `N` from just started to one frame left. Results: the
+  largest `trim x supremum` 60.12 (+35.58 dB, HPF 10 Hz to 100 Hz at `N - 1`, 44.1 kHz), 60.08 /
+  59.62 / 59.62 at 48 / 88.2 / 96 kHz; `g_t` 4.1783e4 (the stated 9,242 mB); margin 56.84-56.91
+  dB; largest remainder `1.1e-12`. Oracle self-checks: the settled 10 Hz into the maximum equals
+  the impulse response's `l1` (3.5286663711 at 44.1 kHz, to `1e-9`), and on a ramp history the
+  rows at `N + 40` and `N + 200` equal forward sums of unit-impulse responses through the kernel's
+  equations (to `1e-12`). 13.5 s for the four rates; ignored in debug (release scale).
+- L3': `G_t` above the recomputation by `3.5e-8` relative at every rate (1 mB is `1.15e-4`); the
+  module's second mix row at least the derivation's `sqrt(2) + mix_box`. #1466's L3 and L4
+  unchanged and passing.
+- L5': `Stated` at every launch rate, each value the accessor's rounded up; `G_t <= G_p` and
+  `sigma_t <= sigma_p` raw and in mB. The statement's unit test: equal gains and stalls stated,
+  a tail value one millibel above its peak value refused.
+- L6': gate 8 passed. Gate 2: one invocation, `taskset -c 7`, after the 1-minute load fell below
+  2 (`/proc/loadavg` before 1.87 2.62 2.52, after 1.68 2.54 2.50): exit 0, worst median design work
+  24.950 ms, 97.2 % of 25.67 ms. Candidly: the printout was captured through `tail -8`, so the
+  `ns needed` line was not kept, and a following `--help` probe of the binary (output discarded)
+  may have started it a second time; neither figure is of record (the batch verifier's is). This
+  slice changes only live code in `math::tail` (the fixed walk is untouched), so L6' is a
+  regression run and claims no unique catch.
+- L5 (#1466's, nothing else moves): release `tail_contract` 22 passed; `audit capi`
+  `pcm_digest` `cb10fbface44a3a4`, 0 allocations, 0 deallocations, 0 syscalls;
+  `check-builtins-fixtures.sh` ok (50 files); `run-wasm-gates.sh` ok; the worklet chain
+  (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`) passed.
+- The debug gate command (`lane`, `math`, `builtins`, `dsp-reference`, all targets) passed;
+  `cargo test --release -p builtins-compiler --features test-support` and `-p host-core` passed;
+  `check-workspace-policy.sh` ok; `check-cross-targets.sh` PASS (the #1018 expected failures);
+  workspace clippy `-D warnings` clean; `cargo fmt --check` clean.
+
+**Mutation table** (each defect applied, the release `tail_contract` run with every test (the
+table test excluded for the M rows: it pins every stated value and is restated with any
+deliberate change; M1t shows it), the files restored; "mirrored" means the same defect also in
+the recomputation):
+
+| mutant | red | green |
+|---|---|---|
+| M1 window part dropped (`tail_gain = g L_1 L_2`) | L3' only (`2.51e2` against `4.17e4`) | L2, L5', the rest |
+| M1t M1 with the table test included | L3', the table test | the rest |
+| M2 trim and window dropped, mirrored | L2 only (`g_t` 15.87 < 60.12) | L3' (mirrored), L5' |
+| M2b trim and window dropped | L2, L3' | L5' |
+| M3 settled input term dropped | L3' only (`4.149e4`) | L2, L5' |
+| M4 settled continuation dropped | L3' only (`2.806e4`) | L2, L5' |
+| M5 window frames' outputs dropped | none: equivalent at the launch rates (the continuation sets `W*`) | all |
+| M6 the window input's feedthrough dropped | L3' only (`3.888e4`) | L2, L5' |
+| M7 `second_mix_row = first_mix_row` (builtins) | L3' at its mix-row check | L2, L5' |
+| M8a, M8b first or last settled group dropped | none: neither sets the continuation's supremum | all |
+| M8c the binding settled group dropped | L3' only (`3.834e4`) | L2, L5' |
+| S1 statement crosses `peak_gain` and `tail_gain` | L5', the table test | L2, L3' |
+| S2 statement `tail_gain = peak_gain` | L5', the table test | L2, L3' |
+| S3 statement swaps the stalls | L5', the table test | L2, L3' |
+| S4 statement check strict (`>=`) | the statement's unit test (equality refused) | `tail_contract` |
+| S5 statement check removed | the statement's unit test | `tail_contract` |
+| S6 `math` stalls swapped | L3, L5' (`Unstated`), the table test, L2 (reads the statement) | the rest |
+| S7 `math` `sigma_t = sigma_p (1 + 1e-5)` (same millibel) | L3's order assertion, L5' at its raw order, the table test | the rest |
+| S8 `math` `tail_gain = peak_gain` | L3', the table test | L2, L5' |
+| O1 the L2 oracle drops the ramp columns after the ramp | L2 at its forward-sum self-check | the rest |
+
+**Test value** (as the section above states; measured): L2's unique catch is M2 (a mirrored
+derivation error below the exact supremum); L3' is the only value-checking gate red for a dropped
+window term (M1), and also for M3, M4, M6, M7 and M8c; L5' for S1-S3 (with the table pin); the
+unit test for S4 and S5, which pin the equality boundary. M5, M8a and M8b are equivalent at the
+launch configuration and claim nothing.
+
+**Open items.**
+- The live `G_t` (+92.4 dB) is about 56.8 dB above the scanned exact supremum (+35.6 dB): the
+  second section's frequency-blind window sum and the tau system's `rho_settled` set `W*`. Its
+  tightening is folded into #1485 (root's amendment); #1485 is not edited here.
+- Gate 2's figure of record is the batch verifier's (see L6' above).

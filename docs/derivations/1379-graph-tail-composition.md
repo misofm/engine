@@ -1,12 +1,12 @@
-# Issue #1379: node tail composition values (H1), the input section (issues #1465, #1466)
+# Issue #1379: node tail composition values (H1), the input section (issues #1465, #1466, #1467)
 
 #1379 Amendment 1 (`docs/handoffs/decision-15-2026-10-05/1379-amendment1-design.md`, H1-H3) asks
 every node to state five values beside #1329's tail, so that a graph can carry a node's tail through
 the gain after it. This note states the contract and derives the values of the builtin input
 section with a fixed design (#1329 D4) and with both filters disabled, as `math::tail` and
-`crates/builtins/src/tail.rs` compute them at preparation (issue #1465, slice A2), and the decay,
-the peak gain and both stalls of a live input lane (issue #1466, slice B1; its tail gain and the
-statement are slice B2, #1467). Nothing here runs on the render thread. The notation and the bounds
+`crates/builtins/src/tail.rs` compute them at preparation (issue #1465, slice A2), the decay,
+the peak gain and both stalls of a live input lane (issue #1466, slice B1), and its tail gain and
+the statement of all five (issue #1467, slice B2). Nothing here runs on the render thread. The notation and the bounds
 it reuses are #1329's and #1433's (`docs/derivations/1329-input-section-tail-and-rest.md`).
 
 ## The contract (H1)
@@ -305,10 +305,9 @@ trim's gain (`crates/builtins/src/tail.rs`, `memoryless_input_bound`).
 A live input lane (#1329 D5) may change its trim, polarity and filter targets at any frame before
 `N`; #1433's frequency-aware cascade (`math::tail::live_cascade`) bounds it over every admitted
 history. This part derives `D`, `G_p`, `sigma_p` and `sigma_t` from that bound
-(`math::tail::live_cascade_composition`, `LiveComposition`). `G_t` is slice B2's (#1467), and
-`input_section_live_bound` states `CompositionBound::Unstated` until B2 states all five values (H2:
-no partial statement); preparation reads the live bound from its table and never computes these
-values.
+(`math::tail::live_cascade_composition`, `LiveComposition`). `G_t` and the statement of all five
+values are slice B2's (#1467, "The live tail gain `G_t` and the statement" below; H2: no partial
+statement); preparation reads the live bound from its table and never computes these values.
 
 Notation as #1433 (the #1329 note, "#1433: the frequency-aware cascade"): the trim word's largest
 magnitude `trim_max` (the `f32` word of +24 dB, #1408) and `g = trim_max (1 + u)`; `F` the per-step
@@ -417,7 +416,7 @@ one, #1433; each product and sum is inflated by `SLACK`) and `G_p = ceil_mB(peak
 
 ### (N2): `sigma_t` and `D`
 
-Under (N2)'s hypotheses with the input zero from `M` (the `epsilon` part is slice B2's), #1433
+Under (N2)'s hypotheses with the input zero from `M` (the `epsilon` part is slice B2's, below), #1433
 applies with its silence from `M`: no control event at or after `M`, and a retarget started before
 `N <= M` completes by `M + 64`. By (P1) the output at `M + n` is at most `X R(n) + A(n)`.
 
@@ -491,8 +490,202 @@ Per rate (44.1 / 48 / 88.2 / 96 kHz), the module's raw values (`live_cascade_com
 | `sigma_t` mB | -28,841 | -28,846 | -28,840 | -28,828 |
 
 The millibels are `ceil(2000 log10)` of the raw values; slice B2 states them with the module's
-`ceil_mB` (below, "Numerical limits"). The groups, the certificate rates and the cost are in the
-#1466 attempt record.
+`ceil_mB` (below, "Numerical limits"), with the same results. The groups, the certificate rates and
+the cost are in the #1466 attempt record.
+
+## The live tail gain `G_t` and the statement (issue #1467, slice B2)
+
+(N2) needs `G_t`: at every frame `n >= M`, a bound of the part of the output that the input from
+`M` on produces, for every admitted history before `N`. This part derives it from #1433's
+inequalities (`math::tail::live_cascade_composition`, `LiveComposition::tail_gain`) and states all
+five values. Notation as the live part above; in addition `G = g epsilon` (the trimmed input from
+`M` is at most `G`), `h = first_mix_row / 2`, `omega = first_output_rounding` (the first section's
+mix row and output rounding), `h_2 = second_mix_row / 2`, `omega_2 = second_output_rounding` (the
+second section's, below), and for a zone `k`: `rho_k`, `q_k`, `beta_k` its ramp constants
+(`contraction`, `sum_norm`, `input`), `r_k`, `q_k^s` its settled ones (`settled.contraction`,
+`settled.sum_norm`), `nb(k)` its neighbours.
+
+### (P3) The decomposition at `M` is linear
+
+Fix an admitted history. The kernel's frame is exact arithmetic plus perturbations: per section,
+`s_{n+1} = R_n (A_n s_n + b_n v_n + e_n)` and `w_n = c_n . s_n + d_n v_n + f_n`, with `v_n` the
+section's input (the trimmed input `x'_n = fl(x_n trim)` for the first section, the first
+section's output for the second), the words of frame `n`, and `R_n` the identity or zero (a joint
+flush, the per-block recovery, a rule-3 replacement; #1433's moves). #1329's rounding count and
+#1433's constants split each perturbation into a relative part, `||e_n^rel||_V <= mu ||s_n||_V +
+mu_x |v_n|` and `|f_n^rel| <= omega ||s_n||_V + omega_x |v_n|` (the constants are taken over every
+reachable word: `mu` inside `rho_k`, `r_k`, `rho_ramp`, `rho_settled`, `mu_x` inside `beta_k` and
+`iota`, `omega_x` inside `delta`), and the flush part (the per-word flush and the underflow
+allowance), at most `F`.
+
+Define three *parts* of every state, input and output by induction over frames. At the history's
+first frame every part is zero. At frame `n`, with the parts' states known and summing to the
+kernel's: the first section's input splits as `x'_n [n < M]` (the *early* part), `x'_n [n >= M]`
+(the *late* part) and `0` (the *flush* part); each later input is the previous section's output
+part. The flush part of each perturbation goes to the flush part. The relative part `e_n^rel`
+satisfies `||e_n^rel||_V <= a_1 + a_2 + a_3`, `a_i = mu ||s_n^i||_V + mu_x |v_n^i|` (the triangle
+inequality on the sums), and is split in proportion: `e_n^i = e_n^rel a_i / (a_1 + a_2 + a_3)`
+(zero when the sum is), so `||e_n^i||_V <= a_i`; the same for `f_n^rel`. Each part then steps by
+the same exact map `s' = R_n (A_n s + b_n v + e)`, `w = c_n . s + d_n v + f`, which is linear in
+`(s, v, e, f)`, so the parts' states and outputs again sum to the kernel's. A channel copy (the
+mono collapse) replaces a channel's state and words with the other channel's, and so its parts with
+the other channel's parts, which are parts of an admitted history with the same input bounds; the
+bounds below hold for every channel, so they hold across a copy.
+
+So every part is an exact cascade under the history's words and resets, driven by its own input
+and by perturbations bounded relative to its own state and input; only the flush part carries
+`F`. Each of #1433's per-frame inequalities holds for each part with that part's input and with
+`F = 0` for the early and late parts. The early part is B1's relative part with the input zero
+from `M` (B1's (N2), with #1433's silence from `M`), the flush part is B1's flush part, and the
+late part's state is exactly zero up to and including frame `M` (its input and perturbations are
+zero before `M`). The output is at most the sum of the three parts' magnitudes, so (N2) holds with
+
+```text
+g_t >= sup over n >= M of |y_late[n]| / epsilon,
+```
+
+and `G_t` is a bound of that supremum per unit of `epsilon`. Where the kernel's state is exactly
+zero at `M`, the early and flush parts are zero from `M` on and the late part is the whole output
+(H1).
+
+The late part is split once more at `M + 64` in the same way: the *window input* part `W` (the
+late input on `M ..= M + 63`, at most 64 frames) and the *settled input* part `Z` (the late input
+from `M + 64`).
+Words: a retarget started before `N <= M` completes by `N + 64 <= M + 64` (#1407), so every word
+is fixed from `M + 64` on; before that each frame's word is reachable and consecutive words are
+related by #1433's moves (a held word is one).
+
+### (W) The window input's part
+
+*The first section's state, finitely many frames.* Let `Phi^(0)_k = 0` and
+`Phi^(j+1)_k = max over i in nb(k) of (rho_i Phi^(j)_i + beta_i [j < 64])`. **Claim:** if the
+first section's word at frame `M + j` lies in zone `k`, then `||s_W[M + j]||_V <= Phi^(j)_k G`.
+*Proof*, by induction on `j`: at `j = 0` the state is zero. If the word at `M + j` lies in zone
+`i` and the one at `M + j + 1` in zone `k`, then either the move holds the word or takes one ramp
+step, so the two words' `Re p` differ by at most the zones' `step` and `i` is in `nb(k)` (the
+neighbour relation is symmetric), and `||s_W[M + j + 1]||_V <= rho_i ||s_W[M + j]||_V + beta_i
+|x'_W[M + j]| <= (rho_i Phi^(j)_i + beta_i [j < 64]) G`; or the move replaces the state with zero
+(rule 3), or a reset zeroes it, and zero satisfies the claim. A first section at the identity has
+zero state (a completed disable replaces the state with zero, and the identity's state never
+changes), and its output is its input exactly. `Phi^(j)` runs `j` frames from zero; it is not
+#1433's `Phi`, the least fixed point over every history, which is far larger near the top
+(`1/(1 - rho_ramp)` against at most `j` frames).
+
+With `E_j = max_k Phi^(j)_k` and `P_j = max_k (h q_k + omega) Phi^(j)_k` (the zone at a frame is
+not known, so the largest over every zone), #1433's inequality for the first section's output
+(`|y_1| <= 1/2 |m| q_k E + delta |x'| + omega E`, `F = 0`) gives
+`|y_1W[M + j]| <= Y_j G` with `Y_j = P_j + delta [j < 64]` (at the identity, `delta [j < 64]`).
+
+*The second section and the output, frequency-blind.* The second section's step is at most
+`rho_ramp` and its input column at most `iota`, at any reachable word, so with `S_0 = 0`,
+`S_{j+1} = rho_ramp S_j + iota Y_j`, its state at `M + j` is at most `S_j G` (a reset only lowers
+it), and the output at `M + j` is at most `O_j G`, `O_j = gamma_2 S_j + delta Y_j`, for
+`0 <= j <= 64`.
+
+*After the window.* From `M + 64` the part `W` has zero input and fixed words: #1433's settled
+phase, with its first frame `n0 = M + 65` in place of `N + 65` (a window of the same 65 frames). Its
+`tau_n = sigma_n - e2 y_1[n - 1]` obeys #1433's recursion from `n0` on, because `y_1[n - 1]` and
+`y_1[n]` both have zero input for `n >= n0`; and its start is #1433's `settled_start` read at the
+window's end: `||tau[n0]||_V <= S_65 G + c_y H`, `H = min(E_64 G, Phi_c G)` the first section's
+state at `M + 64` (its word there is settled and its input zero, so `|y_1[M + 64]| <= c_y H`), and the joint flush's
+one-off `X = 2 c_y H` (#1433's `Phi_c`, a fixed point over every history with input at most `G`,
+also bounds this part's state). So the output at `M + 65 + m` is at most `o_c . M_c^m u_c` for the
+group `c` that covers the first section's settled zone (the identity's included), with #1433's
+relative system `M_c` and output row `o_c` (`settled_system` without the flush) and
+`u_c = (S_65 G + c_y H, H, 2 c_y H)`. Let `C_c = sup over m >= 0 of o_c . M_c^m u_c`: the module
+steps `u` frame by frame, each step rounded up, until the computed `u'` is componentwise at most
+`u`; then, `M_c` being non-negative, every later exact state is at most that `u` (`M_c u <= u`
+gives `M_c^i u <= u` for every `i`), so the outputs read up to there bound every frame. A group
+whose computed `u` does not fall within `HORIZON_LIMIT` steps is refused (`TailBoundError::Horizon`).
+
+So at every frame from `M` on the part `W` is at most `W* G`, `W* = max(max_{j <= 64} O_j,
+max_c C_c)`; a group covered by another has every term at most the other's (#1433's `covers`), so
+its `C_c` is at most the other's and the maximum over the kept groups is the maximum over all.
+
+### (Z) The settled input's part
+
+`Z` has zero state at `M + 64`, input at most `G` from `M + 64`, and fixed words. The first
+section's word lies in a zone `k` with settled constants (or is the identity), so
+`||s_Z|| <= beta_k G / (1 - r_k)` at every frame (by induction from zero:
+`r_k beta_k / (1 - r_k) + beta_k = beta_k / (1 - r_k)`; a reset only lowers it), and its output is
+at most `L_1(k) G`, `L_1(k) = (h q_k^s + omega) beta_k / (1 - r_k) + delta` (`delta` at the
+identity). The second section's word lies in a zone `l` with settled constants (both sections
+share the pole domain, #1433) or is the identity. Its output row on the state is
+`1/2 (m1, m2) (I + A)` exactly, as the first's (`v1`, `v2` are the half sums of the states; the
+identity holds for any mix words), so with its mix row at most `h_2` and its output rounding at
+most `omega_2`, its state is at most `beta_l L_1 G / (1 - r_l)` and its output at most
+`L_2(l) L_1 G`, `L_2(l) = (h_2 q_l^s + omega_2) beta_l / (1 - r_l) + delta`. With
+`L_1 = max(delta, max_k L_1(k))` and `L_2 = max(delta, max_l L_2(l))`, `Z` is at most
+`L_1 L_2 G` at every frame (zero before `M + 64`).
+
+*The second section's mix row.* The second section is the low-pass: its mix words are `(0, 0, 1)`
+designed, the identity `(1, 0, 0)` disabled, and their mixtures within #1407's mix allowance
+(`docs/derivations/1329-input-section-tail-and-rest.md`, D5), so `(m1, m2) = theta (0, 1)` plus the
+allowance box, and `||(m1, m2)||_V* <= ||(0, 1)||_V* + ` the box's largest dual norm
+`= sqrt(2) + mix_box` (`crates/builtins/src/tail.rs`, `second_mix_row`, times `1 + 2^-30` for its
+`f64` evaluation). `first_mix_row` does not cover it: `||(-k, -1)||_V*` with the `f32` word
+`k = fl(sqrt(2))` is `2.4e-8` below `sqrt(2)`. The output rounding on the state, `omega_state`, is
+a supremum over every word of either section (its value at the largest words, whose mix words
+dominate both mixes, plus its value at the opposite corner), so `second_output_rounding =
+omega_state`, the value `first_output_rounding` also takes.
+
+### `G_t`
+
+Before `M + 64` only `W` is nonzero; from `M + 64` both are. So for every `n >= M`:
+
+```text
+|y_late[n]| <= (W* + L_1 L_2) G = g (W* + L_1 L_2) epsilon,
+```
+
+and the module states `tail_gain = (g W* + g L_1 L_2) SLACK` (every intermediate a rounded-up
+product or sum; `g W*` computed directly at the input scale `g`) and `G_t = ceil_mB(tail_gain)`.
+`W*` reads the window's frames and every settled group; `L_1 L_2` the settled designs over every
+zone; both carry the trim through `g`. Neither alone bounds the late part. On the bound, the
+state the window input builds is 44.4 dB above the settled input's term (`g W*` about +92.4 dB with
+the trim, `g L_1 L_2` +48.0 dB), and the window frames' own outputs (`g max O_j`, about +88.9 dB)
+are below their settled continuation (`g max C_c`), which sets `W*` at every launch rate.
+
+**On the kernel.** The bound is loose: the exact supremum of the late part over every input
+`|x| <= 1` from `N` (the time-varying cascade's row `l1`, gate L2's oracle) is close to the settled
+pair's `l1` (+35.0 dB with the trim for the 10 Hz HPF into the top LPF at 44.1 kHz) and at most
++35.6 dB on gate L2's scanned ramp histories, so the kernel does not show the window term that the
+bound carries. The two frequency-blind steps
+(`sum` of the second section over the window, and the tau system's `rho_settled` after it) set
+`W*`; tightening them is #1485's. `G_t` is still far below `G_p` (+144.2 dB), whose
+`sup Psi Phi` term a history of any length builds.
+
+### The statement
+
+`input_section_live_bound` states `CompositionBound::Stated` with `decay = D`,
+`peak_gain = ceil_mB(G_p)`, `tail_gain = ceil_mB(G_t)`, `peak_stall = Level(ceil_mB(sigma_p))` and
+`tail_stall = Level(ceil_mB(sigma_t))`, each `ceil_mB` the module's rounding up of a computed
+value ("Numerical limits"). Rule (g) and A1's `tail_gain <= peak_gain` run only in the effect
+registry, which never sees this bound, so the statement checks both on the millibel values and
+states `Unstated` when either fails (equality is admissible). `sigma_t <= sigma_p` holds raw by B1's
+construction (the smaller of `stall(T)` and `stall(0)`) and `G_t <= G_p` holds raw as measured
+(51.7 dB apart); `ceil_mB` is non-decreasing, so the raw orders give the millibel ones. At the
+launch rates the statement is made (the values below). Preparation reads the statement from
+`input_section_live_bound_table`, which the table test holds equal to the computed bound.
+
+### The tail gain at the launch rates
+
+Per rate (44.1 / 48 / 88.2 / 96 kHz), the module's raw value (`LiveComposition::tail_gain`, at the
++24 dB trim word) with its parts from gate L3''s recomputation, and the statement:
+
+| value | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
+|---|---|---|---|---|
+| window frames, `max O_j g` | 2.780908e4 | 2.780991e4 | 2.781601e4 | 2.781628e4 |
+| continuation, `max C_c g` | 4.149384e4 | 4.149546e4 | 4.150697e4 | 4.150752e4 |
+| settled input, `g L_1 L_2` | 2.512627e2 | 2.512548e2 | 2.512627e2 | 2.512548e2 |
+| `g_t` raw | 4.174511e4 | 4.174672e4 | 4.175823e4 | 4.175878e4 |
+| `G_t` mB (stated) | 9,242 | 9,242 | 9,242 | 9,242 |
+| `G_p` mB (stated) | 14,424 | 14,416 | 14,426 | 14,417 |
+
+The statement at every launch rate is `Stated { decay, peak_gain, tail_gain, peak_stall,
+tail_stall }` with B1's `D` and the millibels of B1's table above, and `G_t = 9,242` mB (+92.42 dB),
+51.7 to 51.8 dB below `G_p`. The exact supremum of the late part on gate L2's scanned histories is
+at most +35.6 dB (gate L2; the #1467 attempt record).
+
 
 ## Numerical limits
 
@@ -517,7 +710,12 @@ and each certificate's crossing against the module's directly searched crossings
 which must increase strictly in `k`, and `D_inf` against the settled contraction's floor), L5
 (nothing certified moves) and the refusal test (a capped or NaN window and a carry outside its
 rounding argument give no values); the measurements are in the #1466 attempt
-record.
+record. The tail gain and the statement: #1467's L2 (`G_t` at least the exact row-`l1` supremum of
+the time-varying cascade, by an adjoint oracle, over a stated scan of ramp histories), L3' (`G_t`
+against the plain-`f64` recomputation of "The live tail gain"), L5' (the statement is the
+accessors rounded up, with `G_t <= G_p` and `sigma_t <= sigma_p` raw and in millibels) and the
+statement's own unit test (equality admissible, a tail value above its peak value refused); the
+measurements are in the #1467 attempt record.
 
 ## Citations
 
