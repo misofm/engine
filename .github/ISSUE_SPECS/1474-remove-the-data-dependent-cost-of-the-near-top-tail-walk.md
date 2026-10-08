@@ -490,7 +490,9 @@ builtins -p builtins-compiler --all-targets --features builtins/test-support` an
 
 **Note (2026-10-08, from #1465).** #1465 restated this issue's figures after it: under root's
 second frame-equivalent ruling of 2026-10-08 (each design's cost the median of five measured
-samples), the frame-equivalent is 21.5 ns and `INPUT_BOUND_SECTION_CHARGE` 470, so the budget is
-32.47 ms (32.465) and the cache cap's arithmetic 257 + 470 = 727 a design, at most 2,077 designs a
-preparation. The 18.5 ns, 380 and 27.94 ms above are superseded; #1465's attempt record has the
+samples) and its ruling (c) of the same day (a calibration sample is a batch of 48 different
+designs, each batch's median per design against its charge per design), the frame-equivalent is
+17.0 ns and `INPUT_BOUND_SECTION_CHARGE` 550, so the budget is 25.67 ms and the cache cap's
+arithmetic 257 + 550 = 807 a design, at most 1,871 designs a preparation. The 18.5 ns, 380 and
+27.94 ms above, and #1465's earlier 21.5 ns, 470 and 32.47 ms, are superseded; #1465's attempt record has the
 calibration and gate 2.

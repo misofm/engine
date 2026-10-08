@@ -240,7 +240,25 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   the per-design median bounds the cost the budget states, while a single preemption does not set
   the constant. The raw maximum sample and its ratio to its design's median are recorded as
   evidence. `calibrate` computes it directly and prints the binding design; gate 2 prints what its
-  own medians need. The per-frame medians and spreads stay descriptive.
+  own medians need. The per-frame medians and spreads stay descriptive. *(The second fold-in's
+  sampling, one walk a calibration sample, is superseded by root's ruling (c) below.)* **Root's
+  ruling (c) of 2026-10-08 (in force), the sample:** the median rule stands, on a
+  better-conditioned sample. `calibrate` times each short design class as a **batch** of N
+  back-to-back walks, so that a sample lasts at least about 1 ms, and takes the median over R >= 5
+  batches' samples. A batch must not make a sample cheaper than a real preparation, which walks
+  each distinct design once: so each batch walks N **different** designs of the same class, in
+  the order a preparation walks them (one preparation, fresh cache, no budget limit); a class that
+  cannot supply N different designs shows by measurement that the batch's per-walk cost is not
+  below the same designs' single-walk cost, and records it. The fit and the joint search run on the
+  per-batch medians, normalized per design. **"Every design", batched:** every batch's median work
+  per design is at most (its frames walked per design + `INPUT_BOUND_SECTION_CHARGE` x its sections
+  per design) x frame-equivalent, that is, the whole batch's median work against the whole batch's
+  charged frame-equivalents; a long walk that already lasts over 1 ms (the near-top frame-class
+  points) is a batch of one; each gate-2 family at a rate is one design at its own median. **The
+  figure of record** is the batch verdict's single calibration and gate-2 invocation, run by the
+  batch verifier; the constants are restated in the batch follow-up if it differs. Gate 2 (real
+  preparations, charged against measured) is the final check: a gate-2 family whose median exceeds
+  the stated budget means the constant is wrong.
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
@@ -627,6 +645,9 @@ as superseded.
 
 ### Attempt 1, second fold-in under root's second ruling (2026-10-08, implementer)
 
+*(Its sampling, one walk a calibration sample, and its 21.5 ns, 470 and 32.465 ms are superseded
+by root's ruling (c) and follow-up 2 below.)*
+
 **The statistic in the example** (`crates/builtins/examples/input_bound_budget.rs`). Every
 workload now runs one warmup and **five** measured rounds (`REPEATS` = 5, `ROUNDS` = 6; was two
 measured rounds), so every design has R = 5 samples: each calibration grid design (each round
@@ -683,7 +704,7 @@ every family and rate but two. **Raw samples (evidence):** the largest raw desig
 its median of 24.71 ms and 144.1 % of the budget (30.98 ns per consumed frame-equivalent); the
 other outlier is 45.78 ms, 2.174 x its median of 21.06 ms (65,537 near-top, 48 kHz). Each is one
 of five samples whose other four lie near the median; under root's ruling they do not set the
-constant. The whole preparation of 65,537 strips reached 69.36 ms in that interfered round (60.36-
+constant. The whole preparation of 65,537 strips reached 69.36 ms in that interfered round (59.06-
 61.16 ms otherwise; the O(strips) keying outside the budget, as in #1457).
 
 **Gate 8** (charge 470): passed, every 64-track console document exact at every rate. Stereo
@@ -764,3 +785,131 @@ test). `cargo test --locked -p builtins --features test-support --lib`: 15 passe
 --check`: clean. `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 and without `--all-features`: clean. `scripts/check-workspace-policy.sh`: ok.
 `scripts/check-realtime-policy.sh`: ok. `scripts/check-cross-targets.sh`: PASS.
+
+### Root's ruling (c) (2026-10-08, after the follow-up; supersedes the second fold-in's sampling)
+
+Root's ruling, recorded as given. The verifier's descriptive calibration (load 2.15-2.33) gave
+23.5 ns and a charge of 420 (binding: 96 kHz grid design 3238, 513 frames, median 31.68 us),
+against the second fold-in's 21.5 ns and 470: the frame-equivalent is a maximum over about 45k
+per-design medians of short (about 30 us) samples, so it moves about 10 % with the box's load.
+**(c) A better-conditioned sample under the same median rule:** `calibrate` times each short
+design class as a batch of N back-to-back walks, so that a sample lasts at least about 1 ms, and
+takes the median over R >= 5 batches. **Condition:** a batch must not make the sample cheaper than
+a real preparation, which walks each distinct design once (warm caches and branch predictors from
+repeating one design would understate the cost), so each batch walks N different designs of the
+same class, in the order a preparation would; a class that cannot supply N different designs shows
+by measurement that the batch's per-walk cost is not below the single-walk cost of the same
+designs, and records it. The fit and the joint search (the frame-equivalent on the 0.5 ns grid,
+the charge from the largest per-section fixed cost) run on the per-batch medians, normalized per
+design. "Every design" for the batched form: every batch's per-design median work satisfies the
+inequality with its own frames and sections (F5). **(a) The figure of record** is the batch
+verdict's single calibration and gate-2 invocation, run later by the batch verifier; the constants
+are restated in the batch follow-up if it differs. Gate 2 (real preparations, charged against
+measured) is the final check: a gate-2 family whose median exceeds the stated bound means the
+constant is wrong. The second fold-in's sampling (one walk a sample) is superseded; its figures
+stay above.
+
+**Every run's value so far** (frame-equivalent / section charge):
+
+| Run | Statistic | Value |
+| --- | --- | --- |
+| Fold-in 1 | every sample | 48.5 ns / 210 |
+| Fold-in 2 | per-design median, one walk a sample | 21.5 ns / 470 |
+| The verifier's descriptive run (load 2.15-2.33) | as fold-in 2 | 23.5 ns / 420 |
+| This follow-up (below) | per-batch median, 48 different designs a batch | **17.0 ns / 550** |
+
+### Attempt 1 follow-up 2: root's ruling (c) (2026-10-08, implementer)
+
+**The sample** (`crates/builtins/examples/input_bound_budget.rs`). A calibration sample is a
+batch: one preparation (`input_section_bounds_within`, a fresh cache, no budget limit) of **N = 48
+different designs** of one class, walked back to back in strip order, as a real preparation walks
+each distinct design once. The example asserts that every design of a batch is computed (none is
+served from the cache), that the batch walks exactly the frames its designs walk alone, and that
+every round charges the same. How the designs are chosen:
+
+- *The fixed-cost grid* (four classes, every rate): the class's grid designs ordered by the frames
+  each walks, cut into batches of 48 consecutive designs, the remainder folded into the last batch
+  (48-95 designs), so a batch's designs are alike and the fit reads each batch at one length.
+  Batches per rate: one cascade of one section 6 (288 designs), of two sections 70 (3,384), two
+  cascades of one section 24 (1,152), of two sections 8 (420).
+- *The short frame-class points* (typical and cheap, 513-24,913 frames a design): each point a
+  batch of 48 designs next to it, its HPF (typical) or LPF (cheap) raised by 0.05 Hz per design,
+  as gate 2's families step them.
+- *The near-top points* (397,826-528,640 frames, about 5-7 ms a walk) are already over 1 ms:
+  each is a batch of one, its own single walk.
+
+960 batches, 27,144 designs, five measured samples each after one warmup. Each round also walks
+every design of a multi-design batch alone, right after the batch (evidence only). The fit is the
+least-squares line of each batch's median per design against its frames per design (batches whose
+longest design walks at most 16,384 frames); the joint search reads each batch's median against
+its own charged frame-equivalents. Two invocations did not complete and gave no figure: the first
+aborted on the batch assertion (two near-top designs one `f32` step apart designed the same words,
+so a batch computed 47 of 48), and the second, with the near-top points batched as 48 designs, was
+stopped after about 10 minutes (a batch of 48 walks of over 5 ms each, about 22 minutes in all);
+the near-top points then became batches of one, as above. Neither printed a frame-equivalent.
+
+**Calibration** (one invocation, `taskset -c 7`, built with charge 470 (the sections counted do not
+depend on it), one warmup and five measured rounds, no retry; 93 s; `/proc/loadavg` before
+1.14 1.27 1.62, after 1.27 1.29 1.60; the wait for the 1-minute load below 2 was not a retry):
+
+- Largest per-batch-median fixed cost per section **9.34 us** (one cascade of two sections, 88.2
+  and 96 kHz; median-fit intercepts 18.69 and 18.68 us). The median fits' largest per section at
+  each rate 8.37-9.34 us, their per-design terms -1.93 to -1.44 us. Each measured round's own fit:
+  largest per section 8.35-9.68 us (the second fold-in's single walks: 8.65-14.17 us).
+- **Frame-equivalent 17.0 ns, section charge 550** (9.34 us / 17.0 ns = 549.7, rounded up to a
+  ten; 550 x 17.0 ns = 9.35 us). **Binding batch:** 48 kHz, one cascade of two sections, grid batch
+  34 (48 designs): median work 44,723 ns a design, 1,537.0 frames + 550 x 2 sections = 2,637.0
+  charged frame-equivalents a design, 16.960 ns per charged frame-equivalent.
+- **Sample length.** The shortest batch sample is **0.584 ms** (44.1 kHz, one cascade of one
+  section, batch 1: 48 designs of about 12 us each), below the ruling's "about 1 ms"; the binding
+  class's batches last about 2.1 ms. The one-section batches are far from binding (at 17.0 ns their
+  charge of 513 + 550 frame-equivalents is about 18 us against about 12 us measured). A batch of 96
+  would give that class three batches a rate, too few for its fit; not changed in this run.
+- **Raw maximum sample (evidence):** 19.104 ns per charged frame-equivalent, 1.468 x its batch's
+  median (96 kHz, near-top, +24 dB, HPF 0.51: 8.69 ms against 5.92 ms); it is also the largest
+  ratio of a raw sample to its batch's median.
+- **Batch against single walks (evidence, the ruling's condition).** Every class supplies 48
+  different designs, so the measurement is not required; it is recorded. A batch's median per walk
+  over the sum of its designs' single-walk medians (the same rounds): **min 0.9842, median 1.0000,
+  max 1.0367**; 133 of the 960 batches are below 1 (the least: 44.1 kHz, two cascades of two
+  sections, batch 3, 53,798 ns a design batched against 54,663 ns alone). Per class over the rates:
+  one cascade of one section 1.0010-1.0367; of two sections 0.9844-1.0255; two cascades of one
+  section 1.0001-1.0194, of two sections 0.9842-1.0192; typical 0.9861-1.0225; cheap
+  0.9917-1.0337; near-top 1 (single walks). So the batch's per-walk cost is not systematically
+  below the single walk: it is within -1.6 % to +3.7 % of it, centred on 1. And the single walks
+  give the same constant: the summed single-walk medians need at most **16.933 ns** per charged
+  frame-equivalent at charge 550, which rounds up to the same 17.0 ns.
+- Descriptive (net of the fixed cost): the slowest frame class's slowest point's median 16.65 ns a
+  frame (cheap two-section, 1 kHz into 1.28 kHz, +24 dB, 88.2 kHz, spread 16.05-17.01).
+
+**Gate 2** (one invocation on charge 550 and 17.0 ns, `taskset -c 7`, one warmup and five measured
+rounds, no retry; 15 s; `/proc/loadavg` before 0.91 1.18 1.54, after 1.07 1.20 1.54): exit 0,
+every family's three results identical in every round, every preparation within its budget in
+frames, every warm rebuild walking nothing. The budget is 1,510,000 x 17.0 ns = **25.67 ms**.
+Gate 2's medians need **16.5 ns** (largest median design work per consumed frame-equivalent
+16.289 ns: 4,096 cheap two-section designs, 1 kHz into 1.28 kHz, +24 dB, 88.2 kHz), below 17.0 ns.
+**Worst median design work 24.60 ms, 95.8 % of the budget** (the same family and rate; 807 of
+4,096 designs exact). **No family's median is over the budget.** Medians per family over the four
+rates: top pair 7.13-7.33 ms; LPF at the maximum 3.71-3.74; 64 near-top 20.85-21.22; 65,537
+near-top 20.64-20.97; 64 band 20.28-20.40; 4,096 band 20.20-20.45; 64 typical 11.08-21.08 (64 of
+64 exact); 256 typical 22.05-22.88; cheap one-section 17.99-18.08; cheap two-section 18.60-24.60;
+cheap two-cascade 17.80-17.95. Largest-to-median ratio 1.000-1.054. **Raw samples (evidence):**
+the largest raw design work is 24.83 ms, 96.7 % of the budget, 1.010 x its median (the same family
+and rate; 16.445 ns per consumed frame-equivalent). The whole preparation of 65,537 strips took
+61.20-62.64 ms (the O(strips) keying outside the budget, as in #1457). The margin is thin: the
+cheap 1 kHz into 1.28 kHz family sits at 95.8 % of the budget at 88.2 kHz and 93.5 % at 96 kHz.
+
+**Gate 8** (charge 550): passed, every 64-track console document exact at every rate. Stereo
+documents (`console-sixty-four-track`, `-app`, `-intended`, `-sends`, identical; charged, frames
+walked, margin): 44.1 kHz 751,232 (610,432, 758,768); 48 kHz 799,616 (658,816, 710,384); 88.2 kHz
+1,298,560 (1,157,760, 211,440); 96 kHz 1,394,816 (1,254,016, **115,184**, the least). Mono:
+386,880 (margin 1,123,120), 412,224 (1,097,776), 671,552 (838,448), 721,216 (788,784). Frames
+walked unchanged.
+
+**Restated.** `FRAME_EQUIVALENT_NS` = 17.0 (`examples/input_bound_budget.rs`, with the batched
+sample in its module doc); `INPUT_BOUND_SECTION_CHARGE` = 550 and its doc;
+`INPUT_BOUND_BUDGET_FRAMES`'s doc (25.67 ms); the cache cap's doc (a computed design charges at
+least 257 + 550 = 807, so at most 1,510,000 / 807 = 1,871 designs a preparation; the cap of 8,192
+holds them); the figures of #1468 (`:153-154`), #1470 (`:28-36`, `:50`), #1471 (`:21`) and the
+#1474 note. The verifier NIT (59.06-61.16 ms, not 60.36-61.16 ms, in the second fold-in's gate 2)
+is fixed above.

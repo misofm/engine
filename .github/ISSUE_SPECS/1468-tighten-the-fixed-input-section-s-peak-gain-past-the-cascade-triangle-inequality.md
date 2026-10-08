@@ -150,8 +150,8 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
    frame-equivalent (the slowest frame class) and `builtins::INPUT_BOUND_SECTION_CHARGE` from it
    (#1457 Amendments 3 and 4; Amendment 4 removed the per-design charge and set the section charge
    to 290 frame-equivalents of 23.5 ns; #1474 restated them as 380 frame-equivalents of 18.5 ns;
-   #1465, under root's second frame-equivalent statistic of 2026-10-08 (per-design medians), as
-   470 frame-equivalents of 21.5 ns).
+   #1465, under root's second frame-equivalent statistic of 2026-10-08 (per-design medians) and
+   its ruling (c) of the same day (per-batch medians), as 550 frame-equivalents of 17.0 ns).
 5. **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
    --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
    builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8

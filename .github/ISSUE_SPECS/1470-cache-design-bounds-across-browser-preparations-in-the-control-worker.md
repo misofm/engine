@@ -25,15 +25,15 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
 - **What #1457 ships** (`crates/builtins/src/tail.rs`, `crates/builtins/src/lib.rs`; both hosts
   unless noted).
   - The per-preparation budget `INPUT_BOUND_BUDGET_FRAMES` = **1,510,000 frames walked**, charged
-    in strip order, in frame-equivalents of 21.5 ns (the smallest half nanosecond that bounds every
-    calibration and gate-2 design's median work, of five measured samples, by its charged
-    frame-equivalents, root's second ruling of 2026-10-08), so 32.47 ms (32.465; #1457 Amendment
-    4, restated by #1474 and #1465). The stated worst case is **27.97 ms** of design-bound work
-    (median of five) measured on the CI-class runner (4,096 cheap two-section designs, 1 kHz into
-    1.28 kHz, +24 dB, 88.2 kHz), 86.2 % of the 32.47 ms budget; medians over the families and
-    rates: the cheap families 18.99-27.97 ms, typical 11.24-23.79 ms, near-top 21.02-21.37 ms,
-    the band families 20.27-20.52 ms, the single top designs 3.74-7.36 ms (#1465's attempt 1
-    second fold-in record, which also states the largest raw sample). Past the
+    in strip order, in frame-equivalents of 17.0 ns (the smallest half nanosecond that bounds every
+    calibration batch's and gate-2 design's median work, of five measured samples, by its charged
+    frame-equivalents, root's second ruling and ruling (c) of 2026-10-08), so 25.67 ms (#1457
+    Amendment 4, restated by #1474 and #1465). The stated worst case is **24.60 ms** of
+    design-bound work (median of five) measured on the CI-class runner (4,096 cheap two-section
+    designs, 1 kHz into 1.28 kHz, +24 dB, 88.2 kHz), 95.8 % of the 25.67 ms budget; medians over
+    the families and rates: the cheap families 17.80-24.60 ms, typical 11.08-22.88 ms, near-top
+    20.64-21.22 ms, the band families 20.20-20.45 ms, the single top designs 3.71-7.33 ms (#1465's
+    attempt 1 follow-up 2 record, which also states the largest raw sample). Past the
     budget a design reports its rate's live bound, which is certified for every history and is
     never `Infinite`. A design served from a cache charges the same stored amount it charged when
     computed, so every reported bound is a pure function of the session, with or without a cache,
@@ -47,7 +47,7 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
     m3: a cache that several sessions fill can clear in the middle of a preparation). A full cache
     holds about 2.4 MiB (2,486,520 bytes measured at 8,192 entries). Render never reads it.
   - *(#1457 Amendments 3 and 4.)* The budget is in frame-equivalents: each design computed
-    charges the frames it walks plus `INPUT_BOUND_SECTION_CHARGE` (470 frame-equivalents) per
+    charges the frames it walks plus `INPUT_BOUND_SECTION_CHARGE` (550 frame-equivalents) per
     section. Amendment 4 removed the per-design charge.
   - **One entry point, no parallel API** (Amendment 2, ruling (i)):
     `builtins_compiler::prepare_session_builtins_with_live_controls` takes
