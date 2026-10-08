@@ -1372,7 +1372,7 @@ async function testMainRealm() {
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
-    const acceptedAllocationReplies = [];
+    const unrefusedAllocationReplies = [];
     for (const [what, mutation] of [
       ["a wrong tag", (reply) => ({ ...reply, tag: "miso.status.v1" })],
       ["no count", ({ count: _dropped, ...rest }) => rest],
@@ -1386,13 +1386,21 @@ async function testMainRealm() {
     ]) {
       const host = await allocationHost();
       renderAllocationsMutation = mutation;
-      await errorResult(host.renderAllocationCount(), 255)
-        .catch(() => acceptedAllocationReplies.push(what));
+      const outcome = host.renderAllocationCount();
+      await errorResult(outcome, 255).catch(async () => {
+        const seen = await outcome.then(
+          (reply) => `resolved with count ${String(reply?.count)}`,
+          (error) => error?.tag === "miso.error.v1"
+            ? `refused with result ${String(error.result)}, fields ${Object.keys(error).sort().join(",")}`
+            : `rejected with ${String(error)}`,
+        );
+        unrefusedAllocationReplies.push(`${what}: ${seen}`);
+      });
       renderAllocationsMutation = null;
       await host.dispose();
     }
-    assert.deepEqual(acceptedAllocationReplies, [],
-      "the host accepted a malformed render allocation reply");
+    assert.deepEqual(unrefusedAllocationReplies, [],
+      "the host did not refuse every malformed render allocation reply with 255");
     for (const [what, mutation, count] of [
       ["count 0", null, 0],
       ["count 4294967295", (reply) => ({ ...reply, count: 4294967295 }), 4294967295],

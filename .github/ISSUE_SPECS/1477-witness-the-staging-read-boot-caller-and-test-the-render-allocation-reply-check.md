@@ -76,7 +76,10 @@ No engine source changes. No rendered bit moves.
 1. `bash scripts/test-web-audioworklet.sh` passes (node and, where the script runs it, bun), and
    its log shows the new caller count.
 2. Mutations, each applied alone (PR evidence; each must turn the named case red, then revert):
-   - `runStagingReadRun` removed from `qualificationBootContract`: the caller witness assertion;
+   - `runStagingReadRun` removed from `qualificationBootContract`: the call throws
+     `hooks.runStagingReadRun is not a function` before the caller witness assertion (corrected
+     (follow-ups, per verdict MINOR 2); was "the caller witness assertion", which the run never
+     reaches);
    - `runStagingReadRun` boots `spectrumCollection` with one entry: D2's shape assertion;
    - the host's `message.result === RESULT_OK` removed from `validRenderAllocations`: the
      `result` `6` case;
@@ -88,9 +91,24 @@ No engine source changes. No rendered bit moves.
    - the `renderAllocations` expected tag changed: the wrong-tag case.
 3. `bash scripts/check-workspace-policy.sh` passes.
 
-*Test value.* D1 and D2 are red when `runStagingReadRun`'s boot options change or the host's
-guards refuse that shape, which today only a browser run shows; D3 is red when any conjunct of
-the reply check is lost, which no test catches today.
+*Test value* (corrected (follow-ups, per verdict MINOR 1)). D1 and D2 are red when
+`runStagingReadRun` boots different collection entries or entry order, a non-null `spectrum` or
+different live-control words; when the host's option guards refuse a `trackPostPan` collection
+entry; or when the worklet's pre-boot collection staging refuses or mis-stages the two-entry
+collection (the entry count or an identity length written at the wrong offset, a lost
+`trackPostPan` mapping, a `TextEncoder` call in the worklet). Today only a browser run shows
+these. A host guard that refuses more than one entry or a capture budget above 1 MiB is already
+red in the main-realm spectrum option tests. The collection's `maximumCaptureBytes` and
+`sourceRingFrames` are not held. D3 is red when any conjunct of the reply check is lost (the tag,
+the exact field set, `result` 0, a `u32` count) or when the check refuses the `u32` maximum. No
+test catches these today.
+
+The original sentence, struck because it was not true as written (it claimed any boot-option
+change, and the host's guards in general):
+
+> ~~*Test value.* D1 and D2 are red when `runStagingReadRun`'s boot options change or the host's
+> guards refuse that shape, which today only a browser run shows; D3 is red when any conjunct of
+> the reply check is lost, which no test catches today.~~
 
 ## Evidence
 
@@ -177,4 +195,62 @@ at 1 MiB (the staging-read run asks for 2 MiB) -- turn this suite red but also t
 red: the main-realm spectrum option tests already boot two-entry and larger collections. D1's
 unique catch is the caller's own boot options (rows 1-2), not the host's generic guards.
 
-**Open.** None in scope. Root may want the Test-value sentence narrowed to the caller's options.
+**Open.** None in scope. ~~Root may want the Test-value sentence narrowed to the caller's options.~~
+(Corrected (follow-ups, per verdict MINOR 1): this narrowing was wrong. It would delete true unique
+catches -- a host guard that refuses a `trackPostPan` collection entry and the worklet's pre-boot
+collection staging -- and keep a false one, `maximumCaptureBytes`, which no assertion holds. See
+the Follow-ups section.)
+
+### Follow-ups (2026-10-08, from the attempt-1 verdict: PASS, 2 MINOR, 3 NIT)
+
+**Changes.**
+
+- MINOR 1: the Test-value sentence is replaced with the verifier's corrected claim. The original
+  is kept struck. The attempt record's proposed narrowing is struck and corrected.
+- MINOR 2: gate 2 row 1 now says the call throws `hooks.runStagingReadRun is not a function`
+  before the caller witness assertion.
+- NIT 3: in `scripts/test-web-audioworklet.mjs`, each refusal case still fails exactly when
+  `errorResult(..., 255)` rejects (the verdict logic is the same). The failure entry now names what
+  the host did: `resolved with count N`, `refused with result R, fields ...` or `rejected with ...`.
+  The assertion message is now "the host did not refuse every malformed render allocation reply
+  with 255".
+- NIT 1 needs no change (the one argument at the call site is reported above).
+
+**Mutation evidence for the corrected sentence.** Each applied alone to a copy of this tree, run
+with the follow-up suite (new) and the suite at `e403684d9` (base), then reverted:
+
+| Mutation | New suite | Base suite |
+| --- | --- | --- |
+| p3: host collection guard `SPECTRUM_TARGETS.has(entry.target)` -> `entry.target === "output"` (refuses `trackPostPan`) | red: `runStagingReadRun real host guard rejected (miso.error.v1 result=1)` | green (callers=5) |
+| p5: worklet pre-boot staging target map loses `trackPostPan` | red: `runStagingReadRun real host guard rejected (miso.error.v1 result=1)` | green |
+| p8: worklet pre-boot staging measures the identity with `new TextEncoder()` | red: `... rejected (miso.error.v1 result=255)` | green |
+| p9: `runStagingReadRun`'s `maximumCaptureBytes` 2 MiB -> 1 MiB | green (callers=6) | green |
+
+p9 confirms that `maximumCaptureBytes` is not held, as the corrected sentence says. The other
+parts of the sentence (p4, p6, p10, p11, m2-m7, and p1/p2 red on both suites) rest on the
+verifier's runs, `submix-verdicts/evidence/1477-attempt1/mut/`; this follow-up does not change the
+product or those assertions.
+
+**NIT 3 evidence.** q1: the host's failure path refuses a `renderAllocations` reply with `1` in
+place of `255`. New suite: red, `the host did not refuse every malformed render allocation reply
+with 255`, entries `'a wrong tag: refused with result 1, fields requestId,result,tag'`, ... .
+The attempt-1 suite on the same mutation: red, `the host accepted a malformed render allocation
+reply`, entries `'a wrong tag'`, ... (the wrong label). Base suite: green. m3 (`result ===
+RESULT_OK` dropped) on the new suite: red, `'result 6: resolved with count 0'`.
+
+**Gates.**
+
+- Gate 1: `bash scripts/test-web-audioworklet.sh` with a private `TMPDIR`: exit 0, nothing left
+  in the `TMPDIR`, both node passes log `callers=6 real-ready=6 real-disposed=6 diagnose-ready=1`.
+- Gate 3: `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+- No browser-compiled code changed, so the worklet build chain and the browser legs were not
+  re-run.
+
+**Open for root.**
+
+- NIT 2 (out of scope, not fixed): the boot contract gives the real worklet class
+  `createFakeExports`, not the real module, and the fake does not check that the boot uses the
+  staged collection. A worklet that skips collection staging completely (verifier probe p7) is
+  green on both suites; only a browser leg shows it. The Hazards line "runs the real worklet class
+  with the real module" is also not correct for the same reason. A successor issue is needed if
+  root wants it caught hermetically.
