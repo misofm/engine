@@ -41,12 +41,13 @@
 use dsp_reference::randomized::{Draw, Profile, first_difference, run_seeds, same_word};
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectProcessBlock, EffectTargetRequest, InitialParameterValue, LinkMode,
-    NativeEffectFactory, NativeEffectTargetPreparation, PREPARED_EFFECT_TARGET_WORDS,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind,
+    EffectDescriptor, EffectId, EffectProcessBlock, EffectTargetRequest, InitialParameterValue,
+    LinkMode, NativeEffectFactory, NativeEffectRegistry, NativeEffectTargetPreparation,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
+    PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts,
+    PreparedSidechainPort, ProcessReport, QualityDescriptor, RegisteredTailBound, ResetKind,
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, canonical_bits,
     default_initial_values, is_negative_zero, normalize_zero, parameter_value_valid,
 };
@@ -113,8 +114,11 @@ pub enum Known {
 
 /// One effect's randomized differential.
 pub struct EffectDifferential<'a> {
-    /// The factory under test.
-    pub factory: &'a dyn NativeEffectFactory,
+    /// The registry that admitted the factory under test ([`admit`]): every request the
+    /// differential builds carries this registry's tail-bound entry (issue #1462 D1).
+    pub registry: &'a NativeEffectRegistry,
+    /// The effect under test, an effect `registry` admitted.
+    pub effect: EffectId,
     /// The test's name, printed beside a failing seed.
     pub test: &'a str,
     /// The command that reruns the test, printed beside a failing seed.
@@ -271,6 +275,98 @@ impl DifferentialCoverage {
     }
 }
 
+/// Admits `factory` into a registry of its own, as a host admits it (issue #1462): the one way
+/// the harness obtains the tail-bound entries its requests carry.
+///
+/// # Panics
+///
+/// When the registry refuses the factory, naming the registry's code.
+#[must_use]
+pub fn admit(factory: Box<dyn NativeEffectFactory>) -> (NativeEffectRegistry, EffectId) {
+    let id = factory.descriptor().id;
+    match NativeEffectRegistry::new([factory]) {
+        Ok(registry) => (registry, id),
+        Err(error) => panic!("the registry refuses `{}`: {}", id.as_str(), error.code),
+    }
+}
+
+/// The tail-bound entry a registry that admits `factory` holds for `sample_rate` and `quality`
+/// ([`admit`], then [`NativeEffectRegistry::tail_bound`]): what a test's prepare request carries
+/// (issue #1462 D1).
+///
+/// # Panics
+///
+/// When the registry refuses the factory, or the factory declares no such row.
+#[must_use]
+pub fn tail_bound_of(
+    factory: Box<dyn NativeEffectFactory>,
+    sample_rate: u32,
+    quality: effect_contract::EffectQuality,
+) -> RegisteredTailBound {
+    let (registry, effect) = admit(factory);
+    match registry.tail_bound(effect, sample_rate, quality) {
+        Ok(entry) => entry,
+        Err(error) => panic!(
+            "`{}` has no tail-bound entry at {sample_rate} Hz {quality:?}: {}",
+            effect.as_str(),
+            error.code
+        ),
+    }
+}
+
+/// The tail-bound entry a test request at `sample_rate` and `quality` carries: [`tail_bound_of`]
+/// for a row the effect declares and, for a row it does not, the entry of its first declared row.
+///
+/// A request for an undeclared row exists only to be refused: `expected_prepared_metadata`
+/// refuses it with `effect.quality.unsupported` (or an earlier validation code) before it reads
+/// the entry, and an entry of another row is never prepared with
+/// (`effect.tail_bound.mismatch`). So the stand-in entry can change no prepared value.
+///
+/// # Panics
+///
+/// When the registry refuses the factory.
+#[must_use]
+pub fn tail_bound_for_request(
+    factory: Box<dyn NativeEffectFactory>,
+    sample_rate: u32,
+    quality: effect_contract::EffectQuality,
+) -> RegisteredTailBound {
+    let first = factory.descriptor().qualities[0];
+    let (registry, effect) = admit(factory);
+    registry
+        .tail_bound(effect, sample_rate, quality)
+        .or_else(|_| registry.tail_bound(effect, first.sample_rate, first.quality))
+        .expect("the registry has an entry for every declared quality row")
+}
+
+/// The registry's entry for `quality`'s row.
+///
+/// # Panics
+///
+/// When the registry has no such row: a declared row always has one.
+fn tail_bound(
+    registry: &NativeEffectRegistry,
+    effect: EffectId,
+    quality: QualityDescriptor,
+) -> RegisteredTailBound {
+    registry
+        .tail_bound(effect, quality.sample_rate, quality.quality)
+        .expect("the registry has an entry for every declared quality row")
+}
+
+impl EffectDifferential<'_> {
+    /// The factory under test.
+    ///
+    /// # Panics
+    ///
+    /// When `registry` did not admit `effect`.
+    fn factory(&self) -> &dyn NativeEffectFactory {
+        self.registry
+            .get(self.effect)
+            .expect("the registry admitted the effect under test")
+    }
+}
+
 /// Runs `spec` over its seeds and returns what it reached.
 ///
 /// # Panics
@@ -283,7 +379,7 @@ pub fn run_effect_differential(spec: &EffectDifferential<'_>) -> DifferentialCov
         audited,
         banks_natively: spec.banks_natively,
         witness: spec.witness,
-        prepared_targets: spec.factory.target_preparation().is_some(),
+        prepared_targets: spec.factory().target_preparation().is_some(),
         ..DifferentialCoverage::default()
     };
     run_seeds(spec.test, spec.replay, spec.seeds, |seed| {
@@ -337,6 +433,8 @@ fn audited<T>(armed: bool, what: &str, call: impl FnOnce() -> T) -> T {
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     quality: QualityDescriptor,
+    /// The registry's entry for `quality` (issue #1462 D1).
+    tail_bound: RegisteredTailBound,
     quantum: u32,
     link: LinkMode,
     bypass: bool,
@@ -360,14 +458,16 @@ fn scenario(
     coverage: &mut DifferentialCoverage,
 ) {
     let mut draw = Draw::new(seed);
-    let descriptor = spec.factory.descriptor();
+    let descriptor = spec.factory().descriptor();
     let links: Vec<LinkMode> = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
         .into_iter()
         .filter(|link| descriptor.supported_link_modes.contains(*link))
         .collect();
     let mono = draw.chance(1, 3);
+    let quality = draw.pick(descriptor.qualities);
     let shape = Shape {
-        quality: draw.pick(descriptor.qualities),
+        quality,
+        tail_bound: tail_bound(spec.registry, spec.effect, quality),
         quantum: QUANTA[(seed % QUANTA.len() as u64) as usize],
         link: draw.pick(&links),
         bypass: draw.chance(1, 8),
@@ -400,7 +500,7 @@ fn run_scalar(
     audited_calls: bool,
     coverage: &mut DifferentialCoverage,
 ) {
-    let factory = spec.factory;
+    let factory = spec.factory();
     let descriptor = factory.descriptor();
     let lanes = 1 + draw.below(2);
     let mut values: Vec<Vec<InitialParameterValue>> = Vec::with_capacity(lanes);
@@ -413,7 +513,7 @@ fn run_scalar(
     let mut pairs = Vec::with_capacity(lanes);
     for member in &requests {
         match (factory.prepare(*member), factory.prepare(*member)) {
-            (Ok(oracle), Ok(twin)) => pairs.push((oracle, twin)),
+            (Ok(oracle), Ok(twin)) => pairs.push((oracle, twin.processor)),
             (Err(first), Err(second)) => {
                 assert_eq!(first.code, second.code, "prepare is deterministic");
                 coverage.refused_cohorts += 1;
@@ -423,8 +523,11 @@ fn run_scalar(
         }
     }
     coverage.scalar_scenarios += 1;
-    let metadata = pairs[0].0.metadata();
-    let sizes = metadata.state_sizes;
+    let sizes = pairs[0].0.metadata.state_sizes;
+    let mut pairs: Vec<_> = pairs
+        .into_iter()
+        .map(|(oracle, twin)| (oracle.processor, twin))
+        .collect();
     let version = descriptor.state_layout_version;
     let quantum = shape.quantum as usize;
     let connected = matches!(
@@ -748,6 +851,7 @@ fn request<'a>(shape: Shape, values: &'a [InitialParameterValue]) -> PrepareEffe
         ports: shape.ports,
         initial_values: values,
         limits: limits(shape),
+        tail_bound: shape.tail_bound,
     }
 }
 
@@ -758,6 +862,8 @@ fn index_of(width: BankWidth) -> usize {
 /// The dual bank's collapsing twin, and the witness terms that decide its mode.
 struct MonoArm {
     bank: Box<dyn PreparedNativeEffectBank>,
+    /// The bank's width, from its bind result (issue #1461: the bank holds no metadata).
+    width: BankWidth,
     collapsed: bool,
     /// No dual block has run under a failed witness since bind (`rack::BankChain`'s agreement
     /// invariant). Nothing restores it: every launch effect declines `channels_agree`.
@@ -776,7 +882,7 @@ fn run_width(
     audited_calls: bool,
     coverage: &mut DifferentialCoverage,
 ) {
-    let factory = spec.factory;
+    let factory = spec.factory();
     let descriptor = factory.descriptor();
     let lanes = width.lanes() as usize;
     let mut values: Vec<Vec<InitialParameterValue>> = Vec::with_capacity(lanes);
@@ -795,11 +901,14 @@ fn run_width(
 
     // Bind eligibility first: it needs no rendering.
     bind_eligibility(
-        factory, draw, shape, &values, backend, width, spec.known, coverage,
+        spec, draw, shape, &values, backend, width, spec.known, coverage,
     );
 
     // Bind first: a declined width prepares nothing more, which matters for a large state.
-    let mut bank = match factory.bind_homogeneous_bank(bank_request) {
+    let PreparedEffectBank {
+        processor: mut bank,
+        metadata: bank_metadata,
+    } = match factory.bind_homogeneous_bank(bank_request) {
         Ok(Some(bank)) => bank,
         Ok(None) => {
             coverage.declined[index_of(width)] += 1;
@@ -823,7 +932,7 @@ fn run_width(
             return;
         }
     };
-    let mut scalars: Vec<Box<dyn PreparedNativeEffect>> = requests
+    let mut prepared: Vec<PreparedEffect> = requests
         .iter()
         .map(|member| {
             factory.prepare(*member).unwrap_or_else(|error| {
@@ -834,14 +943,16 @@ fn run_width(
             })
         })
         .collect();
+    let metadata = prepared[0].metadata;
+    let mut scalars: Vec<Box<dyn PreparedNativeEffect>> =
+        prepared.drain(..).map(|member| member.processor).collect();
     coverage.banks[index_of(width)] += 1;
     if backend == Backend::current() {
         coverage.native_banks += 1;
     }
-    let metadata = scalars[0].metadata();
-    assert_eq!(bank.metadata().width, width, "the bank's width");
+    assert_eq!(bank_metadata.width, width, "the bank's width");
     assert_eq!(
-        bank.metadata().program_key,
+        bank_metadata.program_key,
         metadata.program_key(),
         "{width:?}: the bank's program key is its members'"
     );
@@ -858,7 +969,9 @@ fn run_width(
         bank: factory
             .bind_homogeneous_bank(bank_request)
             .expect("the same cohort binds twice")
-            .expect("the same cohort binds twice"),
+            .expect("the same cohort binds twice")
+            .processor,
+        width,
         collapsed: false,
         agree: true,
         restored: true,
@@ -1437,7 +1550,8 @@ impl Continuation {
     ) -> Self {
         let mut twin = factory
             .prepare(request)
-            .expect("a lane's own request prepares again");
+            .expect("a lane's own request prepares again")
+            .processor;
         let payload = snapshot_scalar(source, sizes, armed);
         let input = StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
             .expect("the prepared sizes");
@@ -1700,7 +1814,7 @@ fn disengage(
     arm.bank.desymmetrize_channels();
     arm.collapsed = false;
     coverage.disengages += 1;
-    for lane in 0..arm.bank.metadata().width.lanes() as usize {
+    for lane in 0..arm.width.lanes() as usize {
         assert_eq!(
             snapshot_lane(arm.bank.as_ref(), lane, sizes, armed),
             snapshot_lane(bank, lane, sizes, armed),
@@ -2223,7 +2337,7 @@ struct Restored {
 /// The three-outcome rule on `bind_homogeneous_bank`, on cohorts built to break it.
 #[allow(clippy::too_many_arguments)]
 fn bind_eligibility(
-    factory: &dyn NativeEffectFactory,
+    spec: &EffectDifferential<'_>,
     draw: &mut Draw,
     shape: Shape,
     values: &[Vec<InitialParameterValue>],
@@ -2232,6 +2346,7 @@ fn bind_eligibility(
     known: &[Known],
     coverage: &mut DifferentialCoverage,
 ) {
+    let factory = spec.factory();
     let descriptor = factory.descriptor();
     let lanes = values.len();
     let base: Vec<PrepareEffectRequest<'_>> =
@@ -2293,6 +2408,7 @@ fn bind_eligibility(
             let row = draw.pick(&rows);
             varied[member].sample_rate = row.sample_rate;
             varied[member].quality = row.quality;
+            varied[member].tail_bound = tail_bound(spec.registry, spec.effect, row);
         }
         3 => {
             let quantum = if shape.quantum == 128 { 64 } else { 128 };
@@ -2441,11 +2557,15 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
 /// * a lane whose input was clean counts a block;
 /// * the failing lane's output is zeroed on the poisoned block, and that block counts nothing.
 #[must_use]
-pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
+pub fn d7_report_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String> {
     const QUANTUM: u32 = 64;
     const BLOCKS: usize = 4;
     const POISONED: usize = 1;
     let descriptor = factory.descriptor();
+    let (registry, _) = admit(factory);
+    let factory = registry
+        .get(descriptor.id)
+        .expect("the registry admitted the effect");
     let link = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
         .into_iter()
         .find(|link| descriptor.supported_link_modes.contains(*link))
@@ -2470,6 +2590,7 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
     let connected = matches!(sidechain, PreparedSidechainPort::Connected { .. });
     let shape = Shape {
         quality: descriptor.qualities[0],
+        tail_bound: tail_bound(&registry, descriptor.id, descriptor.qualities[0]),
         quantum: QUANTUM,
         link,
         bypass: false,
@@ -2518,7 +2639,8 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
     // The scalar instance: one lane, the poisoned one.
     let mut scalar = factory
         .prepare(request(shape, &values))
-        .expect("the defaults prepare");
+        .expect("the defaults prepare")
+        .processor;
     for block in 0..BLOCKS {
         let first = (block * frames) as u64;
         let mut left: Vec<f32> = (0..frames).map(|f| signal(block, 0, 0, f)).collect();
@@ -2546,12 +2668,16 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         let lanes = width.lanes() as usize;
         let requests: Vec<PrepareEffectRequest<'_>> =
             (0..lanes).map(|_| request(shape, &values)).collect();
-        let Ok(Some(mut bank)) = factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+        let Ok(Some(PreparedEffectBank {
+            processor: mut bank,
+            ..
+        })) = factory.bind_homogeneous_bank(PrepareEffectBankRequest {
             backend,
             width,
             requests: &requests,
             active_mask: width.full_mask(),
-        }) else {
+        })
+        else {
             continue;
         };
         let who = format!("{width:?} bank");
@@ -2600,12 +2726,13 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
 /// # Panics
 ///
 /// When the D7 recovery's report breaks the contract anywhere.
-pub fn assert_d7_reports(factory: &dyn NativeEffectFactory) {
+pub fn assert_d7_reports(factory: Box<dyn NativeEffectFactory>) {
+    let name = factory.descriptor().display_name;
     let violations = d7_report_violations(factory);
     assert!(
         violations.is_empty(),
         "{}: the D7 recovery's report breaks the contract (#1073):\n{}",
-        factory.descriptor().display_name,
+        name,
         violations.join("\n")
     );
 }
@@ -2633,8 +2760,10 @@ macro_rules! randomized_effect_test {
         fn $name() {
             ::bench_support::alloc::assert_installed();
             ::bench_support::alloc::set_mode(::bench_support::alloc::Mode::Count);
+            let (registry, effect) = $crate::admit(::std::boxed::Box::new($factory));
             let coverage = $crate::run_effect_differential(&$crate::EffectDifferential {
-                factory: &$factory,
+                registry: &registry,
+                effect,
                 test: stringify!($name),
                 replay: concat!(
                     "cargo test -p ",
@@ -2686,7 +2815,7 @@ impl EffectDifferential<'_> {
     /// replay), it restores after every sample instead. It returns each refusal. (An associated
     /// function of this exported type, so an effect crate's tests reach it.)
     #[must_use]
-    pub fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
+    pub fn edge_ramp_restore_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String> {
         edge_ramp_restore_violations(factory)
     }
 
@@ -2695,14 +2824,18 @@ impl EffectDifferential<'_> {
     /// # Panics
     ///
     /// When the effect refuses a snapshot of its own state.
-    pub fn assert_edge_ramps_restore(factory: &dyn NativeEffectFactory) {
+    pub fn assert_edge_ramps_restore(factory: Box<dyn NativeEffectFactory>) {
         assert_edge_ramps_restore(factory);
     }
 }
 
 // The body of `EffectDifferential::edge_ramp_restore_violations`.
-fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
+fn edge_ramp_restore_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<String> {
     let descriptor = factory.descriptor();
+    let (registry, _) = admit(factory);
+    let factory = registry
+        .get(descriptor.id)
+        .expect("the registry admitted the effect");
     let link = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
         .into_iter()
         .find(|link| descriptor.supported_link_modes.contains(*link))
@@ -2730,6 +2863,7 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
     for (row, quality) in descriptor.qualities.iter().enumerate() {
         let shape = Shape {
             quality: *quality,
+            tail_bound: tail_bound(&registry, descriptor.id, *quality),
             quantum: 64,
             link,
             bypass: false,
@@ -2764,7 +2898,11 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
                         value.value = start;
                     }
                 }
-                let Ok(mut effect) = factory.prepare(request(shape, &values)) else {
+                let Ok(PreparedEffect {
+                    processor: mut effect,
+                    ..
+                }) = factory.prepare(request(shape, &values))
+                else {
                     continue;
                 };
                 let channels: &[ParameterChannel] = match parameter.channel_policy {
@@ -2805,7 +2943,8 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
                     let payload = snapshot_scalar(effect.as_ref(), sizes, false);
                     let mut twin = factory
                         .prepare(request(shape, &values))
-                        .expect("the same request prepares again");
+                        .expect("the same request prepares again")
+                        .processor;
                     let input = StatePayloadInput::new(
                         &payload.common,
                         &payload.left,
@@ -2900,12 +3039,13 @@ fn edge_restore_positions(
 }
 
 // The body of `EffectDifferential::assert_edge_ramps_restore`.
-fn assert_edge_ramps_restore(factory: &dyn NativeEffectFactory) {
+fn assert_edge_ramps_restore(factory: Box<dyn NativeEffectFactory>) {
+    let name = factory.descriptor().display_name;
     let violations = edge_ramp_restore_violations(factory);
     assert!(
         violations.is_empty(),
         "{}: a restore refuses the effect's own mid-ramp snapshot (#1278):\n{}",
-        factory.descriptor().display_name,
+        name,
         violations.join("\n")
     );
 }

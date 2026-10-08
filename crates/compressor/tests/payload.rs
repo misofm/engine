@@ -15,8 +15,8 @@ use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use compressor::COMPRESSOR_PARAMETERS;
 use support::{
     CURRENT, REMAINING, STATE_HEADER_WORDS, STATE_VERSION, STEP, TARGET, bind_bank, initial_values,
-    native_bank_width, noise, prepare, ramp_word, render_scalar, request, restore, restore_track,
-    snapshot, snapshot_track, values_with,
+    native_bank_width, noise, prepare, prepare_with_metadata, ramp_word, render_scalar, request,
+    restore, restore_track, snapshot, snapshot_track, values_with,
 };
 
 fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
@@ -100,7 +100,9 @@ fn an_idle_restore_is_bit_exact() {
 #[test]
 fn a_restore_is_transactional_across_both_channels() {
     let values = initial_values();
-    let mut effect = prepare(request(&values));
+    let prepared = prepare_with_metadata(request(&values));
+    let sizes = prepared.metadata.state_sizes;
+    let mut effect = prepared.processor;
     let mut left = vec![0.5_f32; 128];
     let mut right = vec![-0.25_f32; 128];
     render_scalar(effect.as_mut(), &mut left, &mut right, 128, 128, &[]);
@@ -146,7 +148,6 @@ fn a_restore_is_transactional_across_both_channels() {
     }
 
     // A wrong section length is rejected before anything is read.
-    let sizes = effect.metadata().state_sizes;
     let mut short = saved_right.clone();
     short.truncate(short.len() - 4);
     assert!(
@@ -206,7 +207,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
     let requests: Vec<_> = (0..lanes).map(|_| request(&values)).collect();
     let mut bank = bind_bank(&requests).expect("bank");
     let bank_scalar = prepare(request(&values));
-    let bank_saved = snapshot_track(bank.as_ref(), 0, bank_scalar.as_ref());
+    let bank_saved = snapshot_track(bank.as_ref(), 0);
 
     let mut bank_left = bank_saved.0.clone();
     write_f32(&mut bank_left, 1, -17.5);
@@ -226,7 +227,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         "effect.state.parameter"
     );
     assert_eq!(
-        snapshot_track(bank.as_ref(), 0, bank_scalar.as_ref()),
+        snapshot_track(bank.as_ref(), 0),
         bank_saved,
         "bank restore must be transactional across both channels"
     );
@@ -259,10 +260,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         .code,
         "effect.state.length"
     );
-    assert_eq!(
-        snapshot_track(bank.as_ref(), 0, bank_scalar.as_ref()),
-        bank_saved
-    );
+    assert_eq!(snapshot_track(bank.as_ref(), 0), bank_saved);
 }
 
 /// A mid-ramp restore continues exactly as the lane it was taken from (#1278 D2a).
@@ -515,9 +513,7 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
         .expect("the scalar snapshot restores into a bank track");
         bank
     });
-    let bank_saved = bank
-        .as_ref()
-        .map(|bank| snapshot_track(bank.as_ref(), 0, effect.as_ref()));
+    let bank_saved = bank.as_ref().map(|bank| snapshot_track(bank.as_ref(), 0));
 
     for (index, below, low, high, above) in words {
         for (outside, edge) in [(below, low), (above, high)] {
@@ -549,11 +545,7 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
                     "effect.state.parameter",
                     "bank {case}"
                 );
-                assert_eq!(
-                    &snapshot_track(bank.as_ref(), 0, effect.as_ref()),
-                    bank_saved,
-                    "bank {case}"
-                );
+                assert_eq!(&snapshot_track(bank.as_ref(), 0), bank_saved, "bank {case}");
             }
             let section = with_current(index, edge);
             restore(effect.as_mut(), STATE_VERSION, &section, &saved.1)

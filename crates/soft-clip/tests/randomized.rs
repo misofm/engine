@@ -206,5 +206,5 @@ conformance::randomized_effect_test!(
 #[test]
 #[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
-    conformance::assert_d7_reports(&soft_clip::SoftClipFactory);
+    conformance::assert_d7_reports(Box::new(soft_clip::SoftClipFactory));
 }

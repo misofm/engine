@@ -101,6 +101,45 @@ fn stream_planes<L: Lane, R: RestThresholds<L>, const S: usize>(
     }))
 }
 
+/// Whether every stream of [`svf_cascade_interleaved_form`]'s frame loop, and every armed rest
+/// plane, still holds a whole frame: that loop's one exit test (issue #1454).
+///
+/// The loop walks its planes by splitting one frame off the front of each per step
+/// ([`next_frame_mut`], [`next_frame`]) instead of indexing `plane[base..base + width]`. LLVM
+/// cannot prove `frame * width + width <= frames * width` (the products may wrap), so the indexed
+/// form kept a bounds branch per frame, an early exit from the loop. In V8's code for the shipped
+/// module that exit came before the uses of the loop's `v128.const` splats, and TurboFan rebuilt
+/// `FLUSH_EPS` and `NONFINITE_LIMIT` on every frame of the depth-one tails instead of keeping them
+/// in registers. A split at a length this test has just checked has nothing left to check.
+///
+/// [`svf_cascade_skewed_form`] keeps its indexed form: walked the same way, its steady-state loop
+/// let LLVM unroll the mono pair by two and gave the armed mono pair a carried stack slot in V8
+/// (issue #1454's record), so its per-frame bounds branches stay.
+#[inline(always)]
+fn frames_left<L: Lane, const S: usize, const ARMED: bool>(
+    io: &[&mut [f32]; S],
+    rest: &[&[f32]; S],
+) -> bool {
+    io.iter().all(|block| block.len() >= L::WIDTH)
+        && (!ARMED || rest.iter().all(|plane| plane.len() >= L::WIDTH))
+}
+
+/// Splits the next `L::WIDTH`-word frame off the front of `plane` ([`frames_left`]).
+#[inline(always)]
+fn next_frame_mut<'a, L: Lane>(plane: &mut &'a mut [f32]) -> &'a mut [f32] {
+    let (frame, tail) = core::mem::take(plane).split_at_mut(L::WIDTH);
+    *plane = tail;
+    frame
+}
+
+/// [`next_frame_mut`] for a read-only plane.
+#[inline(always)]
+fn next_frame<'a, L: Lane>(plane: &mut &'a [f32]) -> &'a [f32] {
+    let (frame, tail) = plane.split_at(L::WIDTH);
+    *plane = tail;
+    frame
+}
+
 /// One frame's thresholds in a loop of form `ARMED`: loaded from the plane when armed, `+0.0`
 /// (never read by the unarmed step) otherwise.
 #[inline(always)]
@@ -718,7 +757,8 @@ fn svf_cascade_skewed_form<
     let width = L::WIDTH;
     let span = frames * width;
     debug_assert!(io.iter().all(|block| block.len() == span));
-    // Truncating once, outside the loops, as the interleaved body does.
+    // Truncating once, outside the loops. The `base..base + width` indexing below still carries a
+    // bounds branch per step, which LLVM cannot remove; [`frames_left`] says why it stays here.
     let io = io.map(|block| &mut block[..span]);
     let rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
     let mut state = *s;
@@ -937,20 +977,23 @@ fn svf_cascade_interleaved_form<
     let width = L::WIDTH;
     let span = frames * width;
     debug_assert!(io.iter().all(|block| block.len() == span));
-    // Truncating once, outside the loop, is what lets the frame indexing below carry no per-frame
-    // bounds branch: every stream then has exactly `span` samples, and so has every armed plane.
-    let io = io.map(|block| &mut block[..span]);
-    let rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
+    // Every plane is cut to `span` once, so all of them hold `frames` whole frames and the loop
+    // below, which walks them with [`frames_left`], runs exactly `frames` times.
+    let mut io = io.map(|block| &mut block[..span]);
+    let mut rest = rest.map(|plane| if ARMED { &plane[..span] } else { plane });
     let mut state = *s;
     let nc1: [[L; D]; S] =
         core::array::from_fn(|stream| core::array::from_fn(|section| c[stream][section].c1.neg()));
-    for frame in 0..frames {
-        let base = frame * width;
+    while frames_left::<L, S, ARMED>(&io, &rest) {
         for stream in 0..S {
-            let slot = &mut io[stream][base..base + width];
+            let slot = next_frame_mut::<L>(&mut io[stream]);
             let mut x = L::load(slot);
             // One threshold per stream and frame, read by every section of the frame.
-            let threshold = threshold_at::<L, ARMED>(rest[stream], base);
+            let threshold = if ARMED {
+                L::load(next_frame::<L>(&mut rest[stream]))
+            } else {
+                L::zero()
+            };
             for section in 0..D {
                 let coefficients = &c[stream][section];
                 let (v1, v2) = svf_step_when(

@@ -220,6 +220,7 @@ fn prepare_bank() -> Option<Box<dyn PreparedNativeEffectBank>> {
             active_mask: width.full_mask(),
         })
         .expect("valid bank request")
+        .map(|bank| bank.processor)
 }
 
 /// The scalar instance, with a sidechain connected so the connected kernel variant is audited too.
@@ -228,6 +229,7 @@ fn prepare_scalar(connected: bool) -> Box<dyn PreparedNativeEffect> {
     GateExpanderFactory
         .prepare(request(&values, connected))
         .expect("prepared gate/expander")
+        .processor
 }
 
 fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRequest<'_> {
@@ -262,6 +264,11 @@ fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRe
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(GateExpanderFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 

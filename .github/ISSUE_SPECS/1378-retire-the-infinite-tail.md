@@ -116,6 +116,8 @@ slice starts, refresh its anchors by re-grep: `hosts/host-web/src/tests.rs`,
 
 ## Dependencies
 
+- *Build the launch effect registry once per process and share it* (#1469): the shared registry
+  the tail derivations run behind, once per process
 - *State the parametric EQ's bounded tail and exact-rest bound* (#1372)
 - *State the multiband compressor's bounded tail and exact-rest bound* (#1373)
 - *State the delay's bounded tail and exact-rest bound* (#1374)

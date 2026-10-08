@@ -64,6 +64,11 @@ fn request(
             maximum_scratch_bytes: quality.scratch_fixed_bytes,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(crate::SoftClipFactory),
+            rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -80,7 +85,7 @@ fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     let request = PrepareEffectBankRequest {
         backend: backend(width),
         width,
@@ -94,7 +99,8 @@ fn bind(
     }
 }
 
-fn scalar(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
+/// A member's scalar instance, beside the metadata its prepare reported.
+fn scalar(request: PrepareEffectRequest<'_>) -> PreparedEffect {
     SoftClipFactory
         .prepare(request)
         .expect("a valid member prepares")
@@ -313,6 +319,7 @@ impl Padded<'_> {
         bind(self.width, &requests, self.mask)
             .expect("a padded request is well formed")
             .expect("the soft clip binds a padded bank")
+            .processor
     }
 }
 
@@ -325,20 +332,24 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
     let lanes = padded.lanes();
     let width = lanes.len();
     let mut bank = padded.bind();
-    let mut scalars: Vec<Box<dyn PreparedNativeEffect>> = padded
+    let prepared: Vec<PreparedEffect> = padded
         .members
         .iter()
         .map(|values| scalar(request(values, padded.rate, padded.link)))
         .collect();
-    let sizes = scalars[0].metadata().state_sizes;
+    let sizes = prepared[0].metadata.state_sizes;
+    let mut scalars: Vec<Box<dyn PreparedNativeEffect>> = prepared
+        .into_iter()
+        .map(|prepared| prepared.processor)
+        .collect();
     // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
     // scalar instance of the member the lane clones, fed `+0.0` and no automation.
     let idle_request = request(&padded.members[padded.clone_of], padded.rate, padded.link);
-    let rest = payload_of(scalar(idle_request).as_ref(), sizes);
+    let rest = payload_of(scalar(idle_request).processor.as_ref(), sizes);
     let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
         .iter()
-        .map(|member| member.is_none().then(|| scalar(idle_request)))
+        .map(|member| member.is_none().then(|| scalar(idle_request).processor))
         .collect();
     let mut outputs = vec![Vec::new(); padded.members.len()];
     let mut first_sample = 0_u64;
@@ -780,6 +791,7 @@ fn concrete<L: Lane>(
     )
     .expect("a well-formed request")
     .expect("the bank binds")
+    .0
 }
 
 /// Frames in one block of a D7 test: fewer than a ramp's 64 samples, so a ramp set at a block's
@@ -913,7 +925,10 @@ fn planted_nonfinite_state<L: Lane>(width: BankWidth) {
         let mut bank = concrete::<L>(width, &mask, &values);
         let mut control = concrete::<L>(width, &mask, &values);
         let source = if is_padded { 0 } else { target };
-        let mut oracle = scalar(request(&values[source], 48_000, LinkMode::DualMono));
+        let PreparedEffect {
+            processor: mut oracle,
+            metadata: oracle_metadata,
+        } = scalar(request(&values[source], 48_000, LinkMode::DualMono));
         // A drive ramp set at the poisoned block's first sample is mid-flight when D7 fires.
         let ramp = [PreparedAutomationSpan {
             kind: AutomationSpanKind::Point,
@@ -978,7 +993,7 @@ fn planted_nonfinite_state<L: Lane>(width: BankWidth) {
                 }
                 // Recovered to rest: every history row of the lane is zero and every ramp has
                 // snapped to its target, the in-flight drive ramp included.
-                let sizes = oracle.metadata().state_sizes;
+                let sizes = oracle_metadata.state_sizes;
                 let (_, left_words, right_words) = bank_payload(&bank, target, sizes);
                 for section in [&left_words, &right_words] {
                     for parameter in 0..PARAMETER_COUNT {
@@ -1009,7 +1024,7 @@ fn planted_nonfinite_state<L: Lane>(width: BankWidth) {
             }
         };
         assert_eq!(bank.inner.nonfinite, record, "{context}: the D7 record");
-        let sizes = oracle.metadata().state_sizes;
+        let sizes = oracle_metadata.state_sizes;
         assert_eq!(
             bank_payload(&bank, target, sizes),
             payload_of(oracle.as_ref(), sizes),

@@ -42,6 +42,8 @@ it has today: each mutant that #1409's attempt record shows red stays red after 
 - **D1. Home.** A public module in `crates/conformance` (for example `conformance::ramp_endpoint`),
   behind the feature the seven crates already enable, unless a measured reason (a dependency the
   harness needs that `conformance` must not take) puts it elsewhere; the record states the reason.
+  (As built, the module is not behind a feature; the attempt 1 record, "D1, home", gives the
+  reason.)
 - **D2. Per-effect data stays in each crate.** Each `tests/ramp_endpoint.rs` keeps its moves, its
   `RampWord` layout and its effect hooks, and calls the harness. The harness takes the factory and
   the hooks as arguments; no effect name appears in it.
@@ -90,10 +92,206 @@ it has today: each mutant that #1409's attempt record shows red stays red after 
 
 ## Test value
 
-No new test behavior. A plausible defect this guards: a harness fix (or defect) applied to one copy
+The move itself adds no test behavior; the attempt 1 fold-in adds two (see the record's "Batch
+follow-ups"). A plausible defect this guards: a harness fix (or defect) applied to one copy
 only, which leaves another effect's gate weaker without any red; after this slice there is one
 copy. Gate 2's re-run proves the move kept each gate's catches.
 
 ## Dependencies
 
 - #1409 and #1411 (merged with the stream G batch).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-06)
+
+Test code only; no `src` change outside `crates/conformance/src`.
+
+**D1, home.** `conformance::ramp_endpoint` (`crates/conformance/src/ramp_endpoint.rs`, `pub mod` in
+`lib.rs`). It is not behind a feature: the crate's other shared harnesses (`randomized.rs`,
+`EffectDifferential`) are not either, and `realtime-audit` only forwards engine's render-audit
+instrumentation, which this harness does not use. No `Cargo.toml` change and no new dependency
+(`check-conformance-boundaries.sh` exit 0).
+
+**The harness** holds `Section` (`Common`, `Channels`), `RampWord`, `Move` (with `whole`),
+`FRAMES = 72`, the request (48 kHz `qualities[1]` row asserted, quantum 128, dual mono, sidechain
+connected or not), the snapshot and ramp-word readers, the signal, the one-frame render with the
+endpoint check after each block, the unclamped-law reach check, the one-block partition comparison,
+and the native-width bank half. Entry points: `check_every_move(factory, &RampEndpoints, sidechain:
+&[bool])` and `check_every_bank_move(factory, &RampEndpoints)`. Each admits the boxed factory into
+a registry once (`randomized::admit`) and reads the tail-bound entry from it, the entry
+`tail_bound_of` gave every request before. No effect is named in it.
+
+Two changes of form, no change of reach: (1) the delay's `values_with` hook is the data field
+`RampEndpoints::rest` (`&[(0, DELAY_TIME_MS)]`), applied before the move's own `start`, as the delay
+copy did; a bank's resting lanes would rest at the same values (no banking effect sets any). (2) A
+connected run of an effect without a sidechain port now panics instead of silently running
+unconnected (the spec's hazard); the compressor's connected run is the only one and its port exists.
+
+**Per crate (gate 3)** each `tests/ramp_endpoint.rs` keeps only: its module doc (render site,
+effect-specific remarks, test value), `WORDS`, `MOVES` (unchanged: same words, starts, targets,
+`whole` flags), the `ENDPOINTS` constant, the delay's `DELAY_TIME_MS`, and the two test functions
+(one for the delay), each a single harness call with the factory and the sidechain list (compressor
+`[false, true]`, every other effect `[false]`).
+
+**Line counts.** Before: compressor 563, delay 407, gate-expander 500, multiband-compressor 591,
+soft-clip 493, transient-shaper 498, true-peak-limiter 481 (3,533). After: 162, 95, 99, 180, 83, 90,
+78 (787; multiband corrected from 179 in the batch follow-ups), plus the harness module 519; 1,306
+in all.
+
+**Gate 1.** Debug and `cargo test --locked --release -p compressor -p delay -p gate-expander -p
+multiband-compressor -p soft-clip -p transient-shaper -p true-peak-limiter --test ramp_endpoint`:
+pass, 13 tests in 7 targets, the same names and counts as before (`--list` before the change: two
+per effect, one for the delay).
+
+**Gate 2, mutation re-run.** Each mutant applied alone to the new tree by a scratch script, the
+named crates' `--test ramp_endpoint` run in debug, the file restored (`git status` of every `src`
+clean afterwards; the seven targets green after).
+
+| Mutant (#1409 table) | Result on the shared harness |
+| --- | --- |
+| site 2 `next_value` back to `current += step` | red: compressor connected (threshold, frame 33, `0xc2a00001`); transient (attack amount, frame 48, `0x3f800001`); delay (feedback, frame 33, `0x3f733334`) |
+| site 2 `advance_block` first word back to `current + step` | **green** on the delay (see below) |
+| site 4 `advance_where` back to `add` | red: compressor unconnected (threshold, frame 33, `0xc2a00001`) |
+| site 4 gather: target from lane `W - 1 - lane` | red: compressor bank test (threshold, frame 0) |
+| site 5 gate prologue back to `add` | red: gate (threshold, frame 33) |
+| site 6 `run_segment` back to `add` | red: multiband (low threshold, frame 33) |
+| site 6 `Side::segment` target from lane `W - 1 - track` | red: multiband bank test (low threshold, frame 0) |
+| site 7 `ramp_word` at `RAMPING` back to `value + step` | red: delay (feedback, final snapshot depends on the partition) |
+| site 7 D5 choice inverted | red: delay (feedback, final snapshot) |
+| site 8 drive back to `add` | red: soft clip (drive gain, frame 33, `0x427c620b`) |
+| site 8 D5 choice inverted (`if !L::mask_any(L::mask_not(settled))`) | **green** (see below) |
+| site 8 `target_vector` from lane `W - 1 - lane` | red: soft clip bank test (drive gain, frame 0) |
+| site 9 limiter back to `add` | red: limiter (limit coefficient, frame 33, `0x3d6655c2`) |
+| #1409 attempt 2, site 7 left damping `g` | red: delay (damping coefficient, final snapshot) |
+| site 7 left feedback | red: delay (feedback, final snapshot) |
+| site 7 right damping `g` | red: delay (damping coefficient, final snapshot) |
+| site 7 right feedback | red: delay (feedback, final snapshot) |
+| site 7 cross position | red: delay (cross feedback, final snapshot) |
+
+The two green rows are green on the pre-move tree too: with the seven old copies restored from
+`8fc41c5b0` and the same mutants applied, both tests pass. So the move loses no reach, but #1409's
+table no longer describes `8fc41c5b0`:
+- Soft clip's D5 choice changed shape after #1409 (#1452 undo 5): the settled copy now holds the
+  three words instead of adding a zero step. Inverted, a ramping block holds its words at rest,
+  which stays inside the endpoints and is partition- and lane-invariant, so an endpoint gate cannot
+  see it (it is a frozen ramp, not an overshoot).
+- The delay's `advance_block` first-word mutant: the first word of a block differs from the
+  clamped one only on a frame where `current + step` passes the target; no gate-2 test of the
+  delay reaches that on `8fc41c5b0`. Not investigated further (outside this slice: no new moves).
+Both are open items for root, not defects of this slice.
+
+**Gate 4 and the rest.** `cargo clippy --locked --workspace --all-targets -- -D warnings`: pass.
+`cargo fmt --all -- --check`: pass. `RUSTDOCFLAGS='-D warnings' cargo doc --locked -p conformance
+--no-deps`: pass. `check-workspace-policy.sh`, `check-conformance-boundaries.sh`,
+`check-realtime-policy.sh`: exit 0. No engine or render code changed, so `check-cross-targets.sh`
+was not run.
+
+### Attempt 1 fold-in (implementer, 2026-10-07; root ruling on open item 1)
+
+**Root ruling (2026-10-06, relayed by the stream G coordinator).** #1409's mutation record must be
+corrected, and both mutants that are green at `8fc41c5b0` get reach in this slice, in one fold-in
+commit on attempt 1, so that one verdict covers both: (a) a frozen-ramp check, so that a soft clip
+ramp that stops short of its target is red; (b) a delay move whose `current + step` crosses its
+target. Then the full #1409 table and the gates are run again.
+
+**Correction of #1409's record.** Two rows of #1409's mutation table were green on `8fc41c5b0`
+(the parent of this slice), both on the old seven copies and on the shared harness (attempt 1
+above): *site 2 `advance_block` first word* (delay) and *site 8 D5 choice inverted* (soft clip).
+The reasons are in attempt 1's record. #1409's own spec file
+(`.github/ISSUE_SPECS/1409-*.md`) is outside this slice's authorized paths, so the correction is
+recorded here only, and #1409's spec is not edited. Root decides whether #1409's record or GitHub
+issue gets a pointer.
+
+**(a) Frozen-ramp check.** This is in the shared harness, so all seven effects run it.
+`check_every_move` now checks every ramp word from the second frame on: the word must be one
+clamped D11 sample of the word that the snapshot held one frame before (`follows_law`). At rest
+(`remaining` all zero bits), the word holds. In flight, the target is unchanged, and `current` is
+bit-equal either to `lane::kernels::ramp_toward(current, step, target)` or to the target (the
+snap).
+- The check reads `remaining` only as zero or non-zero, because the effects write it in two
+  encodings: the gate expander writes it as `f32` bits, the others as `u32`. A first form that
+  modelled `remaining - 1` exactly was red on the unmutated gate expander for this reason, and it
+  was replaced.
+- The check does not catch an early snap to the target. It catches a word that holds or stops
+  short while its ramp is in flight. The endpoint check alone cannot see that defect, because a
+  frozen word stays inside its endpoints and is partition- and lane-invariant.
+
+**(b) Delay move.** A fifth delay move: mix from `0x3f7fff9f` (one ulp below the first mix move)
+to 1.0, `whole: true`. In the one-frame render every frame is a block start, so the block-start
+word of `LinearRamp::advance_block` is the word that renders. On this move, the unclamped
+`current + step` changes an output bit. It was found by a scratch scan (not committed, now
+deleted), in release, of 51,198 candidate delay moves:
+- The candidates covered all four words. The targets were each parameter's domain edges and 19
+  interior points. The starts were the target ± k ulps, k = 33..300 and a 5% geometric spread up
+  to 4096.
+- 20,227 candidates pass the harness on the real code.
+- 17,211 of those are red on the `advance_block` mutant. The first mix move `0x3f7fffa0` is not
+  one of them, and `0x3f7fff9f` is.
+
+**Mutation evidence (each mutant applied alone, the named crates' `--test ramp_endpoint` run in
+debug, then restored; `src` status clean afterwards):**
+
+| Mutant | Result |
+| --- | --- |
+| site 8 D5 choice inverted (soft clip) | was green, now **red**: drive gain, frame 1, `follows_law` (the word held at 63.095615 while remaining went 63 to 62) |
+| site 2 `advance_block` first word back to `current + step` (delay) | was green, now **red**: mix from `0x3f7fff9f` to 1, `left output` |
+| the other 16 rows of attempt 1's table | red on the same test, word and frame as before. The overshoot rows (site 2 `next_value`, sites 4, 5, 6, 8 drive and 9) now fail first at the new law check on the same frame (frame 33; transient frame 48), one assertion before the endpoint check. The bank rows and the delay site-7 rows fail on the same assertions as before |
+
+All 18 rows are red, and all seven targets are green on the real code.
+
+**Gates.**
+- Debug and `--release` `--test ramp_endpoint` for the seven effects: pass, 13 tests.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: pass.
+- `cargo fmt --all -- --check`: pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked -p conformance --no-deps`: pass.
+- `check-workspace-policy.sh`, `check-conformance-boundaries.sh` and `check-realtime-policy.sh`:
+  exit 0.
+- No `src` change outside `crates/conformance/src`.
+
+**Line counts after the fold-in:** harness 557, delay 107; the other six files are unchanged.
+
+### Batch follow-ups (stream G2 part 2, 2026-10-07; verdict `1458-attempt1.md` PASS)
+
+- **MINOR 1: `follows_law` no longer accepts a premature snap.** In flight, a word may now equal its
+  target only when `ramp_toward` itself reached it or the ramp has ended:
+  `same(now.0, ramp_toward(current, step, target)) || (same(now.0, target) && now.3 == 0)`. It
+  reads `remaining` only as zero or non-zero, so both encodings (gate `f32` bits, the others `u32`)
+  still work. The function doc and the module doc state the rule. This supersedes the fold-in
+  record's "the check does not catch an early snap to the target" for a mid-ramp snap; a one-sample
+  early snap at the very end changes no bit with these moves and stays gate 1's catch (verdict).
+  - Test value (`every_ramped_word_stays_inside_its_endpoints`, all seven effects): a render site
+    that snaps a ramp word to its target while the ramp still counts turns it red; with the old
+    clause the harness was green on it.
+  - Mutation runs (debug, `--test ramp_endpoint`): gate site 5 `final_sample =
+    L::splat(61.0).gt(ramp.remaining)` (snap at `remaining <= 60`): red, threshold move `0xc29fffdf
+    -> -80`, frame 4, "not one clamped D11 sample"; the same mutant with the old clause: green.
+    Limiter site 9 `stepping = self.remaining.gt(L::splat(40.0))`: red, limit coefficient move
+    `0xc1bffff6 -> -24`, frame 23; old clause: green. Reverted: all seven crates green (13 tests).
+- **MINOR 2: the #1409 correction, completed.** Cause of the delay row (`advance_block` first word):
+  `f6f599d84` (#1409 attempt 2) set the delay time to 1 ms; the verifier set the old copy back to
+  250 ms and the old mix move `0x3f7fffa0` was red again on `left output`. With a live tap, the
+  unclamped word's output bit at the crossing frame rounds away. Cause of the soft clip row (site 8
+  D5 inverted): `00a0445c5` (#1452 undo 5) replaced the settled branch's `drive.add(c.drive_step)`
+  with a hold, so the inverted choice freezes the words where it used to overshoot. Neither mutant
+  escaped the suite: the `advance_block` mutant is red in gate 1 (effect-runtime
+  `every_statement_of_the_law_stays_inside_its_endpoints_and_agrees`), and the D5 inversion is red
+  in `crates/soft-clip/tests/ramp_law.rs` (three tests). So the fold-in **restores gate-2 reach**;
+  it is not a first catch. A pointer note now sits under #1409's mutation table
+  (`.github/ISSUE_SPECS/1409-keep-every-effect-parameter-ramp-inside-its-endpoints.md`; stream G
+  owns #1409).
+- NIT 1: `crates/conformance/src/ramp_endpoint.rs`'s module doc rewrapped to 100 columns.
+- NIT 2: `crates/delay/tests/ramp_endpoint.rs`'s module doc and `MOVES` doc now say five moves for
+  four words (the mix's second move from #1458's scan); the harness module doc says "at least one
+  move per word".
+- NIT 3: multiband after the move was 180 lines, not 179 (corrected above; total 787, 1,306 with the
+  harness). The batch follow-ups changed the delay file's docs since.
+- NIT 4: the scan counts (51,198 candidates, 20,227 passing, 17,211 red on the mutant) are one-time
+  PR evidence and cannot be reproduced from this record: the 19 interior points and the geometric
+  spread were not specified and the script is deleted. What is reproducible: the new move is red on
+  the `advance_block` mutant and `0x3f7fffa0` is green on it.
+- NIT 5 (root): the Test value section now says the fold-in adds two behaviors (the frozen- and
+  premature-ramp law check and the delay block-start move).
+- NIT 6 (root): D1 now notes that the module is not behind a feature, as built, and points at the
+  reason recorded under "D1, home" (no other shared harness in `conformance` is gated, and
+  `realtime-audit` only forwards engine render-audit instrumentation this harness does not use).

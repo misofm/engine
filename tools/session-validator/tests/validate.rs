@@ -480,7 +480,7 @@ fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() 
         .unwrap();
         let engine = prepare_native_session_effects(
             &compiled,
-            &launch_native_effect_registry().unwrap(),
+            launch_native_effect_registry().unwrap(),
             EffectCompileCaps {
                 maximum_total_state_bytes: u64::MAX,
                 maximum_scratch_bytes: u64::MAX,

@@ -155,5 +155,7 @@ conformance::randomized_effect_test!(
 /// restore slack.
 #[test]
 fn the_effects_own_edge_ramp_snapshots_restore() {
-    conformance::EffectDifferential::assert_edge_ramps_restore(&compressor::CompressorFactory);
+    conformance::EffectDifferential::assert_edge_ramps_restore(Box::new(
+        compressor::CompressorFactory,
+    ));
 }

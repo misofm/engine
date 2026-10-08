@@ -36,11 +36,15 @@ fn bank_snapshot_restore_and_resets_are_track_local() {
     let lanes = width.lanes() as usize;
     let values = track_values(lanes);
     let mut bank = bind_native_bank(&values, LinkMode::DualMono).expect("bank");
-    let mut scalar = values
+    let prepared = values
         .iter()
-        .map(|values| prepare_with(values, 48_000, false, LinkMode::DualMono))
+        .map(|values| prepared_with(values, 48_000, false, LinkMode::DualMono))
         .collect::<Vec<_>>();
-    let sizes = scalar[0].metadata().state_sizes;
+    let sizes = prepared[0].metadata.state_sizes;
+    let mut scalar = prepared
+        .into_iter()
+        .map(|prepared| prepared.processor)
+        .collect::<Vec<_>>();
 
     let frames = 40;
     let mut bank_left = vec![0.0_f32; frames * lanes];
@@ -158,7 +162,7 @@ fn a_padded_request_binds_and_still_validates_every_lane() {
         let bank = bind(&requests, &mask)
             .expect("a padded request is well formed")
             .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the bank binds"));
-        assert_eq!(bank.metadata().width, width);
+        assert_eq!(bank.metadata.width, width);
     }
     // Malform a member other than the first, so that a check of the first request alone -- or a
     // decision taken above the member loop -- goes red.

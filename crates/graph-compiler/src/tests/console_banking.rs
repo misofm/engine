@@ -384,7 +384,7 @@ fn compile_at(
         1_098,
         &[],
         dispatch,
-        &launch_native_effect_registry().expect("launch registry"),
+        launch_native_effect_registry().expect("launch registry"),
     )
 }
 
@@ -840,13 +840,13 @@ impl NativeEffectFactory for DecliningPaddedLimiter {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
         self.delegate.prepare(request)
     }
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
         request.validate_shape()?;
         if request.is_padded() {
             return Ok(None);

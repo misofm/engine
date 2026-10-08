@@ -16,8 +16,13 @@ gone.
 Factories validate static descriptors and allocate/design all processor resources off render.
 Prepared metadata fixes sample rate, quantum, quality, bypass, link mode, ports, exact integer
 latency, tail, tail over every peak (`tail_every_peak`), exact-rest bound (`rest`),
-state-section sizes, scratch bytes, and automation capacity. The compiler caches
-that metadata; graph/PDC consumers never query a live processor. The semantic `EffectProgramKey`
+state-section sizes, scratch bytes, and automation capacity. `NativeEffectFactory::prepare`
+returns it beside the processor (`PreparedEffect { processor, metadata }`), and a bound bank's
+`PreparedBankMetadata` rides beside its processor the same way (`PreparedEffectBank`). The
+processor holds no copy of the record and has no `metadata()` method: it keeps, as plain fields,
+only the values its own render path reads, because render-owned memory carries no control-only
+data (#1461). The compiler caches the returned metadata on the control side; graph/PDC consumers
+never query a live processor. The semantic `EffectProgramKey`
 contains these fields directly and is not a digest or persistence identity.
 
 The callback receives disjoint in-place planar L/R slices and optional planar sidechain slices.
@@ -98,12 +103,28 @@ A native effect states its three values in one place, its descriptor's
 `tail_and_rest(sample_rate, quality) -> EffectTailBound { tail, tail_every_peak, rest }` (#1377).
 It runs on the control thread, takes no parameter values (each bound holds over the whole
 parameter domain at that rate), and render never calls it. `QualityDescriptor` carries no tail.
-`expected_prepared_metadata`, the sole conforming metadata, copies the three values into
-`PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the program key carries them too, so
-cohorts with different bounds never share a bank. `effect-compiler` refuses a prepared effect whose
-metadata differs in any of them (`effect.metadata.mismatch`), and the conformance harness's
-`metadata.exact` compares each prepared instance's program key, which carries all three, with the
-expected one. `rest` is a `RestBound`:
+`NativeEffectRegistry::new` evaluates it once per declared quality row (every launch rate of every
+declared quality) and keeps the results in its table, and nothing else calls it (#1462). The
+launch registry is built once per process (once per module instance in the browser) and shared by
+every preparation, live classification and preview; its bytes are process-level, charged to no
+plan (#1469). `new` checks each row: (a) `tail_every_peak >= tail`, with `Infinite` the largest;
+(b) `rest` is `Unstated` only with `tail_every_peak: Infinite`; (c) `rest` is `Bounded` only with
+a finite `tail_every_peak`; (d) in a `Bounded` rest, `peak_plus_24_dbfs <= any_sanitized_input`
+(the bound for every sanitized input covers the inputs whose peak is at most +24 dBFS). (b) and
+(c) together are "`rest` is `Unstated` if and only if `tail_every_peak` is `Infinite`". A row that
+breaks a rule refuses the registry with
+`effect.tail_bound.inconsistent`, naming the effect. `NativeEffectRegistry::tail_bound(id,
+sample_rate, quality)` reads a `RegisteredTailBound` entry (`effect.quality.unsupported` for a row
+the effect does not declare, never a fallback call), and every `PrepareEffectRequest` carries one
+in `tail_bound`: the effect compiler reads it once per instance into `EffectBankPreparation`, which
+replays it into every bank member's request. `expected_prepared_metadata`, the sole conforming
+metadata, refuses an entry of another effect, rate or quality (`effect.tail_bound.mismatch`) and
+copies the entry's three values into `PreparedEffectMetadata::{tail, tail_every_peak, rest}`; the
+program key carries them too, so cohorts with different bounds never share a bank.
+`effect-compiler` refuses a prepare result whose metadata differs from `expected_prepared_metadata`
+in any field it compares, these three included (`effect.metadata.mismatch`), and the conformance
+harness's `metadata.exact` compares each prepare result's program key, which carries all three,
+with the expected one. `rest` is a `RestBound`:
 `Bounded(RestSamples)`, or `Unstated` while an effect's derivation has not landed. Each native
 effect's bounds are its own slice (#1372-#1376); until then it reports its earlier declared `tail`,
 `tail_every_peak: Infinite` (no `R(P*)` is derived, so no finite `T_rest` can be stated) and
@@ -283,12 +304,16 @@ effect.metadata.mismatch
 effect.state.invalid
 effect.third_party.unavailable_at_launch
 effect.automation.rate
+effect.tail_bound.inconsistent
 ```
 
 `effect.descriptor.invalid` is raised only by `NativeEffectRegistry::new`, once per effect type
 when its factory enters the registry; `validate_prepare_request` no longer re-validates the
 descriptor per prepared instance (issue #1330), and because session preparation builds the
 registry before preparing any effect, a host observes the same refusal as before.
+`effect.tail_bound.inconsistent` is raised the same way, by `NativeEffectRegistry::new` alone
+(issue #1462, see *Tail and exact rest*), so it joins the frozen list on the same terms as
+`effect.descriptor.invalid`.
 
 `effect.automation.rate` refuses a stored automation whose `inserts` or `console` target parameter
 is not `automatable` or whose `automation_rate` is not `Block` (decision 15 E1, issue #1335). Its
@@ -302,12 +327,12 @@ declared quality must have exactly the 44,100, 48,000, 88,200, and 96,000 Hz row
 other rate, including the former extended research rates 176,400, 192,000, 352,800, and
 384,000 Hz, refuses the descriptor with `Quality` (owner ruling R5, #1036). Conformance launch
 gates cover every declared row. It checks
-every declared quality/link mode, enabled/bypass, metadata immutability,
+every declared quality/link mode, enabled/bypass, exact prepare-result metadata,
 D7 output-block bounds under poisoned input and sidechain, deterministic state restore, and lane
 isolation. Separate faulty mocks exercise
-allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, changing
-latency/tail/resources, bypass latency, malformed automation, NaN propagation, partial or
-nondeterministic snapshot, and rejected restore.
+allocation/free/lock/file/network/log/syscall hooks, panic, shared lane state, a prepare result
+whose metadata misstates latency or resources, bypass latency, malformed automation, NaN
+propagation, partial or nondeterministic snapshot, and rejected restore.
 
 The harness is built from the descriptor, not from the reference mock: the prepare request uses
 `default_initial_values`, the ports come from the descriptor's own sidechain declaration (or

@@ -1,0 +1,56 @@
+site2_next_value: exit 101
+    every_ramped_word_stays_inside_its_endpoints: threshold from -7.999975e1 (0xc29fffdf) to -80, sidechain connected true: frame 33, `threshold` (section 0) went from (-80.0, -80.0, -3.9339066e-6, 31) to (-80.00001, -80.0, -3.9339066e-6, 30), not one clamped D11 sample
+    every_ramped_word_stays_inside_its_endpoints: feedback from 9.49998e-1 (0x3f733312) to 0.95, sidechain connected false: frame 33, `feedback` (section 0) went from (0.95, 0.95, 3.0733645e-8, 31) to (0.95000005, 0.95, 3.0733645e-8, 30), not one clamped D11 sample
+    every_ramped_word_stays_inside_its_endpoints: attack amount from 9.999943e-1 (0x3f7fffa0) to 1, sidechain connected false: frame 48, `attack amount` (section 0) went from (1.0, 1.0, 8.940697e-8, 16) to (1.0000001, 1.0, 8.940697e-8, 15), not one clamped D11 sample
+    results: [('FAILED', '1', '1'), ('FAILED', '0', '1'), ('FAILED', '1', '1')]
+site2_advance_block: exit 101
+    every_ramped_word_stays_inside_its_endpoints: assertion `left == right` failed: mix from 9.999942e-1 (0x3f7fff9f) to 1, sidechain connected false: left output
+    results: [('ok', '2', '0'), ('FAILED', '0', '1'), ('ok', '2', '0')]
+site4_advance_where: exit 101
+    every_ramped_word_stays_inside_its_endpoints: threshold from -7.999975e1 (0xc29fffdf) to -80, sidechain connected false: frame 33, `threshold` (section 0) went from (-80.0, -80.0, -3.9339066e-6, 31) to (-80.00001, -80.0, -3.9339066e-6, 30), not one clamped D11 sample
+    results: [('FAILED', '1', '1')]
+site4_gather: exit 101
+    every_ramped_word_of_a_bank_lane_follows_its_own_target: assertion `left == right` failed: threshold from -7.999975e1 to -80 in a bank: `threshold` after frame 0
+    results: [('FAILED', '1', '1')]
+site5_gate: exit 101
+    every_ramped_word_stays_inside_its_endpoints: threshold from -7.999975e1 (0xc29fffdf) to -80, sidechain connected false: frame 33, `threshold` (section 0) went from (-80.0, -80.0, -3.9339066e-6, 1106771968) to (-80.00001, -80.0, -3.9339066e-6, 1106247680), not one clamped D11 sample
+    results: [('FAILED', '1', '1')]
+site6_run_segment: exit 101
+    every_ramped_word_stays_inside_its_endpoints: low threshold from -7.999975e1 (0xc29fffdf) to -80, sidechain connected false: frame 33, `low threshold` (section 0) went from (-80.0, -80.0, -3.9339066e-6, 31) to (-80.00001, -80.0, -3.9339066e-6, 30), not one clamped D11 sample
+    results: [('FAILED', '1', '1')]
+site6_segment_lane: exit 101
+    every_ramped_word_of_a_bank_lane_follows_its_own_target: assertion `left == right` failed: low threshold from -7.999975e1 to -80 in a bank: `low threshold` after frame 0
+    results: [('FAILED', '1', '1')]
+site7_ramp_word: exit 101
+    every_ramped_word_stays_inside_its_endpoints: feedback from 9.49998e-1 (0x3f733312) to 0.95, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]
+site7_d5_inverted: exit 101
+    every_ramped_word_stays_inside_its_endpoints: feedback from 9.49998e-1 (0x3f733312) to 0.95, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]
+site8_drive: exit 101
+    every_ramped_word_stays_inside_its_endpoints: drive gain from 3.5999985e1 (0x420ffffc) to 36, sidechain connected false: frame 33, `drive gain` (section 0) went from (63.09574, 63.09574, 1.9669533e-6, 31) to (63.095745, 63.09574, 1.9669533e-6, 30), not one clamped D11 sample
+    results: [('FAILED', '1', '1')]
+site8_d5_inverted: exit 101
+    every_ramped_word_stays_inside_its_endpoints: drive gain from 3.5999985e1 (0x420ffffc) to 36, sidechain connected false: frame 1, `drive gain` (section 0) went from (63.095615, 63.09574, 1.9669533e-6, 63) to (63.095615, 63.09574, 1.9669533e-6, 62), not one clamped D11 sample
+    results: [('FAILED', '1', '1')]
+site8_target_vector: exit 101
+    every_ramped_word_of_a_bank_lane_follows_its_own_target: assertion `left == right` failed: drive gain from 3.5999985e1 to 36 in a bank: `drive gain` after frame 0
+    results: [('FAILED', '1', '1')]
+site9_limiter: exit 101
+    every_ramped_word_stays_inside_its_endpoints: limit coefficient from -2.399998e1 (0xc1bffff6) to -24, sidechain connected false: frame 33, `limit coefficient` (section 0) went from (0.056234132, 0.056234132, -1.9208528e-9, 31) to (0.05623413, 0.056234132, -1.9208528e-9, 30), not one clamped D11 sample
+    results: [('FAILED', '1', '1')]
+site7_left_damping: exit 101
+    every_ramped_word_stays_inside_its_endpoints: damping coefficient from 2.5000098e-1 (0x3e800021) to 0.25, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]
+site7_left_feedback: exit 101
+    every_ramped_word_stays_inside_its_endpoints: feedback from 9.49998e-1 (0x3f733312) to 0.95, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]
+site7_right_damping: exit 101
+    every_ramped_word_stays_inside_its_endpoints: damping coefficient from 2.5000098e-1 (0x3e800021) to 0.25, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]
+site7_right_feedback: exit 101
+    every_ramped_word_stays_inside_its_endpoints: feedback from 9.49998e-1 (0x3f733312) to 0.95, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]
+site7_cross_position: exit 101
+    every_ramped_word_stays_inside_its_endpoints: cross feedback from 9.999943e-1 (0x3f7fffa0) to 1, sidechain connected false: the final snapshot depends on the partition
+    results: [('FAILED', '0', '1')]

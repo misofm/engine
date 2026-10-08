@@ -13,7 +13,8 @@
 mod support;
 
 use bench_support::alloc;
-use effect_contract::{BankWidth, ParameterChannel, ResetKind};
+use effect_contract::{BankWidth, NativeEffectFactory, ParameterChannel, ResetKind};
+use soft_clip::SoftClipFactory;
 use support::{initial_values, prepare, prepare_bank, process, process_bank};
 
 /// Measures this thread after checking and warming the installed allocator outside the region.
@@ -28,7 +29,11 @@ fn count(body: impl FnOnce()) -> (u64, u64) {
 #[test]
 fn the_scalar_render_path_never_allocates() {
     let values = initial_values();
-    let mut effect = prepare(&values);
+    let prepared = SoftClipFactory
+        .prepare(support::request(&values))
+        .expect("prepare");
+    let sizes = prepared.metadata.state_sizes;
+    let mut effect = prepared.processor;
     let mut left = vec![0.0_f32; 128];
     let mut right = vec![0.0_f32; 128];
     for (index, sample) in left.iter_mut().enumerate() {
@@ -39,7 +44,6 @@ fn the_scalar_render_path_never_allocates() {
     // Warm once outside the guard so nothing lazily initialises inside it.
     process(effect.as_mut(), &mut left, &mut right, 0, &spans);
 
-    let sizes = effect.metadata().state_sizes;
     let mut common = vec![0_u8; sizes.common_bytes as usize];
     let mut snapshot_left = vec![0_u8; sizes.left_bytes as usize];
     let mut snapshot_right = vec![0_u8; sizes.right_bytes as usize];

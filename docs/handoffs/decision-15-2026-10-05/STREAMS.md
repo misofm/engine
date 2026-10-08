@@ -67,27 +67,29 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 
 | File | Order |
 |---|---|
-| `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1406) → F |
+| `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1406) → F; G #1379 (the tail copy and the gain-liveness selection passed to the graph compile, a few lines) in either order with the others, the later slice rebases; G #1469 (the `launch_native_effect_registry` call only, one line) in either order with the others, the later slice rebases; G #1457 (the internal policy function's `bound_cache` parameter, its `None` arguments and one unit test) in either order with the others, the later slice rebases; G #1471 (the two C ABI entry points' `bound_cache` parameter) after #1457 |
 | `crates/lane/src/kernels/builtins.rs` (the D11 trim, fader and matrix ramp kernels), the ramp stages in `crates/builtins/src/lib.rs` (`InputStage::set_trim_signed`/`settle`, `FaderRampStage`, `MatrixStage`), `crates/dsp-reference/src/ramp.rs` | G #1408 → G #1409 → B (#1312, #1346) → E (#1054, #1394) → A #1277 → D #1288 |
 | `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter`), `docs/rulings/builtins-input-liveness-d2.md` (#808 paragraph) | G #1407 → G #1329 → F (#1268, #1262) |
 | `crates/lane/src/kernels.rs` (`ramp_block`, the `ramp_toward` re-export), `crates/effect-runtime/src/ramp.rs`, `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`), the effect ramp render bodies (compressor `RampVec`/`advance_ramps`, gate `channel_step`, multiband `Segment`/`run_segment`, delay `LaneChunk`/`CrossChunk`/`delay_chunk`, soft clip `SoftClipCoef`/`soft_clip_block`/`process`, limiter `RampLanes`) | G #1409 → A (#1279, #1280, #1282) → G (#1336, #1338, #1370); G #1455 (multiband `run_segment` and its per-segment dispatch) after #1409, in either order with #1338 (neither depends on the other), the later slice rebases |
 | `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`'s walk, `ramp_path_within`), the effect payload readers' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid`), their restore-refusal test rows (delay `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`, limiter restore corruptions, `crates/compressor/tests/payload.rs`), soft clip's overshoot restore tests (`tests/state_roundtrip.rs`, `tests/randomized.rs`), `crates/delay/tests/MUTATIONS.md` (M18, M19), the #1301 spec | J #1301 → G #1409 → G #1411 (#1409 and #1411 in one Stream G pull request); A's carry slices (#1279, #1280, #1282) and that pull request in either order, the second rebases |
-| `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → G #1377 → G #1461 → G #1462 → B (#1315, #1345) → G (#1339, #1340, #1378); F #1306 after B #1345, either order with G, the second rebases. #1377 goes first (root, 2026-10-06, #1377 Amendment 1): B and G's other slices are blocked, and #1377's edit is one comparison and one test; the later slices rebase. #1461 and #1462 follow #1377 by the same reason and land before #1372 (root, 2026-10-06) |
-| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1441 (two markers around `impl BuiltinBankProcessor`, replacing blank lines; if a blank line is gone, J #1443 places them) and J #1443 (markers around the three test-support `LiveControl*` drains, and the move of `LiveControlInputProcessor`'s drain into its own `drain_controls`), in any order with A, B (#1312, #1346), D, G and F, the later slice rebases; J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346 |
+| `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → G #1377 → G #1461 → G #1462 → B (#1315, #1345) → G (#1339, #1340, #1378); F #1306 after B #1345, either order with G, the second rebases. #1377 goes first (root, 2026-10-06, #1377 Amendment 1): B and G's other slices are blocked, and #1377's edit is one comparison and one test; the later slices rebase. #1461 and #1462 follow #1377 by the same reason and land before #1372 (root, 2026-10-06). G #1464 (the `composition` comparison and its forgery row) after G #1462, in either order with B (#1315, #1345); the later slice rebases. G #1469 (the process-lifetime launch registry: its static, builder and entry point, `launch_registry_owns_factory`, and the factory-charging loop of `effect_control_resources`, which now skips a registry-owned factory) after G #1462 and before G #1372, in either order with G #1464 and B (#1315, #1345); the later slice rebases |
+| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1441 (two markers around `impl BuiltinBankProcessor`, replacing blank lines; if a blank line is gone, J #1443 places them) and J #1443 (markers around the three test-support `LiveControl*` drains, and the move of `LiveControlInputProcessor`'s drain into its own `drain_controls`), in any order with A, B (#1312, #1346), D, G and F, the later slice rebases; J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346; G #1464 (the bound type, the seal, `input_bounds`, the tail-entry charge and their unit tests) after G (#1329), in either order with F (#1261, #1262) and J, the later slice rebases |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
-| `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 → G #1461 → G #1462 (root, 2026-10-06; both before #1372); G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
+| `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 → G #1461 → G #1462 (root, 2026-10-06; both before #1372) → G #1464 (the `EffectTailBound` → `NodeTailBound` rename, the `composition` field, the two registry rules); G #1469 (the feature-gated `tail_and_rest` evaluation counter in `NativeEffectRegistry::new` only) after G #1462, in either order with G #1464, the later slice rebases; G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
 | `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349 |
 | `crates/engine/src/realtime/plan.rs` | B #1311 → H #1400 → C #1396 → H #1381 |
 | `crates/engine/src/realtime/spsc.rs` | B (#1343, #1311) → C #1320 (`peek` only) |
 | `crates/source/src/lib.rs` | B batch 1 (#1343) → B #1447 → B (#1318, #1316, #1350, #1319, #1344) → C (#1320, #1355); J #1443 (three region markers, each replacing a blank line, around `take_recycled_block`, `observe_seek_at_block_boundary` and `acquire_current_block` with #1447's `settle_block`) after B #1447, in any order with the rest; the later slice rebases |
 | `crates/host-core/src/spectrum.rs` | H #1449 (the `SpectrumCapture` drains and the collection's `cancel_except`, by named exception) → A #1327 → A #1395; J #1443 (markers around the spectrum drains and `cancel_except`, replacing blank lines where there are some) after H #1449, in any order with A #1327 and #1395; the later slice rebases |
 | `crates/host-core/src/transition.rs` | D (#1325, #1324) → C #1397 |
-| `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371; J #1423 (strip record construction only) after B #1312 and #1346, rebasing over the rest |
+| `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371; J #1423 (strip record construction only) after B #1312 and #1346, rebasing over the rest; G #1469 (the registry plumbing and `load_registry` only) in any order with the others, the later slice rebases |
 | `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) → C #1360 |
-| `crates/graph/src/{lib,runtime}.rs` | G #1460 → A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371 |
-| `crates/graph-compiler/src/*` | G #1460 (`estimate.rs` live-control owner charge and its `lib.rs` test mirror) → A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases |
-| `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → A payload (#1279, #1280) → G #1337 → G #1372 |
+| `crates/graph/src/{lib,runtime}.rs` | G #1460 → G #1461 (the bank record's `metadata` field and `stage_for`'s read; test effects) → G #1462 (one test request's `tail_bound` field) → A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371; G #1464 (the rename only, `lib.rs`) and G #1379 (`GraphNode`'s field and the test literals that build one, `lib.rs`), each after G #1461, in either order with A, B, C and D, the later slice rebases |
+| `crates/graph-compiler/src/*` | G #1460 (`estimate.rs` live-control owner charge and its `lib.rs` test mirror) → G #1461 (`banks.rs` bind check, `estimate.rs` bank reads, test factories) → A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases; G #1469 (test-module `launch_native_effect_registry` call sites only, and only if its return-type change forces them) in any order, the later slice rebases |
+| `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → G #1462 (three test requests' `tail_bound` field) → A payload (#1279, #1280) → G #1337 → G #1372; G #1464 (the `tail_and_rest` rename and field only) before G #1372, in either order with A's payload slices and G #1337, the later slice rebases |
+| The other `PreparedEffectMetadata {` literals in the effect crates' payload code and test helpers (`crates/transient-shaper/src/corpus.rs:190` and its peers) | G #1464 (the `composition` field only) in either order with A's payload slices; the later slice rebases |
+| `crates/builtins/src/tail.rs`, `crates/builtins/tests/tail_contract.rs`, `crates/math/src/tail.rs` | G #1464 (`builtins` only) → G #1465 → G #1466 → G #1467 → G #1468; G #1457 before #1464; G #1474 (`math` and `builtins` tail, after #1457) before #1465, in either order with #1464, the later slice rebases |
 | `hosts/host-web/src/lib.rs` | H owns; J #1423 (record construction in `into_track_record` and the coalescing sites) lands after B #1312 and #1346; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381; H #1448 (`poll_meters`, unmarked) lands in any order with the B, D, E and J slices that land before H #1332, the later slice rebases; then "H #1448's guard, landed by J after C2" (two markers replacing blank lines, in the J tool batch) after H #1448, in any order with the rest, the later slice rebases |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
@@ -97,7 +99,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
-| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), J #1429 (the `artifact-gates` "Hermetic browser host and worklet tests" step) and J #1435 (the `sdk` "Qualify the SDK package against the shared artifact" step), J #1438 (`audit-native`: one build flag and one step) and J #1446 (`lint`: two lines removed and the step renamed), G #1428 (`test-release` steps in `qualification.yml`; under its amended D2 (R1) the release sweeps move to their own parallel required job, never `nightly.yml`) in any order, the later slice rebases |
+| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), J #1429 (the `artifact-gates` "Hermetic browser host and worklet tests" step) and J #1435 (the `sdk` "Qualify the SDK package against the shared artifact" step), J #1438 (`audit-native`: one build flag and one step) and J #1446 (`lint`: two lines removed and the step renamed), G #1428 (`test-release` steps in `qualification.yml`; under its amended D2 (R1) the release sweeps move to their own parallel required job, never `nightly.yml`) and G #1379 (one `test-release` step for host-core's `tail_composition`) in any order, the later slice rebases |
 | `Cargo.toml`, `Cargo.lock` | J #1438 (one member and its own lock entry) and B #1447 (the `source` package's `bench-support` dev-dependency line) in any order with C #1320; the later slice rebases |
 | `scripts/check-ci-path-routing.py`, `scripts/test-ci-path-routing.py` | J #1446 (one `DEDUPLICATED_OWNERS` entry and its case) in any order with any later edit of those tables; the later slice rebases |
 | Realtime-policy floors and allowlists (the awk gate's floor lines in `scripts/check-realtime-policy.sh` and its self-test's pad until J #1446, then `Policy::workspace()` in `tools/realtime-policy`) | B batch 1 (#1314) → J #1438; then, in any order, J's tool slices (#1441: one region; the #1448 guard: one; #1443: ten), B #1345 (Amendment 1: one region or more), B's other cell slices (#1312, #1346, #1347), #1321 (`:55`) and any slice under the standing exception. H #1448 adds none. Each slice re-measures the floors when it lands. While the awk gate is on `main` (until the J batch push), a slice that adds a region raises the awk floor and the self-test's pad with it. `Policy::workspace()` reaches `main` only with the J batch push, which re-measures it |
@@ -144,7 +146,59 @@ of its prepared metadata*) edits the eight effect crates' `src/lib.rs` (each pre
 metadata copy and `metadata()`), `crates/effect-contract/src/lib.rs` and
 `crates/effect-compiler/src/prepare.rs` by named exception. It lands after G #1377 and after any
 #1409-family slice already landed (#1409, #1411; #1458 if landed first), and before G #1372-#1376,
-which rebase onto it.
+which rebase onto it. As implemented (attempt 1, Amendment 1 A1-A2) it also reaches every caller
+of `NativeEffectFactory::prepare` and `bind_homogeneous_bank` (the prepare result now carries the
+metadata): `crates/rack/src/lib.rs` (the two bank stage constructors), `crates/conformance`,
+the effect crates' tests, `crates/host-core`, `crates/capi/tests/resource_lifecycle.rs` (one
+budget row), `tools/{audit,bench,console-workload}` and `docs/EFFECT_CONTRACT_V1.md`.
+
+Hot-file note (2026-10-07, root ruling, #1469 Amendment 1): G #1469 edits stream H's
+`hosts/host-web/src/tests.rs` by named exception, in one test only
+(`effect_control_browser_table_and_payload_reach_exact_budget_gate`: its expected factory term
+follows the charge rule), and `crates/host-core/src/lib.rs` (one re-export,
+`launch_registry_owns_factory`). It also adds a registry warm-up to
+`crates/capi/tests/resource_lifecycle.rs` (`warm_process_lifetime_statics`) and
+`crates/graph-compiler/tests/live_routes.rs` (`retained`). Its stop 3 also edits
+`crates/host-core/src/control_preparation.rs` (`factory_allocation_bytes` charges no
+registry-owned factory, and one unit test) and `crates/host-core/tests/prepare.rs` (one expected
+value, `effect_control_report_uses_actual_native_capacity_strings_and_owners`). These edits come
+after G #1462, in either order with the other slices that touch these files; the later slice
+rebases. A slice that rebases over `effect_control_resources` (G #1464, B #1315, #1345) inherits
+the changed charge rule: a plan is charged only the factories it retains.
+
+Hot-file note (2026-10-07, root rulings, #1457 Amendment 2): G #1457 adds `bound_cache:
+Option<&mut InputBoundCache>` to `builtins_compiler::prepare_session_builtins_with_live_controls`
+and edits, by named exception, only to add `None` at its callers: the tests in
+`crates/graph-compiler/src/lib.rs` and `crates/builtins-compiler/tests/allocation_tracker.rs`
+(`hosts/host-web/src/tests.rs` and `crates/host-core/tests/prepare.rs` name the function only in
+comments and need no edit). It also edits `crates/host-core/src/prepare.rs` (the internal policy
+function's parameter and a unit test), `crates/builtins/src/lib.rs` (`input_section_bounds` and
+its budgeted form), `crates/builtins/src/tail.rs`, `crates/builtins-compiler/src/lib.rs`,
+`crates/math/src/tail.rs` (`fixed_cascade_within`) and `crates/builtins/tests/tail_contract.rs`.
+Any slice in flight on those callers rebases and passes `None`.
+
+Hot-file note (2026-10-06, root rulings, #1379 Amendment 1): #1379 is split. G #1464 (*Carry
+every node's tail bound in one node-neutral struct*) renames `EffectTailBound` to `NodeTailBound`
+and adds the `composition` field, so it edits `crates/effect-contract/src/lib.rs`,
+`crates/effect-compiler/src/prepare.rs` (one comparison), `crates/builtins-compiler/src/lib.rs`
+(the bound type, the seal, `input_bounds`, the tail-entry charge), `crates/graph/src/lib.rs` (the
+rename only), the effect crates' `tail_and_rest` functions and their `PreparedEffectMetadata {`
+literals (stream A's payload code: the field only), and `crates/builtins` (the bound type and
+entry points) by named exception, after G #1457, #1461 and #1462. G #1465, #1466, #1467 and #1468
+edit `crates/builtins/src/tail.rs` and `crates/builtins/tests/tail_contract.rs` (stream A's) in
+that order. G #1379 (slice C) then edits `crates/graph/src/lib.rs` (`GraphNode`'s field),
+`crates/graph-compiler` at its turn, `crates/host-core/src/prepare.rs` (the tail copy and the
+gain-liveness selection), every `GraphBuiltinsCompileRequest {` literal (the new field only, in
+`crates/graph-compiler/tests`, `crates/host-core/tests` and `tools/audit/src/fixture_builtins.rs`),
+`crates/capi/src/runtime/compile.rs` (one read) and `crates/capi/src/abi.rs` (two doc comments)
+(stream B's), the new `crates/capi/tests/tail_every_peak.rs` (stream F's column) and, for D15-4(b)
+and (c), the decision-15 ruling's two sentences (stream S0's). Slice C is about one working day,
+an explicit exception to the half-day rule (root ruling m7, recorded in #1379). #1375 and #1376
+need only #1464's carrier and the contract, not the composed extent (#1379 Amendment 1, third
+round), so they follow #1465; they land on `main` in the batch with #1379, never before it
+(confirmed by root, 2026-10-06), because
+before #1379 the extent does not compose a newly finite effect tail through gain. The full
+amendment is kept in `1379-amendment1-design.md` in this folder.
 
 ## Stream S0
 
@@ -298,7 +352,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 ## Stream G
 
 - **Coordinator scope:** DSP contracts: SVF joint flush, engine-wide tail and exact-rest bounds, live gate/EQ/multiband parameters, live bypass shunts, per-strip and multiband link mode.
-- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows and soft clip overshoot tests it supersedes, the effect corpus pins and the #1301 amendment note (#1409), `ramp_path_within` and its docs in `crates/effect-runtime/src/state_payload.rs`, the effect crates' restore validators' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid` and `ulp_at`) with their payload-refusal unit tests and gate-1 rows (`crates/compressor/tests/payload.rs`, `crates/gate-expander/tests/state.rs`, `crates/multiband-compressor/tests/product.rs`, `crates/transient-shaper/tests/contract.rs`, `crates/soft-clip/tests/state_roundtrip.rs`) and `crates/delay/tests/MUTATIONS.md` M18 and M19 (#1411; stream A's payload code and the effect owners'), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329; its tail unit tests, #1433), `crates/graph-compiler` extent (#1379), `crates/graph` per-node effect render node and response row, `crates/graph-compiler/src/estimate.rs` live-control owner charge and its `lib.rs` test mirror (#1460), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
+- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows and soft clip overshoot tests it supersedes, the effect corpus pins and the #1301 amendment note (#1409), `ramp_path_within` and its docs in `crates/effect-runtime/src/state_payload.rs`, the effect crates' restore validators' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid` and `ulp_at`) with their payload-refusal unit tests and gate-1 rows (`crates/compressor/tests/payload.rs`, `crates/gate-expander/tests/state.rs`, `crates/multiband-compressor/tests/product.rs`, `crates/transient-shaper/tests/contract.rs`, `crates/soft-clip/tests/state_roundtrip.rs`) and `crates/delay/tests/MUTATIONS.md` M18 and M19 (#1411; stream A's payload code and the effect owners'), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329; its tail unit tests, #1433), `crates/graph-compiler` extent (#1379), and for #1379 Amendment 1: `crates/builtins/src/tail.rs`, `crates/builtins/src/lib.rs` (the bound entry points and re-exports), `crates/builtins/tests/tail_contract.rs`, `crates/builtins-compiler/src/lib.rs` (the bound type, the seal, `input_bounds`, the tail-entry charge, their unit tests), `crates/graph/src/lib.rs` (the rename only), the effect crates' `tail_and_rest` functions (the rename and the field only) and their `PreparedEffectMetadata {` literals in payload code and test helpers (the field only) (#1464); `crates/builtins/src/tail.rs` and `crates/builtins/tests/tail_contract.rs` (#1465, #1466, #1467, #1468); `crates/graph/src/lib.rs` (`GraphNode`'s field and the test literals that build one), `crates/host-core/src/prepare.rs` (the tail copy and the gain-liveness selection), every `GraphBuiltinsCompileRequest {` literal (the new field only), `crates/capi/src/runtime/compile.rs` (one read) and `crates/capi/src/abi.rs` (two doc comments) (B's), `crates/capi/tests/tail_every_peak.rs` (new; F's column) and the decision-15 ruling's D15-4(b) and (c) sentences (S0's) (#1379); only if #1468 lands after #1379, the graph pins its tighter value moves (#1468), `crates/graph` per-node effect render node and response row, `crates/graph-compiler/src/estimate.rs` live-control owner charge and its `lib.rs` test mirror (#1460), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
 - **Depends on:** A's carry slice for each effect crate (#1279, #1280, #1282); #1069 for the multiband; E #1054 for #1371.
 - **Parallel-safe with:** A (coordinate on effect crates), B, E, J.
 
@@ -320,29 +374,40 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 14 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
 | 15 | #1458 | Share one effect-ramp endpoint harness instead of seven copies | #1409, #1411 | — |
 | 16 | #1459 | Replay an effect ramp whose endpoint clamp acts in the wasm corpus | #1409 | — |
-| 17 | #1452 | Undo the iOS memset ratchet workarounds once splats are free | #1451, #1409 | — |
-| 18 | #1456 | Remove the libc memset calls from the true-peak limiter's reset on Apple targets | #1451, #1452 | — |
-| 19 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
-| 20 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
-| 21 | #1457 | Cache design bounds across preparations within a stated preparation budget | #1329 | coordinate with H #1332 |
-| 22 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
-| 23 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
-| 24 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
-| 25 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
-| 26 | #1460 | Keep only render-read effect fields in the render node table | — | — |
-| 27 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329, #1460 | — |
-| 28 | #1461 | Keep each effect processor's render memory free of its prepared metadata | #1377 | — |
-| 29 | #1462 | Compute and validate each effect's tail bound once per rate and quality at registry build | #1377 | — |
-| 30 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 31 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 32 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 33 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379, #1461, #1462 | — |
-| 34 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379, #1461, #1462 | — |
-| 35 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 36 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379, #1461, #1462 | — |
-| 37 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379, #1461, #1462 | — |
-| 38 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379, #1461, #1462 | — |
-| 39 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 17 | #1473 | Pin ramp_toward's operand order, signed zero and NaN in the wasm corpus | #1459, #1455 | — |
+| 18 | #1452 | Undo the iOS memset ratchet workarounds once splats are free | #1451, #1409 | — |
+| 19 | #1456 | Remove the libc memset calls from the true-peak limiter's reset on Apple targets | #1451, #1452 | — |
+| 20 | #1472 | Measure the iOS memset_pattern16 ratchet on the shipped post-LTO capi staticlib | #1456 | — |
+| 21 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
+| 22 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
+| 23 | #1457 | Cache design bounds across preparations within a stated preparation budget | #1329 | — (the C ABI cache is #1471, the browser cache #1470) |
+| 24 | #1474 | Remove the data-dependent cost of the near-top tail walk | #1457 | — |
+| 25 | #1471 | Wire the engine and session design-bound caches into the C ABI | #1457 | #1309 |
+| 26 | #1470 | Cache design bounds across browser preparations in the control Worker | #1457 | #1332 |
+| 27 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
+| 28 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
+| 29 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
+| 30 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
+| 31 | #1460 | Keep only render-read effect fields in the render node table | — | — |
+| 32 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329, #1460 | — |
+| 33 | #1461 | Keep each effect processor's render memory free of its prepared metadata | #1377 | — |
+| 34 | #1462 | Compute and validate each effect's tail bound once per rate and quality at registry build | #1377 | — |
+| 35 | #1469 | Build the launch effect registry once per process and share it | #1462 | — |
+| 36 | #1464 | Carry every node's tail bound in one node-neutral struct | #1457, #1461, #1462 | — |
+| 37 | #1465 | State a fixed input section's decay, gains and flush stall | #1457, #1464, #1474 | — |
+| 38 | #1466 | Certify the live input section's decay, peak gain and flush stall | #1457, #1465 | — |
+| 39 | #1467 | Derive the live input section's tail gain and state its composition | #1466 | — |
+| 40 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 41 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377, #1464, #1465, #1466, #1467 | #1237, #1285, #1384, #1287 (first slice) |
+| 42 | #1468 | Tighten the fixed input section's peak gain past the cascade triangle inequality | #1465, #1467 | — |
+| 43 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 44 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379, #1461, #1462, #1464, #1469 | — |
+| 45 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1461, #1462, #1464, #1465, #1469 | — |
+| 46 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 47 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
+| 48 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
+| 49 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1461, #1462, #1464, #1465, #1469 | — |
+| 50 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379, #1469 | — |
 
 ## Stream H
 

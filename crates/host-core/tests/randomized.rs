@@ -909,7 +909,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
 fn randomized_consoles_render_the_same_bits_armed_dual_and_serialized() {
     let registry = launch_native_effect_registry().expect("the launch registry");
     let mut reach = Reach::default();
-    let seeds = run_seeds(TEST, REPLAY, 12, |seed| probe(seed, &registry, &mut reach));
+    let seeds = run_seeds(TEST, REPLAY, 12, |seed| probe(seed, registry, &mut reach));
     println!("{seeds} seeds: {reach:?}");
     if dsp_reference::randomized::replaying() {
         return;
@@ -1386,7 +1386,7 @@ fn randomized_response_queries_agree_across_paths_and_with_the_grid_law() {
     let registry = launch_native_effect_registry().expect("the launch registry");
     let mut reach = ResponseReach::default();
     let seeds = run_seeds(RESPONSE_TEST, RESPONSE_REPLAY, 24, |seed| {
-        response_probe(seed, &registry, &mut reach);
+        response_probe(seed, registry, &mut reach);
     });
     println!("{seeds} seeds: {reach:?}");
     if dsp_reference::randomized::replaying() {

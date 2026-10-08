@@ -128,11 +128,12 @@ fn todays_lowering(effects: &mut EffectPreparedSession) {
         let lane = entry.control.take().expect("a lowered bypass rides a lane");
         assert!(!lane.has_channel() && lane.bypassed());
         entry.bank_preparation.bypass = true;
-        entry.processor = entry
+        let prepared = entry
             .factory
             .prepare(entry.bank_preparation.request())
             .expect("the same request, prepared bypassed");
-        entry.metadata = entry.processor.metadata();
+        entry.processor = prepared.processor;
+        entry.metadata = prepared.metadata;
     }
 }
 
@@ -263,11 +264,12 @@ fn p1_lowering(effects: &mut EffectPreparedSession) {
         }
         assert!(entry.metadata.bypass && entry.control.is_none());
         entry.bank_preparation.bypass = false;
-        entry.processor = entry
+        let prepared = entry
             .factory
             .prepare(entry.bank_preparation.request())
             .expect("the same request, prepared enabled");
-        entry.metadata = entry.processor.metadata();
+        entry.processor = prepared.processor;
+        entry.metadata = prepared.metadata;
         entry.control = Some(Box::new(EffectControlLane::without_channel(true)));
     }
 }
@@ -283,7 +285,7 @@ fn render_with(
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,
@@ -479,7 +481,7 @@ fn a_mixed_bypass_cohort_binds_one_bank_per_slot() {
         let registry = launch_native_effect_registry().expect("launch registry");
         let effects = prepare_native_session_effects(
             &session,
-            &registry,
+            registry,
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 30,
                 maximum_scratch_bytes: 1 << 28,
@@ -722,7 +724,7 @@ fn a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,

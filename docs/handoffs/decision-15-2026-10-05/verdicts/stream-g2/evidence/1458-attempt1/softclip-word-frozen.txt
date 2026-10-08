@@ -1,0 +1,14 @@
+sc-mix-frozen-suite exit 101 ['test result: FAILED. 1 passed; 1 failed']
+   FAIL every_ramped_word_stays_inside_its_endpoints mix from 9.999943e-1 (0x3f7fffa0) to 1, sidechain connected false: frame 1, `mix` (section 0) went from (0.9999943, 1.0, 8.940697e-8, 63) to (0.9999943, 1.0, 8.940697e-8, 62), not one clamped D11 samp
+sc-mix-frozen-g5 exit 101 ['test result: FAILED. 6 passed; 1 failed']
+   FAIL g5_native_digests_match_pins native corpus digests differ from the pins:
+    case 113 (effect/soft_clip/ramped) at scalar
+    case 113 (effect/soft_clip/ramped) at simd4
+    case 113 (effect/soft_clip/ramped) at simd8
+sc-output-frozen-suite exit 101 ['test result: FAILED. 1 passed; 1 failed']
+   FAIL every_ramped_word_stays_inside_its_endpoints output gain from 2.3999983e1 (0x41bffff7) to 24, sidechain connected false: frame 1, `output gain` (section 0) went from (15.848902, 15.848933, 4.917383e-7, 63) to (15.848902, 15.848933, 4.917383e-7, 
+sc-output-frozen-g5 exit 101 ['test result: FAILED. 6 passed; 1 failed']
+   FAIL g5_native_digests_match_pins native corpus digests differ from the pins:
+    case 113 (effect/soft_clip/ramped) at scalar
+    case 113 (effect/soft_clip/ramped) at simd4
+    case 113 (effect/soft_clip/ramped) at simd8

@@ -452,9 +452,14 @@ impl EqTargetPreparer {
         Ok(())
     }
 
-    /// Actual retained allocation size of the shared factory `Arc`.
+    /// Actual retained allocation size of the shared factory `Arc`: 0 for a factory the
+    /// process-lifetime launch registry owns, which this preparer's clone does not allocate
+    /// (issue #1469 Amendment 1).
     #[must_use]
     pub fn factory_allocation_bytes(&self) -> usize {
+        if effect_compiler::launch_registry_owns_factory(&self.factory) {
+            return 0;
+        }
         let header = Layout::new::<AtomicUsize>();
         let Ok((strong_weak, _)) = header.extend(header) else {
             return 0;
@@ -470,8 +475,7 @@ mod tests {
     use super::*;
     use effect_contract::{
         EffectDescriptor, EffectPrepareError, NativeEffectTargetPreparation,
-        PrepareEffectBankRequest, PrepareEffectRequest, PreparedNativeEffect,
-        PreparedNativeEffectBank,
+        PrepareEffectBankRequest, PrepareEffectRequest,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
@@ -483,7 +487,7 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             ParametricEqFactory.prepare(request)
         }
         fn target_preparation(&self) -> Option<&dyn NativeEffectTargetPreparation> {
@@ -492,9 +496,31 @@ mod tests {
         fn bind_homogeneous_bank(
             &self,
             request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             ParametricEqFactory.bind_homogeneous_bank(request)
         }
+    }
+
+    /// #1469 Amendment 1. Red if a preparer is charged for the launch registry's own EQ factory,
+    /// or no longer charged for a factory it owns alone.
+    #[test]
+    fn a_registry_owned_factory_is_charged_to_no_preparer() {
+        let shared = effect_compiler::launch_native_effect_registry()
+            .expect("launch registry")
+            .get_shared_ascii("miso.parametric-eq")
+            .expect("launch EQ");
+        assert_eq!(
+            EqTargetPreparer::new(shared)
+                .unwrap()
+                .factory_allocation_bytes(),
+            0
+        );
+        assert_eq!(
+            EqTargetPreparer::new(Arc::new(OptInEq))
+                .unwrap()
+                .factory_allocation_bytes(),
+            2 * size_of::<AtomicUsize>()
+        );
     }
 
     #[test]

@@ -9,9 +9,9 @@ use compressor::{COMPRESSOR_PARAMETERS, CompressorFactory};
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
-    StatePayloadInput, StatePayloadOutput,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
+    PreparedEffectBank, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts,
+    PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
 };
 use lane::Backend;
 
@@ -89,6 +89,11 @@ pub fn request_with_quantum<'a>(
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(compressor::CompressorFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -97,9 +102,23 @@ pub fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<
     request_with_quantum(values, 128)
 }
 
-/// Prepares a scalar instance.
-pub fn prepare(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
+/// Prepares a scalar instance: the processor and the metadata its preparation derived.
+pub fn prepare_with_metadata(request: PrepareEffectRequest<'_>) -> PreparedEffect {
     CompressorFactory.prepare(request).expect("prepare")
+}
+
+/// Prepares a scalar instance and keeps only its processor.
+pub fn prepare(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
+    prepare_with_metadata(request).processor
+}
+
+/// The payload sizes of every instance these tests prepare, read from a prepare result's metadata.
+///
+/// The sizes are the descriptor's `Normal` quality's maximum state, and `Normal` is the
+/// compressor's only quality, so every request here prepares exactly these sizes.
+pub fn state_sizes() -> StatePayloadSizes {
+    let values = initial_values();
+    prepare_with_metadata(request(&values)).metadata.state_sizes
 }
 
 /// The backend this build was compiled for, as the plan selector sees it, and its bank width.
@@ -112,6 +131,13 @@ pub fn native_bank_width() -> Option<(Backend, BankWidth)> {
 pub fn bind_bank(
     requests: &[PrepareEffectRequest<'_>],
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    bind_bank_with_metadata(requests).map(|bank| bank.processor)
+}
+
+/// [`bind_bank`], keeping the metadata the binding derived beside the processor.
+pub fn bind_bank_with_metadata(
+    requests: &[PrepareEffectRequest<'_>],
+) -> Option<PreparedEffectBank> {
     let (backend, width) = native_bank_width()?;
     assert_eq!(requests.len(), width.lanes() as usize);
     CompressorFactory
@@ -231,7 +257,7 @@ pub fn accumulate(total: &mut ProcessReport, report: ProcessReport) {
 
 /// The two channel sections of a scalar instance's payload.
 pub fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>) {
-    let sizes = effect.metadata().state_sizes;
+    let sizes = state_sizes();
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
     effect
@@ -243,12 +269,8 @@ pub fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The two channel sections of one track of a bank's payload.
-pub fn snapshot_track(
-    bank: &dyn PreparedNativeEffectBank,
-    track: u32,
-    sizes_from: &dyn PreparedNativeEffect,
-) -> (Vec<u8>, Vec<u8>) {
-    let sizes = sizes_from.metadata().state_sizes;
+pub fn snapshot_track(bank: &dyn PreparedNativeEffectBank, track: u32) -> (Vec<u8>, Vec<u8>) {
+    let sizes = state_sizes();
     let mut left = vec![0_u8; sizes.left_bytes as usize];
     let mut right = vec![0_u8; sizes.right_bytes as usize];
     bank.snapshot_track_state_payload(

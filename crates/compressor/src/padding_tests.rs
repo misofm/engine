@@ -49,6 +49,11 @@ fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(crate::CompressorFactory),
+            rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -298,9 +303,11 @@ fn per_node(case: &Case) -> Rendered {
         payloads: Vec::new(),
     };
     for (member, values) in case.members.iter().enumerate() {
-        let mut effect = CompressorFactory
+        let prepared = CompressorFactory
             .prepare(request(values, case.rate, case.link))
             .expect("a member prepares");
+        let sizes = prepared.metadata.state_sizes;
+        let mut effect = prepared.processor;
         let mut first_sample = 0;
         for block in &case.blocks {
             let (mut left, mut right) = block.inputs[member].clone();
@@ -313,7 +320,6 @@ fn per_node(case: &Case) -> Rendered {
             rendered.reports[member].push(report);
             first_sample += block.frames as u64;
         }
-        let sizes = effect.metadata().state_sizes;
         let (mut left, mut right) = (
             vec![0_u8; sizes.left_bytes as usize],
             vec![0_u8; sizes.right_bytes as usize],
@@ -476,7 +482,7 @@ fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
         // The rack's disengage seam, before anyone reads the right channel's state.
         bank.desymmetrize_channels();
     }
-    let sizes = bank.instance.metadata.state_sizes;
+    let sizes = bank.instance.state_sizes;
     for lane in 0..lanes {
         let (mut left, mut right) = (
             vec![0_u8; sizes.left_bytes as usize],
@@ -785,13 +791,7 @@ fn planted_state<L: Lane>() {
                             .expect("metadata");
                         let (left, right) =
                             initial_defaults(request.initial_values).expect("values");
-                        PreparedCompressor {
-                            instance: Instance::new(
-                                metadata,
-                                &[left; MAX_WIDTH],
-                                &[right; MAX_WIDTH],
-                            ),
-                        }
+                        PreparedCompressor::new(&metadata, left, right)
                     })
                     .collect();
                 let offsets = vec![0_u32; lanes + 1];

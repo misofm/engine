@@ -9,16 +9,17 @@ use std::{
 use crate::prng::SplitMix64;
 
 use effect_contract::{
-    AutomationSpanKind, BankProcessReport, EffectDescriptor, EffectId, EffectPrepareError,
-    EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples, LinkMode, LinkModeSet,
-    NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    AutomationSpanKind, BankProcessReport, BankWidth, EffectDescriptor, EffectId,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples,
+    LinkMode, LinkModeSet, NativeEffectFactory, NativeEffectRegistry, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
+    PreparedEffect, PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect,
     PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
     QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes, TailSamples, default_initial_values,
-    expected_prepared_metadata, valid_runtime_span, validate_descriptor,
+    expected_prepared_metadata, valid_runtime_span,
 };
 use engine::{LAUNCH_SAMPLE_RATES, realtime::audit};
 
@@ -132,8 +133,6 @@ pub enum FaultKind {
     LogHook,
     SyscallHook,
     SharedLaneState,
-    ChangingMetadata,
-    ChangingTail,
     LatencyChangingBypass,
     BadResources,
     MalformedSpanAcceptance,
@@ -152,9 +151,10 @@ pub enum FaultKind {
     StickyReset,
     /// Issue #105 E12: a bypass path that emits the dry signal without the declared PDC delay.
     ///
-    /// Distinct from [`FaultKind::LatencyChangingBypass`], which lies in `metadata()` and is
-    /// caught by `metadata.exact` before any audio is rendered. This one reports the contractual
-    /// latency and then fails to honour it, which only the bypass reference render can see.
+    /// Distinct from [`FaultKind::LatencyChangingBypass`], which lies in the metadata its prepare
+    /// result carries and is caught by `metadata.exact` before any audio is rendered. This one
+    /// reports the contractual latency and then fails to honour it, which only the bypass
+    /// reference render can see.
     BypassDelayMismatch,
 }
 
@@ -178,8 +178,8 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-        let metadata = expected_prepared_metadata(self.descriptor(), request)?;
+    ) -> Result<PreparedEffect, EffectPrepareError> {
+        let mut metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let left = request
             .initial_values
             .iter()
@@ -190,23 +190,34 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
             .iter()
             .find(|v| v.channel == ParameterChannel::Right)
             .map_or(1.0, |v| v.value);
-        Ok(Box::new(DualAccumulatorDelay {
-            metadata,
+        let processor = Box::new(DualAccumulatorDelay {
+            bypass: metadata.bypass,
             initial_gain: [left, right],
             gain: [left, right],
             delay: [[0.0; 3]; 2],
             accumulator: [0.0; 2],
             active: [None; 2],
             delay_index: 0,
-            metadata_calls: 0,
             snapshot_calls: Cell::new(0),
             fault: self.fault,
-        }))
+        });
+        // The two metadata faults lie in the prepare result, the only place a reader finds the
+        // metadata (issue #1461).
+        if self.fault == FaultKind::LatencyChangingBypass && metadata.bypass {
+            metadata.latency = LatencySamples(0);
+        }
+        if self.fault == FaultKind::BadResources {
+            metadata.scratch_bytes = metadata.scratch_bytes.saturating_add(1);
+        }
+        Ok(PreparedEffect {
+            processor,
+            metadata,
+        })
     }
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         if self.fault != FaultKind::None
             || !request.has_matching_backend_width()
             || request.requests.len() != request.width.lanes() as usize
@@ -222,14 +233,13 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
             return Ok(None);
         }
         let mut lanes = core::array::from_fn(|_| DualAccumulatorDelay {
-            metadata,
+            bypass: metadata.bypass,
             initial_gain: [1.0; 2],
             gain: [1.0; 2],
             delay: [[0.0; 3]; 2],
             accumulator: [0.0; 2],
             active: [None; 2],
             delay_index: 0,
-            metadata_calls: 0,
             snapshot_calls: Cell::new(0),
             fault: FaultKind::None,
         });
@@ -247,26 +257,26 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
             lanes[index].initial_gain = [left, right];
             lanes[index].gain = [left, right];
         }
-        Ok(Some(Box::new(DualAccumulatorDelayBank {
+        Ok(Some(PreparedEffectBank {
+            processor: Box::new(DualAccumulatorDelayBank {
+                width: request.width,
+                lanes,
+            }),
             metadata: PreparedBankMetadata {
                 width: request.width,
                 program_key: metadata.program_key(),
             },
-            lanes,
-        })))
+        }))
     }
 }
 
 struct DualAccumulatorDelayBank {
-    metadata: PreparedBankMetadata,
+    width: BankWidth,
     lanes: [DualAccumulatorDelay; 8],
 }
 impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
     fn reset(&mut self, kind: ResetKind) {
-        for lane in &mut self.lanes[..self.metadata.width.lanes() as usize] {
+        for lane in &mut self.lanes[..self.width.lanes() as usize] {
             lane.reset(kind);
         }
     }
@@ -274,7 +284,7 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
         &mut self,
         block: effect_contract::EffectBankProcessBlock<'_>,
     ) -> BankProcessReport {
-        let width = self.metadata.width;
+        let width = self.width;
         let mut report = BankProcessReport::empty(width);
         let lanes = width.lanes() as usize;
         for frame in 0..block.frames as usize {
@@ -340,15 +350,15 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
     }
 }
 
+/// The mock keeps, as a plain field, the one prepared value it reads (issue #1461).
 struct DualAccumulatorDelay {
-    metadata: PreparedEffectMetadata,
+    bypass: bool,
     initial_gain: [f32; 2],
     gain: [f32; 2],
     delay: [[f32; 3]; 2],
     accumulator: [f32; 2],
     active: [Option<PreparedAutomationSpan>; 2],
     delay_index: usize,
-    metadata_calls: u64,
     snapshot_calls: Cell<u64>,
     fault: FaultKind,
 }
@@ -378,7 +388,7 @@ impl DualAccumulatorDelay {
         }
         let delayed = self.delay[lane][self.delay_index];
         self.delay[lane][self.delay_index] = input;
-        let output = if self.metadata.bypass {
+        let output = if self.bypass {
             if self.fault == FaultKind::BypassDelayMismatch {
                 input
             } else {
@@ -397,22 +407,6 @@ impl DualAccumulatorDelay {
     }
 }
 impl PreparedNativeEffect for DualAccumulatorDelay {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        let mut metadata = self.metadata;
-        if self.fault == FaultKind::ChangingMetadata && self.metadata_calls != 0 {
-            metadata.latency = LatencySamples(metadata.latency.0 + 1);
-        }
-        if self.fault == FaultKind::ChangingTail && self.metadata_calls != 0 {
-            metadata.tail = TailSamples::Infinite;
-        }
-        if self.fault == FaultKind::LatencyChangingBypass && metadata.bypass {
-            metadata.latency = LatencySamples(0);
-        }
-        if self.fault == FaultKind::BadResources {
-            metadata.scratch_bytes = metadata.scratch_bytes.saturating_add(1);
-        }
-        metadata
-    }
     fn reset(&mut self, kind: ResetKind) {
         self.delay = [[0.0; 3]; 2];
         self.accumulator = [0.0; 2];
@@ -425,7 +419,6 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
         }
     }
     fn process(&mut self, mut block: EffectProcessBlock<'_>) -> ProcessReport {
-        self.metadata_calls = self.metadata_calls.saturating_add(1);
         use engine::realtime::audit::ForbiddenOperation;
         match self.fault {
             FaultKind::AllocationHook => audit::forbidden(ForbiddenOperation::Allocation),
@@ -448,7 +441,7 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
         for span in block.automation {
             let valid = valid_runtime_span(
                 span,
-                self.metadata,
+                &DUAL_ACCUMULATOR_DELAY_DESCRIPTOR,
                 block.first_sample,
                 block.left.len() as u32,
             );
@@ -808,7 +801,7 @@ fn render_sequence(
     compare: usize,
     tier: &mut EffectConformanceTierReport,
 ) -> Option<(Vec<f32>, Vec<f32>)> {
-    let Ok(mut effect) = factory.prepare(request) else {
+    let Ok(mut effect) = prepare_processor(factory, request) else {
         tier.failures.push("prepare.factory");
         return None;
     };
@@ -954,7 +947,7 @@ macro_rules! effect_conformance_test {
             ::bench_support::alloc::assert_installed();
             ::bench_support::alloc::set_mode(::bench_support::alloc::Mode::Count);
             let report = $crate::run_effect_conformance(
-                &$factory,
+                ::std::boxed::Box::new($factory),
                 $crate::ConformanceConfig {
                     quantum: 128,
                     blocks: 1,
@@ -996,8 +989,10 @@ fn lane_isolation_probe(
     config: ConformanceConfig,
     tier: &mut EffectConformanceTierReport,
 ) {
-    let (Ok(mut impulsed), Ok(mut silent)) = (factory.prepare(request), factory.prepare(request))
-    else {
+    let (Ok(mut impulsed), Ok(mut silent)) = (
+        prepare_processor(factory, request),
+        prepare_processor(factory, request),
+    ) else {
         tier.failures.push("prepare.factory");
         return;
     };
@@ -1046,18 +1041,34 @@ fn lane_isolation_probe(
     }
 }
 
+/// Runs every launch gate against `factory`.
+///
+/// The harness admits the factory through a [`NativeEffectRegistry`] of its own, as a host does,
+/// so every request carries the registry's tail-bound entry (issue #1462 D1): a descriptor the
+/// registry refuses fails `descriptor.validation`, or names the registry's own code (for example
+/// `effect.tail_bound.inconsistent`).
 pub fn run_effect_conformance(
-    factory: &dyn NativeEffectFactory,
+    factory: Box<dyn NativeEffectFactory>,
     config: ConformanceConfig,
 ) -> EffectConformanceReport {
     let mut report = EffectConformanceReport {
         launch_gates: EffectConformanceTierReport::new(),
     };
     let descriptor = factory.descriptor();
-    if validate_descriptor(descriptor).is_err() {
+    let registry = match NativeEffectRegistry::new([factory]) {
+        Ok(registry) => registry,
+        Err(error) => {
+            report.launch_gates.failures.push(match error.code {
+                "effect.descriptor.invalid" => "descriptor.validation",
+                code => code,
+            });
+            return report;
+        }
+    };
+    let Some(factory) = registry.get(descriptor.id) else {
         report.launch_gates.failures.push("descriptor.validation");
         return report;
-    }
+    };
     if config.quantum < 4 || config.blocks == 0 {
         report.launch_gates.failures.push("configuration");
         return report;
@@ -1078,6 +1089,12 @@ pub fn run_effect_conformance(
                 // Issue #95: built from the descriptor, not hard-coded to the mock's single
                 // parameter. This is what lets the harness run against a real effect (eval E6).
                 let initial: Vec<_> = default_initial_values(descriptor).collect();
+                let Ok(tail_bound) =
+                    registry.tail_bound(descriptor.id, quality.sample_rate, quality.quality)
+                else {
+                    tier.failures.push("prepare.request");
+                    continue;
+                };
                 let request = PrepareEffectRequest {
                     sample_rate: quality.sample_rate,
                     quantum: config.quantum,
@@ -1087,6 +1104,7 @@ pub fn run_effect_conformance(
                     ports: unconnected_ports(descriptor),
                     initial_values: &initial,
                     limits: declared_limits(quality, config.quantum),
+                    tail_bound,
                 };
                 let expected = match expected_prepared_metadata(descriptor, request) {
                     Ok(v) => v,
@@ -1095,7 +1113,12 @@ pub fn run_effect_conformance(
                         continue;
                     }
                 };
-                let mut effect = match factory.prepare(request) {
+                // The prepare result carries the metadata beside the processor, which holds no
+                // copy of it (issue #1461), so this is the one place there is a metadata to check.
+                let PreparedEffect {
+                    processor: mut effect,
+                    metadata,
+                } = match factory.prepare(request) {
                     Ok(v) => v,
                     Err(_) => {
                         tier.failures.push("prepare.factory");
@@ -1103,7 +1126,7 @@ pub fn run_effect_conformance(
                     }
                 };
                 tier.prepared_configurations += 1;
-                if effect.metadata().program_key() != expected.program_key() {
+                if metadata.program_key() != expected.program_key() {
                     tier.failures.push("metadata.exact");
                 }
                 let frames = config.quantum as usize;
@@ -1157,9 +1180,6 @@ pub fn run_effect_conformance(
                 }
                 if !within_bounds {
                     tier.failures.push("process.block_bounds");
-                }
-                if effect.metadata().program_key() != expected.program_key() {
-                    tier.failures.push("metadata.changed");
                 }
                 snapshot_checks(effect.as_mut(), expected, &mut tier.failures);
                 if link_mode == LinkMode::DualMono {
@@ -1265,7 +1285,7 @@ fn sanitization_probe(
     tier: &mut EffectConformanceTierReport,
 ) -> bool {
     request.bypass = false;
-    let Ok(mut effect) = factory.prepare(request) else {
+    let Ok(mut effect) = prepare_processor(factory, request) else {
         return false;
     };
     let mut left = [f32::NAN, f32::INFINITY, f32::from_bits(1), -0.0];
@@ -1315,7 +1335,7 @@ fn sidechain_probe(
             required: port.required,
         },
     };
-    let Ok(mut effect) = factory.prepare(request) else {
+    let Ok(mut effect) = prepare_processor(factory, request) else {
         return false;
     };
     let mut left = [0.0; 4];
@@ -1358,7 +1378,10 @@ fn reset_probe(
     expected: PreparedEffectMetadata,
     tier: &mut EffectConformanceTierReport,
 ) {
-    let (Ok(mut effect), Ok(fresh)) = (factory.prepare(request), factory.prepare(request)) else {
+    let (Ok(mut effect), Ok(fresh)) = (
+        prepare_processor(factory, request),
+        prepare_processor(factory, request),
+    ) else {
         tier.failures.push("reset.semantics");
         return;
     };
@@ -1397,10 +1420,7 @@ fn reset_probe(
     {
         return;
     }
-    if left != [0.0; 4]
-        || right != [0.0; 4]
-        || effect.metadata().program_key() != expected.program_key()
-    {
+    if left != [0.0; 4] || right != [0.0; 4] {
         tier.failures.push("reset.semantics");
     }
     effect.reset(ResetKind::FullToDefaults);
@@ -1409,14 +1429,25 @@ fn reset_probe(
     }
 }
 
+/// Prepares one instance for a probe that needs only the processor; the probe holds the expected
+/// metadata already.
+fn prepare_processor(
+    factory: &dyn NativeEffectFactory,
+    request: PrepareEffectRequest<'_>,
+) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    factory.prepare(request).map(|prepared| prepared.processor)
+}
+
 fn continuation_probe(
     factory: &dyn NativeEffectFactory,
     request: PrepareEffectRequest<'_>,
     expected: PreparedEffectMetadata,
     tier: &mut EffectConformanceTierReport,
 ) -> bool {
-    let (Ok(mut source), Ok(mut restored)) = (factory.prepare(request), factory.prepare(request))
-    else {
+    let (Ok(mut source), Ok(mut restored)) = (
+        prepare_processor(factory, request),
+        prepare_processor(factory, request),
+    ) else {
         return false;
     };
     let mut left = [0.25, -0.5];

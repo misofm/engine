@@ -225,8 +225,8 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         let defaults: Vec<[f32; PARAMETER_COUNT]> = (0..width)
             .map(|offset| lane_parameters(case, group * width + offset))
             .collect();
-        let mut left_state = ChannelState::new(width, &shape, &defaults, RATE);
-        let mut right_state = ChannelState::new(width, &shape, &defaults, RATE);
+        let mut left_state = ChannelState::new::<L>(width, &shape, &defaults, RATE);
+        let mut right_state = ChannelState::new::<L>(width, &shape, &defaults, RATE);
         let mut cursors = Cursors::default();
         for frame in 0..FRAMES {
             for offset in 0..width {

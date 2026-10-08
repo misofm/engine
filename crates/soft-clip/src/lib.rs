@@ -28,9 +28,9 @@ use effect_contract::{
     LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
@@ -564,7 +564,7 @@ impl<L: Lane> SoftClipState<L> {
 /// once per event (D11).
 fn apply_automation<L: Lane>(
     spans: &[PreparedAutomationSpan],
-    metadata: PreparedEffectMetadata,
+    automation_capacity: u32,
     first_sample: u64,
     lane: usize,
     left: &mut Channel<L>,
@@ -591,7 +591,7 @@ fn apply_automation<L: Lane>(
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         };
-        let valid = span_index < metadata.automation_capacity as usize
+        let valid = span_index < automation_capacity as usize
             && parameter < PARAMETER_COUNT
             && span.kind == AutomationSpanKind::Point
             && span.start_sample == first_sample
@@ -910,8 +910,14 @@ fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
 ///
 /// `WIDTH = 1` is the scalar instance the contract's `PreparedNativeEffect` uses, and 4 and 8 are
 /// the banks; the type, the driver and the kernel are the same in all three cases.
+///
+/// It keeps no copy of its `PreparedEffectMetadata` (issue #1461): the prepare result carries that
+/// record on the control side, and the cohort keeps only the prepared values its own code reads.
 struct SoftClip<L: Lane> {
-    metadata: PreparedEffectMetadata,
+    /// The session's bypass, read by `process` and `process_bank`.
+    bypass: bool,
+    /// The prepared automation span capacity, read by `apply_automation`.
+    automation_capacity: u32,
     left_defaults: Box<[[f32; PARAMETER_COUNT]]>,
     right_defaults: Box<[[f32; PARAMETER_COUNT]]>,
     left: Channel<L>,
@@ -925,14 +931,16 @@ struct SoftClip<L: Lane> {
 
 impl<L: Lane> SoftClip<L> {
     fn new(
-        metadata: PreparedEffectMetadata,
+        bypass: bool,
+        automation_capacity: u32,
         left_defaults: Box<[[f32; PARAMETER_COUNT]]>,
         right_defaults: Box<[[f32; PARAMETER_COUNT]]>,
     ) -> Self {
         let left = Channel::new(&left_defaults);
         let right = Channel::new(&right_defaults);
         Self {
-            metadata,
+            bypass,
+            automation_capacity,
             left_defaults,
             right_defaults,
             left,
@@ -1011,8 +1019,14 @@ struct PreparedSoftClip {
 }
 
 /// A prepared homogeneous soft-clip cohort.
+///
+/// Its `PreparedBankMetadata` is returned beside it (issue #1461); it keeps only the two bank
+/// values `process_bank` reads.
 struct PreparedSoftClipBank<L: Lane> {
-    metadata: PreparedBankMetadata,
+    /// The bound bank width, read by `process_bank`'s block check and report.
+    width: BankWidth,
+    /// The prepared quantum, read by `process_bank`'s block check.
+    quantum: u32,
     inner: SoftClip<L>,
 }
 
@@ -1024,22 +1038,26 @@ impl NativeEffectFactory for SoftClipFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let (left, right) = initial_defaults(request.initial_values)?;
-        Ok(Box::new(PreparedSoftClip {
-            inner: SoftClip::new(
-                metadata,
-                vec![left].into_boxed_slice(),
-                vec![right].into_boxed_slice(),
-            ),
-        }))
+        Ok(PreparedEffect {
+            processor: Box::new(PreparedSoftClip {
+                inner: SoftClip::new(
+                    metadata.bypass,
+                    metadata.automation_capacity,
+                    vec![left].into_boxed_slice(),
+                    vec![right].into_boxed_slice(),
+                ),
+            }),
+            metadata,
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         bind_bank::<true>(self, request)
     }
 }
@@ -1050,7 +1068,7 @@ impl NativeEffectFactory for SoftClipFactory {
 fn bind_bank<const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     request.validate_shape()?;
     Ok(effect_contract::match_bank_width!(request.width, |L| {
         boxed::<L, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
@@ -1064,15 +1082,18 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 /// a width it does not execute. `prepare_bank` cannot promise that alone: it returns the bank by
 /// value, and the eight-lane soft clip would otherwise stay in the four-lane browser artifact.
 fn boxed<L: Lane, const NATIVE_ONLY: bool>(
-    bank: Option<PreparedSoftClipBank<L>>,
-) -> Option<Box<dyn PreparedNativeEffectBank>>
+    bank: Option<(PreparedSoftClipBank<L>, PreparedBankMetadata)>,
+) -> Option<PreparedEffectBank>
 where
     PreparedSoftClipBank<L>: PreparedNativeEffectBank,
 {
     if NATIVE_ONLY && !executes(L::WIDTH) {
         return None;
     }
-    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
+    bank.map(|(bank, metadata)| PreparedEffectBank {
+        processor: Box::new(bank) as Box<dyn PreparedNativeEffectBank>,
+        metadata,
+    })
 }
 
 /// `true` if this artifact executes banks of `lanes` lanes natively.
@@ -1084,7 +1105,7 @@ const fn executes(lanes: usize) -> bool {
     lanes == Backend::current().width()
 }
 
-/// Binds one bank of `L::WIDTH` lanes.
+/// Binds one bank of `L::WIDTH` lanes, returned beside its `PreparedBankMetadata`.
 ///
 /// # Padding (issue #1092; decision 12)
 ///
@@ -1099,7 +1120,7 @@ const fn executes(lanes: usize) -> bool {
 fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<PreparedSoftClipBank<L>>, EffectPrepareError> {
+) -> Result<Option<(PreparedSoftClipBank<L>, PreparedBankMetadata)>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -1126,7 +1147,8 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
         return Ok(None);
     }
     let mut inner = SoftClip::new(
-        metadata,
+        metadata.bypass,
+        metadata.automation_capacity,
         left_defaults.into_boxed_slice(),
         right_defaults.into_boxed_slice(),
     );
@@ -1136,20 +1158,20 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
         .enumerate()
         .filter(|(_, active)| **active)
         .fold(0, |bits, (lane, _)| bits | (1 << lane));
-    Ok(Some(PreparedSoftClipBank::<L> {
-        metadata: PreparedBankMetadata {
+    Ok(Some((
+        PreparedSoftClipBank::<L> {
+            width: request.width,
+            quantum: metadata.quantum,
+            inner,
+        },
+        PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
         },
-        inner,
-    }))
+    )))
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.inner.metadata
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
@@ -1159,14 +1181,14 @@ impl PreparedNativeEffect for PreparedSoftClip {
         let frames = block.frames();
         apply_automation(
             block.automation,
-            self.inner.metadata,
+            self.inner.automation_capacity,
             block.first_sample,
             0,
             &mut self.inner.left,
             &mut self.inner.right,
             &mut report,
         );
-        let bypass = self.inner.metadata.bypass;
+        let bypass = self.inner.bypass;
         if self.inner.process(block.left, block.right, frames, bypass) != 0 {
             let count = frames as u64;
             report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(count);
@@ -1200,18 +1222,14 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.metadata.width);
-        if !bank_block_matches(&block, self.metadata.width, self.inner.metadata.quantum)
-            || L::WIDTH != self.metadata.width.lanes() as usize
+        let mut report = BankProcessReport::empty(self.width);
+        if !bank_block_matches(&block, self.width, self.quantum)
+            || L::WIDTH != self.width.lanes() as usize
         {
             return report;
         }
@@ -1224,7 +1242,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             let end = block.automation_offsets[lane + 1] as usize;
             apply_automation(
                 &block.automation[start..end],
-                self.inner.metadata,
+                self.inner.automation_capacity,
                 block.first_sample,
                 lane,
                 &mut self.inner.left,
@@ -1233,7 +1251,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             );
         }
         let frames = block.frames as usize;
-        let bypass = self.inner.metadata.bypass;
+        let bypass = self.inner.bypass;
         // Only the lanes that failed are charged, never a bank-mate or a padded lane (issue
         // #1092). Each is charged as its scalar instance charges itself: the block's frames, on
         // both channels (#1073 owns that unit).

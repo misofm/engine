@@ -69,13 +69,13 @@ impl NativeEffectFactory for PaddingDouble {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
         self.delegate.prepare(request)
     }
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
         request.validate_shape()?;
         let members: Vec<_> = request
             .requests
@@ -211,7 +211,7 @@ fn a_console_remainder_binds_one_padded_bank_and_an_insert_remainder_renders_per
             1_088,
             &[],
             Backend::Scalar,
-            &launch_native_effect_registry().expect("launch registry"),
+            launch_native_effect_registry().expect("launch registry"),
         )
         .unwrap_or_else(|_| panic!("{what}: the Scalar oracle compiles"));
         let oracle =
@@ -314,7 +314,7 @@ fn a_padded_bank_charges_member_metadata_per_active_member() {
         &model,
         1_088,
         &[],
-        &launch_native_effect_registry().expect("launch registry"),
+        launch_native_effect_registry().expect("launch registry"),
     )
     .graph()
     .dependency_levels

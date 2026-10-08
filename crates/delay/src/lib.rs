@@ -41,9 +41,9 @@ use effect_contract::{
     EffectQuality, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
     ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
     ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectMetadata,
-    PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
+    PreparedEffectMetadata, PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::check_block;
@@ -579,10 +579,21 @@ impl DelayLane {
     }
 }
 
-/// Prepared scalar delay state. The ring shape and metadata are immutable after preparation.
+/// Prepared scalar delay state. The ring shape and the prepared scalars below are immutable after
+/// preparation. The processor keeps no copy of its `PreparedEffectMetadata` (issue #1461): the
+/// prepare result carries that record on the control side, and the processor keeps only the four
+/// prepared values its own code reads.
 #[derive(Debug)]
 pub struct PreparedDelay {
-    metadata: PreparedEffectMetadata,
+    /// The session's bypass, read by `process`.
+    bypass: bool,
+    /// The prepared sample rate, read by `apply_automation` (delay-tap mapping) and by
+    /// `restore_state_payload` (lane header validation).
+    sample_rate: u32,
+    /// The prepared automation span capacity, read by `apply_automation`.
+    automation_capacity: u32,
+    /// The prepared state payload sizes, read by the state snapshot and restore length checks.
+    state_sizes: StatePayloadSizes,
     resources: Resources,
     left_defaults: LaneDefaults,
     right_defaults: LaneDefaults,
@@ -605,15 +616,18 @@ impl NativeEffectFactory for DelayFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-        Ok(Box::new(prepare_delay(request)?))
+    ) -> Result<PreparedEffect, EffectPrepareError> {
+        let (processor, metadata) = prepare_delay(request)?;
+        Ok(PreparedEffect {
+            processor: Box::new(processor),
+            metadata,
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn effect_contract::PreparedNativeEffectBank>>, EffectPrepareError>
-    {
+    ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
         request.validate_shape()?;
         for member in request.requests.iter().copied() {
             let _ = validate_inputs(member)?;
@@ -626,11 +640,18 @@ impl NativeEffectFactory for DelayFactory {
     }
 }
 
-fn prepare_delay(request: PrepareEffectRequest<'_>) -> Result<PreparedDelay, EffectPrepareError> {
+/// Prepares the processor and returns it beside the metadata its preparation derived; the
+/// processor keeps only the prepared scalars its own code reads.
+fn prepare_delay(
+    request: PrepareEffectRequest<'_>,
+) -> Result<(PreparedDelay, PreparedEffectMetadata), EffectPrepareError> {
     let (metadata, resources, left_defaults, right_defaults, cross_default) =
         validate_inputs(request)?;
-    Ok(PreparedDelay {
-        metadata,
+    let processor = PreparedDelay {
+        bypass: metadata.bypass,
+        sample_rate: metadata.sample_rate,
+        automation_capacity: metadata.automation_capacity,
+        state_sizes: metadata.state_sizes,
         resources,
         left_defaults,
         right_defaults,
@@ -641,7 +662,8 @@ fn prepare_delay(request: PrepareEffectRequest<'_>) -> Result<PreparedDelay, Eff
         right: DelayLane::new(&right_defaults, resources.ring_words),
         #[cfg(test)]
         chunk_cap: CHUNK_FRAMES,
-    })
+    };
+    Ok((processor, metadata))
 }
 
 type ValidatedInputs = (
@@ -1282,10 +1304,6 @@ impl PreparedDelay {
 }
 
 impl PreparedNativeEffect for PreparedDelay {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
-    }
-
     fn channel_symmetry(&self) -> bool {
         self.designed_channel_symmetry()
     }
@@ -1309,10 +1327,11 @@ impl PreparedNativeEffect for PreparedDelay {
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
         let max_delay = self.resources.max_delay;
-        let bypass = self.metadata.bypass;
+        let bypass = self.bypass;
         apply_automation(
             block.automation,
-            self.metadata,
+            self.sample_rate,
+            self.automation_capacity,
             block.first_sample,
             max_delay,
             &mut self.left,
@@ -1369,7 +1388,7 @@ impl PreparedNativeEffect for PreparedDelay {
             output.common.len(),
             output.left.len(),
             output.right.len(),
-            self.metadata.state_sizes,
+            self.state_sizes,
         )?;
         write_u32(output.common, 0, self.cursor as u32);
         write_ramp(output.common, 1, self.cross);
@@ -1390,9 +1409,9 @@ impl PreparedNativeEffect for PreparedDelay {
             input.common.len(),
             input.left.len(),
             input.right.len(),
-            self.metadata.state_sizes,
+            self.state_sizes,
         )?;
-        let sample_rate = self.metadata.sample_rate;
+        let sample_rate = self.sample_rate;
         let cursor = read_u32(input.common, 0) as usize;
         if cursor >= self.resources.ring_words {
             return Err(state_error("effect.state.cursor"));
@@ -1464,7 +1483,8 @@ impl LaneHeader {
 #[allow(clippy::too_many_arguments)]
 fn apply_automation(
     spans: &[PreparedAutomationSpan],
-    metadata: PreparedEffectMetadata,
+    sample_rate: u32,
+    automation_capacity: u32,
     first_sample: u64,
     maximum_delay: u32,
     left: &mut DelayLane,
@@ -1472,7 +1492,6 @@ fn apply_automation(
     cross: &mut LinearRamp,
     report: &mut ProcessReport,
 ) {
-    let sample_rate = metadata.sample_rate;
     let mut pending: [Option<f32>; 9] = [None; 9];
     let mut last_slot: Option<usize> = None;
     for (span_index, span) in spans.iter().enumerate() {
@@ -1485,7 +1504,7 @@ fn apply_automation(
         };
         let accepted = match slot {
             Some(slot) => {
-                span_index < metadata.automation_capacity as usize
+                span_index < automation_capacity as usize
                     && span.kind == AutomationSpanKind::Point
                     && span.start_sample == first_sample
                     && span.end_sample == first_sample
@@ -1744,6 +1763,11 @@ mod tests {
                 maximum_scratch_bytes: FIXED_BYTES,
                 maximum_automation_spans_per_block: 16,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::DelayFactory),
+                sample_rate,
+                EffectQuality::Normal,
+            ),
         }
     }
 
@@ -1751,15 +1775,18 @@ mod tests {
         values: &'a [InitialParameterValue],
         sample_rate: u32,
     ) -> PrepareEffectRequest<'a> {
-        request_with_quantum(values, sample_rate, 128)
+        request_with_quantum(values, sample_rate, QUANTUM)
     }
+
+    /// The quantum of [`request`], and so of every effect [`prepare`] returns.
+    const QUANTUM: u32 = 128;
 
     fn prepare(values: &[InitialParameterValue]) -> PreparedDelay {
-        prepare_delay(request(values, 48_000)).expect("prepare")
+        prepare_delay(request(values, 48_000)).expect("prepare").0
     }
 
-    fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let sizes = effect.metadata().state_sizes;
+    fn snapshot(effect: &PreparedDelay) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let sizes = effect.state_sizes;
         let mut common = vec![0; sizes.common_bytes as usize];
         let mut left = vec![0; sizes.left_bytes as usize];
         let mut right = vec![0; sizes.right_bytes as usize];
@@ -1803,15 +1830,15 @@ mod tests {
                 None,
                 first_sample,
                 automation,
-                effect.metadata.quantum,
+                QUANTUM,
             )
             .expect("zero block"),
         )
     }
 
     fn process_chunked(effect: &mut PreparedDelay, left: &mut [f32], right: &mut [f32]) {
-        for offset in (0..left.len()).step_by(effect.metadata.quantum as usize) {
-            let end = (offset + effect.metadata.quantum as usize).min(left.len());
+        for offset in (0..left.len()).step_by(QUANTUM as usize) {
+            let end = (offset + QUANTUM as usize).min(left.len());
             effect.process(
                 EffectProcessBlock::new(
                     &mut left[offset..end],
@@ -1819,7 +1846,7 @@ mod tests {
                     None,
                     offset as u64,
                     &[],
-                    effect.metadata.quantum,
+                    QUANTUM,
                 )
                 .expect("chunk"),
             );
@@ -1847,10 +1874,10 @@ mod tests {
             let resource = resources(sample_rate).expect("resources");
             assert_eq!(resource.ring_words, ring_words);
             assert_eq!(resource.lane_bytes, lane_bytes);
-            let prepared = prepare_delay(request(&values, sample_rate)).expect("prepare");
-            assert_eq!(prepared.metadata.state_sizes.total(), Some(total_state));
-            assert_eq!(prepared.metadata.latency, LatencySamples(0));
-            assert_eq!(prepared.metadata.tail, TailSamples::Infinite);
+            let (_, metadata) = prepare_delay(request(&values, sample_rate)).expect("prepare");
+            assert_eq!(metadata.state_sizes.total(), Some(total_state));
+            assert_eq!(metadata.latency, LatencySamples(0));
+            assert_eq!(metadata.tail, TailSamples::Infinite);
             assert_eq!(
                 delay_samples(2000.0, sample_rate, resource.max_delay),
                 Some(resource.max_delay)
@@ -1950,8 +1977,9 @@ mod tests {
             values[6].value = 1.0;
             values[7].value = 1.0;
             values[8].value = 0.5;
-            let mut effect =
-                prepare_delay(request(&values, sample_rate)).expect("prepare at launch rate");
+            let mut effect = prepare_delay(request(&values, sample_rate))
+                .expect("prepare at launch rate")
+                .0;
             let mut reference = ReferenceDelayPair::new(
                 f64::from(sample_rate),
                 ReferenceDelayParameters {
@@ -2216,8 +2244,9 @@ mod tests {
         // `D - valid_history` chunk bound load bearing.
         values[0].value = 13.0;
         values[1].value = 13.0;
-        let mut effect =
-            prepare_delay(request_with_quantum(&values, 48_000, 512)).expect("prepare at q512");
+        let mut effect = prepare_delay(request_with_quantum(&values, 48_000, 512))
+            .expect("prepare at q512")
+            .0;
         effect.chunk_cap = chunk_cap;
         let (mut left, mut right) = partition_signal(frames);
         let mut offset = 0;
@@ -2417,13 +2446,8 @@ mod tests {
                 effect
                     .restore_state_payload(
                         1,
-                        StatePayloadInput::new(
-                            &before.0,
-                            left,
-                            right,
-                            effect.metadata().state_sizes,
-                        )
-                        .expect("invalid payload shape"),
+                        StatePayloadInput::new(&before.0, left, right, effect.state_sizes,)
+                            .expect("invalid payload shape"),
                     )
                     .is_err()
             );
@@ -2437,13 +2461,8 @@ mod tests {
             effect
                 .restore_state_payload(
                     1,
-                    StatePayloadInput::new(
-                        &before.0,
-                        &stale,
-                        &before.2,
-                        effect.metadata().state_sizes,
-                    )
-                    .expect("stale payload shape"),
+                    StatePayloadInput::new(&before.0, &stale, &before.2, effect.state_sizes,)
+                        .expect("stale payload shape"),
                 )
                 .is_err()
         );
@@ -2452,13 +2471,8 @@ mod tests {
             effect
                 .restore_state_payload(
                     2,
-                    StatePayloadInput::new(
-                        &before.0,
-                        &before.1,
-                        &before.2,
-                        effect.metadata().state_sizes,
-                    )
-                    .expect("payload shape"),
+                    StatePayloadInput::new(&before.0, &before.1, &before.2, effect.state_sizes,)
+                        .expect("payload shape"),
                 )
                 .is_err()
         );
@@ -2502,7 +2516,7 @@ mod tests {
         let values = initial_values();
         let mut bypass_request = request(&values, 48_000);
         bypass_request.bypass = true;
-        let mut bypass = prepare_delay(bypass_request).expect("bypass prepare");
+        let mut bypass = prepare_delay(bypass_request).expect("bypass prepare").0;
         let mut left = [-0.0_f32];
         let mut right = [0.0_f32];
         bypass.process(
@@ -2712,15 +2726,8 @@ mod tests {
                 .map(|i| ((first as usize + i) * 53 % 97) as f32 / 97.0 - 0.5)
                 .collect();
             effect.process(
-                EffectProcessBlock::new(
-                    &mut left,
-                    &mut right,
-                    None,
-                    first,
-                    spans,
-                    effect.metadata.quantum,
-                )
-                .expect("block"),
+                EffectProcessBlock::new(&mut left, &mut right, None, first, spans, QUANTUM)
+                    .expect("block"),
             );
             (left, right)
         }
@@ -2761,8 +2768,7 @@ mod tests {
         let mut twin = prepare(&values);
         twin.restore_state_payload(
             1,
-            StatePayloadInput::new(&common, &left, &right, twin.metadata.state_sizes)
-                .expect("input"),
+            StatePayloadInput::new(&common, &left, &right, twin.state_sizes).expect("input"),
         )
         .expect("the delay restores its own mid-ramp snapshot");
         assert_eq!(
@@ -2840,7 +2846,7 @@ mod tests {
             }
             let refused = effect.restore_state_payload(
                 1,
-                StatePayloadInput::new(&valid.0, &invalid, &valid.2, effect.metadata.state_sizes)
+                StatePayloadInput::new(&valid.0, &invalid, &valid.2, effect.state_sizes)
                     .expect("payload shape"),
             );
             assert_eq!(
@@ -2890,7 +2896,7 @@ mod tests {
             EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128).expect("block"),
         );
         let saved = snapshot(&effect);
-        let sizes = effect.metadata.state_sizes;
+        let sizes = effect.state_sizes;
         let damping_max = damping_coefficient_max(48_000);
         // (section: 0 common, 1 left; word of `current`; domain)
         let words = [

@@ -56,8 +56,10 @@ conformance::randomized_effect_test!(
 fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
     bench_support::alloc::assert_installed();
     bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
+    let (registry, effect) = conformance::admit(Box::new(parametric_eq::ParametricEqFactory));
     let coverage = conformance::run_effect_differential(&conformance::EffectDifferential {
-        factory: &parametric_eq::ParametricEqFactory,
+        registry: &registry,
+        effect,
         test: "the_bank_renders_its_scalar_instances_including_the_known_defect",
         replay: "cargo test -p parametric-eq --test randomized -- --ignored --exact \
                  the_bank_renders_its_scalar_instances_including_the_known_defect",

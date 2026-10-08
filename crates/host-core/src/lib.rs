@@ -188,7 +188,7 @@ pub use vca::{LiveVcaFaderDelta, LiveVcaState};
 pub use effect_compiler::{
     EffectControlOwnerError, EffectControlProducer, EffectControlResources,
     EffectObservationHandle, EffectRack, LiveEffectAddress, LiveEffectRack,
-    parametric_eq_target_preparation_factory,
+    launch_registry_owns_factory, parametric_eq_target_preparation_factory,
 };
 #[cfg(feature = "test-support")]
 pub use effect_compiler::{

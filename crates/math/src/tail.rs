@@ -2081,14 +2081,74 @@ pub fn fixed_cascade(
     law: &FlushLaw,
     peaks: [f64; 2],
 ) -> Result<CascadeBound, TailBoundError> {
+    fixed_cascade_within(sections, gain, law, peaks, u64::MAX)
+        .result
+        .expect("no walk reaches u64::MAX frames: the horizon limit stops it first")
+}
+
+/// What a [`fixed_cascade_within`] walk returns: the bound (or why none is stated) when the walk
+/// finished inside its horizon, and the frames it actually walked, finished or stopped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CascadeWalk {
+    /// [`fixed_cascade`]'s result, bit for bit, when the walk finished inside its horizon; `None`
+    /// when it stopped because one more frame would pass the horizon.
+    pub result: Option<Result<CascadeBound, TailBoundError>>,
+    /// The frames walked: every frame-by-frame step of the majorant pass, of the replay of its
+    /// crossing block and of the deviation walk (issue #1457 D1), counted as taken, so a stopped
+    /// walk reports what it really took. The closed-form steps (powers of a step matrix, the rest
+    /// bound) are not frames walked. For a finished walk, a function of the sections, the gain,
+    /// the law and the peaks only.
+    pub frames: u64,
+}
+
+/// One more frame of a walk under a horizon of `horizon` frames: `false` once the walk has taken
+/// `horizon` frames, so a walk of exactly `horizon` frames finishes and a longer one stops.
+fn take_frame(walked: &mut u64, horizon: u64) -> bool {
+    if *walked >= horizon {
+        return false;
+    }
+    *walked += 1;
+    true
+}
+
+/// [`fixed_cascade`] under a horizon of `horizon` frames walked (issue #1457 D1, D3). The result
+/// is `None` when the walk would take more than `horizon` frames, and otherwise the same result as
+/// [`fixed_cascade`], bit for bit; [`CascadeWalk::frames`] is the frames walked either way, never
+/// more than `horizon`. The walk is the same whatever the horizon, so a walk that finishes takes
+/// the same frames under every horizon at or above them, and stops under every smaller one.
+#[must_use]
+pub fn fixed_cascade_within(
+    sections: &[SvfWords],
+    gain: f64,
+    law: &FlushLaw,
+    peaks: [f64; 2],
+    horizon: u64,
+) -> CascadeWalk {
+    let mut walked = 0_u64;
+    let result = fixed_cascade_walk(sections, gain, law, peaks, &mut walked, horizon);
+    CascadeWalk {
+        result,
+        frames: walked,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn fixed_cascade_walk(
+    sections: &[SvfWords],
+    gain: f64,
+    law: &FlushLaw,
+    peaks: [f64; 2],
+    walked: &mut u64,
+    horizon: u64,
+) -> Option<Result<CascadeBound, TailBoundError>> {
     if sections.is_empty() {
-        return Ok(CascadeBound::ZERO);
+        return Some(Ok(CascadeBound::ZERO));
     }
     let constants: Vec<SectionConstants> = sections.iter().map(SectionConstants::of).collect();
     // A NaN contraction is refused with the rest: only `rho < 1` passes.
     let contracts = |rho: f64| rho.partial_cmp(&1.0) == Some(core::cmp::Ordering::Less);
     if !constants.iter().all(|c| contracts(c.rho_kernel())) {
-        return Err(TailBoundError::NotContracting);
+        return Some(Err(TailBoundError::NotContracting));
     }
     let k = constants.len();
     // `gain` is the trim word's magnitude; the kernel's `fl(x * trim)` is at most `(1 + u)` times
@@ -2106,11 +2166,14 @@ pub fn fixed_cascade(
     let mut input_sup = std::vec![0.0; k + 1];
     let remainder = loop {
         if majorants.frame >= HORIZON_LIMIT {
-            return Err(TailBoundError::Horizon);
+            return Some(Err(TailBoundError::Horizon));
         }
         checkpoints.push(majorants.clone());
         let mut sum = 0.0;
         for _ in 0..BLOCK {
+            if !take_frame(walked, horizon) {
+                return None;
+            }
             majorants.step(&mut frame);
             sum += frame.input[k];
             for i in 0..k {
@@ -2162,12 +2225,14 @@ pub fn fixed_cascade(
     } else {
         let block = first_block - 1;
         let mut replay = checkpoints[block].clone();
-        let values: Vec<f64> = (0..BLOCK)
-            .map(|_| {
-                replay.step(&mut frame);
-                frame.input[k]
-            })
-            .collect();
+        let mut values = Vec::with_capacity(BLOCK);
+        for _ in 0..BLOCK {
+            if !take_frame(walked, horizon) {
+                return None;
+            }
+            replay.step(&mut frame);
+            values.push(frame.input[k]);
+        }
         let mut running = suffix[block + 1];
         let mut first = (block + 1) * BLOCK;
         for index in (0..BLOCK).rev() {
@@ -2198,6 +2263,9 @@ pub fn fixed_cascade(
     // Walk frame by frame until the propagation is falling: from that frame on it is
     // componentwise non-increasing, and so is every value.
     loop {
+        if !take_frame(walked, horizon) {
+            return None;
+        }
         let value = deviation.step();
         values.push(value);
         if value >= quarter {
@@ -2208,78 +2276,126 @@ pub fn fixed_cascade(
             break;
         }
         if frame >= HORIZON_LIMIT {
-            return Err(TailBoundError::Horizon);
+            return Some(Err(TailBoundError::Horizon));
         }
     }
-    let (step, row) = deviation.linear_map();
-    let at = |later: u64| dot(&row, &power_apply(&step, later, &deviation.state()));
-    if tail_deviation == frame {
-        // Still at or above `quarter` on the last walked frame: the first later frame below it,
-        // by an exponential search and a bisection over the non-increasing values.
-        let (mut low, mut high) = (0_u64, 1_u64);
-        while at(high) >= quarter {
-            low = high;
-            high = high
-                .checked_mul(2)
-                .filter(|value| frame + value < HORIZON_LIMIT)
-                .ok_or(TailBoundError::Horizon)?;
-        }
-        if at(low) < quarter {
-            high = low;
-        } else {
-            while high - low > 1 {
-                let middle = low + (high - low) / 2;
-                if at(middle) < quarter {
-                    high = middle;
-                } else {
-                    low = middle;
+    // The rest is closed-form (powers of the step, the rest bound): no frame is walked.
+    let mut finish = || -> Result<CascadeBound, TailBoundError> {
+        let (step, row) = deviation.linear_map();
+        let at = |later: u64| dot(&row, &power_apply(&step, later, &deviation.state()));
+        if tail_deviation == frame {
+            // Still at or above `quarter` on the last walked frame: the first later frame below it,
+            // by an exponential search and a bisection over the non-increasing values.
+            let (mut low, mut high) = (0_u64, 1_u64);
+            while at(high) >= quarter {
+                low = high;
+                high = high
+                    .checked_mul(2)
+                    .filter(|value| frame + value < HORIZON_LIMIT)
+                    .ok_or(TailBoundError::Horizon)?;
+            }
+            if at(low) < quarter {
+                high = low;
+            } else {
+                while high - low > 1 {
+                    let middle = low + (high - low) / 2;
+                    if at(middle) < quarter {
+                        high = middle;
+                    } else {
+                        low = middle;
+                    }
                 }
             }
+            tail_deviation = frame + high;
         }
-        tail_deviation = frame + high;
-    }
-    let tail_decay = tail_reference.max(tail_deviation);
-    // The deviation's supremum from `tail_decay` on: the walked values from there, and beyond the
-    // walk the value at `max(tail_decay, frame)`, which bounds every later one. That value comes
-    // from the current state by powers of the (linear, non-negative) step.
-    let mut dev_sup_from_core = values
-        .iter()
-        .skip(tail_decay as usize)
-        .fold(0.0_f64, |sup, value| sup.max(*value));
-    dev_sup_from_core = dev_sup_from_core.max(at(tail_decay.max(frame) - frame));
-    let budget = TAIL_FLOOR / 2.0 - gain * dev_sup_from_core;
-    let p_star = stall / budget * SLACK;
+        let tail_decay = tail_reference.max(tail_deviation);
+        // The deviation's supremum from `tail_decay` on: the walked values from there, and beyond the
+        // walk the value at `max(tail_decay, frame)`, which bounds every later one. That value comes
+        // from the current state by powers of the (linear, non-negative) step.
+        let mut dev_sup_from_core = values
+            .iter()
+            .skip(tail_decay as usize)
+            .fold(0.0_f64, |sup, value| sup.max(*value));
+        dev_sup_from_core = dev_sup_from_core.max(at(tail_decay.max(frame) - frame));
+        let budget = TAIL_FLOOR / 2.0 - gain * dev_sup_from_core;
+        let p_star = stall / budget * SLACK;
 
-    // Rest: the kernel state at `N`, section by section.
-    let envelopes: Vec<EnvelopeSection> =
-        constants.iter().map(SectionConstants::envelope).collect();
-    let cap = R_NORM * core::f64::consts::SQRT_2 * F32_MAX;
-    let at_end = Deviation::at_end(&constants, &state_sup, &input_sup);
-    let kernel_state = |peak: f64| -> Vec<f64> {
-        (0..k)
-            .map(|i| {
-                ((state_sup[i] + at_end.error[i]) * gain * peak + f * absolute_error[i]).min(cap)
-                    * SLACK
-            })
-            .collect()
+        // Rest: the kernel state at `N`, section by section.
+        let envelopes: Vec<EnvelopeSection> =
+            constants.iter().map(SectionConstants::envelope).collect();
+        let cap = R_NORM * core::f64::consts::SQRT_2 * F32_MAX;
+        let at_end = Deviation::at_end(&constants, &state_sup, &input_sup);
+        let kernel_state = |peak: f64| -> Vec<f64> {
+            (0..k)
+                .map(|i| {
+                    ((state_sup[i] + at_end.error[i]) * gain * peak + f * absolute_error[i])
+                        .min(cap)
+                        * SLACK
+                })
+                .collect()
+        };
+        let rest_star = rest_frames(&envelopes, &kernel_state(p_star), law, 0)?;
+        let rest_peak = rest_frames(&envelopes, &kernel_state(peaks[0]), law, 0)?;
+        let rest_any = rest_frames(&envelopes, &kernel_state(peaks[1]), law, 0)?;
+        Ok(CascadeBound {
+            tail: tail_decay,
+            tail_every_peak: tail_decay.max(rest_star),
+            rest_peak,
+            rest_any,
+            flush_floor: p_star,
+            rest_at_flush_floor: rest_star,
+            tail_reference,
+        })
     };
-    let rest_star = rest_frames(&envelopes, &kernel_state(p_star), law, 0)?;
-    let rest_peak = rest_frames(&envelopes, &kernel_state(peaks[0]), law, 0)?;
-    let rest_any = rest_frames(&envelopes, &kernel_state(peaks[1]), law, 0)?;
-    Ok(CascadeBound {
-        tail: tail_decay,
-        tail_every_peak: tail_decay.max(rest_star),
-        rest_peak,
-        rest_any,
-        flush_floor: p_star,
-        rest_at_flush_floor: rest_star,
-        tail_reference,
-    })
+    Some(finish())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SvfWords, v_operator_norm};
+    use super::{FlushLaw, SvfWords, fixed_cascade, fixed_cascade_within, v_operator_norm};
+
+    /// Issue #1457 (attempt 2 verdict, m2): a walk under every horizon from zero past its length
+    /// takes at most that horizon, exactly the horizon when it stops, and finishes with
+    /// [`fixed_cascade`]'s result, bit for bit, exactly when the horizon covers its frames. The
+    /// design is cheap and its walk has every frame-by-frame part: three blocks of the majorant
+    /// pass, the replay of the crossing block and the deviation walk (1,025 frames), so the sweep
+    /// stops the walk inside each part and on each part's last frame. A loop that counts its frames
+    /// but does not stop at the horizon, or a horizon test that lets one frame past, walks past
+    /// some horizon here.
+    #[test]
+    fn a_walk_takes_at_most_its_horizon_and_finishes_exactly_when_the_horizon_covers_it() {
+        // A 300 Hz low-pass at 44.1 kHz, the Butterworth design's `f32` words; unity trim.
+        let words = SvfWords::from_f32(
+            [0x3cf3_e39f, 0x3ca9_e351, 0x39e8_6719, 0, 0, 0x3f80_0000].map(f32::from_bits),
+        );
+        // The frames walked do not depend on the flush law; any law whose stall is below its rest
+        // threshold lets the finished walk state a bound.
+        let law = FlushLaw {
+            flush_eps: 1.0e-20,
+            rest_eps: 1.0e-14,
+            silence_frames: 64,
+        };
+        let peaks = [15.848_932, 1.0e6];
+        let complete = fixed_cascade(&[words], 1.0, &law, peaks).expect("the design is bounded");
+        let frames = fixed_cascade_within(&[words], 1.0, &law, peaks, u64::MAX).frames;
+        assert_eq!(frames, 3 * 256 + 256 + 1, "the walk's parts");
+        for horizon in 0..=frames + 1 {
+            let walk = fixed_cascade_within(&[words], 1.0, &law, peaks, horizon);
+            if horizon < frames {
+                assert_eq!(
+                    (walk.result, walk.frames),
+                    (None, horizon),
+                    "horizon {horizon}"
+                );
+            } else {
+                assert_eq!(
+                    (walk.result, walk.frames),
+                    (Some(Ok(complete)), frames),
+                    "horizon {horizon}"
+                );
+            }
+        }
+    }
 
     /// The certified operator norm is never below the exact `||A||_V` of a near-rotation, and
     /// within `1e-13` of it. The references are the exact norms of the kernel's own `f32` words,

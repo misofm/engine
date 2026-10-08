@@ -24,7 +24,7 @@ conformance::randomized_effect_test!(
 #[test]
 #[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
-    conformance::assert_d7_reports(&true_peak_limiter::TruePeakLimiterFactory);
+    conformance::assert_d7_reports(Box::new(true_peak_limiter::TruePeakLimiterFactory));
 }
 
 /// #1278: the plan-swap carry restores every lane it carries, so a restore must accept every state
@@ -37,7 +37,7 @@ fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
 /// restore slack.
 #[test]
 fn the_effects_own_edge_ramp_snapshots_restore() {
-    conformance::EffectDifferential::assert_edge_ramps_restore(
-        &true_peak_limiter::TruePeakLimiterFactory,
-    );
+    conformance::EffectDifferential::assert_edge_ramps_restore(Box::new(
+        true_peak_limiter::TruePeakLimiterFactory,
+    ));
 }

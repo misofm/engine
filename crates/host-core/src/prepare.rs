@@ -7,7 +7,7 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeSet;
 
-use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
+use builtins::{InputBoundCache, MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, SelectedMeterRequest, TrackControlProducer,
     TrackControlRequest, prepare_selected_session_builtins_between_render_calls,
@@ -812,6 +812,7 @@ pub fn prepare_host_runtime_with_live_lanes(
         None,
         None,
         lanes,
+        None,
     )?;
     Ok((prepared, handles))
 }
@@ -837,6 +838,7 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
         None,
         Some(base),
         lanes,
+        None,
     )?;
     Ok((prepared, handles))
 }
@@ -861,6 +863,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         Some(SpectrumPreparationRequest::Single(spectrum)),
         None,
         HostLiveLanes::ALL,
+        None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Single(capture) => capture,
@@ -895,6 +898,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         Some(SpectrumPreparationRequest::Collection(spectrum)),
         None,
         HostLiveLanes::ALL,
+        None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Collection(capture) => capture,
@@ -1090,6 +1094,7 @@ fn prepare_host_runtime_with_live_controls_policy(
         None,
         successor,
         HostLiveLanes::ALL,
+        None,
     )?;
     Ok((prepared, handles))
 }
@@ -1110,6 +1115,7 @@ pub fn prepare_host_runtime_with_spectrum(
         Some(SpectrumPreparationRequest::Single(request)),
         None,
         HostLiveLanes::ALL,
+        None,
     )?;
     debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -1148,6 +1154,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     spectrum_request: Option<SpectrumPreparationRequest<'_>>,
     successor: Option<SuccessorBase<'_>>,
     lanes: HostLiveLanes,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<
     (
         PreparedHost,
@@ -1348,7 +1355,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
     let mut effects = prepare_native_session_effects(
         compiled,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: caps.maximum_effect_state_bytes,
             maximum_scratch_bytes: caps.maximum_effect_scratch_bytes,
@@ -1531,6 +1538,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .collect::<Vec<_>>(),
             &control_requests,
             builtin_caps,
+            bound_cache,
         )
     }
     .map_err(|diagnostics| {
@@ -2106,5 +2114,136 @@ mod tests {
             expected.push_str(&format!("schema.unknown_field\t$.unexpected_{index:02}\n"));
         }
         assert_eq!(bounded, expected.into_bytes());
+    }
+
+    /// #1457 gate 3 (native): a design-bound cache changes no prepared value. The session's first
+    /// three strips carry distinct near-top designs whose charges cross the preparation budget, so
+    /// the third reports the live bound; the report (the output tail included) is the same with
+    /// no cache, a cold cache and the same cache warm, and the cold preparation fills the cache, so
+    /// the policy function hands its cache to `builtins-compiler` rather than dropping it.
+    #[test]
+    fn a_design_bound_cache_changes_no_prepared_value() {
+        use super::{
+            Backend, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy,
+            InputBoundCache, compile_host_model, parse_host_session,
+            prepare_host_runtime_with_live_controls_policy_and_spectrum,
+        };
+        use effect_contract::TailSamples;
+
+        let caps = HostPrepareCaps {
+            shape: HostShapePolicy::AnyLaunchRate,
+            source_ring_frames: 256,
+            maximum_source_channels: None,
+            maximum_automation_spans_per_block: 4096,
+            maximum_tracks: u64::MAX,
+            maximum_submixes: u64::MAX,
+            maximum_vcas: u64::MAX,
+            maximum_sources: u64::MAX,
+            maximum_routes: u64::MAX,
+            maximum_effects: u64::MAX,
+            maximum_graph_session_plus_plan_bytes: u64::MAX,
+            maximum_source_total_bytes: u64::MAX,
+            maximum_source_overhead_bytes: u64::MAX,
+            maximum_effect_state_bytes: u64::MAX,
+            maximum_effect_scratch_bytes: u64::MAX,
+            maximum_builtin_retained_bytes: u64::MAX,
+            maximum_named_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_meter_items: u64::MAX,
+            maximum_meter_bytes: u64::MAX,
+        };
+        let mut model = parse_host_session(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("EQ fixture");
+        // No effect, so the output tail is the strips' own (the EQ states no finite tail yet).
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        for submix in &mut model.submixes {
+            submix.console.clear();
+            submix.inserts.effects.clear();
+        }
+        let rate = model.sample_rate_hz;
+        let maximum = builtins::builtin_filter_cutoff_maximum_hz(rate).expect("launch rate");
+        let below = |steps: u32| f32::from_bits(maximum.to_bits() - steps);
+        let designs = [
+            (below(1), maximum),
+            (below(2), maximum),
+            (below(3), maximum),
+        ];
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            track.console.clear();
+            track.inserts.effects.clear();
+            if let Some(&(hpf, lpf)) = designs.get(index) {
+                for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+                    channel.hpf_hz = hpf;
+                    channel.lpf_hz = lpf;
+                    channel.trim_db = 24.0;
+                }
+            }
+        }
+        // The premise: the first two designs fit the budget, the three together do not, and each
+        // design's own tail is below the live bound's, so only the fallback reaches it.
+        let charged: Vec<builtins::ChargedInputBound> = designs
+            .iter()
+            .map(|&(hpf, lpf)| {
+                let channel = builtins::ChannelParameters {
+                    trim_db: 24.0,
+                    hpf_hz: hpf,
+                    lpf_hz: lpf,
+                    ..builtins::ChannelParameters::default()
+                };
+                let parameters = builtins::BuiltinParameters {
+                    left: channel,
+                    right: channel,
+                    ..builtins::BuiltinParameters::default()
+                };
+                builtins::input_section_bound_charged(rate, parameters).expect("bound")
+            })
+            .collect();
+        let fits = charged[0].charge + charged[1].charge;
+        assert!(fits <= builtins::INPUT_BOUND_BUDGET_FRAMES);
+        assert!(fits + charged[2].charge > builtins::INPUT_BOUND_BUDGET_FRAMES);
+        let compiled = compile_host_model(
+            &model,
+            caps.compile_caps(model.sources.len()).expect("caps"),
+        )
+        .expect("compile");
+        let prepare = |cache: Option<&mut InputBoundCache>| {
+            prepare_host_runtime_with_live_controls_policy_and_spectrum(
+                &compiled,
+                &caps,
+                &HostLiveControlRequest::default(),
+                None,
+                false,
+                Backend::current(),
+                None,
+                None,
+                HostLiveLanes::ALL,
+                cache,
+            )
+            .expect("prepare")
+            .0
+            .report
+        };
+        let none = prepare(None);
+        // The third design's live bound reaches the report.
+        let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
+        let (TailSamples::Finite(output), TailSamples::Finite(live)) =
+            (none.output_tail, live.tail)
+        else {
+            panic!("finite tails: {:?}", none.output_tail);
+        };
+        assert!(output >= live, "{output} < {live}");
+        for design in &charged {
+            assert!(
+                matches!(design.bound.tail, TailSamples::Finite(tail) if tail < live),
+                "{design:?}"
+            );
+        }
+        let mut cache = InputBoundCache::new();
+        assert_eq!(prepare(Some(&mut cache)), none, "cold cache");
+        assert!(!cache.is_empty());
+        assert_eq!(prepare(Some(&mut cache)), none, "warm cache");
     }
 }

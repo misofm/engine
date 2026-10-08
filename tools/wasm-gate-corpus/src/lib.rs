@@ -182,8 +182,9 @@ pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
 /// downward-expansion curve, the unfused/two-rounding `rate * (target - G) + G` mul+add one-pole
 /// with its D7 `flush`, `exp2_lane`
 /// and identity select. One case per link mode, one of gated bursts that drives both one-pole
-/// rates and the hold, one of subnormal input, and one with a D11 word ramp in flight across a
-/// block boundary.
+/// rates and the hold, one of subnormal input, one with a D11 word ramp in flight across a
+/// block boundary, and one whose ramp words the unclamped D11 law would take past their targets,
+/// each lane's window ending on a different frame, so issue #1409's clamp acts (issue #1459).
 pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 
 /// Cases delegated to [`builtins::corpus`] (issue #85), replayed under wasm.

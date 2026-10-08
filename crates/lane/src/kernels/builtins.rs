@@ -19,6 +19,57 @@ use crate::Lane;
 use crate::kernels::{SvfCoef, SvfState, silence_skip_block, svf_state_held, svf_step_when};
 use crate::{silence_armable_holding, silence_step};
 
+/// The frames of two AoSoA planes, left and right together, for every dual input-chain frame loop
+/// in this module (issue #1454).
+///
+/// It yields what `left.chunks_exact_mut(L::WIDTH).zip(right.chunks_exact_mut(L::WIDTH))` yields:
+/// one `L::WIDTH`-word frame of each plane per step, over the shorter plane, a trailing partial
+/// frame left untouched. It is written out because the loop must not depend on LLVM inlining
+/// `core`'s `Zip` constructor, and in the shipped `simd128` module it did not: after #1328 gave
+/// each chain body two forms, the constructor stayed out of line at five of
+/// `InputStage::process`'s dual call sites. The iterator's state then went through linear memory,
+/// so the frame loop no longer knew its chunk was `L::WIDTH` words (a bounds branch and a
+/// `slice_index_fail` exit per frame) and reloaded every section coefficient from memory on every
+/// frame (22 more `v128.load`s; the frame addresses came from memory, so alias analysis could not
+/// keep them apart from the coefficients). V8 compiled that stationary loop to 222 instructions in
+/// five blocks, against 196 in three before #1328; built from this type it is 196 in three again.
+/// Here the state is two slices built and advanced by `#[inline(always)]` code of this crate: both
+/// planes are cut to one length up front, so each step is one length compare and two splits whose
+/// bounds checks that compare settles. The frames, and so every rendered bit, are the zip's.
+struct FramePairs<'a, L: Lane> {
+    left: &'a mut [f32],
+    right: &'a mut [f32],
+    lane: core::marker::PhantomData<L>,
+}
+
+impl<'a, L: Lane> FramePairs<'a, L> {
+    #[inline(always)]
+    fn new(left: &'a mut [f32], right: &'a mut [f32]) -> Self {
+        let span = core::cmp::min(left.len(), right.len());
+        Self {
+            left: &mut left[..span],
+            right: &mut right[..span],
+            lane: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a, L: Lane> Iterator for FramePairs<'a, L> {
+    type Item = (&'a mut [f32], &'a mut [f32]);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.left.len() < L::WIDTH {
+            return None;
+        }
+        let (left_frame, left) = core::mem::take(&mut self.left).split_at_mut(L::WIDTH);
+        let (right_frame, right) = core::mem::take(&mut self.right).split_at_mut(L::WIDTH);
+        self.left = left;
+        self.right = right;
+        Some((left_frame, right_frame))
+    }
+}
+
 /// Magnitude at or above which a sample is treated as non-finite by the D7 boundary policy.
 ///
 /// `!(|x| < 1e30)` is exactly "NaN or `|x| >= 1e30`", because an ordered compare against NaN is
@@ -648,10 +699,8 @@ fn input_chain_block_body<L: Lane>(
         }
     }
 
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
+    // [`FramePairs`], not a `zip` of two chunk iterators: its doc gives the reason (issue #1454).
+    for (left_frame, right_frame) in FramePairs::<L>::new(left, right) {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
             let rest = if armable {
@@ -805,10 +854,7 @@ fn input_chain_ramp_block_body<L: Lane>(
         }
     }
 
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
+    for (left_frame, right_frame) in FramePairs::<L>::new(left, right) {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             remaining[channel] = remaining[channel].sub(one);
             let done = remaining[channel].le(zero);
@@ -1049,10 +1095,7 @@ fn input_chain_ramp_block_filter_body<L: Lane>(
     let mut coefficients = c.section;
     let mut trim_current = trim.current;
     let mut trim_remaining = trim.remaining;
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
+    for (left_frame, right_frame) in FramePairs::<L>::new(left, right) {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let trim_value = if trim_ramping {
                 trim_remaining[channel] = trim_remaining[channel].sub(one);
@@ -1419,10 +1462,7 @@ fn identity_chain_ramp_block<L: Lane>(
     let mut nonfinite = [no_lanes::<L>(); 2];
     let mut current = r.current;
     let mut remaining = r.remaining;
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
+    for (left_frame, right_frame) in FramePairs::<L>::new(left, right) {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             remaining[channel] = remaining[channel].sub(one);
             let done = remaining[channel].le(zero);
@@ -1679,10 +1719,7 @@ fn identity_chain_block<L: Lane>(
 
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
-    for (left_frame, right_frame) in left
-        .chunks_exact_mut(L::WIDTH)
-        .zip(right.chunks_exact_mut(L::WIDTH))
-    {
+    for (left_frame, right_frame) in FramePairs::<L>::new(left, right) {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
             let bad = L::mask_not(x.abs().lt(limit));

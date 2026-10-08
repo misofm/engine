@@ -542,6 +542,17 @@ pub fn prepare_response_preview(
             let mut initial_values: Vec<InitialParameterValue> =
                 default_initial_values(descriptor).collect();
             apply_overrides(descriptor, &mut initial_values, overrides)?;
+            // Issue #1462 D1: the registry's tail-bound entry. A rate or quality the effect does
+            // not declare has none, and is the owner's `effect.quality.unsupported` refusal.
+            let tail_bound = registry
+                .tail_bound(descriptor.id, request.sample_rate_hz, quality)
+                .map_err(|error| {
+                    ResponsePreviewError::Owner(
+                        effect_contract::ResponseAnalysisError::Configuration(
+                            effect_contract::EffectPrepareError { code: error.code },
+                        ),
+                    )
+                })?;
             response
                 .prepare_response(
                     effect_contract::PrepareEffectRequest {
@@ -561,6 +572,7 @@ pub fn prepare_response_preview(
                                 .limits
                                 .maximum_automation_spans_per_block,
                         },
+                        tail_bound,
                     },
                     limits,
                 )

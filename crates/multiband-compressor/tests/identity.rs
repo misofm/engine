@@ -181,8 +181,9 @@ fn run_banks_with_sets(
         let requests = (0..lanes)
             .map(|lane| request_with(&sets[group * lanes + lane], link, FRAMES as u32, false))
             .collect::<Vec<_>>();
-        let mut bank = support::bank(width, &requests);
-        let sizes = bank.metadata().program_key.state_sizes;
+        let prepared = support::bank(width, &requests);
+        let sizes = prepared.metadata.program_key.state_sizes;
+        let mut bank = prepared.processor;
         for block in 0..BLOCKS {
             let mut left = vec![0.0f32; FRAMES * lanes];
             let mut right = vec![0.0f32; FRAMES * lanes];
@@ -252,9 +253,11 @@ fn run_scalar_with_sets(
     let mut reports = Vec::new();
     for track in 0..TRACKS {
         let (mut left, mut right) = track_signal(track);
-        let mut effect: Box<dyn PreparedNativeEffect> = MultibandCompressorFactory
+        let prepared = MultibandCompressorFactory
             .prepare(request_with(&sets[track], link, FRAMES as u32, false))
             .expect("scalar");
+        let sizes = prepared.metadata.state_sizes;
+        let mut effect: Box<dyn PreparedNativeEffect> = prepared.processor;
         let mut last = effect_contract::ProcessReport::default();
         for block in 0..BLOCKS {
             let start = block * FRAMES;
@@ -275,7 +278,7 @@ fn run_scalar_with_sets(
                 .expect("block"),
             );
         }
-        snapshots.push(snapshot(effect.as_ref()));
+        snapshots.push(snapshot(effect.as_ref(), sizes));
         reports.push(last);
         channels[track * 2] = left;
         channels[track * 2 + 1] = right;
@@ -338,14 +341,15 @@ fn transition_values(
 fn assert_scalar_restore_transition(source: usize, destination: usize, link: LinkMode) {
     let source_values = transition_values(3, source);
     let destination_values = transition_values(3, destination);
-    let mut donor = MultibandCompressorFactory
+    let prepared = MultibandCompressorFactory
         .prepare(request_with(&source_values, link, FRAMES as u32, false))
         .expect("source scalar");
-    let sizes = donor.metadata().state_sizes;
+    let sizes = prepared.metadata.state_sizes;
+    let mut donor = prepared.processor;
     let mut donor_left = support::signal(RESTORE_PREFIX, 0xC0DE_0101);
     let mut donor_right = support::signal(RESTORE_PREFIX, 0xC0DE_0202);
     process_scalar_frames(donor.as_mut(), &mut donor_left, &mut donor_right, 0);
-    let saved = snapshot(donor.as_ref());
+    let saved = snapshot(donor.as_ref(), sizes);
     assert_state_populated("scalar donor", &saved);
 
     let mut reference = donor;
@@ -357,12 +361,13 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
             FRAMES as u32,
             false,
         ))
-        .expect("destination scalar");
+        .expect("destination scalar")
+        .processor;
     let mut warm_left = support::signal(RESTORE_PREFIX, 0xBEEF_0303);
     let mut warm_right = support::signal(RESTORE_PREFIX, 0xBEEF_0404);
     process_scalar_frames(receiver.as_mut(), &mut warm_left, &mut warm_right, 0);
     assert_ne!(
-        snapshot(receiver.as_ref()),
+        snapshot(receiver.as_ref(), sizes),
         saved,
         "{source:?}->{destination:?} link={link:?}: warm state must differ"
     );
@@ -371,7 +376,7 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
         Ok(()),
         "{source:?}->{destination:?} link={link:?}: restore"
     );
-    assert_eq!(snapshot(receiver.as_ref()), saved);
+    assert_eq!(snapshot(receiver.as_ref(), sizes), saved);
 
     let mut expected_tail_left = support::signal(RESTORE_TAIL, 0xC0DE_0505);
     let mut expected_tail_right = support::signal(RESTORE_TAIL, 0xC0DE_0606);
@@ -409,8 +414,8 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
         );
     }
     assert_eq!(
-        snapshot(receiver.as_ref()),
-        snapshot(reference.as_ref()),
+        snapshot(receiver.as_ref(), sizes),
+        snapshot(reference.as_ref(), sizes),
         "{source:?}->{destination:?} link={link:?}: restored state"
     );
 
@@ -422,7 +427,8 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
             FRAMES as u32,
             false,
         ))
-        .expect("reset reference");
+        .expect("reset reference")
+        .processor;
     let mut reset_left = support::signal(RESTORE_PREFIX, 0xD00D_0707);
     let mut reset_right = support::signal(RESTORE_PREFIX, 0xD00D_0808);
     let mut reset_reference_left = reset_left.clone();
@@ -437,13 +443,13 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
     assert_populated(
         "full reset scalar",
         &[reset_left.as_slice(), reset_right.as_slice()],
-        &[snapshot(receiver.as_ref())],
+        &[snapshot(receiver.as_ref(), sizes)],
     );
     assert_eq!(reset_left, reset_reference_left);
     assert_eq!(reset_right, reset_reference_right);
     assert_eq!(
-        snapshot(receiver.as_ref()),
-        snapshot(reset_reference.as_ref()),
+        snapshot(receiver.as_ref(), sizes),
+        snapshot(reset_reference.as_ref(), sizes),
         "{source:?}->{destination:?} link={link:?}: full reset state"
     );
 }
@@ -469,8 +475,9 @@ fn assert_bank_restore_transition(
         .iter()
         .map(|values| request_with(values, link, FRAMES as u32, false))
         .collect::<Vec<_>>();
-    let mut donor = support::bank(width, &source_requests);
-    let sizes = donor.metadata().program_key.state_sizes;
+    let prepared = support::bank(width, &source_requests);
+    let sizes = prepared.metadata.program_key.state_sizes;
+    let mut donor = prepared.processor;
     let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
     process_bank_frames(donor.as_mut(), width, &mut donor_left, &mut donor_right, 0);
     let saved = (0..lanes)
@@ -482,7 +489,7 @@ fn assert_bank_restore_transition(
 
     let mut reference = donor;
 
-    let mut receiver = support::bank(width, &destination_requests);
+    let mut receiver = support::bank(width, &destination_requests).processor;
     let (mut warm_left, mut warm_right) = bank_signal(RESTORE_PREFIX, lanes, 0xDCBA_0202);
     process_bank_frames(receiver.as_mut(), width, &mut warm_left, &mut warm_right, 0);
     let warm_state = (0..lanes)
@@ -573,7 +580,7 @@ fn restored_programs_continue_across_scalar_and_bank() {
 #[test]
 fn scalar_and_bank_state_interchange_continues() {
     let values = transition_values(3, 0);
-    let mut scalar = MultibandCompressorFactory
+    let prepared = MultibandCompressorFactory
         .prepare(request_with(
             &values,
             LinkMode::Maximum,
@@ -581,16 +588,17 @@ fn scalar_and_bank_state_interchange_continues() {
             false,
         ))
         .expect("scalar donor");
-    let sizes = scalar.metadata().state_sizes;
+    let sizes = prepared.metadata.state_sizes;
+    let mut scalar = prepared.processor;
     let mut prefix_left = support::signal(RESTORE_PREFIX, 0x1357_0001);
     let mut prefix_right = support::signal(RESTORE_PREFIX, 0x1357_0002);
     process_scalar_frames(&mut *scalar, &mut prefix_left, &mut prefix_right, 0);
-    let scalar_saved = snapshot(scalar.as_ref());
+    let scalar_saved = snapshot(scalar.as_ref(), sizes);
 
     let requests = (0..4)
         .map(|_| request_with(&values, LinkMode::Maximum, FRAMES as u32, false))
         .collect::<Vec<_>>();
-    let mut bank = support::bank(BankWidth::Four, &requests);
+    let mut bank = support::bank(BankWidth::Four, &requests).processor;
     let (mut warm_left, mut warm_right) = bank_signal(RESTORE_PREFIX, 4, 0x2468_0001);
     process_bank_frames(
         bank.as_mut(),
@@ -636,7 +644,7 @@ fn scalar_and_bank_state_interchange_continues() {
         );
     }
 
-    let mut bank_donor = support::bank(BankWidth::Four, &requests);
+    let mut bank_donor = support::bank(BankWidth::Four, &requests).processor;
     let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, 4, 0x9753_0001);
     process_bank_frames(
         bank_donor.as_mut(),
@@ -653,7 +661,8 @@ fn scalar_and_bank_state_interchange_continues() {
             FRAMES as u32,
             false,
         ))
-        .expect("scalar receiver");
+        .expect("scalar receiver")
+        .processor;
     let mut receiver_left = support::signal(RESTORE_PREFIX, 0x8642_0001);
     let mut receiver_right = support::signal(RESTORE_PREFIX, 0x8642_0002);
     process_scalar_frames(
@@ -713,14 +722,15 @@ fn bank_full_reset_restores_different_crossover_defaults() {
             .iter()
             .map(|values| request_with(values, LinkMode::DualMono, FRAMES as u32, false))
             .collect::<Vec<_>>();
-        let mut donor = support::bank(width, &source_requests);
-        let sizes = donor.metadata().program_key.state_sizes;
+        let prepared = support::bank(width, &source_requests);
+        let sizes = prepared.metadata.program_key.state_sizes;
+        let mut donor = prepared.processor;
         let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, lanes, 0xCAFE_0001);
         process_bank_frames(donor.as_mut(), width, &mut donor_left, &mut donor_right, 0);
         let saved = (0..lanes)
             .map(|track| snapshot_track(donor.as_ref(), track as u32, sizes))
             .collect::<Vec<_>>();
-        let mut receiver = support::bank(width, &destination_requests);
+        let mut receiver = support::bank(width, &destination_requests).processor;
         for (track, state) in saved.iter().enumerate() {
             receiver
                 .restore_track_state_payload(
@@ -732,7 +742,7 @@ fn bank_full_reset_restores_different_crossover_defaults() {
                 .expect("different-crossover restore");
         }
         receiver.reset(ResetKind::FullToDefaults);
-        let mut fresh = support::bank(width, &destination_requests);
+        let mut fresh = support::bank(width, &destination_requests).processor;
         for track in 0..lanes {
             assert_eq!(
                 snapshot_track(receiver.as_ref(), track as u32, sizes),
@@ -809,9 +819,11 @@ fn partition_control_trajectory_preserves_ramp_positions() {
     let mut reference_ramps = None;
     let mut reference_filters = None;
     for partition in [1usize, 7, 64, 128, 512] {
-        let mut effect = MultibandCompressorFactory
+        let prepared = MultibandCompressorFactory
             .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
             .expect("scalar");
+        let sizes = prepared.metadata.state_sizes;
+        let mut effect = prepared.processor;
         let mut left = support::signal(TOTAL, 0xFEED_0001);
         let mut right = support::signal(TOTAL, 0xFEED_0002);
         let mut position = 0;
@@ -833,12 +845,12 @@ fn partition_control_trajectory_preserves_ramp_positions() {
             );
             position += frames;
             if partition == 1 && matches!(position, 8 | 63 | 64 | 3_584 | 3_585 | 3_648) {
-                checkpoints.push((position, snapshot(effect.as_ref())));
+                checkpoints.push((position, snapshot(effect.as_ref(), sizes)));
             }
         }
         assert!(left.iter().any(|sample| *sample != 0.0));
         assert!(right.iter().any(|sample| *sample != 0.0));
-        let state = snapshot(effect.as_ref());
+        let state = snapshot(effect.as_ref(), sizes);
         if let Some(reference) = &reference_ramps {
             assert_eq!(
                 &ramp_words(&state),
@@ -921,9 +933,11 @@ fn partition_invariance() {
     ];
     let later = [point(6, ParameterChannel::Right, 3_584, -12.0)];
     let reference = {
-        let mut effect = MultibandCompressorFactory
+        let prepared = MultibandCompressorFactory
             .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
             .expect("scalar");
+        let sizes = prepared.metadata.state_sizes;
+        let mut effect = prepared.processor;
         let mut left = support::signal(TOTAL, 0xFEED_0001);
         let mut right = support::signal(TOTAL, 0xFEED_0002);
         let mut position = 0;
@@ -944,13 +958,15 @@ fn partition_invariance() {
             );
             position += frames;
         }
-        (left, right, snapshot(effect.as_ref()))
+        (left, right, snapshot(effect.as_ref(), sizes))
     };
 
     for partition in [1usize, 7, 64, 128, 512] {
-        let mut effect = MultibandCompressorFactory
+        let prepared = MultibandCompressorFactory
             .prepare(request_with(&sets[3], LinkMode::Maximum, 512, false))
             .expect("scalar");
+        let sizes = prepared.metadata.state_sizes;
+        let mut effect = prepared.processor;
         let mut left = support::signal(TOTAL, 0xFEED_0001);
         let mut right = support::signal(TOTAL, 0xFEED_0002);
         let mut position = 0;
@@ -986,7 +1002,7 @@ fn partition_invariance() {
             );
         }
         assert_eq!(
-            snapshot(effect.as_ref()),
+            snapshot(effect.as_ref(), sizes),
             reference.2,
             "partition={partition} state"
         );
@@ -1007,8 +1023,8 @@ fn resets_agree_across_widths() {
         let requests = (0..tracks)
             .map(|track| request_with(&sets[track], LinkMode::DualMono, FRAMES as u32, false))
             .collect::<Vec<_>>();
-        let mut bank = support::bank(width, &requests);
-        let mut scalars = requests
+        let mut bank = support::bank(width, &requests).processor;
+        let prepared = requests
             .iter()
             .map(|request| {
                 MultibandCompressorFactory
@@ -1016,7 +1032,11 @@ fn resets_agree_across_widths() {
                     .expect("scalar")
             })
             .collect::<Vec<_>>();
-        let sizes = scalars[0].metadata().state_sizes;
+        let sizes = prepared[0].metadata.state_sizes;
+        let mut scalars = prepared
+            .into_iter()
+            .map(|prepared| prepared.processor)
+            .collect::<Vec<_>>();
         let mut bank_left = vec![0.0f32; FRAMES * tracks];
         let mut bank_right = vec![0.0f32; FRAMES * tracks];
         for track in 0..tracks {
@@ -1057,7 +1077,7 @@ fn resets_agree_across_widths() {
         for (track, scalar) in scalars.iter().enumerate() {
             assert_eq!(
                 snapshot_track(bank.as_ref(), track as u32, sizes),
-                snapshot(scalar.as_ref()),
+                snapshot(scalar.as_ref(), sizes),
                 "{kind:?} track={track}"
             );
         }

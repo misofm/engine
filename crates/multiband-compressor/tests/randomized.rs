@@ -44,8 +44,11 @@ conformance::randomized_effect_test!(
 fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
     bench_support::alloc::assert_installed();
     bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
+    let (registry, effect) =
+        conformance::admit(Box::new(multiband_compressor::MultibandCompressorFactory));
     let coverage = conformance::run_effect_differential(&conformance::EffectDifferential {
-        factory: &multiband_compressor::MultibandCompressorFactory,
+        registry: &registry,
+        effect,
         test: "the_bank_renders_its_scalar_instances_including_the_known_defect",
         replay: "cargo test -p multiband-compressor --test randomized -- --ignored --exact \
                  the_bank_renders_its_scalar_instances_including_the_known_defect",
@@ -65,7 +68,7 @@ fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
 #[test]
 #[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
-    conformance::assert_d7_reports(&multiband_compressor::MultibandCompressorFactory);
+    conformance::assert_d7_reports(Box::new(multiband_compressor::MultibandCompressorFactory));
 }
 
 /// #1278: the plan-swap carry restores every lane it carries, so a restore must accept every state
@@ -78,7 +81,7 @@ fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
 /// restore slack.
 #[test]
 fn the_effects_own_edge_ramp_snapshots_restore() {
-    conformance::EffectDifferential::assert_edge_ramps_restore(
-        &multiband_compressor::MultibandCompressorFactory,
-    );
+    conformance::EffectDifferential::assert_edge_ramps_restore(Box::new(
+        multiband_compressor::MultibandCompressorFactory,
+    ));
 }

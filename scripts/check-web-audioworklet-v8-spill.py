@@ -88,8 +88,8 @@ where it sits in the listing:
 | mono | depth-1 tail, after the pair | 1 | 1 | held |
 | mono | depth-2 pair, masked (`svf_cascade_skewed_with_dry_masks`, refused or all-live plan) | 1 | 2 | held |
 | dual | depth-2 pair | 2 | 4 | reported |
-| dual | armed depth-1 tail, after the armed pair | 2 | 2 | reported, ceiling 2 |
-| dual | armed depth-2 pair | 2 | 4 | reported, ceiling 12 |
+| dual | armed depth-1 tail, after the armed pair | 2 | 2 | reported, ceiling 1 |
+| dual | armed depth-2 pair | 2 | 4 | reported, ceiling 11 |
 | mono | armed depth-2 pair | 1 | 2 | reported, ceiling 0 |
 | mono | armed depth-1 tail, after the armed pair | 1 | 1 | reported, ceiling 0 |
 | mono | armed depth-2 pair, masked | 1 | 2 | reported, ceiling 0 |
@@ -126,8 +126,8 @@ flush, one `vpmaxud` per SVF step, which tells the forms apart) only on a block 
 silence counter can arm and that lane still holds state -- a decaying tail after the input stopped.
 Each row matches the loop of its own form and anchors a tail on the pair of its own form. The
 unarmed rows are the rows above them and are held as before. The armed rows are reported with a
-ceiling equal to the carried slots measured when the ceilings were set (dual tail 2, two
-general-purpose words; dual pair 12; every mono row 0): a row with a ceiling is checked like a
+ceiling equal to the carried slots measured when the ceilings were set (dual tail 1, one
+general-purpose word; dual pair 11; every mono row 0): a row with a ceiling is checked like a
 held row, failing closed when its loop is missing or ambiguous, and fails when V8 carries more
 slots than its ceiling; fewer passes and asks for the ceiling to be lowered. They are not held at
 zero because the armed form runs only on silent tails, where a carried slot costs nothing a
@@ -136,7 +136,10 @@ The dual pair's ceiling rose once, from 11 to 12 (issue #1451, root's Amendment 
 the EQ's `FLUSH_EPS` again in place of a carried word, after the iOS `memset_pattern16` cause was
 removed at `Lane::splat`, gave V8 one more carried slot in this armed loop only (221 -> 219
 instructions). The armed path runs only on silent tails, and every unarmed row, the loops that
-run on live audio, stays held at zero.
+run on live audio, stays held at zero. Both ceilings then fell with issue #1454: the `frames_left`
+frame loop of `lane`'s `svf_cascade_interleaved_form` left the dual tail one carried
+general-purpose word (2 -> 1) and the dual pair 11 carried slots (12 -> 11, root's ruling in
+#1454's batch follow-ups).
 
 Loops are natural loops of the listing's control-flow graph (a back edge is a jump to a block that
 dominates its source). Blocks that make a call are left out of a loop's body: inside these kernels
@@ -226,11 +229,14 @@ LOOPS = (
     Row("mono", PAIR, streams=1, steps=2),
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
     Row("mono", "depth-2 pair, masked", streams=1, steps=2, masked=True),
+    # Ceiling 1 since #1454 (was 2): the interleaved form's `frames_left` loop left one
+    # general-purpose word in this armed loop.
     Row("dual", "armed depth-1 tail, select-free", streams=2, steps=2, held=False,
-        after=ARMED_PAIR, armed=True, ceiling=2),
-    # Ceiling 12 since #1451 (was 11): the splatted `FLUSH_EPS` adds one slot to this armed loop,
-    # which runs only on silent tails; the unarmed rows above stay held at zero.
-    Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True, ceiling=12),
+        after=ARMED_PAIR, armed=True, ceiling=1),
+    # Ceiling 11 since #1454 (12 since #1451, when the splatted `FLUSH_EPS` added one slot): the
+    # interleaved form's `frames_left` loop gave the slot back. The loop runs only on silent tails;
+    # the unarmed rows above stay held at zero.
+    Row("dual", ARMED_PAIR, streams=2, steps=4, held=False, armed=True, ceiling=11),
     Row("mono", ARMED_PAIR, streams=1, steps=2, held=False, armed=True, ceiling=0),
     Row("mono", "armed depth-1 tail, select-free", streams=1, steps=1, held=False,
         after=ARMED_PAIR, armed=True, ceiling=0),

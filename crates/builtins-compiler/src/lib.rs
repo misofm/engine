@@ -26,9 +26,10 @@ use std::any::Any;
 use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
     BuiltinParameterError, BuiltinParameters, ChannelParameters, FaderMuteBuiltins,
-    FaderMuteRampBuiltins, InputBuiltins, InputSectionBound, Matrix2x2, MatrixBuiltins,
-    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
-    MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    FaderMuteRampBuiltins, InputBoundCache, InputBuiltins, InputSectionBound, Matrix2x2,
+    MatrixBuiltins, MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet,
+    MeterSnapshot, MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix,
+    validate_builtin_filter_cutoff,
 };
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveControlRecord, ResponseAnalysisError,
@@ -386,7 +387,11 @@ pub struct PreparedBuiltinsSession {
     /// Every strip's input-section bounds as reported (#1329 D7, Amendment 4 R5), sorted by track
     /// ID: `T_decay` (the tail graph lowering reads), `T_rest` and `RestSamples` (silence skipping,
     /// #1107). Control-side: nothing render owns carries them. A strip with a live input lane
-    /// carries [`builtins::input_section_live_bound`], any other its own design's bound.
+    /// carries the rate's live bound ([`builtins::input_section_live_bound_table`]). Any other
+    /// strip carries its own design's bound while the preparation's budget covers its design, and
+    /// the live bound once it does not (#1457 D3, `builtins::INPUT_BOUND_BUDGET_FRAMES`, charged
+    /// in strip order): a non-live strip's bound is certified for its design either way, but it
+    /// is not always the design's own.
     tails: Vec<(Box<str>, InputSectionBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
@@ -3268,11 +3273,11 @@ fn processors_match(
 }
 
 /// The bound a session with a live input lane gives each of its live strips (#1329 D5, D7): the
-/// live bound, which holds for every history of live trim, polarity and filter targets. Off the
-/// launch rates no bound is stated (no rate there has a cutoff domain, and preparation refuses the
-/// session before this is reached).
+/// live bound, which holds for every history of live trim, polarity and filter targets, read from
+/// its per-rate table (#1457 D2). Off the launch rates no bound is stated (no rate there has a
+/// cutoff domain, and preparation refuses the session before this is reached).
 fn live_input_bound(sample_rate: u32) -> InputSectionBound {
-    builtins::input_section_live_bound(sample_rate).unwrap_or(InputSectionBound::UNBOUNDED)
+    builtins::input_section_live_bound_table(sample_rate).unwrap_or(InputSectionBound::UNBOUNDED)
 }
 
 /// The strip bounds the seal check expects, sorted by track ID: the sealed live bound for a strip
@@ -3337,7 +3342,7 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    prepare_session_builtins_with_live_controls(session, requests, &[], caps)
+    prepare_session_builtins_with_live_controls(session, requests, &[], caps, None)
 }
 
 /// Prepare builtins with live-control channels attached (issue #137 D1).
@@ -3350,11 +3355,18 @@ pub fn prepare_session_builtins(
 /// [`prepare_session_builtins`] is exactly this call with no control channels, so a host that does
 /// not want live controls pays nothing: no queue is allocated and the matrix processors carry
 /// `None`.
+///
+/// `bound_cache` (#1457 D2) is a design-bound cache the host keeps across preparations (one per
+/// engine, or one per session for its rebuilds): each distinct input design's bound is read from
+/// it when it holds the design and stored there when it is computed. The prepared session is the
+/// same, bit for bit, with `None`, an empty cache or a warm one; only the control-thread cost
+/// changes.
 pub fn prepare_session_builtins_with_live_controls(
     session: &CompiledSession,
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     prepare_session_builtins_with_live_controls_and_policy(
         session,
@@ -3363,6 +3375,7 @@ pub fn prepare_session_builtins_with_live_controls(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
+        bound_cache,
     )
 }
 
@@ -3384,6 +3397,7 @@ pub fn prepare_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
+        None,
     )
 }
 
@@ -3403,6 +3417,7 @@ pub fn prepare_selected_session_builtins_with_live_controls(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
+        None,
     )
 }
 
@@ -3424,6 +3439,7 @@ pub fn prepare_selected_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
+        None,
     )
 }
 
@@ -3446,6 +3462,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
@@ -3566,13 +3583,17 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         );
     }
     // #1329 D7, Amendment 4 R7: each distinct input design's certified tail and rest bound is
-    // computed here, once per preparation, before the phase-two observation: the computation
-    // allocates transient storage, which phase two's retained-allocation account must not see. A
-    // live input lane's bound depends only on the rate, so it is computed once for the session.
+    // computed here, at most once per preparation, before the phase-two observation: the
+    // computation allocates transient storage, which phase two's retained-allocation account must
+    // not see. A live input lane's bound depends only on the rate, so it is read from the table
+    // (#1457 D2) and computed nowhere.
     // Amendment 5 (MJ1): a strip whose input lane is live reports the live bound, so no design
     // bound is computed for it, so a browser boot with live controls computes none. An audio-only
     // browser boot (the SDK default) and the C ABI attach no input lane and bound every distinct
-    // design (#1329 follow-up C; the cost is #1457's).
+    // design (#1329 follow-up C). #1457: within the preparation budget
+    // `builtins::INPUT_BOUND_BUDGET_FRAMES`, charged in strip order; a design past it reports the
+    // live bound (D3). `bound_cache`, when the host keeps one, serves designs it already holds with
+    // the same charge, so the prepared values are the same with or without it (D2).
     let input_lane_live = |track_id: &str| {
         control_capacity
             .get(track_id)
@@ -3593,6 +3614,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
                 )
                 .expect("preflighted parameters")
             }),
+        bound_cache,
     )
     .expect("preflighted coefficients");
     let mut design_bounds = design_bounds.into_iter();
@@ -6108,12 +6130,10 @@ mod tests {
         observations: &[],
     };
 
-    struct SidechainSum(PreparedEffectMetadata);
+    /// Reads no prepared value, so holds none (issue #1461).
+    struct SidechainSum;
 
     impl PreparedNativeEffect for SidechainSum {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            self.0
-        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let (side_left, side_right) = block.sidechain.expect("connected sidechain");
@@ -6524,7 +6544,7 @@ mod tests {
                 vec![GraphPreparedEffect {
                     id: sidechain_effect_id,
                     metadata,
-                    processor: Box::new(SidechainSum(metadata)),
+                    processor: Box::new(SidechainSum),
                     response_snapshot_declared: false,
                     native_id: "miso.test.sidechain-sum",
                 }]
@@ -7014,6 +7034,7 @@ mod tests {
                 meter.as_slice(),
                 &controls,
                 caps(),
+                None,
             )
         }
         .expect("prepared builtins");
@@ -7449,7 +7470,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let builtins =
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
                 .expect("prepared builtins");
         assert!(builtins.validate_for_session(&compiled).0.is_empty());
         let (mut graph, levels) = track_graph(n);
@@ -11326,7 +11347,7 @@ mod tests {
         };
         let default = collect(prepare_session_builtins(&compiled, &[], caps()).expect("default"));
         let raw = collect(
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
                 .expect("raw"),
         );
         let between = collect(
@@ -11487,7 +11508,7 @@ mod tests {
         );
 
         let concurrent =
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
                 .expect("concurrent owners")
                 .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
                 .expect("checked scalar estimate");
@@ -12000,6 +12021,7 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
+            None,
         )
         .expect("live");
         // A live input lane can enable either filter anywhere in the domain, so the strip reports
@@ -12043,7 +12065,8 @@ mod tests {
         .expect("parse");
         // Six distinct designs over nine strips: eq0-eq2 keep the fixture's 20 Hz / 20 kHz pair,
         // eq3 moves its HPF, eq4 its LPF, eq5 its trim, eq6 only its right channel's HPF, and
-        // eq7-eq8 disable both filters.
+        // eq7-eq8 disable both filters. The last is memoryless: its zero bound walks nothing and
+        // is not computed (#1457), so five designs are bounded.
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let builtins = &mut track.builtins;
             match index {
@@ -12103,6 +12126,7 @@ mod tests {
                 &[],
                 &controls(live),
                 caps(),
+                None,
             )
             .expect("prepare");
             let after = builtins::test_support::fixed_input_bounds_computed();
@@ -12111,8 +12135,8 @@ mod tests {
         };
         assert_eq!(
             computed(&[]),
-            6,
-            "no strip live: one bound per distinct design"
+            5,
+            "no strip live: one bound per distinct design with an enabled filter"
         );
         assert_eq!(
             computed(&(0..9).collect::<Vec<_>>()),
@@ -12120,7 +12144,151 @@ mod tests {
             "every strip live (the browser): no design bound is computed"
         );
         // eq3 and eq4 are the only strips of their designs.
-        assert_eq!(computed(&[3, 4]), 4, "a live strip's design is not bounded");
+        assert_eq!(computed(&[3, 4]), 3, "a live strip's design is not bounded");
+    }
+
+    /// #1457 D1's purpose: typical sessions bound every distinct design exactly. Each 64-track
+    /// console document (`console-sixty-four-track.json`, `-app`, `-intended`, `-mono` and
+    /// `-sends`, 64 distinct input designs each) prepares with no strip on the live bound at every
+    /// launch rate, its charge (frames walked plus the fixed charges) inside the budget.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate() {
+        let documents = [
+            (
+                "console-sixty-four-track.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track.json"),
+            ),
+            (
+                "console-sixty-four-track-app.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-app.json"),
+            ),
+            (
+                "console-sixty-four-track-intended.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json"),
+            ),
+            (
+                "console-sixty-four-track-mono.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json"),
+            ),
+            (
+                "console-sixty-four-track-sends.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-sends.json"),
+            ),
+        ];
+        for (name, document) in documents {
+            let model = parse_session_json(document).expect("parse");
+            for rate in [44_100, 48_000, 88_200, 96_000] {
+                let mut model = model.clone();
+                model.sample_rate_hz = rate;
+                let compiled = compile_session(
+                    &model,
+                    CompileCaps {
+                        max_compiled_model_bytes: u64::MAX,
+                        max_requested_runtime_bytes: u64::MAX,
+                        max_single_allocation_bytes: u64::MAX,
+                        max_queue_items: u64::MAX,
+                        max_source_ring_frames: u64::MAX,
+                        max_source_ring_bytes: u64::MAX,
+                    },
+                )
+                .expect("compile");
+                let frames = builtins::test_support::fixed_input_frames_walked();
+                let charged = builtins::test_support::fixed_input_charged();
+                let prepared =
+                    prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), None)
+                        .expect("prepare");
+                let walked = builtins::test_support::fixed_input_frames_walked() - frames;
+                let charged = builtins::test_support::fixed_input_charged() - charged;
+                let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
+                let on_live: Vec<&str> = prepared
+                    .input_bounds()
+                    .filter(|(_, bound)| *bound == live)
+                    .map(|(id, _)| id)
+                    .collect();
+                assert!(
+                    on_live.is_empty() && charged <= builtins::INPUT_BOUND_BUDGET_FRAMES,
+                    "{name} at {rate} Hz: charged {charged} ({walked} frames walked) of a budget \
+                     of {}, on the live bound: {on_live:?}",
+                    builtins::INPUT_BOUND_BUDGET_FRAMES
+                );
+                println!(
+                    "{name} at {rate} Hz: charged {charged} ({walked} frames walked), margin {}",
+                    builtins::INPUT_BOUND_BUDGET_FRAMES - charged
+                );
+            }
+        }
+    }
+
+    /// #1457 D1, D2: a preparation walks at most the budget, and a warm cache walks nothing. The
+    /// first three strips carry distinct near-top designs, more than the budget covers: a cold
+    /// preparation walks exactly the budget less the three designs' section charges (the design that
+    /// crosses it is stopped there, and every later one walks nothing), and a second preparation
+    /// with the same cache computes no bound and walks no frame, the stopped design included, with
+    /// the same prepared bounds.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing() {
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("parse");
+        let rate = model.sample_rate_hz;
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch rate");
+        let below = |steps: u32| f32::from_bits(maximum.to_bits() - steps);
+        let designs = [
+            (below(1), maximum),
+            (below(2), maximum),
+            (below(3), maximum),
+        ];
+        for (track, &(hpf, lpf)) in model.tracks.iter_mut().zip(&designs) {
+            for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+                channel.hpf_hz = hpf;
+                channel.lpf_hz = lpf;
+                channel.trim_db = 24.0;
+            }
+        }
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compile");
+        let prepare = |cache: Option<&mut InputBoundCache>| {
+            let bounds = builtins::test_support::fixed_input_bounds_computed();
+            let frames = builtins::test_support::fixed_input_frames_walked();
+            let prepared =
+                prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), cache)
+                    .expect("prepare");
+            assert!(prepared.validate_for_session(&compiled).0.is_empty());
+            let values: Vec<(String, InputSectionBound)> = prepared
+                .input_bounds()
+                .map(|(id, bound)| (id.to_owned(), bound))
+                .collect();
+            (
+                values,
+                builtins::test_support::fixed_input_bounds_computed() - bounds,
+                builtins::test_support::fixed_input_frames_walked() - frames,
+            )
+        };
+        // Each design reserves its sections' charge before it walks: two sections on one cascade.
+        let fixed = 3 * 2 * builtins::INPUT_BOUND_SECTION_CHARGE;
+        let spent = builtins::INPUT_BOUND_BUDGET_FRAMES - fixed;
+        let (none, _, walked) = prepare(None);
+        assert_eq!(walked, spent, "no cache");
+        let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
+        assert!(none.iter().any(|(_, bound)| *bound == live), "{none:?}");
+        let mut cache = InputBoundCache::new();
+        let (cold, _, walked) = prepare(Some(&mut cache));
+        assert_eq!((&cold, walked), (&none, spent));
+        let (warm, computed, walked) = prepare(Some(&mut cache));
+        assert_eq!((&warm, computed, walked), (&none, 0, 0), "warm cache");
     }
 
     #[test]
@@ -13066,6 +13234,7 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
+            None,
         )
         .expect("attached live controls");
         assert_eq!(baseline.track_control_count(), 0);
@@ -13105,6 +13274,7 @@ mod tests {
                 },
             ],
             caps(),
+            None,
         )
         .map(|_| ())
         .expect_err("a track may hold one control channel");
@@ -13125,6 +13295,7 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
+            None,
         )
         .map(|_| ())
         .expect_err("an undeclared track has no channel");

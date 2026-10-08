@@ -195,4 +195,24 @@ helper_count_output="$(PATH="$temp/wc-fail:$PATH" bash "$temp/scripts/check-effe
     printf 'effect helper count partial error escaped: %s\n' "$helper_count_output" >&2; exit 1;
 }
 
+# Issue #1462 batch follow-ups: the two diagnostics the registry (#1462) and session preparation
+# (#1335) raise are required. Renaming one everywhere the gate searches must fail it, by name.
+for code in effect.tail_bound.inconsistent effect.automation.rate; do
+    saved="$temp/diagnostic-saved"
+    rm -rf -- "$saved"
+    mkdir -p "$saved/crates"
+    cp -R "$temp/crates/effect-contract" "$temp/crates/effect-compiler" "$saved/crates/"
+    cp "$temp/docs/EFFECT_CONTRACT_V1.md" "$saved/"
+    grep -rlF "$code" "$temp/crates/effect-contract" "$temp/crates/effect-compiler" \
+        "$temp/docs/EFFECT_CONTRACT_V1.md" | xargs sed -i "s/${code//./\\.}/effect.renamed.away/g"
+    code_output="$(bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && code_rc=0 || code_rc=$?
+    [[ "$code_rc" -ne 0 && "$code_output" == *"missing diagnostic $code"* ]] || {
+        printf 'effect runtime missing diagnostic escaped: %s: %s\n' "$code" "$code_output" >&2; exit 1;
+    }
+    rm -rf -- "$temp/crates/effect-contract" "$temp/crates/effect-compiler"
+    cp -R "$saved/crates/effect-contract" "$saved/crates/effect-compiler" "$temp/crates/"
+    cp "$saved/EFFECT_CONTRACT_V1.md" "$temp/docs/EFFECT_CONTRACT_V1.md"
+done
+bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null
+
 printf 'effect runtime policy mutations: ok\n'

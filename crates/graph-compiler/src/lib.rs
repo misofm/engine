@@ -1158,7 +1158,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let bank_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let bank_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared bank-capable effects");
         let per_node_effects =
             prepare_native_session_effects(&session, &scalar_registry, effect_caps)
@@ -1200,7 +1200,7 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         let effects = prepare_native_session_effects(
             &session,
-            &registry,
+            registry,
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 20,
                 maximum_scratch_bytes: 1 << 20,
@@ -1612,13 +1612,13 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             DualAccumulatorDelayFactory::correct().prepare(request)
         }
         fn bind_homogeneous_bank(
             &self,
             _request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             Err(EffectPrepareError {
                 code: "fixture.bank.bind_failure",
             })
@@ -1637,13 +1637,13 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             self.delegate.prepare(request)
         }
         fn bind_homogeneous_bank(
             &self,
             _: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             Ok(None)
         }
     }
@@ -3297,10 +3297,10 @@ mod tests {
         };
 
         let cases = [
-            (&registry, host_dispatch(), 0_usize, false, "none"),
-            (&registry, host_dispatch(), 1_usize, true, "bank-one-target"),
+            (registry, host_dispatch(), 0_usize, false, "none"),
+            (registry, host_dispatch(), 1_usize, true, "bank-one-target"),
             (
-                &registry,
+                registry,
                 host_dispatch(),
                 8_usize,
                 false,
@@ -3450,7 +3450,7 @@ mod tests {
         .expect("compiled compressor session");
         let compressor_registry = launch_native_effect_registry().expect("launch registry");
         let mut compressor_effects =
-            prepare_native_session_effects(&compressor_session, &compressor_registry, effect_caps)
+            prepare_native_session_effects(&compressor_session, compressor_registry, effect_caps)
                 .expect("prepared compressor effects");
         let compressor_depth = NonZeroUsize::new(4_103).expect("compressor queue depth");
         let compressor_producers =
@@ -5480,7 +5480,7 @@ mod tests {
             &post_matrix_meter_requests(&intended, MeterMetricSet::SAMPLE_PEAK, 12 * 128),
             true,
             host_dispatch(),
-            &registry,
+            registry,
         );
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
@@ -5573,7 +5573,7 @@ mod tests {
                 .into_iter()
                 .map(|selected| selected.request)
                 .collect();
-        let artifact = compile_console_model_with_builtins(&intended, 9_550, &meters, &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 9_550, &meters, registry);
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
         assert_eq!(frames, 128, "the console period is four 128-frame blocks");
@@ -5679,7 +5679,7 @@ mod tests {
             let registry = launch_native_effect_registry().expect("launch registry");
             let effects = prepare_native_session_effects(
                 &session,
-                &registry,
+                registry,
                 EffectCompileCaps {
                     maximum_total_state_bytes: 1 << 20,
                     maximum_scratch_bytes: 1 << 20,
@@ -5855,7 +5855,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let bank_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let bank_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared bank-capable effects");
         let bank_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
@@ -5890,7 +5890,7 @@ mod tests {
         let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: Backend::Scalar,
             plan_id: 1_043,
-            effects: prepare_native_session_effects(&session, &registry, effect_caps)
+            effects: prepare_native_session_effects(&session, registry, effect_caps)
                 .expect("prepared scalar effects"),
             caps: integration_caps(),
         })
@@ -6037,9 +6037,8 @@ mod tests {
             },
         )
         .expect("compiled bypass fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass effects");
         let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_044,
@@ -6386,8 +6385,8 @@ mod tests {
         })
             as Box<dyn NativeEffectFactory>])
         .expect("scalar launch registry");
-        let candidate = compile_queued_eq(&model, &registry, 8_071, host_dispatch());
-        let oracle = compile_queued_eq(&model, &registry, 8_072, host_dispatch());
+        let candidate = compile_queued_eq(&model, registry, 8_071, host_dispatch());
+        let oracle = compile_queued_eq(&model, registry, 8_072, host_dispatch());
         let scalar = compile_queued_eq(&model, &scalar_registry, 8_073, Backend::Scalar);
         let width = BankWidth::for_backend(candidate.artifact.report().rack_cohorts.dispatch);
         let expected_banks = width.map_or(0, |width| 8 / width.lanes() as usize);
@@ -6412,7 +6411,7 @@ mod tests {
         );
 
         let mut untouched =
-            bind_queued_eq(compile_queued_eq(&model, &registry, 8_076, host_dispatch()));
+            bind_queued_eq(compile_queued_eq(&model, registry, 8_076, host_dispatch()));
         let dry_first = render_queued_eq(&mut untouched, 0);
         assert!(
             dry_first
@@ -6527,8 +6526,8 @@ mod tests {
     fn prepared_eq_target_queue_fifo_left_both_left_matches_final_dual_batch() {
         let model = queued_eq_model();
         let registry = launch_native_effect_registry().expect("launch registry");
-        let candidate = compile_queued_eq(&model, &registry, 8_074, host_dispatch());
-        let oracle = compile_queued_eq(&model, &registry, 8_075, host_dispatch());
+        let candidate = compile_queued_eq(&model, registry, 8_074, host_dispatch());
+        let oracle = compile_queued_eq(&model, registry, 8_075, host_dispatch());
         let width = BankWidth::for_backend(candidate.artifact.report().rack_cohorts.dispatch);
         assert_eq!(
             candidate.artifact.graph().prepared_bank_count(),
@@ -6673,7 +6672,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared compressor effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(
@@ -6837,9 +6836,8 @@ mod tests {
             },
         )
         .expect("bypass compressor fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass compressor effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass compressor effects");
         assert!(
             bypass_effects
                 .entries
@@ -6904,7 +6902,7 @@ mod tests {
                 maximum_scratch_bytes: 1 << 20,
                 maximum_automation_spans_per_block: 32,
             };
-            let effects = prepare_native_session_effects(&session, &registry, caps)
+            let effects = prepare_native_session_effects(&session, registry, caps)
                 .expect("prepared mixed effects");
             assert_eq!(
                 effects
@@ -6982,7 +6980,7 @@ mod tests {
                 },
             )
             .expect("mixed bypass fixture");
-            let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
+            let bypass_effects = prepare_native_session_effects(&bypass_session, registry, caps)
                 .expect("prepared mixed bypass effects");
             let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
                 dispatch: host_dispatch(),
@@ -7385,7 +7383,7 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         let Err(failure) = prepare_native_session_effects(
             &session,
-            &registry,
+            registry,
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 20,
                 maximum_scratch_bytes: 1 << 20,
@@ -7479,7 +7477,7 @@ mod tests {
         let bank = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_650,
-            effects: prepare_native_session_effects(&session, &registry, effect_caps)
+            effects: prepare_native_session_effects(&session, registry, effect_caps)
                 .expect("prepared console effects"),
             caps: integration_caps(),
         })
@@ -7493,7 +7491,7 @@ mod tests {
         let scalar_graph = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: Backend::Scalar,
             plan_id: 1_652,
-            effects: prepare_native_session_effects(&session, &registry, effect_caps)
+            effects: prepare_native_session_effects(&session, registry, effect_caps)
                 .expect("prepared Scalar console effects"),
             caps: integration_caps(),
         })
@@ -7668,7 +7666,7 @@ mod tests {
 
         let registry = launch_native_effect_registry().expect("launch registry");
         let compile = |model: &session::SessionModel, plan_id: u64| {
-            compile_console_model_with_builtins(model, plan_id, &[], &registry)
+            compile_console_model_with_builtins(model, plan_id, &[], registry)
         };
 
         let split_artifact = compile(&split, 1_750);
@@ -7890,7 +7888,7 @@ mod tests {
             },
         }];
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, registry);
         let (pcm, transposes, chains, slots, frames, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -7978,7 +7976,7 @@ mod tests {
         sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], registry);
         let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -8047,7 +8045,7 @@ mod tests {
             }
         }
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&model, 2_070, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_070, &[], registry);
 
         // Every builtin bank is class-homogeneous, which is the strip-stage planner's half.
         let mono = |track: &str| {
@@ -8152,8 +8150,8 @@ mod tests {
         let mut odd = uniform.clone();
         odd.tracks[7].right_source_channel = 1;
 
-        let unsplit = compile_console_model_with_builtins(&uniform, 2_074, &[], &registry);
-        let split = compile_console_model_with_builtins(&odd, 2_075, &[], &registry);
+        let unsplit = compile_console_model_with_builtins(&uniform, 2_074, &[], registry);
+        let split = compile_console_model_with_builtins(&odd, 2_075, &[], registry);
         let unsplit_slots = unsplit.graph().prepared_bank_count();
         let split_slots = split.graph().prepared_bank_count();
 
@@ -8398,8 +8396,8 @@ mod tests {
             folded.tracks[index].right_source_channel = 0;
         }
 
-        let stereo_artifact = compile_console_model_with_builtins(&stereo, 2_078, &[], &registry);
-        let folded_artifact = compile_console_model_with_builtins(&folded, 2_079, &[], &registry);
+        let stereo_artifact = compile_console_model_with_builtins(&stereo, 2_078, &[], registry);
+        let folded_artifact = compile_console_model_with_builtins(&folded, 2_079, &[], registry);
         let stereo_banks = stereo_artifact.graph().prepared_bank_count();
         assert_eq!(
             stereo_banks,
@@ -8481,7 +8479,7 @@ mod tests {
             track.inserts.effects.clear();
         }
         let builtins_artifact =
-            compile_console_model_with_builtins(&builtins_only, 2_081, &[], &registry);
+            compile_console_model_with_builtins(&builtins_only, 2_081, &[], registry);
         let mono_builtin_banks = builtins_artifact
             .prepared_builtin_banks()
             .filter(|bank| {
@@ -8553,7 +8551,7 @@ mod tests {
             .step_by(2)
             .map(|index| format!("ch{index:02}"))
             .collect();
-        let artifact = compile_console_model_with_builtins(&model, 2_082, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_082, &[], registry);
         let pooled = pooled_tracks(&artifact);
         assert_eq!(pooled[0], mono, "every mono track stays in the mono pool");
         // simd1: one mono and one stereo cohort (EQ, compressor); simd2: the stereo limiters.
@@ -8608,7 +8606,7 @@ mod tests {
         let mono: BTreeSet<String> = (2 * lanes..2 * lanes + mono_count)
             .map(|index| format!("ch{index:02}"))
             .collect();
-        let artifact = compile_console_model_with_builtins(&model, 2_084, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_084, &[], registry);
         assert_eq!(
             pooled_tracks(&artifact)[0],
             mono,
@@ -8667,7 +8665,7 @@ mod tests {
         let mono: BTreeSet<String> = (stereo..stereo + mono_count)
             .map(|index| format!("ch{index:02}"))
             .collect();
-        let artifact = compile_console_model_with_builtins(&model, 2_095, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_095, &[], registry);
         assert_eq!(
             pooled_tracks(&artifact)[0],
             mono,
@@ -8742,7 +8740,7 @@ mod tests {
             .map(|track| track.id.as_str().to_owned())
             .collect();
         let stranded = name(lanes + 1);
-        let artifact = compile_console_model_with_builtins(&model, 2_086, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_086, &[], registry);
         let pooled = pooled_tracks(&artifact);
         assert_eq!(
             pooled[0],
@@ -8837,7 +8835,7 @@ mod tests {
         place(&mut model, chains);
         let name = |index: usize| format!("ch{index:02}");
         let mono: BTreeSet<String> = (0..=lanes).map(name).collect();
-        let artifact = compile_console_model_with_builtins(&model, 2_088, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_088, &[], registry);
         assert_eq!(
             pooled_tracks(&artifact)[0],
             mono,
@@ -8899,7 +8897,7 @@ mod tests {
         place(&mut model, chains);
         let name = |index: usize| format!("ch{index:02}");
         let mono: BTreeSet<String> = [name(2 * lanes), name(2 * lanes + 1)].into();
-        let artifact = compile_console_model_with_builtins(&model, 2_090, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_090, &[], registry);
         assert_eq!(
             pooled_tracks(&artifact)[0],
             mono,
@@ -8935,13 +8933,13 @@ mod tests {
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+        ) -> Result<effect_contract::PreparedEffect, EffectPrepareError> {
             self.delegate.prepare(request)
         }
         fn bind_homogeneous_bank(
             &self,
             request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<effect_contract::PreparedEffectBank>, EffectPrepareError> {
             let marked = self.marker.is_none_or(|marker| {
                 request.requests.iter().any(|member| {
                     member
@@ -8960,10 +8958,13 @@ mod tests {
             };
             self.live.fetch_add(1, Ordering::SeqCst);
             self.bound.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(Box::new(CountedBank {
-                inner,
-                live: Arc::clone(&self.live),
-            })))
+            Ok(Some(effect_contract::PreparedEffectBank {
+                processor: Box::new(CountedBank {
+                    inner: inner.processor,
+                    live: Arc::clone(&self.live),
+                }),
+                metadata: inner.metadata,
+            }))
         }
     }
 
@@ -8978,9 +8979,6 @@ mod tests {
         }
     }
     impl PreparedNativeEffectBank for CountedBank {
-        fn metadata(&self) -> effect_contract::PreparedBankMetadata {
-            self.inner.metadata()
-        }
         fn reset(&mut self, kind: effect_contract::ResetKind) {
             self.inner.reset(kind);
         }
@@ -9313,7 +9311,7 @@ mod tests {
                     track.right_source_channel = 1;
                 }
             }
-            let artifact = compile_console_model_with_builtins(&model, plan_id, &[], &registry);
+            let artifact = compile_console_model_with_builtins(&model, plan_id, &[], registry);
             let (_, transposes, chains, slots, _, _, fold) =
                 render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
             assert_eq!(chains, 64 / lanes, "{name}: one chain per cohort");
@@ -9377,7 +9375,7 @@ mod tests {
         assert_eq!(model.tracks[0].inserts.effects.len(), leader_slots - 1);
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&model, 2_060, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&model, 2_060, &[], registry);
         // Every bank the plan retained is ascending; the graph would have refused the bind
         // otherwise, and this says so in the planner's own terms rather than as a panic message.
         for bank in artifact.prepared_builtin_banks() {
@@ -9441,7 +9439,7 @@ mod tests {
         place(&mut ragged, chains);
         assert!(ragged.console.slots().next().is_none());
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
         let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
         let (pcm, transposes, chains, slots, _, redirects, _) =
@@ -9703,7 +9701,7 @@ mod tests {
             },
         }];
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, registry);
         let (pcm, transposes, chains, slots, frames, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -9786,7 +9784,7 @@ mod tests {
         sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&sent, 2_070, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&sent, 2_070, &[], registry);
         let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -9847,7 +9845,7 @@ mod tests {
         let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_180, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 2_180, &[], registry);
         let (pcm, transposes, chains, slots, _, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -9871,7 +9869,7 @@ mod tests {
 
         // The fold's own oracle: the same session, bound with the fold declined.
         let unfolded_artifact =
-            compile_console_model_with_builtins(&intended, 2_188, &[], &registry);
+            compile_console_model_with_builtins(&intended, 2_188, &[], registry);
         graph::test_only_set_route_fold_declined(true);
         let (unfolded_pcm, _, _, _, _, _, unfolded_folds) =
             render_console_builtins_blocks(unfolded_artifact, BLOCKS, Vec::new());
@@ -9919,7 +9917,7 @@ mod tests {
         doubled.routes.sort_by(|left, right| left.id.cmp(&right.id));
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&doubled, 2_182, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&doubled, 2_182, &[], registry);
         let (pcm, _, _, _, _, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -9974,7 +9972,7 @@ mod tests {
             },
         }];
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_184, &meters, &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 2_184, &meters, registry);
         graph::test_only_meter_input_reset(false);
         let (pcm, _, _, _, frames, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -10017,7 +10015,7 @@ mod tests {
 
         // The unfolded oracle: the same session and meter, bound with the fold declined.
         let unfolded_artifact =
-            compile_console_model_with_builtins(&intended, 2_189, &meters, &registry);
+            compile_console_model_with_builtins(&intended, 2_189, &meters, registry);
         graph::test_only_set_route_fold_declined(true);
         let (unfolded_pcm, _, _, _, unfolded_frames, _, unfolded_folds) =
             render_console_builtins_blocks(unfolded_artifact, BLOCKS, Vec::new());
@@ -10035,7 +10033,7 @@ mod tests {
 
         // The member-buffer fallback, with the real meter: withdraw the resident offer.
         let withdrawn_artifact =
-            compile_console_model_with_builtins(&intended, 2_190, &meters, &registry);
+            compile_console_model_with_builtins(&intended, 2_190, &meters, registry);
         graph::test_only_meter_input_reset(true);
         let (withdrawn_pcm, _, _, _, withdrawn_frames, _, withdrawn_folds) =
             render_console_builtins_blocks(withdrawn_artifact, BLOCKS, Vec::new());
@@ -10105,7 +10103,7 @@ mod tests {
                             &meters,
                             between_render_calls,
                             dispatch,
-                            &registry,
+                            registry,
                         );
                         graph::test_only_set_bank_sample_peak_declined(declined);
                         builtins::test_only_reset_block_peak_merges();
@@ -10202,8 +10200,7 @@ mod tests {
                 .into_iter()
                 .map(|selected| selected.request)
                 .collect();
-        let artifact =
-            compile_console_model_with_builtins(&intended, 9_440, &all_meters, &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 9_440, &all_meters, registry);
         graph::test_only_set_bank_sample_peak_declined(false);
         builtins::test_only_reset_block_peak_merges();
         let (_, _, _, _, all_frames, _, all_folds) =
@@ -10352,7 +10349,7 @@ mod tests {
                                 &meters,
                                 between_render_calls,
                                 dispatch,
-                                &registry,
+                                registry,
                             );
                             render_full_meter_arm(artifact, BLOCKS, declined, Vec::new())
                         })
@@ -10431,7 +10428,7 @@ mod tests {
             .map(|declined| {
                 plan_id += 1;
                 let artifact =
-                    compile_console_model_with_builtins(&intended, plan_id, &all_meters, &registry);
+                    compile_console_model_with_builtins(&intended, plan_id, &all_meters, registry);
                 render_full_meter_arm(artifact, BLOCKS, declined, Vec::new())
             })
             .collect();
@@ -10486,7 +10483,7 @@ mod tests {
                 .map(|declined| {
                     plan_id += 1;
                     let artifact = compile_console_model_with_selected_meters(
-                        &intended, plan_id, meters, true, host, &registry,
+                        &intended, plan_id, meters, true, host, registry,
                     );
                     render_full_meter_arm(artifact, BLOCKS, declined, Vec::new())
                 })
@@ -10667,7 +10664,7 @@ mod tests {
                             &meters,
                             between_render_calls,
                             dispatch,
-                            &registry,
+                            registry,
                         );
                         render_full_meter_arm(artifact, BLOCKS, declined, Vec::new())
                     })
@@ -10808,7 +10805,7 @@ mod tests {
             // The order the tracks' post-matrix nodes are observed in, from a probe plan.
             plan_id += 1;
             let artifact = compile_console_model_with_selected_meters(
-                &intended, plan_id, &meters, true, dispatch, &registry,
+                &intended, plan_id, &meters, true, dispatch, registry,
             );
             let sequence = Arc::new(AtomicU64::new(0));
             let firsts: Vec<Arc<AtomicU64>> = (0..intended.tracks.len())
@@ -10855,7 +10852,7 @@ mod tests {
             for declined in [false, true] {
                 plan_id += 1;
                 let artifact = compile_console_model_with_selected_meters(
-                    &intended, plan_id, &meters, true, dispatch, &registry,
+                    &intended, plan_id, &meters, true, dispatch, registry,
                 );
                 let envelope = artifact.envelope();
                 let frames = envelope.quantum.0 as usize;
@@ -11005,7 +11002,7 @@ mod tests {
             .sort_by(|left, right| left.id.cmp(&right.id));
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&reversed, 2_186, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&reversed, 2_186, &[], registry);
         let (pcm, _, _, _, _, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -11316,7 +11313,7 @@ mod tests {
             },
         }];
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_120, &meters, &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 2_120, &meters, registry);
         let (pcm, transposes, chains, slots, frames, _, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
@@ -11412,6 +11409,7 @@ mod tests {
                 maximum_peak_hold_frames: u32::MAX,
                 maximum_smoothing_samples: u32::MAX,
             },
+            None,
         )
         .expect("prepared console builtins");
         let registry = launch_native_effect_registry().expect("launch registry");
@@ -11420,7 +11418,7 @@ mod tests {
             plan_id,
             effects: prepare_native_session_effects(
                 &session,
-                &registry,
+                registry,
                 EffectCompileCaps {
                     maximum_total_state_bytes: 1 << 22,
                     maximum_scratch_bytes: 1 << 20,
@@ -11526,7 +11524,7 @@ mod tests {
             plan_id,
             meters,
             Backend::Scalar,
-            &launch_native_effect_registry().expect("launch registry"),
+            launch_native_effect_registry().expect("launch registry"),
         )
         .unwrap_or_else(|diagnostics| panic!("the Scalar oracle compiles: {diagnostics:?}"))
     }
@@ -12009,7 +12007,7 @@ mod tests {
         let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_020, &[], &registry);
+        let artifact = compile_console_model_with_builtins(&intended, 2_020, &[], registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
         let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
         assert_eq!(
@@ -12159,7 +12157,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared gate/expander effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
@@ -12324,9 +12322,8 @@ mod tests {
             },
         )
         .expect("compiled bypass gate/expander fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass gate/expander effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass gate/expander effects");
         assert!(
             bypass_effects
                 .entries
@@ -12375,7 +12372,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared bank-capable limiter effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
@@ -12384,7 +12381,7 @@ mod tests {
         }));
         // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
         // is the test-only `Scalar` oracle, where nothing banks.
-        let scalar_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let scalar_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared scalar limiter effects");
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
@@ -12674,9 +12671,8 @@ mod tests {
             },
         )
         .expect("compiled bypass limiter fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass limiter effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass limiter effects");
         assert!(
             bypass_effects
                 .entries
@@ -12719,7 +12715,7 @@ mod tests {
                 && route.destination_arrival == LatencySamples(486)
         }));
 
-        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared limiter effects for transactional cap");
         let mut constrained_caps = integration_caps();
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
@@ -12789,7 +12785,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared bank-capable multiband effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
@@ -13043,9 +13039,8 @@ mod tests {
             },
         )
         .expect("compiled bypass multiband fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass multiband effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass multiband effects");
         let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_082,
@@ -13077,7 +13072,7 @@ mod tests {
                 && route.destination_arrival == LatencySamples(0)
         }));
 
-        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared multiband effects for transactional cap");
         let mut constrained_caps = integration_caps();
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
@@ -13143,7 +13138,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared bank-capable soft-clip effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
@@ -13153,7 +13148,7 @@ mod tests {
         }));
         // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
         // is the test-only `Scalar` oracle, where nothing banks.
-        let scalar_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let scalar_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared scalar soft-clip effects");
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
@@ -13408,9 +13403,8 @@ mod tests {
             },
         )
         .expect("compiled bypass soft-clip fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass soft-clip effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass soft-clip effects");
         assert!(bypass_effects.entries.iter().all(|entry| {
             entry.metadata.latency == LatencySamples(31)
                 && entry.metadata.tail == TailSamples::Finite(29)
@@ -13446,7 +13440,7 @@ mod tests {
                 && route.destination_arrival == LatencySamples(31)
         }));
 
-        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared soft-clip effects for transactional cap");
         let mut constrained_caps = integration_caps();
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
@@ -13510,7 +13504,7 @@ mod tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared bank-capable transient-shaper effects");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
@@ -13520,7 +13514,7 @@ mod tests {
         }));
         // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
         // is the test-only `Scalar` oracle, where nothing banks.
-        let scalar_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let scalar_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared scalar transient-shaper effects");
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
@@ -13753,9 +13747,8 @@ mod tests {
             },
         )
         .expect("compiled bypass transient-shaper fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass transient-shaper effects");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass transient-shaper effects");
         let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_122,
@@ -13789,7 +13782,7 @@ mod tests {
                 && route.destination_arrival == LatencySamples(0)
         }));
 
-        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared transient-shaper effects for transactional cap");
         let mut constrained_caps = integration_caps();
         constrained_caps.maximum_plan_bytes = minimum_plan_bytes
@@ -13854,9 +13847,9 @@ mod tests {
             maximum_scratch_bytes: 36,
             maximum_automation_spans_per_block: 32,
         };
-        let effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared delay effects");
-        let mut direct = prepare_native_session_effects(&session, &registry, effect_caps)
+        let mut direct = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared direct scalar delays");
         assert_eq!(effects.entries.len(), 10);
         assert!(effects.entries.iter().all(|entry| {
@@ -14103,9 +14096,8 @@ mod tests {
             },
         )
         .expect("compiled bypass delay fixture");
-        let bypass_effects =
-            prepare_native_session_effects(&bypass_session, &registry, effect_caps)
-                .expect("prepared bypass delays");
+        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
+            .expect("prepared bypass delays");
         let bypass = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_131,
@@ -14122,7 +14114,7 @@ mod tests {
             expected_canonical
         );
 
-        let cap_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared delay effects for transactional cap");
         let mut constrained = integration_caps();
         constrained.maximum_plan_bytes = minimum_plan_bytes

@@ -4908,11 +4908,15 @@ impl RuntimeParts {
                             .map(|observation| *observation)
                     })
                     .collect();
+                let prepared = effect_contract::PreparedEffectBank {
+                    processor: bank.processor,
+                    metadata: bank.metadata,
+                };
                 if controls.iter().any(Option::is_some) {
-                    let latency = usize::try_from(bank.processor.metadata().program_key.latency.0)
+                    let latency = usize::try_from(prepared.metadata.program_key.latency.0)
                         .unwrap_or(usize::MAX);
                     let stage = LiveControlEffectBankStage::new(
-                        bank.processor,
+                        prepared,
                         width,
                         quantum,
                         controls,
@@ -4923,7 +4927,7 @@ impl RuntimeParts {
                     return (bank.scratch, bank.active_mask, Box::new(stage));
                 }
                 let stage =
-                    EffectBankStage::new(bank.processor, width, quantum).expect("validated width");
+                    EffectBankStage::new(prepared, width, quantum).expect("validated width");
                 (bank.scratch, bank.active_mask, Box::new(stage))
             }
             Membership::Builtin(index) => {

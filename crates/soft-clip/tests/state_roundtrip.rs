@@ -533,7 +533,8 @@ fn both_resets_are_word_exact() {
 
     let mut discontinuity = SoftClipFactory
         .prepare(support::request(&values))
-        .expect("prepare");
+        .expect("prepare")
+        .processor;
     let payload = support::snapshot(effect.as_ref());
     discontinuity
         .restore_state_payload(1, as_input(&payload))

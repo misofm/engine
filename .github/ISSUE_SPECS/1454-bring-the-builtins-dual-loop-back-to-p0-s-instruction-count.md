@@ -198,6 +198,269 @@ Made by the decision-15 root coordinator under the owner's no-shortcuts delegati
   slot. If no lane-kernel shape changes TurboFan's choice, the attempt record gives the evidence
   and the rows stay as measured.
 
+## Amendment 2 (root rulings, 2026-10-06, after attempt 1)
+
+Made by the decision-15 root coordinator on attempt 1 (`a249b3cc1`).
+
+- **B1. Gate 2 accepted as host noise.** Round 2 meets the gate on every row; round 1's three
+  misses fall in a round where base was also +5.6 % to +9.4 % over P0 on the 64-track rows and
+  head was at or below base on every 64-track row in both rounds, at a host load of 4.2 to 5.4.
+  The codegen (196 / 3 / 11 against P0's 196 / 3 / 12, `simd128` -529) is the primary evidence.
+  The benchmark is not re-run.
+- **B2. Authorized paths widened.** `svf_cascade_interleaved_form` and `svf_cascade_skewed_form`
+  in `crates/lane/src/kernels.rs`, for this issue's goal (the loops' instruction count, A1's
+  constant rebuild in the EQ rows), in one fold-in commit under the same verdict. The false
+  comment that the interleaved loop carries no per-frame bounds branch is fixed. If stopping the
+  dual tail's rebuild needs more than these two functions, the remaining cause is recorded and a
+  successor issue is filed.
+
 ## Attempt record
 
-None yet.
+### Attempt 1 (2026-10-06)
+
+Base `f3956e63c` (stream G2 tip, #1461 on #1451/#1452). One code change,
+`crates/lane/src/kernels/builtins.rs`. Scratch tools and logs under the session scratchpad
+`w1454/` (not committed).
+
+**D1, cause.** In the shipped `simd128` module of the base, LLVM kept `core`'s
+`ZipImpl::new` for two `ChunksExactMut<f32>` out of line (one 58-instruction function, five calls
+in `InputStage<f32x4>::process`; P0 inlines every one), so each of those dual frame loops reads its
+chunk size and frame addresses back from linear memory, which costs a per-frame bounds branch to
+`slice_index_fail` and the reload of every section coefficient on every frame, because the frame
+pointers loaded from memory cannot be told apart from the coefficients. Evidence, base against P0:
+
+- `wasm2wat` of the stationary unarmed dual loop: base 24 `v128.load` (22 coefficient loads at
+  `offset=1664..2032` from the coefficient pointer), 3 `br_if`, 1 `call` (`slice_index_fail`),
+  stride `local.get 30`/`31` read from the stored iterator (`i32.load offset=16`); P0 2
+  `v128.load`, 1 `br_if`, no call, coefficients in locals before the loop. The same outlined
+  call precedes four more dual loops in the function: the stationary body's second inlined copy
+  (unarmed and armed), the identity chain, and one copy of the trim-ramp body (unarmed).
+- TurboFan (`--no-liftoff`, the spill gate's `analyse`): base 222 instructions / 5 blocks /
+  16 carried slots, P0 196 / 3 / 12. The base loop's `testl r14,r14; jz` and `cmpl rbx,0x4; jc`
+  are the stored chunk-size checks, its 22 `vmovdqu xmm,[rdx+0x6..0x8..]` the coefficient loads.
+- The three `v128.const` rebuilt in the base loop (`NONFINITE_LIMIT`, `1.0`, `FLUSH_EPS`, each
+  `movq`+`vmovq`+`vpunpcklqdq`) sit after the bounds branch. LLVM emits the constants inside the
+  loop in P0, base and head alike (3, 4, 3 `v128.const`); TurboFan hoists them only in a loop with
+  no early exit (P0, head). That V8's scheduler hoists a node only from a block that dominates
+  every loop exit is inferred from these listings and the experiment below, not read in V8's
+  source.
+
+**A1 (the EQ held rows).** The four held rows' `FLUSH_EPS` rebuild has the same shape: the dual
+depth-1 tail (110) and the mono depth-1 tail (52) rebuild `NONFINITE_LIMIT` and `FLUSH_EPS` per
+frame after an early loop exit, the per-frame bounds branch of `io[stream][base..base + width]`
+in `svf_cascade_interleaved_form` (`crates/lane/src/kernels.rs`), which the code comment there
+says is absent. That function is not an Authorized path, so this attempt does not change it.
+Experiment only (reverted, not committed): the interleaved form rewritten to split its planes
+(the `FramePairs` shape) gives dual tail 110 -> 107, mono tail 52 -> 43 (no constant rebuilt),
+dual pair (reported) 187 / 10 slots -> 172 / 6, mono pair 79 -> 81, dual armed tail 128 / 2 ->
+129 / 1, dual armed pair 219 / 12 -> 221 / 11, mono armed pair 92 -> 96, mono armed tail 58 -> 60,
+masked rows 86 -> 86 and 102 -> 103, every held row clean; the dual tail still rebuilds both
+constants (one early exit remains). **For root:** the EQ rows need a change to
+`svf_cascade_interleaved_form` (and, for the pairs, `svf_cascade_skewed_form`), outside this
+spec's Authorized paths. The rows stay as measured: head equals base on every row.
+
+**D2, the change (`crates/lane/src/kernels/builtins.rs`).** A private iterator `FramePairs`
+replaces `left.chunks_exact_mut(W).zip(right.chunks_exact_mut(W))` in every dual input-chain
+frame loop of the module: `input_chain_block_body`, `identity_chain_block` (the two stationary
+bodies), `input_chain_ramp_block_body`, `identity_chain_ramp_block` and
+`input_chain_ramp_block_filter_body` (the ramp bodies, where D1 found the same outlined call). It
+cuts both planes to their common length once and splits one frame off each per step with
+`#[inline(always)]` code, so the frames are the zip's and no bit can move; its doc states why. No
+`cfg`, no `#[inline(never)]`, the #1328 law (two forms, arming, counter, joint flush) untouched.
+The mono bodies iterate one plane and have no outlined call; the matrix and gain kernels are not
+input-chain loops and are unchanged.
+
+**Gate 1, no bit moved.** The #1451 harness (`bitid2.rs`), adapted to #1461's
+`PreparedEffect { processor, metadata }` and #1452's filter-ramp signature, plus a superset of 160
+scenarios (entries 4 and 5: the all-identity plan, stationary and ramping, which reach
+`identity_chain_block` and `identity_chain_ramp_block`): **1068 of 1068 identical** base vs head;
+the base's first 908 lines equal #1451's `bitid2-head-final.txt`. Sensitivity: `FramePairs::new`
+cutting one frame short moves 200 of 1068 (every dual line of entries 0, 1, 2, 4, 5; the mixed plan,
+entry 3, does not use it); reverted, identical. Pinned artifacts: `g5_native_digests_match_pins` (in `run-wasm-gates.sh` and the release `wasm-gates` tests), `BUILTINS_DIGESTS`, `E9_DIGESTS` and multiband `DIGESTS` (in the gate-5 test runs), `conformance_fixtures --check`, `check-builtins-fixtures.sh` and `check-graph-determinism.sh` all pass. AArch64 legs: CI only, not run.
+
+**Gate 2, browser cost: MISS in round 1, met in round 2.** `web-mixing-automation-benchmark.mjs run`, controls
+`scratchpad/bench-controls.json` (#1451's), modules frozen: P0 `1968517e...` (#1451's), base
+`aa991860...`, head `1ce4a5b4...`; one warmup and two measured rounds each, interleaved (p0, base,
+head warmups; p0 1, base 1, head 1, head 2, base 2, p0 2), `taskset -c 31`, `node --no-liftoff`,
+load 5.35 -> 4.21 on 32 threads (about twice #1451's); one invocation, not retried. Every output
+digest equal across all six measured runs, on every arm and document.
+
+| p50 | P0 r1 / r2 (ns) | base vs P0 | head vs P0 | head vs base |
+|---|---|---|---|---|
+| mono console, quiet | 151,168 / 151,038 | +2.4 % / -1.2 % | **+2.4 %** / -0.8 % | -0.1 % / +0.4 % |
+| mono console, restated | 154,124 / 153,843 | -1.1 % / -1.6 % | -0.8 % / -1.3 % | +0.3 % / +0.3 % |
+| mono console, automated | 159,404 / 157,489 | -1.9 % / -1.4 % | -1.7 % / -0.9 % | +0.2 % / +0.5 % |
+| sixty-four-track console | 234,547 / 236,650 | +8.5 % / +0.6 % | **+7.4 %** / -0.7 % | -1.0 % / -1.2 % |
+| app shape | 149,435 / 147,822 | +9.4 % / +2.6 % | +0.8 % / +1.2 % | -7.9 % / -1.3 % |
+| bus-and-send console | 340,768 / 339,807 | +5.6 % / +1.1 % | **+5.3 %** / +0.3 % | -0.3 % / -0.7 % |
+
+Round 2 meets the gate on every row (head within -1.3 % .. +1.2 % of P0). Round 1 misses it on
+three rows; in that round base is also +5.6 % to +9.4 % over P0 on the 64-track documents, against
++2.4 % to +3.9 % in #1451's quieter run, and head is at or below base on every 64-track row in both
+rounds. So round 1 reads as host noise on CPU 31 during the base and head round-1 runs, but by the
+gate's own rule it is a miss: reported, not re-run; root decides. **Root ruling (2026-10-06, Amendment 2 B1): accepted as host noise; not re-run.**
+
+**Gate 3, codegen.** TurboFan, `InputStage<f32x4>::process`, every dual loop, in V8's listing
+order (the function inlines each body twice; instructions / blocks / carried slots), P0's
+stationary loop 196 / 3 / 12:
+
+| loop | base | head |
+|---|---|---|
+| stationary, first copy, unarmed (the builtins dual loop) | 222 / 5 / 16 | **196 / 3 / 11** |
+| stationary, first copy, armed | 239 / 3 / 16 | 242 / 3 / 16 |
+| stationary, second copy, unarmed | 222 / 5 / 16 | 194 / 3 / 11 |
+| stationary, second copy, armed | 259 / 5 / 18 | 238 / 3 / 16 |
+| trim ramp, first copy, unarmed | 245 / 3 / 18 | 246 / 3 / 18 |
+| trim ramp, first copy, armed | 289 / 3 / 22 | 290 / 3 / 22 |
+| trim ramp, second copy, unarmed | 262 / 5 / 20 | 244 / 3 / 18 |
+| trim ramp, second copy, armed | 287 / 3 / 22 | 288 / 3 / 22 |
+
+The head's stationary unarmed loop has P0's op histogram except the exit (52 / 50 stack `vmovups`,
+4 / 4 `vmovdqu`, no `v128.const` rebuilt, no bounds branch; P0 counts down `addl rsi,0xff; jnz`,
+head compares the remaining length `cmpl rdx,0x3; ja`). Named increases: the armed stationary loop
++3 and the three ramp loops that already inlined the zip +1 each; no slot gained anywhere. The
+A1 rows: unchanged, head equals base on all ten (`run-wasm-gates.sh` exits 0; dual depth-1 tail 110, dual pair 187 / 10 slots, mono pair 79, mono tail 52, every held row clean, armed rows at their ceilings or below), the D1 and A1 notes above give why. `simd128` (`wasm-objdump -d`, every instruction): module -529;
+`InputStage<f32x4>::process` 15,876 -> 15,405, the outlined `ZipImpl::new` (58) gone; no other
+function changes. x86-64-v3 (`cargo rustc --release -p builtins --lib --emit asm`, instruction
+lines): `InputStage<f32>::process` 8,168 -> 8,034, `<f32x4>` 7,805 -> 7,691, `<f32x8>` 7,357 ->
+7,056; no other function changes.
+
+**Gate 4.** `check-cross-targets.sh` passes; `builtins` 5 `memset_pattern16` calls, within its #1018 row.
+
+**Gate 5.** Pass: the DSP-crate `cargo test` with the spec features (441 passed), the release `lane`/`math`/`wasm-gates` tests, `test-debug-a` (1,453 passed), the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`), lane, builtins, workspace and realtime policies, `cargo doc` with `-D warnings`, clippy, fmt. `check-lane-policy.sh` first refused `left.len().min(right.len())` (D8 float-method rule); the span now uses `core::cmp::min`, the lane policy passes, the lane tests pass again (84), and the gated module's code is instruction-identical to the timed head (`wasm-objdump -d` equal; one data byte differs, a source-location string).
+
+**Test value.** No test added, rewritten or deleted.
+
+### Attempt 1, fold-in under Amendment 2 B2 (2026-10-06)
+
+Base `235b5fe4c` (attempt 1 plus #1462 and two spec commits; module `b387e216...`, its EQ rows
+equal attempt 1's base). One change, `crates/lane/src/kernels.rs`.
+
+**The change.** `svf_cascade_interleaved_form` walks its planes by splitting one frame off the
+front of each per step (`next_frame_mut`, `next_frame`) under one exit test, `frames_left`, in
+place of indexing `io[stream][base..base + width]` and `rest[stream][base..base + width]`. LLVM
+cannot prove `frame * width + width <= frames * width`, so the indexed loop kept a bounds branch
+per frame, an early exit before the uses of the loop's `v128.const`s, and TurboFan rebuilt
+`FLUSH_EPS` and `NONFINITE_LIMIT` per frame in both depth-one tails. The false comment ("carry no
+per-frame bounds branch") is gone; `frames_left`'s doc gives the reason for the shape.
+
+**`svf_cascade_skewed_form` is not changed, by evidence.** Its steady-state loop rewritten the same
+way (frame windows whose front is frame `i - (D - 1)`, constant offsets per section, one exit
+test; scratch diff `w1454/e2-skewed.diff`) gave dual pair 179 / 3 blocks / 10 slots and dual armed
+pair 212 / 11, but LLVM then unrolled the unarmed mono pair by two (a 142-instruction loop of 4
+SVF steps and 2 stores: the held mono-pair, mono-tail and masked-pair rows found no loop of their
+shape and failed closed) and V8 gave the armed mono pair a carried slot (`[rbp-0x1c0]`, ceiling
+0) and the armed masked mono pair another (`[rbp-0x170]`). Reverted. The pairs never rebuilt a
+constant, so A1 needs no change there; their per-step bounds branches stay, and the comment in
+the function now says so. No successor is filed: the dual tail's rebuild is gone with the
+interleaved form alone.
+
+**Gate 1.** The attempt-1 harness (adapted again for #1462's `PrepareEffectRequest::tail_bound`,
+from `conformance::tail_bound_for_request`): **1068 of 1068 identical** base vs head, and the base
+output equals attempt 1's base output. Sensitivity: `frames_left` asking for two frames (the loop
+stops one frame early) moves 141 lines (60 `eq_bank`, 81 `eq_scalar`); reverted, identical.
+
+**Gate 3, the V8 rows** (`run-wasm-gates.sh`; instructions / carried slots; every held row clean,
+no slot gained):
+
+| row | base | head |
+|---|---|---|
+| dual depth-1 tail (held, A1) | 110 / 0 (4 blocks) | **101 / 0** (3 blocks), no constant rebuilt |
+| dual depth-2 pair (reported, A1) | 187 / 10 | 181 / 10 |
+| mono depth-2 pair (held, A1) | 79 / 0 | 80 / 0 |
+| mono depth-1 tail (held, A1) | 52 / 0 (4 blocks) | **43 / 0** (3 blocks), no constant rebuilt |
+| mono depth-2 pair, masked (held) | 86 / 0 | 86 / 0 |
+| dual armed depth-1 tail (ceiling 2) | 128 / 2 | 118 / 1 |
+| dual armed depth-2 pair (ceiling 12) | 219 / 12 | 223 / 12 |
+| mono armed depth-2 pair (ceiling 0) | 92 / 0 | 95 / 0 |
+| mono armed depth-1 tail (ceiling 0) | 58 / 0 | 51 / 0 |
+| mono armed depth-2 pair, masked (ceiling 0) | 102 / 0 | 102 / 0 |
+
+Named increases: mono pair +1, dual armed pair +4, mono armed pair +3. The dual armed tail now
+carries 1 slot under its ceiling of 2; the gate prints "lower its ceiling", which is the spill
+gate's file and not changed here.
+
+**Whole-function counts.** `simd128` (`wasm-objdump -d`): module +135. EQ
+`PreparedNativeEffect::process` (scalar) 13,648 -> 13,600, `process_bank` 15,012 -> 15,009,
+`process_bank_mono` 8,751 -> 8,705. **Named increase:** four `core::array::try_from_fn`
+instantiations (two over `[SvfCoef<f32x4>; _]`, 52 instructions each, two over
+`[SvfState<f32x4>; _]`, 64 each) are now out of line, called once each from `parametric_eq`'s
+`interleave` closures (`UnarmedRest`) per block, outside the frame loops: an inlining decision in
+`process_bank`, not in the changed function. Writing `frames_left` without iterator closures
+leaves them out of line too (module +141). x86-64-v3 (`cargo rustc --release -p parametric-eq --lib
+--emit asm`): `process` (scalar) 6,579 -> 6,570, `process_bank<f32x8>` 7,496 -> 7,498 (+2),
+`process_bank_mono<f32x8>` 4,580 -> 4,622 (**+42**, named, not analysed further); no other
+function changes.
+
+**Gates.** Pass, on the final tree: the DSP-crate `cargo test` with the spec features (441
+passed), the release `lane`/`math`/`wasm-gates` tests, `test-debug-a` (1,458 passed),
+`conformance_fixtures --check`, `check-builtins-fixtures.sh`, `check-graph-determinism.sh`, the
+worklet chain (build `--named-twin`, check, expected resources, test), `run-wasm-gates.sh` (rows
+as above), `check-cross-targets.sh` (`builtins` 5 calls, within its row; `parametric-eq` within
+its row), lane, builtins, workspace and realtime policies, `cargo doc` with `-D warnings`, clippy,
+fmt. AArch64 legs: CI only, not run.
+
+**Test value.** No test added, rewritten or deleted.
+
+### Batch follow-ups (stream G2 part 1, after the attempt-1 PASS)
+
+From `/home/bl/misofm/submix-verdicts/1454-attempt1.md`.
+
+- **MINOR 1 (root authorized `scripts/check-web-audioworklet-v8-spill.py`).** The dual armed
+  depth-1 tail's ceiling falls from 2 to 1, its row now says why, and the docstring's ceiling
+  sentence reads "dual tail 1, one general-purpose word" and records the fall. `run-wasm-gates.sh`
+  passes at 1 (the row reports 1 carried slot) and no longer prints "lower its ceiling" for it.
+  The dual armed depth-2 pair, not in this item, now reports 11 slots under its ceiling of 12 and
+  prints "lower its ceiling" (open item for root).
+- **MINOR 2, the x86 increase analysed.** `process_bank_mono<f32x8>` +42 (4,580 -> 4,622) is
+  static code, not per-frame cost on a real path. With the `while frames_left` loop LLVM no longer
+  reduces `svf_cascade_skewed_impl`'s `frames < D` fallback (the interleaved form at `D = 2`, at
+  most one frame) to straight-line code: head keeps it as four innermost loops of 55, 62, 63 and
+  67 instructions (about +247), offset by code that shrinks elsewhere in the function. The skewed
+  steady-state pair loops change by -2..+2 per frame (unarmed 60 -> 58, masked 62 -> 64, armed
+  72 -> 73, armed masked 75 -> 77); the depth-1 tails by -1..+3 (35 -> 36, 37 -> 40, 41 -> 40,
+  44 -> 44), and the unarmed tail loses its three `64(%rsp)` stack loads. x86-64-v3 is a benchmark
+  proxy, not a shipping target.
+- **MINOR 2, the simd128 frequency corrected.** The four out-of-line `core::array::try_from_fn`
+  instantiations are called from the dual `process_bank`'s `UnarmedRest` `interleave` inside
+  `for pass in 0..pairs` (`crates/parametric-eq/src/lib.rs:2616-2625`): once each per depth-2
+  pass, up to three passes per block (`EQ_SECTION_COUNT = 6`), so about twelve calls per block,
+  not "once each per block". Still a per-block cost, small beside the dual pair loop's -6
+  instructions per frame per pass and the dual tail's -9 per frame.
+- **NIT 1.** The attempt-1 TurboFan table omits the four dual identity-chain loops of
+  `InputStage<f32x4>::process` that FramePairs also changed (`identity_chain_block`,
+  `identity_chain_ramp_block` and two inlined copies): 40 -> 41, 86 -> 87, 51 -> 39, 84 -> 85
+  instructions, slots unchanged (0 -> 0, 6 -> 6).
+- **NIT 2.** Two V8 changes outside the rows: the held mono depth-2 pair (live audio) goes 79 ->
+  80 instructions and its loop-invariant stack reloads 10 -> 13 per frame, with no carried slot;
+  the unheld dual masked armed depth-2 pair (silent tails only, not a row) goes 14 -> 15 carried
+  slots.
+- **NIT 3.** `frames_left`'s doc (`crates/lane/src/kernels.rs`) now names the loops'
+  functions, `svf_cascade_interleaved_form` and `svf_cascade_skewed_form`, not the `_impl`
+  dispatchers.
+- **Tests.** None added, rewritten or deleted (a ceiling and doc text only).
+- **Gates.** All pass on the follow-up tree (x86_64): fmt; workspace clippy `-D warnings` with and
+  without `--all-features`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+  --exclude gate-expander` (gate-expander's own doc failure is part 2's);
+  `check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-effect-runtime-policy.sh`;
+  test-debug-a 1,462 passed, 0 failed; test-debug-b 890 passed, 0 failed; `conformance_fixtures
+  --check`; release `lane`/`math`/`wasm-gates` (G5 `g5_native_digests_match_pins`) 123 passed;
+  `run-wasm-gates.sh` (native 144 cases, wasm simd128 144 cases, 0 mismatches; V8 spill ok);
+  `check-cross-targets.sh` PASS (known-defect rows unchanged: builtins 5, host-core 4, soft-clip 1);
+  the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+  `test-web-audioworklet.sh` with a private TMPDIR left empty, the V8 spill gate on the named twin):
+  all pass. AArch64: CI only.
+
+### Batch follow-ups, part 2 (stream G2, 2026-10-07; root-authorized)
+
+- **The dual armed depth-2 pair's V8 ceiling falls from 12 to 11** (part 1's open item; root
+  authorized `scripts/check-web-audioworklet-v8-spill.py`). The row's comment says why (the
+  interleaved form's `frames_left` loop gave back the slot #1451's splatted `FLUSH_EPS` had added),
+  and the docstring's ceiling sentence and table now say dual pair 11. The docstring table's dual
+  armed depth-1 tail cell, still "ceiling 2" after part 1, now says 1 (the row was already 1).
+- Evidence: `bash scripts/run-wasm-gates.sh` rc 0; the row reports "ok dual armed depth-2 pair,
+  select-free (reported, ceiling 11): 223 instructions in 5 blocks ... 11 carried slots" and no
+  longer prints "lower its ceiling". Discrimination (spill script alone on the same named twin):
+  ceiling 10: FAIL ("11 carried slots ... above the row's ceiling of 10"), rc 1; restored to 11:
+  rc 0. No test added or changed.

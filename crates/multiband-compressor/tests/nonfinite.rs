@@ -12,13 +12,14 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, LinkMode, NativeEffectFactory,
-    PreparedNativeEffect,
+    PreparedEffect,
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{request_with, snapshot, varied_values};
 
 const FRAMES: usize = 128;
-fn prepared() -> Box<dyn PreparedNativeEffect> {
+/// A freshly prepared effect: its processor and the metadata its preparation returned.
+fn prepared() -> PreparedEffect {
     let initial = varied_values(1);
     MultibandCompressorFactory
         .prepare(request_with(
@@ -33,7 +34,7 @@ fn prepared() -> Box<dyn PreparedNativeEffect> {
 /// Runs `blocks` blocks of the seeded signal, injecting `injected` at absolute sample `at`, and
 /// returns the rendered PCM together with the per-block recovery counts.
 fn run(injected: Option<(usize, f32)>, blocks: usize) -> (Vec<f32>, Vec<u64>) {
-    let mut effect = prepared();
+    let mut effect = prepared().processor;
     let mut left = support::signal(blocks * FRAMES, 0x0101_0101);
     let mut right = support::signal(blocks * FRAMES, 0x0202_0202);
     if let Some((at, value)) = injected {
@@ -101,8 +102,10 @@ fn a_nonfinite_block_is_zeroed_reset_and_counted() {
 #[test]
 fn recovery_restores_a_fresh_instance() {
     const BLOCKS: usize = 12;
-    let mut faulted = prepared();
-    let mut fresh = prepared();
+    let mut faulted = prepared().processor;
+    let fresh = prepared();
+    let sizes = fresh.metadata.state_sizes;
+    let mut fresh = fresh.processor;
     let mut left = support::signal(BLOCKS * FRAMES, 0x0505_0505);
     let mut right = support::signal(BLOCKS * FRAMES, 0x0606_0606);
     left[37] = f32::NAN;
@@ -122,8 +125,8 @@ fn recovery_restores_a_fresh_instance() {
         );
     }
     assert_eq!(
-        snapshot(faulted.as_ref()),
-        snapshot(fresh.as_ref()),
+        snapshot(faulted.as_ref(), sizes),
+        snapshot(fresh.as_ref(), sizes),
         "the reset must leave exactly a prepared instance"
     );
 
@@ -168,7 +171,7 @@ fn recovery_restores_a_fresh_instance() {
 #[test]
 fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
     const BLOCKS: usize = 12;
-    let mut effect = prepared();
+    let mut effect = prepared().processor;
     let mut left = vec![1.0e29f32; BLOCKS * FRAMES];
     let mut right = vec![1.0e29f32; BLOCKS * FRAMES];
     for block in 0..BLOCKS {
@@ -198,7 +201,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
         .iter()
         .map(|set| request_with(set, LinkMode::DualMono, FRAMES as u32, false))
         .collect::<Vec<_>>();
-    let mut bank = support::bank(width, &requests);
+    let mut bank = support::bank(width, &requests).processor;
     let mut left = support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222);
     let mut right = support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444);
     let offsets = vec![0u32; lanes + 1];

@@ -3,8 +3,9 @@ use effect_contract::{
     AutomationRate, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectQuality,
     InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry, ObservationLane,
     ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedEffectMetadata, PreparedNativeEffect, PreparedPorts,
-    PreparedSidechainPort, RegistryError, expected_prepared_metadata,
+    PrepareEffectRequest, PreparedEffect, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedPorts, PreparedSidechainPort, RegisteredTailBound, RegistryError,
+    expected_prepared_metadata,
 };
 use engine::realtime::{
     ObservationReader, Producer, QueueFull, QueueGeneration, bounded_spsc, observation_slot,
@@ -15,7 +16,7 @@ use session::{
     SidechainDeclaration,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::control::{EffectControlOwner, EffectControlOwnerError, EffectControlResourceError};
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
@@ -84,6 +85,9 @@ pub struct EffectBankPreparation {
     pub ports: PreparedPorts,
     pub initial_values: Box<[InitialParameterValue]>,
     pub limits: PrepareEffectLimits,
+    /// The registry's tail-bound entry for this rate and quality (issue #1462 D1), read once
+    /// here and replayed into every request, so binding a bank never evaluates the descriptor.
+    pub tail_bound: RegisteredTailBound,
 }
 
 impl EffectBankPreparation {
@@ -98,6 +102,7 @@ impl EffectBankPreparation {
             ports: self.ports,
             initial_values: &self.initial_values,
             limits: self.limits,
+            tail_bound: self.tail_bound,
         }
     }
 }
@@ -196,11 +201,55 @@ pub struct EffectPreparedSession {
     pub entries: Vec<EffectPreparedEntry>,
 }
 
-/// Construct the caller-injected native registry for the V1 launch effect set.
+/// The launch native-effect registry, with its tail-bound table (issue #1469, root ruling R2).
 ///
-/// Registry construction is control-plane work. Callers retain and inject the immutable registry
-/// into [`prepare_native_session_effects`]; there is no render-reachable global catalog.
-pub fn launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
+/// The registry is a process-lifetime, control-plane-only value: it is built once, on the first
+/// call (the first session preparation, live classification or response preview of the process,
+/// or of the module instance in the browser), and every later call returns the same immutable
+/// registry. No render path reaches it. Session preparation, live classification and the
+/// response preview read it here and inject it into [`prepare_native_session_effects`] and its
+/// peers; prepared plans keep their own clones of the factories they use.
+///
+/// A concurrent first call on another control thread waits for the one build and then reads the
+/// same value. A failed build is cached as well and is permanent for the process: the registry's
+/// inputs are compiled in, so a retry cannot succeed, and every call returns a clone of the same
+/// [`RegistryError`].
+pub fn launch_native_effect_registry() -> Result<&'static NativeEffectRegistry, RegistryError> {
+    LAUNCH_NATIVE_EFFECT_REGISTRY
+        .get_or_init(build_launch_native_effect_registry)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// The one launch registry of the process (issue #1469 D1). Filled at most once, off render.
+static LAUNCH_NATIVE_EFFECT_REGISTRY: OnceLock<Result<NativeEffectRegistry, RegistryError>> =
+    OnceLock::new();
+
+/// Whether `factory` is the launch registry's own factory allocation (issue #1469 Amendment 1).
+///
+/// The process-lifetime registry owns that allocation, so a plan's clone of it allocates nothing
+/// and no plan is charged for it; the registry's bytes are process-level. Reads the registry only
+/// if it is already built: before the first build no factory can be the registry's, and this
+/// never builds it. Control thread only; it clones and drops one `Arc` (no allocation).
+#[must_use]
+pub fn launch_registry_owns_factory(factory: &Arc<dyn NativeEffectFactory>) -> bool {
+    let Some(Ok(registry)) = LAUNCH_NATIVE_EFFECT_REGISTRY.get() else {
+        return false;
+    };
+    registry
+        .get_shared_ascii(factory.descriptor().id.as_str())
+        .is_some_and(|shared| Arc::ptr_eq(&shared, factory))
+}
+
+// Issue #1469 D4: shared reads from several control threads need a `Send + Sync` registry.
+const _: () = {
+    const fn shared_across_threads<T: Send + Sync>() {}
+    shared_across_threads::<NativeEffectRegistry>();
+    shared_across_threads::<RegistryError>();
+};
+
+/// The eight launch factories, in registry order. Called only by the static's one build.
+fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
     NativeEffectRegistry::new([
         Box::new(parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
         Box::new(compressor::CompressorFactory) as Box<dyn NativeEffectFactory>,
@@ -451,15 +500,20 @@ fn prepare_with_console_eligibility(
                     });
                     continue;
                 }
-                if !descriptor.qualities.iter().any(|item| {
-                    item.quality == quality && item.sample_rate == session.sample_rate().0
-                }) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.quality.unsupported",
-                        path,
-                    });
-                    continue;
-                }
+                // Issue #1462 D1: the registry's table entry, not a call of the descriptor's
+                // `tail_and_rest`. A rate or quality the effect does not declare has no entry and
+                // is `effect.quality.unsupported`, as it always was.
+                let tail_bound =
+                    match registry.tail_bound(descriptor.id, session.sample_rate().0, quality) {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            diagnostics.push(EffectDiagnostic {
+                                code: error.code,
+                                path,
+                            });
+                            continue;
+                        }
+                    };
                 let initial = match resolve_initial_values(descriptor, &effect.params) {
                     Ok(initial) => initial,
                     Err(code) => {
@@ -536,6 +590,7 @@ fn prepare_with_console_eligibility(
                         maximum_scratch_bytes: caps.maximum_scratch_bytes,
                         maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
                     },
+                    tail_bound,
                 };
                 let request = bank_preparation.request();
                 let expected = match expected_prepared_metadata(descriptor, request) {
@@ -548,7 +603,12 @@ fn prepare_with_console_eligibility(
                         continue;
                     }
                 };
-                let processor = match factory.prepare(request) {
+                // Issue #1461: the prepare result carries the metadata beside the processor,
+                // which holds no copy of it; this compares that returned value, field by field.
+                let PreparedEffect {
+                    processor,
+                    metadata,
+                } = match factory.prepare(request) {
                     Ok(value) => value,
                     Err(error) => {
                         diagnostics.push(EffectDiagnostic {
@@ -558,7 +618,6 @@ fn prepare_with_console_eligibility(
                         continue;
                     }
                 };
-                let metadata = processor.metadata();
                 if metadata.descriptor.id != expected.descriptor.id
                     || metadata.descriptor.contract_major != expected.descriptor.contract_major
                     || metadata.descriptor.state_layout_version
@@ -710,7 +769,9 @@ pub fn effect_control_resources(
                 .iter()
                 .filter_map(|prior| prior.owner.as_deref())
                 .any(|prior| Arc::ptr_eq(prior.factory(), owner.factory()));
-            if !shared_factory {
+            // #1469 Amendment 1: a factory the launch registry owns is process-level memory that
+            // the plan's clone does not allocate, so no plan is charged for it.
+            if !shared_factory && !launch_registry_owns_factory(owner.factory()) {
                 factory_payload_bytes = factory_payload_bytes
                     .checked_add(facts.factory_allocation_bytes)
                     .ok_or(EffectControlResourceError::Arithmetic)?;
@@ -1019,92 +1080,134 @@ mod control_producer_tests {
 mod metadata_mismatch_tests {
     use super::{EffectCompileCaps, prepare_native_session_effects};
     use effect_contract::{
-        EffectDescriptor, EffectPrepareError, EffectProcessBlock, NativeEffectFactory,
-        NativeEffectRegistry, PrepareEffectBankRequest, PrepareEffectRequest,
-        PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-        ResetKind, RestBound, RestSamples, StatePayloadError, StatePayloadInput,
-        StatePayloadOutput, TailSamples,
+        EffectDescriptor, EffectId, EffectPrepareError, EffectQuality, LatencySamples, LinkMode,
+        NativeEffectFactory, NativeEffectRegistry, PortId, PrepareEffectBankRequest,
+        PrepareEffectRequest, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
+        PreparedSidechainPort, RestBound, RestSamples, TailSamples,
     };
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use session::{CompileCaps, compile_session, parse_session_json};
 
-    /// The production EQ, whose prepared metadata `drift` then edits.
-    struct DriftingEq(fn(&mut PreparedEffectMetadata));
-    struct Drifting {
-        inner: Box<dyn PreparedNativeEffect>,
-        drift: fn(&mut PreparedEffectMetadata),
-    }
-    impl NativeEffectFactory for DriftingEq {
+    /// The production EQ, whose prepare result's metadata `forge` then edits. The processor is
+    /// the EQ's own; only the metadata handed out beside it differs (issue #1461).
+    struct ForgingEq(Forge);
+    impl NativeEffectFactory for ForgingEq {
         fn descriptor(&self) -> &'static EffectDescriptor {
             &PARAMETRIC_EQ_DESCRIPTOR
         }
         fn prepare(
             &self,
             request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-            Ok(Box::new(Drifting {
-                inner: ParametricEqFactory.prepare(request)?,
-                drift: self.0,
-            }))
+        ) -> Result<PreparedEffect, EffectPrepareError> {
+            let mut prepared = ParametricEqFactory.prepare(request)?;
+            (self.0)(&mut prepared.metadata);
+            Ok(prepared)
         }
         fn bind_homogeneous_bank(
             &self,
             _: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+        ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
             Ok(None)
         }
     }
-    impl PreparedNativeEffect for Drifting {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            let mut metadata = self.inner.metadata();
-            (self.drift)(&mut metadata);
-            metadata
-        }
-        fn reset(&mut self, kind: ResetKind) {
-            self.inner.reset(kind);
-        }
-        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
-            self.inner.process(block)
-        }
-        fn snapshot_state_payload(
-            &self,
-            output: StatePayloadOutput<'_>,
-        ) -> Result<(), StatePayloadError> {
-            self.inner.snapshot_state_payload(output)
-        }
-        fn restore_state_payload(
-            &mut self,
-            version: u32,
-            input: StatePayloadInput<'_>,
-        ) -> Result<(), StatePayloadError> {
-            self.inner.restore_state_payload(version, input)
-        }
+
+    /// A descriptor equal to the prepared one except for what `edit` changes.
+    fn forged_descriptor(metadata: &mut PreparedEffectMetadata, edit: fn(&mut EffectDescriptor)) {
+        let mut descriptor = *metadata.descriptor;
+        edit(&mut descriptor);
+        metadata.descriptor = Box::leak(Box::new(descriptor));
     }
 
-    /// A rest bound other than the one the processor reports.
-    fn other_rest(metadata: &mut PreparedEffectMetadata) {
-        metadata.rest = match metadata.rest {
-            RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
-            RestBound::Bounded(_) => RestBound::Unstated,
-        };
-    }
-
-    /// A tail over every peak other than the one the processor reports.
-    fn other_tail_every_peak(metadata: &mut PreparedEffectMetadata) {
-        metadata.tail_every_peak = match metadata.tail_every_peak {
+    fn other_tail(tail: TailSamples) -> TailSamples {
+        match tail {
             TailSamples::Infinite => TailSamples::Finite(0),
-            TailSamples::Finite(_) => TailSamples::Infinite,
-        };
+            TailSamples::Finite(samples) => TailSamples::Finite(samples.wrapping_add(1)),
+        }
     }
 
-    /// Gate 2 of #1377: a processor whose `rest` or `tail_every_peak` differs from
-    /// `expected_prepared_metadata`'s, which its descriptor's `tail_and_rest` states, is refused
-    /// with `effect.metadata.mismatch` and prepares no partial session; the same processor without
-    /// the drift prepares.
+    /// One edit of a prepare result's metadata.
+    type Forge = fn(&mut PreparedEffectMetadata);
+
+    /// One forgery per field the mismatch check compares, each a value other than the one the
+    /// descriptor and request state.
+    const FORGERIES: [(&str, Forge); 16] = [
+        ("descriptor.id", |m| {
+            forged_descriptor(m, |d| {
+                d.id = EffectId::new("forged.effect").expect("a valid effect id");
+            });
+        }),
+        ("descriptor.contract_major", |m| {
+            forged_descriptor(m, |d| d.contract_major = d.contract_major.wrapping_add(1));
+        }),
+        ("descriptor.state_layout_version", |m| {
+            forged_descriptor(m, |d| {
+                d.state_layout_version = d.state_layout_version.wrapping_add(1);
+            });
+        }),
+        ("sample_rate", |m| {
+            m.sample_rate = m.sample_rate.wrapping_add(1)
+        }),
+        ("quantum", |m| m.quantum = m.quantum.wrapping_add(1)),
+        ("quality", |m| {
+            m.quality = if m.quality == EffectQuality::High {
+                EffectQuality::Draft
+            } else {
+                EffectQuality::High
+            };
+        }),
+        ("bypass", |m| m.bypass = !m.bypass),
+        ("link_mode", |m| {
+            m.link_mode = if m.link_mode == LinkMode::Maximum {
+                LinkMode::Average
+            } else {
+                LinkMode::Maximum
+            };
+        }),
+        ("ports", |m| {
+            m.ports.sidechain = match m.ports.sidechain {
+                PreparedSidechainPort::None => PreparedSidechainPort::Unconnected {
+                    id: PortId::new("forged-sidechain").expect("a valid port id"),
+                    required: false,
+                },
+                _ => PreparedSidechainPort::None,
+            };
+        }),
+        ("latency", |m| {
+            m.latency = LatencySamples(m.latency.0.wrapping_add(1));
+        }),
+        ("tail", |m| m.tail = other_tail(m.tail)),
+        ("tail_every_peak", |m| {
+            m.tail_every_peak = other_tail(m.tail_every_peak);
+        }),
+        ("rest", |m| {
+            m.rest = match m.rest {
+                RestBound::Unstated => RestBound::Bounded(RestSamples::ZERO),
+                RestBound::Bounded(_) => RestBound::Unstated,
+            };
+        }),
+        ("state_sizes", |m| {
+            m.state_sizes.common_bytes = m.state_sizes.common_bytes.wrapping_add(1);
+        }),
+        ("scratch_bytes", |m| {
+            m.scratch_bytes = m.scratch_bytes.wrapping_add(1);
+        }),
+        ("automation_capacity", |m| {
+            m.automation_capacity = m.automation_capacity.wrapping_add(1);
+        }),
+    ];
+
+    /// Gate 3 of #1461 (extending #1377's gate 2 to every field): a prepare result whose metadata
+    /// differs from `expected_prepared_metadata` in any compared field is refused with
+    /// `effect.metadata.mismatch`, and prepares no partial session; the same factory with the
+    /// metadata unedited prepares.
     ///
-    /// Red mutations: drop either new comparison from the mismatch check.
+    /// The processor holds no copy of its metadata, so this check is the one thing that ties the
+    /// metadata every control-side reader uses to what the descriptor and the request state.
+    ///
+    /// Red mutations: drop any one comparison from the mismatch check, or compare the returned
+    /// metadata with itself instead of with the expected value.
     #[test]
-    fn a_processor_whose_rest_or_tail_every_peak_drifts_is_refused() {
+    fn a_prepare_result_whose_metadata_differs_in_any_compared_field_is_refused() {
         let model = parse_session_json(include_str!(
             "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))
@@ -1126,23 +1229,20 @@ mod metadata_mismatch_tests {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let prepare = |drift: fn(&mut PreparedEffectMetadata)| {
+        let prepare = |forge: Forge| {
             let registry = NativeEffectRegistry::new([
-                Box::new(DriftingEq(drift)) as Box<dyn NativeEffectFactory>
+                Box::new(ForgingEq(forge)) as Box<dyn NativeEffectFactory>
             ])
             .expect("registry");
             prepare_native_session_effects(&session, &registry, caps)
         };
 
-        let prepared = prepare(|_| {}).expect("an undrifted processor prepares");
+        let prepared = prepare(|_| {}).expect("an unforged prepare result prepares");
         assert_eq!(prepared.entries.len(), 9);
-        for (field, drift) in [
-            ("rest", other_rest as fn(&mut PreparedEffectMetadata)),
-            ("tail_every_peak", other_tail_every_peak),
-        ] {
-            let diagnostics = prepare(drift)
+        for (field, forge) in FORGERIES {
+            let diagnostics = prepare(forge)
                 .err()
-                .unwrap_or_else(|| panic!("a drifted `{field}` prepared"));
+                .unwrap_or_else(|| panic!("a forged `{field}` prepared"));
             assert_eq!(diagnostics.0.len(), 9, "{field}");
             assert!(
                 diagnostics
@@ -1224,6 +1324,12 @@ mod owner_tests {
                 maximum_scratch_bytes: u64::MAX,
                 maximum_automation_spans_per_block: 64,
             },
+            tail_bound: NativeEffectRegistry::new([
+                Box::new(ParametricEqFactory) as Box<dyn NativeEffectFactory>
+            ])
+            .expect("the EQ is admitted")
+            .tail_bound(PARAMETRIC_EQ_DESCRIPTOR.id, 48_000, EffectQuality::Normal)
+            .expect("a declared row"),
         }
     }
 
@@ -1347,6 +1453,35 @@ mod owner_tests {
             production_resources.largest_owned_allocation_bytes,
             "effect".len() as u64
         );
+    }
+
+    /// #1469 Amendment 1. Red if a plan is charged for a factory the process-lifetime launch
+    /// registry owns: the two owners share the registry's EQ factory, so the charge is their
+    /// strings and owner payloads alone.
+    #[test]
+    fn effect_control_resources_charge_no_registry_owned_factory() {
+        let factory = launch_native_effect_registry()
+            .expect("launch registry")
+            .get_shared_ascii("miso.parametric-eq")
+            .expect("launch EQ");
+        assert!(launch_registry_owns_factory(&factory));
+        assert!(!launch_registry_owns_factory(
+            &(Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>)
+        ));
+        let mut producers = Vec::with_capacity(2);
+        for (track, effect) in [("track-a", "effect-a"), ("track-b", "effect-b")] {
+            producers.push(resource_producer(track, effect, Some(Arc::clone(&factory))));
+        }
+        let values = preparation().initial_values.len();
+        let owner_payload = size_of::<EffectControlOwner>() as u64
+            + (2 * (values * size_of::<InitialParameterValue>()) as u64)
+            + (values * size_of::<bool>()) as u64;
+        let strings = ["track-a", "effect-a", "track-b", "effect-b"]
+            .map(|text| text.len() as u64)
+            .into_iter()
+            .sum::<u64>();
+        let resources = effect_control_resources(&producers).expect("resource facts");
+        assert_eq!(resources.owned_payload_bytes, strings + 2 * owner_payload);
     }
 
     #[test]
@@ -1477,6 +1612,16 @@ mod owner_tests {
         for sample_rate in [44_100, 48_000, 88_200, 96_000] {
             let mut preparation = preparation();
             preparation.sample_rate = sample_rate;
+            preparation.tail_bound = NativeEffectRegistry::new([
+                Box::new(ParametricEqFactory) as Box<dyn NativeEffectFactory>
+            ])
+            .expect("the EQ is admitted")
+            .tail_bound(
+                PARAMETRIC_EQ_DESCRIPTOR.id,
+                sample_rate,
+                EffectQuality::Normal,
+            )
+            .expect("a declared row");
             EffectControlOwner::new(
                 Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>,
                 &preparation,
@@ -1907,4 +2052,283 @@ fn same_unit(session: SessionUnit, contract: ParameterUnit) -> bool {
             | (SessionUnit::Linear, ParameterUnit::Linear)
             | (SessionUnit::Ratio, ParameterUnit::Ratio)
     )
+}
+
+/// Issue #1462 gate 1: an effect's `tail_and_rest` is evaluated once per (rate, quality) at
+/// registry build, and never again by preparation or bank binding.
+#[cfg(test)]
+mod tail_bound_count_tests {
+    use super::{EffectCompileCaps, prepare_native_session_effects};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use effect_contract::{
+        AutomationRate, BankWidth, EffectDescriptor, EffectId, EffectPrepareError,
+        EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples, LinkModeSet,
+        NativeEffectFactory, NativeEffectRegistry, ParameterChannelPolicy, ParameterDescriptor,
+        ParameterDomain, ParameterId, ParameterLattice, ParameterMapping, ParameterUnit,
+        PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+        PrepareEffectRequest, PreparedEffect, PreparedEffectBank, PreparedNativeEffect,
+        ProcessReport, QualityDescriptor, ResetKind, RestBound, SmoothingRule, StatePayloadError,
+        StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+        expected_prepared_metadata,
+    };
+    use session::{CompileCaps, compile_session, parse_session_json};
+
+    /// Every evaluation of [`counted`]; only this module's effect states it.
+    static EVALUATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    const TAIL: EffectTailBound = EffectTailBound {
+        tail: TailSamples::Finite(7),
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+    };
+
+    fn counted(_: u32, _: EffectQuality) -> EffectTailBound {
+        EVALUATIONS.fetch_add(1, Ordering::SeqCst);
+        TAIL
+    }
+
+    const fn port(id: &'static str) -> PortId {
+        match PortId::new(id) {
+            Ok(id) => id,
+            Err(_) => panic!("valid test port ID"),
+        }
+    }
+
+    const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
+        id: ParameterId(1),
+        display_name: "Gain",
+        display_unit: "dB",
+        unit: ParameterUnit::Db,
+        domain: ParameterDomain::Continuous,
+        minimum: Some(-24.0),
+        maximum: Some(24.0),
+        default_value: 0.0,
+        mapping: ParameterMapping::Linear,
+        automation_rate: AutomationRate::Block,
+        channel_policy: ParameterChannelPolicy::Shared,
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: 8,
+        readable: true,
+        automatable: true,
+        enum_choices: &[],
+        lattice: ParameterLattice::arithmetic(0.1, 1),
+    }];
+    const PORTS: [PortDescriptor; 2] = [
+        PortDescriptor {
+            id: port("main-in"),
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptor {
+            id: port("main-out"),
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+    const fn quality(sample_rate: u32) -> QualityDescriptor {
+        QualityDescriptor {
+            quality: EffectQuality::Normal,
+            sample_rate,
+            latency: LatencySamples(0),
+            maximum_state: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_fixed_bytes: 0,
+            scratch_bytes_per_frame: 0,
+        }
+    }
+    /// Four rows: every launch rate at `Normal`.
+    const QUALITIES: [QualityDescriptor; 4] = [
+        quality(44_100),
+        quality(48_000),
+        quality(88_200),
+        quality(96_000),
+    ];
+    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+        id: match EffectId::new("counted-tail") {
+            Ok(id) => id,
+            Err(_) => panic!("valid test effect ID"),
+        },
+        display_name: "Counted Tail",
+        contract_major: 1,
+        contract_minor: 0,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::DUAL_MONO,
+        parameters: &PARAMETERS,
+        ports: &PORTS,
+        qualities: &QUALITIES,
+        tail_and_rest: counted,
+        observations: &[],
+    };
+
+    /// Prepares and binds as every launch effect does: each instance's and each bank member's
+    /// metadata through `expected_prepared_metadata`. The bank then declines, which is all the
+    /// count needs.
+    struct Factory;
+    impl NativeEffectFactory for Factory {
+        fn descriptor(&self) -> &'static EffectDescriptor {
+            &DESCRIPTOR
+        }
+        fn prepare(
+            &self,
+            request: PrepareEffectRequest<'_>,
+        ) -> Result<PreparedEffect, EffectPrepareError> {
+            Ok(PreparedEffect {
+                processor: Box::new(Processor),
+                metadata: expected_prepared_metadata(&DESCRIPTOR, request)?,
+            })
+        }
+        fn bind_homogeneous_bank(
+            &self,
+            request: PrepareEffectBankRequest<'_>,
+        ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
+            for member in request.requests {
+                expected_prepared_metadata(&DESCRIPTOR, *member)?;
+            }
+            Ok(None)
+        }
+    }
+    struct Processor;
+    impl PreparedNativeEffect for Processor {
+        fn reset(&mut self, _: ResetKind) {}
+        fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
+            ProcessReport::default()
+        }
+        fn snapshot_state_payload(
+            &self,
+            _: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_state_payload(
+            &mut self,
+            _: u32,
+            _: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+    }
+
+    /// `tracks` tracks, each with two inserts of the counted effect, all routed to the output.
+    fn session_json(tracks: usize) -> String {
+        let insert = |id: &str| {
+            format!(
+                r#"{{"id":"{id}","identity":{{"kind":"native","effect_id":"counted-tail"}},
+                "quality":"normal","bypass":false,"link_mode":"dual_mono",
+                "params":[{{"parameter_id":1,"channel":"both","unit":"db","value":0.0}}],
+                "sidechain":{{"kind":"none"}}}}"#
+            )
+        };
+        let builtins = r#"{"polarity_invert":false,"trim_db":0.0,"hpf_hz":20.0,
+            "lpf_hz":20000.0,"delay_samples":0}"#;
+        let track = |index: usize| {
+            format!(
+                r#"{{"id":"t{index}","source_id":"voice","left_source_channel":0,
+                "right_source_channel":1,"builtins":{{"left":{builtins},"right":{builtins}}},
+                "console":[],"inserts":{{"effects":[{},{}]}},
+                "fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},
+                "pan":{{"left":1.0,"right":1.0,"smoothing_samples":16}}}}"#,
+                insert("a"),
+                insert("b")
+            )
+        };
+        let route = |index: usize| {
+            format!(
+                r#"{{"id":"r{index}","source":{{"kind":"track","track_id":"t{index}",
+                "tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"main-out"}},
+                "channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0,
+                "mute":false,"follows_mute":false}}"#
+            )
+        };
+        let join = |items: Vec<String>| items.join(",");
+        format!(
+            r#"{{"schema_version":1,"session_id":"counted.session","revision":"1",
+            "sample_rate_hz":48000,"quantum_frames":128,
+            "render_profile":{{"id":"native","mode":"single_thread"}},
+            "output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
+            "sources":[{{"id":"voice",
+            "content":"blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+            "channels":2,"bit_depth":"32f","frames":"48000"}}],
+            "console":{{"pre_insert":[],"post_insert":[]}},
+            "tracks":[{}],"submixes":[],"vcas":[],"outputs":[{{"id":"main-out"}}],
+            "routes":[{}],"automation":[]}}"#,
+            join((0..tracks).map(track).collect()),
+            join((0..tracks).map(route).collect())
+        )
+    }
+
+    /// Building the registry evaluates the statement once per declared row (four), and preparing
+    /// sixteen instances and binding them as four-lane banks evaluates it no further; every
+    /// prepared instance carries the stated values.
+    ///
+    /// Red mutation: `expected_prepared_metadata` calls `tail_and_rest` again instead of reading
+    /// the request's table entry (each instance, each compiler check and each bank member then
+    /// adds one), or the registry evaluates a row more than once.
+    #[test]
+    fn preparation_and_bank_binding_never_evaluate_the_tail_bound() {
+        const TRACKS: usize = 8;
+        let registry =
+            NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>])
+                .expect("the counted effect is admitted");
+        assert_eq!(EVALUATIONS.load(Ordering::SeqCst), QUALITIES.len());
+
+        let model = parse_session_json(&session_json(TRACKS)).expect("a valid session");
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("a compiled session");
+        let prepared = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("the counted effect prepares");
+        assert_eq!(prepared.entries.len(), TRACKS * 2);
+        for entry in &prepared.entries {
+            assert_eq!(
+                (
+                    entry.metadata.tail,
+                    entry.metadata.tail_every_peak,
+                    entry.metadata.rest
+                ),
+                (TAIL.tail, TAIL.tail_every_peak, TAIL.rest)
+            );
+        }
+
+        // Bind as the graph compiler does: each bank's requests are its members' replayed
+        // preparations (`EffectBankPreparation::request`).
+        for members in prepared.entries.chunks(BankWidth::Four.lanes() as usize) {
+            let requests: Vec<_> = members
+                .iter()
+                .map(|entry| entry.bank_preparation.request())
+                .collect();
+            let bound = members[0]
+                .factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: BankWidth::Four.backend(),
+                    width: BankWidth::Four,
+                    requests: &requests,
+                    active_mask: BankWidth::Four.full_mask(),
+                })
+                .expect("every member's metadata derives");
+            assert!(bound.is_none());
+        }
+        assert_eq!(EVALUATIONS.load(Ordering::SeqCst), QUALITIES.len());
+    }
 }

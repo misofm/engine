@@ -14,8 +14,8 @@ use dsp_reference::{
 };
 use effect_contract::{
     EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
-    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort, ProcessReport,
+    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedEffect, PreparedPorts,
+    PreparedSidechainPort, ProcessReport,
 };
 use true_peak_limiter::{
     TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
@@ -76,6 +76,11 @@ fn request_at_rate(values: &[InitialParameterValue], sample_rate: u32) -> Prepar
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(true_peak_limiter::TruePeakLimiterFactory),
+            sample_rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -84,19 +89,19 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
 }
 
 fn render(
-    effect: &mut dyn PreparedNativeEffect,
+    effect: &mut PreparedEffect,
     left: &mut [f32],
     right: &mut [f32],
     block: usize,
 ) -> ProcessReport {
-    let quantum = effect.metadata().quantum;
+    let quantum = effect.metadata.quantum;
     let mut report = ProcessReport::default();
     for (index, (left, right)) in left
         .chunks_mut(block)
         .zip(right.chunks_mut(block))
         .enumerate()
     {
-        let next = effect.process(
+        let next = effect.processor.process(
             EffectProcessBlock::new(left, right, None, (index * block) as u64, &[], quantum)
                 .expect("block"),
         );
@@ -131,7 +136,7 @@ fn output_true_peak_never_exceeds_the_ceiling() {
                             let mut effect = TruePeakLimiterFactory
                                 .prepare(preparation)
                                 .expect("prepare");
-                            render(effect.as_mut(), &mut left, &mut right, 128);
+                            render(&mut effect, &mut left, &mut right, 128);
                             let ceiling_gain = f64::from(10.0_f32).powf(f64::from(ceiling) / 20.0);
                             for (side, channel) in [("left", &left), ("right", &right)] {
                                 let measured: Vec<f64> =
@@ -232,7 +237,7 @@ fn production_tracks_the_f64_oracle() {
             let source: Vec<f32> = (0..frames).map(|_| noise.next() * 3.0).collect();
             let mut left = source.clone();
             let mut right = source.clone();
-            render(effect.as_mut(), &mut left, &mut right, 128);
+            render(&mut effect, &mut left, &mut right, 128);
 
             let mut oracle = ReferenceTruePeakLimiter::new(
                 48_000.0,

@@ -65,8 +65,14 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
     for rate in RATES {
         let mut active_request = request(&active_values);
         active_request.sample_rate = rate;
-        let mut active = prepare(active_request);
-        assert_eq!(active.metadata().latency, LatencySamples(0));
+        active_request.tail_bound = conformance::tail_bound_of(
+            Box::new(compressor::CompressorFactory),
+            active_request.sample_rate,
+            active_request.quality,
+        );
+        let prepared = support::prepare_with_metadata(active_request);
+        assert_eq!(prepared.metadata.latency, LatencySamples(0));
+        let mut active = prepared.processor;
         let mut left = vec![0.0_f32; 128];
         let mut right = vec![0.0_f32; 128];
         left[0] = 0.75;
@@ -77,6 +83,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
 
         let mut bypass_request = request(&active_values);
         bypass_request.sample_rate = rate;
+        bypass_request.tail_bound = conformance::tail_bound_of(
+            Box::new(compressor::CompressorFactory),
+            bypass_request.sample_rate,
+            bypass_request.quality,
+        );
         bypass_request.bypass = true;
         let mut bypass = prepare(bypass_request);
         let mut bypass_left = vec![0.0_f32; 128];
@@ -100,6 +111,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
         ] {
             let mut identity_request = request(values);
             identity_request.sample_rate = rate;
+            identity_request.tail_bound = conformance::tail_bound_of(
+                Box::new(compressor::CompressorFactory),
+                identity_request.sample_rate,
+                identity_request.quality,
+            );
             let mut identity = prepare(identity_request);
             let mut identity_left = vec![0.0_f32; 128];
             let mut identity_right = vec![0.0_f32; 128];
@@ -133,6 +149,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
             .map(|_| {
                 let mut request = request(&active_values);
                 request.sample_rate = rate;
+                request.tail_bound = conformance::tail_bound_of(
+                    Box::new(compressor::CompressorFactory),
+                    request.sample_rate,
+                    request.quality,
+                );
                 request
             })
             .collect();
@@ -144,7 +165,8 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
                 active_mask: width.full_mask(),
             })
             .expect("supported bank bind")
-            .expect("supported bank");
+            .expect("supported bank")
+            .processor;
         let mut bank_left = vec![0.75_f32; lanes];
         let mut bank_right = vec![-0.5_f32; lanes];
         let offsets = vec![0_u32; lanes + 1];
@@ -172,6 +194,11 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
             .map(|_| {
                 let mut request = request(&active_values);
                 request.sample_rate = rate;
+                request.tail_bound = conformance::tail_bound_of(
+                    Box::new(compressor::CompressorFactory),
+                    request.sample_rate,
+                    request.quality,
+                );
                 request.bypass = true;
                 request
             })
@@ -184,7 +211,8 @@ fn every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency() {
                 active_mask: width.full_mask(),
             })
             .expect("supported bypass bank bind")
-            .expect("supported bypass bank");
+            .expect("supported bypass bank")
+            .processor;
         let mut bypass_bank_left = vec![0.75_f32; lanes];
         let mut bypass_bank_right = vec![-0.5_f32; lanes];
         bypass_bank.process_bank(
@@ -263,7 +291,7 @@ fn preparation_has_expected_metadata_and_one_byte_below_rejects() {
     let factory = CompressorFactory;
     let effect = factory.prepare(request(&values)).expect("prepare");
     assert_eq!(
-        effect.metadata().latency,
+        effect.metadata.latency,
         expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request(&values))
             .expect("metadata")
             .latency
@@ -620,7 +648,7 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
         let bank = bind(backend, width, &requests, &prefix(members, lanes))
             .expect("a padded request is well formed")
             .unwrap_or_else(|| panic!("{members} of {lanes} members must bind"));
-        assert_eq!(bank.metadata().width, width);
+        assert_eq!(bank.metadata.width, width);
     }
     // P2a's verdict L3: members come first, and any other mask is malformed.
     let mut scattered = prefix(1, lanes);

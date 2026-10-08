@@ -15,17 +15,26 @@ fn armed() {
 
 use conformance::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory, FaultKind,
-    run_effect_conformance,
+    admit, run_effect_conformance,
 };
 use effect_contract::{
     AutomationSpanKind, BankWidth, DescriptorDiagnosticCode, DescriptorError, EffectDescriptor,
     EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
     ParameterId, ParameterMapping, ParameterSmoother, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts,
-    PreparedSidechainPort, QualityDescriptor, SmoothingRule, automation_segment_value,
-    expected_prepared_metadata, inverse_map_normalized, inverse_map_stepped_normalized,
-    map_normalized, map_stepped_normalized, validate_automation_block, validate_descriptor,
+    PreparedSidechainPort, QualityDescriptor, RegisteredTailBound, SmoothingRule,
+    automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
+    inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
+    validate_automation_block, validate_descriptor,
 };
+
+/// The mock's 48 kHz `Normal` entry, read from a registry that admitted it (issue #1462).
+fn tail_bound_48k() -> RegisteredTailBound {
+    let (registry, effect) = admit(Box::new(DualAccumulatorDelayFactory::correct()));
+    registry
+        .tail_bound(effect, 48_000, EffectQuality::Normal)
+        .expect("a declared row")
+}
 
 #[test]
 fn correct_factory_binds_distinguishable_four_lane_bank() {
@@ -45,6 +54,7 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
             ]
         })
         .collect();
+    let tail_bound = tail_bound_48k();
     let requests: Vec<_> = values
         .iter()
         .map(|initial_values| PrepareEffectRequest {
@@ -65,6 +75,7 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
                 maximum_scratch_bytes: 1 << 20,
                 maximum_automation_spans_per_block: 8,
             },
+            tail_bound,
         })
         .collect();
     let mut bank = DualAccumulatorDelayFactory::correct()
@@ -75,7 +86,8 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
             active_mask: BankWidth::Four.full_mask(),
         })
         .unwrap()
-        .expect("positive bank");
+        .expect("positive bank")
+        .processor;
     let mut left = vec![0.0; 4 * 4];
     let mut right = vec![0.0; 4 * 4];
     for lane in 0..4 {
@@ -167,7 +179,7 @@ fn smoothers_and_segments_finish_on_the_exact_update_or_endpoint() {
 fn correct_mock_passes_every_enabled_conformance_gate() {
     armed();
     let report = run_effect_conformance(
-        &DualAccumulatorDelayFactory::correct(),
+        Box::new(DualAccumulatorDelayFactory::correct()),
         ConformanceConfig {
             quantum: 128,
             blocks: 1,
@@ -194,10 +206,10 @@ fn every_faulty_mock_is_detected() {
         (FaultKind::LogHook, None),
         (FaultKind::SyscallHook, None),
         (FaultKind::SharedLaneState, None),
-        (FaultKind::ChangingMetadata, None),
-        (FaultKind::ChangingTail, None),
-        (FaultKind::LatencyChangingBypass, None),
-        (FaultKind::BadResources, None),
+        // Issue #1461: the two metadata faults lie in the prepare result, which is the only
+        // metadata there is, so `metadata.exact` is what must name them.
+        (FaultKind::LatencyChangingBypass, Some("metadata.exact")),
+        (FaultKind::BadResources, Some("metadata.exact")),
         (FaultKind::MalformedSpanAcceptance, None),
         (FaultKind::NonfinitePropagation, None),
         (FaultKind::NondeterministicSnapshot, None),
@@ -214,7 +226,7 @@ fn every_faulty_mock_is_detected() {
         (FaultKind::BypassDelayMismatch, Some("latency.bypass_delay")),
     ] {
         let report = run_effect_conformance(
-            &DualAccumulatorDelayFactory::faulty(fault),
+            Box::new(DualAccumulatorDelayFactory::faulty(fault)),
             ConformanceConfig {
                 quantum: 128,
                 blocks: 1,
@@ -287,6 +299,7 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
                 maximum_scratch_bytes: 1024,
                 maximum_automation_spans_per_block: 8,
             },
+            tail_bound: tail_bound_48k(),
         },
     )
     .unwrap();
