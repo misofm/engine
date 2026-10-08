@@ -23,9 +23,12 @@ sigma }`, with `g_p = 10^(G_p/2000)`, `g_t = 10^(G_t/2000)` and `sigma` the stal
 
 The share `3/4` is #1329's split: `T` certifies `eps / 2` for the exact reference and `eps / 4`
 for the relative `f32` deviation; the last quarter is the stall's. So (N2) at `k = 0`,
-`epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma / eps`, and `P* <= P^ < 2 P*` with
-#1329's flush floor `P* = F a / (eps / 2 - g dev_core)` (`g dev_core < eps / 4` at `T`). Nothing
-#1329 certified changes: `T`, `T_rest`, both rests and `P*` are computed exactly as before.
+`epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma / eps`, and
+`P* <= P^ < 2 * 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*` with #1329's flush floor
+`P* = F a / (eps / 2 - g dev_core)` (`g dev_core < eps / 4` at `T`; "The stall `sigma`" below).
+`P^` can exceed `2 P*`: the release `tail_contract` run gives `P^ >= 2 P*` on 16 of its 112 F3
+rows, with a maximum ratio of 2.0016 (88.2 kHz, 1 kHz HPF at 0 dB). Nothing #1329 certified
+changes: `T`, `T_rest`, both rests and `P*` are computed exactly as before.
 
 ## A fixed design (#1329 D4)
 
@@ -115,8 +118,17 @@ for each half separately.
 `T` for each half; it is carried to `T` by powers of the non-negative step, so no frame is walked:
 
 * reference: the majorant state at `T_ref` (#1329's `t0`), recorded while the walk replays
-  `t0`'s block (the replay is already walked; recording reads its values). If `t0 = 0` (no
-  replay), the anchor is the pass's last frame `H`, where the remainder is formed anyway.
+  `t0`'s block (the replay is already walked; recording reads its values). If `t0 = 0`, the
+  anchor is the pass's last frame `H`, where the remainder is formed anyway. The module tests
+  `t0 = 0` itself, not "the crossing block is the first": the forward block sum and the replay's
+  backward running sum round in different orders, so a threshold between the two gives the first
+  block and still `t0 = 0`, and frame 0's record is the state before the impulse, which bounds
+  nothing after it (the remainder needs `t >= 1`). `H` is sound for every `t0`: the pass's
+  remainder sums `w(H)` bound the half from `H` on, and the offset `o = H - T` claims nothing
+  before `H`. No builtin design reaches `t0 = 0`: the threshold is at most about `0.5` (the
+  -144 dB trim floor) and `O >= ||h_1||_1 >= 1`, so `t0 >= 256`. Only `math::tail`'s own `gain`
+  below the trim floor reaches it (`math` test
+  `the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero`).
 * deviation: the state at the walk's last frame `F_dev` (the frame from which it falls).
 
 If the anchor `A` is at or before `T`, the state is carried to `T` (`w(T) = M^(T - A) w(A)`,
@@ -152,10 +164,13 @@ floor(a + k b) + 1)` (its bound only falls). The certified crossing is
 *Claim:* `T + k D >= T(k)` for every `k >= 1`. *Proof:* per half,
 `k D_h = k o + k (floor(max(a, 0) + b) + 1) > o + k (max(a, 0) + b) >= o + a + k b`, because
 `k >= 1`, `o >= 0` and `max(a, 0) >= 0`; `k D_h - o` is an integer above `a + k b`, so it is at
-least `floor(a + k b) + 1`, and at least `0`. So `k D >= k D_h >= j_k^h` for both halves. (So
-`max_{k >= 1} ceil((T(k) - T) / k) = D` is reached at `k = 1`, and `D` is the least value that
-the certificate supports.) The asymptotic rate is `D_inf = max_h ceil(b_h)`; the certificate's
-own `k = 0` crossing is `T_lambda = T + max_h j_0^h >= T`.
+least `floor(a + k b) + 1`, and at least `0`. So `k D >= k D_h >= j_k^h` for both halves. (When
+the half that sets `D` has `a >= 0`, its `j_1 = D_h = D`, so
+`max_{k >= 1} ceil((T(k) - T) / k) = D` is reached at `k = 1` and `D` is the least value that
+the certificate supports. When that half has `a < 0`, `j_1` can be below `D`, and `D` is the
+least value of the form `o + floor(max(a, 0) + b) + 1`, not of every `ceil((T(k) - T) / k)`.)
+The asymptotic rate is `D_inf = max_h ceil(b_h)`; the certificate's own `k = 0` crossing is
+`T_lambda = T + max_h j_0^h >= T`.
 
 **Why this form.** Root's amendment allows the certificate from `T` or powers of the step for every
 `k`. Powers alone give each `T(k)` exactly but only for finitely many `k` (a bisection of
@@ -176,13 +191,37 @@ the walked crossings is measured in the #1465 attempt record.
   #1329 already states as upper bounds. A larger matrix only enlarges `G^i z`, and the
   certificate holds for the larger one.
 * The remainder's sums `w` are #1329's (`remainders`). Powers (`power_apply`) inflate every
-  product by `SLACK`; a product that underflows loses at most `2^-1075`. Every power of a
+  product by `SLACK`; a product that underflows loses at most `2^-1075`. Only a design whose two
+  certificates are both verified states a value, so only those carries need to be upper bounds.
+  *The resolvent.* A verified rate has `G_pp SLACK^3 < lambda <= 1 - 2^-53` for every `p`, so
+  `1 - G_pp > 3 2^-30 - 2^-52 > 2^-29` and `1 / (1 - G_pp) < 2^29` (not `2^53`: `L`'s diagonal
+  `q + mu` can be at or above one, and then no certificate is verified). Every power of a
   non-negative lower-triangular `G` with diagonal below one is entrywise at most its resolvent
-  `(I - G)^-1`, whose entries are below `2^220` for these matrices (at most `2K <= 4` rows, each
-  `1 / (1 - G_pp) <= 2^53`, off-diagonal entries below `4`; #1474 bounds `M`'s by `2^108`). A power
-  by squaring performs fewer than `2^12` roundings per component, so a carried component errs by
-  less than `2^12 2^220 2^-1075 < 2^-840` in absolute terms. The carried state is therefore
-  rounded up by `tau = 2^-600` per component (`tau` is #1474's flush), which covers it.
+  `R = (I - G)^-1`. With at most `n = 2K <= 4` rows and off-diagonal entries below `4`, every
+  entry of `R` (a sum over the triangular paths of the diagonal's `1 / (1 - G_pp)` and the
+  off-diagonal entries) is below `(2^29)^4 (1 + 4)^3 < 2^123` (for `M`, `K <= 2`: below
+  `2^29 + 2.85 2^58 < 2^60`). The powers the module forms are inflated by `SLACK` once per
+  squaring, at most `SLACK^(2^26) < 1.07` times the exact powers.
+  *Where a loss goes.* A loss `e` in an entry `(i, j)` of an intermediate power `G^(2^s)` reaches
+  the result `G^m z` as `G^a E G^b z` with `E = e e_i e_j^T` and `a + 2^s + b = m`: two power
+  factors, and proportional to the state. Its component `p` is at most
+  `1.07^2 R_pi e (R z)_j <= 1.15 n e r^2 max_q z_q`, `r < 2^123` the largest entry of `R`. A loss
+  `e` in a product of a power by the vector reaches the result through one power, at most
+  `1.07 r e`. With fewer than `2^12` roundings in all (at most 26 squarings of a `4 x 4`
+  matrix, `26 * 16 * 4` products, and 27 applications, `27 * 4 * 4`, since `m < HORIZON_LIMIT =
+  2^26`), each `e <= 2^-1075`, a carried component errs by less than
+  `2^12 2^-1075 (2^3 2^246 max z + 2^124) = 2^-814 max z + 2^-939`.
+  *The states.* Per unit of `g X`, with #1329's builtin constants (`beta_k <= 2`,
+  `gamma_k <= 1.42`, `|d_k| <= 1`) and the verified gap: the reference's majorant state has
+  `||s_1|| <= beta_1 <= 2` and `Gbar_2 <= beta_2 (gamma_1 2 + 1) 2^29 < 2^32`, so its sums
+  `w = R m < 2 2^60 2^32 = 2^93`. The deviation's state is at most `Deviation::at_end`'s fixed point
+  (it falls from there): `x_k` the summed state majorants (`state_sup`), below `2^30` and `2^61`;
+  each `E_k` its drive over `1 - rho_k`, with every `mu`, `omega` below one, below `2^60` and
+  `(3 2^62 + 2^61 + 2^31) 2^29 < 2^93`. So `max z < 2^94` on both halves, and a carried
+  component errs by less than `2^-814 2^94 + 2^-939 < 2^-719`. On the gate rows the largest
+  carried component is about `2^16` (#1465 attempt-1 verdict).
+  The carried state is therefore rounded up by `tau = 2^-600` per component (`tau` is #1474's
+  flush), which covers it with a factor above `2^119`.
 * The anchored states are the walk's floored values (each at least `tau`, #1474), upper bounds of
   the exact ones; so is every `v_p >= z_p >= tau > 0` (a positive certificate).
 * **The verification.** For each `p`, the module checks `fl(dot(G_p, v) SLACK) <= fl(lambda v_p)`,
@@ -199,8 +238,10 @@ the walked crossings is measured in the #1465 attempt record.
   `2^-30` exceeds the logs' errors (at most `2^-52` times `|ln| <= 745` each) and the relative
   error of the computed `h` against `eps / (2 g)` or `eps / (4 g)` (a few `2^-53`). The crossings
   and `D` are `floor` of `(sum) SLACK` plus one, which covers the sum's own rounding.
-* `T(k)`, `D` and every `j_k` are integers below `HORIZON_LIMIT = 2^26`; a `D` at or above it is not
-  stated (the composition is unstated, as for a design no certificate is verified for).
+* `D` (and so `j_1 <= D`) is an integer below `HORIZON_LIMIT = 2^26`; a `D` at or above it is not
+  stated (the composition is unstated, as for a design no certificate is verified for). `T(k)`
+  and `j_k` grow without limit in `k` and are not bounded by it; `HalfCertificate::crossing` is
+  read only for the `k` a caller asks for.
 
 **The `tau` floors (#1474).** The certificate never floors: the floors were made for the walk's
 cost, and the closed form has no per-frame cost. Its inputs are the walk's floored values (upper
@@ -211,7 +252,12 @@ unfloored value only where a component is within `tau` of zero, which no stated 
 ### The stall `sigma`
 
 `sigma = Level(ceil_mB(F a))`. `P^ = 4 sigma / eps >= 4 F a / eps >= P*` because
-`eps / 2 - g dev_core >= eps / 4` (#1329's `T` puts `g dev_core` below `eps / 4`).
+`eps / 2 - g dev_core >= eps / 4` (#1329's `T` puts `g dev_core` below `eps / 4`). Above:
+`P* >= 2 F a / eps` (`g dev_core >= 0`), and `ceil_mB` adds less than one millibel plus
+`|x| 2^-30 + 2^-30`, so `sigma < 10^(1/2000) (1 + 2^-29) F a` and
+`P^ < 2 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*`. The bound `2 P*` itself does not hold: when
+`g dev_core` is very small, `P*` is near `2 F a / eps` and the millibel rounding alone lifts `P^`
+above `2 P*` (16 of 112 F3 rows, at most 2.0016).
 
 ### A channel with its filters disabled
 

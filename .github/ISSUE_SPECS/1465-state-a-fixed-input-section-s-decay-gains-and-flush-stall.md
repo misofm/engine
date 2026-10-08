@@ -47,7 +47,9 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
 - **The share `3/4`** is #1329's split: `T_decay` certifies `eps / 2` for the exact reference and
   `eps / 4` for the relative rounding; the last quarter is the stall's. So (N2) at `k = 0`,
   `epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma / eps`, and #1329's own floor `P*`
-  satisfies `P* <= P^ < 2 P*`. Nothing #1329 certified changes.
+  satisfies `P* <= P^ < 2 * 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*` (the millibel rounding of
+  `sigma` can lift `P^` above `2 P*`: 16 of the 112 F3 rows, at most 2.0016). Nothing #1329
+  certified changes.
 - **`dev_core` and `dev_loud`.** `dev_core` is #1329's deviation supremum from `T_decay` on; it
   feeds `P*`. `dev_loud` is the output deviation while the input is loud (`Deviation::at_end`'s
   fixed point), per unit of `|trim| P`; it bounds the deviation at every frame. `G_p` uses
@@ -258,14 +260,17 @@ restored) with at least the mutants below; each is red.
 ## Test value
 
 - F1(a): a decade law whose exact half is short (for example the shortest one-decade step of the
-  exact suffix, 35,731 samples against a mean of about 45,500 at the 44.1 kHz top pair, which falls
-  about 52,000 samples short of the brute force by `k = 8`) is red; nothing tests a decade law
-  today.
-- F1(b): a needlessly loose `D` from a certificate rate halfway between the floor rate and 1
-  (`lambda' = (1 + max_s (q_s + mu_s)) / 2`, so `D_inf` is about 2 `D_floor`) exceeds the 1.5 line
-  (mutation M2: red at the first row it reaches, the 10 Hz HPF at +24 dB, `D` 3,758 against
-  1.5 x 2,299.75; the test stops at its first failure, so the other rows were not confirmed and no
-  claim is made for them).
+  exact suffix for `k <= 8` at the 44.1 kHz top pair, 36,270 samples at 0 dB and 33,502 at +24 dB,
+  against means of 45,467 and 45,382, which falls 47,424 and 67,574 samples short of the brute
+  force by `k = 8`; the attempt-1 verifier's figures) is red; nothing tests a decade law today.
+- F1(b): a needlessly loose `D` exceeds the 1.5 line. Two mutants, each red at (b) at its own
+  first failing row (the test stops at its first failure, so no claim is made for later rows):
+  the certificate rate halfway between the floor rate and 1 alone (`lambda = (1 + rho) / 2`, the
+  grid's `j = 2`, so `D_inf` is about 2 `D_floor`; M2) is red at the first row, the 10 Hz LPF at
+  0 dB and 44.1 kHz, `D` 5,422 against 1.5 x 2,301.875 (the attempt-1 verifier's run); the coarse
+  grid cut to `j = 2` with the refinement kept, so the search covers `j in {1, 2, 3, 5}` (M2r, the
+  mutant attempt 1 ran), passes five rows and is red at the 10 Hz HPF at +24 dB, `D` 3,758 against
+  1.5 x 2,299.75.
 - F1(c): a `D` with no transient term (the asymptotic rate alone) falls below the module's own
   crossing at `k = 1`, where the module's majorant takes its longest step (the polynomial factor of
   near-equal poles; steps 48,531, 48,136, 47,816, ... at the top pair). It is caught first by (a)
@@ -280,14 +285,16 @@ restored) with at least the mutants below; each is red.
   line. With (d)'s equality disabled it first fires at the HPF at 10 Hz into the 1 kHz LPF
   (mutation M7b: 1,516 mB against the line's 14.497 dB), not at the top pair; with (d) in place,
   (d)'s equality catches it first (M7).
-- F2(c): a trim-only section that states 0 dB for a non-power-of-two trim (the rounding dropped),
-  drops the trim, or states `D > 0`.
+- F2(c): a trim-only section that drops the `(1 + u)` rounding for a non-power-of-two trim (M8:
+  600 instead of 601 mB at +6 dB), drops the trim, or states `D > 0`.
 - F2(d): a `G_p` built on `dev_core` (#1329's deviation from `T_decay` on) instead of `dev_loud` is
   about 59 mB low at the top pair and fails the equality; a `CascadeBound` that returns `dev_core`
   as `dev_loud` falls below the recomputation's lower edge. F2(a) has about 14 dB of slack at the
   top pair and F2(b) is an upper line, so neither can see it.
-- F3: a stall of zero gives `P^` below the module's `P*` (mutation M13). A stall rounded down is
-  caught by the equality with `ceil_mB(stall)`, not by `P^ < P*` (M14).
+- F3: a stall of zero (M13, `FlushStall::Zero`) is red in `composition_values`'s `Level` match,
+  before any `P^` comparison; a raw stall too small to cover the flush floor (M13m, the stall
+  times `1e-3`) is red at `P^ >= P*` (`P^` 1.65e-12 against `P*` 8.26e-10). A stall rounded down
+  is caught by the equality with `ceil_mB(stall)`, not by `P^ < P*` (M14).
 - F5: reuses #1457's gates; a decade law that extends the horizon past the budget (for example one
   run per `k`) is red there.
 
@@ -420,7 +427,8 @@ restored from a pristine copy; `crates/math/src/tail.rs` unless stated):
 | mutant | test | result |
 |---|---|---|
 | M1 `D` three quarters of the certified | F1 | red at (a): 10 Hz LPF, `T_b` at `k = 1` 19,895 > 17,408 + 2,033 |
-| M2 rates only at `lambda = (1 + rho) / 2` | F1 | red at (b): 10 Hz HPF +24 dB, `D` 3,758 > 1.5 x 2,299.75 (first failing row; every row not checked) |
+| M2r coarse grid cut to `j = 2`, refinement kept (`j in {1, 2, 3, 5}`; the mutant run here, recorded first as "rates only at `lambda = (1 + rho) / 2`") | F1 | red at (b): 10 Hz HPF +24 dB, `D` 3,758 > 1.5 x 2,299.75 (first failing row; every row not checked) |
+| M2 rates only at `lambda = (1 + rho) / 2` (`j = 2` alone; the attempt-1 verifier's run) | F1 | red at (b), first row: 10 Hz LPF 0 dB 44.1 kHz, `D` 5,422 > 1.5 x 2,301.875 |
 | M3 `D` without the transient | F1 | red at (a) (10 Hz LPF, 19,895 > 17,408 + 2,286) |
 | M3b M3 with (a) disabled | F1 | red at (c): `T(1)` 22,066 > 17,408 + 2,286 |
 | M4 deviation certificate on `L` without `mu` on its diagonal | F1 | **green**: the rate search keeps `lambda` above `q + mu` on every row |
@@ -434,8 +442,8 @@ restored from a pristine copy; `crates/math/src/tail.rs` unless stated):
 | M9 trim dropped (disabled) | F2(c) | red: 0 at `|trim| = 2` |
 | M10 `D = 1` (disabled) | F2(c) | red |
 | M11 `dev_core` returned as `dev_loud` | F2 | red at (d): 1.29e-10 against 2.88e-4 |
-| M12 `G_p` on `dev_core` | F2 | red at (d)'s equality (top pair, 773) |
-| M13 stall `Zero` | F3 | red |
+| M12 `G_p` on `dev_core` | F2 | red at (d)'s equality (LPF one `f32` below the maximum, 0 dB, 44.1 kHz: 773 against 792) |
+| M13 stall `Zero` | F3 | red in `composition_values`'s `Level` match |
 | M14 stall one millibel low | F3 | red |
 | M15 `lib.rs` branch states `NodeTailBound::ZERO` | exception test | red: `input_section_bounds` `Unstated` |
 | M16 `fixed_input_walk`'s memoryless branch the left channel only | exception test | red: (0, 0) against the louder channel |
@@ -692,3 +700,67 @@ least 257 + 470 = 727, so at most 1,510,000 / 727 = 2,077 designs a preparation;
 holds them); the figures of #1468 (`:152-154`), #1470 (`:28-36`, `:50`) and #1471 (`:21`); a note in
 #1474's record that #1465 restated them.
 
+
+### Attempt 1 follow-up: verdict MINOR 1-4 and NITs (2026-10-08, implementer)
+
+Attempt 1 PASSed (`/home/bl/misofm/submix-verdicts/1465-attempt1.md`). This follow-up applies its
+four MINORs and seven NITs.
+
+- **MINOR 1, the underflow step** (`docs/derivations/1379-graph-tail-composition.md`, "Rounding").
+  Rewritten. A loss in an intermediate power reaches the carry as `G^a E G^b z`: two resolvent
+  factors, proportional to `z`. The resolvent is now bounded by the verified gap
+  (`G_pp SLACK^3 < lambda <= 1 - 2^-53`, so `1 / (1 - G_pp) < 2^29`; entries of `R` below `2^123`
+  for `L`, `2^60` for `M`), not by `2^53`. With fewer than `2^12` roundings, the carried error is
+  below `2^-814 max z + 2^-939`. From #1329's builtin constants and the gap, `max z < 2^94` on both
+  halves, so the error is below `2^-719`, and `tau = 2^-600` covers it by a factor above `2^119`.
+- **MINOR 2, the anchor condition** (`crates/math/src/tail.rs`). **Choice: test `t0 == 0`** and
+  anchor at the pass end `H` (the proof's text as written), not `max(t0, 1)`. Reasons: (1) it
+  makes the code and the proof test the same quantity; (2) `H` is sound for every `t0`, because
+  the pass's remainder sums bound the half from `H` on and the offset `H - T` claims nothing before
+  it; (3) no builtin design reaches `t0 = 0`, so the extra tightness of `max(t0, 1)` has no value.
+  The derivation now explains the tie. **The case is reachable through `math::tail`'s own
+  `gain`** below the builtin trim floor. A temporary probe found ties for two of seven designs
+  (BAND_HPFS[1]: 7 of the 64 gains below the `t0` boundary; LOW_LPF into TOP_LPF: 1). New `math`
+  test `the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero`: for four designs,
+  bisect to the least gain with `t0 > 0`, check the 64 gains below it, and require that from
+  `T + crossing(k)` (`k = 1..3`) the walked majorant suffix is below `h 10^-k`. **Mutation**
+  (`first_block == 0` restored): red, `gain 2.854376257044066e-8: the walked suffix 1.105e0 from
+  frame 0 (k = 1) is not below 1.105e-1`; green when reverted. Test value: an anchor that reads
+  frame 0's pre-impulse record when the crossing block is the first but `t0 = 0` (a certificate
+  that states the reference as `tau`) turns it red; no other test reaches `t0 = 0`. Builtin bounds
+  do not move: every printed row of the release `tail_contract` run (`--nocapture`,
+  `--test-threads=1`) is identical between `55a92ec11`'s `tail.rs` and this change.
+- **MINOR 3.** `P* <= P^ < 2 P*` is now `P* <= P^ < 2 * 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*`
+  (derivation, contract and "The stall `sigma`"; this spec's contract section). Measured on this
+  change's release `tail_contract` run: `P^ >= 2 P*` on 16 of 112 F3 rows, maximum 2.0016 (88.2 kHz,
+  1 kHz HPF at 0 dB, and 1 kHz LPF at +24 dB: `P^` 3.4085e-11, `P*` 1.7029e-11).
+- **MINOR 4.** F1(b)'s test-value text and the mutation table now name both mutants, each with its
+  own first failing row. M2r (coarse grid cut to `j = 2`, refinement kept, so `j in {1, 2, 3, 5}`)
+  is the mutant attempt 1 ran: red at the 10 Hz HPF +24 dB, `D` 3,758. M2 as named (`j = 2` alone)
+  is the verifier's run: red at the first row, the 10 Hz LPF 0 dB, `D` 5,422 > 1.5 x 2,301.875.
+- **NITs.** F3's text: M13 is red in `composition_values`'s `Level` match, and the verifier's M13m
+  (raw stall x `1e-3`) is red at `P^ >= P*`. M12's row: the LPF one `f32` below the maximum, 773
+  against 792. F1(a)'s figures: the verifier's reproduced 36,270 and 47,424 (0 dB), 33,502 and
+  67,574 (+24 dB), means 45,467 and 45,382. F2(c): the measured M8 (600 instead of 601 mB at +6 dB).
+  Derivation: only `D` is below `HORIZON_LIMIT`; "reached at `k = 1`" holds when the half that sets
+  `D` has `a >= 0`, with the `a < 0` case stated. `docs/EFFECT_CONTRACT_V1.md`: a fixed design over
+  the budget or with no verified certificate states `Unstated`.
+
+**F1(b) at a -144 dB trim (evidence only; temporary probe, not committed; the gate is
+unchanged).** One release run of `fixed_design_decay_law_is_sound_tight_and_above_its_floor` with
+the trims `[0, 24, -144]` and the 1.5 assertion skipped at -144 dB (assertions (a), (c), (d) kept).
+All 56 rows at -144 dB pass (a), (c) and (d). **No row reaches the 1.5 line: the largest ratio is
+1.358.** At the 44.1 kHz top pair: `T` 59,596, `D` 70,794, `D_mean` 52,147.1, `D_floor` 45,036,
+ratio 1.358 (88.2 kHz the same; 48 and 96 kHz: `D` 70,414, `D_mean` 51,863.4, 1.358). Next: the
+10 Hz HPF into the 1 kHz LPF, 1.331-1.338. The verifier's prediction compared `D` with the +24 dB row's
+`D_mean` (45,382). At -144 dB, `T` is early (59,596 against 478,335 at +24 dB), and the exact
+suffix's first decades after it are longer (the polynomial factor of the near-equal poles), so
+that trim's own `D_mean` is 52,147 and the ratio stays below 1.5.
+
+**Gates.** `cargo test --locked --release -p builtins --features builtins/test-support --test
+tail_contract`: 17 passed. `cargo test --locked -p math`: all passed (lib 8, including the new
+test). `cargo test --locked -p builtins --features test-support --lib`: 15 passed. `cargo test
+--locked -p builtins-compiler --features test-support --lib`: 57 passed. `cargo fmt --all --
+--check`: clean. `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+and without `--all-features`: clean. `scripts/check-workspace-policy.sh`: ok.
+`scripts/check-realtime-policy.sh`: ok. `scripts/check-cross-targets.sh`: PASS.

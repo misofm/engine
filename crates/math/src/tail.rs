@@ -2642,8 +2642,11 @@ fn fixed_cascade_walk(
     };
     let tail_reference = t0;
     // The reference certificate's anchor `(A, w(A))`: `t0` from the replay's record, or the pass's
-    // last frame when `t0 = 0` (the remainder needs `now >= 1`).
-    let (reference_anchor, reference_sums) = if first_block == 0 {
+    // last frame when `t0 = 0` (the remainder needs `now >= 1`). The test is on `t0`, not on
+    // `first_block`: the block sum and the replay's running sum are rounded in different orders, so
+    // `first_block = 1` with `t0 = 0` occurs (a rounding tie at the threshold), and frame 0's record
+    // is the state before the impulse, which bounds nothing after it.
+    let (reference_anchor, reference_sums) = if t0 == 0 {
         (majorants.frame, pass_end_sums)
     } else {
         let at = (t0 as usize - (first_block - 1) * BLOCK) * width;
@@ -3134,6 +3137,88 @@ mod tests {
                 bound > exact && bound - exact < 1.0e-13,
                 "words {bits:08x?}: bound {bound:.17} against exact {exact:.17}"
             );
+        }
+    }
+
+    /// Issue #1465 (verdict MINOR 2): the reference certificate is sound where the module's `t0` is
+    /// 0. The forward block sum and the replay's backward running sum round in different orders, so
+    /// at a gain whose threshold falls between them the crossing block is the first one and `t0` is
+    /// still 0; frame 0's record is the state before the impulse. For each design, the test finds the
+    /// least gain with `t0 > 0` and checks the 64 gains below it (one `f64` step each), where any such
+    /// tie lies: from `T + crossing(k)` on, the walked majorant suffix (a lower bound of what the
+    /// reference half bounds) is below `h 10^-k`. These gains are below the builtin trim floor; only
+    /// `math::tail`'s own `gain` reaches them.
+    #[test]
+    fn the_reference_certificate_is_sound_where_the_crossing_is_at_frame_zero() {
+        let law = FlushLaw {
+            flush_eps: 1.0e-20,
+            rest_eps: 1.0e-14,
+            silence_frames: 2_400,
+        };
+        let designs: [std::vec::Vec<SvfWords>; 4] = [
+            std::vec![words(LOW_LPF)],
+            std::vec![words(BAND_HPFS[1])],
+            std::vec![words(BAND_HPFS[2])],
+            std::vec![words(BAND_HPFS[0]), words(LOW_LPF)],
+        ];
+        let peaks = [16.0, 1.0e30];
+        for sections in &designs {
+            let bound = |gain: f64| fixed_cascade(sections, gain, &law, peaks).expect("a bound");
+            // The `t0 = 0` boundary: `t0 = 0` at `low`, `t0 > 0` at `high`.
+            let (mut low, mut high) = (1.0e-30_f64, 1.0_f64);
+            assert_eq!(bound(low).tail_reference, 0);
+            assert!(bound(high).tail_reference > 0);
+            while f64::from_bits(low.to_bits() + 1) < high {
+                let middle = (low * high).sqrt().clamp(
+                    f64::from_bits(low.to_bits() + 1),
+                    f64::from_bits(high.to_bits() - 1),
+                );
+                if bound(middle).tail_reference == 0 {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let gains: std::vec::Vec<f64> = (0..64)
+                .map(|step| f64::from_bits(low.to_bits() - step))
+                .collect();
+            let checks: std::vec::Vec<(f64, u64, super::HalfCertificate)> = gains
+                .iter()
+                .filter_map(|&gain| {
+                    let bound = bound(gain);
+                    let reference = bound.composition?.certificate.reference;
+                    Some((gain, bound.tail, reference))
+                })
+                .collect();
+            assert!(!checks.is_empty(), "no certificate at the boundary");
+            let last = checks
+                .iter()
+                .map(|(_, tail, reference)| tail + reference.crossing(3))
+                .max()
+                .expect("a check");
+            let constants: std::vec::Vec<SectionConstants> =
+                sections.iter().map(SectionConstants::of).collect();
+            let mut majorants = Majorants::new(&constants, &sections[0]);
+            let mut frame = MajorantFrame::new(constants.len());
+            let mut values = std::vec::Vec::new();
+            for _ in 0..=last {
+                majorants.step(&mut frame);
+                values.push(frame.input[constants.len()]);
+            }
+            for (gain, tail, reference) in checks {
+                let threshold = super::TAIL_FLOOR / 2.0 / (gain * (1.0 + super::U));
+                let mut line = threshold;
+                for k in 1..=3_u64 {
+                    line /= 10.0;
+                    let from = tail + reference.crossing(k);
+                    let suffix: f64 = values[from as usize..].iter().sum();
+                    assert!(
+                        suffix < line,
+                        "gain {gain:e}: the walked suffix {suffix:e} from frame {from} (k = {k}) \
+                         is not below {line:e}"
+                    );
+                }
+            }
         }
     }
 }

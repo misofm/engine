@@ -103,9 +103,12 @@ else each peak's bound is the larger; `composition` as below.
 
 `composition` is a `CompositionBound`: `Stated { decay, peak_gain, tail_gain, stall }`, the four
 values #1379 composes through gain, stated together or not at all, or `Unstated` until the node's
-own slice derives them (#1378 retires it). Today the builtin input section with a fixed design or
-with its filters disabled states them (#1465, `docs/derivations/1379-graph-tail-composition.md`);
-every other node, the live input section included, states `Unstated`. With a node's
+own slice derives them (#1378 retires it). Today the builtin input section with its filters
+disabled states them, and so does one with a fixed design when its walk finishes within the
+preparation budget and both halves of its decay certificate are verified (#1465,
+`docs/derivations/1379-graph-tail-composition.md`); a fixed design over the budget (it reports the
+live bound) or with no verified certificate, and every other node, the live input section included,
+states `Unstated`. With a node's
 latency `L`, input `x`, output `y`, `N` the first sample of silence, `g_p = 10^(G_p/2000)` and
 `g_t = 10^(G_t/2000)` the linear gains (`0` for `Zero`) and `sigma` the stall's linear level (`0`
 for `Zero`), each value is a certified upper bound at the node's rate, over its parameter domain
