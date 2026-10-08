@@ -520,3 +520,14 @@ ceil10(544.8) = **550**, the frame-equivalent stays **18.0 ns** and the budget *
 binding batch's 44,723 ns a design is at most (1,537 + 550 x 2) x 18.0 ns / 1.05 = 45,206 ns
 (1.08 % left past the margin). The cache cap's arithmetic is 257 + 550 = 807 a design, at most
 1,871 designs a preparation. No new calibration run.
+
+**Note (2026-10-08, the figure of record, from #1465).** The charge of 550 and the cap's 807 and
+1,871 above are superseded. Root ruled that the stream G batch 3 verifier's single calibrate and
+gate-2 run is the figure of record (load 1.27-1.29 and 1.06-1.21): computed bound 16.909 ns
+(96 kHz, one cascade of two sections, 64 designs, 61,767 ns a design at 2,493 frames + 580 x 2);
+gate 2's medians need 17.138 ns, x 1.05 = 17.995 ns, so the frame-equivalent stays **18.0 ns** and
+the budget **27.18 ms**. The largest per-batch-median fixed cost per section is 9.79 us (96 kHz),
+so the charge is ceil10(1.05 x 9.79 us / 18.0 ns) = ceil10(571.1) = **580**; the binding batch's
+61,767 ns is at most 3,653 x 18.0 ns / 1.05 = 62,623 ns (1.39 % left past the margin). The cache
+cap's arithmetic is 257 + 580 = 837 a design, at most 1,804 designs a preparation. Gate 2's worst
+median is 25.879 ms, 95.2 % of 27.18 ms. #1465's attempt record has the gate-8 margins.

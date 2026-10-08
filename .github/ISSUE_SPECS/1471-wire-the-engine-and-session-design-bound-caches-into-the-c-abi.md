@@ -20,9 +20,10 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
   rate; entry cap `INPUT_BOUND_CACHE_ENTRIES` = 8,192, cleared when full), the per-preparation
   budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frame-equivalents of 18.0 ns, 27.18 ms,
   charged in strip order: each design computed charges the frames it walks plus
-  `INPUT_BOUND_SECTION_CHARGE` = 550 per section, #1457 Amendments 3 and 4, with the 1.05 margin
-  on the whole charged work per #1465's whole-work margin fix of 2026-10-08, so at least 807 a
-  computed design and at most 1,871 designs a preparation; past it a design reports the
+  `INPUT_BOUND_SECTION_CHARGE` = 580 per section, #1457 Amendments 3 and 4, with the 1.05 margin
+  on the whole charged work per #1465's whole-work margin fix of 2026-10-08, on the stream G batch
+  3 verifier's figure of record, so at least 837 a computed design and at most 1,804 designs a
+  preparation; past it a design reports the
   rate's live bound), and `input_section_bounds(rate, strips, cache)`. A cached design charges the budget
   its stored charge, so every prepared value is a pure function of the session, with or without a
   cache, cold or warm.

@@ -273,8 +273,13 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   per section times **1.05**, in frame-equivalents, rounded up to a ten. Then every design's median
   work is at most (frames walked + `INPUT_BOUND_SECTION_CHARGE` x sections) x frame-equivalent /
   1.05. Reason: without the margin on the charge, a raised frame-equivalent lowers the charge (550
-  to 520 on the figure of record), and the binding batch keeps only 3.6 % headroom, not 5 %.
-  `calibrate` and gate 2 print the margin left on their binding design.
+  to 520 on follow-up 2's figure), and the binding batch keeps only 3.6 % headroom, not 5 %.
+  `calibrate` and gate 2 print the margin left on their binding design. **The figure of record
+  (the stream G batch 3 verifier's single run, root's ruling of 2026-10-08):**
+  `FRAME_EQUIVALENT_NS` = **18.0 ns** (computed bound 16.909 ns; gate 2 needs 17.138 ns, x 1.05 =
+  17.995 ns), `INPUT_BOUND_SECTION_CHARGE` = **580** (P = 9.79 us; ceil10(1.05 x 9.79 us / 18.0
+  ns) = ceil10(571.1)), budget **27.18 ms**; restated in the batch follow-up at the end of the
+  record.
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
@@ -841,7 +846,8 @@ stay above.
 | The follow-up verifier's descriptive gate 2 (charge 550) | as fold-in 2's gate 2 | 16.5 ns (16.367) |
 | Follow-up 3's descriptive calibrate (load 2.21-3.26; below) | per-batch median, 96 / 64 / 48 a batch | 17.0 ns / 560 |
 | Root's margin ruling on follow-up 2's figure (no new run; superseded by the next row) | computed bound 16.960 ns x 1.05, rounded up to 0.5 ns; charge searched at it | ~~18.0 ns / 520~~ |
-| The coordinator's whole-work margin fix (no new run; last section) | as the margin ruling, the charge = ceil10(1.05 x 9.34 us / 18.0 ns) | **18.0 ns / 550** |
+| The coordinator's whole-work margin fix (no new run; superseded by the next row) | as the margin ruling, the charge = ceil10(1.05 x 9.34 us / 18.0 ns) | ~~18.0 ns / 550~~ |
+| **The stream G batch 3 verifier's calibrate and gate 2 (the figure of record; load 1.27-1.29 and 1.06-1.21; last section)** | per-batch median, 96 / 64 / 48 a batch, whole-work margin; gate 2 at charge 550 needs 17.138 ns | **18.0 ns / 580** |
 
 ### Attempt 1 follow-up 2: root's ruling (c) (2026-10-08, implementer)
 
@@ -1129,3 +1135,52 @@ input_bound_budget`: built. `cargo fmt --all -- --check`: clean. `cargo clippy -
 No test was added or rewritten. Not run: `scripts/check-cross-targets.sh` (a constant, an example
 and prose; no target-specific code), gate 2 and `calibrate` (the batch verifier's run is the figure
 of record).
+
+### Stream G batch 3 follow-up: the figure of record (2026-10-08, root's ruling; implementer: applied, no new run)
+
+**The run** (the batch verdict's Task 2, `/home/bl/misofm/submix-verdicts/stream-g3-batch-verdict.md`,
+on 8ac5f95f4 built with charge 550; `taskset -c 7`, one invocation each, one warmup and five
+measured rounds, no retry). Root's ruling: the batch verifier's single run is the figure of record.
+
+- **Calibrate:** exit 0, 97 s; `/proc/loadavg` before 1.27 2.01 2.63, after 1.29 1.82 2.50. 888
+  batches of 30,216 designs. Computed per-design-median bound **16.909 ns**, binding: 96 kHz, one
+  cascade of two sections, grid batch 27 (64 designs), median 61,767 ns a design, 2,493.0 frames +
+  580 x 2 sections = 3,653.0 charged frame-equivalents a design. Largest per-batch-median fixed cost
+  per section **P = 9.79 us** (one cascade of two sections, 96 kHz median fit, intercept 19.58 us);
+  per-rate fits of that class 8.09 (44.1), 8.05 (48), 9.49 (88.2), 9.79 (96) us a section. Shortest
+  batch sample 1.118 ms (two cascades of one section). Batch against single walks: min 0.9708,
+  median 1.0000, max 1.0598 (145 of 888 below 1). Largest raw sample 2.304 x its batch's median
+  (evidence). Descriptive: the slowest class's slowest point 17.34 ns a frame net of the fixed cost
+  (44.1 kHz, typical, 80 Hz into 16 kHz).
+- **Gate 2** (charge 550): exit 0, 15 s; `/proc/loadavg` before 1.06 1.72 2.44, after 1.21 1.72
+  2.43. Its medians need **17.138 ns** (the 4,096 cheap two-section designs, 1 kHz into 1.28 kHz,
+  +24 dB, 88.2 kHz). Worst median design work 25.879 ms, 95.2 % of 27.18 ms; no family's median
+  over the stated bound.
+
+**Applied.** The larger need, 17.138 ns x 1.05 = 17.995 ns, rounds up to **`FRAME_EQUIVALENT_NS` =
+18.0 ns**, unchanged (calibrate alone: 16.909 x 1.05 = 17.754 ns). The charge is
+ceil10(1.05 x 9.79 us / 18.0 ns) = ceil10(571.1) = **`INPUT_BOUND_SECTION_CHARGE` = 580** (was
+550; 580 x 18.0 ns / 1.05 = 9.94 us against the 9.79 us). The binding batch: 3,653 x 18.0 ns /
+1.05 = 62,623 ns against its 61,767 ns, **1.39 %** left past the margin.
+
+- The budget: 1,510,000 x 18.0 ns = **27.18 ms**, unchanged.
+- The cache cap: a computed design charges at least 257 + 580 = **837** frame-equivalents, so at
+  most 1,510,000 / 837 = **1,804** designs a preparation; the cap of 8,192 holds them.
+
+**Restated.** `INPUT_BOUND_SECTION_CHARGE` = 580 and its doc; the cache cap's doc (837, 1,804);
+F5 above; the figures of #1470 (What #1457 ships), #1471 (What #1457 ships) and the #1474 note.
+#1468 is parked and not restated.
+
+**Gate 8** (charge 580): passed, every 64-track console document exact at every launch rate.
+Stereo documents (`console-sixty-four-track`, `-app`, `-intended`, `-sends`, identical; charged,
+frames walked, margin): 44.1 kHz 758,912 (610,432, 751,088); 48 kHz 807,296 (658,816, 702,704);
+88.2 kHz 1,306,240 (1,157,760, 203,760); 96 kHz 1,402,496 (1,254,016, **107,504**, the least,
+1.94 ms at 18.0 ns; as the batch verdict's arithmetic predicted). Mono: 390,720 (margin
+1,119,280), 416,064 (1,093,936), 675,392 (834,608), 725,056 (784,944). Frames walked unchanged.
+
+**Gates.** `cargo test --locked --release -p builtins --features builtins/test-support --test
+tail_contract`: 22 passed. `cargo test --locked -p builtins --features test-support --lib`: 16
+passed. `cargo test --locked -p builtins-compiler --features test-support --lib`: 57 passed (gate
+8). `cargo fmt --all -- --check`: clean. `RUSTDOCFLAGS='-D warnings' cargo doc --locked
+--workspace --no-deps`: exit 0. No test was added or rewritten. Not run: `calibrate` and gate 2
+(the batch verifier's run is the figure of record; no new run, per the ruling).
