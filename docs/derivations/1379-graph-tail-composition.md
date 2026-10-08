@@ -12,20 +12,29 @@ the bounds it reuses are #1329's (`docs/derivations/1329-input-section-tail-and-
 
 `eps = 10^(-144/20)` (`TAIL_FLOOR`); `u = 2^-24`; a node with latency `L`, tail `T` (#1329's
 `T_decay`), input `x`, output `y`; `N` the first sample of silence. The node states
-`effect_contract::CompositionBound::Stated { decay: D, peak_gain: G_p, tail_gain: G_t, stall:
-sigma }`, with `g_p = 10^(G_p/2000)`, `g_t = 10^(G_t/2000)` and `sigma` the stall's linear level:
+`effect_contract::CompositionBound::Stated { decay: D, peak_gain: G_p, tail_gain: G_t,
+peak_stall: sigma_p, tail_stall: sigma_t }` (H1 as amended by #1484), with `g_p = 10^(G_p/2000)`,
+`g_t = 10^(G_t/2000)` and `sigma_p`, `sigma_t` the two stalls' linear levels, `sigma_t <= sigma_p`:
 
-* **(N1) Peak.** If `|x[n]| <= X` for all `n`: `|y[n]| <= g_p X + sigma` for every `n`.
+* **(N1) Peak.** If `|x[n]| <= X` for all `n`: `|y[n]| <= g_p X + sigma_p` for every `n`.
 * **(N2) Tail at every decade.** With no control event at or after `N`: if `|x[n]| <= X` for all
   `n` and `|x[n]| <= epsilon` for every `n >= M` (some `M >= N`), then for every integer `k >= 0`
-  and every `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma`.
+  and every `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`.
 * **(N3) Rest.** #1329's `RestSamples`, read with "zero from `M`" for "zero from `N`".
+
+`sigma_p` bounds the flush part of the output at every frame and `sigma_t` only from the node's
+tail on; (N2)'s frames are a subset of (N1)'s, so `sigma_t <= sigma_p`. A use that bounds a signal
+at every frame reads `sigma_p` (`CompositionBound::peak_clause`), and a use from the node's tail
+on reads `sigma_t` (`CompositionBound::tail_clause`). The two differ where the flush part before
+`T` is larger than after it (the live input section, slice B1, #1466); for the fixed design below
+`F a` holds at every frame, so it is both.
 
 The share `3/4` is #1329's split: `T` certifies `eps / 2` for the exact reference and `eps / 4`
 for the relative `f32` deviation; the last quarter is the stall's. So (N2) at `k = 0`,
-`epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma / eps`, and
+`epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma_t / eps`, and
 `P* <= P^ < 2 * 10^(1/2000) (1 + 2^-29) P* < 2.0024 P*` with #1329's flush floor
-`P* = F a / (eps / 2 - g dev_core)` (`g dev_core < eps / 4` at `T`; "The stall `sigma`" below).
+`P* = F a / (eps / 2 - g dev_core)` (`g dev_core < eps / 4` at `T`; "The stalls `sigma_p` and
+`sigma_t`" below).
 `P^` can exceed `2 P*`: the release `tail_contract` run gives `P^ >= 2 P*` on 16 of its 112 F3
 rows, with a maximum ratio of 2.0016 (88.2 kHz, 1 kHz HPF at 0 dB). Nothing #1329 certified
 changes: `T`, `T_rest`, both rests and `P*` are computed exactly as before.
@@ -61,7 +70,7 @@ Define
 ### (N1) and the gains: `G_p = G_t = ceil_mB(g (O + dev_loud))`
 
 For every `n`: `|y[n]| <= |y_ref[n]| + g X dev_loud + F a <= g X (O + dev_loud) + F a`, because
-`sum_m |x[m]| o(n - m) <= X O`. So `g_p >= g (O + dev_loud)` and `sigma >= F a` give (N1).
+`sum_m |x[m]| o(n - m) <= X O`. So `g_p >= g (O + dev_loud)` and `sigma_p >= F a` give (N1).
 `G_t = G_p`: the design's words never change, so an input after `N` meets the operator an input
 before it met, and (N2)'s `epsilon` part below needs exactly this gain.
 
@@ -88,7 +97,7 @@ deviation at `M`, because the drives before `M` are at most the suprema). With t
 |y[M + m]| <= g X (S(m + 1) + dev(m)) + g epsilon (O + dev_loud) + F a.
 ```
 
-`g (O + dev_loud) <= g_t` and `F a <= sigma`, so (N2) holds at `m >= T + k D` once
+`g (O + dev_loud) <= g_t` and `F a <= sigma_t`, so (N2) holds at `m >= T + k D` once
 `g S(m) < (eps / 2) 10^-k` and `g dev(m) < (eps / 4) 10^-k` for every such `m` (`S` is
 non-increasing, so `S(m + 1) <= S(m)`). At `k = 0` that is #1329's `T` (its two halves are exactly
 these two crossings). What remains is `D`: one value with both crossings at `T + k D` for every
@@ -249,9 +258,11 @@ bounds), and its one absolute term is the `tau` added to a carried state, so its
 unfloored value only where a component is within `tau` of zero, which no stated value can see
 (`h >= TAIL_FLOOR / 4 / g > 2^-34` for every builtin trim).
 
-### The stall `sigma`
+### The stalls `sigma_p` and `sigma_t`
 
-`sigma = Level(ceil_mB(F a))`. `P^ = 4 sigma / eps >= 4 F a / eps >= P*` because
+`sigma_p = sigma_t = Level(ceil_mB(F a))`, from the one raw value: `F a` bounds the absolute
+deviation at every frame, so it serves (N1) and, a fortiori, (N2) (#1484 S-D5). Write `sigma` for
+the common value. `P^ = 4 sigma_t / eps >= 4 F a / eps >= P*` because
 `eps / 2 - g dev_core >= eps / 4` (#1329's `T` puts `g dev_core` below `eps / 4`). Above:
 `P* >= 2 F a / eps` (`g dev_core >= 0`), and `ceil_mB` adds less than one millibel plus
 `|x| 2^-30 + 2^-30`, so `sigma < 10^(1/2000) (1 + 2^-29) F a` and
@@ -265,8 +276,8 @@ A channel with no enabled section is `y = fl(x trim)`: `D = 0` (the `X` part is 
 current input), `T = 0`, rest `ZERO`, and `|y| <= |trim| (1 + u) |x|`, or `|trim| |x|` exactly
 when the product is exact, which it is for a power-of-two trim (0 dB included) up to underflow.
 So `G_p = G_t = ceil_mB(|trim|)` for a power-of-two trim and `ceil_mB(|trim| (1 + u))` otherwise,
-and `sigma` is one underflow, `2^-126`, as a `Level`. (N2) holds with `D = 0`: from `M` on,
-`|y[n]| <= g_t epsilon + sigma`.
+and both stalls (`sigma_p = sigma_t`) are one underflow, `2^-126`, as a `Level`. (N2) holds with
+`D = 0`: from `M` on, `|y[n]| <= g_t epsilon + sigma_t`.
 
 ### Channels
 

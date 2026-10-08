@@ -332,7 +332,9 @@ const BOXED_INPUT_ENTRY_BYTES: u64 = 712;
 // replaced (24 before): the prepared bounds live beside the tail, control-side (Amendment 4, R5).
 // #1464: +32 with the bound's `composition` (`effect_contract::NodeTailBound`: two
 // `TailSamples`, a `RestBound` and a `CompositionBound`, 88 bytes; 56 before; the entry was 72).
-const BOXED_TAIL_ENTRY_BYTES: u64 = 104;
+// #1484: +8 with the composition's second `FlushStall` (`peak_stall` and `tail_stall` replace one
+// `stall`; `CompositionBound` 32 -> 40, `NodeTailBound` 88 -> 96; the entry was 104).
+const BOXED_TAIL_ENTRY_BYTES: u64 = 112;
 const BOXED_STR_BYTES: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 /// One `InputBuiltins`, 168 -> 272 at #210 phase 3: `InputStage<f32>` gained the live trim ramp
@@ -5328,7 +5330,13 @@ mod tests {
             // bytes in each of the payload's and the seal's tail vectors, +64 per track in both
             // processor payload counts). The largest allocation and the allocation counts do not
             // move. No PCM, meter, response or benchmark fixture moved.
-            "cd2b9fe6a0055421c2a816fd4454b1b6bdbe4d25cb681aa6df6e1785c27766b5",
+            // Re-pinned by issue #1484: `resources.jsonl` alone moves, by the second stall the
+            // composition gains (`peak_stall` and `tail_stall` replace `stall`; `(Box<str>,
+            // NodeTailBound)` 112 bytes, against 104: +8 bytes in each of the payload's and the
+            // seal's tail vectors, +16 per track in both processor payload counts). The largest
+            // allocation and the allocation counts do not move. No PCM, meter, response or
+            // benchmark fixture moved.
+            "d0bf619820c5c474c6f7475556cfbd5ea20ca9d69bab6fd41cf08d27962deff9",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

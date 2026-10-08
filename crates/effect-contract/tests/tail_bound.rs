@@ -2,7 +2,8 @@
 
 //! #1377 D3 through #1462's table: the prepared metadata carries the registry's tail-bound entry
 //! for the request's own rate and quality, and refuses another row's or another effect's entry.
-//! #1464 K4: `NodeTailBound::max` keeps the componentwise rule for the composition.
+//! #1464 K4: `NodeTailBound::max` keeps the componentwise rule for the composition, each stall by
+//! its own maximum (#1484 S3). #1484 S1: the composition's readers pair each stall with its clause.
 
 mod support;
 
@@ -11,7 +12,7 @@ use engine::LAUNCH_SAMPLE_RATES;
 
 /// Distinct values per rate in every field, so a copy from the wrong field or the wrong rate
 /// shows. The composition is stated (#1464), consistently: a finite tail, the tail gain below the
-/// peak gain.
+/// peak gain, the tail stall below the peak stall.
 fn tail_and_rest(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     let rate = u64::from(sample_rate);
     let millibels = |value: u64| i32::try_from(value).expect("a test level fits i32");
@@ -26,7 +27,8 @@ fn tail_and_rest(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
             decay: TailDecay(rate / 20),
             peak_gain: PeakGain::Millibels(millibels(rate / 50)),
             tail_gain: PeakGain::Millibels(millibels(rate / 200)),
-            stall: FlushStall::Level(-millibels(rate / 40)),
+            peak_stall: FlushStall::Level(-millibels(rate / 40)),
+            tail_stall: FlushStall::Level(-millibels(rate / 30)),
         },
     }
 }
@@ -219,14 +221,15 @@ fn stated(
     decay: u64,
     peak_gain: PeakGain,
     tail_gain: PeakGain,
-    stall: FlushStall,
+    [peak_stall, tail_stall]: [FlushStall; 2],
 ) -> NodeTailBound {
     NodeTailBound {
         composition: CompositionBound::Stated {
             decay: TailDecay(decay),
             peak_gain,
             tail_gain,
-            stall,
+            peak_stall,
+            tail_stall,
         },
         ..NodeTailBound::ZERO
     }
@@ -234,47 +237,53 @@ fn stated(
 
 /// #1464 K4: `NodeTailBound::max`, the bound of a node whose two channels are bounded by its
 /// operands, is `Unstated` in its composition when either channel's is, and otherwise takes each
-/// of the four values from whichever channel's is larger, with `Zero` below every level. The
+/// of the five values from whichever channel's is larger, with `Zero` below every level. The
 /// other three values keep #1329's componentwise rule. Every operand is a statement the registry
-/// admits.
+/// admits. #1484 S3: the crossed operands give each side one larger stall, so each stall is
+/// checked by its own maximum in both operand orders.
 ///
 /// Red mutations: `max` keeps one side's `Stated` composition beside an `Unstated` one; takes
-/// any one of the composition's four values, a tail or a rest value from one fixed side, or by
-/// minimum; or orders `Zero` above a `Millibels` or a `Level`.
+/// any one of the composition's five values, a tail or a rest value from one fixed side, or by
+/// minimum; takes one stall from the other stall field; or orders `Zero` above a `Millibels` or a
+/// `Level`.
 #[test]
 fn max_states_a_composition_only_when_both_channels_state_one() {
     let left = stated(
         7,
         PeakGain::Millibels(-300),
         PeakGain::Millibels(-900),
-        FlushStall::Level(-14_000),
+        [FlushStall::Level(-14_000), FlushStall::Level(-14_500)],
     );
-    let right = stated(3, PeakGain::Zero, PeakGain::Zero, FlushStall::Zero);
+    let right = stated(
+        3,
+        PeakGain::Zero,
+        PeakGain::Zero,
+        [FlushStall::Zero, FlushStall::Zero],
+    );
     let larger = stated(
         7,
         PeakGain::Millibels(-300),
         PeakGain::Millibels(-900),
-        FlushStall::Level(-14_000),
+        [FlushStall::Level(-14_000), FlushStall::Level(-14_500)],
     );
     assert_eq!(left.max(right).composition, larger.composition);
     assert_eq!(right.max(left).composition, larger.composition);
-    // Each value from the side whose value is larger, mixed across the sides.
+    // Each value from the side whose value is larger, mixed across the sides: `crossed` has the
+    // larger peak stall and `left` the larger tail stall, so each side supplies one stall.
     let crossed = stated(
         2,
         PeakGain::Millibels(600),
         PeakGain::Millibels(-500),
-        FlushStall::Level(-13_000),
+        [FlushStall::Level(-13_000), FlushStall::Level(-15_000)],
     );
-    assert_eq!(
-        left.max(crossed).composition,
-        stated(
-            7,
-            PeakGain::Millibels(600),
-            PeakGain::Millibels(-500),
-            FlushStall::Level(-13_000),
-        )
-        .composition
+    let mixed = stated(
+        7,
+        PeakGain::Millibels(600),
+        PeakGain::Millibels(-500),
+        [FlushStall::Level(-13_000), FlushStall::Level(-14_500)],
     );
+    assert_eq!(left.max(crossed).composition, mixed.composition);
+    assert_eq!(crossed.max(left).composition, mixed.composition);
     // An unstated side makes the whole composition unstated, on either side.
     let unstated = NodeTailBound::ZERO;
     assert_eq!(unstated.composition, CompositionBound::Unstated);
@@ -314,4 +323,38 @@ fn max_states_a_composition_only_when_both_channels_state_one() {
     // An infinite tail or an unstated rest on either side absorbs.
     assert_eq!(left.max(NodeTailBound::UNBOUNDED), NodeTailBound::UNBOUNDED);
     assert_eq!(NodeTailBound::UNBOUNDED.max(left), NodeTailBound::UNBOUNDED);
+}
+
+/// #1484 S1: the composition's readers pair each stall with its clause, as H1 states: (N1)'s pair
+/// is `(G_p, sigma_p)` and (N2)'s triple is `(D, G_t, sigma_t)`; both are `None` for `Unstated`.
+/// Every value is distinct, and `sigma_t` lies strictly below `sigma_p`, so a reader that takes
+/// any value from another field shows. On the fixed input section the two stalls are equal, so
+/// only this fixture tells the readers' stalls apart.
+///
+/// Red mutations: `peak_clause` returns `sigma_t` (the small stall at every frame) or `G_t`;
+/// `tail_clause` returns `sigma_p` (the every-frame stall in `Sigma`) or `G_p`; either returns a
+/// value for `Unstated`.
+#[test]
+fn readers_pair_each_stall_with_its_clause() {
+    let composition = stated(
+        11,
+        PeakGain::Millibels(-200),
+        PeakGain::Millibels(-700),
+        [FlushStall::Level(-12_000), FlushStall::Level(-14_000)],
+    )
+    .composition;
+    assert_eq!(
+        composition.peak_clause(),
+        Some((PeakGain::Millibels(-200), FlushStall::Level(-12_000)))
+    );
+    assert_eq!(
+        composition.tail_clause(),
+        Some((
+            TailDecay(11),
+            PeakGain::Millibels(-700),
+            FlushStall::Level(-14_000)
+        ))
+    );
+    assert_eq!(CompositionBound::Unstated.peak_clause(), None);
+    assert_eq!(CompositionBound::Unstated.tail_clause(), None);
 }

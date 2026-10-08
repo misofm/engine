@@ -1193,7 +1193,8 @@ mod metadata_mismatch_tests {
                     decay: TailDecay(0),
                     peak_gain: PeakGain::Zero,
                     tail_gain: PeakGain::Zero,
-                    stall: FlushStall::Zero,
+                    peak_stall: FlushStall::Zero,
+                    tail_stall: FlushStall::Zero,
                 },
                 CompositionBound::Stated { .. } => CompositionBound::Unstated,
             };

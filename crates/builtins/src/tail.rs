@@ -52,14 +52,17 @@ fn bound_from_cascade(bound: &CascadeBound) -> NodeTailBound {
 }
 
 /// #1465 F-D3, F-D4: a fixed design's `D`, `G_p = G_t = ceil_mB(|trim| (1 + u) (O + dev_loud))` and
-/// `sigma = ceil_mB(F a)`, each from a value computed by rounded operations.
+/// `sigma_p = sigma_t = ceil_mB(F a)`, each from a value computed by rounded operations. `F a`
+/// bounds the flush part at every frame, so it is both stalls (issue #1484 S-D5).
 fn stated_composition(composition: &CascadeComposition) -> CompositionBound {
     let gain = PeakGain::Millibels(ceil_millibels(composition.peak_gain, Rounding::Computed));
+    let stall = FlushStall::Level(ceil_millibels(composition.stall, Rounding::Computed));
     CompositionBound::Stated {
         decay: TailDecay(composition.decay),
         peak_gain: gain,
         tail_gain: gain,
-        stall: FlushStall::Level(ceil_millibels(composition.stall, Rounding::Computed)),
+        peak_stall: stall,
+        tail_stall: stall,
     }
 }
 
@@ -97,7 +100,8 @@ const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.
 
 /// #1465 F-D3: a channel with both filters disabled is `y = fl(x trim)`: no tail (`D = 0`, rest
 /// `ZERO`), `G_p = G_t = ceil_mB(|trim|)` when the product is exact (a power-of-two trim, 0 dB
-/// included, up to underflow) and `ceil_mB(|trim| (1 + u))` otherwise, and `sigma` one underflow.
+/// included, up to underflow) and `ceil_mB(|trim| (1 + u))` otherwise, and both stalls
+/// (`sigma_p = sigma_t`) one underflow.
 fn memoryless_channel(lane: &InputLane) -> NodeTailBound {
     let trim = lane.trim_signed.abs();
     let power_of_two = trim.is_normal() && trim.to_bits() & 0x007f_ffff == 0;
@@ -106,12 +110,14 @@ fn memoryless_channel(lane: &InputLane) -> NodeTailBound {
     } else {
         ceil_millibels(f64::from(trim) * (1.0 + U), Rounding::Computed)
     };
+    let stall = FlushStall::Level(ceil_millibels(UNDERFLOW, Rounding::Exact));
     NodeTailBound {
         composition: CompositionBound::Stated {
             decay: TailDecay(0),
             peak_gain: PeakGain::Millibels(gain),
             tail_gain: PeakGain::Millibels(gain),
-            stall: FlushStall::Level(ceil_millibels(UNDERFLOW, Rounding::Exact)),
+            peak_stall: stall,
+            tail_stall: stall,
         },
         ..NodeTailBound::ZERO
     }

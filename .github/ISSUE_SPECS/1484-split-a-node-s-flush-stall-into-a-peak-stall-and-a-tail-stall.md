@@ -239,4 +239,83 @@ restored) with at least the mutants in "Test value"; each is red.
 
 ## Attempt record
 
-(none yet)
+### Attempt 1 (2026-10-08, implementer)
+
+Anchors re-verified on `codex/d15-stream-g3` at `06915dc7c`: `CompositionBound` (`lib.rs:324`),
+`FlushStall` (`:358`), `NodeTailBound::max` (`:255`), `tail_bound_consistent` (`:2645`),
+`stated_composition` (`tail.rs:56`), `memoryless_channel` (`:101`), `math::tail`'s `stall`
+(`:520`), `composition_values` (`tail_contract.rs:2084`), F3 (`:2403`), the disabled-filter test
+(`:2442`), the forgery row (`prepare.rs:1196`). The re-grep for `stall:` found no other
+`CompositionBound::Stated` literal.
+
+**Names.** The proposed names are kept: `peak_stall`, `tail_stall`, `peak_clause`,
+`tail_clause` (each names its clause, carries no version suffix, and matches `peak_gain` and
+`tail_gain`). No `stall` field or alias is left.
+
+**Changed.** `crates/effect-contract/src/lib.rs`: the two fields, the two `const fn` readers,
+rule (g) in `tail_bound_consistent`, `max` by each stall's own maximum, and the docs (five
+values, H1 as amended). `crates/builtins/src/tail.rs`: both writers state both stalls from one
+value. `crates/effect-compiler/src/prepare.rs`: the forgery row's rename. Tests:
+`tail_bound.rs` (S1 `readers_pair_each_stall_with_its_clause`; S3 crossed stalls in both orders;
+the per-rate fixture states distinct stalls), `registry.rs` (S2
+`a_tail_stall_above_the_peak_stall_is_refused`, fixtures `RULE_G`, `RULE_G_ZERO`;
+`COMPOSITION` now has `sigma_t < sigma_p`; `launch_shape_stated` a `Zero` tail stall under a
+`Level` peak stall), `tail_contract.rs` (`composition_values` reads through the two readers and
+returns both stalls; F3 asserts both equal `ceil_mB(raw)` and reads `P^` from `sigma_t`; the
+disabled-filter test asserts both stalls are one underflow). Docs: `EFFECT_CONTRACT_V1.md`,
+`docs/derivations/1379-graph-tail-composition.md`, #1379's spec (H1, H2's carrier line, H3's
+column split, H4 step 6) and the design note (H1, H2's code block, H3, H4 step 6, chain (i),
+(iii), (v)). `STREAMS.md` has no status column for this row, so it is unchanged.
+
+**Resource re-pins (each with its reason).** `CompositionBound` 32 -> 40 bytes, `NodeTailBound`
+88 -> 96, `(Box<str>, NodeTailBound)` 104 -> 112 on 64-bit:
+1. `BOXED_TAIL_ENTRY_BYTES` 104 -> 112 (`tools/audit/src/fixture_builtins.rs`, the layout fact,
+   checked by `verify_pinned_native_resource_abi`).
+2. `fixtures/builtins/v1/resources.jsonl`: both processor payload counts +16 per track (two tail
+   entries per track, the payload's and the seal's, +8 each): 2,133 -> 2,149 (1 track), 8,604 ->
+   8,668 (4), 143,229,429 -> 144,278,021 (65,537); the retained counts move by the same amount;
+   the largest allocation and the allocation counts do not move. Length unchanged (2,370 B).
+3. `fixtures/builtins/v1/MANIFEST.tsv`: `resources.jsonl`'s digest, from 2. alone.
+4. The joined manifest identity `d0bf6198...` in `tools/audit/src/builtins_graph.rs`
+   (`ACCEPTED_MANIFEST_SHA256`) and in `fixture_builtins.rs`'s
+   `issue064_checked_corpus_is_read_only_and_complete` (with its re-pin note), from 3. alone.
+5. Browser: `builtinRetainedBytes` measured **2,033 of 2,048** (+16, two wasm32 tail entries of
+   +8; 15 bytes left). No ceiling is raised; `expected.json` is unchanged.
+No PCM, meter, response or benchmark fixture moved; `audit capi`'s `pcm_digest` is
+`cb10fbface44a3a4` (unchanged), 0 allocations, 0 syscalls; the wasm gates' digests pass unchanged.
+
+**Mutation table** (each defect applied, the named tests run, the file restored; `EC` =
+`cargo test -p effect-contract --all-features --test tail_bound --test registry`, `TC` = the
+release `tail_contract` run):
+
+| mutant | run | red |
+|---|---|---|
+| M1 `peak_clause` returns `sigma_t` | EC, TC | S1 only (`tail_contract` green: the fixed stalls are equal) |
+| M2 `tail_clause` returns `sigma_p` | EC, TC | S1 only (`tail_contract` green) |
+| M3 rule (g) dropped | EC | S2 only |
+| M4 `Zero` ordered above a `Level` in rule (g) | EC | S2, plus the (e) and (f) tests (their `LAUNCH_SHAPE_STATED` twin, a `Zero` tail stall under a `Level` peak stall, is refused) |
+| M5 `max` takes `tail_stall` from the peak stalls | EC | S3 |
+| M6 `max` takes `tail_stall` from one side | EC | S3 (`crossed.max(left)`) |
+| M7 `max` takes `peak_stall` from one side | EC | S3 (`left.max(crossed)`) |
+| M8 fixed `tail_stall` left at one underflow | TC | F3 only |
+| M9 disabled channel `peak_stall` at 0 mB | TC | disabled-filter test only |
+| M10 rule (g) compares the stalls the wrong way round | EC | S2, plus the (e) and (f) tests (as M4) |
+| M11 `peak_clause` returns `G_t` | EC | S1 |
+
+M1 and M2 green on `tail_contract` confirm the spec's claim that only S1's distinct fixture
+tells the readers' stalls apart; the readers have no other caller.
+
+**Gates.** All green: the `test-debug-a` workspace command; the release `tail_contract` (17
+passed); `check-effect-contract.sh`; `audit capi`; `check-builtins-fixtures.sh` (50 files);
+`cargo test -p audit` (33 passed, after re-pin 4's second site; the first run was red only on it);
+`check-workspace-policy.sh`; `check-realtime-policy.sh`; conformance fixtures `--check`;
+`run-wasm-gates.sh`; the worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts`, `test-web-audioworklet.sh` with a private TMPDIR, nothing left in it);
+`check-cross-targets.sh`; clippy `-D warnings`; `cargo fmt --check`.
+
+**Open items (outside this slice's named sections, not edited).** Stale single-`sigma` text
+remains in #1379's spec (D2a's `sigma` `Zero`; H2's canonical-text "both gains, stall";
+H8's "B1 certifies `D`, `G_p` and `sigma` ... B2 ... states all four") and in the design note
+(H2's canonical-text line, H7's gate `sigma`, H8's B1 line). #1379 (the canonical
+plan text: one stall or two) and #1466 (B1) settle them.

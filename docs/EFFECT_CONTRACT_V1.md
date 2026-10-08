@@ -101,8 +101,9 @@ H2, #1464). `NodeTailBound::max` is the bound of a node whose two channels are b
 operands: each tail is `Infinite` if either is, else the larger; `rest` is `Unstated` if either is,
 else each peak's bound is the larger; `composition` as below.
 
-`composition` is a `CompositionBound`: `Stated { decay, peak_gain, tail_gain, stall }`, the four
-values #1379 composes through gain, stated together or not at all, or `Unstated` until the node's
+`composition` is a `CompositionBound`: `Stated { decay, peak_gain, tail_gain, peak_stall,
+tail_stall }`, the five values #1379 composes through gain (#1379 Amendment 1 H1 as amended by
+#1484), stated together or not at all, or `Unstated` until the node's
 own slice derives them (#1378 retires it). Today the builtin input section with its filters
 disabled states them, and so does one with a fixed design when its walk finishes within the
 preparation budget and both halves of its decay certificate are verified (#1465,
@@ -110,8 +111,8 @@ preparation budget and both halves of its decay certificate are verified (#1465,
 live bound) or with no verified certificate, and every other node, the live input section included,
 states `Unstated`. With a node's
 latency `L`, input `x`, output `y`, `N` the first sample of silence, `g_p = 10^(G_p/2000)` and
-`g_t = 10^(G_t/2000)` the linear gains (`0` for `Zero`) and `sigma` the stall's linear level (`0`
-for `Zero`), each value is a certified upper bound at the node's rate, over its parameter domain
+`g_t = 10^(G_t/2000)` the linear gains (`0` for `Zero`) and `sigma_p`, `sigma_t` the two stalls'
+linear levels (`0` for `Zero`), each value is a certified upper bound at the node's rate, over its parameter domain
 or its prepared design, computed on the control thread; a stereo node states the maximum over its
 two channels, and a node with a sidechain states each value for every sidechain input:
 
@@ -120,19 +121,30 @@ two channels, and a node with a sidechain states each value for every sidechain 
 | `decay` | `TailDecay(u64)` | `D` | samples per further 20 dB | (N2) |
 | `peak_gain` | `PeakGain` | `G_p` | millibels, rounded up, or `Zero` | (N1) |
 | `tail_gain` | `PeakGain` | `G_t` | millibels, rounded up, or `Zero`; `G_t <= G_p` | gain to an input that arrives at or after `N`, (N2) |
-| `stall` | `FlushStall` | `sigma` | millibels re 1.0, rounded up (`Level`), or `Zero` | absolute flush stall at the output |
+| `peak_stall` | `FlushStall` | `sigma_p` | millibels re 1.0, rounded up (`Level`), or `Zero` | absolute flush stall at the output at every frame, (N1) |
+| `tail_stall` | `FlushStall` | `sigma_t` | millibels re 1.0, rounded up (`Level`), or `Zero`; `sigma_t <= sigma_p` | absolute flush stall at the output from the node's tail on, (N2) |
 
 * **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted control history:
-  `|y[n]| <= g_p X + sigma` for every `n`.
+  `|y[n]| <= g_p X + sigma_p` for every `n`.
 * **(N2) Tail at every decade.** With no control event at or after `N`: if `|x[n]| <= X` for all
   `n` and `|x[n]| <= epsilon` for every `n >= M` (some `M >= N`), then for every integer `k >= 0`
-  and every `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma`.
+  and every `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`.
 * **(N3) Rest.** `RestSamples`, read with "zero from `M`" (`M >= N`).
+
+(N2) at `k = 0`, `epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma_t / eps`. (N2)'s
+frames are a subset of (N1)'s, so `sigma_t <= sigma_p`; a node whose flush part is smaller from its
+tail on (the live input section: its pre-`N` analysis amplifies the flush floor by 55-61 dB) states
+the smaller value for (N2) and keeps the every-frame value for (N1). The fixed input section states
+`sigma_p = sigma_t = ceil_mB(F a)`, and one with its filters disabled states both as one underflow.
+The stalls are read only through `CompositionBound::peak_clause`, (N1)'s pair `(G_p, sigma_p)`, and
+`CompositionBound::tail_clause`, (N2)'s triple `(D, G_t, sigma_t)`; both are `None` for
+`Unstated`. Every use that bounds a signal at every frame reads the first, every use from the
+node's tail on the second.
 
 `PeakGain::Zero` is a node whose output is exactly `+-0.0` for every input; it and
 `FlushStall::Zero` order below every level. A negative `Millibels` is an attenuation.
-`NodeTailBound::max` takes each of the four values by maximum when both sides state them,
-and is `Unstated` when either side is not.
+`NodeTailBound::max` takes each of the five values by maximum when both sides state them, each
+stall by its own maximum and never from the other stall, and is `Unstated` when either side is not.
 
 Gain-only parts (trim, polarity, fader, mute, matrix) state `0` for all three. An absolute output
 floor in place of the exact-zero branch is refused (Amendment 3, G2): it would make the tail a
@@ -151,8 +163,9 @@ plan (#1469). `new` checks each row: (a) `tail_every_peak >= tail`, with `Infini
 a finite `tail_every_peak`; (d) in a `Bounded` rest, `peak_plus_24_dbfs <= any_sanitized_input`
 (the bound for every sanitized input covers the inputs whose peak is at most +24 dBFS). (b) and
 (c) together are "`rest` is `Unstated` if and only if `tail_every_peak` is `Infinite`". A
-`Stated` composition adds two (#1464): (e) `tail` is finite, and (f) `tail_gain <= peak_gain`, with
-`Zero` below every `Millibels`. A row that
+`Stated` composition adds three (#1464, #1484): (e) `tail` is finite, (f) `tail_gain <= peak_gain`,
+with `Zero` below every `Millibels`, and (g) `tail_stall <= peak_stall`, with `Zero` below every
+`Level`. A row that
 breaks a rule refuses the registry with
 `effect.tail_bound.inconsistent`, naming the effect. `NativeEffectRegistry::tail_bound(id,
 sample_rate, quality)` reads a `RegisteredTailBound` entry (`effect.quality.unsupported` for a row

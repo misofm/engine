@@ -201,7 +201,7 @@ pub enum RestBound {
 /// Every node's tail bound, one struct for a native effect and a builtin input section alike
 /// (decision 15 D15-4(b); #1377 D1, #1379 Amendment 1 H2, issue #1464).
 ///
-/// The first three values are #1329's. `composition` carries the four values #1379 composes
+/// The first three values are #1329's. `composition` carries the five values #1379 composes
 /// through gain (H1); it is [`CompositionBound::Unstated`] until the node's own slice derives them.
 ///
 /// An effect's is computed by [`EffectDescriptor::tail_and_rest`] on the control thread, once per
@@ -249,8 +249,8 @@ impl NodeTailBound {
     ///
     /// A tail is `Infinite` if either side's is; a rest is `Unstated` if either side's is, and
     /// otherwise each peak's bound is the larger; the composition is `Unstated` if either side's
-    /// is, and otherwise each of its four values is the larger ([`PeakGain::Zero`] and
-    /// [`FlushStall::Zero`] below every level).
+    /// is, and otherwise each of its five values is the larger, each stall by its own maximum and
+    /// never from the other stall ([`PeakGain::Zero`] and [`FlushStall::Zero`] below every level).
     #[must_use]
     pub fn max(self, other: Self) -> Self {
         let tail = |left: TailSamples, right: TailSamples| match (left, right) {
@@ -279,19 +279,22 @@ impl NodeTailBound {
                         decay: left_decay,
                         peak_gain: left_peak,
                         tail_gain: left_tail,
-                        stall: left_stall,
+                        peak_stall: left_peak_stall,
+                        tail_stall: left_tail_stall,
                     },
                     CompositionBound::Stated {
                         decay: right_decay,
                         peak_gain: right_peak,
                         tail_gain: right_tail,
-                        stall: right_stall,
+                        peak_stall: right_peak_stall,
+                        tail_stall: right_tail_stall,
                     },
                 ) => CompositionBound::Stated {
                     decay: left_decay.max(right_decay),
                     peak_gain: left_peak.max(right_peak),
                     tail_gain: left_tail.max(right_tail),
-                    stall: left_stall.max(right_stall),
+                    peak_stall: left_peak_stall.max(right_peak_stall),
+                    tail_stall: left_tail_stall.max(right_tail_stall),
                 },
                 _ => CompositionBound::Unstated,
             },
@@ -299,27 +302,34 @@ impl NodeTailBound {
     }
 }
 
-/// The four values a node states so that #1379 can compose its tail through gain (#1379
-/// Amendment 1 H1, H2).
+/// The five values a node states so that #1379 can compose its tail through gain (#1379
+/// Amendment 1 H1 as amended by issue #1484, H2).
 ///
 /// Notation: `eps = 10^(-144/20)`; a node with latency `L`, tail `T`, input `x` and output `y`;
 /// `N` the first sample of silence; `g_p = 10^(G_p/2000)` and `g_t = 10^(G_t/2000)` the linear
-/// gains, `0` for a `Zero` gain; `sigma` the stall's linear level, `0` for `Zero`. Each value is a
+/// gains, `0` for a `Zero` gain; `sigma_p` and `sigma_t` the two stalls' linear levels, `0` for
+/// `Zero`. Each value is a
 /// certified upper bound at the node's rate, over its parameter domain or its prepared design,
 /// computed on the control thread; a stereo node states the maximum over its two channels, and a
 /// node with a sidechain states each value for every sidechain input.
 ///
 /// * **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted control history:
-///   `|y[n]| <= g_p X + sigma` for every `n`.
+///   `|y[n]| <= g_p X + sigma_p` for every `n`.
 /// * **(N2) Tail at every decade.** With no control event at or after `N`: if `|x[n]| <= X` for
 ///   all `n` and `|x[n]| <= epsilon` for every `n >= M` (some `M >= N`), then for every integer
 ///   `k >= 0` and every `n >= M + L + T + k D`:
-///   `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma`.
+///   `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`.
 /// * **(N3) Rest.** [`RestSamples`], read with "zero from `M`" (`M >= N`).
 ///
-/// The four values are stated together or not at all: there is no partial statement.
-/// [`NativeEffectRegistry::new`] refuses a `Stated` composition beside an `Infinite` tail, and a
-/// `tail_gain` above the `peak_gain`.
+/// (N2)'s frames are a subset of (N1)'s, so `sigma_t <= sigma_p`: a node whose flush part is
+/// smaller from its tail on (a live input section, whose pre-`N` analysis amplifies the flush
+/// floor) states the smaller value for (N2) and keeps the every-frame value for (N1). A later
+/// slice reads the stalls only through [`Self::peak_clause`] and [`Self::tail_clause`], which pair
+/// each stall with its clause.
+///
+/// The five values are stated together or not at all: there is no partial statement.
+/// [`NativeEffectRegistry::new`] refuses a `Stated` composition beside an `Infinite` tail, a
+/// `tail_gain` above the `peak_gain`, and a `tail_stall` above the `peak_stall`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CompositionBound {
     Stated {
@@ -329,12 +339,46 @@ pub enum CompositionBound {
         peak_gain: PeakGain,
         /// `G_t <= G_p`, the gain to an input that arrives at or after `N` (N2).
         tail_gain: PeakGain,
-        /// `sigma`, the absolute flush stall at the output.
-        stall: FlushStall,
+        /// `sigma_p`, the absolute flush stall at the output at every frame (N1).
+        peak_stall: FlushStall,
+        /// `sigma_t <= sigma_p`, the absolute flush stall at the output from the node's tail on
+        /// (N2).
+        tail_stall: FlushStall,
     },
-    /// The node's slice has not derived the four values yet (the counterpart of
+    /// The node's slice has not derived the five values yet (the counterpart of
     /// [`RestBound::Unstated`]).
     Unstated,
+}
+impl CompositionBound {
+    /// (N1)'s pair `(G_p, sigma_p)`: the gain and the stall that bound the output at every
+    /// frame; `None` for `Unstated`. Every use that bounds a signal at every frame (#1379 H4's
+    /// `S_out`, `X*`) reads this.
+    #[must_use]
+    pub const fn peak_clause(self) -> Option<(PeakGain, FlushStall)> {
+        match self {
+            Self::Stated {
+                peak_gain,
+                peak_stall,
+                ..
+            } => Some((peak_gain, peak_stall)),
+            Self::Unstated => None,
+        }
+    }
+    /// (N2)'s triple `(D, G_t, sigma_t)`: the decay, the gain and the stall that bound the
+    /// output from the node's tail on; `None` for `Unstated`. Every use from the node's tail on
+    /// (#1379 H4's `Sigma`, `P^ = 4 sigma_t / eps`) reads this.
+    #[must_use]
+    pub const fn tail_clause(self) -> Option<(TailDecay, PeakGain, FlushStall)> {
+        match self {
+            Self::Stated {
+                decay,
+                tail_gain,
+                tail_stall,
+                ..
+            } => Some((decay, tail_gain, tail_stall)),
+            Self::Unstated => None,
+        }
+    }
 }
 
 /// `D`: the samples per further 20 dB of a node's tail ((N2) of [`CompositionBound`]). `0` means
@@ -352,8 +396,8 @@ pub enum PeakGain {
     Millibels(i32),
 }
 
-/// `sigma`: a node's absolute flush stall at its output, in millibels re 1.0 rounded up, or
-/// `Zero`; `Zero` orders below every `Level`.
+/// `sigma_p` or `sigma_t`: a node's absolute flush stall at its output, in millibels re 1.0
+/// rounded up, or `Zero`; `Zero` orders below every `Level`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FlushStall {
     Zero,
@@ -2636,12 +2680,15 @@ impl RegisteredTailBound {
 /// `tail_every_peak` is finite" are one statement. (b) and (c) are its two directions, the two
 /// ways it can fail independently, and together they are the whole equivalence.
 ///
-/// A [`CompositionBound::Stated`] composition adds two rules (#1379 Amendment 1 H2, issue #1464):
+/// A [`CompositionBound::Stated`] composition adds three rules (#1379 Amendment 1 H2, issues #1464
+/// and #1484):
 ///
 /// * (e) `tail` is finite (the decade law (N2) counts from `T`, so an `Infinite` tail states
-///   nothing for the four values to compose);
+///   nothing for the five values to compose);
 /// * (f) `tail_gain <= peak_gain`, with [`PeakGain::Zero`] below every `Millibels` (an input that
-///   arrives after `N` meets at most the gain any input meets).
+///   arrives after `N` meets at most the gain any input meets);
+/// * (g) `tail_stall <= peak_stall`, with [`FlushStall::Zero`] below every `Level` ((N2)'s frames
+///   are a subset of (N1)'s, so a larger tail stall states a value no derivation needs).
 const fn tail_bound_consistent(bound: NodeTailBound) -> bool {
     let ordered = match (bound.tail, bound.tail_every_peak) {
         (_, TailSamples::Infinite) => true,
@@ -2660,6 +2707,8 @@ const fn tail_bound_consistent(bound: NodeTailBound) -> bool {
         CompositionBound::Stated {
             peak_gain,
             tail_gain,
+            peak_stall,
+            tail_stall,
             ..
         } => {
             let finite_tail = matches!(bound.tail, TailSamples::Finite(_));
@@ -2668,7 +2717,12 @@ const fn tail_bound_consistent(bound: NodeTailBound) -> bool {
                 (PeakGain::Millibels(_), PeakGain::Zero) => false,
                 (PeakGain::Millibels(tail), PeakGain::Millibels(peak)) => tail <= peak,
             };
-            finite_tail && gains_ordered
+            let stalls_ordered = match (tail_stall, peak_stall) {
+                (FlushStall::Zero, _) => true,
+                (FlushStall::Level(_), FlushStall::Zero) => false,
+                (FlushStall::Level(tail), FlushStall::Level(peak)) => tail <= peak,
+            };
+            finite_tail && gains_ordered && stalls_ordered
         }
         CompositionBound::Unstated => true,
     };

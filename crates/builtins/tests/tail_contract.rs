@@ -20,8 +20,7 @@ use builtins::{
     input_section_worst_case_pair, prepare_input_filter_pair,
 };
 use effect_contract::{
-    CompositionBound, FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay,
-    TailSamples,
+    FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay, TailSamples,
 };
 use math::tail::{
     CascadeBound, LiveZones, SectionConstants, SvfWords, TAIL_FLOOR, fixed_cascade, live_cascade,
@@ -2079,17 +2078,19 @@ fn live_bounds_leave_headroom_to_the_tail_cap() {
 /// `2^-24`, the `f32` unit roundoff.
 const U: f64 = 1.0 / 16_777_216.0;
 
-/// The four composition values of a bound, `(D, G_p, G_t, sigma)`; panics unless every one is
-/// stated with a level (no `Zero`).
-fn composition_values(bound: NodeTailBound, what: &str) -> (u64, i32, i32, i32) {
-    match bound.composition {
-        CompositionBound::Stated {
-            decay: TailDecay(decay),
-            peak_gain: PeakGain::Millibels(peak),
-            tail_gain: PeakGain::Millibels(tail),
-            stall: FlushStall::Level(stall),
-        } => (decay, peak, tail, stall),
-        other => panic!("{what}: composition {other:?}"),
+/// The five composition values of a bound, `(D, G_p, G_t, sigma_p, sigma_t)`, read through the
+/// clause readers (#1484 S-D2: `G_p` and `sigma_p` from (N1)'s pair, `D`, `G_t` and `sigma_t`
+/// from (N2)'s triple); panics unless every one is stated with a level (no `Zero`).
+fn composition_values(bound: NodeTailBound, what: &str) -> (u64, i32, i32, i32, i32) {
+    match (
+        bound.composition.peak_clause(),
+        bound.composition.tail_clause(),
+    ) {
+        (
+            Some((PeakGain::Millibels(peak), FlushStall::Level(peak_stall))),
+            Some((TailDecay(decay), PeakGain::Millibels(tail), FlushStall::Level(tail_stall))),
+        ) => (decay, peak, tail, peak_stall, tail_stall),
+        _ => panic!("{what}: composition {:?}", bound.composition),
     }
 }
 
@@ -2357,7 +2358,7 @@ fn fixed_design_gains_bound_the_cascade_and_stay_near_its_section_norms() {
                 let kernel = input(rate, hpf, lpf, trim_db, false);
                 let gain = trim_gain(&kernel);
                 let prepared = bound(rate, hpf, lpf, trim_db);
-                let (_, peak, tail, _) = composition_values(prepared, &what);
+                let (_, peak, tail, ..) = composition_values(prepared, &what);
                 // (a) Soundness against the brute force.
                 assert!(tail <= peak, "{what}: G_t {tail} > G_p {peak}");
                 assert!(
@@ -2397,8 +2398,10 @@ fn fixed_design_gains_bound_the_cascade_and_stay_near_its_section_norms() {
     }
 }
 
-/// #1465 F3. The stall is the module's rounded up to a millibel, `P^ = 4 sigma / eps` is at least
-/// the module's `P*`, and every enabled design states a positive stall level.
+/// #1465 F3, #1484 S4. Both stalls are the module's stall rounded up to a millibel (`F a` holds at
+/// every frame, so `sigma_p = sigma_t`), `P^ = 4 sigma_t / eps` (an (N2) use, read through
+/// (N2)'s triple) is at least the module's `P*`, and every enabled design states a positive stall
+/// level.
 #[test]
 fn fixed_design_stall_is_the_module_stall_rounded_up_and_covers_the_flush_floor() {
     for &rate in rates() {
@@ -2412,14 +2415,24 @@ fn fixed_design_stall_is_the_module_stall_rounded_up_and_covers_the_flush_floor(
                 let kernel = input(rate, hpf, lpf, trim_db, false);
                 let sections = kernel_sections(&kernel);
                 let gain = trim_gain(&kernel);
-                let (.., stall) = composition_values(bound(rate, hpf, lpf, trim_db), &what);
+                let (.., peak_stall, tail_stall) =
+                    composition_values(bound(rate, hpf, lpf, trim_db), &what);
                 let cascade = fixed_cascade(&sections, gain, &law, rest_peaks()).expect("bound");
                 let raw = cascade.composition.expect("a stated composition").stall;
                 assert!(raw > 0.0, "{what}: a positive stall");
-                assert_eq!(stall, ceil_mb(raw), "{what}: sigma is the stall rounded up");
-                let p_hat = 4.0 * linear(stall) / TAIL_FLOOR;
+                assert_eq!(
+                    peak_stall,
+                    ceil_mb(raw),
+                    "{what}: sigma_p is the stall rounded up"
+                );
+                assert_eq!(
+                    tail_stall,
+                    ceil_mb(raw),
+                    "{what}: sigma_t is the stall rounded up"
+                );
+                let p_hat = 4.0 * linear(tail_stall) / TAIL_FLOOR;
                 eprintln!(
-                    "F3 {what}: sigma {stall} mB, P^ {p_hat:.4e}, P* {:.4e}",
+                    "F3 {what}: sigma_t {tail_stall} mB, P^ {p_hat:.4e}, P* {:.4e}",
                     cascade.flush_floor
                 );
                 assert!(
@@ -2435,7 +2448,7 @@ fn fixed_design_stall_is_the_module_stall_rounded_up_and_covers_the_flush_floor(
 /// #1465 F2(c), and the both-disabled branch of preparation (root's named exception, 2026-10-08).
 /// A design with both filters disabled states `D = 0`, `G_p = G_t = ceil_mB(|trim|)` for a
 /// power-of-two trim (0 dB, `|trim| = 2`) and `ceil_mB(|trim| (1 + u))` otherwise (+6 dB, whose
-/// word lies below `10^(6/20)`, so the two differ), and one underflow as its stall, through both
+/// word lies below `10^(6/20)`, so the two differ), and one underflow as both stalls, through both
 /// `input_section_bound` and `input_section_bounds`; with the channels' trims different, the larger
 /// gain; and one disabled channel beside an enabled one still leaves the design stated.
 #[test]
@@ -2474,7 +2487,7 @@ fn a_design_with_filters_disabled_states_its_trim_gain() {
             assert_eq!(value.rest, RestBound::Bounded(RestSamples::ZERO), "{what}");
             assert_eq!(
                 composition_values(value, &what),
-                (0, expected, expected, underflow),
+                (0, expected, expected, underflow, underflow),
                 "{what}"
             );
         }
@@ -2497,7 +2510,7 @@ fn a_design_with_filters_disabled_states_its_trim_gain() {
         ("input_section_bound", single),
         ("input_section_bounds", session),
     ] {
-        let (_, peak, tail, _) = composition_values(value, path);
+        let (_, peak, tail, ..) = composition_values(value, path);
         assert_eq!(
             (peak, tail),
             (louder, louder),

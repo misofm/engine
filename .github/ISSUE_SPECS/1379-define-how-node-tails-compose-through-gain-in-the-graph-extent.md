@@ -480,17 +480,26 @@ sidechain input. A stereo node states the maximum over its two channels.
 | `D` | decay | samples per further 20 dB | (N2) |
 | `G_p` | peak gain | millibels, rounded up, or `Zero` | (N1) |
 | `G_t` | tail gain | millibels, rounded up, or `Zero`; `G_t <= G_p` | gain to an input that arrives at or after `N`, (N2) |
-| `sigma` | flush stall | millibels re 1.0, rounded up, or `Zero` | absolute, at the output |
+| `sigma_p` | peak stall | millibels re 1.0, rounded up, or `Zero` | absolute flush part of the output at every frame, (N1) |
+| `sigma_t` | tail stall | millibels re 1.0, rounded up, or `Zero`; `sigma_t <= sigma_p` | absolute flush part of the output from the node's tail on, (N2) |
 
-- **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted history: `|y[n]| <= g_p X + sigma`.
+- **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted history: `|y[n]| <= g_p X + sigma_p`.
 - **(N2) Tail at every decade.** Under (C), if `|x[n]| <= X` for all `n` and `|x[n]| <= epsilon`
   for every `n >= M` (some `M >= N`), then for every integer `k >= 0` and every
-  `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma`. `G_t` bounds the
+  `n >= M + L + T + k D`: `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`. `G_t` bounds the
   part of the output that the input from `M` on produces; for a fixed design `G_t = G_p`.
+- **The two stalls (#1484, root ruling of 2026-10-08 on #1466 attempt 1).** (N2)'s frames are a
+  subset of (N1)'s, so `sigma_t <= sigma_p` (the registry's rule (g)); (N2) at `k = 0`,
+  `epsilon = 0` is #1329 D1 for every peak `P >= P^ := 4 sigma_t / eps`. A fixed design states
+  `sigma_p = sigma_t = ceil_mB(F a)`; the live input section's flush part before `T` is 55-61 dB
+  larger than from `T` on, so it states the two apart. Every use of a node's stall that bounds a
+  signal at every frame reads `sigma_p` (`CompositionBound::peak_clause`, `(G_p, sigma_p)`); every
+  use from the node's tail on reads `sigma_t` (`CompositionBound::tail_clause`,
+  `(D, G_t, sigma_t)`).
 - **(N3) Rest.** #1329 D2's `RestSamples`, read with "zero from `M`" (`M >= N`).
 - `D = 0` means the `X` part is exactly zero from `M + L + T` on (gain-only nodes, sums, delays).
-  `sigma` is internal to the composition: no report states an absolute output floor (#1329
-  Amendment 3, G2). `G_p` uses the loud-input deviation `dev_loud`, never #1329's `dev_core`.
+  `sigma_p` and `sigma_t` are internal to the composition: no report states an absolute output
+  floor (#1329 Amendment 3, G2). `G_p` uses the loud-input deviation `dev_loud`, never #1329's `dev_core`.
 - **`D`'s construction (binding):** the certified crossings `T(k)` for `k = 1..16` from one extended
   pass, a contraction certificate (`M v <= lambda v`, `lambda < 1`) for `k > 16`, and
   `D = max(max_{k <= 16} ceil((T(k) - T) / k), D_inf + ceil((T_lambda - T) / 17))`, with
@@ -499,8 +508,8 @@ sidechain input. A stereo node states the maximum over its two channels.
 ### H2. The carriers (ruling (c), Q4)
 
 `NodeTailBound { tail, tail_every_peak, rest, composition }` with `CompositionBound { Stated {
-decay, peak_gain, tail_gain, stall }, Unstated }`, `TailDecay(u64)`, `PeakGain { Zero,
-Millibels(i32) }` and `FlushStall { Zero, Level(i32) }` are slice A1's (#1464, one rename of
+decay, peak_gain, tail_gain, peak_stall, tail_stall }, Unstated }` (#1484 split the stall),
+`TailDecay(u64)`, `PeakGain { Zero, Millibels(i32) }` and `FlushStall { Zero, Level(i32) }` are slice A1's (#1464, one rename of
 `EffectTailBound`, no parallel struct; `InputSectionBound` deleted). `PeakGain::Zero` composes as
 `-infinity` (absorbing in a sum, neutral in a maximum); `Millibels` is signed. The parts slice C
 adds:
@@ -524,25 +533,25 @@ the `f32` rounding of the gain word and of each product included. "Underflow" is
 rounded operation on the output's dependency chain (flush-to-zero or gradual underflow, as
 `math::tail`'s `UNDERFLOW`), rounded up into a `FlushStall::Level`.
 
-| node | `T` | `D` | `G_p` | `G_t` | `sigma` | rest |
-|---|---|---|---|---|---|---|
-| track `Input` (source; delay line, D2a) | `max(left, right) delay_samples` | 0 | 0 mB | 0 mB | `Zero` | `T` for both peaks |
-| submix `Input` (sum of `m >= 1` route edges; delay line if any) | max delay | 0 | `m (1 + u)^(m-1)` | same | `(m - 1)` underflows | `T` for both peaks |
-| submix `Input`, `m = 0` | max delay | 0 | `Zero` | `Zero` | `Zero` | `T` for both peaks |
-| `PostInputBuiltins`, fixed design (#1329 D4) | #1329's | H1 certificate | `|trim| (1 + u) (O + dev_loud)` | `= G_p` | the module's stall | #1329's |
-| `PostInputBuiltins`, filters disabled | 0 | 0 | `|trim| (1 + u)`, or `|trim|` where the product is exact (a power-of-two trim, 0 dB included) | same | underflow | `ZERO` |
-| `PostInputBuiltins`, live input lane | #1433's | H1 certificate, the maximum over the settled groups (slice B1) | supremum over every admitted history (slice B1) | derived (slice B2) | the live stall (slice B1) | #1433's |
-| `PostSimd1`, `PostDynamic`, `PostSimd2PreFader` (identity boundaries) | 0 | 0 | 0 mB | 0 mB | `Zero` | `ZERO` |
-| effect | its prepared metadata | | | | | |
-| `PostFader` (fader, mute, VCA) | 0 | 0 | live: the `f32` word of +24 dB; fixed: the prepared effective gain, or `Zero` if muted | same | underflow (`Zero` if `G_p` is `Zero`) | `ZERO` |
-| `PostMatrix` (2x2 matrix, pan) | 0 | 0 | live: row `l1` bound 2; fixed: the largest prepared row `l1` | same | 2 underflows | `ZERO` |
-| `Route` | 0 | 0 | live: `2 * 10^(ROUTE_GAIN_DB_MAXIMUM / 20) * ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`; fixed (its own gain and matrix fixed): the prepared ungated gain times the largest prepared ungated row `l1`, or `Zero` where the mute rule below allows it; each with the fold's rounding | same | 2 underflows (`Zero` if `G_p` is `Zero`) | `ZERO` |
-| `Output` (sum of `m >= 1` routes; `m = 0` as the submix row) | 0 | 0 | `m (1 + u)^(m-1)` | same | `(m - 1)` underflows | `ZERO` |
+| node | `T` | `D` | `G_p` | `G_t` | `sigma_p` | `sigma_t` | rest |
+|---|---|---|---|---|---|---|---|
+| track `Input` (source; delay line, D2a) | `max(left, right) delay_samples` | 0 | 0 mB | 0 mB | `Zero` | `Zero` | `T` for both peaks |
+| submix `Input` (sum of `m >= 1` route edges; delay line if any) | max delay | 0 | `m (1 + u)^(m-1)` | same | `(m - 1)` underflows | `(m - 1)` underflows | `T` for both peaks |
+| submix `Input`, `m = 0` | max delay | 0 | `Zero` | `Zero` | `Zero` | `Zero` | `T` for both peaks |
+| `PostInputBuiltins`, fixed design (#1329 D4) | #1329's | H1 certificate | `|trim| (1 + u) (O + dev_loud)` | `= G_p` | the module's stall | the module's stall | #1329's |
+| `PostInputBuiltins`, filters disabled | 0 | 0 | `|trim| (1 + u)`, or `|trim|` where the product is exact (a power-of-two trim, 0 dB included) | same | underflow | underflow | `ZERO` |
+| `PostInputBuiltins`, live input lane | #1433's | H1 certificate, the maximum over the settled groups (slice B1) | supremum over every admitted history (slice B1) | derived (slice B2) | the every-frame flush bound (slice B1) | the live stall from `T` (slice B1) | #1433's |
+| `PostSimd1`, `PostDynamic`, `PostSimd2PreFader` (identity boundaries) | 0 | 0 | 0 mB | 0 mB | `Zero` | `Zero` | `ZERO` |
+| effect | its prepared metadata | | | | | | |
+| `PostFader` (fader, mute, VCA) | 0 | 0 | live: the `f32` word of +24 dB; fixed: the prepared effective gain, or `Zero` if muted | same | underflow (`Zero` if `G_p` is `Zero`) | underflow (`Zero` if `G_p` is `Zero`) | `ZERO` |
+| `PostMatrix` (2x2 matrix, pan) | 0 | 0 | live: row `l1` bound 2; fixed: the largest prepared row `l1` | same | 2 underflows | 2 underflows | `ZERO` |
+| `Route` | 0 | 0 | live: `2 * 10^(ROUTE_GAIN_DB_MAXIMUM / 20) * ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`; fixed (its own gain and matrix fixed): the prepared ungated gain times the largest prepared ungated row `l1`, or `Zero` where the mute rule below allows it; each with the fold's rounding | same | 2 underflows (`Zero` if `G_p` is `Zero`) | 2 underflows (`Zero` if `G_p` is `Zero`) | `ZERO` |
+| `Output` (sum of `m >= 1` routes; `m = 0` as the submix row) | 0 | 0 | `m (1 + u)^(m-1)` | same | `(m - 1)` underflows | `(m - 1)` underflows | `ZERO` |
 
 - **Fixed and live input sections.** Their values, derivations and gates are slices A2 (#1465:
   `G_p = G_t = ceil_mB(|trim| (1 + u) (O + dev_loud))`, `O` the module's certified output majorant
-  sum), B1 (#1466: the live `D`, `G_p`, `sigma`) and B2 (#1467: the live `G_t`, derived, never
-  `G_p`). The fixed `G_p`'s triangle inequality is sound but about 14 dB loose at the top pair;
+  sum), B1 (#1466: the live `D`, `G_p`, `sigma_p`, `sigma_t`) and B2 (#1467: the live `G_t`,
+  derived, never `G_p`). The fixed `G_p`'s triangle inequality is sound but about 14 dB loose at the top pair;
   #1468 tightens it (m6). Details: the design note, H3.
 - **Gain-only nodes: prepared values unless live** (M3). A gain value is *fixed* when nothing can
   change it after preparation: no live lane carries it and the plan carries no ramp into it. Then the
@@ -617,9 +626,11 @@ millibels (`Zero` as `-infinity`) except the stall sum:
    `D > 0` and fan-in needs an amendment before it composes.
 5. *Decay branch:* `extent(v) = max over incoming edges of (extent(u) + comp(u -> v)) + L_v + T_v
    + k(v) D_v` (today's recurrence plus `k D`); `output_tail = extent(output)`.
-6. *Floor:* `S_out(v) = g_p(v) max_u S_out(u) + sigma_v` (`sigma_v` at a source; `0` after a `Zero`
-   gain), `S_in(v) = max_u S_out(u)` over signal predecessors; the effective stall
-   `sigma'_v = sigma_v + (3/4) eps 10^(-k(v)) S_in(v)` if `D_v > 0`, else `sigma_v`;
+6. *Floor:* `S_out(v) = g_p(v) max_u S_out(u) + sigma_p,v` (`sigma_p,v` at a source; `0` after a
+   `Zero` gain; it feeds `X_v` in chain (i), an (N1) use, so it reads the peak stall),
+   `S_in(v) = max_u S_out(u)` over signal predecessors; the effective stall
+   `sigma'_v = sigma_t,v + (3/4) eps 10^(-k(v)) S_in(v)` if `D_v > 0`, else `sigma_t,v` (it feeds
+   `Sigma` in chain (iii)-(v), an (N2) use, so it reads the tail stall; #1484);
    `Sigma = sum over v of 10^(down(v)/2000) sigma'_v` (a term with `down(v) = -infinity` is `0`);
    `P*_graph = 4 Sigma / eps`, stated as `Zero` if `Sigma = 0`, else as
    `ceil(2000 log10 P*_graph)` millibels. Evaluated in `f64`, each operation inflated by

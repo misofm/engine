@@ -131,12 +131,14 @@ fn peak_rest_above_any_input_rest(sample_rate: u32, _: EffectQuality) -> NodeTai
     )
 }
 
-/// A consistent composition (#1464): the tail gain below the peak gain.
+/// A consistent composition (#1464, #1484): the tail gain below the peak gain, the tail stall
+/// below the peak stall.
 const COMPOSITION: CompositionBound = CompositionBound::Stated {
     decay: TailDecay(30),
     peak_gain: PeakGain::Millibels(-100),
     tail_gain: PeakGain::Millibels(-200),
-    stall: FlushStall::Level(-14_000),
+    peak_stall: FlushStall::Level(-14_000),
+    tail_stall: FlushStall::Level(-14_100),
 };
 
 /// [`consistent`] with a consistent stated composition, at every rate.
@@ -170,7 +172,8 @@ fn tail_gain_above_peak_gain(sample_rate: u32, _: EffectQuality) -> NodeTailBoun
                 decay: TailDecay(30),
                 peak_gain: PeakGain::Millibels(-100),
                 tail_gain: PeakGain::Millibels(-99),
-                stall: FlushStall::Zero,
+                peak_stall: FlushStall::Zero,
+                tail_stall: FlushStall::Zero,
             },
             ..consistent(sample_rate, EffectQuality::Normal)
         },
@@ -186,7 +189,43 @@ fn tail_gain_above_zero_peak_gain(sample_rate: u32, _: EffectQuality) -> NodeTai
                 decay: TailDecay(0),
                 peak_gain: PeakGain::Zero,
                 tail_gain: PeakGain::Millibels(i32::MIN),
-                stall: FlushStall::Zero,
+                peak_stall: FlushStall::Zero,
+                tail_stall: FlushStall::Zero,
+            },
+            ..consistent(sample_rate, EffectQuality::Normal)
+        },
+    )
+}
+
+/// Breaks only (g): a tail stall one millibel above the peak stall.
+fn tail_stall_above_peak_stall(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
+    at_broken_rate(
+        sample_rate,
+        NodeTailBound {
+            composition: CompositionBound::Stated {
+                decay: TailDecay(30),
+                peak_gain: PeakGain::Millibels(-100),
+                tail_gain: PeakGain::Millibels(-200),
+                peak_stall: FlushStall::Level(-14_000),
+                tail_stall: FlushStall::Level(-13_999),
+            },
+            ..consistent(sample_rate, EffectQuality::Normal)
+        },
+    )
+}
+
+/// Breaks only (g): a `Level` tail stall beside a `Zero` peak stall (`Zero` is below every
+/// `Level`).
+fn tail_stall_above_zero_peak_stall(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
+    at_broken_rate(
+        sample_rate,
+        NodeTailBound {
+            composition: CompositionBound::Stated {
+                decay: TailDecay(0),
+                peak_gain: PeakGain::Zero,
+                tail_gain: PeakGain::Zero,
+                peak_stall: FlushStall::Zero,
+                tail_stall: FlushStall::Level(i32::MIN),
             },
             ..consistent(sample_rate, EffectQuality::Normal)
         },
@@ -194,8 +233,9 @@ fn tail_gain_above_zero_peak_gain(sample_rate: u32, _: EffectQuality) -> NodeTai
 }
 
 /// Today's launch shape with a stated composition: a finite `tail`, an infinite
-/// `tail_every_peak` (no `R(P*)` derived), an unstated rest, and a `Zero` tail gain under a
-/// `Millibels` peak gain. Every rule holds, so it is admitted.
+/// `tail_every_peak` (no `R(P*)` derived), an unstated rest, a `Zero` tail gain under a
+/// `Millibels` peak gain, and a `Zero` tail stall under a `Level` peak stall. Every rule holds, so
+/// it is admitted.
 fn launch_shape_stated(_: u32, _: EffectQuality) -> NodeTailBound {
     NodeTailBound {
         tail: TailSamples::Finite(5),
@@ -205,7 +245,8 @@ fn launch_shape_stated(_: u32, _: EffectQuality) -> NodeTailBound {
             decay: TailDecay(30),
             peak_gain: PeakGain::Millibels(-100),
             tail_gain: PeakGain::Zero,
-            stall: FlushStall::Zero,
+            peak_stall: FlushStall::Level(-14_000),
+            tail_stall: FlushStall::Zero,
         },
     }
 }
@@ -222,6 +263,8 @@ static LAUNCH_SHAPE_STATED: EffectDescriptor = descriptor(1, launch_shape_stated
 static RULE_E: EffectDescriptor = descriptor(1, stated_composition_with_infinite_tail);
 static RULE_F: EffectDescriptor = descriptor(1, tail_gain_above_peak_gain);
 static RULE_F_ZERO: EffectDescriptor = descriptor(1, tail_gain_above_zero_peak_gain);
+static RULE_G: EffectDescriptor = descriptor(1, tail_stall_above_peak_stall);
+static RULE_G_ZERO: EffectDescriptor = descriptor(1, tail_stall_above_zero_peak_stall);
 static RULE_A: EffectDescriptor = descriptor(1, finite_peak_below_tail);
 static RULE_A_INFINITE: EffectDescriptor = descriptor(1, finite_peak_below_infinite_tail);
 static RULE_B: EffectDescriptor = descriptor(1, unstated_rest_with_finite_peak);
@@ -317,4 +360,24 @@ fn a_tail_gain_above_the_peak_gain_is_refused() {
     );
     assert_refused_as_inconsistent(&RULE_F);
     assert_refused_as_inconsistent(&RULE_F_ZERO);
+}
+
+/// Issue #1484 S2 (g): `tail_stall <= peak_stall`, with `Zero` below every `Level`. A tail stall
+/// below the peak stall, and a `Zero` tail stall under a `Level` peak stall, are admitted.
+///
+/// Red mutation: the registry drops rule (g), compares the two stalls the wrong way round, orders
+/// `Zero` above a `Level`, refuses a `Zero` tail stall under a `Level` peak stall, or checks only
+/// the first quality row.
+#[test]
+fn a_tail_stall_above_the_peak_stall_is_refused() {
+    assert!(
+        registry(&CONSISTENT_STATED).is_ok(),
+        "a tail stall below the peak stall is admitted"
+    );
+    assert!(
+        registry(&LAUNCH_SHAPE_STATED).is_ok(),
+        "a Zero tail stall under a Level peak stall is admitted"
+    );
+    assert_refused_as_inconsistent(&RULE_G);
+    assert_refused_as_inconsistent(&RULE_G_ZERO);
 }
