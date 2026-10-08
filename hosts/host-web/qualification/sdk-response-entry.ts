@@ -565,11 +565,30 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     nativeStarts.push(reply.metadata);
     return reply;
   };
+  // Issue #1480 D2: the capture loss is made certain by construction, not by a race. While the
+  // offline context renders, no native read runs: a read the SDK starts then waits on
+  // `readsHeld` (a promise, not a sleep), and every read already dispatched has settled before
+  // `startRendering` is called. The render therefore completes all
+  // (CONTINUOUS_FRAMES - 2,048) / 256 + 1 = 17 hop-256 windows into the native stream's one-record
+  // queue with no pop between them: the first is queued and the other 16 are dropped. The first
+  // read after the render must report that gap (`renderLoss`), and the SDK's first ready
+  // notification must carry it. A read that popped mid-render (the race #1480 D1 found) leaves
+  // fewer than 16 drops and the `renderLoss` predicate red.
+  const inFlightReads = new Set<Promise<unknown>>();
+  let readsHeld: Promise<void> | undefined;
+  let releaseReads = () => {};
   const nativeReadSpectrumStream = browser.host.readSpectrumStream.bind(browser.host);
   browser.host.readSpectrumStream = async (...args) => {
-    const reply = await nativeReadSpectrumStream(...args);
-    nativeReads.push(reply.metadata);
-    return reply;
+    if (readsHeld !== undefined) await readsHeld;
+    const read = nativeReadSpectrumStream(...args);
+    inFlightReads.add(read);
+    try {
+      const reply = await read;
+      nativeReads.push(reply.metadata);
+      return reply;
+    } finally {
+      inFlightReads.delete(read);
+    }
   };
   const meterFrames: Array<{ readonly peaks: Float32Array; readonly firstSample: bigint; readonly endSample: bigint }> = [];
   const automaticNotifications = [];
@@ -621,7 +640,15 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     const sharedJob = shared.job === subscription.job
       && shared.owner === subscription.owner && shared.epoch === subscription.epoch;
     await submitSpectrumSource(browser, CONTINUOUS_FRAMES, toneSpectrumPlanes);
-    const rendered = await browser.context.startRendering();
+    readsHeld = new Promise<void>((resolve) => { releaseReads = resolve; });
+    await Promise.allSettled([...inFlightReads]);
+    const readsBeforeRender = nativeReads.length;
+    let rendered: AudioBuffer;
+    try {
+      rendered = await browser.context.startRendering();
+    } finally {
+      releaseReads();
+    }
     const firstPcmPeak = Math.max(
       ...[rendered.getChannelData(0), rendered.getChannelData(1)].map((plane) => {
         let peak = 0;
@@ -673,6 +700,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       || secondNotification?.skippedPublications > 0n
       || callbackGap;
     const readyNotification = notifications.find((notification) => notification.available);
+    const firstReadAfterRender = nativeReads[readsBeforeRender];
     const sharedAfterFirstClose = (await subscription.close(), shared.readLatest() !== undefined);
     await shared.close();
     let staleReadRefused = false;
@@ -696,6 +724,10 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       publicationHopFrames: notifications.map((notification) => notification.metadata.hopFrames),
       publicationSmoothingMs: notifications.map((notification) => notification.metadata.smoothingMs),
       gap,
+      renderLoss: firstReadAfterRender === undefined ? undefined : {
+        status: firstReadAfterRender.status,
+        droppedCaptures: firstReadAfterRender.droppedCaptures.toString(),
+      },
       recoveryDelivery,
       ownedArrays,
       sharedAfterFirstClose,

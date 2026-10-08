@@ -564,6 +564,11 @@ function validateSdkResponse(browserName, response) {
     ["automaticDelivery", continuous?.automaticDelivery === true],
     [`windows >= 1 (windows=${continuous?.windows})`, continuous?.windows >= 1],
     ["gap", continuous?.gap === true],
+    // Issue #1480 D2: no read runs during the render, so all 17 windows of 6,144 frames at hop 256
+    // meet the one-record native queue: one is queued, 16 are dropped, and the first read after
+    // the render reports that gap (status 3).
+    [`renderLoss (status=${continuous?.renderLoss?.status}, dropped=${continuous?.renderLoss?.droppedCaptures})`,
+      continuous?.renderLoss?.status === 3 && continuous?.renderLoss?.droppedCaptures === "16"],
     ["ownedArrays", continuous?.ownedArrays === true],
     ["sharedAfterFirstClose", continuous?.sharedAfterFirstClose === true],
     ["staleReadRefused", continuous?.staleReadRefused === true],
