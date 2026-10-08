@@ -1313,9 +1313,10 @@ struct LiveWindow {
     /// The cascade's output bound at each window frame.
     outputs: Vec<f64>,
     /// Whether a state bound above took the cap (the `V`-norm of finite `f32` words) instead of
-    /// its propagated value. A capped value bounds the kernel's state but not one part of the
-    /// split by drive (`docs/derivations/1379-graph-tail-composition.md`, "(P1)"), so the
-    /// composition values read only an uncapped window (issue #1466).
+    /// its propagated value (a NaN value counts as capped). A capped value bounds the kernel's
+    /// state but not one part of the split by drive
+    /// (`docs/derivations/1379-graph-tail-composition.md`, "(P1)"), so the composition values read
+    /// only an uncapped window (issue #1466).
     capped: bool,
 }
 
@@ -1523,7 +1524,8 @@ impl<'a> LiveBound<'a> {
             };
         let mut capped = false;
         let mut cap = |value: f64| {
-            capped |= value >= self.cap;
+            // A NaN counts as capped: `NaN.min(cap)` would continue as the cap, unflagged.
+            capped |= value >= self.cap || value.is_nan();
             value.min(self.cap)
         };
         let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);

@@ -8,12 +8,14 @@ every anchor at start.
 
 ## Product outcome
 
-For an input section with a live input lane, the engine computes three certified composition
+For an input section with a live input lane, the engine computes four certified composition
 values over every history of live trim, polarity and filter targets: the decay `D`, the peak gain
-`G_p` and the flush stall `sigma`. They are exposed through test-support accessors and checked on
-the real kernel. The live bound keeps `CompositionBound::Unstated` until *Derive the live input
-section's tail gain and state its composition* adds the fourth value (`G_t`), because the four
-values are stated together or not at all. No reported tail and no rendered bit moves.
+`G_p`, the peak stall `sigma_p` and the tail stall `sigma_t` (the flush stall split in two by root's
+ruling of 2026-10-08 and #1484; see the Attempt record). They are exposed through `math::tail`'s
+public accessors (`live_cascade_composition`, `LiveComposition`) and checked on the real kernel.
+The live bound keeps `CompositionBound::Unstated` until *Derive the live input section's tail gain
+and state its composition* (#1467) adds the fifth value (`G_t`), because the five values are stated
+together or not at all. No reported tail and no rendered bit moves.
 
 ## Context
 
@@ -22,8 +24,9 @@ values are stated together or not at all. No reported tail and no rendered bit m
 - **`math::tail`'s live cascade** (#1433, `live_cascade`, `LiveCascade`, `live_zones`) computes the
   live `T_decay`, stall, `P*` and rests from the zone state bounds (`Phi`), the LPF's state bound,
   the 65-frame window and every settled group; its relative share is `eps / 2` and the stall's
-  `eps / 2` (`crates/math/src/tail.rs:1494-1496`, `:1675`). The live bound costs about 250 us and
-  is cached per rate by #1457.
+  `eps / 2` (`crates/math/src/tail.rs:1494-1496`, `:1675`). Preparation never computes the live
+  bound: it reads the committed `input_section_live_bound_table` (#1457), and a test pins the table
+  to the computed bound. The live construction's own cost is descriptive.
 - **`builtins::input_section_live_bound`** (`crates/builtins/src/tail.rs:211`) returns it as
   `NodeTailBound` with `composition: Unstated` (A1).
 - **`live_bound_carries_every_term_an_independent_recomputation_requires`** in
@@ -42,10 +45,11 @@ values are stated together or not at all. No reported tail and no rendered bit m
 `N`; `g_p = 10^(G_p/2000)`.
 
 - **(N1) Peak.** For every input with `|x[n]| <= X` for all `n`, under any admitted history:
-  `|y[n]| <= g_p X + sigma` for every `n`.
+  `|y[n]| <= g_p X + sigma_p` for every `n`. (H1 had one stall `sigma` in (N1) and (N2); root's
+  ruling of 2026-10-08 and #1484 split it into `sigma_p` here and `sigma_t` in (N2).)
 - **(N2) Tail at every decade.** If `|x[n]| <= X` for all `n` and `|x[n]| <= epsilon` for every
   `n >= M` (some `M >= N`), then for every integer `k >= 0` and every `n >= M + L + T + k D`:
-  `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma`. (The live bound's own split is
+  `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`. (The live bound's own split is
   `eps / 2` relative and `eps / 2` stall; (N2) at `3/4` stays valid for it.)
 - **`D` by the binding construction** of slice A2 (F-D2): the certified crossings `T(k)` for
   `k = 1..16` from one extended pass, a contraction certificate (`M v <= lambda v`, `lambda < 1`)
@@ -57,23 +61,33 @@ values are stated together or not at all. No reported tail and no rendered bit m
   A2 (`T(k)`, `D_inf`, `lambda`, `T_lambda`).
 - **L-D2. `G_p`:** the supremum over every admitted history, through the output row and the
   feedthrough, over the 65-frame window and every settled group, with the trim word of +24 dB,
-  plus the live loud-input deviation; rounded up to millibels with `math::log`.
-- **L-D3. `sigma`:** the live stall rounded up to millibels.
+  plus the live loud-input deviation (folded into the live bound's constants, so no separate term).
+  B1 states the raw linear value; its millibel statement (rounded up with `math::log`) is B2's
+  (#1467).
+- **L-D3. The stalls** (as root's ruling of 2026-10-08 reads L-D3; the text before it, "`sigma`: the
+  live stall rounded up to millibels", is superseded): `sigma_p`, the peak stall, is the flush part
+  of the output bound with the tail at frame `0` (`stall(0)`), which bounds the flush part at every
+  frame; `sigma_t`, the tail stall, is `min(stall(T), stall(0))`, the flush part from the live
+  `T_decay` on, so `sigma_t <= sigma_p` by construction. B1 states both raw and linear; their
+  millibel statement is B2's (#1467).
 - **L-D4. No partial statement.** `input_section_live_bound` keeps `CompositionBound::Unstated`;
-  the three values are reachable only through the accessors until the tail-gain slice states all
-  four.
-- **L-D5. Cost** within #1457's D1 budget (the live bound depends only on the rate and is cached per
-  rate).
+  the four values are reachable only through the accessors until the tail-gain slice states all
+  five.
+- **L-D5. Cost.** Preparation reads `input_section_live_bound_table` and never computes the live
+  bound or these values, so they add nothing to #1457's D1 budget; their construction cost is
+  recorded descriptively. (The earlier text, "within #1457's D1 budget (the live bound ... is cached
+  per rate)", is superseded by root's corrected L6.)
 
 ## DSP evidence (AGENTS.md)
 
 - **Equations:** the TPT SVF cascade under #1407's live words (#1433's zone analysis); L-D1-L-D3.
 - **Coefficient and update rules:** #1407's retarget through designs and their mixtures; #1408's
   trim ramp.
-- **Numerical limits:** `f64` with #1433's certified rounding allowances; every millibel rounding
-  upward.
+- **Numerical limits:** `f64` with #1433's certified rounding allowances; no millibel rounding in
+  B1 (B2's statement rounds upward).
 - **Latency and tail:** latency 0; `T`, `T_rest` and both rests unchanged.
-- **Units and smoothing:** samples at the plan's rate; gains in millibels.
+- **Units and smoothing:** samples at the plan's rate; linear gains and stalls per unit of the
+  input's peak (millibels at B2's statement).
 - **Denormal/NaN:** unchanged (sanitized input; per-block reset of a non-finite state).
 - **Citations:** as #1329 and #1433 ([SIMPER-SVF], [ZAVALISHIN-TPT], [ORFANIDIS-ISP],
   [SMITH-SASP]; Higham for the rounding model).
@@ -82,8 +96,8 @@ values are stated together or not at all. No reported tail and no rendered bit m
 
 ## Deliverables
 
-1. `math::tail`'s live cascade: `D`, `G_p` and `sigma`, with test-support accessors.
-2. The derivation note's live part for `D`, `G_p` and `sigma`
+1. `math::tail`'s live cascade: `D`, `G_p`, `sigma_p` and `sigma_t`, with public accessors.
+2. The derivation note's live part for `D`, `G_p`, `sigma_p` and `sigma_t`
    (`docs/derivations/1379-graph-tail-composition.md`).
 3. Gates L1, L3-L6, and the mutation table.
 
@@ -108,8 +122,11 @@ values are stated together or not at all. No reported tail and no rendered bit m
 - **#1433's values must not move**: live `T_decay`, `T_rest`, both rests and `P*` (L5).
 - **`G_p` is not the settled designs' `l1`.** The retarget transient after a Nyquist drive exceeds
   it by tens of dB; L1 exists for that.
-- **Cost.** The extended horizon over every settled group lengthens the live computation; a miss of
-  #1457's budget stops the slice.
+- **Cost.** Preparation never computes the live bound (it reads `input_section_live_bound_table`),
+  so the live construction's cost cannot reach #1457's budget; the hazard is only that this slice's
+  edits to the shared `math::tail` move the fixed walk's cost (L6). (The earlier text, "the
+  extended horizon ... lengthens the live computation; a miss of #1457's budget stops the slice",
+  is superseded by root's corrected L6.)
 
 ## Objective gates
 
@@ -118,14 +135,16 @@ values are stated together or not at all. No reported tail and no rendered bit m
 - **L1. Live peak gain on the real kernel.** A real `InputBuiltins` with a live input lane, trim
   +24 dB, both sections designed at the worst-case pair (`input_section_worst_case_pair(rate)`),
   driven by an alternating `+-1` input for 1,000,000 frames, then the HPF target moved to 10 Hz with
-  the input still running: the largest `|y|` over the run is at most `g_p + sigma` (accessors). The
-  measured ratio is recorded.
+  the input still running: the largest `|y|` over the run is at most `g_p + sigma_p` (accessors).
+  The measured ratio is recorded.
 - **L3. Independent recomputation.** The existing
-  `live_bound_carries_every_term_an_independent_recomputation_requires` gains `D`, `G_p` and
-  `sigma`: each lies between a plain-`f64` recomputation of the derivation in the test and that
-  value plus 0.01 % and 64 frames (`D`) or 1 mB (gain, stall).
+  `live_bound_carries_every_term_an_independent_recomputation_requires` gains `D`, `G_p`, `sigma_p`
+  and `sigma_t`: each lies between a plain-`f64` recomputation of the derivation in the test and
+  that value plus 0.01 % and 64 frames (`D`) or 1 mB (gain, stalls); and `sigma_t <= sigma_p`.
 - **L4. Live decade identity.** The module's directly searched live crossing `T(k)` is at most
   `T + k D` for `k = 0..64`, and `D_inf` is at least the live floor recomputed as in A2's F1(d).
+  (Added by the follow-up to attempt 1: for `k = 1..64`, `T(k)` lies strictly past `T(k - 1)` and
+  is at most `T + crossing(k)`, the certificates' own crossing.)
 - **L5. Nothing certified moves.** Every existing `tail_contract` assertion passes unchanged; the
   live bound still states `Unstated`; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm
   G5 digests, the builtins PCM fixtures).
@@ -151,8 +170,11 @@ The attempt record carries a mutation table with at least the mutants below; eac
   +67 dB before the trim); no other test drives a retarget after a Nyquist drive.
 - L3: a live value that drops a ramp-window or zone term falls below the recomputation; the real
   kernel's slack (about 8.5 % in `R`) cannot see it.
-- L4: a live `D` with no transient term falls below the module's own crossing at small `k`; a
-  certificate rate that omits the state rounding falls below the floor (as A2's F1(c) and F1(d)).
+- L4: a live `D` with no transient term (M5), or with a certificate rate that omits the settled
+  state rounding (M6), falls below the module's own crossing at `k = 1` (`T(1) - T = 46,099` at
+  44.1 kHz). The earlier sentence, "a certificate rate that omits the state rounding falls below
+  the floor", was false: M6 gives `D_inf` 45,264, above the floor of 44,466, and is red only at the
+  crossing check. The floor assertion is L4's invariant and claims no unique catch.
 - L6 (corrected 2026-10-08, root order): preparation reads `input_section_live_bound_table` and
   never computes the live bound (`crates/builtins/src/tail.rs`, module doc and the table's doc;
   `crates/builtins-compiler/src/lib.rs` and `crates/host-core/src/prepare.rs` read only the table),
@@ -337,8 +359,9 @@ rate, the 65 direct searches of L4 about 9 ms per rate; preparation never runs e
 - L1: the real-kernel peak over the run is 3.4456e4 / 3.4281e4 / 3.4460e4 / 3.4285e4 (+90.75 /
   +90.70 / +90.75 / +90.70 dB; 3.19 before the retarget) against `g_p + sigma_p`: ratio 472.8 /
   470.5 / 473.5 / 471.2 (53.49 / 53.45 / 53.51 / 53.46 dB). Pass; the gap is #1485's.
-- L3: module against the plain-`f64` recomputation: `D` equal at every rate; `G_p`, `sigma_p`,
-  `sigma_t` above it by 3e-8, 1e-6 and 2e-6 relative at most (1 mB is 1.15e-4). The test also
+- L3: module against the plain-`f64` recomputation: `D` equal at every rate; `G_p` above it by
+  3e-8 relative at most, `sigma_p` by up to 2.2e-6 (96 kHz) and `sigma_t` by up to 8e-7 (88.2 kHz)
+  (1 mB is 1.15e-4; figures corrected by the follow-up, verdict NIT 6). The test also
   asserts `sigma_t <= sigma_p`, raw and in mB (#1484 verdict note: rule (g) runs only in the
   registry, and the live section is no registry row). Pass.
 - L4: the directly searched `T(k)` is `T` at `k = 0` and at most `T + k D` for `k = 1..64`;
@@ -399,3 +422,71 @@ also applied to the recomputation, a defect of the derivation itself):
 - The live millibel statement (`ceil_mB` with the module's margins) and `G_t` are B2's (#1467).
 - A `builtins` accessor for the live composition needs a re-export in `crates/builtins/src/lib.rs`
   (not authorized here); B2's statement makes it unnecessary.
+
+### Follow-up to attempt 1 (2026-10-08, after the PASS verdict)
+
+The verdict (`submix-verdicts/1466-attempt1.md`, PASS) left three MINORs and six NITs. This
+follow-up applies them; no certified value moves (`D`, `G_p`, `sigma_p`, `sigma_t`, `T`, the rests
+and the live table are unchanged, and the release `tail_contract` passes with every earlier
+assertion unchanged).
+
+- **MINOR 1 and NIT 2 (L4 checked nothing under a broken crossing search; `crossing(k)` read by no
+  test).** L4 now asserts, for `k = 1..64`, that `T(k)` lies strictly past `T(k - 1)` (non-vacuity:
+  the search reads `k`) and that `T(k) <= T + crossing(k)`, the certificates' own per-decade claim,
+  beside `T(k) <= T + k D`.
+- **MINOR 2.** The false L4 sentence in Test value is corrected to what was measured (M6: `D_inf`
+  45,264 above the floor 44,466, red only at the crossing check).
+- **MINOR 3.** The one-sigma text (Product outcome, the contract's (N1) and (N2), L-D3, L-D4,
+  Deliverables 1 and 2, L1, L3) now names `sigma_p` and `sigma_t` as the attempt computes them; the
+  cost text (Context, L-D5, the Cost hazard) now says preparation reads
+  `input_section_live_bound_table` and never computes the live bound. The superseded L-D3, L-D5
+  and Cost text is quoted and marked.
+- **NIT 1.** L-D2 and L-D3 now say B1 states raw linear values and the millibel statement of `G_p`
+  and both stalls is B2's (#1467); the DSP evidence's numerical-limits and units lines follow.
+- **NIT 3.** `LiveWindow`'s cap flag counts a NaN as capped (`capped |= value >= self.cap || value.is_nan()`).
+  This was reachable through `math::tail`'s public accessor: `live_cascade_composition` at a NaN
+  input scale returned `Ok(Some(..))` with a NaN `peak_gain` before the fix, and `Ok(None)` after.
+- **NIT 4.** Both refusal guards are reachable through `math::tail`'s public accessor with a
+  doctored input, so they now have a test,
+  `live_composition_refuses_a_capped_window_and_an_unbounded_carry` (every launch rate): the input
+  scales `1e35`, infinity and NaN reach the capped-window guard, and the launch cascade with its
+  `first_mix_row` scaled tenfold reaches the carry guard's step half (an off-diagonal entry above
+  8). The carry guard's start half (`start <= 2^132`) has no test: a probe over `first_mix_row`
+  x1-x8 and input scales `1e29`-`1e34` at 48 kHz found no input it alone refuses (the capped-window
+  guard or the step half refuses first), so it stays a by-construction guard of the carry's
+  rounding argument.
+- **NIT 5.** The derivation's (P2) now describes the second section's state at `N` term by term:
+  the potential term `sup Psi Phi` by Abel summation, the other terms as weighted sums at most
+  `1 / (1 - rho)` times their largest drive; its introduction says five values; its cap paragraph
+  and its gates paragraph name the NaN rule, L4's new assertions and the refusal test.
+- **NIT 6.** The L3 figures in the record above are corrected in place: `sigma_p` up to 2.2e-6
+  above the recomputation (96 kHz), `sigma_t` up to 8e-7 (88.2 kHz), `G_p` 3e-8.
+
+**Mutation runs** (release `tail_contract -- live_`, each defect applied to
+`crates/math/src/tail.rs`, then the file restored; restored, 11 passed):
+
+| mutant | red |
+|---|---|
+| X5 `live_cascade_crossing` ignores `decades` (`limit = TAIL_FLOOR / 2`) | L4, at the strict-increase assertion |
+| `LiveComposition::crossing(k)` returns 0 | L4, at `T(k) <= T + crossing(k)` |
+| `crossing(k)` halved | L4, at `T(k) <= T + crossing(k)` |
+| `crossing(k)` reads `k - 1` | L4, at `T(k) <= T + crossing(k)` |
+| NaN fix reverted (`capped |= value >= self.cap`) | the refusal test, at the NaN scale |
+| X1 the capped-window refusal removed | the refusal test, at the input scale `1e35` |
+| X6 the carry refusal removed | the refusal test, at the doctored mix row |
+| X6, the step half removed (start half kept) | the refusal test, at the doctored mix row |
+| X6, the start half removed (step half kept) | survives (no input reaches it; NIT 4 above) |
+
+**Test value.**
+- L4's new assertions: a crossing search that ignores its decade count (X5) made L4 pass while
+  checking only `T <= T + k D`, and a certificate crossing that understates the per-decade frame
+  (0, halved, one decade behind) is read by no other test.
+- `live_composition_refuses_a_capped_window_and_an_unbounded_carry`: a composition that states
+  values from a capped or NaN window (X1, the NaN fix reverted) or carries a group past its
+  rounding argument (X6) returns certified-looking values; no other test reaches either guard,
+  since neither is reached at the launch configuration.
+
+**Gates** (follow-up): release `tail_contract` with `builtins/test-support`, 20 passed (19 earlier
+plus the refusal test); `cargo test --locked -p math` ok; `cargo fmt --all -- --check` clean;
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean;
+`check-workspace-policy.sh` ok; `check-cross-targets.sh` PASS (the #1018 expected failures).

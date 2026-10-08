@@ -2739,7 +2739,8 @@ fn live_peak_gain_bounds_a_retarget_after_a_nyquist_drive_on_the_real_kernel() {
 
 /// #1466 L4. The live decade law against the module's own crossings: the directly searched
 /// crossing of `(eps / 2) 10^-k` (`math::tail::live_cascade_crossing`, #1433's search at the lower
-/// threshold) is at most `T + k D` for `k = 0..64`, and `T` itself at `k = 0`; and `D_inf` is at
+/// threshold) is `T` itself at `k = 0`, strictly increasing in `k`, and for `k = 1..64` at most
+/// the certificates' own crossing `T + crossing(k)` and at most `T + k D`; and `D_inf` is at
 /// least the floor `ceil(ln 10 / -ln rho_s)` of the settled contraction the derivation requires
 /// ([`settled_contraction`], as #1465's F1(d)).
 #[test]
@@ -2752,14 +2753,29 @@ fn live_decay_covers_the_module_crossings_and_its_floor() {
         let decay = composition.decay;
         let tail = input_section_live_cascade(rate).expect("launch rate").tail;
         let mut worst = 0.0_f64;
+        let mut previous = tail;
         for k in 0..=64_u64 {
             let crossing = live_cascade_crossing(&terms, rest_peaks()[0], &law, ramp, k)
                 .expect("live crossing");
             if k == 0 {
                 assert_eq!(crossing, tail, "{rate} Hz: the crossing at k = 0 is T");
             } else {
+                // Non-vacuity: each decade's crossing lies past the one before, so the search
+                // reads `k` (a search that ignores it gives `T(k) = T` and checks nothing).
+                assert!(
+                    crossing > previous,
+                    "{rate} Hz: T({k}) = {crossing} is not past T({}) = {previous}",
+                    k - 1
+                );
+                // The certificate's own per-decade claim, which is stronger than `T + k D`.
+                let certified = tail + composition.crossing(k);
+                assert!(
+                    crossing <= certified,
+                    "{rate} Hz: T({k}) = {crossing} > T + crossing({k}) = {certified}"
+                );
                 worst = worst.max((crossing - tail) as f64 / k as f64);
             }
+            previous = crossing;
             assert!(
                 crossing <= tail + k * decay,
                 "{rate} Hz: T({k}) = {crossing} > T + k D = {tail} + {k} {decay}"
@@ -2778,6 +2794,34 @@ fn live_decay_covers_the_module_crossings_and_its_floor() {
         assert!(
             d_inf >= floor,
             "{rate} Hz: D_inf {d_inf} below the settled contraction's floor {floor}"
+        );
+    }
+}
+
+/// #1466 follow-up (verdict NITs 3 and 4). The live composition is refused (`Ok(None)`) when a
+/// window state bound took the cap, a NaN included, and when a settled group leaves the carry's
+/// rounding argument. Neither guard is reached at the launch configuration; both are reached here
+/// through `math::tail`'s public accessor: an input scale far above any trim word (`1e35`,
+/// infinity), a NaN scale, and the launch cascade with its first section's mix row scaled tenfold.
+#[test]
+fn live_composition_refuses_a_capped_window_and_an_unbounded_carry() {
+    for &rate in rates() {
+        let live = input_section_live_envelope(rate).expect("launch rate");
+        let law = input_section_flush_law(rate);
+        let ramp = u64::from(INPUT_FILTER_RAMP_SAMPLES);
+        for gain in [1e35, f64::INFINITY, f64::NAN] {
+            let composition = live_cascade_composition(&live, gain, &law, ramp);
+            assert!(
+                matches!(composition, Ok(None)),
+                "{rate} Hz: a capped window at the input scale {gain:e} gave {composition:?}"
+            );
+        }
+        let mut doctored = live;
+        doctored.first_mix_row *= 10.0;
+        let composition = live_cascade_composition(&doctored, rest_peaks()[0], &law, ramp);
+        assert!(
+            matches!(composition, Ok(None)),
+            "{rate} Hz: a carry outside its rounding argument gave {composition:?}"
         );
     }
 }

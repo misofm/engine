@@ -1,7 +1,7 @@
 # Issue #1379: node tail composition values (H1), the input section (issues #1465, #1466)
 
 #1379 Amendment 1 (`docs/handoffs/decision-15-2026-10-05/1379-amendment1-design.md`, H1-H3) asks
-every node to state four values beside #1329's tail, so that a graph can carry a node's tail through
+every node to state five values beside #1329's tail, so that a graph can carry a node's tail through
 the gain after it. This note states the contract and derives the values of the builtin input
 section with a fixed design (#1329 D4) and with both filters disabled, as `math::tail` and
 `crates/builtins/src/tail.rs` compute them at preparation (issue #1465, slice A2), and the decay,
@@ -356,14 +356,17 @@ Two points of the split are not arithmetic of the bound's formula and must be st
   the runs are separate majorants, not because of the minimum.
 * *The cap.* #1433 caps a state bound at the `V`-norm of finite `f32` words. The cap bounds the
   kernel's state, not a run, so a split value is a bound only where the cap was not taken. The
-  module states no composition when the window took the cap in either part (`LiveWindow::capped`);
+  module states no composition when the window took the cap in either part (`LiveWindow::capped`;
+  a NaN state bound counts as capped, since `NaN.min(cap)` would continue as the cap);
   at the launch rates the relative window's largest state bound is about `1.1e7` per unit of the
   peak against a cap of `6.3e38`.
 
 **(P2) The window's first frame bounds every frame.** `W_0(g X, F)` reads only the frames before
 `N`: the first section's state at `N` (at most `sup Phi`, which holds at every frame of every
-admitted history), the second section's state at `N` (the weighted sums over every earlier frame,
-each at its supremum `1 / (1 - rho)` times the largest drive, for a history of any length), and the
+admitted history), the second section's state at `N` (the potential term `sup Psi Phi`, bounded by
+Abel summation with the non-decreasing weights `rho^(N-1-j)`, and the charges, the direct zones'
+term, the feedthrough, the rounding and `F_sum`, each a weighted sum over the earlier frames at most
+`1 / (1 - rho)` times its largest drive; every term holds for a history of any length), and the
 input at `N`, which is zero. Its hypotheses on those frames (`|x| <= X`, reachable words, #1433's
 moves, the trim) are those of any admitted history; silence and the absence of control events are
 hypotheses on the frames from `N` on, which `W_0` does not read. The state at a frame `n` depends
@@ -510,8 +513,10 @@ values, `dev_loud`, the stall) and F4 (every #1329 assertion unchanged); #1457's
 the cost (F5). The measurements are in the #1465 attempt record. The live part: #1466's L1 (`G_p`
 and `sigma_p` against the real kernel's peak after a Nyquist drive and a retarget), L3 (`D`, `G_p`,
 `sigma_p` and `sigma_t` against an independent plain-`f64` recomputation of this part), L4 (`D`
-against the module's directly searched crossings for `k = 0..64`, and `D_inf` against the settled
-contraction's floor) and L5 (nothing certified moves); the measurements are in the #1466 attempt
+and each certificate's crossing against the module's directly searched crossings for `k = 0..64`,
+which must increase strictly in `k`, and `D_inf` against the settled contraction's floor), L5
+(nothing certified moves) and the refusal test (a capped or NaN window and a carry outside its
+rounding argument give no values); the measurements are in the #1466 attempt
 record.
 
 ## Citations
