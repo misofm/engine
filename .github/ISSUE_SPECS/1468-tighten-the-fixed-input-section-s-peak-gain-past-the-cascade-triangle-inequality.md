@@ -8,6 +8,10 @@ anchor on the branch where A2 has landed before starting. Amended the same day (
 #1379 Amendment 1, third round): the gate factor is set from a first measurement, not frozen in
 advance (P-D3).
 
+**Status: parked out of decision-15 stream G batch 3 (root, 2026-10-08).** A2's `G_p` stays in
+production. The next attempt works under the Amendment (root, 2026-10-08) below, which supersedes
+the marked text.
+
 ## Product outcome
 
 A fixed input section (no live input lane) states a peak gain `G_p` (and so `G_t = G_p`) within a
@@ -56,15 +60,20 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
   - *Step 1, before the gate is frozen.* On gate 2's rows, measure the real kernel's peak gain
     `g_meas` and compute the certified `g_p` of the method P-D1 chooses. Record both and the ratio
     `r = g_p / g_meas` per row and rate in the attempt record.
-  - *Step 2, the factor.* `F = min(1.5, r_max (1 + m))`, with `r_max` the largest measured ratio and
+  - *Step 2, the factor.* *(Superseded for the top pair by the Amendment (root, 2026-10-08), (ii):
+    `F` is set on every row except the top pair, which has its own gate.)*
+    `F = min(1.5, r_max (1 + m))`, with `r_max` the largest measured ratio and
     `m` a stated margin (default 5 %, so that a sound bound is not failed on calibration while the
     gate still binds; the attempt record states `m` and its reason), rounded up to two decimals.
     Root confirms `F` in the attempt record before gate 2 is committed, as #1433 set 1.15 from its
     estimate.
   - *Ceiling.* If `r_max` exceeds 1.5 on a gated row, P-D5 applies: stop and report. Today's value
-    is about 5 (+14 dB) at the top pair; a sound method that keeps today's deviation term lands
+    is about 5 (+14 dB) at the top pair; ~~a sound method that keeps today's deviation term lands
     near 1.33 there by estimate (`dev_loud` 0.231 against an exact `l1` of 0.697) and near 1.0 at
-    low cutoffs.
+    low cutoffs.~~ *(Superseded by the Amendment (root, 2026-10-08): the estimate used the
+    uninterrupted `l1`, which is not a bound under a single-section flush; with today's `dev_loud`
+    no sound bound goes below `r` of about 1.17 at the top pair, and the parked attempt 2's sound
+    bound measured 2.40 to 2.53 there.)*
 - **P-D4. Only `G_p` and `G_t` move.** `T_decay`, `T_rest`, both rests, `P*`, `D`, `sigma_p` and `sigma_t`
   stay exactly as A2 and #1329 state them (the tightened gain is a separate computation from the
   majorant that feeds `T`).
@@ -139,14 +148,17 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
    {0, +24 dB}: drive the real kernel (`InputBuiltins`, fixed design) with the worst-sign input for
    the designed cascade's `f64` impulse response (`x[N - 1 - i] = sign(h[i])` over 4,000,000
    samples, peak `P = 1` before the trim), and take the measured peak gain `g_meas = max |y| / P`.
-   Assert `g_meas <= g_p <= F g_meas`, with `F` from P-D3 (at most 1.5). Record `g_meas`, `g_p`
-   and the ratio per row.
+   ~~Assert `g_meas <= g_p <= F g_meas`, with `F` from P-D3 (at most 1.5).~~ *(Superseded by the
+   Amendment (root, 2026-10-08), (ii): the reference is the reset-aware `g_ref`; every row except
+   the top pair asserts `g_ref <= g_p <= F g_ref`, and the top pair asserts
+   `g_ref <= g_p <= r_top (1 + m) g_ref`.)* Record `g_meas`, `g_p` and the ratio per row.
 3. **Nothing else moves.** Every other `tail_contract` assertion passes unchanged (`T_decay`,
    `T_rest`, both rests, `P*`, `D`, `sigma_p`, `sigma_t`, the live figures); A2's F2(a)-(c) pass; F2(d)'s
    equality holds for the new formula; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm
    G5 digests, the builtins PCM fixtures).
-4. **Budget.** #1457's gates 2 and 8 pass, within #1457's D1 budget. A change to the walk's cost
-   also reruns `target/release/examples/input_bound_budget calibrate` and restates the
+4. **Budget.** *(Tightened by the Amendment (root, 2026-10-08), (i): no cost change beyond noise
+   against #1457 gate 2 at the committed constants.)* #1457's gates 2 and 8 pass, within #1457's
+   D1 budget. A change to the walk's cost also reruns `target/release/examples/input_bound_budget calibrate` and restates the
    frame-equivalent (the slowest frame class) and `builtins::INPUT_BOUND_SECTION_CHARGE` from it
    (#1457 Amendments 3 and 4; Amendment 4 removed the per-design charge and set the section charge
    to 290 frame-equivalents of 23.5 ns; #1474 restated them as 380 frame-equivalents of 18.5 ns;
@@ -189,6 +201,51 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
   shared files `crates/math/src/tail.rs` and `crates/builtins/src/tail.rs`, landed first.
 - *Cache design bounds across preparations within a stated preparation budget* (#1457).
 - It may land before or after #1379; if after, it re-pins as Deliverable 5 states.
+
+## Amendment (root, 2026-10-08): parked
+
+Root's ruling of 2026-10-08, recorded by the batch follow-up worker. Superseded text above is
+struck through or marked. **#1468 is parked out of decision-15 stream G batch 3; A2's `G_p` stays in
+production.** This GitHub issue's body joins the batch's pending-sync list.
+
+**The parked attempts.** Kept on the local side branch `codex/d15-1468-attempt1` (not merged, not
+deleted):
+
+- `74035cd0d`, attempt 1 (stopped under P-D5): the window bound; `r_max = 5.0056` at the top pair.
+- `0f071f0db`, Amendment 1 (root's ruling (b) after attempt 1): gate 2's reference is reset-aware,
+  `g_ref = max(g_meas, |trim| P_reset)` from a committed test-only oracle; the bound
+  `L = min(||h||_1 + ||E_K||_1, O)` (the flush excess `E` by the recursion
+  `E_(k+1) = |h_(k+1)| * (T_k + E_k)`, for two sections `||h_2||_1 sum_{t >= W} |h_1(t)|`).
+- `8030a6df2`, attempt 2: the reset-aware oracle, gate 2's lower half (`g_ref <= g_p`), `F`
+  measured.
+
+**Key results of attempt 2.** `r_max = 2.532` (44.1 kHz top pair, both trims), and only the top
+pair is above the ceiling (2.40 to 2.53 at every rate); every other row is at most **1.056**
+(96 kHz, HPF 10 Hz into the LPF one `f32` below the maximum), so `F` would be 1.11 without the top pair. The
+LPF-only flush was reached on the real kernel at every launch rate (A1-4). **Gate 4 was over
+budget:** #1457 gate 2's medians needed **33.5 ns against the committed 18.0 ns** (the 64-design
+near-top family at 96 kHz, +24 dB; calibrate's margined value 35 ns, charge 260), because the
+signed walk of each later section alone in every frame of the pass about doubled its cost per
+frame.
+
+**For the next attempt.**
+
+- **(i) Cost first.** The per-design constants (`||h_2||_1` and the tail of `h_1` past `W`) are
+  computed once per section design, in closed form or cached by #1457's cache, with no extra
+  per-frame work in the pass. **Gate 4:** no cost change beyond noise against #1457 gate 2 at the
+  committed constants (18.0 ns and section charge 550, with the margin on the whole charged work,
+  #1465's record).
+- **(ii) The factor.** `F` is set on every row except the top pair: `F = min(1.5, r_max (1 + m))`,
+  with `r_max` over those rows. The top pair gets its own gate, `g_p <= r_top (1 + m) g_ref`, with
+  the measured `r_top` recorded in the attempt record and confirmed by root. The derivation states
+  the Young floor: with today's `dev_loud`, no sound bound goes below `r` of about 1.17 at the top
+  pair (`(1.384 + 0.231) / 1.384` at 44.1 kHz).
+- **Accepted, for the next attempt's verifier to check:** F2(a) folded into gate 1 (gate 1 covers
+  the same rows and trims and more); the module stating `min(L, O)` (both bounds are sound, so their
+  minimum is).
+- **Coverage.** The oracle's coverage statement stays explicit: it covers no flush, or one
+  single-section flush after any armed frame, and claims no more.
+- **Rejected:** a 35 ns frame-equivalent for everyone.
 
 ## Attempt record
 
