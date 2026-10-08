@@ -105,7 +105,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `Cargo.toml`, `Cargo.lock` | J #1438 (one member and its own lock entry) and B #1447 (the `source` package's `bench-support` dev-dependency line) in any order with C #1320; the later slice rebases |
 | `scripts/check-ci-path-routing.py`, `scripts/test-ci-path-routing.py` | J #1446 (one `DEDUPLICATED_OWNERS` entry and its case) in any order with any later edit of those tables; the later slice rebases |
 | Realtime-policy floors and allowlists (the awk gate's floor lines in `scripts/check-realtime-policy.sh` and its self-test's pad until J #1446, then `Policy::workspace()` in `tools/realtime-policy`) | B batch 1 (#1314) → J #1438; then, in any order, J's tool slices (#1441: one region; the #1448 guard: one; #1443: ten), B #1345 (Amendment 1: one region or more), B's other cell slices (#1312, #1346, #1347), #1321 (`:55`) and any slice under the standing exception. H #1448 adds none. B #1482 (the shared seqlock's render-side region, if its D4 adds one) lands in any order with these. Each slice re-measures the floors when it lands. While the awk gate is on `main` (until the J batch push), a slice that adds a region raises the awk floor and the self-test's pad with it. `Policy::workspace()` reaches `main` only with the J batch push, which re-measures it |
-| #1446's comment lines: `crates/engine/src/realtime/observe.rs`, `crates/engine/src/realtime/watermark.rs` (added by B batch 1), `crates/lane/src/fpenv.rs`, `crates/lane/src/softfma.rs`, `crates/capi/tests/resource_lifecycle.rs`, `crates/host-core/src/lib.rs`, `tools/bench-support/src/lib.rs`, `scripts/check-bench-policy.sh`, `docs/REALTIME_DEPENDENCY_POLICY.md`, `docs/REALTIME_MEMORY.md` | J #1446 (comment lines only, each keeping its line count) in any order with every other slice that edits these files; the later slice rebases. J #1478 (`docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership") and B #1482 (`observe.rs` and `watermark.rs` code, after #1314) in any order with #1446, the later slice rebases and keeps #1446's wording |
+| #1446's comment lines: `crates/engine/src/realtime/observe.rs`, `crates/engine/src/realtime/watermark.rs` (added by B batch 1), `crates/lane/src/fpenv.rs`, `crates/lane/src/softfma.rs`, `crates/capi/tests/resource_lifecycle.rs`, `crates/host-core/src/lib.rs`, `tools/bench-support/src/lib.rs`, `scripts/check-bench-policy.sh`, `docs/REALTIME_DEPENDENCY_POLICY.md`, `docs/REALTIME_MEMORY.md` | J #1446 (comment lines only, each keeping its line count) in any order with every other slice that edits these files; the later slice rebases. J #1489 (`docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", and `crates/lane/src/softfma.rs` comment and `SAFETY` lines; it superseded #1478) and B #1482 (`observe.rs` and `watermark.rs` code, after #1314) in any order with #1446, the later slice rebases and keeps #1446's wording |
 | `.github/ISSUE_SPECS/*.md` | J #1446's D5 substitutions apply to the specs on `main` when it lands; a spec that lands later gets them at the root's issue-boundary audit |
 
 Hot-file note (2026-10-05, after #1329 attempt 1): #1408 changes the D11 ramp law that the trim,
@@ -431,7 +431,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 ## Stream H
 
 - **Coordinator scope:** Browser control plane: shared-memory spike, allocation gates, nightly browser artifact, Worker control plane, render-only worklet, transaction API in the SDK.
-- **Owns:** `hosts/host-web`, `sdk/`, `scripts/check-web-audioworklet*`; #1334 also `rust-toolchain.toml`, `.github/workflows/{qualification,npm-publish}.yml`, `docs/RELEASE.md`, `docs/TARGET_MATRIX.md` and the build/identity scripts it lists; #1333 also `tools/parameter-metadata/src/abi_layout.rs`, `scripts/check-abi-layout-v1.py`; #1381 the `RuntimePreparer` hook in `crates/control-plane`; by named exception: `crates/host-core/src/spectrum.rs` (#1449: the `SpectrumCapture` drains, the new `SpectrumCapture::reset_after_cancel`, `SpectrumCaptureCollection::cancel`, `select` and the new `cancel_except`, the new `SPECTRUM_RESULT_SLOTS`, `spectrum_capture_resources_for_id_bytes` (`:331-333`), the capture queue's construction (`:1353`), and their unit tests). #1448 edits only H's own files and no floor; its markers are J's guard commit (stream J). #1477 also edits `scripts/test-web-audioworklet.mjs` (`testQualificationBoot`, the fake port's `miso.renderallocations.v1` reply and the reply-check cases only).
+- **Owns:** `hosts/host-web`, `sdk/`, `scripts/check-web-audioworklet*`; #1334 also `rust-toolchain.toml`, `.github/workflows/{qualification,npm-publish}.yml`, `docs/RELEASE.md`, `docs/TARGET_MATRIX.md` and the build/identity scripts it lists; #1333 also `tools/parameter-metadata/src/abi_layout.rs`, `scripts/check-abi-layout-v1.py`; #1381 the `RuntimePreparer` hook in `crates/control-plane`; by named exception: `crates/host-core/src/spectrum.rs` (#1449: the `SpectrumCapture` drains, the new `SpectrumCapture::reset_after_cancel`, `SpectrumCaptureCollection::cancel`, `select` and the new `cancel_except`, the new `SPECTRUM_RESULT_SLOTS`, `spectrum_capture_resources_for_id_bytes` (`:331-333`), the capture queue's construction (`:1353`), and their unit tests). #1448 edits only H's own files and no floor; its markers are J's guard commit (stream J). #1477 also edits `scripts/test-web-audioworklet.mjs` (`testQualificationBoot`, the fake port's `miso.renderallocations.v1` reply and the reply-check cases only). #1488 also edits `docs/REALTIME_DEPENDENCY_POLICY.md`, one sentence, only if J #1489 landed first with its D-M2 exception clause.
 - **Depends on:** B #1309, #1312-#1316, #1348, #1349; A #1277, #1327; D #1326; E #1054, #1364; F #1225, #1226, #1247, #1261, #1262, #1267; I #1335.
 - **Parallel-safe with:** A, G, J.
 
@@ -462,6 +462,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 23 | #1389 | Apply session transactions from the headless SDK engine | #1293, #1296, #1332, #1381, #1382, #1383, #1385, #1386 | — |
 | 24 | #1476 | Read every SDK qualification instance's render allocation count before it closes | — | — |
 | 25 | #1477 | Witness the staging-read boot caller and test the render allocation reply check hermetically | — | — |
+| 26 | #1488 | Bring the PCM-feed worklet's source submit and seek under the render-locked allocation count | — | — |
 
 #1448's markers are not in its row: stream J lands them as "H #1448's guard, landed by J after C2"
 (stream J's table).
@@ -509,6 +510,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
     and `createContinuousSpectrumBrowser`), `hosts/host-web/qualification/run.mjs` (the
     `sdk-spectrum-continuous` predicates) and `hosts/host-web/MUTATIONS.md` (its rows) (stream H's;
     #1480);
+  - `crates/lane/src/softfma.rs` (stream G's): comment and `SAFETY` lines only (#1489);
   - `.github/workflows/nightly.yml` (#1481: the `native-vectorization-report` step's
     `continue-on-error` line and its comment) and `scripts/test-test-support-ci.py` (#1481: two
     rewrapped lines).
@@ -541,7 +543,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 22 | #1434 | Hold every block-form owner step in qualification.yml to its guard lines | #1429 | — |
 | 23 | #1435 | Remove every temporary directory the enginectl CLI test creates, and fail the SDK qualify step on a leftover | #1429 | — |
 | 24 | #1445 | Sync edited issue specs to their GitHub bodies with a checked operator script | — | — |
-| 25 | #1438 | Check realtime regions with a Rust syntax-tree tool: the crate, the walk, unsafe ownership, markers and floors | — | #1309, #1343, #1314, #1311, #1348 |
+| 25 | #1438 | Check realtime regions with a Rust syntax-tree tool: the crate, the walk, unsafe ownership, markers and floors (D5 amended, root 2026-10-08: the four stale allowlist entries and the wasm-gate-guest entry are dropped from both gates) | — | #1309, #1343, #1314, #1311, #1348 |
 | 26 | #1439 | Check realtime regions with a Rust syntax-tree tool: region boundaries, the forbidden-body predicate and the whole-plan check | #1438 | — |
 | 27 | #1440 | Check realtime regions with a Rust syntax-tree tool: the drain-bound rule's mapping, scope and innermost bound | #1439 | — |
 | 28 | #1441 | Check realtime regions with a Rust syntax-tree tool: the drain-bound rule's outer loops, attributes and constructors | #1440 | — |
@@ -552,9 +554,10 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 33 | #1444 | Check realtime regions with a Rust syntax-tree tool: refuse a call to a popping function in a marked loop or closure | #1443 | #1345 |
 | 34 | #1418 | Require every loop around a realtime drain to drain a different queue on each pass | #1444 (the whole tool batch on `main`) | — |
 | 35 | #1426 | Bound each realtime drain per queue: require the pop receiver to be the counted queue | #1418 | — |
-| 36 | #1478 | Name every approved unsafe file in the realtime dependency policy | — | — |
+| 36 | ~~#1478~~ | ~~Name every approved unsafe file in the realtime dependency policy~~ (superseded by #1489, root 2026-10-08; closed, both doc commits reverted) | — | — |
 | 37 | #1480 | Make the continuous-spectrum gate's capture loss independent of browser timing | #1248 | — |
 | 38 | #1481 | Make the nightly vectorization report pass on main and report its failures | — | — |
+| 39 | #1489 | Correct the realtime dependency policy's unsafe-ownership statements | — | H #1488 (preferred; else its D-M2 exception clause) |
 
 **#1444 waits for B #1345 (Amendment 1): accepted by root, 2026-10-05**, in place of the earlier
 "not ordered against #1345" for this one slice.

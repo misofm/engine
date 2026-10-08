@@ -193,6 +193,13 @@ from `:440` on move down by one.
     - `crates/true-peak-limiter/tests/allocation.rs`, `crates/multiband-compressor/tests/no_alloc_render.rs`;
     - `hosts/host-web/src/ffi.rs`, `hosts/host-web/tests/boot_transient_budget.rs`;
     - `tools/bench-support/src/alloc.rs`, `tools/audit/src/capi.rs`, `tools/wasm-gate-guest/src/lib.rs`.
+  - **Amended (root, 2026-10-08; see "Amendment (root, 2026-10-08)").** `Policy::workspace()`
+    does not carry the four stale entries (`crates/soft-clip/tests/allocation.rs`,
+    `crates/transient-shaper/tests/allocation.rs`, `crates/true-peak-limiter/tests/allocation.rs`,
+    `crates/multiband-compressor/tests/no_alloc_render.rs`) or `tools/wasm-gate-guest/src/lib.rs`,
+    and the awk gate's exclusion line drops the same five in this slice's commit. With
+    `hosts/host-web/src/render_lock.rs` (#1333, on `main` since this spec was filed) the allowlist is
+    14 paths.
   - The scan is at token level, so macro bodies are scanned, as they are today. A comment or a
     string literal that says `unsafe {` is no longer a finding. That is deliberate: neither is
     code. `unsafe trait` and `#[unsafe(..)]` stay outside the rule, as today.
@@ -350,6 +357,8 @@ from `:440` on move down by one.
 - `tools/realtime-policy/**` (new)
 - `Cargo.toml` (one `members` entry) and `Cargo.lock` (the new package's entry; no version
   changes). `Cargo.lock` is a cross-stream exception: STREAMS gives it to stream C for #1320.
+- `scripts/check-realtime-policy.sh`: the `unsafe source exclusions` line only (the Amendment's five
+  removals, so the two gates keep one allowlist until C2).
 - `.github/workflows/qualification.yml` (D12's two edits in `audit-native`). This is a
   cross-stream exception: H #1334 edits the workflows, and J #1422, J #1429 and J #1435 edit other
   steps of this file.
@@ -471,3 +480,49 @@ Root names each cross-stream exception in STREAMS.md (D15-0). The rows are in
   on fixture trees, which are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Amendment (root, 2026-10-08)
+
+Filed from #1478's two verdicts, which found four allowlist entries that approve nothing and an
+inert `wasm-gate-guest` entry (`/home/bl/misofm/submix-verdicts/1478-attempt1.md`, "Stale entries";
+`1478-attempt2.md`, open item 3). This slice has not started: `tools/realtime-policy` does not
+exist and no implementation commit names #1438 (only its filing, `c45f48691`, and a merge that
+carried it). Root's ruling (3), verbatim:
+
+> (3) (b): amend #1438's D5 now (the slice has not started): drop the four stale allowlist entries
+> and remove the wasm-gate-guest entry if it allows nothing reachable (state the evidence). Body
+> syncs join the pending list.
+
+**Decision: all five entries go.** D5 is amended in place (its "Amended" bullet).
+
+- **The four stale entries.** `crates/soft-clip/tests/allocation.rs`,
+  `crates/transient-shaper/tests/allocation.rs`, `crates/true-peak-limiter/tests/allocation.rs` and
+  `crates/multiband-compressor/tests/no_alloc_render.rs` contain no `unsafe` and no
+  `allow(unsafe_code)`; they count through `bench_support::alloc`. Their wrappers were removed by
+  `568ad4087`, `cb4898437` (#1046), `a6da0cade` and `39c4651b1` (`git log -S'unsafe impl GlobalAlloc'
+  --follow`). On `a059cdd03` the awk gate's regex
+  (`unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{`) matches 0 lines in each. Today each
+  entry would let a later change add `#![allow(unsafe_code)]` and unsafe code to that file and pass
+  the gate unreviewed.
+- **`tools/wasm-gate-guest/src/lib.rs`: the entry allows nothing.**
+  - The file's only `unsafe` tokens are eleven `#[unsafe(no_mangle)]` attributes (`:57`-`:220`)
+    and its `#![allow(unsafe_code)]` (`:15`). The awk regex matches 0 lines in it, so the realtime
+    allowlist entry suppresses nothing today. D5's token rule (`unsafe` followed by `impl`, `fn`,
+    `extern` or a `{ }` group) also leaves `#[unsafe(..)]` outside the rule, so under the tool the
+    entry would suppress nothing either.
+  - The binding approval of this file's unsafe boundary is `scripts/check-bench-policy.sh:209-229`:
+    the exact three-file `tools/` set allowed to carry `#![allow(unsafe_code)]`, with the reason
+    (a `cdylib` export needs `#[unsafe(no_mangle)]` under edition 2024 and has no safe spelling).
+    That check is unchanged and still pins the file.
+  - Nothing in it is reachable from a render path: it is the wasm gate guest built only by
+    `scripts/run-wasm-gates.sh:73`, linked into no shipped artifact.
+  - Removing the entry makes a real unsafe block, fn or impl added to the file a realtime-gate
+    finding that needs a decision, which is the intent of an exact allowlist.
+- **Both gates.** Until C2 the awk gate and the tool hold one allowlist (Hazards), so this slice
+  removes the same five from `scripts/check-realtime-policy.sh`'s exclusion line (Authorized
+  paths). Neither self-test names these paths.
+- **Gate addition.** Gate 4 gains one mutation, applied alone: add `unsafe {}` to
+  `crates/soft-clip/tests/allocation.rs` in the base tree (or a case tree); both the tool and the
+  awk gate report it.
+- The doc's "Unsafe-code ownership" section is #1489's; it lists the allowlist as `main` holds it.
+
