@@ -125,7 +125,7 @@ const STEP_UP: f64 = 1.0 + 4.0 * U64;
 /// step error `nu (|s_1| + |s_2|)` keeps its margin of `3.7 u64 ||R|| tau` over the relative error
 /// it bounds, above the at most `4 ||R|| 2^-1075` its four products can lose to underflow. The
 /// derivation (`docs/derivations/1329-input-section-tail-and-rest.md`) states the closing terms.
-pub(crate) const TAU: f64 = f64::from_bits((1023 - 600) << 52);
+const TAU: f64 = f64::from_bits((1023 - 600) << 52);
 
 /// `2^-500`: a state word at or above it has a normal square ([`Majorants::remainders`]).
 const SQUARE_SAFE: f64 = f64::from_bits((1023 - 500) << 52);
@@ -2520,7 +2520,8 @@ mod tests {
     /// zero and `tau` enters the error radius, so the radius still covers the exact state; a word
     /// at or above `tau` is kept. Red when the state is flushed without the addition (the radius
     /// then falls short of the flushed state), when it is rounded up to `tau` instead of flushed,
-    /// or when words above `tau` are flushed with only `tau` added.
+    /// when words above `tau` are flushed with only `tau` added, or when two flushed words add only
+    /// one `tau` (the words `(0.9 tau, 0.9 tau)` have a `V`-norm of about `1.66 tau`).
     #[test]
     fn the_first_state_below_tau_is_flushed_to_zero_and_its_magnitude_enters_the_radius() {
         let section = words(BAND_HPFS[1]);
@@ -2548,6 +2549,21 @@ mod tests {
             "radius {:e} against {:e}",
             majorants.first_error,
             propagated + flushed
+        );
+
+        // Two words just below `tau`: the flushed `V`-norm is above one `tau`, so the flush must
+        // add `tau` for each word.
+        let both = [0.9 * TAU, 0.9 * TAU];
+        majorants.first = both;
+        majorants.first_error = 4.0 * TAU;
+        majorants.flush_first();
+        let flushed = v_norm(both.map(|word| word / TAU)) * TAU;
+        assert_eq!(majorants.first, [0.0, 0.0], "both words flushed");
+        assert!(
+            majorants.first_error >= 4.0 * TAU + flushed,
+            "radius {:e} against {:e} for two flushed words",
+            majorants.first_error,
+            4.0 * TAU + flushed
         );
 
         let kept = [2.0 * TAU, -3.0 * TAU];

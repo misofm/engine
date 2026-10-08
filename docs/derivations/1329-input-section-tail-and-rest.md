@@ -310,12 +310,19 @@ about 60 groups).
   cutoff grid at the four launch rates; `1 / (1 - q_k) <= 2^53` for any `f64` `q_k` below one),
   each entry of `(I - M)^-1` is at most `2^53 (1 + 2.84 * 2^53) < 2^108` and each input row at most
   `2^110`, so the floors add less than `4 * 2^110 * 2^108 * tau = 2^-380` to the remainder,
-  against `threshold / 16 >= TAIL_FLOOR / 32 / 15.85 > 2^-34`. The falling test compares each floored component with
-  its previous floored value; a component held at `tau` compares equal, and a component above it
-  falls as it did, its coupling to floored ones adding at most `tau` times the step's entries.
-  The deviation's `eps / 4` test and `p_star`'s budget see at most `tau` times the output row.
-  If a cascade outside these ranges ever left a floor share near its threshold, the walk would
-  reach its horizon and state no bound (`TailBoundError::Horizon`): soundness never depends on it.
+  against `threshold / 16 >= TAIL_FLOOR / 32 / 15.85 > 2^-34`. The suffix-sum search for `t0`
+  sums the floored output majorants of at most `HORIZON_LIMIT = 2^26` frames, so the floors add
+  at most `2^26 tau = 2^-574` to any suffix `Ref(t0)`, and `g_t 2^-574` to the value compared,
+  far below its threshold (above `2^-34`): the floors move `t0` only when that value lies within
+  `g_t 2^-574` of the threshold. The falling test compares each floored component with its
+  previous floored value; a component held at `tau` compares equal, and a component above `tau`
+  differs from its unfloored value by at most `tau` times the step's entries, far below its own
+  size, so the test's outcome changes only for a component within that margin of its previous
+  value. The deviation's `eps / 4` test and
+  `p_star`'s budget see at most `tau` times the output row. If a cascade outside these ranges ever
+  left a floor share near its threshold, the walk would reach its horizon and state no bound
+  (`TailBoundError::Horizon`): soundness never depends on it, and termination is guaranteed by
+  that horizon, not by these margins.
   The walk's bounds are unchanged: every family of `input_bound_budget.rs` and a 3,984-cascade grid
   give the same bounds and frames, bit for bit, with and without the flush (#1474's record).
 * The `1 + 2^-30` step inflation compounds: it lengthens the stated values by a few tens of frames

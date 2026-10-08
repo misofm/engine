@@ -25,10 +25,10 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
 - **What #1457 ships** (`crates/builtins/src/tail.rs`, `crates/builtins/src/lib.rs`; both hosts
   unless noted).
   - The per-preparation budget `INPUT_BOUND_BUDGET_FRAMES` = **1,510,000 frames walked**, charged
-    in strip order, in frame-equivalents of 17.0 ns (one frame of the slowest frame class), so
-    25.7 ms (#1457 Amendment 4, restated by #1474). The stated worst case is **25.44 ms** of
-    design-bound work measured on the CI-class runner (4,096 cheap two-section designs, 88.2 kHz),
-    inside the 25.7 ms budget; spread over rounds and rates: the cheap two-section families
+    in strip order, in frame-equivalents of 17.5 ns (the slowest frame class's measured maximum
+    time of one frame), so 26.43 ms (#1457 Amendment 4, restated by #1474). The stated worst case
+    is **25.44 ms** of design-bound work measured on the CI-class runner (4,096 cheap two-section
+    designs, 88.2 kHz), inside the 26.43 ms budget; spread over rounds and rates: the cheap two-section families
     17.13-25.44 ms, typical 10.73-22.72 ms (one interference sample of 28.44 ms), near-top
     20.47-21.41 ms, the band families 19.92-20.21 ms, the single top designs 3.71-7.43 ms (#1474's
     attempt 1 record). Past the
@@ -45,7 +45,7 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
     m3: a cache that several sessions fill can clear in the middle of a preparation). A full cache
     holds about 2.4 MiB (2,486,520 bytes measured at 8,192 entries). Render never reads it.
   - *(#1457 Amendments 3 and 4.)* The budget is in frame-equivalents: each design computed
-    charges the frames it walks plus `INPUT_BOUND_SECTION_CHARGE` (290 frame-equivalents) per
+    charges the frames it walks plus `INPUT_BOUND_SECTION_CHARGE` (410 frame-equivalents) per
     section. Amendment 4 removed the per-design charge.
   - **One entry point, no parallel API** (Amendment 2, ruling (i)):
     `builtins_compiler::prepare_session_builtins_with_live_controls` takes

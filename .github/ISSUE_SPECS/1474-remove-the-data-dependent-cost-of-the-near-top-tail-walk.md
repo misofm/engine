@@ -324,10 +324,12 @@ and rate, ns per frame net of the fixed cost (min-max):
 | 96k | 13.68 / 13.67 | 14.97 / 15.05 | 12.81 / 14.52 / 14.61 |
 
 Slowest class: **16.54 ns** (spread 16.39-17.10), typical, an 80 Hz HPF into an 18 kHz LPF, 0 dB,
-44.1 kHz. **Frame-equivalent: 17.0 ns** (rounded up). Largest fixed cost per section: **7.03 us**
+44.1 kHz. **Frame-equivalent: 17.0 ns** (rounded up; superseded by root's 2026-10-08 ruling
+below: 17.5 ns). Largest fixed cost per section: **7.03 us**
 (96 kHz, round 2; the other rounds and rates 5.53-6.61 us), 413.5 frame-equivalents of 17.0 ns:
-**`INPUT_BOUND_SECTION_CHARGE` = 420**. The per-design term is negative at every rate (-1.55 to
--3.46 us). The budget, 1,510,000 frame-equivalents, is **25.7 ms**.
+**`INPUT_BOUND_SECTION_CHARGE` = 420** (superseded below: 410). The per-design term is negative at
+every rate (-1.55 to -3.46 us). The budget, 1,510,000 frame-equivalents, is **25.67 ms** (superseded
+below: 26.43 ms).
 
 **Gate 2 on the final constants (one invocation, load 1.96 -> 2.13).** Design work over rates and
 measured rounds, and ns per frame-equivalent consumed:
@@ -357,7 +359,7 @@ took 19.43 ms, and the family's other seven measured samples took 10.73-20.88 ms
 18 runnable tasks during the run), not a frame class. Not retried, as the ruling requires.
 
 **The stated worst case:** **25.44 ms** of design-bound work (4,096 cheap two-section designs, 1 kHz
-into 1.28 kHz, +24 dB, 88.2 kHz, round 1), inside the 25.7 ms budget, down from #1457's 34.90 ms;
+into 1.28 kHz, +24 dB, 88.2 kHz, round 1), inside the 25.67 ms budget (26.43 ms after the follow-up below), down from #1457's 34.90 ms;
 spread as in the table. The per-frame cause: a frame costs 13.2-13.7 ns in long near-top and band
 walks and 15-16.5 ns in typical and short walks (net of the fixed cost); no class depends on
 subnormal operands any more. The slowest whole preparation is 55.86 ms (65,537 distinct near-top
@@ -379,3 +381,57 @@ passed): all pass. `check-workspace-policy.sh`, `check-realtime-policy.sh`: ok.
 
 **Specs corrected** (root-authorized): #1468 (`:152`, the restated charge), #1470 (`:28-31`, the
 budget, the worst case and the spreads), #1471 (`:21`, the budget).
+
+#### Follow-ups after attempt 1's verdict (PASS; MINOR-1..3, NIT-1..4)
+
+**Root's ruling (2026-10-08): a stated worst case is a bound.** So the frame-equivalent comes from
+the slowest class's measured **maximum**, not its median. The statistic: the slowest frame class
+(by median) is typical, an 80 Hz HPF into an 18 kHz LPF, 0 dB, 44.1 kHz, median 16.54 ns, spread
+16.39-17.10 ns; its maximum, 17.10 ns, rounded up to the next half nanosecond, gives **17.5 ns**.
+The reason: a median lets half of the slowest class's samples cost more than the unit the budget
+charges, so a worst case stated from it is not a bound. This is a constant change only: no new
+calibration and no new gate-2 run.
+
+- **`INPUT_BOUND_SECTION_CHARGE` = 410.** The largest recorded fixed cost per section, 7.03 us, is
+  401.7 frame-equivalents of 17.5 ns. Rounded up to the next ten (the rule that gave 420 from
+  413.5), 410 frame-equivalents are 7.18 us, 2.1 % above it.
+- **The budget** (unchanged, 1,510,000 frame-equivalents) is now 1,510,000 x 17.5 ns = **26.43 ms**
+  (26.425 ms) of design-bound work.
+- **The margin (MINOR-3).** The measured worst family, 25.44 ms (4,096 cheap two-section designs,
+  1 kHz into 1.28 kHz, +24 dB, 88.2 kHz), is 96.3 % of 26.43 ms: a margin of 0.99 ms (3.7 %), still
+  inside that family's own 4.6 % run-to-run spread (24.28-25.44 ms) at that rate; per consumed
+  frame-equivalent, 16.85 against 17.5 ns (3.7 %).
+- **Not covered by this statistic (flagged for root).** One other point of the recorded
+  calibration has a larger maximum than 17.5 ns: typical, +24 dB, 44.1 kHz, median 16.52 ns, spread
+  16.37-**18.25** ns (and typical, +24 dB, 88.2 kHz reaches 17.14 ns). The ruling takes the slowest
+  class's maximum, which is 17.10 ns; I applied it as ruled and did not widen it.
+- **The calibration binary (NIT-4).** `g3/cal-final.log` printed the then-committed constants
+  ("frame-equivalent 23.5 ns (committed)"), but its measurement does not use them: `one_design`
+  runs with a budget of `u64::MAX`, so the figures above are valid for 17.5 ns and 410. The
+  example now carries 17.5 ns and its `calibrate` prints the slowest class's maximum as well as its
+  median.
+- **Gate 8** (Amendment 3's command): passed, every 64-track console document exact at every rate
+  at charge 410. Charged and margin: 44.1 kHz 715,392 (794,608), 48 kHz 763,776 (746,224),
+  88.2 kHz 1,262,720 (247,280), 96 kHz 1,358,976 (**151,024**); the mono document at 96 kHz 703,296
+  (806,704). Frames walked are unchanged (96 kHz 1,254,016).
+- **The cache cap's arithmetic** (`INPUT_BOUND_CACHE_ENTRIES`' doc) still used Amendment 4's 290:
+  a design charges at least 257 + 410 = 667 frame-equivalents, so at most 2,263 designs a
+  preparation; the cap of 8,192 still holds them.
+- **MINOR-1.** The flush test now also flushes `first = [0.9 tau, 0.9 tau]` (a `V`-norm of about
+  1.66 `tau`) and asserts the radius grows by at least that norm. Mutation `flushed = TAU` (one
+  `tau` for two words) in `flush_first`: red (`the_first_state_below_tau_...`, the new assertion);
+  reverted: green.
+- **NIT-1..3.** Budget figures are written to two decimals where a margin matters (25.67 and
+  26.43 ms, not 25.7); `TAU` is a private `const`; the derivation's termination paragraph covers
+  the suffix-sum search for `t0` (at most `2^26 tau = 2^-574` per suffix) and states that the
+  horizon, not the margins, guarantees termination.
+- **Specs corrected** (root-authorized): #1468 `:152`, #1470 `:28-31` and `:48` (the section
+  charge, which still said 290), #1471 `:21`.
+
+**Gates.** `cargo test --locked -p math`: all pass. `tail_contract` in release with
+`builtins/test-support`: 13 passed. Gate 8: passed (above). `cargo fmt --all -- --check`: clean.
+clippy (`-p math -p builtins -p builtins-compiler --all-targets --features builtins/test-support`
+and `-p math --features lane --all-targets`, `-D warnings`): clean (only the pre-existing
+`clippy.toml` `fast_db` path notes). `check-workspace-policy.sh`: ok. `check-cross-targets.sh`:
+exit 0, PASS (only the expected #1018 rows).
+
