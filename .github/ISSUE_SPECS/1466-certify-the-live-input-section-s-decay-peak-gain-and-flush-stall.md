@@ -153,13 +153,24 @@ The attempt record carries a mutation table with at least the mutants below; eac
   kernel's slack (about 8.5 % in `R`) cannot see it.
 - L4: a live `D` with no transient term falls below the module's own crossing at small `k`; a
   certificate rate that omits the state rounding falls below the floor (as A2's F1(c) and F1(d)).
-- L6: reuses #1457's gates; a live construction that runs one pass per `k` is red there.
+- L6 (corrected 2026-10-08, root order): preparation reads `input_section_live_bound_table` and
+  never computes the live bound (`crates/builtins/src/tail.rs`, module doc and the table's doc;
+  `crates/builtins-compiler/src/lib.rs` and `crates/host-core/src/prepare.rs` read only the table),
+  so a slow live construction cannot turn #1457's gates 2 and 8 red; the earlier sentence ("a live
+  construction that runs one pass per `k` is red there") was wrong. What L6 defends is narrower:
+  this slice's edits to the shared `crates/math/src/tail.rs` (the fixed walk lives there too) do not
+  move the fixed walk's cost past #1457's budget or change gate 8's exact bounds. The live
+  construction's own cost is recorded descriptively (one invocation, ms per rate). The attempt
+  restates L6's test value with that measured evidence, or names the defect it catches; if none,
+  L6 is reduced to a regression run of #1457's gates and claims no unique catch.
 
 ## Dependencies
 
 - *State a fixed input section's decay, gains and flush stall* (slice A2, #1465): the construction
   of `D`, the accessors' shape and the shared files.
 - *Carry every node's tail bound in one node-neutral struct* (slice A1, #1464).
+- *Split a node's flush stall into a peak stall and a tail stall* (#1484, root ruling of
+  2026-10-08): the two stalls this slice certifies (L-D3 as the ruling reads it, Attempt record).
 - *Tighten the cascade exact-rest bound with a frequency-aware cascade analysis* (#1433, passed),
   *Retarget a live input filter only through its designs and their mixtures* (#1407), *Keep every
   trim, fader and matrix ramp inside its endpoints* (#1408).
@@ -240,3 +251,27 @@ The two readings, for root:
 No code, test or document changed besides this record. The prototype's `D` construction and `G_p`
 are ready for the next attempt once `sigma` is ruled; the derivation note's live part will be
 written first, as ruled.
+
+### Root's ruling (2026-10-08), option (2)
+
+Root ruled the conflict above with option (2): the contract changes.
+
+- `CompositionBound`'s single stall becomes two fields: `sigma_p` (the peak stall; it bounds the
+  flush part of the output at every frame and is (N1)'s term) and `sigma_t` (the tail stall; it
+  bounds it from the node's tail on and is (N2)'s term). H1 and #1379's composition read `sigma_p`
+  for (N1) and `sigma_t` for (N2). The fixed input section states `sigma_p = sigma_t = F a`; every
+  other node still states `Unstated`.
+- Reason: the live section's stall from `T` is 55-61 dB below its every-frame stall (the table
+  above); one `sigma` would permanently cost every live strip that much exact-rest reach.
+- The change is filed as *Split a node's flush stall into a peak stall and a tail stall* (#1484),
+  which lands before this slice. It blocks this slice, #1467 and #1379.
+- For this slice, L-D3 reads: `sigma_p` is the every-frame flush bound (`stall(0)` of the
+  prototype) rounded up to millibels, and `sigma_t` the live stall from `T` (`P* eps / 2`) rounded
+  up; `sigma_t <= sigma_p`. L1 checks `max |y| <= g_p + sigma_p`; L3 recomputes both stalls. The
+  accessors expose both.
+- Root also filed the live `G_p` tightening successor, *Tighten the live input section's peak gain
+  toward the real-kernel history peak* (#1485): the prototype's `G_p` (+144.24 dB at 44.1 kHz) is
+  sound and about 53.5 dB above the real-kernel history peak (+90.75 dB); this slice keeps it.
+- L6's test value is corrected in place (Test value, L6).
+
+The next attempt starts after #1484 has landed.

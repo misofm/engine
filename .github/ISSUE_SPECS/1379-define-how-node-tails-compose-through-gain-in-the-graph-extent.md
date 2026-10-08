@@ -341,6 +341,11 @@ red.
   input section's decay, gains and flush stall*, #1465), B1 (*Certify the live input section's
   decay, peak gain and flush stall*, #1466) and B2 (*Derive the live input section's tail gain and
   state its composition*, #1467): the node values this slice composes.
+- *Split a node's flush stall into a peak stall and a tail stall* (#1484, root ruling of
+  2026-10-08 on #1466 attempt 1): each node states a peak stall `sigma_p` for (N1) and a tail stall
+  `sigma_t` for (N2); #1484 amends H1, H3's `sigma` column and H4 step 6 in this spec and the design
+  note (`S_out` reads `sigma_p`, the effective stall `sigma'_v` reads `sigma_t`), and this slice
+  composes them as amended.
 - *Bound route gain and matrix values* (#1237, landed): a route's `PeakGain` is finite only under
   its bounds. *Retarget a live input filter only through its designs and their mixtures* (#1407) and
   *Keep every trim, fader and matrix ramp inside its endpoints* (#1408): the live words and the gain
