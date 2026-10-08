@@ -324,12 +324,12 @@ and rate, ns per frame net of the fixed cost (min-max):
 | 96k | 13.68 / 13.67 | 14.97 / 15.05 | 12.81 / 14.52 / 14.61 |
 
 Slowest class: **16.54 ns** (spread 16.39-17.10), typical, an 80 Hz HPF into an 18 kHz LPF, 0 dB,
-44.1 kHz. **Frame-equivalent: 17.0 ns** (rounded up; superseded by root's 2026-10-08 ruling
-below: 17.5 ns). Largest fixed cost per section: **7.03 us**
+44.1 kHz. **Frame-equivalent: 17.0 ns** (rounded up; superseded by root's 2026-10-08 rulings
+below: 17.5 ns, then 18.5 ns). Largest fixed cost per section: **7.03 us**
 (96 kHz, round 2; the other rounds and rates 5.53-6.61 us), 413.5 frame-equivalents of 17.0 ns:
-**`INPUT_BOUND_SECTION_CHARGE` = 420** (superseded below: 410). The per-design term is negative at
+**`INPUT_BOUND_SECTION_CHARGE` = 420** (superseded below: 410, then 380). The per-design term is negative at
 every rate (-1.55 to -3.46 us). The budget, 1,510,000 frame-equivalents, is **25.67 ms** (superseded
-below: 26.43 ms).
+below: 26.43 ms, then 27.94 ms).
 
 **Gate 2 on the final constants (one invocation, load 1.96 -> 2.13).** Design work over rates and
 measured rounds, and ns per frame-equivalent consumed:
@@ -359,7 +359,7 @@ took 19.43 ms, and the family's other seven measured samples took 10.73-20.88 ms
 18 runnable tasks during the run), not a frame class. Not retried, as the ruling requires.
 
 **The stated worst case:** **25.44 ms** of design-bound work (4,096 cheap two-section designs, 1 kHz
-into 1.28 kHz, +24 dB, 88.2 kHz, round 1), inside the 25.67 ms budget (26.43 ms after the follow-up below), down from #1457's 34.90 ms;
+into 1.28 kHz, +24 dB, 88.2 kHz, round 1), inside the 25.67 ms budget (26.43 ms, then 27.94 ms, after the follow-ups below), down from #1457's 34.90 ms;
 spread as in the table. The per-frame cause: a frame costs 13.2-13.7 ns in long near-top and band
 walks and 15-16.5 ns in typical and short walks (net of the fixed cost); no class depends on
 subnormal operands any more. The slowest whole preparation is 55.86 ms (65,537 distinct near-top
@@ -384,7 +384,8 @@ budget, the worst case and the spreads), #1471 (`:21`, the budget).
 
 #### Follow-ups after attempt 1's verdict (PASS; MINOR-1..3, NIT-1..4)
 
-**Root's ruling (2026-10-08): a stated worst case is a bound.** So the frame-equivalent comes from
+**Root's ruling (2026-10-08): a stated worst case is a bound.** (Its statistic, 17.5 ns, 410 and
+26.43 ms are superseded by root's re-ruling below: 18.5 ns, 380 and 27.94 ms.) So the frame-equivalent comes from
 the slowest class's measured **maximum**, not its median. The statistic: the slowest frame class
 (by median) is typical, an 80 Hz HPF into an 18 kHz LPF, 0 dB, 44.1 kHz, median 16.54 ns, spread
 16.39-17.10 ns; its maximum, 17.10 ns, rounded up to the next half nanosecond, gives **17.5 ns**.
@@ -435,3 +436,54 @@ and `-p math --features lane --all-targets`, `-D warnings`): clean (only the pre
 `clippy.toml` `fast_db` path notes). `check-workspace-policy.sh`: ok. `check-cross-targets.sh`:
 exit 0, PASS (only the expected #1018 rows).
 
+#### Follow-up: root's re-ruling (2026-10-08) -- the maximum over all points
+
+**Root's ruling (2026-10-08; supersedes the 17.5 ns ruling).** A stated worst case is a bound, and
+a bound does not pick which outlier to believe. So the frame-equivalent comes from the **maximum
+over all recorded calibration points**, not the slowest class's maximum. The statistic: the largest
+recorded sample is **18.25 ns** (typical, +24 dB, 44.1 kHz, the class's slowest point, an 80 Hz HPF
+into an 18 kHz LPF, median 16.52 ns, spread 16.37-18.25 ns; `g3/cal-final.log`); rounded up to the next half
+nanosecond, the frame-equivalent is **18.5 ns**. The reason: any recorded sample above the unit
+the budget charges is a frame the stated worst case does not bound. Constant change only: no new
+calibration and no gate-2 run.
+
+- **`INPUT_BOUND_SECTION_CHARGE` = 380.** The largest recorded fixed cost per section, 7.03 us
+  (96 kHz, round 2), is 7,030 / 18.5 = 380.0 frame-equivalents. Rounded up to a ten by the same
+  rule as before (413.5 -> 420, 401.7 -> 410), it stays **380**, because 380.0 is already a ten.
+  It is not below the measured cost: the same log prints that point's intercept for the cascade's
+  two sections as 14.05 us, so the unrounded per-section cost lies in 7.025-7.0275 us
+  (379.7-379.9 frame-equivalents), and 380 frame-equivalents are 7.03 us.
+- **The budget** (unchanged, 1,510,000 frame-equivalents) is 1,510,000 x 18.5 ns = **27.935 ms**,
+  written 27.94 ms.
+- **The margin.** The measured worst family, 25.44 ms (4,096 cheap two-section designs, 1 kHz
+  into 1.28 kHz, +24 dB, 88.2 kHz, round 1), is 25.44 ms of 27.94 ms (91.1 %): a margin of
+  2.50 ms (8.9 %), outside that family's 4.6 % run-to-run spread at that rate (24.28-25.44 ms);
+  per consumed frame-equivalent, 16.85 against 18.5 ns.
+- **What "recorded" covers.** The calibration log prints, per class and rate, only the slowest
+  point (by median) with its min-max, so 18.25 ns is the maximum over the printed points. The
+  example's `calibrate` now tracks and prints the largest sample over **every** point of every
+  class ("largest sample over every point"), and states the section charge against it, so the next
+  calibration reports this statistic directly.
+- **The cache cap's arithmetic** (`INPUT_BOUND_CACHE_ENTRIES`' doc): a design charges at least
+  257 + 380 = 637 frame-equivalents, so at most 1,510,000 / 637 = 2,370 designs a preparation; the
+  cap of 8,192 still holds them.
+- **Gate 8** (Amendment 3's command): passed, every 64-track console document exact at every rate
+  at charge 380 (frames walked unchanged). Charged and margin, for the stereo documents
+  (`console-sixty-four-track`, `-app`, `-intended`, `-sends`, identical): 44.1 kHz 707,712
+  (802,288), 48 kHz 756,096 (753,904), 88.2 kHz 1,255,040 (254,960), 96 kHz 1,351,296
+  (**158,704**); the mono document: 44.1 kHz 365,120 (1,144,880), 48 kHz 390,464 (1,119,536),
+  88.2 kHz 649,792 (860,208), 96 kHz 699,456 (810,544).
+- **Statements updated:** `crates/builtins/src/tail.rs` (the charge's and the budget's docs, and
+  the cache cap's per-design figure), `crates/builtins/examples/input_bound_budget.rs`
+  (`FRAME_EQUIVALENT_NS` = 18.5 and the `calibrate` statistic), and the local specs of #1468
+  (`:152`), #1470 (`:28-31`, `:48`) and #1471 (`:21`) (root-authorized).
+  `docs/derivations/1329-input-section-tail-and-rest.md` states none of these figures (no
+  frame-equivalent, charge or budget), so it is unchanged.
+
+**Gates.** `tail_contract` in release with `builtins/test-support`: 13 passed. Gate 8: passed
+(above). `cargo test --locked -p math`: all pass. `builtins` and `builtins-compiler` lib tests
+(test-support): 15 and 57 passed. `cargo fmt --all -- --check`: clean. clippy (`-p math -p
+builtins -p builtins-compiler --all-targets --features builtins/test-support` and `-p math
+--features lane --all-targets`, `-D warnings`): clean (only the pre-existing `clippy.toml`
+`fast_db` path notes). `check-workspace-policy.sh`: ok. `check-cross-targets.sh`: exit 0, PASS
+(only the expected #1018 rows).

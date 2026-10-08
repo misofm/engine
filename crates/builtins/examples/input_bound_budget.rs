@@ -35,9 +35,9 @@
 //!   an LPF at 16-20 kHz, at 0 and +24 dB) and of gate 2's cheap two-section designs (at 0, +12 and
 //!   +24 dB). Each point's time is the median of `CLASS_RUNS` measured sweeps after one warmup
 //!   sweep, reported with its spread (minimum to maximum), so one noisy sample cannot move the
-//!   class; the slowest class (by median) is the one whose measured maximum, rounded up, is the
-//!   frame-equivalent (`FRAME_EQUIVALENT_NS`; root's 2026-10-08 ruling: a stated worst case is a
-//!   bound).
+//!   class. The frame-equivalent (`FRAME_EQUIVALENT_NS`) is the maximum sample over every point
+//!   of every class, rounded up (root's 2026-10-08 rulings: a stated worst case is a bound, and a
+//!   bound does not pick which outlier to believe).
 #![allow(missing_docs)]
 
 use builtins::test_support::{
@@ -52,10 +52,10 @@ use effect_contract::NodeTailBound;
 use std::time::Instant;
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-/// The frame-equivalent in ns: the slowest frame class's measured maximum time of one frame, rounded
-/// up (#1457 Amendment 4, restated by #1474), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s doc
-/// states it.
-const FRAME_EQUIVALENT_NS: f64 = 17.5;
+/// The frame-equivalent in ns: the maximum measured time of one frame over every calibration point,
+/// rounded up (#1457 Amendment 4, restated by #1474), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s
+/// doc states it.
+const FRAME_EQUIVALENT_NS: f64 = 18.5;
 const ROUNDS: usize = 3;
 
 fn channel(trim_db: f32, hpf_hz: f32, lpf_hz: f32) -> ChannelParameters {
@@ -447,12 +447,14 @@ fn frame_class_points(rate: u32) -> Vec<(String, Vec<(String, BuiltinParameters)
 /// the rate's measured intercept of one cascade of two sections), so that short walks are compared
 /// frame for frame with long ones. Each sweep measures every point once, so a burst of
 /// interference reaches one sample of many points, not every sample of one; sweep 0 is the
-/// warmup. Returns the slowest point's median and its maximum (the frame-equivalent's statistic).
+/// warmup. Returns the slowest point's median and the maximum sample over every point (the
+/// frame-equivalent's statistic).
 fn frame_classes(fixed_ns: &[f64; 4]) -> (f64, f64) {
     println!(
         "rate | class | slowest point | its ns per frame net of the fixed cost, median (min-max) | fastest median | frames"
     );
     let mut slowest = (0.0_f64, 0.0_f64, String::new());
+    let mut maximum = (0.0_f64, String::new());
     for (slot, rate) in RATES.into_iter().enumerate() {
         for (class, points) in frame_class_points(rate) {
             let mut samples = vec![Vec::with_capacity(CLASS_RUNS); points.len()];
@@ -474,6 +476,17 @@ fn frame_classes(fixed_ns: &[f64; 4]) -> (f64, f64) {
                     (point, runs[CLASS_RUNS / 2], runs[0], runs[CLASS_RUNS - 1])
                 })
                 .collect();
+            for (point, median, _, max) in &medians {
+                if *max > maximum.0 {
+                    maximum = (
+                        *max,
+                        format!(
+                            "{rate} Hz, {class}, {}, median {median:.2}",
+                            points[*point].0
+                        ),
+                    );
+                }
+            }
             let high = medians
                 .iter()
                 .copied()
@@ -502,7 +515,11 @@ fn frame_classes(fixed_ns: &[f64; 4]) -> (f64, f64) {
         "slowest frame class measured: {:.2} ns per frame (median of {CLASS_RUNS}), maximum {:.2} ns, {}",
         slowest.0, slowest.1, slowest.2
     );
-    (slowest.0, slowest.1)
+    println!(
+        "largest sample over every point: {:.2} ns per frame, {}",
+        maximum.0, maximum.1
+    );
+    (slowest.0, maximum.0)
 }
 
 /// Per design class, the least-squares line of one design's time against its frames walked
@@ -590,14 +607,14 @@ fn fixed_costs() -> ([f64; 4], f64) {
 fn calibrate() {
     // The fixed costs first: the frame classes are read net of them.
     let (two_sections, per_section) = fixed_costs();
-    let (median, slowest) = frame_classes(&two_sections);
+    let (median, maximum) = frame_classes(&two_sections);
     println!(
-        "frame-equivalent {FRAME_EQUIVALENT_NS} ns (committed); slowest class measured: median {median:.2} ns, maximum {slowest:.2} ns"
+        "frame-equivalent {FRAME_EQUIVALENT_NS} ns (committed); slowest class's median {median:.2} ns; largest sample over every point {maximum:.2} ns"
     );
     println!(
-        "largest fixed cost per section {:.2} us: {:.1} frame-equivalents of the slowest class's maximum, {:.1} of the committed frame-equivalent",
+        "largest fixed cost per section {:.2} us: {:.1} frame-equivalents of the largest sample, {:.1} of the committed frame-equivalent",
         per_section * 1e-3,
-        per_section / slowest,
+        per_section / maximum,
         per_section / FRAME_EQUIVALENT_NS
     );
 }
