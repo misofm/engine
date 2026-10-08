@@ -260,7 +260,13 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   figure of record** is the batch verdict's single calibration and gate-2 invocation, run by the
   batch verifier; the constants are restated in the batch follow-up if it differs. Gate 2 (real
   preparations, charged against measured) is the final check: a gate-2 family whose median exceeds
-  the stated budget means the constant is wrong.
+  the stated budget means the constant is wrong. **Root's measurement-margin ruling of
+  2026-10-08 (in force):** the frame-equivalent is the computed per-design-median bound (the
+  binding value of the joint search above) times **1.05**, rounded up to 0.5 ns, and the section
+  charge is searched jointly at that frame-equivalent (the largest per-batch-median fixed cost per
+  section over it, rounded up to a ten). Reason: gate-2 shares of 95.8-98.7 % of the budget are too
+  thin for a stated bound measured on a shared host; the observed run-to-run spread is in the
+  attempt record. The batch verifier's single run applies the same rule. Gate 8 stays exact.
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
@@ -826,6 +832,7 @@ stay above.
 | The follow-up verifier's descriptive calibrate (load 1.95-2.48) | per-batch median, 48 a batch | 17.5 ns / 540 |
 | The follow-up verifier's descriptive gate 2 (charge 550) | as fold-in 2's gate 2 | 16.5 ns (16.367) |
 | Follow-up 3's descriptive calibrate (load 2.21-3.26; below) | per-batch median, 96 / 64 / 48 a batch | 17.0 ns / 560 |
+| Root's margin ruling on follow-up 2's figure (no new run; last section) | computed bound 16.960 ns x 1.05, rounded up to 0.5 ns; charge searched at it | **18.0 ns / 520** |
 
 ### Attempt 1 follow-up 2: root's ruling (c) (2026-10-08, implementer)
 
@@ -989,3 +996,67 @@ builtins-compiler --features test-support --lib`: 57 passed. `cargo fmt --all --
 `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean.
 `scripts/check-workspace-policy.sh`: ok. Not run: `scripts/check-cross-targets.sh` (no engine code
 changed: an example, a `#[cfg(test)]` test and prose).
+
+### Root's measurement-margin ruling (2026-10-08, implementer: applied, no new run)
+
+**The ruling.** Gate-2 shares of 95.8-98.7 % of the budget are too thin for a stated bound
+measured on a shared host. The frame-equivalent is the computed per-design-median bound x 1.05,
+rounded **up** to 0.5 ns; `calibrate` runs the section-charge joint search at that
+frame-equivalent. Gate 8 must stay exact. No new calibration run: the batch verifier's single run
+is the figure of record and applies the same rule.
+
+**The reason: the observed run-to-run spread.** The recorded runs' binding values (the computed
+bound, largest median work per charged frame-equivalent) are **16.960 ns** (follow-up 2, the figure
+of record so far), **17.164 ns** (the follow-up verifier's descriptive calibrate) and **16.917 ns**
+(follow-up 3's descriptive calibrate), a spread of 1.5 %. Gate 2's worst shares of the budget then
+stated are **95.8 %** (follow-up 2's median, of 25.67 ms), **96.3 %** (#1474's re-ruling, of
+26.43 ms), **96.7 %** (follow-up 2's largest raw sample, of 25.67 ms), **97.2 %** (#1467 L6', of
+25.67 ms) and **98.7 %** (#1466 L6, of 25.67 ms): one box, the same workload, a 2.9-point spread
+under load, against a margin of 1.3-4.2 %.
+
+**Applied to the figure of record so far** (follow-up 2's binding 16.960 ns: 48 kHz, one cascade of
+two sections, grid batch 34, 44,723 ns a design at 1,537 frames + 550 x 2):
+
+- 16.960 ns x 1.05 = 17.808 ns, rounded up: **`FRAME_EQUIVALENT_NS` = 18.0**.
+- The section charge at 18.0 ns: the recorded largest per-batch-median fixed cost per section
+  9.34 us / 18.0 ns = 518.9, rounded up to a ten: **`INPUT_BOUND_SECTION_CHARGE` = 520** (9.36 us).
+- The joint search at 18.0 ns stands: at charge 520 the binding batch charges 1,537 + 1,040 =
+  2,577 frame-equivalents a design, 44,723 / 2,577 = 17.355 ns, below 18.0 ns. Candidly, the
+  margin left against the binding batch at the final charge is **3.6 %**, not 5 %: as the
+  frame-equivalent rises the charge falls (550 to 520), so the fixed part keeps only its
+  rounding-to-a-ten slack (9.36 against 9.34 us) and the 5 % stays on the walked frames
+  (18.0 ns against the batch's about 16.9 ns a frame net of its fixed cost).
+- The budget: 1,510,000 x 18.0 ns = **27.18 ms**. Follow-up 2's worst gate-2 median (24.60 ms,
+  measured at 17.0 ns and 550) is 90.5 % of it.
+- The cache cap: a computed design charges at least 257 + 520 = **777** frame-equivalents, so at
+  most 1,510,000 / 777 = **1,943** designs a preparation; the cap of 8,192 holds them.
+
+**The example** (`crates/builtins/examples/input_bound_budget.rs`). `MARGIN` = 1.05 with its
+reason; `calibrate` runs the joint search from the grid's first point for the computed bound (the
+binding batch's median work per charged frame-equivalent at that search's charge), multiplies it by
+`MARGIN`, rounds it up to the half nanosecond and runs the joint search again from there; it prints
+the computed bound, its batch and charge, the margined value, the resulting frame-equivalent and
+charge, and every batch's need at that charge with the margin it leaves. Gate 2 prints its own
+need with the same margin. The module doc and `FRAME_EQUIVALENT_NS`'s doc state the rule. Built
+(`cargo build --locked --release -p builtins --features test-support --example
+input_bound_budget`); not run (no new calibration, per the ruling).
+
+**Restated.** `FRAME_EQUIVALENT_NS` = 18.0; `INPUT_BOUND_SECTION_CHARGE` = 520 and its doc;
+`INPUT_BOUND_BUDGET_FRAMES`'s doc (27.18 ms); the cache cap's doc (777, 1,943); F5 above; the
+figures of #1468 (Budget item), #1470 (What #1457 ships), #1471 (What #1457 ships) and a #1474
+note.
+
+**Gate 8** (charge 520): passed, every 64-track console document exact at every launch rate.
+Stereo documents (`console-sixty-four-track`, `-app`, `-intended`, `-sends`, identical; charged,
+frames walked, margin): 44.1 kHz 743,552 (610,432, 766,448); 48 kHz 791,936 (658,816, 718,064);
+88.2 kHz 1,290,880 (1,157,760, 219,120); 96 kHz 1,387,136 (1,254,016, **122,864**, the least,
+2.21 ms at 18.0 ns). Mono: 383,040 (margin 1,126,960), 408,384 (1,101,616), 667,712 (842,288),
+717,376 (792,624). Frames walked unchanged.
+
+**Gates.** `cargo test --locked --release -p builtins --features builtins/test-support --test
+tail_contract`: 22 passed. `cargo test --locked -p builtins --features test-support --lib`: 16
+passed. `cargo test --locked -p builtins-compiler --features test-support --lib`: 57 passed (gate
+8). `cargo fmt --all -- --check`: clean. `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`: clean. `scripts/check-workspace-policy.sh`: ok. No test was added
+or rewritten. Not run: `scripts/check-cross-targets.sh` (a constant and prose; no target-specific
+code), gate 2 and `calibrate` (the batch verifier's run is the figure of record).

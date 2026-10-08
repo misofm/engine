@@ -52,10 +52,16 @@
 //!   the batch, and calibrate prints the batch's median per walk over its designs' summed
 //!   single-walk medians: a batch must not be cheaper per walk than a real preparation.
 //!
-//! The frame-equivalent (`FRAME_EQUIVALENT_NS`, root's ruling of 2026-10-08 on #1465, which
-//! supersedes the same day's every-sample statistic) is the smallest value on a half-nanosecond
-//! grid such that every design's median work is at most its charged frame-equivalents (frames
-//! walked plus the section charge per section) times the frame-equivalent. For the batched
+//! The computed per-design-median bound (root's ruling of 2026-10-08 on #1465, which supersedes
+//! the same day's every-sample statistic) is the binding value of the smallest value on a
+//! half-nanosecond grid such that every design's median work is at most its charged
+//! frame-equivalents (frames walked plus the section charge per section) times the
+//! frame-equivalent: the largest median work per charged frame-equivalent at that value's section
+//! charge. The frame-equivalent (`FRAME_EQUIVALENT_NS`) is that bound times `MARGIN` (1.05),
+//! rounded up to a half nanosecond, with the section charge searched jointly at it (root's ruling
+//! of 2026-10-08 on the measurement margin: the recorded runs' binding values spread over
+//! 16.917-17.164 ns and gate 2's worst shares over 95.8-98.7 % of the budget, too thin for a bound
+//! stated from one run on a shared host). For the batched
 //! calibration, "every design" is every batch: its median work per design is at most its frames
 //! per design plus the section charge times its sections per design, times the frame-equivalent
 //! (the whole batch's median against the whole batch's charge); gate 2's families count each as
@@ -64,8 +70,9 @@
 //! computation is deterministic and interference only adds time, so a median bounds the cost the
 //! budget states, while one preempted sample does not set the constant. Calibrate prints the
 //! binding batch, its median work and its charged frame-equivalents per design, the shortest batch
-//! sample, and the largest raw sample with its ratio to its batch's median (evidence); gate 2
-//! prints the value its own medians need, and the committed value is the larger.
+//! sample, and the largest raw sample with its ratio to its batch's median (evidence), and the
+//! computed bound, the margin and the result; gate 2 prints the value its own medians need with the
+//! same margin, and the committed value is the larger.
 #![allow(missing_docs)]
 
 use builtins::test_support::{
@@ -80,14 +87,25 @@ use effect_contract::NodeTailBound;
 use std::time::Instant;
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-/// The frame-equivalent in ns: the smallest half nanosecond that bounds every design's median work
-/// by its charged frame-equivalents, of the calibration and of gate 2 (root's ruling of 2026-10-08,
-/// #1465), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s doc states it.
-const FRAME_EQUIVALENT_NS: f64 = 17.0;
+/// The frame-equivalent in ns: the computed per-design-median bound (the largest median work per
+/// charged frame-equivalent, of the calibration and of gate 2; root's ruling of 2026-10-08, #1465)
+/// times [`MARGIN`], rounded up to a half nanosecond, as `builtins::INPUT_BOUND_SECTION_CHARGE`'s
+/// doc states it.
+const FRAME_EQUIVALENT_NS: f64 = 18.0;
+/// The measurement margin on the computed bound (root's ruling of 2026-10-08 on #1465 and #1474):
+/// the run-to-run spread of the recorded runs' binding values (16.917-17.164 ns) and gate-2 worst
+/// shares of 95.8-98.7 % of the budget are too thin for a bound stated from one run on a shared
+/// host.
+const MARGIN: f64 = 1.05;
 /// Measured samples of each design, after one warmup (root's ruling of 2026-10-08, #1465: at
 /// least five, and a design's cost is their median).
 const REPEATS: usize = 5;
 const ROUNDS: usize = 1 + REPEATS;
+
+/// `ns` rounded up to the half-nanosecond grid.
+fn half_ns_up(ns: f64) -> f64 {
+    (ns * 2.0).ceil() / 2.0
+}
 
 /// The median of a design's measured samples.
 fn median(samples: &[f64]) -> f64 {
@@ -379,9 +397,10 @@ fn gate_two() {
         .expect("a family");
     let need = binding.0 * 1e6 / binding.2 as f64;
     println!(
-        "frame-equivalent gate 2's medians need: {:.1} ns (largest median design work per consumed frame-equivalent {need:.3} ns, {}, rounded up to a half nanosecond; committed {FRAME_EQUIVALENT_NS} ns)",
-        (need * 2.0).ceil() / 2.0,
-        binding.3
+        "frame-equivalent gate 2's medians need: {:.1} ns (largest median design work per consumed frame-equivalent {need:.3} ns, {}; x {MARGIN} measurement margin {:.3} ns, rounded up to a half nanosecond; committed {FRAME_EQUIVALENT_NS} ns)",
+        half_ns_up(need * MARGIN),
+        binding.3,
+        need * MARGIN
     );
     let heaviest = designs
         .iter()
@@ -716,26 +735,31 @@ fn section_charge(per_section_ns: f64, frame_ns: f64) -> u64 {
 /// walked plus the section charge per section, the charge itself following from the
 /// frame-equivalent by [`section_charge`]) times the frame-equivalent. Divided by the batch's
 /// design count on both sides, it is the whole batch's median against the whole batch's charge.
-/// Returns the frame-equivalent, its section charge and the binding batch's index (the largest
-/// median work per charged frame-equivalent).
-fn frame_equivalent(designs: &[Design], per_section_ns: f64) -> (f64, u64, usize) {
-    let required = |charge: u64| {
-        designs
-            .iter()
-            .enumerate()
-            .map(|(index, design)| (design.median() / design.charged(charge) as f64, index))
-            .fold((0.0_f64, 0), |a, b| if b.0 > a.0 { b } else { a })
-    };
-    let mut half_ns = 1_u32;
+/// The search starts at `from_ns` (a point of the grid): at the grid's first point for the computed
+/// bound, and at the margined bound for the committed value ([`calibrate`]). Returns the
+/// frame-equivalent, its section charge and the binding batch's index (the largest median work per
+/// charged frame-equivalent).
+fn frame_equivalent(designs: &[Design], per_section_ns: f64, from_ns: f64) -> (f64, u64, usize) {
+    let mut half_ns = ((from_ns * 2.0).ceil() as u32).max(1);
     loop {
         let frame_ns = f64::from(half_ns) * 0.5;
         let charge = section_charge(per_section_ns, frame_ns);
-        let (need, binding) = required(charge);
+        let (need, binding) = required(designs, charge);
         if need <= frame_ns {
             return (frame_ns, charge, binding);
         }
         half_ns += 1;
     }
+}
+
+/// The largest median work per charged frame-equivalent over `designs` at a section charge, and the
+/// index of the batch that has it.
+fn required(designs: &[Design], charge: u64) -> (f64, usize) {
+    designs
+        .iter()
+        .enumerate()
+        .map(|(index, design)| (design.median() / design.charged(charge) as f64, index))
+        .fold((0.0_f64, 0), |a, b| if b.0 > a.0 { b } else { a })
 }
 
 /// A frame-class point: its name and the designs of its batch.
@@ -1013,7 +1037,21 @@ fn calibrate() {
     println!(
         "descriptive, net of the fixed cost: slowest class's median {slowest:.2} ns per frame"
     );
-    let (frame_ns, charge, binding) = frame_equivalent(&recorded, per_section);
+    // Root's ruling of 2026-10-08 (the measurement margin): the computed per-design-median bound
+    // is the joint search's binding value; the frame-equivalent is that bound times `MARGIN`,
+    // rounded up to a half nanosecond, and the section charge is searched jointly at it.
+    let (grid_ns, grid_charge, grid_binding) = frame_equivalent(&recorded, per_section, 0.5);
+    let bound =
+        recorded[grid_binding].median() / recorded[grid_binding].charged(grid_charge) as f64;
+    let margined = half_ns_up(bound * MARGIN);
+    let (frame_ns, charge, binding) = frame_equivalent(&recorded, per_section, margined);
+    let (need, _) = required(&recorded, charge);
+    println!(
+        "computed per-design-median bound {bound:.3} ns ({}, at section charge {grid_charge}; the grid's {grid_ns} ns); margin x {MARGIN}: {:.3} ns, rounded up to {margined} ns; the joint search at it: frame-equivalent {frame_ns} ns, section charge {charge}, every batch's need at that charge at most {need:.3} ns ({:.1} % below the frame-equivalent)",
+        recorded[grid_binding].what,
+        bound * MARGIN,
+        (1.0 - need / frame_ns) * 1e2
+    );
     let design = &recorded[binding];
     let charged = design.charged(charge);
     let count = design.count as f64;

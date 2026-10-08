@@ -496,3 +496,18 @@ designs, each batch's median per design against its charge per design), the fram
 arithmetic 257 + 550 = 807 a design, at most 1,871 designs a preparation. The 18.5 ns, 380 and
 27.94 ms above, and #1465's earlier 21.5 ns, 470 and 32.47 ms, are superseded; #1465's attempt record has the
 calibration and gate 2.
+
+**Note (2026-10-08, root's measurement-margin ruling, from #1465).** The 17.0 ns, 550 and
+25.67 ms are superseded in turn. Root ruled that gate-2 worst shares of 95.8-98.7 % of the budget
+are too thin for a bound stated from one run on a shared host: the frame-equivalent is the computed
+per-design-median bound times 1.05, rounded up to 0.5 ns, with the section charge searched jointly
+at it. The reason is the observed run-to-run spread: the recorded runs' binding values are 16.960
+(#1465 follow-up 2, the figure of record so far), 17.164 (the follow-up verifier) and 16.917 ns
+(#1465 follow-up 3), and gate 2's worst shares of the budget then stated were 95.8 % (#1465
+follow-up 2's median, of 25.67 ms), 96.3 % (this issue's re-ruling above, of 26.43 ms), 96.7 %
+(#1465 follow-up 2's largest raw sample, of 25.67 ms), 97.2 % (#1467 L6', of 25.67 ms) and 98.7 %
+(#1466 L6, of 25.67 ms). Applied to 16.960 ns: 17.808 ns, so **18.0
+ns**; `INPUT_BOUND_SECTION_CHARGE` **520** (9.34 us / 18.0 ns = 518.9, rounded up to a ten); the
+budget 1,510,000 x 18.0 ns = **27.18 ms**; the cache cap's arithmetic 257 + 520 = 777 a design, at
+most 1,943 designs a preparation. No new calibration run: the batch verifier's single run is the
+figure of record and applies the same rule. #1465's attempt record has the gate-8 margins.
