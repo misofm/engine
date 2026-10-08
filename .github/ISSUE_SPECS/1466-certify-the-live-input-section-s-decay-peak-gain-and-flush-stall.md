@@ -168,3 +168,75 @@ The attempt record carries a mutation table with at least the mutants below; eac
 - Named exceptions: `STREAMS.md` (#1379 Amendment 1, H8).
 
 ## Attempt record
+
+### Attempt 1 (2026-10-08): stopped before implementation, one spec problem (L-D3 against (N1))
+
+Anchors re-verified on `codex/d15-stream-g3` at `583fd8607`. They moved with #1474 and #1465; their
+content is as the spec states: the live relative share `eps / 2` is `LiveBound::tail`'s `limit`
+(`crates/math/src/tail.rs:1639`), the stall's share is `live_cascade`'s `P*`
+(`bound.stall(tail) / (eps / 2)`, `:1818`); `LiveCascade` `:829`, `live_zones` `:1035`,
+`live_cascade` `:1805`; `builtins::input_section_live_bound` is `crates/builtins/src/tail.rs:483`;
+`live_bound_carries_every_term_an_independent_recomputation_requires` is
+`crates/builtins/tests/tail_contract.rs:1568`. The construction of `D` read as #1465's amended F-D2
+(the certificate anchored at `T`, no extended walk); the live bound has no frame walk at all (its
+settled phase is carried by powers of each zone group's 4 x 4 system), so the anchor costs one
+power per group.
+
+**Prototype (exploration only; not committed).** A prototype in `math::tail`
+(`live_cascade_composition`, `LiveComposition`; the diff is kept outside the tree) computed the
+three values at the +24 dB trim word, per unit of the input's peak:
+
+- `D`: one certificate per settled zone group (#1465's `HalfSystem` on each group's relative
+  system `(tau, H, X)`, order `H, tau, X`), anchored at `T` by powers of the step. Every group's
+  transient `a` is negative at `T` (the group that sets `T` has `a = -0.91`), so
+  `D = max_g (floor(b_g) + 1)`: **46,678 / 46,421 / 46,678 / 46,421** (44.1 / 48 / 88.2 / 96 kHz),
+  `crossing(1)` 46,241 / 45,986 / 46,241 / 45,985, `lambda` 0.999950672 / 0.999950398, 60-63
+  groups, about 0.26-0.34 ms per rate. (When `T` lies in the 65-frame window, each group anchors at
+  the window's end with offset `65 - T`, so `D >= 66 - T` and `T + k D` is past every window frame;
+  not reached at the launch rates, where `T` is about 700,000.)
+- `G_p`: the window's first frame is the output bound at any frame of any admitted history with the
+  current input zero (the pre-`N` analysis holds at every frame: `Phi` and the second section's
+  Abel sum are stated for any history), and the current input adds `delta^2 g` through the two
+  feedthroughs; so `L = outputs[0] + delta^2 g` bounds every frame, the window's and every settled
+  group's included. **`L` = 1.629e7 (+144.24 dB) / 1.613e7 / 1.632e7 / 1.615e7.** The real kernel
+  under L1's history (the worst-case pair, +24 dB trim, alternating `+-1` for 1,000,000 frames,
+  then the HPF target moved to 10 Hz with the input running) peaks at **3.446e4 (+90.75 dB)** /
+  3.428e4 / 3.446e4 / 3.429e4 (before the retarget: 3.19). So `G_p` is sound and about **53.5 dB**
+  above the measured transient (the pre-`N` second-section state bound `sup Psi Phi` of #1433 is
+  what sets it; the spec has no tightness line for `G_p`, so this is recorded, not a stop).
+- `sigma`: see the problem below.
+
+**The problem: L-D3's "live stall" does not satisfy (N1).** (N1) needs `|y[n]| <= g_p X + sigma`
+at **every** frame, for every input, `X -> 0` included, so `sigma` must bound the flush's part of
+the output bound at every frame. #1433's live stall (`LiveBound::stall(T)`, the stall `live_cascade`
+reads for `P*`) is that part only **from `T` on**: the window's outputs from frame `T` and each
+group's fixed point plus its decaying start from `T`. Before `T` the module's own flush part is far
+larger, because the pre-`N` and window analysis (no settled-phase output-change trick, words still
+moving) amplifies `F` through `sup Psi Phi_F`. Measured with the same machinery from frame 0
+(`stall(0)`, which also covers a loud frame: the current input adds nothing to the flush part):
+
+| rate | stall from `T` (`P* eps / 2`) | stall at every frame | ratio |
+|---|---|---|---|
+| 44.1 kHz | 3.794e-15 | 2.042e-12 | 538 (+54.6 dB) |
+| 48 kHz | 3.773e-15 | 2.208e-12 | 585 (+55.3 dB) |
+| 88.2 kHz | 3.798e-15 | 4.142e-12 | 1,091 (+60.8 dB) |
+| 96 kHz | 3.853e-15 | 4.487e-12 | 1,164 (+61.3 dB) |
+
+So a `sigma` read as the live stall (from `T`) is not a certified (N1) value: at early frames the
+module's bound exceeds `g_p X + sigma` for small `X`. (N2) needs the stall only from `M + T` on,
+where `stall(T)` suffices. The fixed slice (#1465) had no such split: its `F a` holds at every frame.
+
+The two readings, for root:
+
+1. **`sigma` = the every-frame flush bound** (`stall(0)`, rounded up). (N1) and (N2) hold with H1's
+   single `sigma`. Cost: `P^ = 4 sigma / eps` is about 1.3e-4 to 2.8e-4 (-77.8 to -71 dBFS) instead
+   of about `2 P*` (2.4e-7); H1's remark that the live `P^ < 2 P*` holds "to within `SLACK`" is then
+   false (`P^` is about 1,076-2,328 `P*`), and every composed graph floor that reads the live input
+   section's `sigma` rises by 55-61 dB.
+2. **`sigma` = the stall from `T`** with a contract change: (N1)'s additive floor stated separately
+   (a peak stall) from (N2)'s (a tail stall). That changes H1 (one `sigma`) and #1379's composition,
+   which only root can amend.
+
+No code, test or document changed besides this record. The prototype's `D` construction and `G_p`
+are ready for the next attempt once `sigma` is ruled; the derivation note's live part will be
+written first, as ruled.
