@@ -9,14 +9,15 @@
 #![allow(missing_docs)]
 
 use builtins::INPUT_FILTER_RAMP_SAMPLES;
+#[cfg(feature = "test-support")]
+use builtins::input_section_bound_charged;
 use builtins::test_support::{input_section_words, input_state_words, input_trim_words};
 use builtins::{
     BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBoundCache,
     InputBuiltins, InputSectionBound, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
-    input_section_bound, input_section_bound_charged, input_section_bounds,
-    input_section_flush_law, input_section_live_bound, input_section_live_bound_table,
-    input_section_live_cascade, input_section_live_envelope, input_section_worst_case_pair,
-    prepare_input_filter_pair,
+    input_section_bound, input_section_bounds, input_section_flush_law, input_section_live_bound,
+    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
+    input_section_worst_case_pair, prepare_input_filter_pair,
 };
 use effect_contract::{RestSamples, TailSamples};
 use math::tail::{

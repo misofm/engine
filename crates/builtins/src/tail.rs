@@ -185,6 +185,9 @@ pub(crate) fn fixed_input_bound(
         // The frames really walked, a stopped walk's included (#1457 attempt 1, MJ2).
         FIXED_INPUT_FRAMES.with(|count| count.set(count.get() + walked));
     }
+    // Only the test-support counters read the frames walked.
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = walked;
     bound
 }
 
