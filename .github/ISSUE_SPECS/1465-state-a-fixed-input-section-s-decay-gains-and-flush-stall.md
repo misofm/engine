@@ -253,3 +253,30 @@ restored) with at least the mutants below; each is red.
 - Named exceptions: `STREAMS.md` (#1379 Amendment 1, H8).
 
 ## Attempt record
+
+### Attempt 1 (2026-10-08): stopped before implementation, spec problems
+
+Anchors re-verified on `codex/d15-stream-g3` at `bc2299a08`. The `math::tail` line anchors moved
+with #1474 (`Deviation::at_end` is now `tail.rs:2004-2029`, `dev_sup_from_core` and `P*`
+`:2376-2386`); their content is as the spec states. Two problems stop the attempt; no code changed.
+
+1. **F-D2's extended pass cannot fit F5 (gate 8).** The extended horizon `T(16)` is about 3.07 `T`
+   for a typical design, not only for the top pair. An `f64` probe of the designed cascades
+   (exact Butterworth words, brute-force suffix sums): HPF 40 Hz into LPF 18 kHz at 96 kHz, `T_b`
+   9,510, `T_b(eps/2 10^-16)` 29,231; HPF 20 Hz into LPF 16 kHz at 48 kHz, 9,509 and 29,230; HPF
+   80 Hz into LPF 20 kHz at 96 kHz, 4,756 and 14,616 (ratio 3.07 on each). #1457's gate 8 record
+   walks 1,254,016 frames for the 64 designs of the 64-track console documents at 96 kHz (charge
+   about 1.30M of 1,510,000 at 380 a section). The majorant pass is most of each walk, so walking it
+   to `T(16)` takes about 3.5M frames at 96 kHz (and about 3.9M at 88.2 kHz's ratio of today's
+   figures), over twice the budget. The spec's cost hazard (8.8 ms to about 25 ms per design)
+   counts one design, not a 64-design session. Under the spec this stops the slice ("a miss of
+   #1457's budget stops the slice; there is no fallback value"); the miss is certain by this
+   estimate, so the construction (or the budget) needs a root ruling before implementation.
+2. **The disabled-filter values do not reach preparation inside the authorized paths.**
+   `input_section_bounds_within` (`crates/builtins/src/lib.rs:3557-3566`) answers a design with
+   both filters disabled on both channels with `NodeTailBound::ZERO` itself (composition
+   `Unstated`), before `tail.rs` is called. F-D3's trim-dependent `Stated` values for that design
+   need that branch to call `tail.rs` (a named exception for those lines); without it
+   `input_section_bound` and `input_section_bounds` disagree for the most common strip. Also,
+   `tail.rs`'s own memoryless branch (`fixed_input_walk`, `:186-191`) reads only the left channel;
+   with a trim-dependent gain it must take both channels' maximum (inside the authorized file).
