@@ -153,6 +153,9 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
     (root's frame-equivalent statistic, F5);
   - the stale budget figures in the local specs of #1468 (`:152`), #1470 (`:28-31`, `:48`) and
     #1471 (`:21`), as under #1474's authorization.
+- Root's second ruling of 2026-10-08 (the frame-equivalent from per-design medians): the same
+  example, `crates/builtins/src/tail.rs`'s constants and docs, the same stale figures, and a note
+  in #1474's record that #1465 restated its figures.
 
 ## Non-goals
 
@@ -220,14 +223,22 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   budget. A change to the walk's cost also reruns `target/release/examples/input_bound_budget
   calibrate` and restates the frame-equivalent and
   `builtins::INPUT_BOUND_SECTION_CHARGE` (#1457 Amendments 3 and 4; the per-design charge was
-  removed in Amendment 4). **Root's ruling of 2026-10-08 replaces the per-frame statistic:** the
-  frame-equivalent is the smallest value, rounded up to 0.5 ns, such that every recorded
-  calibration sample and every gate-2 sample satisfies: measured design work <= (frames walked +
-  `INPUT_BOUND_SECTION_CHARGE` x sections) x frame-equivalent; the section charge comes from the
-  largest measured fixed cost per section, in frame-equivalents, rounded up to a ten. `calibrate`
-  computes and prints it (the binding sample, its work, its charged frame-equivalents, the
-  value); gate 2 prints what its own samples need. The per-frame medians and spreads stay
-  descriptive.
+  removed in Amendment 4). *(Superseded by root's second ruling below:)* ~~Root's ruling of
+  2026-10-08 replaces the per-frame statistic: the frame-equivalent is the smallest value, rounded
+  up to 0.5 ns, such that every recorded calibration sample and every gate-2 sample satisfies:
+  measured design work <= (frames walked + `INPUT_BOUND_SECTION_CHARGE` x sections) x
+  frame-equivalent.~~ **Root's second ruling of 2026-10-08 (in force):** each design (a
+  calibration design, a frame-class point, a gate-2 family at a rate) is measured R >= 5 times
+  within the one invocation, and its cost is the **median** of its repeats. The frame-equivalent
+  is the smallest value, rounded up to 0.5 ns, such that every design satisfies: median work <=
+  (frames walked + `INPUT_BOUND_SECTION_CHARGE` x sections) x frame-equivalent, gate 2's families
+  included (their per-family medians). The section charge comes from the largest per-design-median
+  fixed cost per section, in frame-equivalents, rounded up to a ten, found jointly with the
+  frame-equivalent. Reason: the computation is deterministic and interference only adds time, so
+  the per-design median bounds the cost the budget states, while a single preemption does not set
+  the constant. The raw maximum sample and its ratio to its design's median are recorded as
+  evidence. `calibrate` computes it directly and prints the binding design; gate 2 prints what its
+  own medians need. The per-frame medians and spreads stay descriptive.
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
@@ -585,7 +596,99 @@ without `--all-features`: clean. `check-workspace-policy.sh`: ok. `check-realtim
 `check-cross-targets.sh`: PASS. `audit capi`: 0 allocations, 0 locks, 0 syscalls, `pcm_digest`
 `cb10fbface44a3a4` (unchanged). `check-builtins-fixtures.sh`: ok (50 files).
 
-**Open for root.** The frame-equivalent rose from 18.5 to 48.5 ns and the section charge fell from
+**Open for root** (answered by root's second ruling below; this fold-in's 48.5 ns, 210 and
+73.235 ms are superseded). The frame-equivalent rose from 18.5 to 48.5 ns and the section charge fell from
 520 to 210 on one interference sample of 44,592; the budget's milliseconds rose from 27.94 to
 73.235 ms, and the real worst case with it (45.11 ms), because a lower charge admits more cheap
 designs. This is the ruling's statistic applied as written; it is reported for root's view.
+
+### Root's second ruling (2026-10-08, after the fold-in; supersedes the fold-in's statistic)
+
+Root's ruling, recorded as given: each design is measured R >= 5 times within the one invocation,
+and its cost is the **median** of its repeats. The frame-equivalent is the smallest value, rounded
+up to 0.5 ns, such that every design satisfies: median work <= (frames walked +
+`INPUT_BOUND_SECTION_CHARGE` x sections) x frame-equivalent, gate 2's families included (per-design
+medians, enough repeats that each has R >= 5). The section charge comes from the largest
+per-design-median fixed cost per section (the joint search kept, the rounding stated). **Reason:**
+the computation is deterministic and interference only adds time, so the per-design median bounds
+the cost the budget states, while a single preemption does not set the constant. The raw maximum
+sample and its ratio to its design's median are recorded as evidence. One calibration and one
+gate-2 invocation, each after a 1-minute load below about 2; gate 8 stays exact; a gate-2 family
+over the budget stops the slice. The fold-in's statistic, 48.5 ns, 210 and 73.235 ms stay above
+as superseded.
+
+### Attempt 1, second fold-in under root's second ruling (2026-10-08, implementer)
+
+**The statistic in the example** (`crates/builtins/examples/input_bound_budget.rs`). Every
+workload now runs one warmup and **five** measured rounds (`REPEATS` = 5, `ROUNDS` = 6; was two
+measured rounds), so every design has R = 5 samples: each calibration grid design (each round
+measures every design once, so a burst of interference reaches one sample of many designs), each
+frame-class point (five sweeps, as before) and each gate-2 family at a rate. A design's cost is the
+median of its five samples (the middle one). `fixed_costs` fits each class's line on the designs'
+medians (each round's own line is still printed, descriptive); the section charge is the largest
+median-fit fixed cost per section over the classes and rates. `frame_equivalent` keeps the
+fold-in's joint search: on the half-nanosecond grid upward, the charge at `F` is
+`C(F) = ceil_10(P / F)` (`P` the largest per-design-median fixed cost per section, rounded up to a
+ten), and the first `F` at which every design's median is at most `(frames + C(F) sections) F` is
+the frame-equivalent. Gate 2's design is a family at a rate: its five measured rounds' design work
+(the no-cache preparation less the warm rebuild, as before) gives the median; its consumed
+frame-equivalents (the charge when every design is exact, otherwise the budget) are asserted equal
+in every round (the computation is deterministic), and gate 2 prints the frame-equivalent its
+medians need and each family's median, largest sample, their ratio and its share of the budget.
+
+**Calibration** (one invocation, `taskset -c 7`, built with charge 210 (the sections counted do not
+depend on it), one warmup and five measured rounds, no retry; 48.7 s; `/proc/loadavg` before
+1.94 3.07 2.84, after 2.48 3.05 2.84; the wait for the 1-minute load below 2 was not a retry):
+
+- 21,504 designs (the fixed-cost grid and the frame-class points of the four rates), five samples
+  each. Largest per-design-median fixed cost per section **9.93 us** (88.2 kHz, one cascade of two
+  sections, median-fit intercept 19.86 us); the median fits' per-section costs 8.54-9.93 us over
+  the classes' largest at each rate, and their per-design terms -1.01 to -0.09 us. (Each measured
+  round's own fit: largest per section 8.65-14.17 us, the 14.17 us of 44.1 kHz round 1 an
+  interference round; descriptive.)
+- **Frame-equivalent 21.5 ns, section charge 470** (9.93 us / 21.5 ns = 461.8, rounded up to a
+  ten; 470 x 21.5 ns = 10.11 us). **Binding design:** 96 kHz, one cascade of two sections, grid
+  design 1864: median work 41,890 ns, 1,025 frames + 470 x 2 sections = 1,965 charged
+  frame-equivalents, 21.318 ns per charged frame-equivalent.
+- **Raw maximum sample (evidence):** 386,907 ns, 44.1 kHz, two cascades of one section, grid design
+  156, **13.26 x** its design's median of 29,176 ns (174.1 ns per charged frame-equivalent of the
+  2,222). It is the largest raw sample per charged frame-equivalent and also the largest ratio of a
+  raw sample to its design's median.
+- Descriptive (net of the fixed cost): the slowest frame class's slowest point's median 19.40 ns a
+  frame (cheap two-section, 1 kHz into 1.28 kHz, +24 dB, 44.1 kHz, spread 18.93-20.32); the
+  classes' slowest points' medians 13.30-19.40 ns.
+
+**Gate 2** (one invocation on charge 470 and 21.5 ns, `taskset -c 7`, one warmup and five measured
+rounds, no retry; 16.1 s; `/proc/loadavg` before 1.95 2.60 2.72, after 2.12 2.60 2.72): exit 0,
+every family's three results identical in every round, every preparation within its budget in
+frames, every warm rebuild walking nothing. The budget is 1,510,000 x 21.5 ns = **32.47 ms**
+(32.465). Gate 2's medians need **19.0 ns** (largest median design work per consumed
+frame-equivalent 18.523 ns: 4,096 cheap two-section designs, 1 kHz into 1.28 kHz, +24 dB, 88.2
+kHz), below 21.5 ns, so the calibration binds. **Worst median design work 27.97 ms, 86.2 % of the
+budget** (the same family and rate). No family's median is over the budget. Medians per family
+over the four rates: top pair 7.31-7.36 ms; LPF at the maximum 3.74-3.79; 64 near-top
+21.09-21.34; 65,537 near-top 21.02-21.37; 64 band 20.27-20.52; 4,096 band 20.32-20.52; 64 typical
+11.24-21.83 (64 of 64 exact); 256 typical 22.52-23.79; cheap one-section 18.99-19.29; cheap
+two-section 21.06-27.97; cheap two-cascade 19.04-19.45. Largest-to-median ratio 1.000-1.055 for
+every family and rate but two. **Raw samples (evidence):** the largest raw design work is
+**46.77 ms** (4,096 cheap two-section designs, 1.28 into 5.12 kHz, +12 dB, 44.1 kHz), **1.893 x**
+its median of 24.71 ms and 144.1 % of the budget (30.98 ns per consumed frame-equivalent); the
+other outlier is 45.78 ms, 2.174 x its median of 21.06 ms (65,537 near-top, 48 kHz). Each is one
+of five samples whose other four lie near the median; under root's ruling they do not set the
+constant. The whole preparation of 65,537 strips reached 69.36 ms in that interfered round (60.36-
+61.16 ms otherwise; the O(strips) keying outside the budget, as in #1457).
+
+**Gate 8** (charge 470): passed, every 64-track console document exact at every rate. Stereo
+documents (`console-sixty-four-track`, `-app`, `-intended`, `-sends`, identical; charged, frames
+walked, margin): 44.1 kHz 730,752 (610,432, 779,248); 48 kHz 779,136 (658,816, 730,864); 88.2 kHz
+1,278,080 (1,157,760, 231,920); 96 kHz 1,374,336 (1,254,016, **135,664**, the least). Mono:
+376,640 (margin 1,133,360), 401,984 (1,108,016), 661,312 (848,688), 710,976 (799,024). Frames
+walked unchanged.
+
+**Restated.** `FRAME_EQUIVALENT_NS` = 21.5 (`examples/input_bound_budget.rs`, with the statistic
+in its module doc); `INPUT_BOUND_SECTION_CHARGE` = 470 and its doc; `INPUT_BOUND_BUDGET_FRAMES`'s
+doc (32.465 ms; it bounds the median work); the cache cap's doc (a computed design charges at
+least 257 + 470 = 727, so at most 1,510,000 / 727 = 2,077 designs a preparation; the cap of 8,192
+holds them); the figures of #1468 (`:152-154`), #1470 (`:28-36`, `:50`) and #1471 (`:21`); a note in
+#1474's record that #1465 restated them.
+

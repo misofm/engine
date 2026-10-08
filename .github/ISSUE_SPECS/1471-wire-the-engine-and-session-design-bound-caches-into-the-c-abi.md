@@ -18,7 +18,7 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
 
 - **What #1457 ships.** In `builtins`: `InputBoundCache` (keyed by `InputBoundKey`, which carries the
   rate; entry cap `INPUT_BOUND_CACHE_ENTRIES` = 8,192, cleared when full), the per-preparation
-  budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frame-equivalents of 48.5 ns, 73.235 ms,
+  budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frame-equivalents of 21.5 ns, 32.47 ms,
   charged in strip order: each design computed charges the frames it walks plus
   `INPUT_BOUND_SECTION_CHARGE` per section, #1457 Amendments 3 and 4; past it a design reports the
   rate's live bound), and `input_section_bounds(rate, strips, cache)`. A cached design charges the budget

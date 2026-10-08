@@ -487,3 +487,10 @@ builtins -p builtins-compiler --all-targets --features builtins/test-support` an
 --features lane --all-targets`, `-D warnings`): clean (only the pre-existing `clippy.toml`
 `fast_db` path notes). `check-workspace-policy.sh`: ok. `check-cross-targets.sh`: exit 0, PASS
 (only the expected #1018 rows).
+
+**Note (2026-10-08, from #1465).** #1465 restated this issue's figures after it: under root's
+second frame-equivalent ruling of 2026-10-08 (each design's cost the median of five measured
+samples), the frame-equivalent is 21.5 ns and `INPUT_BOUND_SECTION_CHARGE` 470, so the budget is
+32.47 ms (32.465) and the cache cap's arithmetic 257 + 470 = 727 a design, at most 2,077 designs a
+preparation. The 18.5 ns, 380 and 27.94 ms above are superseded; #1465's attempt record has the
+calibration and gate 2.
