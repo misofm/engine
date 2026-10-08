@@ -8,9 +8,9 @@ every anchor at start.
 
 ## Product outcome
 
-An input section with a live input lane states all four composition values,
-`CompositionBound::Stated { decay, peak_gain, tail_gain, stall }`. This slice derives the fourth,
-the tail gain `G_t`: the gain that the section applies to an input arriving at or after the last
+An input section with a live input lane states all five composition values,
+`CompositionBound::Stated { decay, peak_gain, tail_gain, peak_stall, tail_stall }` (#1484 split the
+stall). This slice derives the one B1 does not certify, the tail gain `G_t`: the gain that the section applies to an input arriving at or after the last
 control event, which #1379 uses to carry an upstream residual through the section. `G_t` is
 derived, never set to `G_p`; a live section's `G_p` covers state that a pre-`N` history builds and
 a retarget exposes, so the two differ by tens of dB. No reported tail moves until #1379, and no
@@ -18,8 +18,9 @@ rendered bit moves.
 
 ## Context
 
-- **`D`, `G_p` and `sigma`** of the live section are computed and exposed through accessors by
-  slice B1 (#1466); the live bound still states `Unstated` (no partial statement).
+- **`D`, `G_p` and the two stalls** of the live section are computed and exposed through accessors
+  by slice B1 (#1466): `sigma_p`, the peak stall (every frame, (N1)), and `sigma_t`, the tail stall
+  (from the node's tail on, (N2)); the live bound still states `Unstated` (no partial statement).
 - **The live cascade** (#1433, `crates/math/src/tail.rs`) bounds the state by zone (`Phi`) over the
   65-frame window and every settled group; `builtins::input_section_live_bound`
   (`crates/builtins/src/tail.rs:211`) returns the bound.
@@ -33,7 +34,7 @@ rendered bit moves.
 `eps = 10^(-144/20)`; `N` the first sample of silence; no control event at or after `N`;
 `g_t = 10^(G_t/2000)`. Under that condition, if `|x[n]| <= X` for all `n` and `|x[n]| <= epsilon`
 for every `n >= M` (some `M >= N`), then for every `k >= 0` and every `n >= M + L + T + k D`:
-`|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma`. `G_t` bounds, at every `n >= M`, the part of
+`|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`. `G_t` bounds, at every `n >= M`, the part of
 the output that the input from `M` on produces (the reference's response to that part, plus the
 rounding deviation it drives), for every admitted history before `N`; where the section's state is
 exactly zero at `M`, that part is the whole output. The deviation is bounded by the sum of its
@@ -46,9 +47,12 @@ drives, so the decomposition at `M` is linear.
   most 64 ramp frames (words in the convex hull of the designs plus #1407's allowance), then meets
   the settled design's response, over every settled group, plus the deviation it drives, with the
   trim word of +24 dB. Rounded up to millibels with `math::log`.
-- **L-D7. State all four.** `input_section_live_bound` returns `CompositionBound::Stated` with B1's
-  `D`, `G_p` and `sigma` and this slice's `G_t`; `G_t <= G_p` holds (else the slice stops and
-  reports: the registry rule would refuse it).
+- **L-D7. State all five.** `input_section_live_bound` returns `CompositionBound::Stated` with B1's
+  `D` and `G_p`, `sigma_p` as `peak_stall` and `sigma_t` as `tail_stall`, each as B1 (#1466)
+  computes it and rounded up to millibels, and this slice's `G_t`. `G_t <= G_p` holds (else the
+  slice stops and reports: the registry rule would refuse it). `sigma_t <= sigma_p` holds too (else
+  the slice stops and reports), and this slice gates it itself (L5'): rule (g) runs only in the
+  effect registry (`NativeEffectRegistry::new`), and an input section is not a registry row.
 - **L-D8. Cost** within #1457's D1 budget.
 
 ## DSP evidence (AGENTS.md)
@@ -58,7 +62,7 @@ drives, so the decomposition at `M` is linear.
 - **Coefficient and update rules:** #1407 and #1408, unchanged.
 - **Numerical limits:** `f64` with #1433's certified rounding allowances; every millibel rounding
   upward.
-- **Latency and tail:** latency 0; `T`, `T_rest`, both rests, `D`, `G_p` and `sigma` unchanged.
+- **Latency and tail:** latency 0; `T`, `T_rest`, both rests, `D`, `G_p`, `sigma_p` and `sigma_t` unchanged.
 - **Units and smoothing:** samples at the plan's rate; gains in millibels.
 - **Denormal/NaN:** unchanged.
 - **Citations:** as #1329 and #1433.
@@ -86,7 +90,7 @@ drives, so the decomposition at `M` is linear.
 
 ## Non-goals
 
-- Changing B1's `D`, `G_p` or `sigma`. Fixed designs (A2). Any graph or report change (#1379).
+- Changing B1's `D`, `G_p`, `sigma_p` or `sigma_t`. Fixed designs (A2). Any graph or report change (#1379).
 
 ## Hazards
 
@@ -105,14 +109,17 @@ drives, so the decomposition at `M` is linear.
   zero (it has rested; the gate checks it). The HPF target is moved from its maximum toward 10 Hz at
   `N - 32` (also `N - 63` and `N - 1`) with zero input, then from `N` an input of peak `1e-6`:
   alternating during the ramp window, then the worst-sign pattern of the settled 10 Hz design. Every
-  output sample from `N` on is at most `g_t 1e-6 + sigma`. The drive is chosen so that the "settled
-  design only" mutant below is red; the slice records the drive and the margin.
+  output sample from `N` on is at most `g_t 1e-6 + sigma_p` (an every-frame bound, so the peak
+  stall). The drive is chosen so that the "settled design only" mutant below is red; the slice
+  records the drive and the margin.
 - **L3'. Independent recomputation.** `live_bound_carries_every_term_an_independent_recomputation_requires`
   gains `G_t`: it lies between a plain-`f64` recomputation of L-D6 in the test and that value plus
   1 mB.
 - **L5'. The statement.** `input_section_live_bound(rate)` returns `Stated` with `decay`,
-  `peak_gain` and `stall` equal to B1's accessors and `tail_gain` equal to this slice's, and
-  `tail_gain <= peak_gain`, at every launch rate. Every existing `tail_contract` assertion passes
+  `peak_gain`, `peak_stall` and `tail_stall` equal to B1's `D`, `G_p`, `sigma_p` and `sigma_t` (its
+  accessors, rounded up to millibels) and `tail_gain` equal to this slice's, and
+  `tail_gain <= peak_gain` and `tail_stall <= peak_stall` (rule (g), gated here because the
+  registry never sees this bound), at every launch rate. Every existing `tail_contract` assertion passes
   unchanged; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm G5 digests, the builtins
   PCM fixtures).
 - **L6'. Budget.** #1457's gates 2 and 8 pass after this change, within #1457's D1 budget (#1457's

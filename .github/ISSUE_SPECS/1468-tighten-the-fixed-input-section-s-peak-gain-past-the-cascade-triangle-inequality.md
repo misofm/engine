@@ -35,7 +35,7 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
   of its sections' `l1` norms (1.09 x 2.43 at 48 kHz), and `O` exceeds that product by up to
   +5.27 dB (LPF at 10 Hz). At low cutoffs `dev_loud` is at most +0.005 dB of `O`.
 - **The contract** the value must keep is #1379 Amendment 1 H1's (N1): for every input with
-  `|x[n]| <= X` for all `n`, under any admitted history, `|y[n]| <= g_p X + sigma`, with
+  `|x[n]| <= X` for all `n`, under any admitted history, `|y[n]| <= g_p X + sigma_p` (the peak stall), with
   `g_p = 10^(G_p/2000)`, for every reset pattern of the joint flush, every channel, and the `f32`
   rounding of the trim product included.
 - **Gates already in place** (A2, `crates/builtins/tests/tail_contract.rs`): F2(a) (the brute-force
@@ -65,8 +65,8 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
     is about 5 (+14 dB) at the top pair; a sound method that keeps today's deviation term lands
     near 1.33 there by estimate (`dev_loud` 0.231 against an exact `l1` of 0.697) and near 1.0 at
     low cutoffs.
-- **P-D4. Only `G_p` and `G_t` move.** `T_decay`, `T_rest`, both rests, `P*`, `D` and `sigma` stay
-  exactly as A2 and #1329 state them (the tightened gain is a separate computation from the
+- **P-D4. Only `G_p` and `G_t` move.** `T_decay`, `T_rest`, both rests, `P*`, `D`, `sigma_p` and `sigma_t`
+  stay exactly as A2 and #1329 state them (the tightened gain is a separate computation from the
   majorant that feeds `T`).
 - **P-D5. Stop rule.** If the derivation cannot prove a tighter bound, or the measured ratio
   exceeds 1.5 on a gated row (P-D3), stop and report the measured ratios to root. A2's value
@@ -142,7 +142,7 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
    Assert `g_meas <= g_p <= F g_meas`, with `F` from P-D3 (at most 1.5). Record `g_meas`, `g_p`
    and the ratio per row.
 3. **Nothing else moves.** Every other `tail_contract` assertion passes unchanged (`T_decay`,
-   `T_rest`, both rests, `P*`, `D`, `sigma`, the live figures); A2's F2(a)-(c) pass; F2(d)'s
+   `T_rest`, both rests, `P*`, `D`, `sigma_p`, `sigma_t`, the live figures); A2's F2(a)-(c) pass; F2(d)'s
    equality holds for the new formula; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm
    G5 digests, the builtins PCM fixtures).
 4. **Budget.** #1457's gates 2 and 8 pass, within #1457's D1 budget. A change to the walk's cost

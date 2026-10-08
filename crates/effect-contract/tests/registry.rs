@@ -232,6 +232,35 @@ fn tail_stall_above_zero_peak_stall(sample_rate: u32, _: EffectQuality) -> NodeT
     )
 }
 
+/// Admitted at (f)'s boundary: a tail gain equal to the peak gain (the stalls strictly ordered).
+fn equal_gains(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
+        composition: CompositionBound::Stated {
+            decay: TailDecay(30),
+            peak_gain: PeakGain::Millibels(-100),
+            tail_gain: PeakGain::Millibels(-100),
+            peak_stall: FlushStall::Level(-14_000),
+            tail_stall: FlushStall::Level(-14_100),
+        },
+        ..consistent(0, EffectQuality::Normal)
+    }
+}
+
+/// Admitted at (g)'s boundary: equal `Level` stalls (the gains strictly ordered). This is the
+/// shape the fixed input section states (#1484 H3: both stalls from one value).
+fn equal_stalls(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
+        composition: CompositionBound::Stated {
+            decay: TailDecay(30),
+            peak_gain: PeakGain::Millibels(-100),
+            tail_gain: PeakGain::Millibels(-200),
+            peak_stall: FlushStall::Level(-14_000),
+            tail_stall: FlushStall::Level(-14_000),
+        },
+        ..consistent(0, EffectQuality::Normal)
+    }
+}
+
 /// Today's launch shape with a stated composition: a finite `tail`, an infinite
 /// `tail_every_peak` (no `R(P*)` derived), an unstated rest, a `Zero` tail gain under a
 /// `Millibels` peak gain, and a `Zero` tail stall under a `Level` peak stall. Every rule holds, so
@@ -260,6 +289,8 @@ static CONSISTENT: EffectDescriptor = descriptor(1, consistent);
 static UNBOUNDED: EffectDescriptor = descriptor(1, unbounded);
 static CONSISTENT_STATED: EffectDescriptor = descriptor(1, consistent_stated);
 static LAUNCH_SHAPE_STATED: EffectDescriptor = descriptor(1, launch_shape_stated);
+static EQUAL_GAINS: EffectDescriptor = descriptor(1, equal_gains);
+static EQUAL_STALLS: EffectDescriptor = descriptor(1, equal_stalls);
 static RULE_E: EffectDescriptor = descriptor(1, stated_composition_with_infinite_tail);
 static RULE_F: EffectDescriptor = descriptor(1, tail_gain_above_peak_gain);
 static RULE_F_ZERO: EffectDescriptor = descriptor(1, tail_gain_above_zero_peak_gain);
@@ -343,11 +374,13 @@ fn a_stated_composition_with_an_infinite_tail_is_refused() {
     assert_refused_as_inconsistent(&RULE_E);
 }
 
-/// Issue #1464 K3 (f): `tail_gain <= peak_gain`, with `Zero` below every `Millibels`.
+/// Issue #1464 K3 (f): `tail_gain <= peak_gain`, with `Zero` below every `Millibels`. A tail gain
+/// below the peak gain, a tail gain equal to it, and a `Zero` tail gain under a `Millibels` peak
+/// gain, are admitted.
 ///
-/// Red mutation: the registry drops rule (f), compares the two gains the wrong way round, orders
-/// `Zero` above a `Millibels`, refuses a `Zero` tail gain under a `Millibels` peak gain, or checks
-/// only the first quality row.
+/// Red mutation: the registry drops rule (f), compares the two gains the wrong way round or
+/// strictly (`tail < peak`), orders `Zero` above a `Millibels`, refuses a `Zero` tail gain under a
+/// `Millibels` peak gain, or checks only the first quality row.
 #[test]
 fn a_tail_gain_above_the_peak_gain_is_refused() {
     assert!(
@@ -358,16 +391,21 @@ fn a_tail_gain_above_the_peak_gain_is_refused() {
         registry(&LAUNCH_SHAPE_STATED).is_ok(),
         "a Zero tail gain under a Millibels peak gain is admitted"
     );
+    assert!(
+        registry(&EQUAL_GAINS).is_ok(),
+        "a tail gain equal to the peak gain is admitted"
+    );
     assert_refused_as_inconsistent(&RULE_F);
     assert_refused_as_inconsistent(&RULE_F_ZERO);
 }
 
 /// Issue #1484 S2 (g): `tail_stall <= peak_stall`, with `Zero` below every `Level`. A tail stall
-/// below the peak stall, and a `Zero` tail stall under a `Level` peak stall, are admitted.
+/// below the peak stall, equal `Level` stalls, and a `Zero` tail stall under a `Level` peak stall,
+/// are admitted.
 ///
-/// Red mutation: the registry drops rule (g), compares the two stalls the wrong way round, orders
-/// `Zero` above a `Level`, refuses a `Zero` tail stall under a `Level` peak stall, or checks only
-/// the first quality row.
+/// Red mutation: the registry drops rule (g), compares the two stalls the wrong way round or
+/// strictly (`tail < peak`), orders `Zero` above a `Level`, refuses a `Zero` tail stall under a
+/// `Level` peak stall, or checks only the first quality row.
 #[test]
 fn a_tail_stall_above_the_peak_stall_is_refused() {
     assert!(
@@ -377,6 +415,10 @@ fn a_tail_stall_above_the_peak_stall_is_refused() {
     assert!(
         registry(&LAUNCH_SHAPE_STATED).is_ok(),
         "a Zero tail stall under a Level peak stall is admitted"
+    );
+    assert!(
+        registry(&EQUAL_STALLS).is_ok(),
+        "equal Level stalls are admitted"
     );
     assert_refused_as_inconsistent(&RULE_G);
     assert_refused_as_inconsistent(&RULE_G_ZERO);

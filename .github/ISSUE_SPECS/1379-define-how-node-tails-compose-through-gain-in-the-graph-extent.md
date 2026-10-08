@@ -76,7 +76,7 @@ Amendment 1's H1-H4 and H10 are the decisions; this section states them as slice
   (`crates/graph-compiler/src/pdc.rs:5-23`), lowered as `PreparedTrackDelay` on the strip's `Input`
   node. After the input stops the delayed strip keeps playing for `delay_samples`, so the extent
   counts it: the `Input` node states `T = max(left, right) delay_samples`, `D = 0` (exact zero after
-  it), `G_p = G_t = 0` mB, `sigma` `Zero`, and `RestSamples` with that same value for both peaks (the
+  it), `G_p = G_t = 0` mB, both stalls (`sigma_p` and `sigma_t`) `Zero`, and `RestSamples` with that same value for both peaks (the
   ring holds only input samples). Today `output_tail` omits it.
 - **D2b. Gain-only node values.** Amendment 1, H3: prepared values for fixed gain lanes, domain
   maxima for live ones, `Zero` for a fixed mute where the kernel gives exact zero. The graph compile
@@ -522,7 +522,7 @@ adds:
   (`P*_graph`: `Zero`, `Millibels(i32)` re 1.0 rounded up, `AboveRange` when the stall sum is not
   finite, or unstated when `output_tail` is `Infinite`) beside `output_tail`.
 - The canonical plan text: each node's `tail` row carries the whole bound (`tail`,
-  `tail_every_peak`, the two rest values, decay, both gains, stall; `unstated`, `zero` and
+  `tail_every_peak`, the two rest values, decay, both gains, both stalls; `unstated`, `zero` and
   `above_range` as tokens); a new `extent` row carries `output_tail`, `output_tail_every_peak` and
   `P*_graph`. The `node` rows and the DOT text keep `tail` as today.
 
@@ -715,8 +715,9 @@ independently verifiable, in this order, and one tightening successor:
 C; if after, it re-pins the graph digests its tighter value moves, one at a time.
 
 **Sizes.** B was split (root ruling 4) because `G_t` became a full derivation: B1 certifies `D`,
-`G_p` and `sigma` behind accessors with the bound still `Unstated` (H2 forbids a partial
-statement), B2 derives `G_t` and states all four; each is half a day and verifiable alone. C is
+`G_p` and the two stalls behind accessors with the bound still `Unstated` (H2 forbids a partial
+statement): `sigma_p`, the peak stall (every frame, (N1)), and `sigma_t`, the tail stall (from the
+node's tail on, (N2)); B2 derives `G_t` and states all five; each is half a day and verifiable alone. C is
 about one working day, an explicit exception to the half-day rule (root ruling m7; Hazards).
 
 **Hot-file slots and named exceptions** for every slice are listed in the design note, H8, and in

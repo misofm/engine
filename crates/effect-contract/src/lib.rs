@@ -308,10 +308,9 @@ impl NodeTailBound {
 /// Notation: `eps = 10^(-144/20)`; a node with latency `L`, tail `T`, input `x` and output `y`;
 /// `N` the first sample of silence; `g_p = 10^(G_p/2000)` and `g_t = 10^(G_t/2000)` the linear
 /// gains, `0` for a `Zero` gain; `sigma_p` and `sigma_t` the two stalls' linear levels, `0` for
-/// `Zero`. Each value is a
-/// certified upper bound at the node's rate, over its parameter domain or its prepared design,
-/// computed on the control thread; a stereo node states the maximum over its two channels, and a
-/// node with a sidechain states each value for every sidechain input.
+/// `Zero`. Each value is a certified upper bound at the node's rate, over its parameter domain or
+/// its prepared design, computed on the control thread; a stereo node states the maximum over its
+/// two channels, and a node with a sidechain states each value for every sidechain input.
 ///
 /// * **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted control history:
 ///   `|y[n]| <= g_p X + sigma_p` for every `n`.

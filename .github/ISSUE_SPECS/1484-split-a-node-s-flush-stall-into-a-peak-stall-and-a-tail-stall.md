@@ -299,7 +299,7 @@ release `tail_contract` run):
 | M7 `max` takes `peak_stall` from one side | EC | S3 (`left.max(crossed)`) |
 | M8 fixed `tail_stall` left at one underflow | TC | F3 only |
 | M9 disabled channel `peak_stall` at 0 mB | TC | disabled-filter test only |
-| M10 rule (g) compares the stalls the wrong way round | EC | S2, plus the (e) and (f) tests (as M4) |
+| M10 rule (g) compares the stalls the wrong way round | EC | S2, plus the (e) and (f) tests (as M4), plus `tail_bound.rs`'s `a_request_with_another_rows_entry_is_refused` and `prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate` (their per-rate fixture states `sigma_t < sigma_p`, so the swapped rule refuses its registry; corrected by the follow-up) |
 | M11 `peak_clause` returns `G_t` | EC | S1 |
 
 M1 and M2 green on `tail_contract` confirm the spec's claim that only S1's distinct fixture
@@ -319,3 +319,56 @@ remains in #1379's spec (D2a's `sigma` `Zero`; H2's canonical-text "both gains, 
 H8's "B1 certifies `D`, `G_p` and `sigma` ... B2 ... states all four") and in the design note
 (H2's canonical-text line, H7's gate `sigma`, H8's B1 line). #1379 (the canonical
 plan text: one stall or two) and #1466 (B1) settle them.
+
+### Follow-up to attempt 1 (2026-10-08, after Sol's PASS; root's authorization of 2026-10-08)
+
+Root authorized each item below on 2026-10-08 after the attempt-1 verdict (PASS, two MINORs, four
+NITs).
+
+**MINOR 1: the equality boundaries of rules (f) and (g).** `registry.rs` gains two admitted
+fixtures, `EQUAL_GAINS` (a `Millibels` tail gain equal to the peak gain, the stalls strictly
+ordered) and `EQUAL_STALLS` (equal `Level` stalls, the shape every fixed input section states; the
+gains strictly ordered). The (f) test admits `EQUAL_GAINS`, S2 admits `EQUAL_STALLS`, and both doc
+comments name the strict mutant. Mutation runs (`cargo test -p effect-contract --all-features
+--all-targets`, each defect applied in `tail_bound_consistent` and then reverted):
+
+| mutant | red | reverted |
+|---|---|---|
+| X7 rule (g) strict, `tail < peak` on two `Level`s | S2 `a_tail_stall_above_the_peak_stall_is_refused` only | green |
+| Xf rule (f) strict, `tail < peak` on two `Millibels` | `a_tail_gain_above_the_peak_gain_is_refused` only | green |
+
+Before the follow-up both mutants survived the whole package (X7 per the verdict; Xf re-run here
+on the pre-follow-up `registry.rs`: no test red).
+
+**MINOR 2: the one-sigma text (root authorized).** Each line was re-verified first; only the stall
+wording and its direct consequences changed. `sigma_p` is the peak stall (every frame, (N1)),
+`sigma_t` the tail stall (from the node's tail on, (N2)).
+- #1379's spec: D2a (both stalls `Zero`), H2's canonical-text list ("both stalls"; the `tail` row
+  carries the whole bound), H8 (B1 certifies `D`, `G_p` and the two stalls; B2 states all five).
+- The design note: H2's registry bullet (three rules, with (g)) and canonical-text list, which
+  finishes H2; H7's restated #1376 D4 and the #1462 line (A1 adds the first two rules, #1484 the
+  third); H8's B line.
+- #1467: the product outcome (five values, the two stall fields), the context, the (N2) form of
+  `G_t` (`sigma_t`), L-D7 (B1's `sigma_p` and `sigma_t` as #1466 computes them; #1467 gates
+  `sigma_t <= sigma_p` itself, because rule (g) runs only in `NativeEffectRegistry::new` and an
+  input section is not a registry row), the DSP note and the non-goal, L2 (an every-frame bound,
+  so `sigma_p`) and L5' (`peak_stall` and `tail_stall` equal to B1's values; both orders gated).
+- #1375: the composition list, the stall statement (both stalls from one underflow allowance, so
+  equal) and gate 3 (`sigma_p`, an (N1) use).
+- #1376: the restated D4 lists both stalls.
+- #1468: the (N1) contract (`sigma_p`), P-D4 and gate 3 (both stalls do not move).
+These local specs need their GitHub bodies synchronized: #1379, #1467, #1375, #1376, #1468 (and
+#1484 for this record).
+
+**NITs.** The M10 row above names the two `tail_bound.rs` tests that also go red (NIT 1).
+`crates/effect-contract/src/lib.rs`: the `NodeTailBound` composition doc paragraph is reflowed
+(NIT 2; no text change). NIT 3 is closed by MINOR 2's H2 edits. NIT 4: `builtinRetainedBytes` is
+**2,033 of 2,048** (15 B left), as measured in attempt 1. Root's ruling (2026-10-08): a later field
+that takes the measurement over the ceiling raises the ceiling individually, with its reason
+recorded at the re-pin.
+
+**Gates (follow-up).** All green: `cargo test --locked -p effect-contract -p effect-compiler
+--all-features` (118 passed, 0 failed); `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` (CI's flags); `cargo fmt --all -- --check`;
+`check-workspace-policy.sh`; `check-effect-contract.sh` (8 production factories, 0 failed gates).
+No render, resource or fixture byte changed, so the wider gates of attempt 1 were not rerun.

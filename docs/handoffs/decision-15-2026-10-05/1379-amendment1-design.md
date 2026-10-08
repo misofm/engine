@@ -280,8 +280,9 @@ pub enum FlushStall { Zero, Level(i32) }      // sigma_p, sigma_t: millibels re 
 - `PreparedEffectMetadata` and `EffectProgramKey` carry `composition` as they carry `rest`;
   `expected_prepared_metadata` copies it; `effect-compiler`'s mismatch check compares it. This needs
   #1461 first: no control-only bytes in render-owned memory (#1329 R5).
-- `NativeEffectRegistry::new` (#1462) refuses two inconsistent statements with a typed error:
-  `Stated` with `tail` `Infinite`, and `tail_gain > peak_gain` (`Zero` below every `Millibels`).
+- `NativeEffectRegistry::new` (#1462) refuses three inconsistent statements with a typed error:
+  `Stated` with `tail` `Infinite`, `tail_gain > peak_gain` (`Zero` below every `Millibels`), and
+  `tail_stall > peak_stall` (`Zero` below every `Level`; #1484).
 - `builtins::InputSectionBound` is **deleted**. `input_section_bound`, `input_section_bounds`,
   `input_section_live_bound` and `PreparedBuiltinsSession::input_bounds` return `NodeTailBound`.
   The field `rest: None` becomes `rest: RestBound::Unstated`; a function that returns `Option` today
@@ -300,7 +301,7 @@ pub enum FlushStall { Zero, Level(i32) }      // sigma_p, sigma_t: millibels re 
   (`P*_graph`: `Zero`, `Millibels(i32)` re 1.0 rounded up, `AboveRange` when the stall sum is not
   finite (H4 step 6), or unstated when `output_tail` is `Infinite`) beside `output_tail`.
 - The canonical plan text: each node's `tail` row carries the node's whole bound (`tail`,
-  `tail_every_peak`, the two rest values, decay, both gains, stall; `unstated`, `zero` and
+  `tail_every_peak`, the two rest values, decay, both gains, both stalls; `unstated`, `zero` and
   `above_range` spelled as tokens); a new `extent` row carries `output_tail`, `output_tail_every_peak` and `P*_graph`. The
   `node` rows and the DOT text keep `tail` as today.
 
@@ -581,12 +582,12 @@ and the precondition is not dropped.
   them; a miss stops the slice. #1457's cache key does not change; its value
   type becomes `NodeTailBound` in A1.
 - **#1461.** Lands before A1 (the composition field grows `PreparedEffectMetadata`).
-- **#1462.** Lands before A1; A1 adds H2's two registry rules in `NativeEffectRegistry::new`.
+- **#1462.** Lands before A1; A1 adds H2's first two registry rules (#1484 adds the third) in `NativeEffectRegistry::new`.
 - **#1372-#1376 and #1378.** Each per-effect slice states its `CompositionBound`; #1375 and #1376
   follow A2 and land in the batch with C (Q3, third round); their dependency on #1379 becomes A1 and
   A2 (they need only the types and the contract). #1375's D4 is restated to H1 as #1376's below. #1376's D4 ("Gain (#1379 D1: a peak gain and an incremental gain after
   silence)") is restated to H1: the gate, transient shaper and soft clip state `D`, `G_p`, `G_t` and
-  `sigma` under H1's contract, with H1's sidechain quantifier (the gate has a sidechain, and its gain
+  the two stalls `sigma_p` and `sigma_t` under H1's contract, with H1's sidechain quantifier (the gate has a sidechain, and its gain
   bound `g <= 1` holds for every sidechain input). #1378 retires `CompositionBound::Unstated` with
   `Infinite` and `RestBound::Unstated`. Root records these dependencies and #1376's restated D4 in
   #1372-#1376 and #1378.
@@ -619,9 +620,10 @@ C; if after, it re-pins the graph digests its tighter value moves, one at a time
 
 **B's size (root ruling 4).** With `G_t` a full derivation (it was `G_t = G_p` in the first draft),
 B is about one working day: the live `D` by H1's construction over every settled group, the live
-`G_p` as a supremum over every admitted history, the stall, and the new `G_t` derivation with its
+`G_p` as a supremum over every admitted history, the two stalls, and the new `G_t` derivation with its
 real-kernel gate. It is split at the line that keeps each half verifiable on its own. B1 certifies
-`D`, `G_p` and `sigma` in `math::tail`'s live cascade and exposes them through test-support
+`D`, `G_p` and the two stalls in `math::tail`'s live cascade (`sigma_p`, the peak stall, at every
+frame, (N1); `sigma_t`, the tail stall, from the node's tail on, (N2)) and exposes them through test-support
 accessors; the live bound keeps `CompositionBound::Unstated` (H2 forbids a partial statement), and
 B1's real-kernel gate (L1) and recomputation (L3) check the accessors. B2 derives `G_t`, gates it on
 the real kernel (L2), and switches the live bound to `Stated`. Nothing reads the live values before
