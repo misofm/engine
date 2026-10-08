@@ -19,7 +19,10 @@ use builtins::{
     input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
     input_section_worst_case_pair, prepare_input_filter_pair,
 };
-use effect_contract::{NodeTailBound, RestBound, RestSamples, TailSamples};
+use effect_contract::{
+    CompositionBound, FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay,
+    TailSamples,
+};
 use math::tail::{
     CascadeBound, LiveZones, SectionConstants, SvfWords, TAIL_FLOOR, fixed_cascade, live_cascade,
     live_cascade_groups, live_zones, pole_real, v_operator_norm,
@@ -2069,4 +2072,445 @@ fn live_bounds_leave_headroom_to_the_tail_cap() {
             assert!(value < CAP, "{rate} Hz {name} {value} reaches the cap");
         }
     }
+}
+
+// ---- #1465: a fixed input section's composition values (F1-F3) --------------------------------
+
+/// `2^-24`, the `f32` unit roundoff.
+const U: f64 = 1.0 / 16_777_216.0;
+
+/// The four composition values of a bound, `(D, G_p, G_t, sigma)`; panics unless every one is
+/// stated with a level (no `Zero`).
+fn composition_values(bound: NodeTailBound, what: &str) -> (u64, i32, i32, i32) {
+    match bound.composition {
+        CompositionBound::Stated {
+            decay: TailDecay(decay),
+            peak_gain: PeakGain::Millibels(peak),
+            tail_gain: PeakGain::Millibels(tail),
+            stall: FlushStall::Level(stall),
+        } => (decay, peak, tail, stall),
+        other => panic!("{what}: composition {other:?}"),
+    }
+}
+
+/// `ceil(2000 log10 g)`, plain.
+fn ceil_mb(g: f64) -> i32 {
+    -math::floor(-2000.0 * math::log10(g)) as i32
+}
+
+/// The linear value of `millibels`.
+fn linear(millibels: i32) -> f64 {
+    math::pow(10.0, f64::from(millibels) / 2000.0)
+}
+
+/// `T_b(level)` for each level: the smallest `j` with `g * sum_{j <= m < len} |h[m]| < level`.
+fn suffix_crossings_at(response: &[f64], gain: f64, levels: &[f64]) -> Vec<usize> {
+    let mut crossings = vec![0_usize; levels.len()];
+    let mut found = vec![false; levels.len()];
+    let mut sum = 0.0_f64;
+    for index in (0..response.len()).rev() {
+        sum += response[index].abs();
+        for ((crossing, found), level) in crossings.iter_mut().zip(&mut found).zip(levels) {
+            if !*found && gain * sum >= *level {
+                *crossing = index + 1;
+                *found = true;
+            }
+        }
+    }
+    crossings
+}
+
+fn l1(response: &[f64]) -> f64 {
+    response.iter().map(|value| value.abs()).sum()
+}
+
+/// One section's constants by #1329's closed forms (`docs/derivations/1329-input-section-tail-
+/// and-rest.md`, "The kernel and its norm", "Rounding and the flush"), recomputed in plain `f64`
+/// from the designed words: no code shared with `math::tail`.
+#[derive(Clone, Copy, Debug)]
+struct PlainSection {
+    q: f64,
+    beta: f64,
+    gamma: f64,
+    delta: f64,
+    mu_state: f64,
+    mu_input: f64,
+    omega_state: f64,
+    omega_input: f64,
+}
+
+/// The largest singular value of `[[a, b], [c, d]]`, by the non-cancelling closed form.
+fn singular(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    (math::sqrt((a + d) * (a + d) + (c - b) * (c - b))
+        + math::sqrt((a - d) * (a - d) + (b + c) * (b + c)))
+        / 2.0
+}
+
+fn plain_section(words: &SvfWords) -> PlainSection {
+    let r = core::f64::consts::FRAC_1_SQRT_2;
+    let sqrt2 = core::f64::consts::SQRT_2;
+    let (c1, a2, a3, m0, m1, m2) = (words.c1, words.a2, words.a3, words.m0, words.m1, words.m2);
+    // `A`, `b`, `c`, `d` of the stored-form step.
+    let (al, be, ga, de) = (1.0 - 2.0 * c1, -2.0 * a2, 2.0 * a2, 1.0 - 2.0 * a3);
+    let b = [2.0 * a2, 2.0 * a3];
+    let c = [m1 * (1.0 - c1) + m2 * a2, -m1 * a2 + m2 * (1.0 - a3)];
+    let d = m0 + m1 * a2 + m2 * a3;
+    // `||A||_V = ||R A R^-1||_2`, `R = [[1, r], [0, r]]`.
+    let q = singular(
+        al + r * ga,
+        sqrt2 * be + de - al - r * ga,
+        r * ga,
+        de - r * ga,
+    );
+    let v_norm =
+        |x: [f64; 2]| math::sqrt((x[0] + r * x[1]) * (x[0] + r * x[1]) + r * x[1] * r * x[1]);
+    let beta = v_norm(b);
+    let gamma = math::sqrt(c[0] * c[0] + (sqrt2 * c[1] - c[0]) * (sqrt2 * c[1] - c[0]));
+    let (r_norm, r_inverse, kappa) = (math::sqrt(1.0 + r), 1.0 / math::sqrt(1.0 - r), 1.0 + sqrt2);
+    let k = 1.0 + U;
+    let gamma2 = 2.0 * U / (1.0 - 2.0 * U);
+    let gamma3 = 3.0 * U / (1.0 - 3.0 * U);
+    let (c1a, a2a, a3a) = (c1.abs(), a2.abs(), a3.abs());
+    let g = [
+        [2.0 * k * gamma2 * c1a, 2.0 * k * gamma3 * a2a],
+        [2.0 * k * gamma2 * a2a, 2.0 * k * gamma3 * a3a],
+    ];
+    let mu_state =
+        r_norm * singular(g[0][0], g[0][1], g[1][0], g[1][1]) * r_inverse + kappa * U * q;
+    let input = [2.0 * k * gamma3 * a2a, 2.0 * k * gamma3 * a3a];
+    let mu_input =
+        r_norm * math::sqrt(input[0] * input[0] + input[1] * input[1]) + kappa * U * beta;
+    let (one_c1, one_a3) = ((1.0 - c1).abs(), (1.0 - a3).abs());
+    let (m0a, m1a, m2a) = (m0.abs(), m1.abs(), m2.abs());
+    let v1_error = [
+        k * gamma2 * c1a + U * one_c1,
+        k * gamma3 * a2a + U * a2a,
+        k * gamma3 * a2a + U * a2a,
+    ];
+    let v2_error = [
+        k * gamma2 * a2a + U * a2a,
+        k * gamma3 * a3a + U * one_a3,
+        k * gamma3 * a3a + U * a3a,
+    ];
+    let v1_magnitude = [one_c1, a2a, a2a];
+    let v2_magnitude = [a2a, one_a3, a3a];
+    let w: [f64; 3] = core::array::from_fn(|i| {
+        m1a * (1.0 + gamma3) * v1_error[i]
+            + m2a * (1.0 + gamma2) * v2_error[i]
+            + gamma3 * m1a * v1_magnitude[i]
+            + gamma2 * m2a * v2_magnitude[i]
+    });
+    PlainSection {
+        q,
+        beta,
+        gamma,
+        delta: d.abs(),
+        mu_state,
+        mu_input,
+        omega_state: math::sqrt(w[0] * w[0] + w[1] * w[1]) * r_inverse,
+        omega_input: w[2] + gamma3 * m0a,
+    }
+}
+
+/// #1465 F1. For every enabled pair of gate 1(a) at trims 0 and +24 dB, the stated `D` against the
+/// independent brute force and the module's own crossings:
+/// (a) `T_b(eps 10^-k / (2 |trim|)) <= T + k D` for `k = 0..8`;
+/// (b) `D <= 1.5 max(D_mean, D_floor)`, `D_mean` the brute force's mean decade over eight decades;
+/// (c) the module's certified crossing `T(k)` is at most `T + k D` for `k = 0..64`;
+/// (d) each half's certificate rate is no faster than its propagation's spectral radius allows,
+/// recomputed from the words: the deviation half's frames per decade at least
+/// `D_floor = ceil(ln 10 / -ln(max_s (q_s + mu_s)))`, the reference half's at least that of
+/// `max_s q_s`, and so `D_inf >= D_floor`.
+#[test]
+fn fixed_design_decay_law_is_sound_tight_and_above_its_floor() {
+    const FRAMES: usize = 4_000_000;
+    for &rate in rates() {
+        let law = input_section_flush_law(rate);
+        for (hpf, lpf) in pairs(rate) {
+            if hpf == 0.0 && lpf == 0.0 {
+                continue;
+            }
+            let probe = input(rate, hpf, lpf, 0.0, false);
+            let sections = kernel_sections(&probe);
+            let response = impulse_response(&sections, FRAMES);
+            // `ceil(ln 10 / -ln rho)`: the frames per decade of a rate `rho`.
+            let decade =
+                |rho: f64| -math::floor(-core::f64::consts::LN_10 / -math::log(rho)) as u64;
+            let plain: Vec<PlainSection> = sections.iter().map(plain_section).collect();
+            // The deviation's spectral radius `max_s (q_s + mu_s)` and the reference's `max_s q_s`.
+            let d_floor = decade(plain.iter().map(|c| c.q + c.mu_state).fold(0.0, f64::max));
+            let reference_floor = decade(plain.iter().map(|c| c.q).fold(0.0, f64::max));
+            for trim_db in [0.0, 24.0] {
+                let what = format!("{rate} Hz HPF {hpf} LPF {lpf} trim {trim_db}");
+                let kernel = input(rate, hpf, lpf, trim_db, false);
+                let gain = trim_gain(&kernel);
+                let prepared = bound(rate, hpf, lpf, trim_db);
+                let tail = finite(prepared.tail);
+                let (decay, ..) = composition_values(prepared, &what);
+                let levels: Vec<f64> = (0..=8)
+                    .map(|k| TAIL_FLOOR / 2.0 * math::pow(10.0, -f64::from(k)))
+                    .collect();
+                let crossings = suffix_crossings_at(&response, gain, &levels);
+                // (a) The exact half of the decade law.
+                for (k, crossing) in crossings.iter().enumerate() {
+                    assert!(
+                        *crossing as u64 <= tail + k as u64 * decay,
+                        "{what}: T_b at k = {k} is {crossing} > T + k D = {tail} + {k} {decay}"
+                    );
+                }
+                // (b) Tightness.
+                let d_mean = (crossings[8] - crossings[0]) as f64 / 8.0;
+                let line = d_mean.max(d_floor as f64);
+                let ratio = decay as f64 / line;
+                // (c) The module's own crossings.
+                let cascade = fixed_cascade(&sections, gain, &law, rest_peaks()).expect("bound");
+                let composition = cascade.composition.expect("a stated composition");
+                assert_eq!(
+                    composition.decay, decay,
+                    "{what}: the prepared D is the module's"
+                );
+                for k in 0..=64 {
+                    let crossing = cascade.tail + composition.certificate.crossing(k);
+                    assert!(
+                        crossing <= tail + k * decay,
+                        "{what}: T({k}) = {crossing} > T + k D = {tail} + {k} {decay}"
+                    );
+                }
+                // (d) The asymptotic floor.
+                let d_inf = composition.certificate.asymptotic_decay();
+                eprintln!(
+                    "F1 {what}: T {tail}, D {decay}, D_mean {d_mean:.1}, D_floor {d_floor}, \
+                     D_inf {d_inf}, ratio {ratio:.3}, T_lambda - T {}",
+                    composition.certificate.floor_crossing()
+                );
+                let half = |decade: f64| -math::floor(-decade) as u64;
+                let certificate = composition.certificate;
+                assert!(
+                    half(certificate.deviation.decade) >= d_floor
+                        && half(certificate.reference.decade) >= reference_floor
+                        && d_inf >= d_floor,
+                    "{what}: the deviation half's rate {} against D_floor {d_floor}, the \
+                     reference half's {} against {reference_floor}",
+                    certificate.deviation.decade,
+                    certificate.reference.decade
+                );
+                assert!(
+                    ratio <= 1.5,
+                    "{what}: D {decay} > 1.5 max(D_mean, D_floor) = 1.5 {line}"
+                );
+            }
+        }
+    }
+}
+
+/// The impulse response of one enabled section alone, its `l1` norm.
+fn section_l1(sections: &[SvfWords], frames: usize) -> Vec<f64> {
+    sections
+        .iter()
+        .map(|words| l1(&impulse_response(core::slice::from_ref(words), frames)))
+        .collect()
+}
+
+/// #1465 F2(a), (b), (d). For every enabled pair of gate 1(a) at trims 0 and +24 dB, and at every
+/// launch rate the top pair and the HPF at 10 Hz into the LPF one `f32` above 10 Hz:
+/// (a) `|trim| ||h||_1 <= g_t <= g_p` against the brute-force cascade;
+/// (b) `G_p <= 20 log10(|trim| ||h_HPF||_1 ||h_LPF||_1) + 6.02 dB`, the margin recorded;
+/// (d) the module's `dev_loud` lies within 1 mB above a plain recomputation of the loud fixed
+/// point, and `G_p = ceil_mB(|trim| (1 + u) (O + dev_loud))` from the module's values.
+#[test]
+fn fixed_design_gains_bound_the_cascade_and_stay_near_its_section_norms() {
+    const FRAMES: usize = 4_000_000;
+    for &rate in rates() {
+        let law = input_section_flush_law(rate);
+        let mut rows = pairs(rate);
+        rows.push((10.0, f32::from_bits(10.0_f32.to_bits() + 1)));
+        for (hpf, lpf) in rows {
+            if hpf == 0.0 && lpf == 0.0 {
+                continue;
+            }
+            let probe = input(rate, hpf, lpf, 0.0, false);
+            let sections = kernel_sections(&probe);
+            let cascade_l1 = l1(&impulse_response(&sections, FRAMES));
+            let norms = section_l1(&sections, FRAMES);
+            let product: f64 = norms.iter().product();
+            // (d)'s recomputation: the first section's output supremum from the brute force.
+            let plain: Vec<PlainSection> = sections.iter().map(plain_section).collect();
+            let mut state_sup = vec![plain[0].beta / (1.0 - plain[0].q)];
+            let mut input_sup = vec![1.0, norms[0]];
+            if plain.len() == 2 {
+                state_sup.push(plain[1].beta * input_sup[1] / (1.0 - plain[1].q));
+            }
+            input_sup.truncate(plain.len());
+            let mut difference = 0.0;
+            for (i, c) in plain.iter().enumerate() {
+                let error = ((c.beta + c.mu_input) * difference
+                    + c.mu_state * state_sup[i]
+                    + c.mu_input * input_sup[i])
+                    / (1.0 - (c.q + c.mu_state));
+                difference = (c.gamma + c.omega_state) * error
+                    + (c.delta + c.omega_input) * difference
+                    + c.omega_state * state_sup[i]
+                    + c.omega_input * input_sup[i];
+            }
+            for trim_db in [0.0, 24.0] {
+                let what = format!("{rate} Hz HPF {hpf} LPF {lpf} trim {trim_db}");
+                let kernel = input(rate, hpf, lpf, trim_db, false);
+                let gain = trim_gain(&kernel);
+                let prepared = bound(rate, hpf, lpf, trim_db);
+                let (_, peak, tail, _) = composition_values(prepared, &what);
+                // (a) Soundness against the brute force.
+                assert!(tail <= peak, "{what}: G_t {tail} > G_p {peak}");
+                assert!(
+                    gain * cascade_l1 <= linear(tail),
+                    "{what}: |trim| ||h||_1 = {} > g_t = {}",
+                    gain * cascade_l1,
+                    linear(tail)
+                );
+                // (b) Tightness against the sections' own norms.
+                let line = 20.0 * math::log10(gain * product) + 6.02;
+                let margin = line - f64::from(peak) / 100.0;
+                eprintln!(
+                    "F2 {what}: G_p {peak} mB, |trim| ||h||_1 {:.3} dB, line {line:.3} dB, \
+                     margin {margin:.3} dB",
+                    20.0 * math::log10(gain * cascade_l1)
+                );
+                assert!(
+                    margin >= 0.0,
+                    "{what}: G_p {peak} mB above the line {line:.3} dB"
+                );
+                // (d) `dev_loud` and its use.
+                let composition = fixed_cascade(&sections, gain, &law, rest_peaks())
+                    .expect("bound")
+                    .composition
+                    .expect("a stated composition");
+                let dev_loud = composition.dev_loud;
+                assert!(
+                    difference <= dev_loud
+                        && dev_loud <= difference * math::pow(10.0, 1.0 / 2000.0),
+                    "{what}: dev_loud {dev_loud} against the recomputation {difference}"
+                );
+                let recomputed =
+                    ceil_mb(gain * (1.0 + U) * (composition.output_majorant + dev_loud));
+                assert_eq!(peak, recomputed, "{what}: G_p from O and dev_loud");
+            }
+        }
+    }
+}
+
+/// #1465 F3. The stall is the module's rounded up to a millibel, `P^ = 4 sigma / eps` is at least
+/// the module's `P*`, and every enabled design states a positive stall level.
+#[test]
+fn fixed_design_stall_is_the_module_stall_rounded_up_and_covers_the_flush_floor() {
+    for &rate in rates() {
+        let law = input_section_flush_law(rate);
+        for (hpf, lpf) in pairs(rate) {
+            if hpf == 0.0 && lpf == 0.0 {
+                continue;
+            }
+            for trim_db in [0.0, 24.0] {
+                let what = format!("{rate} Hz HPF {hpf} LPF {lpf} trim {trim_db}");
+                let kernel = input(rate, hpf, lpf, trim_db, false);
+                let sections = kernel_sections(&kernel);
+                let gain = trim_gain(&kernel);
+                let (.., stall) = composition_values(bound(rate, hpf, lpf, trim_db), &what);
+                let cascade = fixed_cascade(&sections, gain, &law, rest_peaks()).expect("bound");
+                let raw = cascade.composition.expect("a stated composition").stall;
+                assert!(raw > 0.0, "{what}: a positive stall");
+                assert_eq!(stall, ceil_mb(raw), "{what}: sigma is the stall rounded up");
+                let p_hat = 4.0 * linear(stall) / TAIL_FLOOR;
+                eprintln!(
+                    "F3 {what}: sigma {stall} mB, P^ {p_hat:.4e}, P* {:.4e}",
+                    cascade.flush_floor
+                );
+                assert!(
+                    p_hat >= cascade.flush_floor,
+                    "{what}: P^ {p_hat} < P* {}",
+                    cascade.flush_floor
+                );
+            }
+        }
+    }
+}
+
+/// #1465 F2(c), and the both-disabled branch of preparation (root's named exception, 2026-10-08).
+/// A design with both filters disabled states `D = 0`, `G_p = G_t = ceil_mB(|trim|)` for a
+/// power-of-two trim (0 dB, `|trim| = 2`) and `ceil_mB(|trim| (1 + u))` otherwise (+6 dB, whose
+/// word lies below `10^(6/20)`, so the two differ), and one underflow as its stall, through both
+/// `input_section_bound` and `input_section_bounds`; with the channels' trims different, the larger
+/// gain; and one disabled channel beside an enabled one still leaves the design stated.
+#[test]
+fn a_design_with_filters_disabled_states_its_trim_gain() {
+    let rate = 48_000;
+    // `+6.0206 dB`: the `f32` gain word is exactly 2.
+    let two_db = 6.020_6_f32;
+    let underflow = ceil_mb(f64::from(f32::MIN_POSITIVE));
+    for (trim_db, exact) in [(0.0_f32, true), (two_db, true), (6.0, false), (-3.0, false)] {
+        let strip = parameters(0.0, 0.0, trim_db, false);
+        let kernel = input(rate, 0.0, 0.0, trim_db, false);
+        let trim = trim_gain(&kernel);
+        let expected = if exact {
+            ceil_mb(trim)
+        } else {
+            ceil_mb(trim * (1.0 + U))
+        };
+        if trim_db == two_db {
+            assert_eq!(trim, 2.0, "the +6.0206 dB word");
+        }
+        if !exact {
+            assert_ne!(
+                expected,
+                ceil_mb(trim),
+                "{trim_db} dB: the rounding moves the value"
+            );
+        }
+        let single = input_section_bound(rate, strip).expect("bound");
+        let session = input_section_bounds(rate, [strip], None).expect("bounds")[0];
+        for (path, value) in [
+            ("input_section_bound", single),
+            ("input_section_bounds", session),
+        ] {
+            let what = format!("{path} at {trim_db} dB");
+            assert_eq!(value.tail, TailSamples::Finite(0), "{what}");
+            assert_eq!(value.rest, RestBound::Bounded(RestSamples::ZERO), "{what}");
+            assert_eq!(
+                composition_values(value, &what),
+                (0, expected, expected, underflow),
+                "{what}"
+            );
+        }
+    }
+    // Different trims, both disabled: the larger gain, on both paths.
+    let channel = |trim_db: f32, lpf_hz: f32| ChannelParameters {
+        trim_db,
+        lpf_hz,
+        ..ChannelParameters::default()
+    };
+    let strip = BuiltinParameters {
+        left: channel(0.0, 0.0),
+        right: channel(12.0, 0.0),
+        ..BuiltinParameters::default()
+    };
+    let louder = ceil_mb(f64::from(math::pow(10.0, 12.0 / 20.0) as f32) * (1.0 + U));
+    let single = input_section_bound(rate, strip).expect("bound");
+    let session = input_section_bounds(rate, [strip], None).expect("bounds")[0];
+    for (path, value) in [
+        ("input_section_bound", single),
+        ("input_section_bounds", session),
+    ] {
+        let (_, peak, tail, _) = composition_values(value, path);
+        assert_eq!(
+            (peak, tail),
+            (louder, louder),
+            "{path}: the louder channel's gain"
+        );
+    }
+    // One channel disabled, the other enabled: stated, at least the disabled channel's gain.
+    let mixed = BuiltinParameters {
+        left: channel(24.0, 0.0),
+        right: channel(0.0, 1_000.0),
+        ..BuiltinParameters::default()
+    };
+    let (_, peak, ..) =
+        composition_values(input_section_bound(rate, mixed).expect("bound"), "mixed");
+    assert!(peak >= ceil_mb(f64::from(math::pow(10.0, 24.0 / 20.0) as f32)));
 }

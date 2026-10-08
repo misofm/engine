@@ -28,6 +28,11 @@ instead. Tail reporting (PDC, the C ABI, the browser) uses `T_decay`; silence sk
 `RestSamples`, which holds for every input up to its stated peak (+24 dBFS, or below the
 sanitizer's `1e30`). Disabled filters and gain-only parts report `0` for all three.
 
+The four composition values a node states beside these three (#1379 Amendment 1 H1: the decay
+`D`, the peak and tail gains, the flush stall), and their derivation for a fixed design and for
+disabled filters, are in `docs/derivations/1379-graph-tail-composition.md` (issue #1465). They
+read this note's walk and change none of its values.
+
 ## The kernel and its norm
 
 One section, stored-form TPT SVF [SIMPER-SVF] [ZAVALISHIN-TPT], with state `s = (ic1, ic2)`:

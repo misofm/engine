@@ -56,7 +56,8 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
 ## Decisions frozen for this slice
 
 - **F-D1. The contract** is H1 above: (N1), (N2) with the share `3/4`, (N3).
-- **F-D2. `D` by the binding construction.** Compute the certified crossing `T(k)` of the floor
+- **F-D2 (superseded by root's amendment of 2026-10-08, below; the original text is kept for the
+  record). `D` by the binding construction.** Compute the certified crossing `T(k)` of the floor
   `(3/4) eps 10^(-k)` directly, by the machinery that computes `T` (the exact share
   `eps/2 10^(-k)`, the rounding share `eps/4 10^(-k)`, the horizon extended), for `k = 1..16`, all
   17 crossings in **one extended pass** (horizon `T(16)`, about 2.8 `T` at the top pair; one run
@@ -69,6 +70,23 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   For `k > 16`: `T + k D >= T_lambda + k D_inf >= T(k)`. A slope alone is not a certificate: the
   exact suffix of the top pair falls by 36k-51k samples per decade at 44.1 kHz. `T(k)`, `D_inf`,
   `lambda` and `T_lambda` are exposed through test-support accessors.
+- **F-D2, amended by root (2026-10-08, after attempt 1's stop; binding).** The walk goes only to
+  `T`, the existing crossing; there is no extended pass to `T(16)`. Every `k >= 1` after `T` is
+  covered by a certified closed form: either the contraction certificate (a positive `v`,
+  `lambda < 1` with `M v <= lambda v` on #1329's non-negative majorant and deviation propagations)
+  extended from `k > 16` down to `k >= 1`, or powers of the non-negative step; the form that gives
+  the tighter sound `D` is chosen, with the reason. The closed form and its full proof (rounding and
+  #1474's `tau` floors included) are written in the derivation before the code, and the verifier
+  checks them as a proof. The looseness of `D` against the walked `T(k)` (computed off-line, for
+  measurement only, never shipped) is measured on gate 2's families and recorded; if `D` is more
+  than 2x the walked value on any family, the report says so and root files a tightening
+  successor (the implementer files nothing). The budget and gate 8 are unchanged: gate 8 stays
+  exact at every rate. **Applied:** the certificate, anchored at `T` (each half's state carried to
+  `T` by powers of its step), covers every `k >= 1`; `D = max_h (o_h + floor(max(a_h, 0) + b_h) +
+  1)` (`docs/derivations/1379-graph-tail-composition.md`, "`D`: the closed form"). The accessors
+  are `CascadeComposition::certificate` (`crossing(k)` = `T(k) - T`, `asymptotic_decay()` =
+  `D_inf`, `lambda()`, `floor_crossing()` = `T_lambda - T`), `output_majorant` (`O`) and
+  `dev_loud`, public fields of `math::tail::CascadeBound::composition`.
 - **F-D3. Gains.** Let `O = SLACK accumulation(n) sum_t o(t)` be the module's certified output
   majorant sum (it bounds the cascade's `l1` norm for every reset pattern: a reset only drops
   non-negative terms). Enabled filters: `G_p = G_t = ceil_mB(|trim| (1 + u) (O + dev_loud))`.
@@ -117,6 +135,9 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
 - `crates/math/src/tail.rs`
 - `crates/builtins/src/tail.rs`, `crates/builtins/tests/tail_contract.rs` (named exceptions, stream
   A's)
+- `crates/builtins/src/lib.rs`, `input_section_bounds_within`, the both-disabled branch only
+  (named exception, root's ruling of 2026-10-08: the branch reaches `tail.rs`, so that
+  `input_section_bound` and `input_section_bounds` agree for a strip with no filters)
 - `docs/derivations/1379-graph-tail-composition.md` (new),
   `docs/derivations/1329-input-section-tail-and-rest.md` (a pointer to the new note),
   `docs/EFFECT_CONTRACT_V1.md` (the fixed section's statement)
@@ -280,3 +301,168 @@ with #1474 (`Deviation::at_end` is now `tail.rs:2004-2029`, `dev_sup_from_core` 
    `input_section_bound` and `input_section_bounds` disagree for the most common strip. Also,
    `tail.rs`'s own memoryless branch (`fixed_input_walk`, `:186-191`) reads only the left channel;
    with a trim-dependent gain it must take both channels' maximum (inside the authorized file).
+
+### Root's rulings (2026-10-08, after attempt 1's stop)
+
+1. **F-D2 amended** (the amendment note beside F-D2 above): walk only to `T`; cover every `k >= 1`
+   by a certified closed form (the contraction certificate extended down to `k >= 1`, or powers of
+   the non-negative step), the tighter sound one, with its reason; write the closed form and its
+   full proof (rounding and #1474's `tau` floors) in the derivation before the code; measure `D`'s
+   looseness against the walked `T(k)` (off-line, never shipped) on gate 2's families, and report it
+   if `D` exceeds 2x the walked value on any family (root then files a tightening successor). Budget
+   and gate 8 unchanged; gate 8 exact at every rate.
+2. **Named exception, authorized:** `crates/builtins/src/lib.rs`, `input_section_bounds_within`,
+   the both-disabled branch only, reaches `tail.rs`, so that `input_section_bound` and
+   `input_section_bounds` agree for a strip with no filters; and `tail.rs`'s memoryless branch
+   (`fixed_input_walk`) takes the larger of the two channels' values, not the left channel's. Each
+   with a test and a mutation run.
+
+### Attempt 1, restarted under root's rulings (2026-10-08, implementer)
+
+**The closed form** (`docs/derivations/1379-graph-tail-composition.md`, "`D`: the closed form",
+written before the code). Each half (the reference against `eps / 2`, the relative deviation
+against `eps / 4`) is a non-negative lower-triangular linear system: `S(t + j) <= alpha . M^j w(t)`
+for the reference (`M` the majorant step for `t >= 1`, `w` the remainder's sums), `dev(m + j) <=
+ell . L^j z(m)` for the deviation (`L` = `linear_map`). Each half's state is carried to `T` by
+powers of its step (no frame walked: the reference from `t0`, whose majorant state the replay of
+`t0`'s block records; the deviation from the walk's last frame), rounded up by `tau`. From `T` the
+least contraction certificate `v >= z`, `G v <= lambda v` (forward substitution, then verified on the
+computed values) gives `B lambda^i`; with `a = ln(B / h) / -ln lambda`, `b = ln 10 / -ln lambda`,
+`D_h = o + floor(max(a, 0) + b) + 1`, `D = max(D_ref, D_dev)`, and `T + k D >= T(k)` for every
+`k >= 1` (proof in the note). **Why this form:** powers alone give each `T(k)` only for finitely
+many `k` (16 bisections of a `4 x 4` power, more than a typical design's walk) and still need a
+rate for the rest; the certificate covers every `k` in one formula. Powers are used once, to
+anchor the certificate at `T`: anchored at the walk's last frame it must cover the near-equal-pole
+factor over the whole of `T` with one rate (up to about 0.43 decade looser at the top pair).
+
+**Values (44.1 kHz, `probe` records; gate F1-F3 prints every row):** top pair +24 dB: `T` 478,335,
+`D` 49,403, `G_p = G_t` = 3,489 mB (`g (O + dev_loud)` = 55.52, `O` 3.2719, `dev_loud` 0.2310),
+`sigma` = `Level(ceil_mB(1.519e-19))`; typical 20 Hz into 20 kHz, 0 dB: `T` 9,272, `D` 1,271, `O`
+6.3842, `dev_loud` 0.0004; 1 kHz LPF, 0 dB: `T` 175, `D` 27. Disabled filters: `D = 0`, `G` 0 mB
+at 0 dB, 603 mB at `|trim| = 2`, 601 mB at +6 dB (`ceil_mB(|trim| (1 + u))`; 600 without the
+`(1 + u)`), `sigma = Level(-75,859)` (`2^-126`).
+
+**Looseness against the walked `T(k)` (measurement only, never shipped).** A temporary function
+walked the module's own majorant pass and deviation frame by frame to the `k = 16` floor and took
+`D_walked = max_{k <= 16} ceil((T_walked(k) - T) / k)`; it and its probe test were deleted before the
+commit. 110 rows, the four launch rates: every gate-2 family's representatives (top pair 0 and
++24 dB, LPF at the maximum, near-top `i = 1, 32, 64`, 65,537 near-top `j = 100, 65,537`, band +1 and
++4,096, typical 20 and 23.15 Hz into 20 kHz, the cheap one-section, two-section and two-cascade
+designs) and the gate 1(a) style rows (10 Hz HPF and LPF, 10 Hz into 1 kHz and into the maximum, 10
+Hz into one `f32` above, 1 kHz at +24 dB). `D / D_walked`: top pair 1.018-1.028, LPF at the maximum
+1.010, near-top 1.012-1.028, band 1.010, typical 1.085-1.108, cheap one-section 1.080-1.120, cheap
+two-section 1.100-1.222 (a 9- or 5-sample decade: 11 against 9), 10 Hz HPF +24 dB 1.217, 1 kHz HPF
++24 dB 1.231. **Worst 1.231, below root's 2x line** (no successor needed by that rule). Every row
+also checked `T_walked(k) <= T + k D` and `T(k) <= T + k D` for `k <= 16`. `T_walked(0)` is within
+0-77 frames below `T` (the walk's longer summation factor), as expected.
+
+**F4, nothing certified moves.** A one-time comparison (PR evidence, not a committed test) of
+`fixed_cascade_within`'s `tail`, `tail_every_peak`, both rests, `P*` (bits), `R(P*)`,
+`tail_reference` and frames walked on 3,024 designs (19 cutoffs per section, HPF-below-LPF pairs,
+trims -12, 0, +12, +24 dB, four rates) between `ee1ef4222` (an export, deleted after) and this change:
+identical. Every existing `tail_contract` assertion passes unchanged; the live table is unchanged
+(the live bound states `Unstated`).
+
+**Gates.**
+
+- F1 (release, every rate): `D <= 1.5 max(D_mean, D_floor)`, ratio 1.046-1.391 (worst: 1 kHz HPF
+  +24 dB at 44.1 kHz, `D` 32 against `D_mean` 23; the certificate's transient there is the closed
+  remainder's `gamma ||s||` against `|c . s|`; the walked construction's probe was about 1.12x); (a)
+  and (c) for `k = 0..8` and `0..64`; (d) per half.
+- F2: margins under the line +0.743 to +0.752 dB on the HPF 10 Hz into one `f32` above 10 Hz row
+  (the least), every row non-negative; (a), (d) on every row.
+- F3: on every row.
+- F2(c) and the exception: `a_design_with_filters_disabled_states_its_trim_gain`.
+- F5: below.
+
+**F1(d) reworded.** `D_inf` is the larger of the two halves' rates, so a too-fast deviation rate
+hides behind the reference half's slower one (mutant M4c: green against `D_inf >= D_floor` alone).
+(d) now checks each half against its own propagation's spectral radius, recomputed from the words:
+the deviation's frames per decade at least `ceil(ln 10 / -ln max_s (q_s + mu_s))`, the reference's
+at least that of `max_s q_s`. The spec's mutant ("a rate from `q` alone") is not reachable in this
+construction: the certificate is verified on `L`, whose diagonal holds `q_s + mu_s`, so any rate
+below it fails the verification (M4, M4c green or caught elsewhere); (d) defends the stated rate
+against a defect after the verification (M4d).
+
+**Mutation table** (release, `tail_contract`, each mutant applied, the named test run, the files
+restored from a pristine copy; `crates/math/src/tail.rs` unless stated):
+
+| mutant | test | result |
+|---|---|---|
+| M1 `D` three quarters of the certified | F1 | red at (a): 10 Hz LPF, `T_b` at `k = 1` 19,895 > 17,408 + 2,033 |
+| M2 rates only at `lambda = (1 + rho) / 2` | F1 | red at (b): 10 Hz HPF +24 dB, `D` 3,758 > 1.5 x 2,299.75 (first failing row; every row not checked) |
+| M3 `D` without the transient | F1 | red at (a) (10 Hz LPF, 19,895 > 17,408 + 2,286) |
+| M3b M3 with (a) disabled | F1 | red at (c): `T(1)` 22,066 > 17,408 + 2,286 |
+| M4 deviation certificate on `L` without `mu` on its diagonal | F1 | **green**: the rate search keeps `lambda` above `q + mu` on every row |
+| M4c M4 at the rate nearest `q` | F1 | red at (b) (`D` 5,822), (d) green before the rewording |
+| M4d stated rate from `rho - 0.05 (1 - rho)` | F1 | red at (d): deviation half 2,176.97 < `D_floor` 2,286, (a)-(c) green on the row |
+| M5 trim dropped from `G_p` | F2 | red at (a): 17.28 > 1.09 |
+| M6 `O` from the first section | F2 | red at (a): 10 Hz into 1 kHz, 2.443 > 2.435 |
+| M7 `G_p` from the sections' state norms | F2 | red at (d)'s equality |
+| M7b M7 with (d)'s equality disabled | F2 | red at (b): 10 Hz into 1 kHz, 1,516 mB above 14.497 dB |
+| M8 `(1 + u)` dropped for a non-power-of-two trim | F2(c) | red: 600 at +6 dB |
+| M9 trim dropped (disabled) | F2(c) | red: 0 at `|trim| = 2` |
+| M10 `D = 1` (disabled) | F2(c) | red |
+| M11 `dev_core` returned as `dev_loud` | F2 | red at (d): 1.29e-10 against 2.88e-4 |
+| M12 `G_p` on `dev_core` | F2 | red at (d)'s equality (top pair, 773) |
+| M13 stall `Zero` | F3 | red |
+| M14 stall one millibel low | F3 | red |
+| M15 `lib.rs` branch states `NodeTailBound::ZERO` | exception test | red: `input_section_bounds` `Unstated` |
+| M16 `fixed_input_walk`'s memoryless branch the left channel only | exception test | red: (0, 0) against the louder channel |
+| M17 `memoryless_input_bound` the left channel only | exception test | red |
+
+Test-value notes against the spec's list: F1(c)'s "the brute force cannot see it" does not hold
+here (M3 is red at (a) first); (c) is still red alone (M3b). F2(b)'s mutant is red at (b) at 10 Hz
+into 1 kHz before the top pair. F3's "rounded down gives `P^` below `P*`" is not what catches it: the
+equality with `ceil_mB(stall)` does (M14).
+
+**F5, cost.** The closed form adds a fixed cost per walk (about 3.3 us for a two-section cascade,
+2.3 us for one, measured before the calibration; no frame is walked, so frames walked and gate 8's
+frames are unchanged). One build (`CARGO_INCREMENTAL=0 cargo build --locked --release -p builtins
+--features test-support --example input_bound_budget`), then one invocation of each, `taskset -c 7`,
+one warmup and two measured rounds, no retry:
+
+- *Calibration* (load 1.22 -> 1.37): the largest fixed cost per section is **9.49 us** (96 kHz, round
+  1; the measured rounds' intercepts: one section at most 9.20 us, two at most 18.97 us), 512.7
+  frame-equivalents of 18.5 ns: **`INPUT_BOUND_SECTION_CHARGE` = 520** (was 380), restated in
+  `crates/builtins/src/tail.rs` with the cache cap's arithmetic (at least 257 + 520 = 777 a design,
+  at most 1,943 designs a preparation; the cap of 8,192 holds them). **The frame classes net of the
+  fixed cost rose above the 18.5 ns frame-equivalent:** slowest class median 19.64 ns (cheap
+  two-section, 1 kHz into 1.28 kHz, +24 dB, 44.1 kHz, spread 19.53-19.82; 513-frame walks, whose
+  per-frame residual carries the new design-dependent fixed cost the rate's mean intercept does not
+  model), and the largest single sample over every point 34.18 ns (cheap two-section, 5.12 into
+  10.24 kHz, +24 dB, 88.2 kHz, that point's median 7.99 ns). Under root's rule (the maximum over every
+  recorded point, rounded up) the frame-equivalent would be 34.5 ns, which restates
+  `FRAME_EQUIVALENT_NS` in `examples/input_bound_budget.rs` (not an authorized path) and moves the
+  budget's milliseconds; **not restated, open for root.**
+- *Gate 2 on charge 520 and the committed 18.5 ns* (load 0.96 -> 1.04): every family's three results
+  identical, every preparation within its budget, every warm rebuild walking nothing. Worst design
+  work **24.93 ms** (4,096 cheap two-section designs, 1 kHz into 1.28 kHz, +24 dB, 96 kHz, round 2)
+  of the 27.94 ms budget; worst design work per consumed frame-equivalent **17.61 ns** (64 typical
+  designs, 48 kHz, round 1), then 17.27 ns (top pair, 44.1 kHz), both below 18.5 ns.
+- *Gate 8*: passed, every 64-track console document exact at every rate. Stereo documents: charged
+  (frames walked, margin) 44.1 kHz 743,552 (610,432, 766,448), 48 kHz 791,936 (658,816, 718,064),
+  88.2 kHz 1,290,880 (1,157,760, 219,120), 96 kHz 1,387,136 (1,254,016, **122,864**); mono 44.1 kHz
+  383,040, 48 kHz 408,384, 88.2 kHz 667,712, 96 kHz 717,376. Frames walked equal #1474's.
+
+**Other gates.** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
+--features math/lane,builtins/test-support,lane/test-support`: pass. Release `tail_contract`: 17
+passed. `audit capi`: 0 allocations, 0 locks, 0 syscalls, `pcm_digest` `cb10fbface44a3a4`
+(unchanged). `check-builtins-fixtures.sh`: ok (50 files). `run-wasm-gates.sh`: ok.
+`check-workspace-policy.sh`: ok. `cargo clippy --locked --workspace --all-targets -- -D warnings`:
+clean. `cargo fmt --all -- --check`: clean.
+
+**Stopped: one test outside the authorized paths is red.** `cargo test --locked -p
+builtins-compiler --features test-support`: 56 passed, **1 failed**,
+`tests::live_input_lane_reports_the_live_bound_and_plain_input_its_own`
+(`crates/builtins-compiler/src/lib.rs:12011-12014`) pins a strip with both filters disabled to
+`NodeTailBound::ZERO` (composition `Unstated`); root's named exception makes that strip state its
+composition (`Stated { decay: 0, peak_gain: 0 mB, tail_gain: 0 mB, stall: Level(-75,859) }` at
+0 dB), so the expected value must change to `input_section_bound`'s. The file is stream A's (#1464)
+and not in this slice's paths: a named exception for that one assertion is needed. Not edited.
+
+**Open for root.** (1) The builtins-compiler assertion above. (2) The frame-equivalent (F5): 18.5 ns
+kept; the calibration's frame classes measured above it, though gate 2's real work per consumed
+frame-equivalent stays below it. (3) The doc comment of `builtins::input_section_bounds`
+(`crates/builtins/src/lib.rs:3520-3521`, "reports the zero bound") is outside the named exception's
+branch; it now reads loosely (the bound has a zero tail and a stated composition).

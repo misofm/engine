@@ -19,9 +19,12 @@
 //! designed `f32` words (D4), and for a live input lane the per-section suprema over every word a
 //! control history can reach (D5).
 
-use effect_contract::{CompositionBound, NodeTailBound, RestBound, RestSamples, TailSamples};
+use effect_contract::{
+    CompositionBound, FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay,
+    TailSamples,
+};
 use math::tail::{
-    CascadeBound, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords,
+    CascadeBound, CascadeComposition, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords,
     fixed_cascade_within, live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm,
     word_box_norm,
 };
@@ -30,7 +33,9 @@ use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
 use crate::{BUTTERWORTH_K, InputLane, SvfSection, builtin_filter_cutoff_maximum_hz, db_gain};
 
 /// A builtin input section's bound from a cascade's: its tail, tail over every peak and exact-rest
-/// bound (#1329 D1, D2, Amendment 3). Its composition is unstated until #1465 and #1467 derive it.
+/// bound (#1329 D1, D2, Amendment 3), and its composition (#1379 Amendment 1 H1, H3; #1465): a
+/// fixed design states the cascade's values rounded up into millibels; a live bound states none
+/// yet (`math::tail` returns none for it; #1466 and #1467 derive it).
 fn bound_from_cascade(bound: &CascadeBound) -> NodeTailBound {
     NodeTailBound {
         tail: TailSamples::Finite(bound.tail),
@@ -39,8 +44,84 @@ fn bound_from_cascade(bound: &CascadeBound) -> NodeTailBound {
             peak_plus_24_dbfs: bound.rest_peak,
             any_sanitized_input: bound.rest_any,
         }),
-        composition: CompositionBound::Unstated,
+        composition: bound
+            .composition
+            .as_ref()
+            .map_or(CompositionBound::Unstated, stated_composition),
     }
+}
+
+/// #1465 F-D3, F-D4: a fixed design's `D`, `G_p = G_t = ceil_mB(|trim| (1 + u) (O + dev_loud))` and
+/// `sigma = ceil_mB(F a)`, each from a value computed by rounded operations.
+fn stated_composition(composition: &CascadeComposition) -> CompositionBound {
+    let gain = PeakGain::Millibels(ceil_millibels(composition.peak_gain, Rounding::Computed));
+    CompositionBound::Stated {
+        decay: TailDecay(composition.decay),
+        peak_gain: gain,
+        tail_gain: gain,
+        stall: FlushStall::Level(ceil_millibels(composition.stall, Rounding::Computed)),
+    }
+}
+
+/// Whether a linear value handed to [`ceil_millibels`] is exactly the value it states, or a value
+/// computed by rounded operations, which may lie a few `2^-53` below it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Rounding {
+    Exact,
+    Computed,
+}
+
+/// `ceil_mB(g) = ceil(2000 log10 g)` (#1465 F-D3), with `math::log`, so every target computes the
+/// same value, and rounded up: `x = 2000 log(g) / ln 10` carries a few `2^-53` relative errors (the
+/// logarithm within one ulp, the product and the quotient), and a computed `g` a few more. The
+/// ceiling is taken of `x + |x| 2^-30`, plus `2^-30` mB for a computed `g`; an exact `g = 1` stays
+/// `0` (`log(1) = 0` exactly). `g` is positive and finite.
+fn ceil_millibels(g: f64, rounding: Rounding) -> i32 {
+    const MARGIN: f64 = 1.0 / 1_073_741_824.0;
+    let x = 2000.0 * math::log(g) / core::f64::consts::LN_10;
+    let absolute = match rounding {
+        Rounding::Exact => 0.0,
+        Rounding::Computed => MARGIN,
+    };
+    let up = x + x.abs() * MARGIN + absolute;
+    let ceiling = -math::floor(-up);
+    assert!(
+        ceiling.is_finite() && ceiling.abs() < f64::from(i32::MAX),
+        "a millibel value of a finite positive gain"
+    );
+    ceiling as i32
+}
+
+/// `2^-126`, the smallest normal `f32`: one rounded operation's underflow.
+const UNDERFLOW: f64 = 1.0 / 85_070_591_730_234_615_865_843_651_857_942_052_864.0;
+
+/// #1465 F-D3: a channel with both filters disabled is `y = fl(x trim)`: no tail (`D = 0`, rest
+/// `ZERO`), `G_p = G_t = ceil_mB(|trim|)` when the product is exact (a power-of-two trim, 0 dB
+/// included, up to underflow) and `ceil_mB(|trim| (1 + u))` otherwise, and `sigma` one underflow.
+fn memoryless_channel(lane: &InputLane) -> NodeTailBound {
+    let trim = lane.trim_signed.abs();
+    let power_of_two = trim.is_normal() && trim.to_bits() & 0x007f_ffff == 0;
+    let gain = if power_of_two {
+        ceil_millibels(f64::from(trim), Rounding::Exact)
+    } else {
+        ceil_millibels(f64::from(trim) * (1.0 + U), Rounding::Computed)
+    };
+    NodeTailBound {
+        composition: CompositionBound::Stated {
+            decay: TailDecay(0),
+            peak_gain: PeakGain::Millibels(gain),
+            tail_gain: PeakGain::Millibels(gain),
+            stall: FlushStall::Level(ceil_millibels(UNDERFLOW, Rounding::Exact)),
+        },
+        ..NodeTailBound::ZERO
+    }
+}
+
+/// The bound of a design with both filters disabled on both channels: the maximum over the two
+/// channels of [`memoryless_channel`]. Preparation reports it without a walk or a charge
+/// (`crate::input_section_bounds`), as [`fixed_input_bound`] does.
+pub(crate) fn memoryless_input_bound(lanes: [&InputLane; 2]) -> NodeTailBound {
+    memoryless_channel(lanes[0]).max(memoryless_channel(lanes[1]))
 }
 
 /// What a fixed input section's bound depends on: the rate, and per channel the seven words of each
@@ -162,7 +243,7 @@ fn fixed_input_walk(
         }
         if count == 0 {
             let zero = ChargedInputBound {
-                bound: NodeTailBound::ZERO,
+                bound: memoryless_channel(lane),
                 frames: 0,
                 charge: 0,
             };
@@ -182,12 +263,18 @@ fn fixed_input_walk(
         });
         (charged, walk.frames)
     };
-    // A memoryless design (no section enabled on either channel) walks and charges nothing.
+    // A memoryless design (no section enabled on either channel) walks and charges nothing; it
+    // states the larger of its two channels' gains.
     if lanes
         .iter()
         .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
     {
-        return channel(lanes[0], 0);
+        let memoryless = ChargedInputBound {
+            bound: memoryless_input_bound(lanes),
+            frames: 0,
+            charge: 0,
+        };
+        return (Some(memoryless), 0);
     }
     let (left, left_walked) = channel(lanes[0], budget);
     let Some(left) = left else {
@@ -219,8 +306,9 @@ fn fixed_input_walk(
 
 /// #1457 D1 (Amendments 3 and 4): the fixed charge of each enabled section a design's computation
 /// walks, in frame-equivalents (both channels' sections when they differ, one channel's when they
-/// are the same). A design has no fixed cost of its own beyond its sections' (the calibration's
-/// per-design term is negative at every rate), so it carries no other charge.
+/// are the same). A design carries no other charge: its sections' charges cover every measured
+/// class's fixed cost (the calibration's per-design term is within its noise, -1.39 to +2.83 us
+/// in #1465's measured rounds).
 ///
 /// A frame-equivalent is 18.5 ns on the CI-class runner: the maximum over every calibration point
 /// measured, rounded up to the next half nanosecond (#1474 and root's rulings: every class, and a
@@ -231,13 +319,17 @@ fn fixed_input_walk(
 /// cheap two-section designs 12.8-16.1 ns and typical designs (an HPF at 20-80 Hz into an LPF at
 /// 16-20 kHz) 15.0-16.5 ns (medians of five runs). The largest single sample is 18.25 ns (a typical
 /// design at +24 dB, 44.1 kHz, median 16.52 ns), so 18.5 ns is above every sample recorded. The
-/// largest measured fixed cost per section is 7.03 us (a two-section cascade at 96 kHz, 380.0
-/// frame-equivalents; 7.025-7.0275 us before the print's rounding, 379.7-379.9), so 380
-/// frame-equivalents (rounded up to a ten, 7.03 us) bound the fixed cost of every class measured.
+/// largest measured fixed cost per section is 9.49 us since #1465 added each walk's composition
+/// closed form (a two-section cascade at 96 kHz, 512.7 frame-equivalents; it was 7.03 us, 380,
+/// before), so 520 frame-equivalents (rounded up to a ten, 9.62 us) bound the fixed cost of every
+/// class measured. #1465's calibration also measured frame classes above 18.5 ns net of the fixed
+/// cost (its attempt record); the frame-equivalent is restated only by root's ruling on it.
 /// Calibrated with `examples/input_bound_budget.rs calibrate` and confirmed against every gate-2
-/// family; the classes, rates and runs are in #1474's attempt record. A change to the walk reruns
-/// the calibration and restates the frame-equivalent and this charge.
-pub const INPUT_BOUND_SECTION_CHARGE: u64 = 380;
+/// family; the classes, rates and runs are in #1474's and #1465's attempt records (#1465's
+/// measured intercepts: one section at most 9.20 us, two at most 18.97 us, against 9.62 and
+/// 19.24 us charged). A change to the walk reruns the calibration and restates the
+/// frame-equivalent and this charge.
+pub const INPUT_BOUND_SECTION_CHARGE: u64 = 520;
 
 /// #1457 D1: the budget of one preparation's design bounds, in frame-equivalents, charged in strip
 /// order (`crate::input_section_bounds`). Each distinct design computed charges the frames it walks
@@ -254,9 +346,9 @@ pub const INPUT_BOUND_SECTION_CHARGE: u64 = 380;
 pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
 
 /// #1457 D2: the entry cap of [`InputBoundCache::new`]. The cache holds only designs with an
-/// enabled section, and such a design charges at least 637 frame-equivalents (a walk of at least
+/// enabled section, and such a design charges at least 777 frame-equivalents (a walk of at least
 /// 257 frames, one 256-frame block of the majorant pass and one deviation frame, plus one section's
-/// charge). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 637` = 2,370 designs
+/// charge). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 777` = 1,943 designs
 /// exactly, and stops one more: the cap holds a whole preparation's designs. A rebuild of an
 /// unchanged session is served entirely from the cache only while the cache has not been cleared
 /// since that session's designs were inserted: a cache shared by several sessions (an engine's,

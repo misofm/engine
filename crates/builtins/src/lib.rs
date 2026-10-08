@@ -3555,14 +3555,16 @@ fn input_section_bounds_within(
             if let Some(bound) = designs.get(&key) {
                 return Ok(*bound);
             }
-            // A memoryless design (both filters disabled on both channels) has the zero bound and
-            // walks nothing, so it is neither computed, charged nor cached.
+            // A memoryless design (both filters disabled on both channels) has no tail and walks
+            // nothing, so it is neither computed, charged nor cached; it states its gain-only
+            // composition (#1465), as `input_section_bound` does.
             if lanes
                 .iter()
                 .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
             {
-                designs.insert(key, NodeTailBound::ZERO);
-                return Ok(NodeTailBound::ZERO);
+                let bound = tail::memoryless_input_bound(lanes);
+                designs.insert(key, bound);
+                return Ok(bound);
             }
             // A spent budget walks nothing more: every other design reports the live bound
             // without a walk.
