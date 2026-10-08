@@ -112,11 +112,12 @@ aarch64_row aarch64-linux-android
 # app links is not. A staticlib links nothing, so no Xcode is needed. Each call is charged to a
 # crate by the assembly's DWARF inline records (the release profile keeps line tables): to the
 # innermost function holding it that belongs to a product crate, so a fill inlined from `builtins`
-# into `builtins-compiler` stays `builtins`'. The 5 calls left are preparation code, none
-# reachable from render (rows in scripts/lib/aarch64-known-defects.py). The judge reads the
-# counts: a row at zero, a count above its ceiling, a crate with calls and no row, calls charged to
-# a crate outside the product closure, or a row for a crate outside it each fail here. The defect
-# reads fixed only when every row is gone. Until #1472 the ratchet read each product crate's
+# into `builtins-compiler` stays `builtins`'. Any other reference to `_memset_pattern16` (a tail
+# call `b`, an address load) is refused, so a call cannot leave the count. The 5 calls left are
+# preparation code, none reachable from render (rows in scripts/lib/aarch64-known-defects.py). The
+# judge reads the counts: a row at zero, a count above its ceiling, a crate with calls and no row,
+# calls charged to a crate outside the product closure, or a row for a crate outside it each fail
+# here. The defect reads fixed only when every row is gone. Until #1472 the ratchet read each product crate's
 # pre-link rlib assembly; that form counted code that LTO removes (`host-core` 4, `soft-clip` 1)
 # and missed code LTO inlines across crates, and it caught nothing this count does not, since
 # every product crate ships only through `capi`.

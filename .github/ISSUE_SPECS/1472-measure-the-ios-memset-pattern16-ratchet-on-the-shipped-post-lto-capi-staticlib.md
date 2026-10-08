@@ -91,8 +91,12 @@ assembly allows it.
 
 ## Test value
 
-The self-test cases defend the judge's refusals on the new count format; gates 2 and 3 defend that
-the shipped library, not a pre-link rlib, is what is counted.
+The self-test cases defend the judge's refusals on the new count format. Gates 2 and 3 defend that
+a new call in a crate is caught and named, but alone they do not prove that the shipped library is
+what is counted: the removed pre-link scan would also go red on both. What proves the counted
+artifact is the re-based row values: post-LTO `builtins` 4 and `lane` 1, with the pre-link
+`host-core` 4 and `soft-clip` 1 rows gone (pre-link: `builtins` 5, `host-core` 4, `soft-clip` 1).
+(Corrected by root's ruling of 2026-10-08.)
 
 ## Dependencies
 
@@ -190,3 +194,63 @@ Also run: `scripts/check-workspace-policy.sh` ok; `scripts/check-ci-path-routing
 Open: D1 counts `bl` only, as frozen. A tail call `b _memset_pattern16` would not be counted (none
 today). `docs/TARGET_MATRIX.md:10` (the platform table, outside the authorized paragraph) still
 says the scan runs "over every product crate".
+
+### Attempt 1 follow-up (2026-10-08, implementer; root's rulings of 2026-10-08)
+
+Applies the verdict on attempt 1 (`/home/bl/misofm/submix-verdicts/1472-attempt1.md`, PASS).
+
+- **Root's amendment of D1 (ruling, 2026-10-08).** The count reads every `_memset_pattern16`
+  reference in the post-LTO assembly and refuses any that is not a `bl` line in `__TEXT,__text`
+  (`MEMSET_REFERENCE` in `Assembly.__init__`). A tail call `b _memset_pattern16` or an address
+  load now turns the gate red instead of leaving the count. The verifier found no such reference in
+  the shipped file today (only the five `bl` lines). Self-test case "a tail call" (the last `bl`
+  of the synthetic function as `b`).
+- **Test value (root's ruling, 2026-10-08).** The Test value section is corrected: gates 2 and 3
+  alone would also go red under the removed pre-link scan; the re-based row values (`builtins` 4,
+  `lane` 1; `host-core` and `soft-clip` gone) are what prove that the shipped library is counted.
+- **`docs/TARGET_MATRIX.md:10` (root authorized, 2026-10-08).** The platform table now names the
+  scan's artifact: "the release-assembly scan `ios-asm-memset-pattern16` of the post-LTO `capi`
+  staticlib, charged per product crate".
+- **MINOR-2.** Attempt 1's record said no case isolates the unit-end check. That was false. New
+  case "a unit whose DIE tree does not close": the compile unit's closing `.byte 0` deleted. The
+  unit length still matches its labels, so only the `or stack` part of the check refuses it.
+- **NIT-2.** Two synthetic variants, so the self-test catches what only the real-assembly rows
+  caught: `synthetic_assembly(nested_module=True)` declares `inner` in a module `crate_a` inside
+  `crate_b` (as `lane::kernels::builtins` is named like the crate `builtins`), and
+  `synthetic_assembly(leading_unit=True)` puts a 25-byte unit first, so the main unit's references
+  are unit-relative at a nonzero offset. Both must count `{crate-a: 1, crate-b: 2}`.
+- **NIT-3.** `count_memset` tests a frame's crate against the product set, not against `counts`,
+  so a call charged to a non-product label crate cannot capture a later call's charge. No case:
+  the run is refused either way, and only the message changed.
+- **NIT-4.** A `.byte`/`.short` operand that is not a decimal number is refused; only `.long` and
+  `.quad` may be symbols. Case "a .byte operand that is not a decimal number": `DW_AT_external`'s
+  attribute code as `0x3f`. Zero-filled it reads as attribute 0, which the count ignores, so the
+  count would stay right and only this check refuses it.
+- **NIT-5.** The two comment lines over 100 columns (58, 64) are wrapped.
+- **Note (NIT-6).** With innermost-product-frame attribution, every fill in a generic `lane` helper,
+  inlined into any crate, is charged to `lane`'s one row. Replacing one such fill with another (fix
+  `lanes_below`, add a render-path fill in another `lane` helper) leaves the count unchanged and
+  would not show in the ratchet. The log line of each call names its function, so a reviewer can
+  see the swap; the count cannot.
+
+**Mutation runs** (`--self-test` on a mutated copy; each reverted is GREEN):
+
+| mutation | result |
+|---|---|
+| tail-call refusal removed (`if False:`) | RED, `AssertionError: a tail call` |
+| unit-end check without `or stack` | RED, `AssertionError: a unit whose DIE tree does not close` |
+| unit-end check removed whole | RED, same case |
+| innermost namespace (`crate = attributes.get(AT_NAME) if crate is None else crate`) | RED, `AssertionError: a module named like another crate` |
+| unit offset dropped (`value += 0`) | RED, refused: `line 6: a function holding the memset call names no crate` (the leading-unit case) |
+| non-decimal `.byte` accepted as a symbol | RED, `AssertionError: a .byte operand that is not a decimal number` |
+
+A first innermost-namespace mutant (`crate = crate or ...`) stayed GREEN only because the
+synthetic string offset of `crate_a` is 0, which is falsy; the `is None` form is the real defect.
+
+**Gates.** `python3 -B scripts/lib/aarch64-known-defects.py --self-test`: PASS.
+`scripts/check-cross-targets.sh`: PASS (2m04s; run when the disk had 41.9 GiB free, after it had
+been 23.0 GiB at the start). The real post-LTO file passes the new refusals (no non-`bl` reference,
+no non-decimal `.byte`/`.short`), and the log charges the same five calls (now at lines 56709,
+85417, 627300, 628327, 629659 on `d060b8a70`): `builtins` 4, `lane` 1.
+`scripts/check-workspace-policy.sh`: ok. `scripts/check-ci-path-routing.py` and
+`scripts/test-ci-path-routing.py`: passed. No engine source changed; no rendered bit moves.

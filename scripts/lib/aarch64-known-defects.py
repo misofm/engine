@@ -55,17 +55,17 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 
 # Product crate -> (owning issue, ceiling): `bl _memset_pattern16` calls charged to the crate in
 # `capi`'s post-LTO `aarch64-apple-ios` release staticlib assembly, as
-# `scripts/check-cross-targets.sh` emits it and `count_memset` charges them. LLVM's loop-idiom pass rewrites a loop that stores one
-# constant `f32` pattern into `llvm.experimental.memset.pattern`, which only Darwin lowers to this
-# libc call.
+# `scripts/check-cross-targets.sh` emits it and `count_memset` charges them. LLVM's loop-idiom
+# pass rewrites a loop that stores one constant `f32` pattern into
+# `llvm.experimental.memset.pattern`, which only Darwin lowers to this libc call.
 #
 # History, on the per-crate pre-link rlib assembly that the ratchet read until #1472: #1017
 # attempt 2 counted 3,494 calls on Rust 1.97.1; #1112, #1328, its amendment A9 and its follow-up
-# lowered that to 2,122 by removing eight-lane AArch64 code and by carrying constants as words. #1451 found the
-# cause of nearly all of them: `wide`'s `splat` is `transmute([elem; N])`, rustc lowers that array
-# repeat to a store loop, and every `Lane::splat` in a kernel became such a loop; `lane` now builds
-# its splats as array literals (`crates/lane/src/wide_impl.rs`): 2,122 -> 16. #1456 removed the
-# `true-peak-limiter`'s 6 (`clear_runtime` and `ChannelState::new`): 16 -> 10.
+# lowered that to 2,122 by removing eight-lane AArch64 code and by carrying constants as words.
+# #1451 found the cause of nearly all of them: `wide`'s `splat` is `transmute([elem; N])`, rustc
+# lowers that array repeat to a store loop, and every `Lane::splat` in a kernel became such a loop;
+# `lane` now builds its splats as array literals (`crates/lane/src/wide_impl.rs`): 2,122 -> 16.
+# #1456 removed the `true-peak-limiter`'s 6 (`clear_runtime` and `ChannelState::new`): 16 -> 10.
 #
 # #1472 re-based the rows on the shipped library, where fat LTO keeps 5 calls, all in preparation
 # code reached from `builtins-compiler`'s `into_graph_artifact_with_banks` and from `builtins`'
@@ -191,9 +191,12 @@ def parse_counts(text: str) -> dict[str, int]:
 # it that belongs to a product crate (an inlined `core`, `alloc` or `std` frame such as
 # `<[T]>::fill` is skipped, so the fill is charged to the crate that called it). A call with no
 # product frame is charged to its function label's crate, which the judge then refuses as not a
-# product crate.
+# product crate. Every reference to `_memset_pattern16` in the file is read, and any that is not a
+# `bl` line in `__TEXT,__text` (a tail call `b _memset_pattern16`, an address load) is refused, so
+# a call cannot leave the count by changing its form (#1472 follow-up).
 
 MEMSET_CALL = "\tbl\t_memset_pattern16"
+MEMSET_REFERENCE = re.compile(r"(?<![\w$.])_memset_pattern16(?![\w$.])")
 DWARF_SECTIONS = ("__debug_abbrev", "__debug_info", "__debug_str", "__debug_ranges")
 DIRECTIVE_SIZES = {".byte": 1, ".short": 2, ".long": 4, ".quad": 8}
 TAG_COMPILE_UNIT, TAG_INLINED = 0x11, 0x1D
@@ -256,6 +259,9 @@ class Assembly:
         in_text = False
         for number, line in enumerate(lines, 1):
             line = line.rstrip("\n")
+            if MEMSET_REFERENCE.search(line) and not (in_text and line == MEMSET_CALL):
+                raise Refused(f"line {number}: a reference to _memset_pattern16 that is not a "
+                              f"`bl` call in __TEXT,__text: {line.strip()!r}")
             if line.startswith("\t.section\t"):
                 segment, _, rest = line.split("\t")[2].partition(",")
                 name = rest.split(",")[0]
@@ -288,9 +294,13 @@ class Assembly:
                 size = DIRECTIVE_SIZES[directive]
                 if re.fullmatch(r"-?[0-9]+", operand):
                     current.data += (int(operand) % (1 << (8 * size))).to_bytes(size, "little")
-                else:
+                elif size in (4, 8):
                     current.symbols[len(current.data)] = (size, operand)
                     current.data += bytes(size)
+                else:
+                    # Only an offset (`.long`) or an address (`.quad`) is a symbol. The LEB and
+                    # children reads take raw bytes, so any other operand would be misread.
+                    raise Refused(f"line {number}: {directive} {operand!r} is not a decimal number")
             elif directive in (".ascii", ".asciz"):
                 current.data += ast.literal_eval("b" + operand)
                 if directive == ".asciz":
@@ -496,6 +506,7 @@ def count_memset(assembly: Assembly, products: list[str]) -> tuple[dict[str, int
     call: its line, its function label and that label's crate, and the crate it is charged to."""
     entries, parents, frames = memset_frames(assembly)
     names = {product.replace("-", "_"): product for product in products}
+    product_set = set(products)
     counts = {product: 0 for product in products}
     report = []
     for call in assembly.calls:
@@ -510,7 +521,7 @@ def count_memset(assembly: Assembly, products: list[str]) -> tuple[dict[str, int
         crates = [names.get(debug_string(assembly, crate), debug_string(assembly, crate))
                   for crate in crates]
         label_crate = crates[-1]
-        charged = next((crate for crate in crates if crate in counts), label_crate)
+        charged = next((crate for crate in crates if crate in product_set), label_crate)
         via = next(frame for frame, crate in zip(chain, crates) if crate == charged)
         _, attributes = entries[declaration(entries, via.offset)]
         name = debug_string(assembly, attributes.get(AT_LINKAGE_NAME, attributes.get(AT_NAME)))
@@ -530,11 +541,13 @@ def refuses(action) -> bool:
     return False
 
 
-def synthetic_assembly() -> str:
+def synthetic_assembly(nested_module: bool = False, leading_unit: bool = False) -> str:
     """A post-LTO-shaped assembly with one function, `crate_a::caller`, that inlines
     `crate_b::inner`, which inlines `core::fill`. Its memset calls lie in `fill` (line 6), in
     `inner` only (line 8) and in `caller` only (line 10). The DIE offsets in the comments are the
-    `__debug_info` offsets the references use."""
+    unit-relative offsets the references use. `nested_module` declares `inner` in a module of
+    `crate_b` named `crate_a` (as `lane::kernels::builtins` is named like the crate `builtins`);
+    `leading_unit` puts an empty unit first, so the unit's references are not absolute offsets."""
     strings = ["crate_a", "_Rcaller", "caller", "crate_b", "_Rinner", "inner", "core", "_Rfill",
                "fill"]
     at = {text: sum(len(earlier) + 1 for earlier in strings[:index])
@@ -553,16 +566,24 @@ def synthetic_assembly() -> str:
     namespace = lambda crate: [".byte\t2", f".long\t{at[crate]}"]  # noqa: E731
     declared = lambda linkage, name: [".byte\t3", f".long\t{at[linkage]}",  # noqa: E731
                                       f".long\t{at[name]}"]
-    info = (["Ldebug_info_start0:", ".short\t4", ".long\tLset1", ".byte\t8",
-             ".byte\t1", ".quad\tLfunc_begin0", ".long\tLset2"]  # 11: the unit
+    module = namespace("crate_a") + declared("_Rinner", "inner") + [".byte\t0"] \
+        if nested_module else declared("_Rinner", "inner")  # 89 (module), 94 (inner) when nested
+    inner, fill = (94, 110) if nested_module else (89, 104)
+    unit = ["Lset0 = Ldebug_info_end0-Ldebug_info_start0", ".long\tLset0",
+            "Ldebug_info_start0:", ".short\t4", ".long\tLset1", ".byte\t8",
+            ".byte\t1", ".quad\tLfunc_begin0", ".long\tLset2"]  # 11: the unit
+    info = (unit
             + namespace("crate_a") + declared("_Rcaller", "caller")  # 24, 29
             + [".byte\t4", ".quad\tLfunc_begin0", ".long\tLset3", ".long\t29"]  # 38: caller
-            + [".byte\t5", ".long\t89", ".long\tLset4"]  # 55: inner, inlined
-            + [".byte\t6", ".long\t104", ".quad\tLtmp0", ".long\tLset5"]  # 64: fill, inlined
+            + [".byte\t5", f".long\t{inner}", ".long\tLset4"]  # 55: inner, inlined
+            + [".byte\t6", f".long\t{fill}", ".quad\tLtmp0", ".long\tLset5"]  # 64: fill, inlined
             + [".byte\t0", ".byte\t0", ".byte\t0"]
-            + namespace("crate_b") + declared("_Rinner", "inner") + [".byte\t0"]  # 84, 89
-            + namespace("core") + declared("_Rfill", "fill") + [".byte\t0"]  # 99, 104
+            + namespace("crate_b") + module + [".byte\t0"]  # 84
+            + namespace("core") + declared("_Rfill", "fill") + [".byte\t0"]  # 99 (105 nested)
             + [".byte\t0", "Ldebug_info_end0:"])
+    if leading_unit:  # 25 bytes: a unit whose compile unit has no children
+        info = ["Lset8 = Ldebug_info_end8-Ldebug_info_start8", ".long\tLset8",
+                "Ldebug_info_start8:", *unit[3:], ".byte\t0", "Ldebug_info_end8:", *info]
     lines = [
         ".section\t__TEXT,__text,regular,pure_instructions",
         "_caller:", "Lfunc_begin0:", "\tnop", "Ltmp0:", MEMSET_CALL.strip(), "Ltmp1:",
@@ -570,7 +591,7 @@ def synthetic_assembly() -> str:
         ".section\t__DWARF,__debug_abbrev,regular,debug", "Lsection_abbrev:",
         *(f".byte\t{value}" for value in abbrev), ".byte\t0",
         ".section\t__DWARF,__debug_info,regular,debug", "Lsection_info:",
-        "Lset0 = Ldebug_info_end0-Ldebug_info_start0", ".long\tLset0", *info,
+        *info,
         "Lset1 = Lsection_abbrev-Lsection_abbrev", "Lset2 = Lfunc_end0-Lfunc_begin0",
         "Lset3 = Lfunc_end0-Lfunc_begin0", "Lset4 = Ldebug_ranges0-Ldebug_range",
         "Lset5 = Ltmp1-Ltmp0",
@@ -642,9 +663,27 @@ def self_test() -> None:
     assert count(text, ["crate-a", "crate-b"]) == {"crate-a": 1, "crate-b": 2}
     assert count(text, ["crate-a"]) == {"crate-a": 3}
     assert count(text, ["other"]) == {"other": 0, "crate_a": 3}
+    # A frame's crate is its outermost namespace: a module named like another crate does not move
+    # the charge (`lane::kernels::builtins` is not the crate `builtins`).
+    assert count(synthetic_assembly(nested_module=True), ["crate-a", "crate-b"]) == \
+        {"crate-a": 1, "crate-b": 2}, "a module named like another crate"
+    # DIE references are relative to their unit, which is not the first one in the real file.
+    assert count(synthetic_assembly(leading_unit=True), ["crate-a", "crate-b"]) == \
+        {"crate-a": 1, "crate-b": 2}, "a unit that does not start the section"
     outside = text.replace("Lfunc_end0:\n", f"Lfunc_end0:\n_other:\n{MEMSET_CALL}\n")
+    tail_call = f"{MEMSET_CALL}\nLfunc_end0:"
     for label, mutated in (
         ("a call outside every described function", outside),
+        # A sibling call has no `bl`: without the refusal it would leave the count silently.
+        ("a tail call", text.replace(tail_call, "\tb\t_memset_pattern16\nLfunc_end0:")),
+        # The unit's closing null removed: its length still matches its labels, but the DIE tree
+        # is left open.
+        ("a unit whose DIE tree does not close", text.replace(
+            "\t.byte\t0\nLdebug_info_end0:", "Ldebug_info_end0:")),
+        # DW_AT_external's attribute code in hex: zero-filled it reads as attribute 0, which the
+        # count ignores, so only the operand check can refuse it.
+        ("a .byte operand that is not a decimal number", text.replace(
+            "\t.byte\t63\n", "\t.byte\t0x3f\n")),
         # DW_AT_external's DW_FORM_flag_present (0x19, no bytes) read as form 0x02, which DWARF 4
         # does not define: the DIEs stay aligned, so only the form check can refuse it.
         ("an attribute form the reader does not know", text.replace(
