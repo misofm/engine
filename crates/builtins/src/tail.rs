@@ -524,7 +524,7 @@ pub const fn input_section_worst_case_pair(sample_rate: u32) -> Option<(f32, f32
 /// `None` off the launch rates (only a launch rate has a cutoff domain).
 ///
 /// Its composition states all five values of #1379 Amendment 1 H1 (#1466, #1467,
-/// [`live_stated_composition`]), or `Unstated` when they are not certified.
+/// `live_stated_composition`), or `Unstated` when they are not certified.
 #[must_use]
 pub fn input_section_live_bound(sample_rate: u32) -> Option<NodeTailBound> {
     let terms = input_section_live_envelope(sample_rate)?;
