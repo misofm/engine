@@ -99,3 +99,94 @@ the shipped library, not a pre-link rlib, is what is counted.
 - #1456 (stream G).
 
 ## Attempt record
+
+### Attempt 1 (2026-10-08, implementer)
+
+Anchors verified on `04fc3cc8f`: the per-crate rlib loop, `judge-memset`, the Android staticlib
+row, `IOS_MEMSET_CEILINGS` (`builtins` 5, `host-core` 4, `soft-clip` 1), the #1018 paragraph, and
+the release profile (`lto = "fat"`, `codegen-units = 1`, `debug = 1`).
+`scripts/check-ci-path-routing.py` pins two lines of the scan (the products file and the
+`judge-memset "$asm_out/counts" "$asm_out/products"` call); both are kept byte for byte.
+
+**D1, D2 (counted artifact and attribution).** The scan emits `capi` for `aarch64-apple-ios` as
+the release staticlib, in the Android row's form, and the new `count-memset` subcommand reads it.
+Rule used: **DWARF inline records, innermost product-crate frame.** With `debug = 1` the
+assembly keeps `__debug_info` as raw `.byte`/`.long`/`.quad` cells (no verbose comments). The
+counter decodes the abbreviation tables, the units and their DIEs, resolves `low_pc`/`high_pc`
+(`Lset = end-low`) and `DW_AT_ranges` (`Ldebug_rangesN`, entries relative to the unit's
+`Lfunc_beginN`) to code-label lines, and collects every subprogram and inlined subroutine whose
+code holds each `bl _memset_pattern16` line. A frame's crate is the outermost
+`DW_TAG_namespace` above its abstract origin. The call is charged to the innermost frame in a
+product crate, so a `core`/`alloc` frame such as `<[T]>::fill` is skipped. With no product frame,
+the function label's crate is charged, and the judge refuses it. Any DWARF it cannot read is
+refused: an unknown form, a unit that does not end at its length, a `high_pc` that is not an end
+label minus `low_pc`, or a call in zero or two described function bodies.
+Why not the alternatives: `.loc` gives only the innermost file, which here is a `core` file for
+two of the five calls (`slice/iter/macros.rs`, `iter/adapters/mod.rs`, at line 0). The
+unlinked Mach-O object has unrelocated addresses, so `llvm-symbolizer` and `llvm-dwarfdump
+--lookup` cannot read it (both tried). The `cross-target` runner has no LLVM tools, and the
+workflow is outside this slice.
+Example from the real assembly: line 629997, `bl _memset_pattern16` in the function label
+`builtins_compiler::PreparedBuiltinsSession::into_graph_artifact_with_banks`. The inline records
+put it in `lane::kernels::builtins::lanes_below::<f32x4>` (its `.loc` is
+`crates/lane/src/kernels/builtins.rs:95`, `*flag = 1.0`), so it is charged to `lane`.
+Limit: a frame's function name follows LLVM's location for the synthesized call. Line 54806
+(`BuiltinChain::new`) reports `builtins::zero` as its innermost frame. The crate is right, but
+the function is approximate.
+
+**Post-LTO counts (`04fc3cc8f` engine code):** 5 calls, the verifier's number.
+
+| line | charged to | via | function label (crate) |
+|---|---|---|---|
+| 54806 | builtins | `zero` (in `BuiltinChain::new`) | `BuiltinChain::new` (builtins) |
+| 85369 | builtins | `FaderMuteRampBuiltins::new` | same (builtins) |
+| 627638 | builtins | `BuiltinInputBank::new` | `into_graph_artifact_with_banks` (builtins-compiler) |
+| 628665 | builtins | `BuiltinFaderBank::new` | `into_graph_artifact_with_banks` (builtins-compiler) |
+| 629997 | lane | `lanes_below::<f32x4>` | `into_graph_artifact_with_banks` (builtins-compiler) |
+
+**D3.** Rows re-based to `builtins` 4 and `lane` 1 (both #1018). The `host-core` and `soft-clip`
+rows are deleted: their code is not in the shipped library (`SpectrumAnalyzer` and the soft-clip
+corpus do not appear in the post-LTO assembly). The judge also gives calls charged to a crate
+outside the product closure their own message.
+**The pre-link scan is removed.** Every product crate ships only through `capi`, so a pre-link
+call that LTO removes cannot reach a phone. One that LTO keeps is in the post-LTO count. The
+pre-link scan caught nothing the post-LTO count misses. It did count code no app links, and it
+missed calls inlined across crates.
+**D4.** The iOS eight-lane scan runs on the same post-LTO file, as the Android row does.
+
+**Gates.**
+1. `scripts/check-cross-targets.sh`: PASS (1m50s). The log lists the five calls above, then
+   `expected failure (#1018): builtins 4 calls` and `lane 1 calls`.
+2. Limiter mutation (`self.required_ring.fill(1.0); self.box_ring.fill(1.0)` in
+   `clear_runtime`): RED, `true-peak-limiter: 4 memset_pattern16 calls and no row`. The calls
+   are in `clear_runtime::<f32>` and `::<f32x4>`, 2 each, and the limiter is named. Reverted:
+   GREEN.
+3. `let mut probe = vec![0.0_f32; black_box(levels.len())]; probe.fill(1.0); black_box(&probe);`
+   in `builtins-compiler`'s `into_graph_artifact_with_banks` (no row): RED,
+   `builtins-compiler: 1 memset_pattern16 calls and no row`. The other 5 are charged as before.
+   Reverted: GREEN.
+4. `--self-test`: PASS. Mutation runs, each RED:
+   - The label's crate charged instead of the inline frame (D2).
+   - The innermost frame charged, `core` included.
+   - With no product frame, nothing charged instead of the label crate.
+   - The one-function-body check dropped. This goes RED as an uncaught `IndexError`, not as a
+     refusal.
+   - The unknown-form refusal dropped. The case changes a zero-byte `flag_present` to an
+     undefined form, so the DIEs stay aligned and only this check can refuse it.
+   - The `high_pc` check dropped.
+   - The judge reading product crates only (the new non-product case).
+
+   The judge's new non-product branch only words the message: with it dropped, the no-row
+   refusal still refuses (GREEN). With both dropped: RED. The unit-length check stays as an
+   invariant. A short unit is also refused by the section bounds check, so no case isolates it.
+5. Eight-lane mutation (`core::hint::black_box(wide::f32x8::splat(black_box(2.0)))` in
+   `lane::kernels::builtins::lanes_below`, compiled into the iOS library): RED,
+   `eight-lane code is back in the iOS library (#1112): 2 lines` (the inlined
+   `black_box<wide::f32x8_::f32x8>` names in `__debug_str`). Reverted: GREEN.
+
+Also run: `scripts/check-workspace-policy.sh` ok; `scripts/check-ci-path-routing.py` and
+`scripts/test-ci-path-routing.py` passed. No engine source changed. No rendered bit moves.
+
+Open: D1 counts `bl` only, as frozen. A tail call `b _memset_pattern16` would not be counted (none
+today). `docs/TARGET_MATRIX.md:10` (the platform table, outside the authorized paragraph) still
+says the scan runs "over every product crate".

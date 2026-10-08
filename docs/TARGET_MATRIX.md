@@ -186,19 +186,27 @@ AArch64 legs. Each open entry is an expected failure, by name:
   2,122 -> 16 calls, and the rows of `compressor`, `gate-expander`, `graph`,
   `multiband-compressor`, `parametric-eq` and `transient-shaper` were deleted at zero. #1456
   deleted the `true-peak-limiter` row (6 -> 0): its `clear_runtime`, which runs at a reset and on a
-  failed block, writes its `1.0` words as whole lane vectors with two planes per loop. The 10 left
-  are scalar fills of a real length, not lane splats:
+  failed block, writes its `1.0` words as whole lane vectors with two planes per loop.
+
+  Those counts read each product crate's pre-link rlib assembly. Since #1472 the ratchet counts
+  the library an iPhone app links: `capi`'s `aarch64-apple-ios` release staticlib after the
+  release profile's fat LTO, one module with every shipped function after cross-crate inlining.
+  Each call is charged to the innermost function holding it that belongs to a product crate,
+  read from the assembly's DWARF inline records. That form counts 5 calls, all preparation code
+  reached from `builtins-compiler`'s `into_graph_artifact_with_banks` and `builtins`'
+  constructors; the pre-link rows of `host-core` (its spectrum arrays) and `soft-clip` (its test
+  corpus) were code that no app links:
 
   | crate | calls | where |
   |---|---|---|
-  | `builtins` | 5 | preparation constructors: `lanes_below`'s flag fill, `InputStage::new`, `BuiltinFaderBank::new`, `FaderMuteRampBuiltins::new` |
-  | `host-core` | 4 | `SpectrumAnalyzer::analyze` and `analyze_continuous`, two `[SPECTRUM_FLOOR_DB; SPECTRUM_BIN_COUNT]` arrays each |
-  | `soft-clip` | 1 | the test corpus's `fill` |
+  | `builtins` | 4 | preparation constructors: `BuiltinChain::new`, `FaderMuteRampBuiltins::new`, and `BuiltinInputBank::new` and `BuiltinFaderBank::new` inlined into `builtins-compiler` |
+  | `lane` | 1 | `kernels::builtins::lanes_below`'s flag fill, inlined into `builtins-compiler` |
 
   None of these is reachable from render. #1018 stays open for these rows. There is no effect on
   `x86_64`, Linux AArch64 or `wasm32`. The expected failures are `ios-asm-memset-pattern16`, one
-  row per crate with its count as a ceiling, in `scripts/lib/aarch64-known-defects.py`, scanned by
-  `scripts/check-cross-targets.sh`. `capi` is scanned as an rlib and has none.
+  row per crate with its count as a ceiling, in `scripts/lib/aarch64-known-defects.py`, counted
+  and judged by `scripts/check-cross-targets.sh`, which scans the same post-LTO assembly for
+  eight-lane code (#1112).
 - **Resolved by #1017: tests that assumed eight lanes.** The seven test-only warnings
   (`host-core/tests/fp_environment.rs`, `lane/tests/fp_env.rs`) and the tests that asserted or
   returned on `Backend::current() == Simd8` (listed in

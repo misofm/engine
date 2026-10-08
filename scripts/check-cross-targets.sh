@@ -104,51 +104,51 @@ aarch64_row aarch64-linux-android
 # emits on every target and are not this defect; #1456 Amendment 1, Q3.) Until #1451 every
 # lane splat was such a loop (`wide`'s `splat` is `transmute([elem; N])`, an array-repeat store
 # loop); #1451 builds splats from an array literal in `Lane::splat` and `Lane::zero`, which removed
-# that cause (2,122 calls -> 16). #1456 removed the `true-peak-limiter`'s 6 (16 -> 10), the only
-# ones reachable from render. The 10 left are scalar fills of a real length, none reachable from
-# render: preparation constructors in `builtins`, `host-core`'s spectrum arrays and a `soft-clip`
-# test-corpus fill. This scan emits
-# every product crate's iOS release assembly (as an rlib, so `capi`'s cdylib is never linked and no
-# Xcode is needed) and counts those calls per crate.
-# scripts/lib/aarch64-known-defects.py holds one row per affected crate with its ceiling, and
-# judges the counts: a row at zero, a count above its ceiling, a crate with calls and no row, or a
-# row for a crate outside the product closure each fail here. The defect reads fixed only when every
-# row is gone. A fresh `--emit` path per run keeps cargo from treating a crate as fresh and
-# skipping its assembly.
+# that cause. #1456 removed the `true-peak-limiter`'s, the only ones reachable from render.
 #
-# The same assembly also proves that no eight-lane code is back in the AArch64 library (#1112).
+# The counted artifact (#1472) is the library an iPhone app links: `capi` as the release
+# staticlib, which the release profile's fat LTO makes one module, so its assembly is every
+# function the app ships, after inlining. A call that LTO adds or keeps is counted; code that no
+# app links is not. A staticlib links nothing, so no Xcode is needed. Each call is charged to a
+# crate by the assembly's DWARF inline records (the release profile keeps line tables): to the
+# innermost function holding it that belongs to a product crate, so a fill inlined from `builtins`
+# into `builtins-compiler` stays `builtins`'. The 5 calls left are preparation code, none
+# reachable from render (rows in scripts/lib/aarch64-known-defects.py). The judge reads the
+# counts: a row at zero, a count above its ceiling, a crate with calls and no row, calls charged to
+# a crate outside the product closure, or a row for a crate outside it each fail here. The defect
+# reads fixed only when every row is gone. Until #1472 the ratchet read each product crate's
+# pre-link rlib assembly; that form counted code that LTO removes (`host-core` 4, `soft-clip` 1)
+# and missed code LTO inlines across crates, and it caught nothing this count does not, since
+# every product crate ships only through `capi`.
+#
+# The same assembly also proves that no eight-lane code is back in the iOS library (#1112).
 # The phones run the 4-lane (NEON) width only, and the eight-lane items (`lane::Simd8`,
 # `BankWidth::Eight` and everything instantiated at them) exist only where `avx2` is enabled. Any
 # line that spells an eight-lane instantiation -- a function label, a call, or the name of a
-# function inlined into a four-lane caller, which the release profile's line tables keep -- fails
-# the row. `EIGHT_LANE` is the browser module's rule (scripts/check-web-audioworklet-callgraph.py).
-# On 089ef456, before #1112, eight crates matched (builtins 451 lines, multiband-compressor 255).
+# function inlined into a four-lane caller, which the line tables keep -- fails the row.
+# `EIGHT_LANE` is the browser module's rule (scripts/check-web-audioworklet-callgraph.py).
+# On 089ef456, before #1112, the per-crate scan matched eight crates (builtins 451 lines,
+# multiband-compressor 255).
 eight_lane='(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8'
 known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
 "${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
 asm_out="$(mktemp -d)"
 trap 'rm -rf "$asm_out"' EXIT
-while read -r crate; do
-    CARGO_TARGET_DIR="$base_target_dir/aarch64-apple-ios-asm" \
-        cargo rustc --quiet --locked --release --target aarch64-apple-ios -p "$crate" --lib \
-        --crate-type rlib -- --emit "asm=$asm_out/$crate.s"
-    [[ -s "$asm_out/$crate.s" ]] || fail "no iOS release assembly for $crate"
-    count="$(rg -c '^\tbl\t_memset_pattern16$' "$asm_out/$crate.s" || true)"
-    printf '%s %s\n' "$crate" "${count:-0}" >>"$asm_out/counts"
-    eight="$(rg -c "$eight_lane" "$asm_out/$crate.s")" || {
-        status=$?
-        ((status == 1)) || fail "the eight-lane scan could not read $crate's assembly (rg exit $status)"
-        eight=0
-    }
-    ((eight == 0)) || printf '%s %s\n' "$crate" "$eight" >>"$asm_out/eight"
-done <<<"$product_list"
+CARGO_TARGET_DIR="$base_target_dir/aarch64-apple-ios-asm" \
+    cargo rustc --quiet --locked --release --target aarch64-apple-ios -p capi --lib \
+    --crate-type staticlib -- --emit "asm=$asm_out/ios-capi.s"
+[[ -s "$asm_out/ios-capi.s" ]] || fail 'no iOS release assembly for capi'
 printf '%s\n' "$product_list" >"$asm_out/products"
+"${known_defects[@]}" count-memset "$asm_out/ios-capi.s" "$asm_out/products" "$asm_out/counts" ||
+    fail 'could not charge the iOS memset_pattern16 calls to crates; see above'
 "${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||
     fail 'ios-asm-memset-pattern16 moved; see above'
-if [[ -s "$asm_out/eight" ]]; then
-    printf 'eight-lane lines in iOS release assembly, by crate:\n' >&2
-    cat "$asm_out/eight" >&2
-    fail 'eight-lane code is back in the AArch64 product crates (#1112): the phones run four lanes only, so it can never execute; gate it with target_feature = "avx2"'
+if ios_eight="$(rg -n "$eight_lane" "$asm_out/ios-capi.s")"; then
+    head -n 20 <<<"$ios_eight" >&2
+    fail "eight-lane code is back in the iOS library (#1112): $(wc -l <<<"$ios_eight") lines; the phones run four lanes only, so it can never execute; gate it with target_feature = \"avx2\""
+else
+    status=$?
+    ((status == 1)) || fail "the iOS eight-lane scan could not read the assembly (rg exit $status)"
 fi
 
 # --- no eight-lane code in the Android library (#1112) -----------------------------------------
