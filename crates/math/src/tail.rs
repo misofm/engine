@@ -630,14 +630,15 @@ pub struct LiveComposition {
     /// order), each anchored at `T`, or at the window's end when `T` lies in the window.
     pub groups: Vec<HalfCertificate>,
     /// `g_p`: the output at any frame of any admitted history is at most
-    /// `peak_gain X + peak_stall` (H1 (N1)). The window's first frame with zero current input,
-    /// relative part, plus the current input through both sections' feedthroughs.
+    /// `peak_gain X + peak_stall` (H1 (N1)). The input part, with the second section bounded
+    /// along its own zones (issue #1485): its exposure `Gamma` on the first section's output,
+    /// split into a fast part on that output's peak and a slow part telescoped through the
+    /// potential.
     pub peak_gain: f64,
     /// `g_t`: the part of the output that an input from `M >= N` on produces is at most
-    /// `tail_gain epsilon` at every frame from `M` (H1 (N2)), `epsilon` that input's peak:
-    /// `g W* + g L_1 L_2`, the window input's part (the 64 frames a ramp may still be in flight,
-    /// and its settled continuation over every group) and the settled input's part (both
-    /// sections' settled designs, every zone).
+    /// `tail_gain epsilon` at every frame from `M` (H1 (N2)), `epsilon` that input's peak: each
+    /// section along its in-flight ramp through the window, then every pair of settled zones
+    /// (issue #1485).
     pub tail_gain: f64,
     /// `sigma_p`: the flush part of the output bound with the tail at frame `0`, which bounds the
     /// flush part at every frame (H1 (N1)).
@@ -921,8 +922,8 @@ pub struct LiveCascade {
     /// rounding relative to the state.
     pub first_output_rounding: f64,
     /// The supremum of `||(m1, m2)||_V*` over the second section's mix words: its output row on
-    /// the state is `1/2 (m1, m2) (I + A)` too. Read only by the live tail gain (issue #1467),
-    /// whose settled input term bounds the second section by its own zone.
+    /// the state is `1/2 (m1, m2) (I + A)` too. Read by the live peak and tail gains (issues
+    /// #1467, #1485), which bound the second section along its own zones.
     pub second_mix_row: f64,
     /// [`output_rounding`]'s `omega_state` over the second section's words.
     pub second_output_rounding: f64,
@@ -1023,6 +1024,14 @@ const ZONE_WIDEST: f64 = 0.02;
 const FIXED_POINT_MARGIN: f64 = 1.0 / 1_099_511_627_776.0;
 /// The most passes [`live_zones`] makes before it gives up: no bound above it is stated.
 const ZONE_PASSES: usize = 4096;
+/// The frames of the second section's exposure `Gamma` the live peak gain sums explicitly
+/// (issue #1485, [`LiveBound::exposure`]); the rest is a certified geometric tail. Any horizon is
+/// sound; the tail's certificate needs the exposure's shape settled, which takes about the
+/// frames a path needs to cross the domain (`64` per ramp), far below this.
+const EXPOSURE_HORIZON: u64 = 1024;
+/// The relative margin of the exposure tail's rate above `rho_ramp`, far above the few `f64`
+/// roundings of its check (each side rounded once and moved by [`STEP_UP`]).
+const EXPOSURE_MARGIN: f64 = 1.0 / 1_099_511_627_776.0;
 
 /// `h(x) = sqrt(2 - x^2) - 1`, the exact pole circle's height at `Re p = x`, in a form without
 /// cancellation (`|x| < 1`).
@@ -1382,7 +1391,7 @@ fn multiply4(a: &Square4, b: &Square4) -> Square4 {
 }
 
 /// The larger of `a` and `b`, or a NaN when either is one: a fold with it carries a NaN to the
-/// caller's cap, where `f64::max` would drop it (issue #1467's arrival window).
+/// caller's check, where `f64::max` would drop it.
 fn nan_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
@@ -1637,122 +1646,319 @@ impl<'a> LiveBound<'a> {
         ]
     }
 
-    /// The window input's part of the live tail gain (issue #1467; the derivation's "The live tail
-    /// gain", (W)): an input of at most `g` on the window's first `ramp_frames` frames and zero
-    /// state before them. At window frame `j` the first section's state in zone `k` is at most
-    /// `Phi^(j)_k g`, with `Phi^(0) = 0` and
-    /// `Phi^(j+1)_k = max_{i in nb(k)} (rho_i Phi^(j)_i + beta_i [j < ramp_frames])` (`j` frames
-    /// from zero, not [`live_zones`]' fixed point over every history); its output is at most the
-    /// largest `(1/2 |m| q_k + omega) Phi^(j)_k g` plus the feedthrough; the second section is
-    /// propagated frequency-blind with `rho_ramp`, as in [`Self::window`]. Returns the outputs at
-    /// the window's `ramp_frames + 1` frames, the second section's state after them and the first
-    /// section's at the last of them, the shape [`Self::settled_start`] reads.
-    fn arrival_window(&self, g: f64) -> LiveWindow {
-        let envelope = &self.live.envelope;
+    /// The second section's exposure along its own path of zones (issue #1485; the derivation's
+    /// "(N1): `G_p`"): `Gamma(m)` for `m = 1..=EXPOSURE_HORIZON + 1` (at index `m - 1`), the
+    /// largest coefficient
+    /// `beta_{l_0} (prod_{i=1}^{m-1} rho_{l_i}) (1/2 |m_2| q_{l_m} + omega_2)` of an input `y` at
+    /// one frame in the second section's output `m` frames later, over every path `l_0, ..., l_m`
+    /// of neighbouring zones, and a bound of `sum_{m > EXPOSURE_HORIZON + 1} Gamma(m)`.
+    ///
+    /// With `B_0(l) = 1/2 |m_2| q_l + omega_2` and `B_r(l) = rho_l max_{l' in nb(l)} B_(r-1)(l')`
+    /// (`r` frames of the path from `l`, then its exposure), `Gamma(m) = max_l beta_l
+    /// max_{l' in nb(l)} B_(m-1)(l')`; every value is rounded up and floored at [`TAU`]. The
+    /// tail: with `c = B_H` (`H` the horizon) and `lambda = rho_ramp (1 + EXPOSURE_MARGIN)`, the
+    /// check `rho_l max_{nb(l)} c <= lambda c(l)` at every zone gives `B_(H+s) <= lambda^s c` by
+    /// induction (the step is monotone), so `Gamma(m) <= lambda^(m - H - 1) Gamma(H + 1)` and the
+    /// tail is at most `Gamma(H + 1) lambda / (1 - lambda)`. `None` when the check fails.
+    fn exposure(&self) -> Option<(Vec<f64>, f64)> {
+        let live = self.live;
         let zones = &self.zones.zones;
-        let rho = envelope.rho_ramp;
-        let half_row = 0.5 * self.live.first_mix_row;
-        let omega = self.live.first_output_rounding;
-        // `1/2 |m| q_k + omega` per zone.
-        let rows: Vec<f64> = zones
-            .iter()
-            .map(|zone| (half_row * zone.sum_norm + omega) * SLACK)
-            .collect();
-        let mut phi = std::vec![0.0_f64; zones.len()];
-        let mut sigma = 0.0_f64;
-        let mut energy = 0.0_f64;
-        let mut capped = false;
-        let mut cap = |value: f64| {
-            // A NaN counts as capped, as in [`Self::window`].
-            capped |= value >= self.cap || value.is_nan();
-            value.min(self.cap)
-        };
-        let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
-        for frame in 0..=self.ramp_frames {
-            let input = if frame < self.ramp_frames { g } else { 0.0 };
-            let state_output = rows
+        let half_row = 0.5 * live.second_mix_row;
+        let omega = live.second_output_rounding;
+        let largest = |values: &[f64], zone: &PoleZone| {
+            values[zone.first_neighbour..=zone.last_neighbour]
                 .iter()
-                .zip(&phi)
-                .fold(0.0_f64, |sup, (row, phi)| nan_max(sup, row * phi * SLACK));
-            let first = (state_output * g * SLACK + envelope.output_input * input) * SLACK;
-            outputs.push(cap((envelope.output_state * sigma
-                + envelope.output_input * first)
-                * SLACK));
-            sigma = cap((rho * sigma + envelope.input * first) * SLACK);
-            if frame == self.ramp_frames {
-                energy = cap(phi.iter().fold(0.0_f64, |sup, phi| nan_max(sup, *phi)) * g * SLACK);
-            } else {
-                // `Phi^(j+1)` from `Phi^(j)`: this frame (`j < ramp_frames`) carries the input.
-                phi = zones
+                .fold(0.0_f64, |sup, value| nan_max(sup, *value))
+        };
+        let mut exposure: Vec<f64> = zones
+            .iter()
+            .map(|zone| ((half_row * zone.sum_norm + omega) * SLACK).max(TAU))
+            .collect();
+        let horizon = EXPOSURE_HORIZON as usize;
+        let mut gamma = Vec::with_capacity(horizon + 1);
+        for m in 1..=horizon + 1 {
+            gamma.push(
+                zones
                     .iter()
-                    .map(|zone| {
-                        (zone.first_neighbour..=zone.last_neighbour)
-                            .map(|i| (zones[i].contraction * phi[i] + zones[i].input) * STEP_UP)
-                            .fold(0.0_f64, nan_max)
-                    })
+                    .map(|zone| zone.input * largest(&exposure, zone) * SLACK)
+                    .fold(0.0_f64, nan_max),
+            );
+            if m <= horizon {
+                exposure = zones
+                    .iter()
+                    .map(|zone| (zone.contraction * largest(&exposure, zone) * SLACK).max(TAU))
                     .collect();
             }
         }
-        LiveWindow {
-            state: sigma,
-            energy,
-            outputs,
-            capped,
+        let lambda = live.envelope.rho_ramp * (1.0 + EXPOSURE_MARGIN);
+        let certified = lambda < 1.0
+            && zones.iter().zip(&exposure).all(|(zone, value)| {
+                zone.contraction * largest(&exposure, zone) * STEP_UP <= lambda * value / STEP_UP
+            });
+        if !certified {
+            return None;
         }
+        let tail = gamma[horizon] * lambda / (1.0 - lambda) * SLACK;
+        Some((gamma, tail))
     }
 
-    /// The window input's part after the window (the derivation's (W), "After the window"): per
-    /// settled group, the supremum over every frame of the relative settled system's output from
-    /// [`Self::arrival_window`]'s end. The state is stepped (each step rounded up) until the
-    /// computed next state is componentwise at most the current one; from there every later exact
-    /// state is at most it, so the outputs read so far bound every frame.
-    fn arrival_continuation(&self, window: &LiveWindow, g: f64) -> Result<f64, TailBoundError> {
-        let mut peak = 0.0_f64;
-        for terms in &self.terms {
-            let mut current = self.settled_start(terms, window, g, 0.0);
-            // Without the flush the constant component is unused (as in [`Self::tail`]).
-            current[3] = 0.0;
-            let (system, _, output_row) = self.settled_system(terms, 0.0);
-            let mut frames = 0_u64;
-            loop {
-                peak = peak.max(dot4(&output_row, &current));
-                let next = apply4(&system, &current);
-                if next.iter().zip(&current).all(|(next, now)| next <= now) {
-                    break;
-                }
-                current = next;
-                frames += 1;
-                if frames >= HORIZON_LIMIT {
-                    return Err(TailBoundError::Horizon);
-                }
+    /// The live peak gain `g_p` at the input scale `g` (issue #1485; the derivation's "(N1):
+    /// `G_p`"). The output at any frame `n` of any admitted history is at most
+    /// `sum_{m >= 1} Gamma(m) a_(n-m) + delta a_n` per unit of the input part, with
+    /// `a_j <= (1/2 |m| q_k + omega) E_j + delta |x'_j|` the first section's output at frame `j`
+    /// ([`Self::exposure`]). For a split `m0`, `Gamma <= Gamma_f + Gamma_s` with the
+    /// non-increasing `Gamma_s(m) = Gammabar(max(m, m0))` (`Gammabar` the non-increasing envelope
+    /// of `Gamma`) and `Gamma_f = Gammabar - Gamma_s`: the fast part is at most `A sum Gamma_f`
+    /// (`A = max_k (1/2 |m| q_k + omega) Phi_k + delta`, the first section's output at any frame),
+    /// and the slow part telescopes through the potential with the non-decreasing weights
+    /// `Gamma_s(n - j)` (Abel summation): `1/2 |m| Gamma_s(1) sup Psi Phi` plus each frame's charge
+    /// `1/2 |m| (Psi' beta_k + [k direct] q_k Phi_k) + omega Phi_k + delta`, at most `C` at any
+    /// zone, weighted by `sum Gamma_s`. The smallest bound over `m0` is stated. `None` when the
+    /// exposure's tail is not certified.
+    fn peak_gain(&self, g: f64) -> Option<f64> {
+        let live = self.live;
+        let zones = &self.zones.zones;
+        let half_row = 0.5 * live.first_mix_row;
+        let omega = live.first_output_rounding;
+        let delta = live.envelope.output_input;
+        // The maxima below (`f64::max`, the floor at `TAU`) pass over a NaN, so every constant
+        // they read is checked finite first.
+        let finite = zones.iter().all(|zone| {
+            (zone.contraction + zone.input + zone.sum_norm + zone.state + zone.potential)
+                .is_finite()
+        }) && (half_row
+            + omega
+            + delta
+            + live.second_mix_row
+            + live.second_output_rounding
+            + self.zones.potential_state[0])
+            .is_finite();
+        if !finite {
+            return None;
+        }
+        let (gamma, tail) = self.exposure()?;
+        let count = gamma.len();
+        let mut envelope = gamma;
+        for index in (0..count - 1).rev() {
+            envelope[index] = envelope[index].max(envelope[index + 1]);
+        }
+        // `A` and the largest per-frame charge `C`, each at one zone.
+        let (mut output, mut charge) = (0.0_f64, 0.0_f64);
+        for zone in zones {
+            let state = zone.state;
+            output = nan_max(output, (half_row * zone.sum_norm + omega) * state * SLACK);
+            let next = self.zones.zones[zone.first_neighbour..=zone.last_neighbour]
+                .iter()
+                .fold(0.0_f64, |sup, other| nan_max(sup, other.potential));
+            let direct = if zone.direct {
+                zone.sum_norm * state
+            } else {
+                0.0
+            };
+            charge = nan_max(
+                charge,
+                (half_row * (next * zone.input + direct) + omega * state + delta) * SLACK,
+            );
+        }
+        let peak_output = (output + delta) * SLACK;
+        let potential = self.zones.potential_state[0];
+        // `suffix[i] >= sum_{m >= i + 1} Gammabar(m)`, the tail included.
+        let mut suffix = std::vec![0.0_f64; count + 1];
+        suffix[count] = tail;
+        for index in (0..count).rev() {
+            suffix[index] = (suffix[index + 1] + envelope[index]) * SLACK;
+        }
+        // Over `m0 = index + 1`: `fast >= sum_{m < m0} (Gammabar(m) - Gammabar(m0))`, each step
+        // adding `(m0 - 1) (Gammabar(m0 - 1) - Gammabar(m0))`, a non-negative term.
+        let mut fast = 0.0_f64;
+        let mut best = f64::INFINITY;
+        for index in 0..count {
+            if index > 0 {
+                fast = (fast + index as f64 * (envelope[index - 1] - envelope[index])) * SLACK;
+            }
+            let slow = (index as f64 * envelope[index] + suffix[index]) * SLACK;
+            let bound = (delta * peak_output
+                + peak_output * fast
+                + half_row * envelope[index] * potential
+                + charge * slow)
+                * SLACK;
+            best = best.min(bound);
+        }
+        let peak_gain = g * best * SLACK;
+        peak_gain.is_finite().then_some(peak_gain)
+    }
+
+    /// The live tail gain `g_t` at the input scale `g` (issue #1485; the derivation's "The live
+    /// tail gain `G_t`"): the late part (zero state at `M`, input at most `g` from `M` on) at
+    /// every frame from `M`. No control event lies at or after `N <= M`, so each section's words
+    /// on the window's frames `M + j`, `j < ramp_frames`, follow one in-flight ramp of #1407 from a
+    /// reachable word in a zone `s` toward a design in a zone `t`, `r` frames from its end
+    /// (`0 <= r <= ramp_frames`), and are that design from then on: the word at ramp frame `i`
+    /// has `Re p` within `eta` of `(1 - i/R) Re p(start) + (i/R) Re p(t)`, so it lies in a zone
+    /// that meets that interval, and the constants are the largest over those zones.
+    ///
+    /// * The first section, every `(s, t, r)`: `E_0 = 0`, `E' = rho E + beta`, output
+    ///   `a_j <= (1/2 |m| q + omega) E_j + delta`; `A_j` the largest over every path, `E*_t` the
+    ///   largest `E` at `M + ramp_frames` over the paths to `t`.
+    /// * The second section, every `(s, t, r)`, driven by `A_j`: `S_0 = 0`,
+    ///   `S' = rho S + beta A_j`, output `(1/2 |m_2| q + omega_2) S + delta A_j`; `S*_t` likewise.
+    /// * Settled, per pair of settled zones `(k, l)`: `E <= max(E*_k, Ebar_k)`,
+    ///   `Ebar_k = beta_k / (1 - r_k)`, and
+    ///   `S <= S*_l + beta_l c_k E*_k / (1 - min(r_k, r_l)) + beta_l (c_k Ebar_k + delta) / (1 - r_l)`,
+    ///   `c_k = 1/2 |m| q_k^s + omega`; output `(1/2 |m_2| q_l^s + omega_2) S + delta a`.
+    ///
+    /// A section at the identity has zero state and passes its input (at most `delta` times the
+    /// bound's own input term), and a reset only lowers a state, so both are covered.
+    fn tail_gain(&self, g: f64) -> f64 {
+        let live = self.live;
+        let zones = &self.zones.zones;
+        let count = zones.len();
+        let frames = self.ramp_frames as usize;
+        let half_rows = [0.5 * live.first_mix_row, 0.5 * live.second_mix_row];
+        let omegas = [live.first_output_rounding, live.second_output_rounding];
+        let delta = live.envelope.output_input;
+        let (eta, _, _) = pole_shift(live.poles.ramp_box);
+        // The propagation below takes maxima that pass over a NaN, so every constant it reads is
+        // checked finite first.
+        let finite = zones.iter().all(|zone| {
+            let settled = zone.settled.map_or(0.0, |s| s.contraction + s.sum_norm);
+            (zone.contraction + zone.input + zone.sum_norm + settled).is_finite()
+        }) && (half_rows[0] + half_rows[1] + omegas[0] + omegas[1] + delta + eta)
+            .is_finite();
+        if !finite || frames == 0 {
+            return f64::NAN;
+        }
+        // A margin far above the rounding of the interval's ends (`|Re p| < 1`).
+        let pad = 1.0e-15;
+        // The largest ramp constants `(rho, beta, q)` over the zones `first..=last`.
+        let mut table = std::vec![[0.0_f64; 3]; count * count];
+        for first in 0..count {
+            let mut sup = [0.0_f64; 3];
+            for (last, zone) in zones.iter().enumerate().skip(first) {
+                sup = [
+                    sup[0].max(zone.contraction),
+                    sup[1].max(zone.input),
+                    sup[2].max(zone.sum_norm),
+                ];
+                table[first * count + last] = sup;
             }
         }
-        Ok(peak)
-    }
-
-    /// `L_1 L_2` (the derivation's (Z)): per unit of the settled input's peak, the largest output
-    /// of the cascade at fixed words from zero state, each section bounded by the zone its
-    /// settled design lies in: `L(k) = (1/2 |m| q_k^s + omega) beta_k / (1 - r_k) + delta`, the
-    /// largest over the zones with settled designs, and at least `delta` (the identity), with
-    /// each section's own mix row and output rounding.
-    fn settled_input_gain(&self) -> f64 {
-        let live = self.live;
-        let delta = live.envelope.output_input;
-        let first_row = 0.5 * live.first_mix_row;
-        let second_row = 0.5 * live.second_mix_row;
-        let (mut first, mut second) = (delta, delta);
-        for zone in &self.zones.zones {
-            let Some(settled) = zone.settled else {
+        let over = |from: f64, to: f64| {
+            let first = zones
+                .partition_point(|zone| zone.high < from)
+                .min(count - 1);
+            let last = zones
+                .partition_point(|zone| zone.low <= to)
+                .saturating_sub(1)
+                .max(first);
+            table[first * count + last]
+        };
+        // One section over every path: per target zone `t` (settled) and start zone `s`, the
+        // constants at each ramp frame `i < R` and the design's after it; every path `r`
+        // (`0..=R` frames of the ramp left at `M`) starts from zero at ramp frame `R - r`. At an
+        // absolute frame `i` (`0 <= i < 2R`), path `r` is at window frame `f = i - R + r`, so
+        // the paths in flight form one contiguous run of `r` and of `f`. `drive[f]` is the input
+        // at window frame `f`; returns, per window frame, the largest output and, per target zone,
+        // the largest state at window frame `R`.
+        let section = |half_row: f64, omega: f64, drive: &[f64]| {
+            let mut output = std::vec![0.0_f64; frames];
+            let mut end = std::vec![0.0_f64; count];
+            let mut constants = std::vec![[0.0_f64; 3]; frames];
+            let mut state = std::vec![0.0_f64; frames + 1];
+            for (target, zone) in zones.iter().enumerate() {
+                let Some(settled) = zone.settled else {
+                    continue;
+                };
+                let fixed = [settled.contraction, zone.input, settled.sum_norm];
+                for start in zones {
+                    for (index, slot) in constants.iter_mut().enumerate() {
+                        let alpha = index as f64 / frames as f64;
+                        *slot = over(
+                            (1.0 - alpha) * start.low + alpha * zone.low - eta - pad,
+                            (1.0 - alpha) * start.high + alpha * zone.high + eta + pad,
+                        );
+                    }
+                    state.iter_mut().for_each(|value| *value = 0.0);
+                    for absolute in 0..2 * frames {
+                        let [rho, beta, q] = constants.get(absolute).copied().unwrap_or(fixed);
+                        let row = half_row * q + omega;
+                        // Paths `r` with `0 <= f = absolute - R + r < R`, `r <= R`.
+                        let low = frames.saturating_sub(absolute);
+                        let high = (2 * frames - 1 - absolute).min(frames);
+                        let first_frame = absolute + low - frames;
+                        let window = first_frame..first_frame + (high - low + 1);
+                        for ((value, out), input) in state[low..=high]
+                            .iter_mut()
+                            .zip(&mut output[window.clone()])
+                            .zip(&drive[window])
+                        {
+                            *out = out.max((row * *value + delta * input) * SLACK);
+                            *value = (rho * *value + beta * input) * SLACK;
+                        }
+                        // Path `r = 2R - 1 - absolute` has just reached window frame `R`.
+                        if let Some(done) = (2 * frames - 1)
+                            .checked_sub(absolute)
+                            .filter(|done| *done <= frames)
+                        {
+                            end[target] = end[target].max(state[done]);
+                        }
+                    }
+                }
+            }
+            // A disable in flight (#1407 rule 2) holds the recursion words at a reachable word in
+            // any zone `s` for `r <= R` frames, then replaces the state with zero and passes the
+            // input, which every path above already covers (`delta >= 1`).
+            for zone in zones {
+                let [rho, beta, q] = over(zone.low - eta - pad, zone.high + eta + pad);
+                let row = half_row * q + omega;
+                state.iter_mut().for_each(|value| *value = 0.0);
+                for absolute in 0..frames {
+                    let low = frames - absolute;
+                    let window = 0..absolute + 1;
+                    for ((value, out), input) in state[low..=frames]
+                        .iter_mut()
+                        .zip(&mut output[window.clone()])
+                        .zip(&drive[window])
+                    {
+                        *out = out.max((row * *value + delta * input) * SLACK);
+                        *value = (rho * *value + beta * input) * SLACK;
+                    }
+                }
+            }
+            (output, end)
+        };
+        let unit = std::vec![1.0_f64; frames];
+        let (first_output, first_end) = section(half_rows[0], omegas[0], &unit);
+        let (second_output, second_end) = section(half_rows[1], omegas[1], &first_output);
+        let window = second_output
+            .iter()
+            .fold(0.0_f64, |sup, value| sup.max(*value));
+        // Settled, per pair of settled zones.
+        let mut settled_peak = 0.0_f64;
+        for (first, end) in zones.iter().zip(&first_end) {
+            let Some(settled) = first.settled else {
                 continue;
             };
-            let state = zone.input / (1.0 - settled.contraction) * SLACK;
-            let section = |row: f64, omega: f64| {
-                (((row * settled.sum_norm + omega) * SLACK * state) * SLACK + delta) * SLACK
-            };
-            first = first.max(section(first_row, live.first_output_rounding));
-            second = second.max(section(second_row, live.second_output_rounding));
+            let r_k = settled.contraction;
+            let c_k = (half_rows[0] * settled.sum_norm + omegas[0]) * SLACK;
+            let e_bar = first.input / (1.0 - r_k) * SLACK;
+            let output = (c_k * end.max(e_bar) + delta) * SLACK;
+            let steady = (c_k * e_bar + delta) * SLACK;
+            for (second, start) in zones.iter().zip(&second_end) {
+                let Some(other) = second.settled else {
+                    continue;
+                };
+                let r_l = other.contraction;
+                let state = (start
+                    + second.input * c_k * end / (1.0 - r_k.min(r_l))
+                    + second.input * steady / (1.0 - r_l))
+                    * SLACK;
+                settled_peak = settled_peak.max(
+                    ((half_rows[1] * other.sum_norm + omegas[1]) * state + delta * output) * SLACK,
+                );
+            }
         }
-        first * second * SLACK
+        g * window.max(settled_peak) * SLACK
     }
 
     /// `R` for one input scale `g = gain * peak`: the first section rests (its state bound below
@@ -1945,25 +2151,23 @@ impl<'a> LiveBound<'a> {
         Ok(stall * SLACK)
     }
 
-    /// The composition values of the cascade (issues #1466 and #1467; the derivation's "The live
-    /// input section" and "The live tail gain"), for the input scale `gain` (the largest trim
-    /// word's magnitude times `1 + u`) and the live `T_decay` `tail`. `None` when a window state
-    /// bound the values read took the cap (the tail gain's window included), a group's start or
-    /// step is outside the carry's rounding argument, a group's certificate is not verified, or `D`
-    /// is not below [`HORIZON_LIMIT`].
+    /// The composition values of the cascade (issues #1466, #1467 and #1485; the derivation's
+    /// "The live input section" and "The live tail gain"), for the input scale `gain` (the largest
+    /// trim word's magnitude times `1 + u`) and the live `T_decay` `tail`. `None` when a window
+    /// state bound took the cap, the exposure's tail is not certified, a group's start or step is
+    /// outside the carry's rounding argument, a group's certificate is not verified, `D` is not
+    /// below [`HORIZON_LIMIT`], or a gain is not finite.
     fn composition(&self, gain: f64, tail: u64) -> Result<Option<LiveComposition>, TailBoundError> {
-        let envelope = &self.live.envelope;
         let relative = self.window(gain, 0.0);
         let flush = self.window(0.0, self.law.per_step());
         // (P1): a capped state bound bounds the kernel, not one part of the split by drive.
         if relative.capped || flush.capped {
             return Ok(None);
         }
-        // (N1): the window's first frame bounds the output at any frame of any admitted history
-        // with the current input zero (P2); the current input adds `delta g X` through the first
-        // section's feedthrough, and that through the second's.
-        let feedthrough = envelope.output_input * envelope.output_input * gain * SLACK;
-        let peak_gain = (relative.outputs[0] + feedthrough) * SLACK;
+        // (N1): the input part along the second section's own zones (issue #1485).
+        let Some(peak_gain) = self.peak_gain(gain) else {
+            return Ok(None);
+        };
         let peak_stall = self.stall(0)?;
         let tail_stall = self.stall(tail)?.min(peak_stall);
         // (N2): one certificate per group on its relative system, anchored at `T` (or at the
@@ -2019,18 +2223,12 @@ impl<'a> LiveBound<'a> {
         if decay >= HORIZON_LIMIT {
             return Ok(None);
         }
-        // (N2)'s `epsilon` part (issue #1467): the late input's window part, through the window
-        // and its settled continuation, plus its settled part, per unit of its peak.
-        let arrival = self.arrival_window(gain);
-        if arrival.capped {
+        // (N2)'s `epsilon` part: the late part along each section's in-flight ramp, then settled
+        // (issue #1485).
+        let tail_gain = self.tail_gain(gain);
+        if !tail_gain.is_finite() {
             return Ok(None);
         }
-        let window_part = arrival
-            .outputs
-            .iter()
-            .fold(0.0_f64, |sup, value| sup.max(*value))
-            .max(self.arrival_continuation(&arrival, gain)?);
-        let tail_gain = (window_part + gain * self.settled_input_gain() * SLACK) * SLACK;
         Ok(Some(LiveComposition {
             decay,
             groups,
@@ -2091,12 +2289,13 @@ pub fn live_cascade_groups(
     bound.group_rests(gain * (1.0 + U) * peak)
 }
 
-/// The composition values of a live cascade (issues #1466 and #1467; #1379 Amendment 1 H1, H3's
-/// live row; `docs/derivations/1379-graph-tail-composition.md`, "The live input section" and "The
-/// live tail gain"): its decay `D`, linear peak and tail gains and linear peak and tail stalls, for
-/// the trim word's magnitude `gain` (as [`live_cascade`]). `Ok(None)` when the values are not
-/// certified (a capped window, a group outside the carry's rounding argument or with no verified
-/// certificate). The caller rounds them up into millibels and states the five together.
+/// The composition values of a live cascade (issues #1466, #1467 and #1485; #1379 Amendment 1 H1,
+/// H3's live row; `docs/derivations/1379-graph-tail-composition.md`, "The live input section" and
+/// "The live tail gain"): its decay `D`, linear peak and tail gains and linear peak and tail
+/// stalls, for the trim word's magnitude `gain` (as [`live_cascade`]). `Ok(None)` when the values
+/// are not certified (a capped window, an uncertified exposure tail, a group outside the carry's
+/// rounding argument or with no verified certificate, a gain that is not finite). The caller
+/// rounds them up into millibels and states the five together.
 ///
 /// # Errors
 ///

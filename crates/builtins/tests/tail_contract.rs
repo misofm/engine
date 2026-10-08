@@ -13,8 +13,8 @@ use builtins::INPUT_FILTER_RAMP_SAMPLES;
 use builtins::input_section_bound_charged;
 use builtins::test_support::{input_section_words, input_state_words, input_trim_words};
 use builtins::{
-    BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBoundCache,
-    InputBuiltins, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
+    BuiltinChain, BuiltinLaneSelector, BuiltinParameters, ChannelParameters, DualMonoBlock,
+    InputBoundCache, InputBuiltins, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
     input_section_bound, input_section_bounds, input_section_flush_law, input_section_live_bound,
     input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
     input_section_worst_case_pair, prepare_input_filter_pair,
@@ -1094,20 +1094,21 @@ struct LiveOracle {
     /// Every zone group's rest at +24 dBFS, with the quantities it reads.
     groups_peak: Vec<OracleGroupRest>,
     /// #1466's composition values (`docs/derivations/1379-graph-tail-composition.md`, "The live
-    /// input section"): `D` by each group's certificate over the full rate grid, `g_p` from the
-    /// window's first frame and the feedthrough, `sigma_p` the flush part with the tail at frame
-    /// `0`, `sigma_t` the flush part from `T_decay` on.
+    /// input section"): `D` by each group's certificate over the full rate grid, `g_p` along the
+    /// LPF's own zones (#1485), `sigma_p` the flush part with the tail at frame `0`, `sigma_t` the
+    /// flush part from `T_decay` on.
     decay: u64,
     peak_gain: f64,
     peak_stall: f64,
     tail_stall: f64,
-    /// #1467's tail gain (`docs/derivations/1379-graph-tail-composition.md`, "The live tail gain
-    /// `G_t`"): `W* + g L_1 L_2`, with its parts as evidence: the window's largest output
-    /// (`max O_j`), the settled continuation's (`max C_c`) and the settled input's `g L_1 L_2`.
+    /// The tail gain (`docs/derivations/1379-graph-tail-composition.md`, "The live tail gain
+    /// `G_t`", #1485): the larger of its window part (the late part along the in-flight ramps)
+    /// and its settled part (every pair of settled zones), both kept as evidence.
     tail_gain: f64,
     tail_window: f64,
-    tail_continuation: f64,
     tail_settled: f64,
+    /// `G_p`'s split (evidence): `m0`, `Gamma(1)`, `Gammabar(m0)`, `A` and `C`.
+    peak_split: (usize, f64, f64, f64, f64),
 }
 
 /// One zone group's rest ([`math::tail::LiveGroupRest`]): `r`, `c_y`, `c_d`, the window's
@@ -1554,9 +1555,84 @@ fn live_oracle(rate: u32) -> LiveOracle {
     }
     let p_star = stall / limit;
 
-    // #1466 (N1): the window's first frame bounds every frame of every admitted history; the
-    // current input adds `delta^2 g` through both feedthroughs.
-    let peak_gain = outputs[0] + oi * oi * gain;
+    // #1485 (N1): the LPF along its own zones. `Gamma(m)`, the largest coefficient of the HPF's
+    // output at one frame in the LPF's output `m` frames later, by the exposure `B_r` over
+    // neighbouring zones (1024 frames, then a geometric tail at `rho_ramp`, whose shape is
+    // checked); the non-increasing envelope split at every `m0`: the fast part on the HPF's
+    // largest output `A`, the slow part telescoped through the potential with each frame's charge
+    // `C` at one zone. The smallest bound over `m0`.
+    let horizon = 1024_usize;
+    let omega_second = terms.second_output_rounding;
+    let nb_max = |values: &[f64], i: usize| {
+        neighbours[i]
+            .iter()
+            .map(|&j| values[j])
+            .fold(0.0_f64, f64::max)
+    };
+    let mut exposure: Vec<f64> = zones
+        .iter()
+        .map(|z| half_second_row * z.q + omega_second)
+        .collect();
+    let mut gamma = Vec::with_capacity(horizon + 1);
+    for m in 1..=horizon + 1 {
+        gamma.push(
+            (0..n)
+                .map(|i| zones[i].beta * nb_max(&exposure, i))
+                .fold(0.0_f64, f64::max),
+        );
+        if m <= horizon {
+            exposure = (0..n)
+                .map(|i| zones[i].rho * nb_max(&exposure, i))
+                .collect();
+        }
+    }
+    assert!(
+        (0..n).all(|i| zones[i].rho * nb_max(&exposure, i) <= rr * exposure[i] * (1.0 + 1.0e-9)),
+        "{rate} Hz: the exposure's shape is not settled at its horizon"
+    );
+    let tail = gamma[horizon] * rr / (1.0 - rr);
+    let mut envelope = gamma.clone();
+    for m in (0..horizon).rev() {
+        envelope[m] = envelope[m].max(envelope[m + 1]);
+    }
+    let peak_output = (0..n)
+        .map(|i| (half_row * zones[i].q + omega) * phi[i][0])
+        .fold(0.0_f64, f64::max)
+        + oi;
+    let charge_per_frame = (0..n)
+        .map(|i| {
+            let direct = if zones[i].direct {
+                zones[i].q * phi[i][0]
+            } else {
+                0.0
+            };
+            half_row * (nb_max(&psi, i) * zones[i].beta + direct) + omega * phi[i][0] + oi
+        })
+        .fold(0.0_f64, f64::max);
+    let mut best = (f64::INFINITY, 0_usize);
+    for m0 in 1..=horizon + 1 {
+        let fast: f64 = envelope[..m0 - 1]
+            .iter()
+            .map(|e| e - envelope[m0 - 1])
+            .sum();
+        let slow =
+            (m0 - 1) as f64 * envelope[m0 - 1] + envelope[m0 - 1..].iter().sum::<f64>() + tail;
+        let bound = oi * peak_output
+            + peak_output * fast
+            + half_row * envelope[m0 - 1] * v[0]
+            + charge_per_frame * slow;
+        if bound < best.0 {
+            best = (bound, m0);
+        }
+    }
+    let peak_gain = gain * best.0;
+    let peak_split = (
+        best.1,
+        gamma[0],
+        envelope[best.1 - 1],
+        peak_output,
+        charge_per_frame,
+    );
     // `sigma_p`: the flush part with the tail at frame `0`, the flush window over every frame and
     // per group the fixed point plus the decaying start's peak, frame by frame until it falls.
     let mut peak_stall = outputs_a.iter().fold(0.0_f64, |s, value| s.max(*value));
@@ -1583,62 +1659,105 @@ fn live_oracle(rate: u32) -> LiveOracle {
     }
     // `sigma_t`: the smaller of the stall from `T_decay` and the stall at every frame.
     let tail_stall = stall.min(peak_stall);
-    // #1467 `G_t`, per unit of the late input's peak. (W): `Phi^(j)` from zero over 64 input
-    // frames, the window frame by frame with the HPF's output from the largest
-    // `(1/2 |m| q_k + omega) Phi^(j)_k`, the LPF frequency-blind; then per group the relative
-    // settled system from the window's end, frame by frame until it falls.
-    let mut phi_j = vec![0.0_f64; n];
-    let mut lpf = 0.0_f64;
-    let mut tail_window = 0.0_f64;
-    let mut energy_end = 0.0_f64;
-    for frame in 0..=ramp {
-        let input = if frame < ramp { gain } else { 0.0 };
-        let first = (0..n)
-            .map(|i| (half_row * zones[i].q + omega) * phi_j[i])
-            .fold(0.0_f64, f64::max)
-            * gain
-            + oi * input;
-        tail_window = tail_window.max(os * lpf + oi * first);
-        lpf = rr * lpf + iota * first;
-        if frame == ramp {
-            energy_end = phi_j.iter().copied().fold(0.0_f64, f64::max) * gain;
-        } else {
-            phi_j = (0..n)
-                .map(|kz| {
-                    neighbours[kz]
-                        .iter()
-                        .map(|&i| zones[i].rho * phi_j[i] + zones[i].beta)
-                        .fold(0.0_f64, f64::max)
+    // #1485 `G_t`, per unit of the late input's peak: each section along every in-flight ramp
+    // of #1407 (from a word in zone `s` toward a design in zone `t`, `r` of its frames left at
+    // `M`, then the design), or a frozen recursion (a disable) for `r` frames, the HPF from zero
+    // with a unit input and the LPF from zero driven by the HPF's largest output at each window
+    // frame; the word at ramp frame `i` lies in a zone that meets the interval
+    // `(1 - i/64) [a_s, b_s] + (i/64) [a_t, b_t] +- eta`. Then per pair of settled zones in
+    // closed form.
+    let ramp_frames = ramp as usize;
+    let edges_a: Vec<f64> = zones.iter().map(|z| z.a).collect();
+    let edges_b: Vec<f64> = zones.iter().map(|z| z.b).collect();
+    let constants_over = |from: f64, to: f64| -> [f64; 3] {
+        let first = edges_b.partition_point(|b| *b < from).min(n - 1);
+        let last = edges_a.partition_point(|a| *a <= to).max(first + 1) - 1;
+        (first..=last).fold([0.0_f64; 3], |sup, i| {
+            [
+                sup[0].max(zones[i].rho),
+                sup[1].max(zones[i].beta),
+                sup[2].max(zones[i].q),
+            ]
+        })
+    };
+    let ramp_constants: Vec<Vec<Vec<[f64; 3]>>> = (0..n)
+        .map(|s| {
+            (0..n)
+                .map(|t| {
+                    (0..ramp_frames)
+                        .map(|i| {
+                            let alpha = i as f64 / ramp_frames as f64;
+                            constants_over(
+                                (1.0 - alpha) * zones[s].a + alpha * zones[t].a - dre_r,
+                                (1.0 - alpha) * zones[s].b + alpha * zones[t].b + dre_r,
+                            )
+                        })
+                        .collect()
                 })
-                .collect();
-        }
-    }
-    let mut tail_continuation = 0.0_f64;
-    for t in &groups {
-        let a_h = rs * t.cd + mu_settled * t.cy + mu_x * t.cy * t.r;
-        let h0 = energy_end.min(t.phi[0] * gain);
-        let (mut tau, mut h, mut x) = (lpf + t.cy * h0, h0, 2.0 * t.cy * h0);
-        loop {
-            tail_continuation =
-                tail_continuation.max(os * (tau + t.cy * h + x) + oi * t.cy * t.r * h);
-            let next = (rs * tau + a_h * h, t.r * h, rs.max(t.r) * x);
-            if next.0 <= tau && next.1 <= h && next.2 <= x {
-                break;
+                .collect()
+        })
+        .collect();
+    let run_section = |row: f64, omega_s: f64, drive: &[f64]| -> (Vec<f64>, Vec<f64>) {
+        let mut output = vec![0.0_f64; ramp_frames];
+        let mut end = vec![0.0_f64; n];
+        for t in 0..n {
+            let Some((rt, qt, _)) = zones[t].settled else {
+                continue;
+            };
+            for from_start in &ramp_constants {
+                for r in 0..=ramp_frames {
+                    let mut state = 0.0_f64;
+                    for f in 0..ramp_frames {
+                        let [rho, beta, q] = if f < r {
+                            from_start[t][ramp_frames - r + f]
+                        } else {
+                            [rt, zones[t].beta, qt]
+                        };
+                        output[f] = output[f].max((row * q + omega_s) * state + oi * drive[f]);
+                        state = rho * state + beta * drive[f];
+                    }
+                    end[t] = end[t].max(state);
+                }
             }
-            (tau, h, x) = next;
+        }
+        for (s, from_start) in ramp_constants.iter().enumerate() {
+            let [rho, beta, q] = from_start[s][0];
+            for r in 1..=ramp_frames {
+                let mut state = 0.0_f64;
+                for f in 0..r {
+                    output[f] = output[f].max((row * q + omega_s) * state + oi * drive[f]);
+                    state = rho * state + beta * drive[f];
+                }
+            }
+        }
+        (output, end)
+    };
+    let (hpf_output, hpf_end) = run_section(half_row, omega, &vec![1.0_f64; ramp_frames]);
+    let (lpf_output, lpf_end) = run_section(half_second_row, omega_second, &hpf_output);
+    let tail_window = lpf_output.iter().copied().fold(0.0_f64, f64::max);
+    let mut tail_settled = 0.0_f64;
+    for k in 0..n {
+        let Some((rk, qk, _)) = zones[k].settled else {
+            continue;
+        };
+        let ck = half_row * qk + omega;
+        let e_bar = zones[k].beta / (1.0 - rk);
+        for l in 0..n {
+            let Some((rl, ql, _)) = zones[l].settled else {
+                continue;
+            };
+            let state = lpf_end[l]
+                + zones[l].beta * ck * hpf_end[k] / (1.0 - rk.min(rl))
+                + zones[l].beta * (ck * e_bar + oi) / (1.0 - rl);
+            tail_settled = tail_settled.max(
+                (half_second_row * ql + omega_second) * state
+                    + oi * (ck * hpf_end[k].max(e_bar) + oi),
+            );
         }
     }
-    // (Z): each section bounded by its settled design's zone, the largest over the zones.
-    let (mut l_1, mut l_2) = (oi, oi);
-    for z in &zones {
-        if let Some((rz, qs, _)) = z.settled {
-            let state = z.beta / (1.0 - rz);
-            l_1 = l_1.max((half_row * qs + omega) * state + oi);
-            l_2 = l_2.max((half_second_row * qs + omega) * state + oi);
-        }
-    }
-    let tail_settled = gain * l_1 * l_2;
-    let tail_gain = tail_window.max(tail_continuation) + tail_settled;
+    let tail_window = gain * tail_window;
+    let tail_settled = gain * tail_settled;
+    let tail_gain = tail_window.max(tail_settled);
     // `D`: per group, the relative state carried to `T_decay` in closed form, then the
     // certificate `v_H = z_H`, `v_tau = max(z_tau, a_H v_H / (lambda - rho_s))`, `v_X = z_X` at
     // every rate `lambda_j = rho + (1 - rho) 2^(-j/2)`, `j = 1..=32`, `rho` the largest diagonal
@@ -1692,8 +1811,8 @@ fn live_oracle(rate: u32) -> LiveOracle {
         tail_stall,
         tail_gain,
         tail_window,
-        tail_continuation,
         tail_settled,
+        peak_split,
     }
 }
 
@@ -1957,14 +2076,21 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
             composition.decay,
             oracle.decay
         );
-        // #1467 L3': `G_t` against the recomputation of "The live tail gain `G_t`".
+        // #1485: `G_p` and `G_t` against the recomputation of "(N1): `G_p`" and "The live tail
+        // gain `G_t`".
+        let (split, gamma_1, gamma_split, peak_output, charge) = oracle.peak_split;
         eprintln!(
-            "L3' {rate} Hz: G_t {:.9e} ({:.9e}: window {:.6e}, continuation {:.6e}, settled input \
-             {:.6e}), {:.3} dB",
+            "L3 {rate} Hz: G_p {:.9e} ({:.3} dB; recomputed {:.9e}: m0 {split}, Gamma(1) \
+             {gamma_1:.6e}, Gammabar(m0) {gamma_split:.6e}, A {peak_output:.6e}, C {charge:.6e})",
+            composition.peak_gain,
+            20.0 * math::log10(composition.peak_gain),
+            oracle.peak_gain
+        );
+        eprintln!(
+            "L3' {rate} Hz: G_t {:.9e} ({:.9e}: window {:.6e}, settled {:.6e}), {:.3} dB",
             composition.tail_gain,
             oracle.tail_gain,
             oracle.tail_window,
-            oracle.tail_continuation,
             oracle.tail_settled,
             20.0 * math::log10(composition.tail_gain)
         );
@@ -2748,7 +2874,7 @@ fn a_design_with_filters_disabled_states_its_trim_gain() {
     assert!(peak >= ceil_mb(f64::from(math::pow(10.0, 24.0 / 20.0) as f32)));
 }
 
-// ---- #1466: the live input section's decay, peak gain and stalls (L1, L4; L3 above) ----------
+// ---- #1466: the live input section's decay, peak gain and stalls (gate 1, L4; L3 above) -----
 
 /// The live composition values at `rate`, as the gates read them: `math::tail`'s accessor at the
 /// +24 dB trim word, the flush law and the ramp the live bound uses.
@@ -2763,64 +2889,140 @@ fn live_composition(rate: u32) -> LiveComposition {
     .expect("a certified live composition")
 }
 
-/// #1466 L1. A real input section, trim +24 dB, both sections designed at the worst-case pair,
-/// driven by an alternating `+-1` input for 1,000,000 frames; then the HPF target moves to 10 Hz
-/// with the input still running (#1379 H9: the Nyquist drive builds a large first integrator
-/// while the output stays near 1, and the retarget exposes it). The largest `|y|` over the run is
-/// at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`; the ratio is printed.
-#[test]
-fn live_peak_gain_bounds_a_retarget_after_a_nyquist_drive_on_the_real_kernel() {
+/// One control event of a gate 1 history ([`peak_history`]), at a frame after the drive.
+#[derive(Clone, Copy)]
+enum PeakEvent {
+    /// Retarget one section (`0` the HPF, `1` the LPF) to a cutoff.
+    Retarget(usize, f32),
+    /// Flip the polarity of both channels at once.
+    Flip,
+}
+
+/// The largest `|y|` of a real input section, trim +24 dB, both sections designed at the
+/// worst-case pair, driven by an alternating `+-1` input for 1,000,000 frames and 200,000 more
+/// with `events` (frames counted from the end of the drive), in blocks of 64 frames, or of
+/// `block` frames from 128 frames before the first event to 512 after it. Returns the peak
+/// before the first event and over the run.
+fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32, f32) {
     const DRIVE: usize = 1_000_000;
     const AFTER: usize = 200_000;
-    for &rate in rates() {
-        let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
-        let mut section = input(rate, hpf, lpf, 24.0, false);
-        let composition = live_composition(rate);
-        let (mut before, mut peak) = (0.0_f32, 0.0_f32);
-        let mut left = [0.0_f32; 64];
-        let mut right = [0.0_f32; 64];
-        let mut frame = 0;
-        while frame < DRIVE + AFTER {
-            if frame == DRIVE {
-                section
-                    .apply_prepared_filter(target(rate, 0, 10.0))
-                    .expect("retarget");
+    let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
+    let mut section = input(rate, hpf, lpf, 24.0, false);
+    let (mut before, mut peak) = (0.0_f32, 0.0_f32);
+    let mut left = [0.0_f32; 64];
+    let mut right = [0.0_f32; 64];
+    let mut inverted = false;
+    let mut frame = 0;
+    while frame < DRIVE + AFTER {
+        for (at, event) in events {
+            if DRIVE + at == frame {
+                match *event {
+                    PeakEvent::Retarget(index, hz) => section
+                        .apply_prepared_filter(target(rate, index, hz))
+                        .expect("retarget"),
+                    PeakEvent::Flip => {
+                        inverted = !inverted;
+                        section.set_polarity_invert(BuiltinLaneSelector::Both, inverted, 0);
+                    }
+                }
             }
-            let end = if frame < DRIVE { DRIVE } else { DRIVE + AFTER };
-            let len = 64.min(end - frame);
-            for index in 0..len {
-                let value = if (frame + index) % 2 == 0 { 1.0 } else { -1.0 };
-                left[index] = value;
-                right[index] = value;
-            }
-            process(
-                &mut section,
-                &mut left[..len],
-                &mut right[..len],
-                frame as u64,
-            );
-            let block = left[..len]
-                .iter()
-                .chain(&right[..len])
-                .fold(0.0_f32, |sup, value| sup.max(value.abs()));
-            if frame < DRIVE {
-                before = before.max(block);
-            }
-            peak = peak.max(block);
-            frame += len;
         }
-        let stated = composition.peak_gain + composition.peak_stall;
-        eprintln!(
-            "L1 {rate} Hz: peak before the retarget {before:.4e}, over the run {peak:.4e} \
-             ({:.2} dB), g_p + sigma_p {stated:.4e} ({:.2} dB), ratio {:.1} ({:.2} dB)",
-            20.0 * math::log10(f64::from(peak)),
-            20.0 * math::log10(stated),
-            stated / f64::from(peak),
-            20.0 * math::log10(stated / f64::from(peak))
+        let mut len = 64.min(DRIVE + AFTER - frame);
+        if frame + 128 >= DRIVE && frame < DRIVE + 512 {
+            len = len.min(block);
+        }
+        for (at, _) in events {
+            if DRIVE + at > frame {
+                len = len.min(DRIVE + at - frame);
+            }
+        }
+        for index in 0..len {
+            let value = if (frame + index) % 2 == 0 { 1.0 } else { -1.0 };
+            left[index] = value;
+            right[index] = value;
+        }
+        process(
+            &mut section,
+            &mut left[..len],
+            &mut right[..len],
+            frame as u64,
         );
-        assert!(
-            f64::from(peak) <= stated,
-            "{rate} Hz: the real kernel's peak {peak:e} exceeds g_p + sigma_p = {stated:e}"
+        let block_peak = left[..len]
+            .iter()
+            .chain(&right[..len])
+            .fold(0.0_f32, |sup, value| sup.max(value.abs()));
+        if frame < DRIVE {
+            before = before.max(block_peak);
+        }
+        peak = peak.max(block_peak);
+        frame += len;
+    }
+    (before, peak)
+}
+
+/// #1485 gate 1 (#1466 L1, widened). The real kernel's largest `|y|` per unit of the input's peak
+/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on five histories
+/// after the Nyquist drive of [`peak_history`] (#1379 H9: the drive builds a large first
+/// integrator in both sections at the top of the domain while the output stays near 1, and a
+/// retarget exposes it). Each history, with its reason:
+///
+/// * L1: the HPF to 10 Hz, the largest peak the attempt found (its record lists the others it
+///   measured, all lower);
+/// * L1 in blocks of one frame around the retarget: #1407's ramp allowance is largest at block
+///   size 1;
+/// * L1 with the polarity flipped 8 frames into the ramp window: a trim or polarity change while
+///   the state is exposed;
+/// * the LPF to 10 Hz: the second section's state at the top, which the bound's slow exposure
+///   charges;
+/// * both sections moving: the HPF to 10 Hz, then the LPF to 10 Hz 4 frames later.
+///
+/// Prints, per history and rate, the peak (`g_meas` of the largest) and the ratio
+/// `g_p / peak` (issue #1485, V-D3).
+#[test]
+fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
+    use PeakEvent::{Flip, Retarget};
+    type History = (&'static str, Vec<(usize, PeakEvent)>, usize);
+    let histories: [History; 5] = [
+        ("L1, HPF to 10 Hz", vec![(0, Retarget(0, 10.0))], 64),
+        ("L1 in blocks of 1", vec![(0, Retarget(0, 10.0))], 1),
+        (
+            "L1, polarity flipped at +8",
+            vec![(0, Retarget(0, 10.0)), (8, Flip)],
+            64,
+        ),
+        ("LPF to 10 Hz", vec![(0, Retarget(1, 10.0))], 64),
+        (
+            "HPF to 10 Hz, LPF to 10 Hz at +4",
+            vec![(0, Retarget(0, 10.0)), (4, Retarget(1, 10.0))],
+            64,
+        ),
+    ];
+    for &rate in rates() {
+        let composition = live_composition(rate);
+        let stated = composition.peak_gain + composition.peak_stall;
+        let mut largest = 0.0_f32;
+        for (name, events, block) in &histories {
+            let (before, peak) = peak_history(rate, events, *block);
+            largest = largest.max(peak);
+            eprintln!(
+                "G1 {rate} Hz {name}: peak before the event {before:.4e}, over the run {peak:.4e} \
+                 ({:.2} dB), g_p {:.4e} ({:.2} dB), ratio g_p / peak {:.2} ({:.2} dB)",
+                20.0 * math::log10(f64::from(peak)),
+                composition.peak_gain,
+                20.0 * math::log10(composition.peak_gain),
+                composition.peak_gain / f64::from(peak),
+                20.0 * math::log10(composition.peak_gain / f64::from(peak))
+            );
+            assert!(
+                f64::from(peak) <= stated,
+                "{rate} Hz {name}: the real kernel's peak {peak:e} exceeds g_p + sigma_p = \
+                 {stated:e}"
+            );
+        }
+        eprintln!(
+            "G1 {rate} Hz: g_meas {largest:.6e}, g_p {:.6e}, r_p {:.4}",
+            composition.peak_gain,
+            composition.peak_gain / f64::from(largest)
         );
     }
 }
