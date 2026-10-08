@@ -76,11 +76,11 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1441 (two markers around `impl BuiltinBankProcessor`, replacing blank lines; if a blank line is gone, J #1443 places them) and J #1443 (markers around the three test-support `LiveControl*` drains, and the move of `LiveControlInputProcessor`'s drain into its own `drain_controls`), in any order with A, B (#1312, #1346), D, G and F, the later slice rebases; J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346; G #1464 (the bound type, the seal, `input_bounds`, the tail-entry charge and their unit tests) after G (#1329), in either order with F (#1261, #1262) and J, the later slice rebases |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
 | `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 → G #1461 → G #1462 (root, 2026-10-06; both before #1372) → G #1464 (the `EffectTailBound` → `NodeTailBound` rename, the `composition` field, the two registry rules) → G #1484 (the stall split into `peak_stall` and `tail_stall`, the two clause readers, registry rule (g), `max`'s stall rule; after G #1465, before G #1466); G #1469 (the feature-gated `tail_and_rest` evaluation counter in `NativeEffectRegistry::new` only) after G #1462, in either order with G #1464, the later slice rebases; G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
-| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349 |
+| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349; B #1482 (the `note_claim` call only) after #1314, in any order with the rest, the later slice rebases |
 | `crates/engine/src/realtime/plan.rs` | B #1311 → H #1400 → C #1396 → H #1381 |
 | `crates/engine/src/realtime/spsc.rs` | B (#1343, #1311) → C #1320 (`peek` only) |
 | `crates/source/src/lib.rs` | B batch 1 (#1343) → B #1447 → B (#1318, #1316, #1350, #1319, #1344) → C (#1320, #1355); J #1443 (three region markers, each replacing a blank line, around `take_recycled_block`, `observe_seek_at_block_boundary` and `acquire_current_block` with #1447's `settle_block`) after B #1447, in any order with the rest; the later slice rebases |
-| `crates/host-core/src/spectrum.rs` | H #1449 (the `SpectrumCapture` drains and the collection's `cancel_except`, by named exception) → A #1327 → A #1395; J #1443 (markers around the spectrum drains and `cancel_except`, replacing blank lines where there are some) after H #1449, in any order with A #1327 and #1395; the later slice rebases |
+| `crates/host-core/src/spectrum.rs` | H #1449 (the `SpectrumCapture` drains and the collection's `cancel_except`, by named exception) → A #1327 → A #1395; J #1443 (markers around the spectrum drains and `cancel_except`, replacing blank lines where there are some) after H #1449, in any order with A #1327 and #1395; the later slice rebases; A #1479 (`entry` and `selected_entry` only, outside every marked region) in any order with the others, the later slice rebases |
 | `crates/host-core/src/transition.rs` | D (#1325, #1324) → C #1397 |
 | `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371; J #1423 (strip record construction only) after B #1312 and #1346, rebasing over the rest; G #1469 (the registry plumbing and `load_registry` only) in any order with the others, the later slice rebases |
 | `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
@@ -97,13 +97,15 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only) |
 | `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit |
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
+| `hosts/host-web/qualification/sdk-response-entry.ts`, `hosts/host-web/qualification/run.mjs` | H #1476 (the SDK instances' allocation reads and the `sdk-render-allocations` gate) and J #1480 (the continuous-spectrum probe and its predicates) in any order; the later slice rebases |
+| `hosts/host-web/MUTATIONS.md` | H #1476, H #1477, A #1479 (row `:563` only) and J #1480, each adding or editing its own rows, in any order; the later slice rebases |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
-| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), J #1429 (the `artifact-gates` "Hermetic browser host and worklet tests" step) and J #1435 (the `sdk` "Qualify the SDK package against the shared artifact" step), J #1438 (`audit-native`: one build flag and one step) and J #1446 (`lint`: two lines removed and the step renamed), G #1428 (`test-release` steps in `qualification.yml`; under its amended D2 (R1) the release sweeps move to their own parallel required job, never `nightly.yml`) and G #1379 (one `test-release` step for host-core's `tail_composition`) in any order, the later slice rebases |
+| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), J #1429 (the `artifact-gates` "Hermetic browser host and worklet tests" step) and J #1435 (the `sdk` "Qualify the SDK package against the shared artifact" step), J #1438 (`audit-native`: one build flag and one step) and J #1446 (`lint`: two lines removed and the step renamed), G #1428 (`test-release` steps in `qualification.yml`; under its amended D2 (R1) the release sweeps move to their own parallel required job, never `nightly.yml`) and G #1379 (one `test-release` step for host-core's `tail_composition`) in any order, the later slice rebases; J #1481 (`nightly.yml`: the `native-vectorization-report` step's `continue-on-error` line and its comment) in any order with the rest, the later slice rebases |
 | `Cargo.toml`, `Cargo.lock` | J #1438 (one member and its own lock entry) and B #1447 (the `source` package's `bench-support` dev-dependency line) in any order with C #1320; the later slice rebases |
 | `scripts/check-ci-path-routing.py`, `scripts/test-ci-path-routing.py` | J #1446 (one `DEDUPLICATED_OWNERS` entry and its case) in any order with any later edit of those tables; the later slice rebases |
-| Realtime-policy floors and allowlists (the awk gate's floor lines in `scripts/check-realtime-policy.sh` and its self-test's pad until J #1446, then `Policy::workspace()` in `tools/realtime-policy`) | B batch 1 (#1314) → J #1438; then, in any order, J's tool slices (#1441: one region; the #1448 guard: one; #1443: ten), B #1345 (Amendment 1: one region or more), B's other cell slices (#1312, #1346, #1347), #1321 (`:55`) and any slice under the standing exception. H #1448 adds none. Each slice re-measures the floors when it lands. While the awk gate is on `main` (until the J batch push), a slice that adds a region raises the awk floor and the self-test's pad with it. `Policy::workspace()` reaches `main` only with the J batch push, which re-measures it |
-| #1446's comment lines: `crates/engine/src/realtime/observe.rs`, `crates/engine/src/realtime/watermark.rs` (added by B batch 1), `crates/lane/src/fpenv.rs`, `crates/lane/src/softfma.rs`, `crates/capi/tests/resource_lifecycle.rs`, `crates/host-core/src/lib.rs`, `tools/bench-support/src/lib.rs`, `scripts/check-bench-policy.sh`, `docs/REALTIME_DEPENDENCY_POLICY.md`, `docs/REALTIME_MEMORY.md` | J #1446 (comment lines only, each keeping its line count) in any order with every other slice that edits these files; the later slice rebases |
+| Realtime-policy floors and allowlists (the awk gate's floor lines in `scripts/check-realtime-policy.sh` and its self-test's pad until J #1446, then `Policy::workspace()` in `tools/realtime-policy`) | B batch 1 (#1314) → J #1438; then, in any order, J's tool slices (#1441: one region; the #1448 guard: one; #1443: ten), B #1345 (Amendment 1: one region or more), B's other cell slices (#1312, #1346, #1347), #1321 (`:55`) and any slice under the standing exception. H #1448 adds none. B #1482 (the shared seqlock's render-side region, if its D4 adds one) lands in any order with these. Each slice re-measures the floors when it lands. While the awk gate is on `main` (until the J batch push), a slice that adds a region raises the awk floor and the self-test's pad with it. `Policy::workspace()` reaches `main` only with the J batch push, which re-measures it |
+| #1446's comment lines: `crates/engine/src/realtime/observe.rs`, `crates/engine/src/realtime/watermark.rs` (added by B batch 1), `crates/lane/src/fpenv.rs`, `crates/lane/src/softfma.rs`, `crates/capi/tests/resource_lifecycle.rs`, `crates/host-core/src/lib.rs`, `tools/bench-support/src/lib.rs`, `scripts/check-bench-policy.sh`, `docs/REALTIME_DEPENDENCY_POLICY.md`, `docs/REALTIME_MEMORY.md` | J #1446 (comment lines only, each keeping its line count) in any order with every other slice that edits these files; the later slice rebases. J #1478 (`docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership") and B #1482 (`observe.rs` and `watermark.rs` code, after #1314) in any order with #1446, the later slice rebases and keeps #1446's wording |
 | `.github/ISSUE_SPECS/*.md` | J #1446's D5 substitutions apply to the specs on `main` when it lands; a spec that lands later gets them at the root's issue-boundary audit |
 
 Hot-file note (2026-10-05, after #1329 attempt 1): #1408 changes the D11 ramp law that the trim,
@@ -226,7 +228,7 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 ## Stream A
 
 - **Coordinator scope:** Swap carry on the C ABI core: move-mode carry for every state owner, latency floors and their reset, meter carry, and the swap block's cost record (#1286).
-- **Owns:** `crates/builtins*`, `crates/rack`, `crates/graph`, `crates/graph-compiler` (except #1384), effect crates' payload code, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`; by named exception: `crates/host-core/src/live_delta.rs` record functions (#1277, #1280, #1284), `crates/host-core/src/spectrum.rs` (#1327), the `control-plane` crate after #1309 (#1280, #1323). By named exception, for #1323 D3's `SuccessorBase::new` only: the `SuccessorBase` construction sites in `crates/host-core/tests/support/successor.rs`, `crates/host-core/tests/withdrawn_successor.rs` (B's, #1344) and `crates/capi/tests/resource_lifecycle.rs` (B's).
+- **Owns:** `crates/builtins*`, `crates/rack`, `crates/graph`, `crates/graph-compiler` (except #1384), effect crates' payload code, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`; by named exception: `crates/host-core/src/live_delta.rs` record functions (#1277, #1280, #1284), `crates/host-core/src/spectrum.rs` (#1327), the `control-plane` crate after #1309 (#1280, #1323); `hosts/host-web/MUTATIONS.md` row `:563` (#1479). By named exception, for #1323 D3's `SuccessorBase::new` only: the `SuccessorBase` construction sites in `crates/host-core/tests/support/successor.rs`, `crates/host-core/tests/withdrawn_successor.rs` (B's, #1344) and `crates/capi/tests/resource_lifecycle.rs` (B's).
 - **Depends on:** S0; B #1312 before #1277 and #1345 before #1280 (cells first); #1323 needs #1309, #1310, #1311 and #1314; #1286 needs C #1354 and #1355.
 - **Parallel-safe with:** G, J, K, H(a); B once #1312 and #1345 have landed.
 
@@ -245,6 +247,7 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 | 11 | #1327 | Carry meter and effect observation state across a plan swap | #1284 | — |
 | 12 | #1323 | Reset latency floors at a host-declared discontinuity | #1285 | #1309, #1310, #1311, #1314 |
 | 13 | #1395 | Carry spectrum capture state across a plan swap | #1327 | #1401 |
+| 14 | #1479 | Give the spectrum capture collection no cloning accessor | — | — |
 
 ## Stream B
 
@@ -280,6 +283,7 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 | 23 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
 | 24 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312, #1399 | — |
 | 25 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
+| 26 | #1482 | Attribute each claim's revisions exactly in the watermark and share one seqlock | #1314 | — |
 
 #1447 is stream B batch 1's successor in `crates/source/src/lib.rs` and merges before #1318 (the
 hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 as a dependent.
@@ -426,7 +430,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 ## Stream H
 
 - **Coordinator scope:** Browser control plane: shared-memory spike, allocation gates, nightly browser artifact, Worker control plane, render-only worklet, transaction API in the SDK.
-- **Owns:** `hosts/host-web`, `sdk/`, `scripts/check-web-audioworklet*`; #1334 also `rust-toolchain.toml`, `.github/workflows/{qualification,npm-publish}.yml`, `docs/RELEASE.md`, `docs/TARGET_MATRIX.md` and the build/identity scripts it lists; #1333 also `tools/parameter-metadata/src/abi_layout.rs`, `scripts/check-abi-layout-v1.py`; #1381 the `RuntimePreparer` hook in `crates/control-plane`; by named exception: `crates/host-core/src/spectrum.rs` (#1449: the `SpectrumCapture` drains, the new `SpectrumCapture::reset_after_cancel`, `SpectrumCaptureCollection::cancel`, `select` and the new `cancel_except`, the new `SPECTRUM_RESULT_SLOTS`, `spectrum_capture_resources_for_id_bytes` (`:331-333`), the capture queue's construction (`:1353`), and their unit tests). #1448 edits only H's own files and no floor; its markers are J's guard commit (stream J).
+- **Owns:** `hosts/host-web`, `sdk/`, `scripts/check-web-audioworklet*`; #1334 also `rust-toolchain.toml`, `.github/workflows/{qualification,npm-publish}.yml`, `docs/RELEASE.md`, `docs/TARGET_MATRIX.md` and the build/identity scripts it lists; #1333 also `tools/parameter-metadata/src/abi_layout.rs`, `scripts/check-abi-layout-v1.py`; #1381 the `RuntimePreparer` hook in `crates/control-plane`; by named exception: `crates/host-core/src/spectrum.rs` (#1449: the `SpectrumCapture` drains, the new `SpectrumCapture::reset_after_cancel`, `SpectrumCaptureCollection::cancel`, `select` and the new `cancel_except`, the new `SPECTRUM_RESULT_SLOTS`, `spectrum_capture_resources_for_id_bytes` (`:331-333`), the capture queue's construction (`:1353`), and their unit tests). #1448 edits only H's own files and no floor; its markers are J's guard commit (stream J). #1477 also edits `scripts/test-web-audioworklet.mjs` (`testQualificationBoot`, the fake port's `miso.renderallocations.v1` reply and the reply-check cases only).
 - **Depends on:** B #1309, #1312-#1316, #1348, #1349; A #1277, #1327; D #1326; E #1054, #1364; F #1225, #1226, #1247, #1261, #1262, #1267; I #1335.
 - **Parallel-safe with:** A, G, J.
 
@@ -455,6 +459,8 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 21 | #1296 | Apply session transactions from the browser SDK | #1294, #1295, #1382, #1383, #1385, #1386 | #1312, #1313, #1314, #1325, #1326, #1349 |
 | 22 | #1297 | Feed and retire the sources a browser edit adds or removes | #1293, #1296, #1332, #1381, #1387 | #1316, #1325 |
 | 23 | #1389 | Apply session transactions from the headless SDK engine | #1293, #1296, #1332, #1381, #1382, #1383, #1385, #1386 | — |
+| 24 | #1476 | Read every SDK qualification instance's render allocation count before it closes | — | — |
+| 25 | #1477 | Witness the staging-read boot caller and test the render allocation reply check hermetically | — | — |
 
 #1448's markers are not in its row: stream J lands them as "H #1448's guard, landed by J after C2"
 (stream J's table).
@@ -497,7 +503,14 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
   - `docs/REALTIME_DEPENDENCY_POLICY.md`, `docs/REALTIME_MEMORY.md` (#1446's lines only) and
     `scripts/operator/README.md` (#1445's sentence and entry);
   - `.github/ISSUE_SPECS/*.md` (#1446's D5 substitutions; S0's files) and
-    `.github/ISSUE_SPECS/948-*.md` (#1439's Evidence section).
+    `.github/ISSUE_SPECS/948-*.md` (#1439's Evidence section);
+  - `hosts/host-web/qualification/sdk-response-entry.ts` (`runContinuousSpectrumQualification`
+    and `createContinuousSpectrumBrowser`), `hosts/host-web/qualification/run.mjs` (the
+    `sdk-spectrum-continuous` predicates) and `hosts/host-web/MUTATIONS.md` (its rows) (stream H's;
+    #1480);
+  - `.github/workflows/nightly.yml` (#1481: the `native-vectorization-report` step's
+    `continue-on-error` line and its comment) and `scripts/test-test-support-ci.py` (#1481: two
+    rewrapped lines).
 - **Depends on:** S0; #1303 and #1384 need A (#1277, #1285); the tool batch (#1445 to #1444) needs stream B batch 1 (#1309, #1343, #1314, #1311, #1348), B #1447, H #1448, H #1449 and B #1345 (Amendment 1) on `main`; #1418 and #1426 need the tool batch.
 - **Parallel-safe with:** all, except the tool batch's waits above and the hot-file rows for its marker commits.
 
@@ -538,6 +551,9 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 33 | #1444 | Check realtime regions with a Rust syntax-tree tool: refuse a call to a popping function in a marked loop or closure | #1443 | #1345 |
 | 34 | #1418 | Require every loop around a realtime drain to drain a different queue on each pass | #1444 (the whole tool batch on `main`) | — |
 | 35 | #1426 | Bound each realtime drain per queue: require the pop receiver to be the counted queue | #1418 | — |
+| 36 | #1478 | Name every approved unsafe file in the realtime dependency policy | — | — |
+| 37 | #1480 | Make the continuous-spectrum gate's capture loss independent of browser timing | #1248 | — |
+| 38 | #1481 | Make the nightly vectorization report pass on main and report its failures | — | — |
 
 **#1444 waits for B #1345 (Amendment 1): accepted by root, 2026-10-05**, in place of the earlier
 "not ordered against #1345" for this one slice.
