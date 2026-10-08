@@ -2889,6 +2889,17 @@ fn live_composition(rate: u32) -> LiveComposition {
     .expect("a certified live composition")
 }
 
+/// #1485 `F_p` (V-D3, confirmed by root on 2026-10-08): the measured `r_p,max` 37.561 (the stated
+/// `G_p` over gate 1's largest peak, at 44.1 kHz) times `1 + 5 %`, rounded up to two decimals. The
+/// margin covers the millibel rounding of the statement and a restatement of a constant at
+/// rounding level; every quantity in gate 2 is deterministic.
+const F_P: f64 = 39.44;
+
+/// #1485 `F_t` (V-D3, confirmed by root on 2026-10-08): the measured `r_t,max` 13.677 (the stated
+/// `G_t` over L2's largest trim x exact supremum, at 96 kHz) times `1 + 5 %`, rounded up to two
+/// decimals, with `F_P`'s reason for the margin.
+const F_T: f64 = 14.37;
+
 /// One control event of a gate 1 history ([`peak_history`]), at a frame after the drive.
 #[derive(Clone, Copy)]
 enum PeakEvent {
@@ -2978,6 +2989,11 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
 ///
 /// Prints, per history and rate, the peak (`g_meas` of the largest) and the ratio
 /// `g_p / peak` (issue #1485, V-D3).
+///
+/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the five histories at the
+/// rate, `g_meas <= g_p` (the raw gain, without `sigma_p`) and the stated `G_p` is at most
+/// [`F_P`] `g_meas`. No other test bounds the live peak gain from above against the real kernel:
+/// #1466's `W_0` bound (a ratio of about 473) passes every other assertion here.
 #[test]
 fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
     use PeakEvent::{Flip, Retarget};
@@ -3019,10 +3035,31 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                  {stated:e}"
             );
         }
+        // Gate 2: never below the measured peak, within `F_p` of it.
+        let (_, peak_gain, ..) = composition_values(
+            input_section_live_bound(rate).expect("launch rate"),
+            "live bound",
+        );
+        let stated_gain = linear(peak_gain);
+        let g_meas = f64::from(largest);
         eprintln!(
-            "G1 {rate} Hz: g_meas {largest:.6e}, g_p {:.6e}, r_p {:.4}",
+            "G2 {rate} Hz: g_meas {g_meas:.6e}, g_p {:.6e} (stated {stated_gain:.6e}), r_p {:.4} \
+             (stated {:.4}), F_p {F_P}",
             composition.peak_gain,
-            composition.peak_gain / f64::from(largest)
+            composition.peak_gain / g_meas,
+            stated_gain / g_meas
+        );
+        assert!(
+            g_meas <= composition.peak_gain,
+            "{rate} Hz gate 2: g_meas {g_meas:e} exceeds the certified g_p {:e}",
+            composition.peak_gain
+        );
+        assert!(
+            stated_gain <= F_P * g_meas,
+            "{rate} Hz gate 2: the stated g_p {stated_gain:e} exceeds F_p g_meas = {:e} (ratio \
+             {:.2})",
+            F_P * g_meas,
+            stated_gain / g_meas
         );
     }
 }
@@ -3710,6 +3747,8 @@ fn l2_scan(rate: u32) -> Vec<ScanHistory> {
 /// rounding, and the flush part is B1's `sigma_t`). The oracle checks itself against
 /// independent brute force (a settled impulse response; forward impulse sums) and against the
 /// real `f32` kernel, which a worst-sign input of `2^-12` drives to the oracle's row.
+///
+/// #1485 gate 2t on the same scan ([`l2_at_rate`]): `s_scan <= g_t <= F_t s_scan`.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release scale (#1467 L2)")]
 fn live_tail_gain_covers_the_exact_supremum_of_a_late_input_over_the_scanned_ramps() {
@@ -3942,6 +3981,28 @@ fn l2_at_rate(rate: u32, trim: f64) -> Vec<String> {
         20.0 * math::log10(g_t),
         20.0 * math::log10(g_t / worst.0)
     ));
+    // #1485 gate 2t: with `s_scan` the largest trim x supremum over the scan, `s_scan <= g_t`
+    // (the raw gain; the stated one is checked above, history by history) and the stated `G_t` is
+    // at most [`F_T`] `s_scan`. No other test bounds the live tail gain from above against the
+    // oracle: #1467's window term (a ratio of about 695) passes every other assertion here.
+    let s_scan = worst.0;
+    let raw = live_composition(rate).tail_gain;
+    lines.push(format!(
+        "G2t {rate} Hz: s_scan {s_scan:.6e}, g_t {raw:.6e} (stated {g_t:.6e}), r_t {:.4} (stated \
+         {:.4}), F_t {F_T}",
+        raw / s_scan,
+        g_t / s_scan
+    ));
+    assert!(
+        s_scan <= raw,
+        "{rate} Hz gate 2t: s_scan {s_scan:e} exceeds the certified g_t {raw:e}"
+    );
+    assert!(
+        g_t <= F_T * s_scan,
+        "{rate} Hz gate 2t: the stated g_t {g_t:e} exceeds F_t s_scan = {:e} (ratio {:.2})",
+        F_T * s_scan,
+        g_t / s_scan
+    );
     lines
 }
 

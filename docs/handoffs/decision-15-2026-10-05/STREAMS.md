@@ -426,6 +426,7 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 50 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
 | 51 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1461, #1462, #1464, #1465, #1469 | — |
 | 52 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379, #1469 | — |
+| 53 | #1487 | Diagnose and tighten the live input section's remaining peak and tail gain looseness | #1485, #1379 (low priority) | — |
 
 ## Stream H
 

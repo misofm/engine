@@ -436,3 +436,106 @@ is red for any value change, as it must be until the table is restated.
 over gate 1's histories per rate) and gate 2t (`s_scan <= g_t <= F_t s_scan` over L2's scan per
 rate) are committed with their mutants (#1466's `W_0` bound restored: red; #1467's window term
 restored: red).
+
+### Attempt 1, phase B (implementer, 2026-10-08)
+
+**Root's ruling (2026-10-08, relayed by the coordinator, verbatim):** "confirmed: F_p = 39.44 and
+F_t = 14.37 (measured r_max x 1.05, rounded up; the margin covers millibel rounding). Condition on
+the cost: the live bound table stays a compiled constant checked by a test (as #1457 D2's table),
+so the ~244 ms per rate is test time only and nothing computes it at boot or preparation; state
+that in the record and make sure the test runs in a required CI job within its time. This slice
+closes with the partial tightening (22.0 dB and 34.1 dB). File a stream G successor for the
+remaining looseness (r_p ~ 37.6, r_t ~ 13.7): diagnosis first (which part of the bound carries the
+remaining gap against the adjoint oracle), then a tighter certified bound if one exists, same gate
+style; low priority, after #1379."
+
+**The factors (V-D3 step 2, confirmed).** `F_p = 39.44` and `F_t = 14.37`, the constants `F_P` and
+`F_T` in `crates/builtins/tests/tail_contract.rs`, each with its measurement and margin in its doc.
+
+**Gates 2 and 2t (committed).** Gate 2 is in gate 1's test
+(`live_peak_gain_bounds_the_real_kernel_on_its_worst_histories`), on the same five runs: per rate,
+`g_meas` (the largest peak) `<=` the raw certified `g_p`, and the stated `G_p` (linear) `<= F_p
+g_meas`. Gate 2t is in L2 (`l2_at_rate`), on the same scan: per rate, `s_scan` (the largest trim x
+exact supremum) `<=` the raw certified `g_t`, and the stated `G_t` `<= F_t s_scan` (L2 already
+holds `s_scan <=` the stated `G_t`, history by history). Each upper check reads the stated value,
+which is at least the raw one, so it holds on either reading. Release, every launch rate, all 22
+`tail_contract` tests pass (11.3 s):
+
+| rate | `g_meas` | `g_p` raw / stated | `r_p` raw / stated | `s_scan` | `g_t` raw / stated | `r_t` raw / stated |
+|---|---|---|---|---|---|---|
+| 44.1 kHz | 3.445581e4 | 1.294092e6 / 1.294196e6 | 37.558 / 37.561 | 6.016420e1 | 8.157736e2 / 8.165824e2 | 13.559 / 13.573 |
+| 48 kHz | 3.428141e4 | 1.280357e6 / 1.280855e6 | 37.348 / 37.363 | 6.017214e1 | 8.166610e2 / 8.175230e2 | 13.572 / 13.586 |
+| 88.2 kHz | 3.445984e4 | 1.294087e6 / 1.294196e6 | 37.554 / 37.557 | 6.012041e1 | 8.212877e2 / 8.212966e2 | 13.661 / 13.661 |
+| 96 kHz | 3.428506e4 | 1.280352e6 / 1.280855e6 | 37.344 / 37.359 | 6.012030e1 | 8.217405e2 / 8.222426e2 | 13.668 / 13.677 |
+
+**Mutation table, phase B** (release `tail_contract`; each defect applied, the whole binary run,
+the files restored and checked by SHA-256 against the tested tree).
+
+| mutant | defect | red | green |
+|---|---|---|---|
+| MP | #1466's `W_0` peak gain restored in `LiveBound::composition` (`g_p = (W_0(g, 0) + delta^2 g) SLACK`), table and L3 left at #1485 | gate 2 (`44100 Hz gate 2: the stated g_p 1.629e7 exceeds F_p g_meas = 1.359e6 (ratio 472.87)`), the table test, L3 | the other 19 tests: gate 1 (every history at 44.1 kHz passed before gate 2 fired), L2 and gate 2t among them |
+| MT | #1467's window term restored (`arrival_window`, `arrival_continuation`, `settled_input_gain` copied back from `a059cdd03`; `g_t = W* g + g L_1 L_2`), table and L3' left at #1485 | gate 2t at every rate (`ratio 694.48 / 694.39 / 694.99 / 694.99`, `g_t` 4.178e4 against `F_t s_scan` about 864), the table test, L3' | the other 19 tests: gates 1 and 2 among them, and L2's per-history checks (the old `g_t` is larger) |
+| MC | the coherent restore: `crates/math/src/tail.rs`, `crates/builtins/src/tail.rs` and `tail_contract.rs` at `a059cdd03` (#1466's `G_p`, #1467's `G_t`, their table, their L1, L2, L3 and L3'), with only gates 2 and 2t transplanted (gate 1's five histories with gate 2 in place of #1466 L1; gate 2t into L2) | gate 2 (ratio 472.87 at 44.1 kHz), gate 2t (694.39 to 694.99, every rate) | all 20 other tests, gate 1's histories at 44.1 kHz and L2's per-history checks included |
+
+Test value (worker rule): MC is the case gates 2 and 2t exist for. With the module, its table and
+its recomputations restored together, as they stood when #1466 and #1467 shipped, every existing
+test is green and only gates 2 and 2t are red. So no existing test catches a bound that does not
+tighten. In MP and MT the table test and L3/L3' are red too, but only because a value moved
+against a pin or a recomputation. They turn red for any change, larger or smaller, and they
+compare the bound with itself, never with the kernel or the oracle.
+
+**Cost (root's condition, checked on this branch).**
+
+* *A compiled constant checked by a test.* `input_section_live_bound_table`
+  (`crates/builtins/src/tail.rs`) is a `pub const fn` that returns literal `NodeTailBound` entries
+  per launch rate, as #1457 D2's table does. `live_bound_table_is_the_computed_live_bound_at_every_launch_rate`
+  holds every entry equal to the computed `input_section_live_bound` (MP and MT show it red on a
+  moved value).
+* *Nothing computes the bound at boot or preparation.* Outside test code, the table is read in
+  only two places: preparation's fallback in `input_section_bounds_within`
+  (`crates/builtins/src/lib.rs`) and the live-lane strip bound in `crates/builtins-compiler/src/lib.rs`
+  (outside its `mod tests`). `crates/host-core/src/prepare.rs` reads it only in its `mod tests`.
+  `input_section_live_bound`, `live_cascade_composition`, `input_section_live_cascade` and
+  `input_section_live_envelope` have no caller outside tests: `tail_contract.rs`, one
+  builtins-compiler unit test (`live_input_lane_reports_the_live_bound_and_plain_input_its_own`,
+  inside `mod tests`) and `crates/host-core/tests/live_lanes.rs`. A grep over `crates`, `hosts` and
+  `tools` finds no other caller. The 244 ms per rate (release; about 5 s in debug) is therefore
+  test time only.
+* *The tests run in required jobs.* `qualification.yml`'s `verdict` (the only required check)
+  expects `test-debug-b`, `test-release` and `aarch64-debug` to succeed on the `full` route, and
+  the router sends this branch's paths (`crates/math/src/tail.rs`,
+  `crates/builtins/tests/tail_contract.rs`) to `full` (`scripts/ci-path-router.py`, checked).
+  `test-release`'s step "Input section tail and exact-rest gates (tail_contract) in release" runs
+  the table test and gates 1, 1t, 2 and 2t. `test-debug-b` (`-p builtins --all-targets`) and
+  `aarch64-debug` (`scripts/run-aarch64-tests.sh debug`; its log in run 37823829719 shows `tail_contract` among its 25 product crates' tests) run the
+  table test and gates 1 and 2 in debug. Gates 1t and 2t (L2) are release scale and run only in
+  `test-release`, as #1467 L2 always did.
+* *Within time* (measured here on four cores with `taskset -c 0-3`, and compared with main's run
+  37823829719 at `a059cdd03`). Debug `tail_contract`: 28.0 s before #1485 and 67.0 s now (+39 s).
+  The `test-debug-b` runner took 43.4 s for it before, about 1.55 times this machine, so it now
+  takes about 104 s. That job took 7 min 54 s of its 15 min, so about 9 min now. `aarch64-debug`
+  took 44.5 s for it and 13 min 38 s of 30 min. Release `tail_contract`: 38.7 s before and 43.4 s
+  now (+4.7 s). The runner took 78.7 s before (2.0 times), so about 88 s now. `test-release` took
+  10 min 43 s of 15 min, so about 10 min 53 s now, with about 4 min of headroom. `test-debug-a`
+  gains the two debug computations outside `tail_contract`: 5.2 s each here, in a job at 6 min
+  57 s of 15 min. No required job's timeout is at risk. `test-release` has the least headroom
+  (about 4 min), and #1485 adds only about 10 s to it.
+
+**Successor.** *Diagnose and tighten the live input section's remaining peak and tail gain
+looseness* (#1487, `.github/ISSUE_SPECS/1487-diagnose-and-tighten-the-live-input-section-s-remaining-peak-and-tail-gain-loose.md`):
+diagnosis first, then a tighter certified bound if one exists, with the same gates. It is low
+priority and comes after #1379, and its row is in `STREAMS.md` under stream G (order 53). This
+slice closes with the partial tightening, as root ruled.
+
+**Gates run (phase B), all green.** Phase B changes only `tail_contract.rs` (gates 2 and 2t),
+this spec and `STREAMS.md`. No library code changes, so no rendered bit can move.
+
+* `cargo test --locked --release -p builtins --features builtins/test-support --test
+  tail_contract`: 22 passed (gates 1, 1t, 2, 2t and 3, L3/L3', L4, L5', the table test).
+* `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference --features
+  math/lane,builtins/test-support,lane/test-support` (debug): 45 binaries, no failure (3 min 44 s).
+* `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`,
+  `scripts/check-workspace-policy.sh`: green.
+* Not rerun in phase B, because no library, render or CI file changed since phase A, where they
+  were green: `audit capi` (`pcm_digest` `cb10fbface44a3a4`), `check-builtins-fixtures.sh`,
+  `run-wasm-gates.sh`, `check-realtime-policy.sh`, `check-cross-targets.sh` and the worklet chain.
