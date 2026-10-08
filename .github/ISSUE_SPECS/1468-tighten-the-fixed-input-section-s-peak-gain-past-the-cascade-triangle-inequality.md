@@ -146,9 +146,10 @@ bound `X*` of the rest branch. No kernel, law, render path or rendered bit chang
    equality holds for the new formula; no rendered bit moves (`audit capi`'s `pcm_digest`, the wasm
    G5 digests, the builtins PCM fixtures).
 4. **Budget.** #1457's gates 2 and 8 pass, within #1457's D1 budget. A change to the walk's cost
-   also reruns `target/release/examples/input_bound_budget calibrate` and restates
-   `builtins::INPUT_BOUND_DESIGN_CHARGE` and `INPUT_BOUND_SECTION_CHARGE` from it (#1457 Amendment
-   3).
+   also reruns `target/release/examples/input_bound_budget calibrate` and restates the
+   frame-equivalent (the slowest frame class) and `builtins::INPUT_BOUND_SECTION_CHARGE` from it
+   (#1457 Amendments 3 and 4; Amendment 4 removed the per-design charge and set the section charge
+   to 290 frame-equivalents of 23.5 ns).
 5. **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
    --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
    builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8

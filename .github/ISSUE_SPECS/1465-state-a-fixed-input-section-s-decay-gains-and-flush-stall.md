@@ -188,7 +188,11 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   budget. A change to the walk's cost also reruns `target/release/examples/input_bound_budget
   calibrate` and restates the frame-equivalent (the slowest frame class) and
   `builtins::INPUT_BOUND_SECTION_CHARGE` from it (#1457 Amendments 3 and 4; the per-design charge
-  was removed in Amendment 4).
+  was removed in Amendment 4). The restated slowest class is a robust statistic, never the maximum
+  of single-shot samples (#1457 attempt 3 verdict n3): each point's ns per frame is the median of
+  repeated runs within the one invocation, stated with its spread (minimum to maximum), and
+  confirmed against gate 2's band families (their design work divided by their charged
+  frame-equivalents).
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8

@@ -25,7 +25,8 @@ bounds, comes down. Every reported bound stays sound.
   (the band families of `crates/builtins/examples/input_bound_budget.rs`). Without the band the
   slowest class would be about 15 ns a frame.
 - **Likely cause, not proven.** On an instrumented copy (#1457 attempt 2 verdict,
-  `/tmp/claude-1002/v1457b/evidence/probe-subnormal48.log`), the first section's state or its
+  `docs/handoffs/decision-15-2026-10-05/verdicts/stream-g2/1457-attempt2.md`, which states the
+  figures of its `probe-subnormal48.log`), the first section's state or its
   error radius is subnormal on about 449,000 of about 450,000 majorant frames in the band, and on
   fewer than 50 outside it (12 kHz and the top cutoff at 48 kHz). Presence alone does not predict
   every point: a 17.28 kHz HPF at 48 kHz was subnormal throughout but ran at 12.9 ns a frame.
@@ -44,18 +45,39 @@ bounds, comes down. Every reported bound stays sound.
    or another), and run a flush-to-zero A/B of the same walk (measurement only, never shipped) and
    record the ns per frame both ways. If the cause is not subnormal operands, stop and report the
    measured cause to root with the evidence; do not change the analysis.
-2. **If confirmed: a certified flush in the analysis.** Where a component that the walk
-   propagates falls below a stated tiny bound `tau`, round it **up** to `tau` (never down, never to
-   zero), so every propagated quantity stays an upper bound of what it bounds. Prove it in the
-   derivation: a larger non-negative majorant is still a majorant under the non-negative
-   propagation, and the closing terms (the suffix sums, the remainder, `p_star`, the rest bound)
-   stay sound. State `tau` and why its contribution cannot keep the walk from finishing (a floor
-   at `tau` never decays: the remainder test and the falling test must still pass, so `tau`'s
-   share of each must be shown far below its threshold).
+2. **If confirmed: a certified flush in the analysis.** Fix a stated tiny bound `tau` and treat
+   each quantity that the walk propagates by its kind, so that every propagated quantity stays an
+   upper bound of what it bounds:
+   - **Non-negative radii and majorants** (the error radius `Majorants::first_error`, the later
+     sections' majorants `Majorants::later`, the `Deviation` components): a component below `tau`
+     is rounded **up** to `tau`, never down and never to zero. A larger non-negative majorant is
+     still a majorant under the non-negative propagation.
+   - **The first section's signed state** (`Majorants::first`, propagated by the section's signed
+     matrix `A`): rounding up is not defined for it and a larger value bounds nothing. When it is
+     below `tau`, it is flushed to **zero**, and an upper bound of its `V`-norm magnitude is added
+     to `first_error` in the same step (rounded up), so the radius still covers the exact state.
+   Prove it in the derivation: the per-quantity treatment above keeps every step an upper bound,
+   and the closing terms (the suffix sums, the remainder, `p_star`, the rest bound) stay sound.
+   The proof must state that the walk's rounding model (`STEP_UP`'s relative bound on each
+   summand, and `nu = 8 u ||R||` for the first state's step error) holds only when no result
+   underflows: a subnormal result has an absolute error and can round to zero. So the proof must
+   do one of these, and say which:
+   - keep `tau`, and every product and sum that a floored or flushed quantity enters, in the
+     normal range of `f64`, and show it;
+   - or carry an explicit absolute underflow term (at most one half-ulp of the smallest subnormal,
+     `2^-1075`, per rounding) in the bound, and show it is covered.
+   State `tau` and why its contribution cannot keep the walk from finishing (a floor at `tau` never
+   decays: the remainder test and the falling test must still pass, so `tau`'s share of each, and
+   that of the radius added by a flush, must be shown far below its threshold).
 3. **Recalibrate and restate.** Rerun #1457's calibration (`input_bound_budget calibrate`, one
    invocation) and restate the frame-equivalent and `INPUT_BOUND_SECTION_CHARGE` from it; rerun
    #1457's gates 2 and 8 with #1457 Amendment 3's commands; restate the worst case (down) with its
-   spread and the per-frame cause.
+   spread and the per-frame cause. The slowest frame class is restated from a robust statistic,
+   never from the maximum of single-shot samples (one noisy sample can move that either way: #1457
+   attempt 3 verdict n3): each point's ns per frame is the median of repeated runs within the one
+   invocation, reported with its spread (minimum to maximum), and the class's value is confirmed
+   against gate 2's band families (their design work divided by their charged frame-equivalents).
+   Changing the calibration's statistic in `input_bound_budget.rs` is in scope.
 
 ## Objective gates
 
@@ -67,12 +89,20 @@ bounds, comes down. Every reported bound stays sound.
    attempt record, per rate, for the band and outside it.
 3. **Timing.** The calibration's frame classes are recorded before and after on the same box (one
    invocation each); the slowest class's ns per frame and the stated worst case come down, and the
-   frame-equivalent is restated from the new slowest class. #1457's gate 2 runs once (one warmup,
+   frame-equivalent is restated from the new slowest class's median with its spread (Scope item
+   3), not from a single-shot maximum. #1457's gate 2 runs once (one warmup,
    two measured rounds, no retry, load average recorded before and after).
 4. **#1457's gate 8.** Every 64-track console document is exact at every launch rate under the
    restated charge.
-5. **The flush rounds up.** A math-level test shows a component below `tau` propagates as `tau`:
-   red when the flush rounds down or to zero (mutation run recorded).
+5. **The flush is sound per quantity.** Math-level tests show:
+   - a non-negative radius or majorant below `tau` propagates as `tau`: red when its flush rounds
+     down or to zero;
+   - the first section's signed state below `tau` is flushed to zero and its magnitude enters
+     `first_error`: red when the state is flushed without that addition, or rounded up to `tau`
+     instead;
+   - the derivation's normal-range condition (or its underflow term) holds on the band designs
+     of gate 1.
+   Each red result is a recorded mutation run.
 
 ## Non-goals
 

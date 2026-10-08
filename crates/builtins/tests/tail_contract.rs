@@ -462,9 +462,8 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
 /// #1457 gate 7 at the bound level (attempt 1, MJ2): a design's computation walks at most the
 /// budget it is given, counted frame by frame by the walk itself, finished or stopped. Each
 /// channel cascade reserves `INPUT_BOUND_SECTION_CHARGE` per section before it walks to the rest
-/// of the budget: a
-/// stopped cascade walks exactly what is left after its reservation, and nothing when the budget
-/// does not cover that. The right channel of a design whose channels differ gets what the left
+/// of the budget: a stopped cascade walks exactly what is left after its reservation, and nothing
+/// when the budget does not cover that. The right channel of a design whose channels differ gets what the left
 /// channel's charge left. The near-top pairs' majorant passes are hundreds of thousands of frames,
 /// so a pass that counted frames but did not stop at the horizon would walk far past every small
 /// budget here.
@@ -519,13 +518,12 @@ fn a_design_walks_at_most_the_budget_it_is_given() {
             ),
         ];
         for (design, charged, channels) in cases {
-            let fixed = cascade;
             let mut budgets = std::vec![
                 1,
-                fixed - 1,
-                fixed,
-                fixed + 1,
-                fixed + 1_000,
+                cascade - 1,
+                cascade,
+                cascade + 1,
+                cascade + 1_000,
                 charged.charge / 2,
                 charged.charge - 1,
                 charged.charge,

@@ -95,8 +95,9 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
    first-touch cost that is not a cache cost: #1457 attempt 2 saw a 65,537-strip first preparation
    with a fresh cache take 11-12 ms more than the same preparation without a cache, and its
    verifier showed that with glibc heap trimming off a cold cache costs the same as no cache
-   (39 ms) and only the process's first preparation pays the extra (about 54 ms;
-   `/tmp/claude-1002/v1457b/evidence/probe-order.log`, `probe-order-notrim.log`). This slice
+   (39 ms) and only the process's first preparation pays the extra (about 54 ms; #1457 attempt 2
+   verdict, `docs/handoffs/decision-15-2026-10-05/verdicts/stream-g2/1457-attempt2.md`, which
+   states the figures of its `probe-order.log` and `probe-order-notrim.log`). This slice
    explains and measures that first-touch cost on the C ABI's first compile: how much of the first
    compile it is, at the 9-track and 64-track documents and at 65,537 strips, with heap trimming on
    (the default) and off, recorded beside the first-compile and rebuild figures.
