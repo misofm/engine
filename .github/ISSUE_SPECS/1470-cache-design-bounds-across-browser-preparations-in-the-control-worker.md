@@ -28,7 +28,9 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
     in strip order, in frame-equivalents of 18.0 ns (the computed bound, the largest median work
     of five measured samples per charged frame-equivalent over every calibration batch and gate-2
     design, 16.960 ns, times root's measurement margin of 1.05, rounded up to a half nanosecond;
-    root's second ruling, ruling (c) and margin ruling of 2026-10-08), so 27.18 ms (#1457
+    root's second ruling, ruling (c) and margin ruling of 2026-10-08; the margin covers the whole
+    charged work, the section charge included, so every design's median work is at most its
+    charge x 18.0 ns / 1.05), so 27.18 ms (#1457
     Amendment 4, restated by #1474 and #1465). The stated worst case is **24.60 ms** of
     design-bound work (median of five) measured on the CI-class runner (4,096 cheap two-section
     designs, 1 kHz into 1.28 kHz, +24 dB, 88.2 kHz; measured at 17.0 ns and charge 550), 95.8 % of
@@ -49,8 +51,10 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
     m3: a cache that several sessions fill can clear in the middle of a preparation). A full cache
     holds about 2.4 MiB (2,486,520 bytes measured at 8,192 entries). Render never reads it.
   - *(#1457 Amendments 3 and 4.)* The budget is in frame-equivalents: each design computed
-    charges the frames it walks plus `INPUT_BOUND_SECTION_CHARGE` (520 frame-equivalents) per
-    section. Amendment 4 removed the per-design charge.
+    charges the frames it walks plus `INPUT_BOUND_SECTION_CHARGE` (550 frame-equivalents:
+    1.05 x 9.34 us / 18.0 ns = 544.8, rounded up to a ten; the coordinator's whole-work margin fix
+    of 2026-10-08, #1465) per section, so a computed design charges at least 257 + 550 = 807 and
+    one preparation computes at most 1,871 designs. Amendment 4 removed the per-design charge.
   - **One entry point, no parallel API** (Amendment 2, ruling (i)):
     `builtins_compiler::prepare_session_builtins_with_live_controls` takes
     `bound_cache: Option<&mut InputBoundCache>`. In `host-core` the parameter is internal to

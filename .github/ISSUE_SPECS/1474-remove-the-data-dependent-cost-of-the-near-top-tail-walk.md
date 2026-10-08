@@ -511,3 +511,12 @@ ns**; `INPUT_BOUND_SECTION_CHARGE` **520** (9.34 us / 18.0 ns = 518.9, rounded u
 budget 1,510,000 x 18.0 ns = **27.18 ms**; the cache cap's arithmetic 257 + 520 = 777 a design, at
 most 1,943 designs a preparation. No new calibration run: the batch verifier's single run is the
 figure of record and applies the same rule. #1465's attempt record has the gate-8 margins.
+
+**Note (2026-10-08, the coordinator's whole-work margin fix, from #1465).** The charge of 520 and
+the cap's 777 and 1,943 above are superseded. With the charge at 9.34 us / 18.0 ns, the raised
+frame-equivalent lowered the charge (550 to 520), and the binding batch kept only 3.6 % headroom.
+The margin now applies to the whole charged work: the charge is ceil10(1.05 x 9.34 us / 18.0 ns) =
+ceil10(544.8) = **550**, the frame-equivalent stays **18.0 ns** and the budget **27.18 ms**; the
+binding batch's 44,723 ns a design is at most (1,537 + 550 x 2) x 18.0 ns / 1.05 = 45,206 ns
+(1.08 % left past the margin). The cache cap's arithmetic is 257 + 550 = 807 a design, at most
+1,871 designs a preparation. No new calibration run.
