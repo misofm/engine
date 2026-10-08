@@ -107,3 +107,74 @@ the reply check is lost, which no test catches today.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (2026-10-08, implementer)
+
+**Change.** `qualificationBootContract` exports `runStagingReadRun`. `testQualificationBoot` calls it
+once (`streaming` false: both forms boot the same options and the sentinel stops at boot), holds
+the six-caller witness list, six ready and six dispose witnesses and five sentinel stops, and holds
+D2's shape (`spectrum` `null`, the two collection entries in order, the observation caller's four
+live-control words). The main-realm fake port answers `miso.renderallocations.v1` through
+`renderAllocationsMutation`; beside the `status` schema case, the nine refusal cases each run on a
+fresh host and must fail it with `255`, then the `count` `0` and `4294967295` replies must resolve
+with their count. The refusal cases are all run before one verdict, so a lost conjunct names every
+reply it lets through.
+
+**Two hermetic-environment findings (D1 hazard).** The collection shape did not boot in the
+boot-contract harness as it stood, for two reasons that are harness gaps, not product defects:
+
+1. `testProcessor` sets `globalThis.TextEncoder = undefined` to model the worklet scope, and
+   `testQualificationBoot` runs the main-realm host in the same global. The host's collection guard
+   (`validSpectrumCollectionBoot`) measures each identity with `TextEncoder`, which a browser main
+   thread has, so the host refused with `1` (`TextEncoder is not a constructor`). No earlier caller
+   booted a spectrum identity, so none reached it. Fix: `testQualificationBoot` takes the main
+   realm's encoder (`mainRealmTextEncoder`, passed at its one call site) and installs it only for
+   the synchronous span of `createMisoAudioWorkletHost` before its first await, where the option
+   guards run; the worklet still runs with no `TextEncoder`.
+2. `createFakeExports` has no pre-boot spectrum collection staging exports, so the real worklet
+   could not stage the collection. Fix: `testQualificationBoot` adds the seven exports to its fake
+   with the bridge's sizing rules (`hosts/host-web/src/ffi.rs`: entry capacity is the header's entry
+   count, identity capacity is the sum of the staged identity lengths).
+
+Neither weakens the sentinel or a witness count. Both stay inside `testQualificationBoot` (plus the
+one argument at its call site).
+
+**Gates.**
+
+- Worklet chain: `scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin
+  target/ci/qualification-artifacts` passed (module `6175e70c...`, unchanged engine);
+  `scripts/check-web-audioworklet.sh --without-metadata-regeneration ...` passed;
+  `check-browser-expected-resources.py --artifacts` passed.
+- Gate 1: `bash scripts/test-web-audioworklet.sh` with a private `TMPDIR` passed, nothing left in
+  it; the log shows `qualification boot contract passed: callers=6 real-ready=6 real-disposed=6
+  diagnose-ready=1`. (Node present, so the script runs node, not bun.)
+- Browser leg, `npm run qualify -- --artifacts ... --sdk-root sdk --browser <b> --check-matrix
+  --self-test-mutations` with a private pulseaudio sink: Chromium 151, Firefox 153 and WebKit 26.5
+  each `all qualification gates passed`.
+- Gate 3: `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+**Gate 2 mutations.** Each applied alone, run against this suite and against the suite at
+`e403684d9` (the base, which has none of the new cases), then reverted:
+
+| Mutation | This suite | Base suite |
+| --- | --- | --- |
+| `runStagingReadRun` removed from the contract | red: `TypeError: hooks.runStagingReadRun is not a function` at the call (before the witness list assertion is reached) | green |
+| one-entry `spectrumCollection` | red: `staging-read spectrum collection changed` | green |
+| `message.result === RESULT_OK` removed | red: accepted `['result 6']` | green |
+| `validU32` -> `Number.isInteger` | red: accepted `['count -1', 'count 4294967296']` | green |
+| `validU32(message.count)` removed | red: accepted `-1`, `4294967296`, `1.5`, `"0"`, `0n` | green |
+| field list widened by `"extra"` | red: accepted `['an extra field']` | green |
+| expected tag changed to `miso.status.v1` | red: accepted `['a wrong tag']` | green |
+
+After revert the suite is green.
+
+**Test-value correction.** The Test-value paragraph says D1 is also red when "the host's guards
+refuse that shape, which today only a browser run shows". Two generic guard mutations tried for
+that half -- the collection guard requiring exactly one entry, and the collection capture capped
+at 1 MiB (the staging-read run asks for 2 MiB) -- turn this suite red but also turn the base suite
+red: the main-realm spectrum option tests already boot two-entry and larger collections. D1's
+unique catch is the caller's own boot options (rows 1-2), not the host's generic guards.
+
+**Open.** None in scope. Root may want the Test-value sentence narrowed to the caller's options.

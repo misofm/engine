@@ -890,6 +890,7 @@ export const qualificationBootContract = Object.freeze({
   runLiveControlQualification,
   runObservationRun,
   runStallQualification,
+  runStagingReadRun,
   diagnoseReady,
 });
 

@@ -115,6 +115,7 @@ async function testMainRealm() {
   let held = null;
   let readyMutation = null;
   let statusMutation = null;
+  let renderAllocationsMutation = null;
   let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
@@ -163,6 +164,11 @@ async function testMainRealm() {
             nextAbsoluteSample: 64n, renderedQuanta: 1n, memoryBytes: 65536,
           };
           if (statusMutation !== null) response = statusMutation(response);
+        } else if (received.tag === "miso.renderallocations.v1") {
+          response = {
+            tag: "miso.renderallocations.v1", requestId: received.requestId, result: 0, count: 0,
+          };
+          if (renderAllocationsMutation !== null) response = renderAllocationsMutation(response);
         } else if (received.tag === "miso.command.v1") {
           response = {
             tag: "miso.ack.v1",
@@ -1355,6 +1361,54 @@ async function testMainRealm() {
     statusMutation = null;
     await schemaHost.dispose();
 
+    // Issue #1477 D3: the render allocation reply check, conjunct by conjunct. Any other tag,
+    // field set, result or count fails the whole host with 255; the well-formed reply resolves at
+    // both ends of the u32 range. Every refusal case runs before the verdict, so a lost conjunct
+    // names each reply it lets through.
+    const allocationHost = () => createMisoAudioWorkletHost({
+      context,
+      document: new Uint8Array(),
+      options: limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    const acceptedAllocationReplies = [];
+    for (const [what, mutation] of [
+      ["a wrong tag", (reply) => ({ ...reply, tag: "miso.status.v1" })],
+      ["no count", ({ count: _dropped, ...rest }) => rest],
+      ["an extra field", (reply) => ({ ...reply, extra: 0 })],
+      ["result 6", (reply) => ({ ...reply, result: 6 })],
+      ["count -1", (reply) => ({ ...reply, count: -1 })],
+      ["count 4294967296", (reply) => ({ ...reply, count: 4294967296 })],
+      ["count 1.5", (reply) => ({ ...reply, count: 1.5 })],
+      ["count \"0\"", (reply) => ({ ...reply, count: "0" })],
+      ["count 0n", (reply) => ({ ...reply, count: 0n })],
+    ]) {
+      const host = await allocationHost();
+      renderAllocationsMutation = mutation;
+      await errorResult(host.renderAllocationCount(), 255)
+        .catch(() => acceptedAllocationReplies.push(what));
+      renderAllocationsMutation = null;
+      await host.dispose();
+    }
+    assert.deepEqual(acceptedAllocationReplies, [],
+      "the host accepted a malformed render allocation reply");
+    for (const [what, mutation, count] of [
+      ["count 0", null, 0],
+      ["count 4294967295", (reply) => ({ ...reply, count: 4294967295 }), 4294967295],
+    ]) {
+      const host = await allocationHost();
+      renderAllocationsMutation = mutation;
+      const reply = await host.renderAllocationCount().catch((error) => {
+        throw new Error(`the host refused a render allocation reply with ${what}`, { cause: error });
+      });
+      renderAllocationsMutation = null;
+      assert.equal(reply.tag, "miso.renderallocations.v1");
+      assert.equal(reply.result, 0);
+      assert.equal(reply.count, count, `render allocation reply with ${what}`);
+      await host.dispose();
+    }
+
     // Issue #1210 gate 3: the session map's submix list is part of the exact field set. A reply
     // without it, or with an entry that is not a nonempty string, fails the whole host; the
     // well-formed reply is delivered with its canonical order intact.
@@ -2435,7 +2489,9 @@ function withTelemetryClock(clock, callback) {
 // Issue #288: exercise the qualification caller's real boot objects through the same host and
 // worklet guards as the main-realm suite. The stop sentinel deliberately ends each caller after
 // real create/dispose, before any source/render/stall loop; the diagnostic initializer still runs.
-async function testQualificationBoot({ registered, makeFake, setNextFake, setProcessorPortFactory, document }) {
+async function testQualificationBoot({
+  registered, makeFake, setNextFake, setProcessorPortFactory, document, mainRealmTextEncoder,
+}) {
   const originalOfflineAudioContext = globalThis.OfflineAudioContext;
   const originalAudioWorkletNode = globalThis.AudioWorkletNode;
   const originalFetch = globalThis.fetch;
@@ -2502,6 +2558,42 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
 
   }
 
+  // Issue #1477 D1: the staging-read caller boots a spectrum collection, so the fake carries the
+  // pre-boot collection staging exports with the bridge's sizing rules (`hosts/host-web/src/ffi.rs`):
+  // the entry capacity is the request header's entry count, and the identity capacity is the sum
+  // of the staged entries' identity byte lengths.
+  const withSpectrumCollectionStaging = (fake) => {
+    const requestPointer = 42000;
+    const entryPointer = 42100;
+    const idPointer = 42600;
+    let entryCapacity = 0;
+    let idCapacity = 0;
+    const view = () => new DataView(fake.exports.memory.buffer);
+    Object.assign(fake.exports, {
+      miso_engine_web_v1_spectrum_collection_request_ptr: () => {
+        entryCapacity = 0;
+        idCapacity = 0;
+        return requestPointer;
+      },
+      miso_engine_web_v1_spectrum_collection_request_bytes: () => 32,
+      miso_engine_web_v1_spectrum_collection_entry_ptr: () => {
+        entryCapacity = view().getUint32(requestPointer + 8, true);
+        return entryCapacity * 24 <= idPointer - entryPointer ? entryPointer : 0;
+      },
+      miso_engine_web_v1_spectrum_collection_entry_capacity: () => entryCapacity,
+      miso_engine_web_v1_spectrum_collection_entry_bytes: () => 24,
+      miso_engine_web_v1_spectrum_collection_target_ids_ptr: () => {
+        idCapacity = 0;
+        for (let index = 0; index < entryCapacity; index += 1) {
+          idCapacity += view().getUint32(entryPointer + index * 24 + 8, true);
+        }
+        return idPointer;
+      },
+      miso_engine_web_v1_spectrum_collection_target_ids_capacity: () => idCapacity,
+    });
+    return fake;
+  };
+
   class QualificationNode {
     static latest = null;
 
@@ -2515,11 +2607,11 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       this.onprocessorerror = null;
       this.disconnectCount = 0;
       const processorOptions = options.processorOptions?.options;
-      setNextFake(makeFake(
+      setNextFake(withSpectrumCollectionStaging(makeFake(
         context.renderQuantumSize,
         1,
         processorOptions?.liveControlCommandQueueRecords !== 0n,
-      ));
+      )));
       setProcessorPortFactory(() => processorPort);
       try {
         this.processor = new registered({ processorOptions: options.processorOptions });
@@ -2563,6 +2655,19 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   };
+  // Issue #1477 D1: the host runs in the main realm, which has `TextEncoder`; the processor scope
+  // this suite models has none. The host's option guards (a spectrum identity's UTF-8 length
+  // among them) run synchronously before its first await, so the encoder is present for exactly
+  // that span and absent again before any worklet code runs.
+  const createInMainRealm = (factory) => {
+    const processorScopeEncoder = globalThis.TextEncoder;
+    globalThis.TextEncoder = mainRealmTextEncoder;
+    try {
+      return createMisoAudioWorkletHost(factory);
+    } finally {
+      globalThis.TextEncoder = processorScopeEncoder;
+    }
+  };
   const forwardingCreateHost = (label) => async (options) => {
     observed.push({ label, options });
     if (options.document !== undefined) {
@@ -2575,7 +2680,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       `qualification boot contract: ${label} quantum mismatch`);
     if (label === "renderCorpusSegment" && options.options !== undefined) {
       await assert.rejects(
-        () => createMisoAudioWorkletHost({
+        () => createInMainRealm({
           ...options,
           options: { ...options.options, qualificationExtra: true },
         }),
@@ -2585,7 +2690,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     }
     let host;
     try {
-      host = await bounded(createMisoAudioWorkletHost(options), `${label} real host`);
+      host = await bounded(createInMainRealm(options), `${label} real host`);
     } catch (error) {
       throw new Error(
         `qualification boot contract: ${label} real host guard rejected `
@@ -2646,18 +2751,23 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     await expectStop("runStallQualification", () => hooks.runStallQualification(
       forwardingCreateHost("runStallQualification"), documentBytes,
     ));
+    // Issue #1477 D1: both forms of the staging-read run boot the same options before they part,
+    // so one call witnesses the shape.
+    await expectStop("runStagingReadRun", () => hooks.runStagingReadRun(
+      forwardingCreateHost("runStagingReadRun"), documentBytes, false,
+    ));
 
     assert.deepEqual(
       observed.map(({ label }) => label),
       [
         "renderCorpusSegment", "typedUnsupportedAttestation", "runLiveControlQualification",
-        "runObservationRun", "runStallQualification",
+        "runObservationRun", "runStallQualification", "runStagingReadRun",
       ],
       "qualification boot contract: caller witness set changed",
     );
-    assert.equal(realReady, 5, "qualification boot contract: five real ready witnesses required");
-    assert.equal(realDisposed, 5, "qualification boot contract: five real dispose witnesses required");
-    assert.equal(sentinelStops, 4, "qualification boot contract: every non-attestation path must stop its sentinel");
+    assert.equal(realReady, 6, "qualification boot contract: six real ready witnesses required");
+    assert.equal(realDisposed, 6, "qualification boot contract: six real dispose witnesses required");
+    assert.equal(sentinelStops, 5, "qualification boot contract: every non-attestation path must stop its sentinel");
     const plain = observed.filter(({ label }) =>
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
     assert(plain.every(({ options }) => options.options.liveControlCommandQueueRecords === 0n
@@ -2676,6 +2786,23 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
     assert.equal(observationOptions.liveControlObservationTaps, 4n);
     assert.equal(observationOptions.liveControlMasterTrackPlusOne, 1n);
+    // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields with
+    // no fixed spectrum target and the two-entry collection, in order.
+    const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
+    assert.equal(stagingReadOptions.liveControlCommandQueueRecords, 64n);
+    assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
+    assert.equal(stagingReadOptions.liveControlObservationTaps, 4n);
+    assert.equal(stagingReadOptions.liveControlMasterTrackPlusOne, 1n);
+    assert.equal(stagingReadOptions.spectrum, null,
+      "qualification boot contract: staging-read run must boot no fixed spectrum target");
+    assert.deepEqual(
+      stagingReadOptions.spectrumCollection.entries,
+      [
+        { target: "trackPostPan", targetId: "track", channels: "both" },
+        { target: "output", targetId: "main-out", channels: "both" },
+      ],
+      "qualification boot contract: staging-read spectrum collection changed",
+    );
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
     assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");
@@ -3357,6 +3484,7 @@ async function testProcessor() {
       setNextFake: (fake) => { nextFake = fake; },
       setProcessorPortFactory: (factory) => { processorPortFactory = factory; },
       document: processorSessionDocument,
+      mainRealmTextEncoder: originalTextEncoder,
     });
   } finally {
     globalThis.AudioWorkletProcessor = originalProcessor;
