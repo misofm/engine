@@ -25,12 +25,13 @@ cached. The browser follows the same ownership as the C ABI (#1457 Amendment 2, 
 - **What #1457 ships** (`crates/builtins/src/tail.rs`, `crates/builtins/src/lib.rs`; both hosts
   unless noted).
   - The per-preparation budget `INPUT_BOUND_BUDGET_FRAMES` = **1,510,000 frames walked**, charged
-    in strip order, in frame-equivalents of 23.5 ns (one frame of the slowest frame class), so
-    35.5 ms (Amendment 4). The stated worst case is **34.90 ms** of design-bound work measured on
-    the CI-class runner (64 band designs, 44.1 kHz), inside the 35.5 ms budget; spread over rounds
-    and rates: the band families 33.71-34.90 ms, the cheap two-section families 20.63-29.54 ms,
-    typical 9.83-21.45 ms, near-top 17.05-19.85 ms, the single top designs 3.32-6.67 ms (#1457's
-    attempt 3 record). Past the
+    in strip order, in frame-equivalents of 17.0 ns (one frame of the slowest frame class), so
+    25.7 ms (#1457 Amendment 4, restated by #1474). The stated worst case is **25.44 ms** of
+    design-bound work measured on the CI-class runner (4,096 cheap two-section designs, 88.2 kHz),
+    inside the 25.7 ms budget; spread over rounds and rates: the cheap two-section families
+    17.13-25.44 ms, typical 10.73-22.72 ms (one interference sample of 28.44 ms), near-top
+    20.47-21.41 ms, the band families 19.92-20.21 ms, the single top designs 3.71-7.43 ms (#1474's
+    attempt 1 record). Past the
     budget a design reports its rate's live bound, which is certified for every history and is
     never `Infinite`. A design served from a cache charges the same stored amount it charged when
     computed, so every reported bound is a pure function of the session, with or without a cache,

@@ -25,15 +25,17 @@
 //!   preparation that leaves a design on its live bound has spent to within one design's section
 //!   charges.
 //! * **Calibrate.** Two fixed-cost measurements, separate from gate 2, that set the charge
-//!   constants. First the frame classes: the time per frame of long near-top walks (an HPF at
-//!   0.50-0.99 of the maximum, and one `f32` below it, into the LPF at the maximum, at 0 and
-//!   +24 dB), whose slowest class defines the frame-equivalent (`FRAME_EQUIVALENT_NS`). Each
-//!   point's time is the median of `CLASS_RUNS` measured sweeps after one warmup sweep, reported
-//!   with its spread (minimum to maximum), so one noisy sample cannot move the class (#1474). Then per
-//!   design class (one or two channel cascades, one or two sections each), the least-squares line
-//!   of one design's computation time against the frames it walks, over a grid of designs: its
-//!   intercept is the class's fixed cost, and `INPUT_BOUND_SECTION_CHARGE` is the largest fixed
-//!   cost per section in frame-equivalents.
+//!   constants. First, per design class (one or two channel cascades, one or two sections each),
+//!   the least-squares line of one design's computation time against the frames it walks, over a
+//!   grid of designs: its intercept is the class's fixed cost, and `INPUT_BOUND_SECTION_CHARGE` is
+//!   the largest fixed cost per section in frame-equivalents. Then the frame classes (#1474 root
+//!   ruling: every class): the time per walked frame, net of the fixed cost of one cascade of two
+//!   sections, of long near-top walks (an HPF at 0.50-0.99 of the maximum, and one `f32` below
+//!   it, into the LPF at the maximum, at 0 and +24 dB), of typical designs (an HPF at 20-80 Hz into
+//!   an LPF at 16-20 kHz, at 0 and +24 dB) and of gate 2's cheap two-section designs (at 0, +12 and
+//!   +24 dB); the slowest class defines the frame-equivalent (`FRAME_EQUIVALENT_NS`). Each point's
+//!   time is the median of `CLASS_RUNS` measured sweeps after one warmup sweep, reported with its
+//!   spread (minimum to maximum), so one noisy sample cannot move the class.
 #![allow(missing_docs)]
 
 use builtins::test_support::{
@@ -49,8 +51,8 @@ use std::time::Instant;
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 /// The frame-equivalent in ns: the time of one frame of the slowest frame class measured (#1457
-/// Amendment 4), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s doc states it.
-const FRAME_EQUIVALENT_NS: f64 = 23.5;
+/// Amendment 4, restated by #1474), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s doc states it.
+const FRAME_EQUIVALENT_NS: f64 = 17.0;
 const ROUNDS: usize = 3;
 
 fn channel(trim_db: f32, hpf_hz: f32, lpf_hz: f32) -> ChannelParameters {
@@ -392,71 +394,101 @@ fn one_design(rate: u32, design: BuiltinParameters) -> (f64, u64) {
 /// median of these, reported with its spread (#1474).
 const CLASS_RUNS: usize = 5;
 
-/// The frame classes: ns per frame of long near-top walks, an HPF at 0.50-0.99 of the maximum
-/// (and one `f32` below it) into the LPF at the maximum, at 0 and +24 dB. Each sweep measures every
-/// point once, so a burst of interference reaches one sample of many points, not every sample of
-/// one; sweep 0 is the warmup. Returns the slowest point's median.
-fn frame_classes() -> f64 {
-    println!(
-        "rate | trim dB | slowest HPF fraction | its ns per frame, median (min-max) | fastest median | fractions whose median is above 1.2 times the fastest"
-    );
-    let mut slowest = (0.0_f64, String::new());
-    for rate in RATES {
-        let top = maximum(rate);
-        let hpfs: Vec<(f32, f32)> = (50..100)
+/// The frame-class points at a rate, grouped by class and trim (#1474 root ruling: every class).
+/// Every point is one cascade of two sections, the same on both channels.
+fn frame_class_points(rate: u32) -> Vec<(String, Vec<(String, BuiltinParameters)>)> {
+    let top = maximum(rate);
+    let mut groups = Vec::new();
+    for trim in [0.0_f32, 24.0] {
+        let points = (50..100)
             .map(|percent| (percent as f32 / 100.0, percent as f32 / 100.0 * top))
             .chain([(1.0, below(top, 1))])
+            .map(|(fraction, hpf)| (format!("HPF {fraction:.2}"), same(trim, hpf, top)))
             .collect();
-        for trim in [0.0_f32, 24.0] {
-            let mut samples = vec![Vec::with_capacity(CLASS_RUNS); hpfs.len()];
+        groups.push((
+            format!("near-top (HPF 0.50-0.99 and one f32 below the maximum into the LPF at it), {trim} dB"),
+            points,
+        ));
+    }
+    for trim in [0.0_f32, 24.0] {
+        let mut points = Vec::new();
+        for hpf in [20.0_f32, 40.0, 80.0] {
+            for lpf in [16_000.0_f32, 18_000.0, 20_000.0] {
+                points.push((format!("{hpf} Hz into {lpf} Hz"), same(trim, hpf, lpf)));
+            }
+        }
+        groups.push((
+            format!("typical (HPF 20-80 Hz into LPF 16-20 kHz), {trim} dB"),
+            points,
+        ));
+    }
+    for trim in [0.0_f32, 12.0, 24.0] {
+        let points = [
+            (1_000.0_f32, 1_280.0_f32),
+            (1_280.0, 5_120.0),
+            (2_560.0, 5_120.0),
+            (5_120.0, 10_240.0),
+        ]
+        .into_iter()
+        .map(|(hpf, lpf)| (format!("{hpf} Hz into {lpf} Hz"), same(trim, hpf, lpf)))
+        .collect();
+        groups.push((
+            format!("cheap two-section (gate 2's families), {trim} dB"),
+            points,
+        ));
+    }
+    groups
+}
+
+/// The frame classes: the ns per walked frame of each point, net of its fixed cost (`fixed_ns`,
+/// the rate's measured intercept of one cascade of two sections), so that short walks are compared
+/// frame for frame with long ones. Each sweep measures every point once, so a burst of
+/// interference reaches one sample of many points, not every sample of one; sweep 0 is the
+/// warmup. Returns the slowest point's median.
+fn frame_classes(fixed_ns: &[f64; 4]) -> f64 {
+    println!(
+        "rate | class | slowest point | its ns per frame net of the fixed cost, median (min-max) | fastest median | frames"
+    );
+    let mut slowest = (0.0_f64, String::new());
+    for (slot, rate) in RATES.into_iter().enumerate() {
+        for (class, points) in frame_class_points(rate) {
+            let mut samples = vec![Vec::with_capacity(CLASS_RUNS); points.len()];
+            let mut frames = vec![0_u64; points.len()];
             for sweep in 0..=CLASS_RUNS {
-                for (point, &(_, hpf)) in hpfs.iter().enumerate() {
-                    let (ms, frames) = one_design(rate, same(trim, hpf, top));
+                for (point, (_, design)) in points.iter().enumerate() {
+                    let (ms, walked) = one_design(rate, *design);
+                    frames[point] = walked;
                     if sweep > 0 {
-                        samples[point].push(ms * 1e6 / frames as f64);
+                        samples[point].push((ms * 1e6 - fixed_ns[slot]) / walked as f64);
                     }
                 }
             }
-            let medians: Vec<(f32, f64, f64, f64)> = hpfs
-                .iter()
-                .zip(&mut samples)
-                .map(|(&(fraction, _), runs)| {
+            let medians: Vec<(usize, f64, f64, f64)> = samples
+                .iter_mut()
+                .enumerate()
+                .map(|(point, runs)| {
                     runs.sort_by(f64::total_cmp);
-                    (
-                        fraction,
-                        runs[CLASS_RUNS / 2],
-                        runs[0],
-                        runs[CLASS_RUNS - 1],
-                    )
+                    (point, runs[CLASS_RUNS / 2], runs[0], runs[CLASS_RUNS - 1])
                 })
                 .collect();
             let high = medians
                 .iter()
                 .copied()
-                .fold(
-                    (0.0, 0.0_f64, 0.0, 0.0),
-                    |a, b| if b.1 > a.1 { b } else { a },
-                );
+                .fold((0, 0.0_f64, 0.0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
             let low = medians.iter().fold(f64::MAX, |low, p| low.min(p.1));
-            let band: Vec<String> = medians
+            let (low_frames, high_frames) = frames
                 .iter()
-                .filter(|p| p.1 > 1.2 * low)
-                .map(|p| format!("{:.2}", p.0))
-                .collect();
+                .fold((u64::MAX, 0), |(l, h), f| (l.min(*f), h.max(*f)));
             println!(
-                "{rate} | {trim} | {:.2} | {:.2} ({:.2}-{:.2}) | {low:.2} | {}",
-                high.0,
-                high.1,
-                high.2,
-                high.3,
-                band.join(" ")
+                "{rate} | {class} | {} | {:.2} ({:.2}-{:.2}) | {low:.2} | {low_frames}-{high_frames}",
+                points[high.0].0, high.1, high.2, high.3
             );
             if high.1 > slowest.0 {
                 slowest = (
                     high.1,
                     format!(
-                        "{rate} Hz, {trim} dB, HPF at {:.2} of the maximum, spread {:.2}-{:.2}",
-                        high.0, high.2, high.3
+                        "{rate} Hz, {class}, {}, spread {:.2}-{:.2}",
+                        points[high.0].0, high.2, high.3
                     ),
                 );
             }
@@ -469,18 +501,16 @@ fn frame_classes() -> f64 {
     slowest.0
 }
 
-fn calibrate() {
-    let slowest = frame_classes();
-    // The fixed costs are stated in frames of the slowest class this run measured; the committed
-    // frame-equivalent rounds that class's time up, so a charge in these units covers it.
+/// Per design class, the least-squares line of one design's time against its frames walked
+/// (warmup round 0, then two measured rounds). Returns each rate's mean measured intercept of one
+/// cascade of two sections (ns) and the largest measured fixed cost per section (ns).
+fn fixed_costs() -> ([f64; 4], f64) {
     println!(
-        "frame-equivalent {FRAME_EQUIVALENT_NS} ns (committed); slowest measured {slowest:.2} ns, the unit below"
+        "rate | round | class | designs | frames min-max | intercept us | ns per frame (slope) | intercept us per section"
     );
-    let per_ms = 1e6 / slowest;
-    println!(
-        "rate | round | class | designs | frames min-max | intercept us | ns per frame | intercept frame-equivalents"
-    );
-    for rate in RATES {
+    let mut two_sections = [0.0_f64; 4];
+    let mut per_section = 0.0_f64;
+    for (slot, rate) in RATES.into_iter().enumerate() {
         for round in 0..ROUNDS {
             let label = if round == 0 {
                 "warmup".to_owned()
@@ -488,9 +518,10 @@ fn calibrate() {
                 round.to_string()
             };
             let mut intercepts = [0.0_f64; 4];
-            let mut charge = 0.0_f64;
             let mut sections = [0_u64; 4];
-            for (slot, (name, walked, designs)) in calibration_classes(rate).into_iter().enumerate()
+            let mut largest = 0.0_f64;
+            for (class, (name, walked, designs)) in
+                calibration_classes(rate).into_iter().enumerate()
             {
                 // Each design is a one-strip preparation with a fresh cache and no budget limit:
                 // everything a preparation spends on one distinct design (its keying, the walk,
@@ -508,42 +539,63 @@ fn calibrate() {
                     .filter(|point| point.0 <= CALIBRATION_FRAMES)
                     .collect();
                 let (intercept, slope) = line(&short);
-                intercepts[slot] = intercept;
-                sections[slot] = walked;
+                intercepts[class] = intercept;
+                sections[class] = walked;
                 let (low, high) = short.iter().fold((f64::MAX, 0.0_f64), |(low, high), p| {
                     (low.min(p.0), high.max(p.0))
                 });
                 println!(
-                    "{rate} | {label} | {name} | {} of {} | {low:.0}-{high:.0} | {:.2} | {:.2} | {:.0}",
+                    "{rate} | {label} | {name} | {} of {} | {low:.0}-{high:.0} | {:.2} | {:.2} | {:.2}",
                     short.len(),
                     points.len(),
                     intercept * 1e3,
                     slope * 1e6,
-                    intercept * per_ms
+                    intercept * 1e3 / walked as f64
                 );
-                charge = charge.max(intercept * per_ms / walked as f64);
+                largest = largest.max(intercept * 1e6 / walked as f64);
             }
             // One cascade of one section is `D + S`, of two sections `D + 2S`; the two-cascade
             // classes check the model (`D + 2S`, `D + 4S`).
             let section = intercepts[1] - intercepts[0];
             let design = intercepts[0] - section;
             let predicted: Vec<String> = (2..4)
-                .map(|slot| {
+                .map(|class| {
                     format!(
                         "{:.2} us predicted against {:.2} us",
-                        (design + section * sections[slot] as f64) * 1e3,
-                        intercepts[slot] * 1e3
+                        (design + section * sections[class] as f64) * 1e3,
+                        intercepts[class] * 1e3
                     )
                 })
                 .collect();
             println!(
-                "{rate} | {label} | per design {:.2} us; per section {:.2} us; two cascades: {}; largest fixed cost per section {charge:.1} frame-equivalents",
+                "{rate} | {label} | per design {:.2} us; per section {:.2} us; two cascades: {}; largest fixed cost per section {:.2} us",
                 design * 1e3,
                 section * 1e3,
-                predicted.join(", ")
+                predicted.join(", "),
+                largest * 1e-3
             );
+            if round > 0 {
+                two_sections[slot] += intercepts[1] * 1e6 / (ROUNDS - 1) as f64;
+                per_section = per_section.max(largest);
+            }
         }
     }
+    (two_sections, per_section)
+}
+
+fn calibrate() {
+    // The fixed costs first: the frame classes are read net of them.
+    let (two_sections, per_section) = fixed_costs();
+    let slowest = frame_classes(&two_sections);
+    println!(
+        "frame-equivalent {FRAME_EQUIVALENT_NS} ns (committed); slowest measured {slowest:.2} ns"
+    );
+    println!(
+        "largest fixed cost per section {:.2} us: {:.1} frame-equivalents of the slowest class measured, {:.1} of the committed frame-equivalent",
+        per_section * 1e-3,
+        per_section / slowest,
+        per_section / FRAME_EQUIVALENT_NS
+    );
 }
 
 fn main() {

@@ -273,22 +273,26 @@ fn fixed_input_walk(
 /// are the same). A design has no fixed cost of its own beyond its sections' (the calibration's
 /// per-design term is negative at every rate), so it carries no other charge.
 ///
-/// A frame-equivalent is 23.5 ns on the CI-class runner: the time of one frame of the slowest frame
-/// class measured, rounded up. That class is the near-top band, an HPF at about 0.73-0.87 of the
-/// maximum cutoff into the LPF at the maximum, whose walk costs 21-23.2 ns a frame, against about
-/// 12-15 ns for every other design measured; so every frame walked costs at most one
-/// frame-equivalent. The largest measured fixed cost per section is a cascade of two sections at
-/// 88.2 kHz, 13.55 us (6.78 us a section, 288.3 frame-equivalents), so 290 frame-equivalents bound
-/// the fixed cost of every class measured. Calibrated with `examples/input_bound_budget.rs
-/// calibrate`; the classes, rates and runs are in the issue's attempt record. A change to the walk
-/// reruns the calibration and restates the frame-equivalent and this charge.
-pub const INPUT_BOUND_SECTION_CHARGE: u64 = 290;
+/// A frame-equivalent is 17.0 ns on the CI-class runner: the time of one frame of the slowest frame
+/// class measured, rounded up (#1474 and its root ruling: every class). Since the walk's certified
+/// flush (`math::tail`'s `tau`, #1474) no propagated quantity is subnormal, and a frame's cost
+/// depends on the walk's length, not its cutoffs: net of the design's fixed cost, long near-top
+/// walks take 13.6-13.7 ns a frame, gate 2's cheap two-section designs 12.8-16.1 ns and typical
+/// designs (an HPF at 20-80 Hz into an LPF at 16-20 kHz) 15.0-16.5 ns, the slowest an 80 Hz HPF
+/// into an 18 kHz LPF at 44.1 kHz (16.54 ns, the median of five runs, spread 16.39-17.10); so every
+/// frame walked costs at most one frame-equivalent. The largest measured fixed cost per section is
+/// 7.03 us (a two-section cascade at 96 kHz, 413.5 frame-equivalents), so 420 frame-equivalents
+/// bound the fixed cost of every class measured. Calibrated with `examples/input_bound_budget.rs
+/// calibrate` and confirmed against every gate-2 family; the classes, rates and runs are in #1474's
+/// attempt record. A change to the walk reruns the calibration and restates the frame-equivalent
+/// and this charge.
+pub const INPUT_BOUND_SECTION_CHARGE: u64 = 420;
 
 /// #1457 D1: the budget of one preparation's design bounds, in frame-equivalents, charged in strip
 /// order (`crate::input_section_bounds`). Each distinct design computed charges the frames it walks
 /// plus [`INPUT_BOUND_SECTION_CHARGE`] per section; a cache hit charges the same stored amount.
 ///
-/// At 23.5 ns a frame-equivalent ([`INPUT_BOUND_SECTION_CHARGE`]) it is 35.5 ms of design-bound
+/// At 17.0 ns a frame-equivalent ([`INPUT_BOUND_SECTION_CHARGE`]) it is 25.7 ms of design-bound
 /// work on the CI-class runner; this workstation (x86-64-v3, release, one pinned core) stood in
 /// for that runner. Its purpose is that typical sessions bound every distinct design exactly: the
 /// 64-track console documents (64 distinct designs) fit at every launch rate. Every frame and every

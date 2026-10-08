@@ -131,7 +131,8 @@ release, `taskset -c 7`. Other agents build on this box; the load averages are r
 timing was retried.
 
 **Result.** Scope items 1 and 2 are done; the cause is subnormal operands, and the walk now has a
-certified flush. Scope item 3 is **blocked on a root ruling**: the slowest frame class is no longer a
+certified flush. Scope item 3 was first **blocked on a root ruling** (resolved: see "Root's ruling"
+and "Completion" at the end of this attempt): the slowest frame class is no longer a
 near-top walk, so the calibration's frame classes (near-top walks only, as the spec says) give a
 frame-equivalent (14.0 ns) that gate 2's typical and cheap two-section families exceed (up to
 15.66 ns per frame-equivalent consumed). The committed constants stay at 23.5 ns and 290 (still an
@@ -288,3 +289,93 @@ builtins/test-support -D warnings` and `-p math --features lane`: clean. `cargo 
 pass. `tail_contract` in release (the CI command): 13 passed. Gate 8: passed. `check-workspace-
 policy.sh`: ok; `check-realtime-policy.sh`: ok; `check-cross-targets.sh`: exit 0 (only the expected
 #1018 failures reported).
+
+#### Root's ruling (2026-10-08)
+
+- The frame-equivalent comes from the slowest class over all frame classes: near-top, band,
+  typical and cheap two-section. The typical and cheap two-section designs join the calibration's
+  frame classes, each point the median of repeated runs, with min-max.
+- It is confirmed against every gate-2 family, not only the band.
+- `INPUT_BOUND_SECTION_CHARGE` is restated from it.
+- One calibration and one gate-2 invocation (#1457 Amendment 3's commands; one warmup, two measured
+  rounds, no retry, load before and after) on the final constants, both recorded.
+- Gate 8 must still show every 64-track document exact at every rate.
+- The flush's +1.1 ns a frame is recorded as a cost; it gets no follow-up issue.
+- Authorized in addition: the stale figures in the local specs of #1468, #1470 and #1471.
+- Timing waits until the 1-minute load is below about 2 (a verifier builds on this box).
+
+#### Completion
+
+**Calibration change.** `calibrate` now runs the design-class fits first, then the frame classes:
+near-top (51 HPFs, 0 and +24 dB), typical (HPF 20, 40, 80 Hz into LPF 16, 18, 20 kHz, 0 and
++24 dB) and gate 2's cheap two-section designs (1/1.28, 1.28/5.12, 2.56/5.12 and 5.12/10.24 kHz at 0,
++12 and +24 dB). A point's value is its ns per walked frame **net of the fixed cost** (the rate's
+mean measured intercept of one cascade of two sections), so short walks compare frame for frame with
+long ones; the median of five measured sweeps after one warmup sweep, with min-max.
+
+**The calibration (one invocation, `taskset -c 7`, load 1.52 -> 2.18).** Slowest median per class
+and rate, ns per frame net of the fixed cost (min-max):
+
+| rate | near-top 0 / +24 dB | typical 0 / +24 dB | cheap two-section 0 / +12 / +24 dB |
+|---|---|---|---|
+| 44.1k | 13.73 / 13.68 | **16.54 (16.39-17.10)** / 16.52 (16.37-18.25) | 13.66 / 14.35 / 16.05 (15.81-16.36) |
+| 48k | 13.69 / 13.69 | 16.26 / 16.36 | 13.23 / 13.22 / 15.21 |
+| 88.2k | 13.65 / 13.61 | 15.24 / 16.24 (15.83-17.14) | 14.64 / 14.27 / 15.76 |
+| 96k | 13.68 / 13.67 | 14.97 / 15.05 | 12.81 / 14.52 / 14.61 |
+
+Slowest class: **16.54 ns** (spread 16.39-17.10), typical, an 80 Hz HPF into an 18 kHz LPF, 0 dB,
+44.1 kHz. **Frame-equivalent: 17.0 ns** (rounded up). Largest fixed cost per section: **7.03 us**
+(96 kHz, round 2; the other rounds and rates 5.53-6.61 us), 413.5 frame-equivalents of 17.0 ns:
+**`INPUT_BOUND_SECTION_CHARGE` = 420**. The per-design term is negative at every rate (-1.55 to
+-3.46 us). The budget, 1,510,000 frame-equivalents, is **25.7 ms**.
+
+**Gate 2 on the final constants (one invocation, load 1.96 -> 2.13).** Design work over rates and
+measured rounds, and ns per frame-equivalent consumed:
+
+| family | design work ms | ns per consumed FE |
+|---|---|---|
+| top pair | 7.19-7.43 | 13.58-14.10 |
+| LPF at the maximum | 3.71-3.76 | 8.27-8.38 |
+| 64-design near-top | 20.74-21.41 | 13.74-14.18 |
+| 65,537 near-top | 20.47-21.23 | 13.55-14.06 |
+| 64 band designs | 19.94-20.21 | 13.21-13.39 |
+| 4,096 band designs | 19.92-20.07 | 13.19-13.29 |
+| 64 typical | 10.73-20.88, one sample 28.44 | 14.46-14.98, one sample 21.35 |
+| 256 typical | 21.91-22.72 | 14.51-15.05 |
+| 4,096 cheap one-section | 15.22-16.71 | 10.08-11.06 |
+| 4,096 cheap two-section 1 / 1.28 kHz, +24 dB | 21.86-**25.44** | 14.48-**16.85** |
+| 4,096 cheap two-section 1.28 / 5.12 kHz | 20.47-22.74 | 13.56-15.06 |
+| 4,096 cheap two-section 2.56 / 5.12 kHz | 18.75-22.01 | 12.42-14.57 |
+| 4,096 cheap two-section 5.12 / 10.24 kHz | 17.13-22.02 | 11.34-14.58 |
+| 4,096 cheap two-cascade | 15.30-16.40 | 10.13-10.86 |
+
+Every family confirms the 17.0 ns frame-equivalent (at most 16.85 ns per consumed frame-equivalent),
+except one sample: the 64 typical designs at 88.2 kHz, round 2, no-cache preparation, 28.44 ms. In
+the same round the first preparation of the same designs (the same walks plus the cache insertion)
+took 19.43 ms, and the family's other seven measured samples took 10.73-20.88 ms
+(14.46-14.98 ns per frame-equivalent), so this is interference on the box (the load rose to 2.13 and
+18 runnable tasks during the run), not a frame class. Not retried, as the ruling requires.
+
+**The stated worst case:** **25.44 ms** of design-bound work (4,096 cheap two-section designs, 1 kHz
+into 1.28 kHz, +24 dB, 88.2 kHz, round 1), inside the 25.7 ms budget, down from #1457's 34.90 ms;
+spread as in the table. The per-frame cause: a frame costs 13.2-13.7 ns in long near-top and band
+walks and 15-16.5 ns in typical and short walks (net of the fixed cost); no class depends on
+subnormal operands any more. The slowest whole preparation is 55.86 ms (65,537 distinct near-top
+designs at 96 kHz), of which 21.23 ms or less is design work; the rest is the keying and lookup of
+65,537 strips, as in #1457.
+
+**The flush's cost.** About +1.1 ns a frame on designs that never went subnormal (long walks: 12.0
+-> 13.1 ns). Recorded as a cost; no follow-up issue (root's ruling).
+
+**Gate 8 (Amendment 3's command):** passed, every 64-track console document exact at every rate.
+Charges at charge 420: 44.1 kHz 717,952 (margin 792,048), 48 kHz 766,336 (743,664), 88.2 kHz
+1,265,280 (244,720), 96 kHz 1,361,536 (margin **148,464**); the mono document at 96 kHz 704,576.
+
+**Gates rerun on the final tree:** `cargo fmt --all -- --check`; clippy (`-p math -p builtins -p
+builtins-compiler --all-targets` with test-support, `-D warnings`): clean. `cargo test -p math`, the
+`builtins` and `builtins-compiler` lib tests (test-support), and `tail_contract` in release (13
+passed): all pass. `check-workspace-policy.sh`, `check-realtime-policy.sh`: ok.
+`check-cross-targets.sh`: exit 0.
+
+**Specs corrected** (root-authorized): #1468 (`:152`, the restated charge), #1470 (`:28-31`, the
+budget, the worst case and the spreads), #1471 (`:21`, the budget).
