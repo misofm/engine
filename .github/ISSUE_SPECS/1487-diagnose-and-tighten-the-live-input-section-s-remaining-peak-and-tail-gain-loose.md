@@ -29,17 +29,18 @@ law, render path or rendered bit changes.
   96 kHz: `G_p` 12,224 / 12,215 / 12,224 / 12,215; `G_t` 5,824 / 5,825 / 5,829 / 5,830. `D`,
   `T_decay`, `T_rest`, both rests, `P*`, `sigma_p` and `sigma_t` are #1433's, #1466's and #1467's.
 - **The remaining gaps** (#1485 gates 2 and 2t, release, every launch rate, ratio of the stated
-  gain to its reference): `r_p` = 37.56 / 37.36 / 37.56 / 37.36 (+31.5 dB) against `g_meas`, the
-  largest real-kernel peak over gate 1's five histories (3.4456e4 at 44.1 kHz, per unit of the
-  input's peak at the +24 dB trim word); `r_t` = 13.57 / 13.59 / 13.66 / 13.68 (+22.7 dB) against
+  gain to its reference): `r_p` = 22.80 / 22.70 / 22.80 / 22.70 (+27.2 dB) against `g_meas`, the
+  largest real-kernel peak over gate 1's six histories (5.6766e4 at 44.1 kHz, per unit of the
+  input's peak at the +24 dB trim word, from the worst-sign history that #1485's follow-ups added
+  to gate 1); `r_t` = 13.57 / 13.59 / 13.66 / 13.68 (+22.7 dB) against
   `s_scan`, the largest trim x exact row-`l1` supremum over #1467 L2's scan (6.016e1 at 44.1 kHz).
-  #1485's factors: `F_p = 39.44`, `F_t = 14.37` (`F_P`, `F_T` in
+  #1485's factors: `F_p = 23.94`, `F_t = 14.37` (`F_P`, `F_T` in
   `crates/builtins/tests/tail_contract.rs`).
 - **The parts of each bound** (#1485's L3 and L3' recomputation, 44.1 kHz). `G_p`, per unit of the
   trim word: `delta A` 7.27e3 (the HPF's largest output `A` through the LPF's feedthrough), the
   fast part 6.07e3, the potential term 3.02e4 (`1/2 |m| Gammabar(m0) sup Psi Phi`,
   `V = sup Psi Phi = 1.60e5`) and the slow charges 3.82e4 (`C = 5.25` weighted by
-  `sum Gamma_s`), at `m0 = 16`, against the measured 2.17e3. `G_t`, with the trim: the window
+  `sum Gamma_s`), at `m0 = 16`, against the measured 3.58e3. `G_t`, with the trim: the window
   part `W* g` 433.7 and the settled part `Z* g` 815.8 (the settled part sets `G_t` at every rate),
   against `s_scan` 60.16. These are the candidates; nothing yet says which of them is loose
   against its own exact counterpart.
@@ -125,7 +126,7 @@ gain that moves.
 
 0. **Diagnosis.** The attempt record carries T-D1's table for every launch rate and names the part
    that carries the gap, for each gain.
-1. **Sound on the real kernel's worst histories** (#1485 gate 1, its five histories, widened with
+1. **Sound on the real kernel's worst histories** (#1485 gate 1, its six histories, widened with
    any history the diagnosis finds worse, each with its reason, never narrowed).
 1t. **`G_t` sound against the adjoint oracle** (#1467 L2, its scan unchanged or widened, never
    narrowed).

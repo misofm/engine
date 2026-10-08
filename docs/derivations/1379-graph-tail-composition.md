@@ -476,8 +476,9 @@ reads neither the window nor (P2): the bound holds at every frame of every admit
   `C = 5.25`, `V = 1.60e5`. The terms: `delta A` 7.27e3, the fast part 6.07e3, the potential
   `h Gammabar(m0) V` 3.02e4, the slow charges `C sum Gamma_s` 3.82e4; in all `8.17e4`, `g_p`
   `1.294e6` (+122.24 dB) against #1466's `1.629e7` (+144.24 dB).
-* *Looseness.* The real kernel's largest peak over gate 1's histories (L1's, +90.75 dB) is 31.5 dB
-  below `G_p` (37.6 times; the ratios per history and rate are in the #1485 attempt record). The
+* *Looseness.* The real kernel's largest peak over gate 1's histories (the worst-sign history's,
+  +95.08 dB at 44.1 kHz) is 27.1 to 27.2 dB below `G_p` (22.7 to 22.8 times; the ratios per
+  history and rate are in the #1485 attempt record, "Follow-ups"). The
   rest is frequency-blindness at the top of the domain: either section's state grows there in the
   `V`-norm at `rho_ramp` per frame, where the kernel's own resonance is narrower, and the
   potential charges every frame of input at the top with the mass a later retarget could expose.
@@ -567,8 +568,9 @@ the cost are in the #1466 attempt record. #1466's `g_p` was `1.629e7` / `1.613e7
 (N2) needs `G_t`: at every frame `n >= M`, a bound of the part of the output that the input from
 `M` on produces, for every admitted history before `N`. This part derives it from #1433's
 inequalities and #1407's ramp law (`math::tail::live_cascade_composition`,
-`LiveComposition::tail_gain`; #1485 restated it) and states all five values. Notation as the live part above; in addition `G = g epsilon` (the trimmed input from
-`M` is at most `G`), `h = first_mix_row / 2`, `omega = first_output_rounding` (the first section's
+`LiveComposition::tail_gain`; #1485 restated it) and states all five values. Notation as the
+live part above; in addition `G = g epsilon` (the trimmed input from `M` is at most `G`),
+`h = first_mix_row / 2`, `omega = first_output_rounding` (the first section's
 mix row and output rounding), `h_2 = second_mix_row / 2`, `omega_2 = second_output_rounding` (the
 second section's, below), and for a zone `k`: `rho_k`, `q_k`, `beta_k` its ramp constants
 (`contraction`, `sum_norm`, `input`), `r_k`, `q_k^s` its settled ones (`settled.contraction`,
@@ -723,8 +725,8 @@ value ("Numerical limits"). Rule (g) and A1's `tail_gain <= peak_gain` run only 
 registry, which never sees this bound, so the statement checks both on the millibel values and
 states `Unstated` when either fails (equality is admissible). `sigma_t <= sigma_p` holds raw by B1's
 construction (the smaller of `stall(T)` and `stall(0)`) and `G_t <= G_p` holds raw as measured
-(63.85 to 64.01 dB apart); `ceil_mB` is non-decreasing, so the raw orders give the millibel ones. At the
-launch rates the statement is made (the values below). Preparation reads the statement from
+(63.85 to 64.01 dB apart); `ceil_mB` is non-decreasing, so the raw orders give the millibel ones.
+At the launch rates the statement is made (the values below). Preparation reads the statement from
 `input_section_live_bound_table`, which the table test holds equal to the computed bound.
 
 ### The tail gain at the launch rates
@@ -763,9 +765,11 @@ exact supremum of the late part on gate L2's scanned histories is at most +35.59
 `crates/builtins/tests/tail_contract.rs`, #1465's F1-F3 (the decade law against the independent
 brute force, `D`'s tightness and asymptotic floor, the gains' soundness and tightness, the disabled
 values, `dev_loud`, the stall) and F4 (every #1329 assertion unchanged); #1457's gates 2 and 8 for
-the cost (F5). The measurements are in the #1465 attempt record. The live part: #1485's gate 1, #1466's L1 widened (`G_p`
-and `sigma_p` against the real kernel's peak after a Nyquist drive and a retarget, on five named
-histories), L3 (`D`, `G_p`,
+the cost (F5). The measurements are in the #1465 attempt record. The live part: #1485's gate 1,
+#1466's L1 widened (`G_p` and `sigma_p` against the real kernel's peak on six named histories:
+five after a Nyquist drive and a retarget, and one driven by the exact row's own worst-sign input),
+#1485's gate 2 on the same runs (`g_meas <= g_p` and the stated `G_p` at most `F_p g_meas`, with
+`g_meas` the largest measured peak), L3 (`D`, `G_p`,
 `sigma_p` and `sigma_t` against an independent plain-`f64` recomputation of this part), L4 (`D`
 and each certificate's crossing against the module's directly searched crossings for `k = 0..64`,
 which must increase strictly in `k`, and `D_inf` against the settled contraction's floor), L5
@@ -774,7 +778,8 @@ rounding argument give no values); the measurements are in the #1466 attempt
 record, and #1485's restated `G_p` with its gate 1 in the #1485 attempt record. The tail gain and
 the statement: #1467's L2 (`G_t` at least the exact row-`l1` supremum of
 the time-varying cascade, by an adjoint oracle, over a stated scan of histories whose words are
-recorded from the real kernel), L3' (`G_t`
+recorded from the real kernel), #1485's gate 2t on the same scan (`s_scan <= g_t` and the stated
+`G_t` at most `F_t s_scan`, with `s_scan` the largest trim x exact supremum), L3' (`G_t`
 against the plain-`f64` recomputation of "The live tail gain"), L5' (the statement is the
 accessors rounded up, with `G_t <= G_p` and `sigma_t <= sigma_p` raw and in millibels) and the
 statement's own unit test (equality admissible, a tail value above its peak value refused); the

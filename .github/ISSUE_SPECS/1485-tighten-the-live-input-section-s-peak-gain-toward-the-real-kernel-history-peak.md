@@ -185,13 +185,20 @@ restored) with at least the mutants below; each is red.
 
 ## Test value
 
-- Gate 1: a tightening that drops the retarget transient (for example a `G_p` from the settled
-  designs' `l1`, about +35 dB with the trim) or the trim's rounding falls below the real kernel's
-  measured peak.
-- Gate 1t: a tightening of `G_t` that drops the window input's ramp or the trim falls below the
-  exact supremum (#1467's M2 mutant shows the gate red for it).
-- Gate 2: a step that does not tighten (#1466's `sup Psi Phi` bound left in place, about 473x) misses
-  the factor `F_p`; no other test compares the live certified gain with the measured one from above.
+*(Gate 1's and gate 1t's entries corrected in the attempt record's "Follow-ups"; each defect named
+here is a mutation run recorded there, red on the named test and green on revert.)*
+
+- Gate 1: a `G_p` derivation that drops the pre-retarget state a retarget exposes falls below the
+  real kernel's measured peak. Mutant G1Z: `G_t`'s late-input bound, which starts from zero state,
+  reused as `G_p` in the module and in L3's recomputation alike (`g_p` about 816 against the peak
+  3.4456e4): gate 1 is red, and every other test except the table pin is green. Gate 1's
+  worst-sign history adds no unique catch; it sets `g_meas`, gate 2's reference.
+- Gate 1t: a `G_t` derivation that drops the trim word, in the module and in the L3' recomputation
+  alike (mutant G1T, `g_t` 51.5 to 51.9), falls below the exact supremum (53.1 to 55.9) at every
+  launch rate: L2 is red, and every other test except the table pin is green.
+- Gate 2: a step that does not tighten (#1466's `sup Psi Phi` bound left in place, mutant MP, a
+  ratio of about 287 against the worst-sign `g_meas`) misses the factor `F_p`; no other test
+  compares the live certified gain with the measured one from above.
 - Gate 2t: a step that does not tighten `G_t` (#1467's window term left in place, about 57 dB, a
   ratio of about 695) misses `F_t`; no other test bounds the live `g_t` from above against the
   oracle.
@@ -358,8 +365,6 @@ cutoffs each at four event-time pairs. It covers those histories only, the input
 exact arithmetic on the kernel's `f32` words; not other endpoints, rule-3 resets, the rounding
 deviation (the derivation's) or the flush part (`sigma_t`). `s_scan` the largest trim x exact
 supremum, `g_t` raw / stated (L2 compares the stated value), `r_t = g_t / s_scan`:
-`s_scan` the largest trim x exact supremum, `g_t` raw / stated (L2 compares the stated value),
-`r_t = g_t / s_scan`:
 
 | rate | `s_scan` (history) | `g_t` raw / stated | `r_t` raw / stated |
 |---|---|---|---|
@@ -426,7 +431,8 @@ checked by digest).
 | L3T | `G_t`'s settled pair drops the window's first-section state (module only; `g_t` falls to 606, still above the scan) | L3' (`G_t: module 6.062e2 against the recomputed 8.158e2`), the table test | gate 1, L2 |
 
 Test value (worker rule): gate 1 is the only test that turns red when the derivation itself drops
-the history's state (G1: L3 recomputes the same derivation and stays green); L2 is the only one
+the history's state (G1: L3 recomputes the same derivation and stays green; corrected in
+"Follow-ups": G1 is also red on L2 and L5', and G1Z is the case only gate 1 catches); L2 is the only one
 for a `G_t` derivation below the exact supremum (G1T); L3/L3' are the only ones for a module that
 departs from the derivation while staying above every measurement (L3P, L3T: gate 1 and L2 stay
 green, and a table restated with the module's values would leave L3 alone red). The table test
@@ -539,3 +545,117 @@ this spec and `STREAMS.md`. No library code changes, so no rendered bit can move
 * Not rerun in phase B, because no library, render or CI file changed since phase A, where they
   were green: `audit capi` (`pcm_digest` `cb10fbface44a3a4`), `check-builtins-fixtures.sh`,
   `run-wasm-gates.sh`, `check-realtime-policy.sh`, `check-cross-targets.sh` and the worklet chain.
+
+### Attempt 1, follow-ups (implementer, 2026-10-08)
+
+The verifier passed attempt 1 with two MINORs and four NITs
+(`/home/bl/misofm/submix-verdicts/1485-attempt1.md`). This pass closes MINOR 1, MINOR 2, NIT 2 and
+NIT 4. NIT 1 (the GitHub sync of #1485) and NIT 3 (`STREAMS.md`'s hot-file row) are root's.
+
+**Root's ruling 2 (2026-10-08, after verifier attempt 1 MINOR 1/2, verbatim):** "I confirm the
+formula now: add the worst-sign histories to gate 1 at every rate, re-measure r_p,max, set F_p =
+r_p,max x 1.05 rounded up, and record the measured value (no need to send it to me unless it
+exceeds 39.44). Correct #1487's local figures (its body sync joins the pending list). MINOR 2:
+correct both test-value claims to what the tests catch."
+
+**MINOR 1: the worst-sign history in gate 1.** `worst_sign_history` (`tail_contract.rs`) builds
+the verifier's history from the real kernel. The input section starts at rest, with trim +24 dB and
+both sections at `input_section_worst_case_pair(rate)`. It holds that pair for 700,000 frames, then
+the events come. The words are recorded from `InputBuiltins`, one frame per block, with zero input
+(the words do not depend on the input). The row `h(n, m)` of output frame `n` comes from the
+backward (adjoint) recursion in `f64`, as in #1467 L2's oracle. The test takes the frame `n` of
+the largest row `l1` over the 16 frames after the last event. Then it drives the real `f32` kernel
+with `sign h(n, m)` (one frame per block from 128 frames before the first event) and measures the
+peak `|y|` over the run. The test also asserts that the kernel's peak reaches the trim word times
+the row's `l1` within `10^-3`. This shows that the input is the worst-case input it claims to be.
+The measured shortfall is 2.5e-4 to 2.6e-4 at every rate.
+
+*Which histories.* The search used the same construction in release, with the full 192-frame
+window searched for `n`. It ran L1 and a grid of 120 two-event histories at every launch rate: the
+HPF to 10 Hz or 100 Hz at 0, then the LPF to `{10, 30, 100, 300, 1000, 3000}` Hz at
+`+{4, 8, 12, 16, 20, 24, 32, 48, 64, 96}`. At every rate the largest row is the verifier's
+history: the HPF to 10 Hz, then the LPF to 10 Hz 16 frames later, at output frame +22. Every
+grid row peaks 6 to 8 frames after its last event, so a 16-frame search is enough. The verifier's
+other worst-sign histories (both to 10 Hz together, the HPF from 1 kHz, the HPF to 0.00342 fs, the
+LPF before the HPF) are lower at 44.1 kHz, and the verifier found the other rates within 1 %. The
+grid includes the verifier's other two-event histories. So one history is enough at every rate,
+and gate 1 now has six histories. The lead is long enough: at 1,400,000 lead frames, every row
+`l1`, every kernel peak and every ratio are the same to the printed seven digits.
+
+*V-D3 step 1, restated* (release, the five Nyquist-drive histories unchanged from phase A's table):
+
+| rate | worst-sign: exact x trim / kernel peak | `g_meas` (worst-sign) | `g_p` raw / stated | `r_p` raw / stated |
+|---|---|---|---|---|
+| 44.1 kHz | 5.678090e4 / 5.676644e4 | 5.676644e4 (+95.08 dB) | 1.294092e6 / 1.294196e6 | 22.7968 / 22.7986 |
+| 48 kHz | 5.645027e4 / 5.643538e4 | 5.643538e4 (+95.03 dB) | 1.280357e6 / 1.280855e6 | 22.6871 / 22.6960 |
+| 88.2 kHz | 5.678101e4 / 5.676656e4 | 5.676656e4 (+95.08 dB) | 1.294087e6 / 1.294196e6 | 22.7966 / 22.7986 |
+| 96 kHz | 5.645033e4 / 5.643544e4 | 5.643544e4 (+95.03 dB) | 1.280352e6 / 1.280855e6 | 22.6870 / 22.6959 |
+
+The worst-sign peak is 1.646 to 1.648 times L1's (+4.33 dB) at every rate. The remaining `G_p`
+looseness is 27.1 to 27.2 dB, not 31.5 dB.
+
+*The factor, by root's ruling 2.* `r_p,max` is 22.7986 (stated, at 44.1 and 88.2 kHz), and
+`22.7986 x 1.05 = 23.9385`. Rounded up, **`F_p = 23.94`** (+27.6 dB). This is below 39.44, so the
+ruling needs no report to root. `F_P` in `tail_contract.rs` carries it. `F_t = 14.37` does not
+change, because L2's scan and `s_scan` do not change.
+
+*Gate 2 is still red on its mutant.* MP (#1466's `W_0` peak gain restored in
+`LiveBound::composition`, with the table and L3 left at #1485): red on gate 2 (`44100 Hz gate 2:
+the stated g_p 1.6292960326397214e7 exceeds F_p g_meas = 1.3589885137500002e6 (ratio 287.02)`,
+after every gate 1 history at 44.1 kHz passed), the table test and L3. The other 19 tests are green.
+
+*Cost.* In release, the gate 1 and 2 test alone takes 2.8 s and the 22 `tail_contract` tests take
+11.3 s (11.2 s before). In debug, `tail_contract` (48 kHz only) takes 69.5 s on four cores
+(`taskset -c 0-3`), against phase B's 67.0 s. The gate 1 and 2 test alone takes 14.5 s. The
+required jobs keep the headroom that phase B's cost section records.
+
+**MINOR 2: the test-value claims, corrected.** Two clauses in the "Test value" section were false.
+Gate 1's "or the trim's rounding" is false: `(1 + u)` moves `g_p` by about 6e-8. Gate 1t's
+"drops the window input's ramp" is also false: the settled part sets `G_t`, and the verifier's L3T
+(the window's end state dropped, `g_t` 585 to 606) stays green on L2. Both clauses are gone. The
+section now names only defects that a mutation run turns red here. Each run used the whole release
+`tail_contract`, with the files restored and checked by SHA-256. "Green" is the full release run
+after every restore (22 passed).
+
+| mutant | defect | red | green |
+|---|---|---|---|
+| G1Z | `G_t`'s late-input bound (zero state from the event) reused as `G_p`: `peak_gain = tail_gain` in `LiveBound::composition` and in L3's recomputation | gate 1 (`44100 Hz L1, HPF to 10 Hz: the real kernel's peak 3.4455813e4 exceeds g_p + sigma_p = 8.157735689623506e2`), the table test | the other 20, L3, L2 and L5' among them |
+| G1 (phase A's, rerun) | `g_p = g delta^2` in the module and in L3 | gate 1 (`peak 3.4455813e4 exceeds g_p + sigma_p = 1.5849e1`), the table test, L2 and L5' (`composition Unstated`: the statement refuses `G_t > G_p`) | the other 18, L3 among them |
+| G1T (phase A's, rerun) | the trim dropped from `G_t` in the module and in L3' | L2 at every rate (`the exact supremum 55.93 / 55.59 / 53.45 / 53.12 exceeds g_t 51.52 / 51.58 / 51.82 / 51.88`), the table test | the other 20, L3' and L5' among them |
+| MP | as above | gate 2, the table test, L3 | the other 19 |
+
+So G1Z is the defect that only gate 1 catches. Phase A's G1 is also red on L2 and L5', through
+the registry rule. Phase A's test-value sentence on G1 carries a note that points here. Gate 1's
+worst-sign history has no unique catch. Its job is to make `g_meas` the largest peak known, so
+that gate 2 and `r_p` read the real kernel's reference. Without it, gate 2 reads L1's peak, and
+`r_p` reads 37.56, which is above `F_p`.
+
+**NIT 2.** The derivation's "Gates" section now names #1485's gate 2 (on gate 1's runs) and gate
+2t (on L2's scan), and gate 1's six histories. The "Looseness" paragraph now states the
+worst-sign figures. Three new lines were wider than 100 characters (161, 121 and 104), and all
+three are now wrapped.
+
+**NIT 4.** The repeated sentence before the `G_t` table of V-D3 step 1 is removed.
+
+**#1487.** Its local Context now has `r_p` 22.80 / 22.70 / 22.80 / 22.70 (+27.2 dB) against the
+worst-sign `g_meas` 5.6766e4, gate 1's six histories, `F_p = 23.94` and the measured 3.58e3 per unit
+of the trim word. Its gate 1 reads "its six histories". Its `STREAMS.md` row has no figure, so it
+does not change. **Pending GitHub sync:** the #1487 body (and, as before, the #1485 title and body).
+
+**Gates run (follow-ups).**
+
+* `cargo test --locked --release -p builtins --features builtins/test-support --test
+  tail_contract`: 22 passed (11.3 s). Gates 1 and 2 on six histories, gates 1t and 2t, L3/L3',
+  L4, L5' and the table test are among them.
+* `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference --features
+  math/lane,builtins/test-support,lane/test-support` (debug): 45 binaries, no failure (4 min 31 s;
+  `tail_contract` 20 passed, 2 ignored release-scale, 72.1 s).
+* `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`,
+  `scripts/check-workspace-policy.sh`: green.
+* Not rerun: this pass changes only `tail_contract.rs` (test code), this spec, #1487's spec and the
+  derivation. No library, render or CI file changes, so `audit capi`, the builtins fixtures, the
+  wasm gates, the realtime policy, the cross-target check and the worklet chain keep phase A's
+  results. `crates/math/src/tail.rs` is the same as at `870a61436` (the mutants were applied and
+  then restored, and SHA-256 confirms each restore).
+* Soundness (V-D2) holds: every measured peak, the worst-sign peak included, is at least 22.69
+  times below `g_p`. V-D4 holds: no bound value or table entry moves.

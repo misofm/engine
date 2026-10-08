@@ -2889,11 +2889,12 @@ fn live_composition(rate: u32) -> LiveComposition {
     .expect("a certified live composition")
 }
 
-/// #1485 `F_p` (V-D3, confirmed by root on 2026-10-08): the measured `r_p,max` 37.561 (the stated
-/// `G_p` over gate 1's largest peak, at 44.1 kHz) times `1 + 5 %`, rounded up to two decimals. The
-/// margin covers the millibel rounding of the statement and a restatement of a constant at
-/// rounding level; every quantity in gate 2 is deterministic.
-const F_P: f64 = 39.44;
+/// #1485 `F_p` (V-D3, by root's formula of 2026-10-08, ruling 2): the measured `r_p,max` 22.7986
+/// (the stated `G_p` over gate 1's largest peak, the worst-sign history's, at 44.1 and 88.2 kHz)
+/// times `1 + 5 %`, rounded up to two decimals. The margin covers the millibel rounding of the
+/// statement and a restatement of a constant at rounding level; every quantity in gate 2 is
+/// deterministic.
+const F_P: f64 = 23.94;
 
 /// #1485 `F_t` (V-D3, confirmed by root on 2026-10-08): the measured `r_t,max` 13.677 (the stated
 /// `G_t` over L2's largest trim x exact supremum, at 96 kHz) times `1 + 5 %`, rounded up to two
@@ -2910,13 +2911,16 @@ enum PeakEvent {
 }
 
 /// The largest `|y|` of a real input section, trim +24 dB, both sections designed at the
-/// worst-case pair, driven by an alternating `+-1` input for 1,000,000 frames and 200,000 more
-/// with `events` (frames counted from the end of the drive), in blocks of 64 frames, or of
-/// `block` frames from 128 frames before the first event to 512 after it. Returns the peak
-/// before the first event and over the run.
-fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32, f32) {
-    const DRIVE: usize = 1_000_000;
-    const AFTER: usize = 200_000;
+/// worst-case pair, driven by `drive(frame)` for `lead + after` frames with `events` (frames
+/// counted from `lead`), in blocks of 64 frames, or of `block` frames from 128 frames before
+/// `lead` to 512 after it. Returns the peak before `lead` and over the run.
+fn peak_run(
+    rate: u32,
+    (lead, after): (usize, usize),
+    events: &[(usize, PeakEvent)],
+    block: usize,
+    drive: &dyn Fn(usize) -> f32,
+) -> (f32, f32) {
     let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
     let mut section = input(rate, hpf, lpf, 24.0, false);
     let (mut before, mut peak) = (0.0_f32, 0.0_f32);
@@ -2924,9 +2928,9 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
     let mut right = [0.0_f32; 64];
     let mut inverted = false;
     let mut frame = 0;
-    while frame < DRIVE + AFTER {
+    while frame < lead + after {
         for (at, event) in events {
-            if DRIVE + at == frame {
+            if lead + at == frame {
                 match *event {
                     PeakEvent::Retarget(index, hz) => section
                         .apply_prepared_filter(target(rate, index, hz))
@@ -2938,19 +2942,18 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
                 }
             }
         }
-        let mut len = 64.min(DRIVE + AFTER - frame);
-        if frame + 128 >= DRIVE && frame < DRIVE + 512 {
+        let mut len = 64.min(lead + after - frame);
+        if frame + 128 >= lead && frame < lead + 512 {
             len = len.min(block);
         }
         for (at, _) in events {
-            if DRIVE + at > frame {
-                len = len.min(DRIVE + at - frame);
+            if lead + at > frame {
+                len = len.min(lead + at - frame);
             }
         }
         for index in 0..len {
-            let value = if (frame + index) % 2 == 0 { 1.0 } else { -1.0 };
-            left[index] = value;
-            right[index] = value;
+            left[index] = drive(frame + index);
+            right[index] = left[index];
         }
         process(
             &mut section,
@@ -2962,7 +2965,7 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
             .iter()
             .chain(&right[..len])
             .fold(0.0_f32, |sup, value| sup.max(value.abs()));
-        if frame < DRIVE {
+        if frame < lead {
             before = before.max(block_peak);
         }
         peak = peak.max(block_peak);
@@ -2971,14 +2974,120 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
     (before, peak)
 }
 
+/// [`peak_run`] with an alternating `+-1` drive for 1,000,000 frames and 200,000 more after it.
+fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32, f32) {
+    peak_run(rate, (1_000_000, 200_000), events, block, &|frame| {
+        if frame % 2 == 0 { 1.0 } else { -1.0 }
+    })
+}
+
+/// Frames of a worst-sign history ([`worst_sign_history`]) at the worst-case pair before its
+/// first event. The settled pair's response decays slowly, so the lead is long; at twice this
+/// lead every row's `l1` and peak are the same to seven digits.
+const SIGN_LEAD: usize = 700_000;
+/// Output frames searched for the largest row, from the history's last event on.
+const SIGN_SEARCH: usize = 16;
+
+/// The cascade frames of a worst-sign history, recorded from the real kernel: the lead's frame
+/// (the worst-case pair) and the frames `SIGN_LEAD + j`, `j < frames`, the words read before each
+/// frame is processed, one frame per block with zero input (the words do not depend on the input),
+/// `events` applied before their frames. No event disables a section, so no frame clears a state.
+fn sign_history_frames(
+    rate: u32,
+    events: &[(usize, PeakEvent)],
+    frames: usize,
+) -> (CascadeFrame, Vec<CascadeFrame>) {
+    let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
+    let mut section = input(rate, hpf, lpf, 24.0, false);
+    let [lead_hpf, lead_lpf] = loaded_words(&section);
+    let mut window = Vec::with_capacity(frames);
+    for frame in 0..frames {
+        for (at, event) in events {
+            match *event {
+                PeakEvent::Retarget(index, hz) if *at == frame => section
+                    .apply_prepared_filter(target(rate, index, hz))
+                    .expect("retarget"),
+                PeakEvent::Retarget(..) => {}
+                PeakEvent::Flip => panic!("a worst-sign history only retargets"),
+            }
+        }
+        let [hpf, lpf] = loaded_words(&section);
+        assert!(
+            !is_identity(&hpf) && !is_identity(&lpf),
+            "a worst-sign history keeps both sections enabled"
+        );
+        window.push(cascade_frame(&hpf, &lpf));
+        let (mut left, mut right) = ([0.0_f32], [0.0_f32]);
+        process(&mut section, &mut left, &mut right, frame as u64);
+    }
+    (cascade_frame(&lead_hpf, &lead_lpf), window)
+}
+
+/// The row `h(n, m)`, `m = 0 ..= n`, of a worst-sign history's output frame `n = SIGN_LEAD + t`
+/// (zero state at frame 0), by the backward (adjoint) recursion of [`exact_row_supremum`] in
+/// `f64`; returns its `l1` and, when asked, the signs `sign h(n, m)` that attain it.
+fn sign_row(
+    lead: &CascadeFrame,
+    window: &[CascadeFrame],
+    t: usize,
+    mut signs: Option<&mut Vec<f32>>,
+) -> f64 {
+    let n = SIGN_LEAD + t;
+    let sign = |h: f64| if h >= 0.0 { 1.0 } else { -1.0 };
+    if let Some(signs) = signs.as_deref_mut() {
+        signs.clear();
+        signs.resize(n + 1, 0.0);
+        signs[n] = sign(window[t].d);
+    }
+    let mut row = window[t].c;
+    let mut l1 = window[t].d.abs();
+    for m in (0..n).rev() {
+        let frame = if m >= SIGN_LEAD {
+            &window[m - SIGN_LEAD]
+        } else {
+            lead
+        };
+        let h = dot_frame(&row, &frame.b);
+        l1 += h.abs();
+        if let Some(signs) = signs.as_deref_mut() {
+            signs[m] = sign(h);
+        }
+        row = row_times(&row, &frame.a);
+    }
+    l1
+}
+
+/// #1485 gate 1's worst-sign history: the real input section from rest, trim +24 dB, both
+/// sections at the worst-case pair for [`SIGN_LEAD`] frames, then `events`, driven by the input
+/// `sign h(n, m)` that attains the exact row `l1` at the output frame `n` (the oracle's own
+/// worst-case input, as #1467 L2's `kernel_against_oracle`), `n` the frame of the largest row over
+/// the [`SIGN_SEARCH`] frames from the last event. Returns `n - SIGN_LEAD`, the trim word times the
+/// row's `l1` and the real kernel's peak `|y|` over the run (to frame `n`).
+fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (usize, f64, f32) {
+    let last = events.iter().map(|(at, _)| *at).max().unwrap_or(0);
+    let (lead, window) = sign_history_frames(rate, events, last + SIGN_SEARCH + 1);
+    let (mut best, mut best_l1) = (last, 0.0_f64);
+    for t in last..=last + SIGN_SEARCH {
+        let l1 = sign_row(&lead, &window, t, None);
+        if l1 > best_l1 {
+            (best, best_l1) = (t, l1);
+        }
+    }
+    let mut signs = Vec::new();
+    sign_row(&lead, &window, best, Some(&mut signs));
+    let (_, peak) = peak_run(rate, (SIGN_LEAD, best + 1), events, 1, &|frame| {
+        signs[frame]
+    });
+    (best, trim * best_l1, peak)
+}
+
 /// #1485 gate 1 (#1466 L1, widened). The real kernel's largest `|y|` per unit of the input's peak
-/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on five histories
-/// after the Nyquist drive of [`peak_history`] (#1379 H9: the drive builds a large first
+/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on six histories.
+/// Five follow the Nyquist drive of [`peak_history`] (#1379 H9: the drive builds a large first
 /// integrator in both sections at the top of the domain while the output stays near 1, and a
 /// retarget exposes it). Each history, with its reason:
 ///
-/// * L1: the HPF to 10 Hz, the largest peak the attempt found (its record lists the others it
-///   measured, all lower);
+/// * L1: the HPF to 10 Hz (#1466 L1);
 /// * L1 in blocks of one frame around the retarget: #1407's ramp allowance is largest at block
 ///   size 1;
 /// * L1 with the polarity flipped 8 frames into the ramp window: a trim or polarity change while
@@ -2987,10 +3096,17 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
 ///   charges;
 /// * both sections moving: the HPF to 10 Hz, then the LPF to 10 Hz 4 frames later.
 ///
+/// The sixth is the worst-sign history ([`worst_sign_history`]): the HPF to 10 Hz, then the LPF
+/// to 10 Hz 16 frames later, driven by the exact row's own worst-case input. It is the largest
+/// peak found at every launch rate (#1485 attempt 1's verifier, and its follow-up's grid of 120
+/// two-event histories, its record), about 1.65 times the Nyquist drive's, so it sets `g_meas`.
+/// The kernel's peak must reach the row's `l1` times the trim within `10^-3`, so the history is
+/// the worst-case input it claims to be.
+///
 /// Prints, per history and rate, the peak (`g_meas` of the largest) and the ratio
 /// `g_p / peak` (issue #1485, V-D3).
 ///
-/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the five histories at the
+/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the six histories at the
 /// rate, `g_meas <= g_p` (the raw gain, without `sigma_p`) and the stated `G_p` is at most
 /// [`F_P`] `g_meas`. No other test bounds the live peak gain from above against the real kernel:
 /// #1466's `W_0` bound (a ratio of about 473) passes every other assertion here.
@@ -3035,6 +3151,27 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                  {stated:e}"
             );
         }
+        let name = "worst sign, HPF to 10 Hz, LPF to 10 Hz at +16";
+        let (frame, exact, peak) = worst_sign_history(
+            rate,
+            &[(0, Retarget(0, 10.0)), (16, Retarget(1, 10.0))],
+            f64::from(math::pow(10.0, 24.0 / 20.0) as f32),
+        );
+        largest = largest.max(peak);
+        eprintln!(
+            "G1 {rate} Hz {name}: row at +{frame}, exact x trim {exact:.6e}, kernel peak \
+             {peak:.6e} ({:.2} dB), ratio g_p / peak {:.2}",
+            20.0 * math::log10(f64::from(peak)),
+            composition.peak_gain / f64::from(peak)
+        );
+        assert!(
+            f64::from(peak) >= exact * (1.0 - 1.0e-3),
+            "{rate} Hz {name}: the kernel's peak {peak:e} does not reach the exact row {exact:e}"
+        );
+        assert!(
+            f64::from(peak) <= stated,
+            "{rate} Hz {name}: the real kernel's peak {peak:e} exceeds g_p + sigma_p = {stated:e}"
+        );
         // Gate 2: never below the measured peak, within `F_p` of it.
         let (_, peak_gain, ..) = composition_values(
             input_section_live_bound(rate).expect("launch rate"),
