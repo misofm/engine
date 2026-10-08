@@ -133,7 +133,9 @@ start and end, and each notification's counters. 50 Firefox runs: 48 passed the 
 failed it with `false: gap` (runs 21 and 40); 2 other runs failed other probes (see open items).
 The native stream holds one record (`SPECTRUM_RESULT_SLOTS = 1`); 6,144 frames at hop 256 publish
 17 windows; a native read round trip in Firefox takes 8-17 ms; the offline render takes 6-24 ms.
-- Pass (run 16, typical of 48): the first read that runs during the render meets drops already
+- Continuous-gate pass (run 16; its continuous probe shows the pattern of the 48 continuous-gate
+  passes, but the full qualify command of run 16 failed later, on `sdk-spectrum-hop`; see open
+  items): the first read that runs during the render meets drops already
   counted (`status 3 (gap), droppedCaptures 6`); the SDK's recovery read pops window 0; the first
   ready notification carries `nativeMissedWindows 6, skippedPublications 1`; `gap` is true.
 - Fail (run 21): the first read that runs during the render pops window 0 before window 1 exists
@@ -185,3 +187,13 @@ not seen in the 50 post-change runs: run 16 `sdk-spectrum-hop` ("actual browser 
 preserve Worklet metadata ...") and run 38 `sdk-spectrum-collection` ("spectrum collection did not return distinct owned A/B/A
 known-signal spans while audio continued"); their causes were not investigated. Root to decide
 whether each needs its own issue.
+
+### Follow-ups (2026-10-08, after the attempt 1 PASS)
+
+- **NIT2.** The D1 record called run 16 a "typical pass". Its continuous probe passed with the
+  pattern of the 48 continuous-gate passes, and the facts quoted for it stay as recorded, but the
+  full qualify command of run 16 failed (exit 1) on `sdk-spectrum-hop`. The record now says so.
+- **Durable D1 evidence.** The 50 instrumented Firefox runs are kept at
+  `/home/bl/misofm/submix-verdicts/1480-d1-traces/`: `run-N.log` is the qualify output of run N,
+  `trace-N.json` is the continuous probe's read and notification trace of run N, and `summary.txt`
+  lists each run's exit code (runs 16, 21, 38 and 40 exit 1).
