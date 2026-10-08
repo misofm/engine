@@ -1,4 +1,5 @@
-//! Gate D1's corpus can fail: every case is NaN-free and has a wide output spread.
+//! Gate D1's corpus can fail: no case hashes a NaN payload (`ramp_toward` carries NaN only as the
+//! canonical token) and every case has a wide output spread.
 //!
 //! The corpus's cross-target claim -- the effect runtime's lane functions compute the same bits at
 //! `f32`, `Simd4` and `Simd8`, natively and under wasmtime -- has one owner, gate G5 (issue #1048):

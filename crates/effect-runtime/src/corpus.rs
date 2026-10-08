@@ -327,8 +327,8 @@ where
 /// A regression guard and the cross-target reference, not an oracle: what makes the values
 /// *correct* is `tests/dynamics.rs` against the `f64` form of equation 4, `tests/envelope.rs`
 /// against an `f64` one-pole, and, for `ramp_toward`, `lane`'s `tests/ramp_endpoint.rs`, which
-/// states the clamp's in-range and NaN bits directly. These pins were produced by this crate on `x86_64` and are checked
-/// at all three widths.
+/// states the clamp's in-range and NaN bits directly. These pins were produced by this crate on
+/// `x86_64` and are checked at all three widths.
 pub const D1_DIGESTS: [[u8; 32]; CASE_COUNT] = [
     // gain_delta_db_hard_knee
     [

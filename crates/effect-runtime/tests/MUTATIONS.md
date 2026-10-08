@@ -204,7 +204,7 @@ T 0 R 1.5 W 1: upper edge 0.5 vs line 0.3333333333333333
 | `params` | domain validation for all three kinds, clamping into the domain, mapping exactness and monotonicity, defaults |
 | `lane_identity` | every lane-generic function agrees at `W = 1`, 4 and 8 by `to_bits` |
 | `partition` | P1: a ramp, a follower and the gain computer composed, rendered in blocks of {1, 7, 64, 128, 512}, bit-identical output and state |
-| `determinism` | D1's corpus is NaN-free and has a wide output spread. Its pinned SHA-256 digests at all three widths are compared by gate G5 alone since issue #1048 (`tools/wasm-gates/tests/g5_native_corpus.rs`, and the wasm guests of `scripts/run-wasm-gates.sh`) |
+| `determinism` | D1's corpus hashes no NaN payload (`ramp_toward` carries NaN only as the canonical token, issue #1473) and has a wide output spread. Its pinned SHA-256 digests at all three widths are compared by gate G5 alone since issue #1048 (`tools/wasm-gates/tests/g5_native_corpus.rs`, and the wasm guests of `scripts/run-wasm-gates.sh`) |
 
 
 ### 16, 17, 18 — the attack/release one-pole step (added by the #92 job)

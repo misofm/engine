@@ -203,14 +203,18 @@ loop's `silence_step` would. Reverted: green.
 
 **Gate 4.** No existing G5 case moved under any mutant above. Each mutant is also caught natively
 by an existing crate test (listed), as expected: those tests do not run in the wasm guest. The new
-cases are the only G5 digests that do, so a `simd128` lowering of `Lane::min`/`max` that swaps
-operands or hides a NaN, or a wasm difference in the per-segment dispatch, turns them red under
-wasm and nothing else in the wasm leg.
+cases are the only G5 digests that do. A swapped `simd128` lowering of `Lane::min`/`max` is not
+theirs alone: the wasm leg's `Lane::max`/`Lane::min` truth table already catches it (verifier,
+wasm `Lane::min` arm swapped: `minmax_lowering_mismatches: 36` and case 98 red at simd4). What
+they alone catch in the wasm leg, as the verifier measured it: a `ramp_toward` body changed on
+wasm only (case 98 red at scalar and simd4, truth table 0), and arming that reads one channel on
+wasm only (case 110 red at scalar and simd4, truth table 0).
 
 **Test value.**
-- `runtime/ramp_toward`: a wasm `simd128` lowering (or a `ramp_toward` rewrite) that swaps the
-  `pmin`/`pmax` operands, nests them the other way, or hides a NaN `next` turns it red under wasm;
-  no other wasm digest reaches those points (#1459 verdict; measured again above).
+- `runtime/ramp_toward`: a `ramp_toward` body changed on wasm only (its clamp nested the other
+  way, or a NaN `next` hidden) turns it red under wasm, with the truth table at 0; no other wasm
+  digest reaches those points (verifier, attempt 1). A swapped `Lane::min`/`max` lowering also
+  turns it red, but the truth table catches that first; a source rewrite is caught natively.
 - `multiband/process_block/segment_dispatch`: a wasm difference in which segments arm (either
   channel, either stage) or in the unarmed form's bits turns it red under wasm; no other wasm digest
   reaches `process_block`.
@@ -236,3 +240,25 @@ wasm and nothing else in the wasm leg.
 carries no NaN into a digest"; it is outside this slice's authorized paths, and its
 `g5_lane_corpus_is_finite` test covers lane cases only, which stay NaN-free, so nothing there is
 wrong in behaviour, only in that sentence's reach.
+
+#### Follow-ups after attempt 1's verdict (PASS; MINOR-1, MINOR-2, NIT-1, NIT-2)
+
+- **MINOR-1 (root: correct to the two measured cases).** Gate 4 and the `runtime/ramp_toward`
+  test-value bullet no longer claim that nothing else in the wasm leg catches a swapped
+  `Lane::min`/`max` lowering: the truth table catches it. They now state the verifier's two
+  measured unique catches (a `ramp_toward` body changed on wasm only: case 98 red, truth table 0;
+  arming that reads one channel on wasm only: case 110 red), and drop "(or a `ramp_toward`
+  rewrite)", which native tests catch.
+- **MINOR-2.** The NaN docs say the shipped rule (no NaN payload reaches a digest; case 98 carries
+  NaN only as the canonical token, and it sees a swapped lowering): `determinism.rs:1`,
+  `wasm-gate-corpus/src/lib.rs` (the truth-table doc), and, root-authorized,
+  `wasm-gates/tests/g5_native_corpus.rs:6`, `effect-runtime/tests/MUTATIONS.md` (`determinism`
+  row) and `wasm-gates/MUTATIONS.md` (the swapped-lowering entry).
+- **NIT-1:** `effect-runtime/src/corpus.rs`'s 121-column doc line is rewrapped. **NIT-2:** the
+  seed doc in `multiband-compressor/src/corpus.rs` says "a validated plan-swap payload".
+
+**Gates.** Docs and record only; no digest moved: `scripts/run-wasm-gates.sh` exit 0 (native and
+wasm legs `"mismatches":[]`, `minmax_lowering_mismatches` 0). `cargo fmt --all -- --check`: clean.
+clippy `--all-targets -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` for
+`effect-runtime`, `multiband-compressor`, `wasm-gate-corpus` and `wasm-gates`: clean.
+

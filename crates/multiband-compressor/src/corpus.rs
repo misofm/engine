@@ -297,8 +297,8 @@ const DISPATCH_RATE: u32 = 48_000;
 /// both, while the detector link makes each channel's gain depend on the other's.
 const DISPATCH_LINKS: [LinkMode; 2] = [LinkMode::DualMono, LinkMode::Maximum];
 
-/// A restored crossover state on one channel of one track: the plan-swap state a long silence
-/// after a quiet low-crossover tail hands over (issue #1328's payload carries the counter).
+/// A restored crossover state on one channel of one track: a validated plan-swap payload (issue
+/// #1328's payload carries the counter).
 ///
 /// Each seed's channel is silent from frame 0 until `silent_until`, and its counter reaches
 /// `N_SILENCE` = 4,096 inside exactly one segment, where its recursive words lie in
