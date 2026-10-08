@@ -280,8 +280,11 @@ columns do not move. `MANIFEST.tsv`'s `resources.jsonl` row moves with it, so th
 identity `1a8fd9a1...` -> `cd2b9fe6...` in `builtins_graph.rs` and `fixture_builtins.rs`. No PCM,
 meter, response or benchmark fixture moved (every other manifest row is byte-identical after
 `audit fixture-builtins --write`). `audit capi` `pcm_digest` `cb10fbface44a3a4`, unchanged (0
-allocations, 0 syscalls, 0 violations); the wasm G5 digests pass; the browser expected resources
-did not move.
+allocations, 0 syscalls, 0 violations); the wasm G5 digests pass. The browser `expected.json`
+did not move, but the measured `builtinRetainedBytes` row grew by +64 (two wasm32 tail entries, 64
+-> 96 bytes each, one track) to 2,017 of its 2,048 ceiling: 31 bytes of headroom are left, so the
+next slice that grows a builtin retained byte by more than 31 will exceed it. (Corrected by the
+follow-up below; this sentence first said the browser resources did not move.)
 
 **Gates.** All pass: `test-debug-a` (workspace debug tests, CI's command and features) and
 `test-debug-b` (DSP crates); `cargo test --release -p builtins --features builtins/test-support
@@ -321,3 +324,38 @@ listed test is the only one red; all green on revert):
 | M8 | the registry orders `Zero` above a `Millibels` (K3) | the same |
 | M9 | `max` keeps a `Stated` side beside an `Unstated` one (K4) | `max_states_a_composition_only_when_both_channels_state_one` |
 | M10 | `max` takes `peak_gain` by minimum (K4) | the same |
+
+### Attempt 1 follow-up (2026-10-08, worker; on `32f623059`): verdict PASS, m1-m2 and n1-n6
+
+- **m1.** `tail_bound.rs::max_states_a_composition_only_when_both_channels_state_one` now gives
+  its operands different finite `tail`, `tail_every_peak` and `rest` values, crossed so that each
+  side supplies at least one larger value (left: 12, 40, (30, 50); right: 20, 35, (25, 60);
+  componentwise: 20, 40, (30, 60)), and asserts the whole componentwise `max` in both operand
+  orders. The `UNBOUNDED` absorption is asserted in both orders too.
+- **m2.** `NodeTailBound` derives only `Clone, Copy, Debug, Eq, PartialEq`; the lexicographic
+  `Hash, Ord, PartialOrd` are gone, so `std::cmp::max` and `Iterator::max` no longer compile on it.
+  No user needed them (`cargo check --workspace --all-targets --all-features` passes).
+  `CompositionBound` and its parts keep `Ord`.
+- **n1.** `registry.rs` adds the admitted descriptor `LAUNCH_SHAPE_STATED` (finite `tail`,
+  `tail_every_peak: Infinite`, `rest: Unstated`, a stated composition with a `Zero` tail gain under
+  a `Millibels(-100)` peak gain), asserted admitted in both the (e) and the (f) test.
+- **n2.** The K4 operands are all statements the registry admits: `left` `(-300, -900)`, `right`
+  `(Zero, Zero)`, `crossed` `(600, -500)`.
+- **n3.** `RegisteredTailBound::bound`'s doc says "The four values".
+- **n4.** `audit`'s `BOXED_TAIL_ENTRY_BYTES` comment: the bound grew 56 -> 88 bytes; the entry was
+  72.
+- **n5.** The #1464 re-pin note in `fixture_builtins.rs` now follows #1329's.
+- **n6.** Corrected in Attempt 1's K5 paragraph above.
+
+**Mutation runs** (each applied to `crates/effect-contract/src/lib.rs`, every `effect-contract`
+and `effect-compiler` test run in debug with `--all-features --no-fail-fast`, the file restored;
+baseline 116 passed, 0 failed, before and after):
+
+| # | defect | red |
+|---|---|---|
+| X3 | `NodeTailBound::max` takes a finite tail by minimum | `max_states_a_composition_only_when_both_channels_state_one` only (115/1) |
+| X4 | `max` takes `rest.any_sanitized_input` from `self` only | the same test only (115/1) |
+| X1 | rule (e) reads `tail_every_peak` in place of `tail` | `a_stated_composition_with_an_infinite_tail_is_refused`, `a_tail_gain_above_the_peak_gain_is_refused` (114/2) |
+| X2 | rule (f) refuses a `Zero` tail gain under a `Millibels` peak gain | the same two tests (114/2) |
+
+All four were green on the previous commit (the verdict's X1-X4 survivors).

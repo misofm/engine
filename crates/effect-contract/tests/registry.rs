@@ -193,6 +193,23 @@ fn tail_gain_above_zero_peak_gain(sample_rate: u32, _: EffectQuality) -> NodeTai
     )
 }
 
+/// Today's launch shape with a stated composition: a finite `tail`, an infinite
+/// `tail_every_peak` (no `R(P*)` derived), an unstated rest, and a `Zero` tail gain under a
+/// `Millibels` peak gain. Every rule holds, so it is admitted.
+fn launch_shape_stated(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
+        tail: TailSamples::Finite(5),
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+        composition: CompositionBound::Stated {
+            decay: TailDecay(30),
+            peak_gain: PeakGain::Millibels(-100),
+            tail_gain: PeakGain::Zero,
+            stall: FlushStall::Zero,
+        },
+    }
+}
+
 /// No bound stated at all: an infinite tail with an unstated composition.
 fn unbounded(_: u32, _: EffectQuality) -> NodeTailBound {
     NodeTailBound::UNBOUNDED
@@ -201,6 +218,7 @@ fn unbounded(_: u32, _: EffectQuality) -> NodeTailBound {
 static CONSISTENT: EffectDescriptor = descriptor(1, consistent);
 static UNBOUNDED: EffectDescriptor = descriptor(1, unbounded);
 static CONSISTENT_STATED: EffectDescriptor = descriptor(1, consistent_stated);
+static LAUNCH_SHAPE_STATED: EffectDescriptor = descriptor(1, launch_shape_stated);
 static RULE_E: EffectDescriptor = descriptor(1, stated_composition_with_infinite_tail);
 static RULE_F: EffectDescriptor = descriptor(1, tail_gain_above_peak_gain);
 static RULE_F_ZERO: EffectDescriptor = descriptor(1, tail_gain_above_zero_peak_gain);
@@ -260,14 +278,20 @@ fn a_rest_for_a_limited_peak_above_the_rest_for_any_input_is_refused() {
 }
 
 /// Issue #1464 K3 (e): a stated composition needs a finite tail. The same values beside a finite
-/// tail, and an unstated composition beside an infinite tail, are admitted.
+/// tail, a stated composition beside a finite tail and an infinite tail over every peak (today's
+/// launch shape), and an unstated composition beside an infinite tail, are admitted.
 ///
-/// Red mutation: the registry drops rule (e), or checks only the first quality row.
+/// Red mutation: the registry drops rule (e), checks only the first quality row, or reads
+/// `tail_every_peak` in place of `tail`.
 #[test]
 fn a_stated_composition_with_an_infinite_tail_is_refused() {
     assert!(
         registry(&CONSISTENT_STATED).is_ok(),
         "the finite-tail twin with the same composition is admitted"
+    );
+    assert!(
+        registry(&LAUNCH_SHAPE_STATED).is_ok(),
+        "a finite tail with an infinite tail over every peak is admitted"
     );
     assert!(
         registry(&UNBOUNDED).is_ok(),
@@ -279,12 +303,17 @@ fn a_stated_composition_with_an_infinite_tail_is_refused() {
 /// Issue #1464 K3 (f): `tail_gain <= peak_gain`, with `Zero` below every `Millibels`.
 ///
 /// Red mutation: the registry drops rule (f), compares the two gains the wrong way round, orders
-/// `Zero` above a `Millibels`, or checks only the first quality row.
+/// `Zero` above a `Millibels`, refuses a `Zero` tail gain under a `Millibels` peak gain, or checks
+/// only the first quality row.
 #[test]
 fn a_tail_gain_above_the_peak_gain_is_refused() {
     assert!(
         registry(&CONSISTENT_STATED).is_ok(),
         "a tail gain below the peak gain is admitted"
+    );
+    assert!(
+        registry(&LAUNCH_SHAPE_STATED).is_ok(),
+        "a Zero tail gain under a Millibels peak gain is admitted"
     );
     assert_refused_as_inconsistent(&RULE_F);
     assert_refused_as_inconsistent(&RULE_F_ZERO);

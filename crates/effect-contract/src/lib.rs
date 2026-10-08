@@ -208,7 +208,10 @@ pub enum RestBound {
 /// launch rate and quality when [`NativeEffectRegistry::new`] builds its table (issue #1462), and
 /// copied from that table into the prepared metadata by [`expected_prepared_metadata`]. The
 /// builtin input section's is computed by `builtins` at preparation. Render never computes one.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+///
+/// It derives no `Ord`: a lexicographic order is a bound of neither channel, so the only "max" is
+/// the componentwise [`NodeTailBound::max`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeTailBound {
     /// `T_decay`: the tail every report and PDC use ([`TailSamples`]).
     pub tail: TailSamples,
@@ -2608,7 +2611,7 @@ impl RegisteredTailBound {
     pub const fn quality(&self) -> EffectQuality {
         self.quality
     }
-    /// The three values, as the registry computed and checked them.
+    /// The four values, as the registry computed and checked them.
     #[must_use]
     pub const fn bound(&self) -> NodeTailBound {
         self.bound

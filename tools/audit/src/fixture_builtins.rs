@@ -331,7 +331,7 @@ const BOXED_INPUT_ENTRY_BYTES: u64 = 712;
 // #1329: a tail entry carries the strip's bound beside its ID, not the one-byte `BuiltinTail` it
 // replaced (24 before): the prepared bounds live beside the tail, control-side (Amendment 4, R5).
 // #1464: +32 with the bound's `composition` (`effect_contract::NodeTailBound`: two
-// `TailSamples`, a `RestBound` and a `CompositionBound`, 88 bytes; 72 before).
+// `TailSamples`, a `RestBound` and a `CompositionBound`, 88 bytes; 56 before; the entry was 72).
 const BOXED_TAIL_ENTRY_BYTES: u64 = 104;
 const BOXED_STR_BYTES: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
@@ -5317,17 +5317,17 @@ mod tests {
             // chain constants leaving the input section's coefficients (-16 bytes per input
             // stage, counted in the preparation strip and in the bound processor). No PCM, meter,
             // response or benchmark fixture moved.
-            // Re-pinned by issue #1464: `resources.jsonl` alone moves, by the `composition` field
-            // each strip's bound gains (`(Box<str>, NodeTailBound)`, 104 bytes, against 72: +32
-            // bytes in each of the payload's and the seal's tail vectors, +64 per track in both
-            // processor payload counts). The largest allocation and the allocation counts do not
-            // move. No PCM, meter, response or benchmark fixture moved.
             // Re-pinned by issue #1329: `resources.jsonl` alone moves, by the strip bounds kept
             // beside each tail (`(Box<str>, InputSectionBound)`, 72 bytes, against 24 for the
             // `BuiltinTail` entry before: +48 bytes in each of the payload's and the seal's tail
             // vectors, +96 per track in both payload counts). The input section and the strip
             // preparation keep their size, so the largest allocation does not move. No PCM,
             // meter, response or benchmark fixture moved.
+            // Re-pinned by issue #1464: `resources.jsonl` alone moves, by the `composition` field
+            // each strip's bound gains (`(Box<str>, NodeTailBound)`, 104 bytes, against 72: +32
+            // bytes in each of the payload's and the seal's tail vectors, +64 per track in both
+            // processor payload counts). The largest allocation and the allocation counts do not
+            // move. No PCM, meter, response or benchmark fixture moved.
             "cd2b9fe6a0055421c2a816fd4454b1b6bdbe4d25cb681aa6df6e1785c27766b5",
             "accepted joined-corpus manifest identity"
         );

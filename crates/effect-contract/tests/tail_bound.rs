@@ -234,25 +234,22 @@ fn stated(
 
 /// #1464 K4: `NodeTailBound::max`, the bound of a node whose two channels are bounded by its
 /// operands, is `Unstated` in its composition when either channel's is, and otherwise takes each
-/// of the four values from whichever channel's is larger, with `Zero` below every level.
+/// of the four values from whichever channel's is larger, with `Zero` below every level. The
+/// other three values keep #1329's componentwise rule. Every operand is a statement the registry
+/// admits.
 ///
 /// Red mutations: `max` keeps one side's `Stated` composition beside an `Unstated` one; takes
-/// any one of the four values from one fixed side, or by minimum; or orders `Zero` above a
-/// `Millibels` or a `Level`.
+/// any one of the composition's four values, a tail or a rest value from one fixed side, or by
+/// minimum; or orders `Zero` above a `Millibels` or a `Level`.
 #[test]
 fn max_states_a_composition_only_when_both_channels_state_one() {
     let left = stated(
         7,
         PeakGain::Millibels(-300),
-        PeakGain::Zero,
+        PeakGain::Millibels(-900),
         FlushStall::Level(-14_000),
     );
-    let right = stated(
-        3,
-        PeakGain::Zero,
-        PeakGain::Millibels(-900),
-        FlushStall::Zero,
-    );
+    let right = stated(3, PeakGain::Zero, PeakGain::Zero, FlushStall::Zero);
     let larger = stated(
         7,
         PeakGain::Millibels(-300),
@@ -265,7 +262,7 @@ fn max_states_a_composition_only_when_both_channels_state_one() {
     let crossed = stated(
         2,
         PeakGain::Millibels(600),
-        PeakGain::Millibels(-1_200),
+        PeakGain::Millibels(-500),
         FlushStall::Level(-13_000),
     );
     assert_eq!(
@@ -273,7 +270,7 @@ fn max_states_a_composition_only_when_both_channels_state_one() {
         stated(
             7,
             PeakGain::Millibels(600),
-            PeakGain::Millibels(-1_200),
+            PeakGain::Millibels(-500),
             FlushStall::Level(-13_000),
         )
         .composition
@@ -283,7 +280,38 @@ fn max_states_a_composition_only_when_both_channels_state_one() {
     assert_eq!(unstated.composition, CompositionBound::Unstated);
     assert_eq!(left.max(unstated).composition, CompositionBound::Unstated);
     assert_eq!(unstated.max(left).composition, CompositionBound::Unstated);
-    // The other three values keep #1329's componentwise rule.
-    assert_eq!(left.max(unstated).tail, TailSamples::Finite(0));
+    // The other three values keep #1329's componentwise rule: each finite tail and each rest
+    // value from the side whose value is larger, mixed across the sides, in both orders.
+    let left_channel = NodeTailBound {
+        tail: TailSamples::Finite(12),
+        tail_every_peak: TailSamples::Finite(40),
+        rest: RestBound::Bounded(RestSamples {
+            peak_plus_24_dbfs: 30,
+            any_sanitized_input: 50,
+        }),
+        ..left
+    };
+    let right_channel = NodeTailBound {
+        tail: TailSamples::Finite(20),
+        tail_every_peak: TailSamples::Finite(35),
+        rest: RestBound::Bounded(RestSamples {
+            peak_plus_24_dbfs: 25,
+            any_sanitized_input: 60,
+        }),
+        ..right
+    };
+    let componentwise = NodeTailBound {
+        tail: TailSamples::Finite(20),
+        tail_every_peak: TailSamples::Finite(40),
+        rest: RestBound::Bounded(RestSamples {
+            peak_plus_24_dbfs: 30,
+            any_sanitized_input: 60,
+        }),
+        composition: larger.composition,
+    };
+    assert_eq!(left_channel.max(right_channel), componentwise);
+    assert_eq!(right_channel.max(left_channel), componentwise);
+    // An infinite tail or an unstated rest on either side absorbs.
     assert_eq!(left.max(NodeTailBound::UNBOUNDED), NodeTailBound::UNBOUNDED);
+    assert_eq!(NodeTailBound::UNBOUNDED.max(left), NodeTailBound::UNBOUNDED);
 }
