@@ -156,8 +156,8 @@ present"]`. Mutation reverted; the next run passed (gate 1's JSON above is that 
 
 **Objdump of the fixed `probe_svf_simd8`** (`llvm-objdump -d`, 0 `call` lines in the body): the
 prologue loads the six coefficients and the state into `ymm` registers, then the frame loop
-`dc360..dc3f4` is `vmovups` load, `vsubps`/`vmulps`/`vaddps` steps, `vandps`/`vpmaxud`, two
-`vcmplt_oqps` (one against the rest plane in memory, `(%rax,%rdx,4)`), `vorps`/`vandnps` flush,
+`dc360..dc3f4` is `vmovups` load, `vsubps`/`vmulps`/`vaddps` steps, `vandps`/`vpmaxud`, three
+`vcmplt_oqps` (one against the rest plane in memory, `(%rax,%rdx,4)`, and two against `%ymm9`), `vorps`/`vandnps` flush,
 `vmovups` store, `addq $0x8,%rdx; cmpq $0x100,%rdx; jne`. No `slice_index_fail` comparison or call
 remains before the loop.
 
@@ -171,3 +171,11 @@ workflow contract passed". `python3 -B scripts/test-ci-path-routing.py`: passed.
 
 **Not run.** The NEON report (`probe_svf_simd4`): no AArch64 runner here; the change is the same
 rebind as the AVX2 probe.
+
+### Follow-ups (2026-10-08, after the attempt 1 PASS)
+
+- **NIT2.** The objdump paragraph said the frame loop has two `vcmplt_oqps`. It has three: one
+  against the rest plane in memory and two against `%ymm9`. Re-read on the same
+  `target/release/audit`: `objdump -d --start-address=0xdc360 --stop-address=0xdc3fa` lists
+  `dc3b2 vcmplt_oqps (%rax,%rdx,4),%ymm15,%ymm15`, `dc3b8 vcmplt_oqps %ymm9,%ymm11,%ymm11` and
+  `dc3c7 vcmplt_oqps %ymm9,%ymm12,%ymm11`, then `dc3f4 jne dc360`. Record-only change.
