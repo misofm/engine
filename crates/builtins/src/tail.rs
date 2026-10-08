@@ -524,6 +524,7 @@ pub fn input_section_live_bound(sample_rate: u32) -> Option<NodeTailBound> {
     let terms = input_section_live_envelope(sample_rate)?;
     Some(
         live_bound(sample_rate, &terms).map_or(NodeTailBound::UNBOUNDED, |bound| NodeTailBound {
+            // An error is deliberately `Unstated`, as `Ok(None)` is: no values are certified.
             composition: live_composition(sample_rate, &terms)
                 .ok()
                 .flatten()

@@ -1381,6 +1381,16 @@ fn multiply4(a: &Square4, b: &Square4) -> Square4 {
     })
 }
 
+/// The larger of `a` and `b`, or a NaN when either is one: a fold with it carries a NaN to the
+/// caller's cap, where `f64::max` would drop it (issue #1467's arrival window).
+fn nan_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
 /// `row . v`, inflated by [`SLACK`].
 fn dot4(row: &[f64; 4], v: &[f64; 4]) -> f64 {
     (row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3]) * SLACK
@@ -1663,14 +1673,14 @@ impl<'a> LiveBound<'a> {
             let state_output = rows
                 .iter()
                 .zip(&phi)
-                .fold(0.0_f64, |sup, (row, phi)| sup.max(row * phi * SLACK));
+                .fold(0.0_f64, |sup, (row, phi)| nan_max(sup, row * phi * SLACK));
             let first = (state_output * g * SLACK + envelope.output_input * input) * SLACK;
             outputs.push(cap((envelope.output_state * sigma
                 + envelope.output_input * first)
                 * SLACK));
             sigma = cap((rho * sigma + envelope.input * first) * SLACK);
             if frame == self.ramp_frames {
-                energy = cap(phi.iter().fold(0.0_f64, |sup, phi| sup.max(*phi)) * g * SLACK);
+                energy = cap(phi.iter().fold(0.0_f64, |sup, phi| nan_max(sup, *phi)) * g * SLACK);
             } else {
                 // `Phi^(j+1)` from `Phi^(j)`: this frame (`j < ramp_frames`) carries the input.
                 phi = zones
@@ -1678,7 +1688,7 @@ impl<'a> LiveBound<'a> {
                     .map(|zone| {
                         (zone.first_neighbour..=zone.last_neighbour)
                             .map(|i| (zones[i].contraction * phi[i] + zones[i].input) * STEP_UP)
-                            .fold(0.0_f64, f64::max)
+                            .fold(0.0_f64, nan_max)
                     })
                     .collect();
             }

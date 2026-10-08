@@ -118,9 +118,10 @@ drives, so the decomposition at `M` is linear.
 - **L2. Live tail gain against the exact supremum (root's amendment of 2026-10-08).** A test-only
   adjoint oracle in `tail_contract.rs` computes the exact row-`l1` supremum of the time-varying
   live cascade over every input `|x| <= 1` from `N` on, with zero state at `N` (the backward
-  recursion over #1407's word mixtures, in `f64`), for a stated scan of ramp histories; the stated
-  `G_t` must be at least the trim word of +24 dB times that supremum, on every scanned history, at
-  every launch rate. Red mutant: a `G_t` below the supremum (trim and window both omitted). The
+  recursion, in `f64`, over the words the real kernel loads frame by frame, recorded from
+  `InputBuiltins`: #1407's rules and the kernel's event timing; attempt 2), for a stated scan of
+  histories; the stated `G_t` must be at least the trim word of +24 dB times that supremum, on every
+  scanned history, at every launch rate. The oracle checks itself against the real `f32` kernel. Red mutant: a `G_t` below the supremum (trim and window both omitted). The
   attempt record states the scan, what it covers, and the mutation runs. (Superseded text, the
   first L2: "Live tail gain on the real kernel. A real live section, trim +24 dB, both sections
   designed at the worst-case pair (`input_section_worst_case_pair(rate)`), whose state is exactly
@@ -157,9 +158,11 @@ Attempt record. The earlier text is quoted and superseded at the end of this sec
 
 - L2: a derivation error that puts `G_t` below the exact supremum of the late input's part on the
   scanned histories, mirrored into the recomputation so that L3' agrees with it (trim and window
-  both omitted, mirrored: `g_t` 15.87 against `trim x supremum` 60.12), is red only here. It does
-  not defend the window term: a `G_t` from the settled designs alone (+48.0 dB) stays 12.4 dB above
-  the scan's largest supremum (+35.6 dB).
+  both omitted, mirrored: `g_t` 15.87 against `trim x supremum` up to 60.17), is red only here. It
+  does not defend the window term: a `G_t` from the settled designs alone (+48.0 dB) stays 12.4 dB
+  above the scan's largest supremum (+35.6 dB). Its kernel check (attempt 2) is red for an oracle
+  whose words are not the kernel's: a disable or an enable modelled as the all-six mixture, or the
+  words read one frame late; the soundness assertion alone stays green for those (56.8 dB margin).
 - L3': a `G_t` that drops the window term (settled input only), the window's settled continuation,
   the settled input's term, or the window input's feedthrough, or a second-section mix row that
   omits the low-pass row (`first_mix_row` in its place), leaves the recomputation's 1 mB band or
@@ -362,6 +365,10 @@ computes it.
   the impulse response's `l1` (3.5286663711 at 44.1 kHz, to `1e-9`), and on a ramp history the
   rows at `N + 40` and `N + 200` equal forward sums of unit-impulse responses through the kernel's
   equations (to `1e-12`). 13.5 s for the four rates; ignored in debug (release scale).
+  (Attempt 2, verdict MAJOR 1: this coverage statement is false in two points. The identity
+  endpoints were the all-six mixture, which is not #1407's disable (rule 2) or enable (rule 3),
+  and every offset was one frame off the kernel's timing, so the event before `N - 1` was not
+  scanned. Attempt 2 replaces the scan; see its record.)
 - L3': `G_t` above the recomputation by `3.5e-8` relative at every rate (1 mB is `1.15e-4`); the
   module's second mix row at least the derivation's `sqrt(2) + mix_box`. #1466's L3 and L4
   unchanged and passing.
@@ -371,8 +378,10 @@ computes it.
 - L6': gate 8 passed. Gate 2: one invocation, `taskset -c 7`, after the 1-minute load fell below
   2 (`/proc/loadavg` before 1.87 2.62 2.52, after 1.68 2.54 2.50): exit 0, worst median design work
   24.950 ms, 97.2 % of 25.67 ms. Candidly: the printout was captured through `tail -8`, so the
-  `ns needed` line was not kept, and a following `--help` probe of the binary (output discarded)
-  may have started it a second time; neither figure is of record (the batch verifier's is). This
+  `ns needed` line was not kept; that figure is not of record (the batch verifier's is).
+  (Corrected in attempt 2, verdict MINOR 1: this record said a following `--help` probe "may have
+  started it a second time". It did not: `input_bound_budget` refuses any argument other than
+  `calibrate` and exits 2 before any work.) This
   slice changes only live code in `math::tail` (the fixed walk is untouched), so L6' is a
   regression run and claims no unique catch.
 - L5 (#1466's, nothing else moves): release `tail_contract` 22 passed; `audit capi`
@@ -424,3 +433,124 @@ launch configuration and claim nothing.
   second section's frequency-blind window sum and the tau system's `rho_settled` set `W*`. Its
   tightening is folded into #1485 (root's amendment); #1485 is not edited here.
 - Gate 2's figure of record is the batch verifier's (see L6' above).
+
+### Attempt 2 (2026-10-08, implementer): L2 reads the kernel's words; verdict fixes
+
+Worktree `codex/d15-stream-g3` at `a1a742d36`. Attempt 1 (`ae054b277`) failed on MAJOR 1: L2's
+stated coverage (the identity endpoints as #1407's disable and enable, the event offsets) was not
+true. `G_t`, the proof and every value are unchanged; no frame-equivalent constant moves.
+
+**Commits.** `8d994fa55` (the derivation, first; verdict NIT 1) and the code commit after it.
+
+**Changed.**
+- `crates/builtins/tests/tail_contract.rs` (L2, MAJOR 1). The oracle's words are now recorded from
+  the real kernel: `record_history` builds an `InputBuiltins` at the start pair, applies the
+  retargets with `apply_prepared_filter` before their frames, and reads the HPF's and LPF's words
+  with `input_section_words` before each frame is processed, zero input throughout. So the oracle
+  reads #1407's rules as the kernel runs them (rule 1 re-send; rule 2 disable: `c1`, `a2`, `a3`
+  frozen, the mix ramped, then the identity and cleared integrators; rule 3 enable from rest: the
+  recursion jumped, the mix ramped; rule 4 the all-six ramp, from in-flight words on a restart) and
+  the kernel's timing (current, then advance: an event before frame `N - s` has `64 - s` frames in
+  flight at `N`; before `N - 1`, weight 1/64 at `N` and the target at `N + 63`). A clear is read
+  where a section's words become the identity (only a disable's completion writes it over other
+  words) and is folded into the frame before it (`history_frames`); no row depends on it, because
+  an identity section's state neither moves nor reaches the output (K3 below). The adjoint
+  recursion is unchanged; the settled system's prefix `l1` is computed once per settled pair per
+  thread (`SettledSum`), and the window's remainder is checked every 4,096 frames. The `mixture`
+  function (with its false doc comment) is deleted: nothing uses it.
+- New in L2: the oracle against the real `f32` kernel. On six recorded histories per rate (a
+  retarget, an HPF disable, an HPF enable and an LPF disable before `N - 1`; an HPF disable before
+  `N - 40` interrupted by a retarget before `N - 8`; an HPF enable before `N - 16` interrupted by a
+  disable before `N - 15`), at `N + 40` and `N + 200`: the oracle's row equals the forward impulse
+  sum (to `1e-12`), and the real kernel, trim +24 dB, driven from `N` in one block by
+  `2^-12 sign h(n, m)`, gives `|y(N + n)|` within `1e-3` of `trim 2^-12 row`. Measured: ratios
+  0.999997 to 1.000020 at every rate. The one-block drive also shows that the words recorded one
+  frame per block are the words the kernel runs inside a block.
+- `crates/math/src/tail.rs` (NIT 2): `arrival_window`'s three max-folds use `nan_max`, which
+  carries a NaN to the window's cap (refused as capped) instead of dropping it as `f64::max` does.
+  For non-NaN values it is `f64::max`, so no value moves (the table test passes unchanged). No test
+  is added: I found no public input that reaches a NaN in these folds and is not refused first.
+- `crates/builtins/src/tail.rs` (NIT 3): a one-line comment that turning an error into `Unstated`
+  with `.ok()` is deliberate.
+- `docs/derivations/1379-graph-tail-composition.md` (NIT 4, `8d994fa55`): the kernel's late-part
+  supremum is close to the largest settled pair's `l1`, not the 10 Hz pair's. Scratch scan (not
+  committed; a 61-point logarithmic grid of HPF cutoffs into the top LPF and a coarser grid of both
+  cutoffs, `f64` impulse responses of the designed words): the largest settled `l1` is 3.7980 /
+  3.7976 / 3.7980 / 3.7976 (+35.59 dB with the trim) at an HPF of 147.98 / 173.54 / 286.93 /
+  341.86 Hz into the top LPF at 44.1 / 48 / 88.2 / 96 kHz; the 10 Hz HPF gives 3.5287 / 3.5077 /
+  3.3727 / 3.3516. The gate summary says L2 scans histories recorded from the real kernel.
+- This spec: L2's gate text and test value; the attempt-1 record's false `--help` sentence
+  (MINOR 1, corrected in place) and a note on its scan statement.
+
+**L2's scan and coverage** (release, every launch rate, 3,213 histories per rate). The cutoffs
+`{the identity, 10 Hz, 100 Hz, 200 Hz, 500 Hz, 1 kHz, 10 kHz, one f32 below the maximum, the
+maximum}`, the HPF below the LPF when both are enabled:
+- (a) 1,792: one section retargeted once between every ordered pair of the cutoffs (a disable, an
+  enable from rest, or an all-six ramp), the other fixed (LPF at the maximum or the identity; HPF
+  at 10 Hz or the identity), the event before `N - s`, `s` in `{1, 2, 8, 16, 32, 48, 63}`;
+- (b) 45: every settled pair of the cutoffs;
+- (c) 800: one section retargeted twice, `a -> b` then `-> c`, on `{the identity, 10 Hz, 200 Hz,
+  1 kHz, one f32 below the maximum}` (HPF, LPF at the maximum) or `{the identity, 100 Hz, 1 kHz,
+  10 kHz, the maximum}` (LPF, HPF at 10 Hz), `a != b`, `c = b` a re-send (rule 1), the events
+  before `(N - 63, N - 1)`, `(N - 40, N - 8)`, `(N - 16, N - 15)`, `(N - 2, N - 1)`;
+- (d) 576: both sections retargeted, the HPF on `{the identity, 10 Hz, 200 Hz, 1 kHz}`, the LPF on
+  `{the identity, 10 kHz, one f32 below the maximum, the maximum}`, the events before
+  `(N - 1, N - 1)`, `(N - 1, N - 63)`, `(N - 63, N - 1)`, `(N - 32, N - 8)`.
+
+Per rate: 622 histories with a disable that completes after `N`, 622 with an enable from rest,
+3,168 with a retarget in flight at `N`. Rules covered: 1 (re-send), 2 (disable, its completion and
+clear), 3 (enable from rest), 4 (all-six ramp, from settled and from in-flight words, a frozen
+disable included). What it covers: those histories only, with the kernel's own `f32` words and
+timing, the input at `N` and later in exact arithmetic (every input `|x| <= 1` from `N`, so every
+`M >= N`), every frame (exact rows until the window's remainder is below `1e-12`, then the settled
+prefix `l1` plus both rigorous remainders). It does not cover other cutoffs or other offsets, a
+retarget at or after `N`, the trim ramp, or the rounding deviation (B1's part); it claims no more.
+L2's cutoffs step over the fine grid's settled maximum (3.7980 against the scan's 3.7966 at 48 kHz,
+0.003 dB); no bound depends on that.
+
+**Results.** The largest `trim x supremum`: 44.1 kHz 60.1642 (+35.59 dB; HPF identity -> 200 Hz
+and LPF maximum -> one `f32` below, both before `N - 1`), 48 kHz 60.1721 (+35.59 dB; HPF identity
+-> one `f32` below the maximum before `N - 2` -> 200 Hz before `N - 1`), 88.2 kHz 60.1204 (+35.58
+dB), 96 kHz 60.1203 (+35.58 dB; HPF identity -> 500 Hz before `N - 1`). `g_t` 4.178304e4 (the
+stated 9,242 mB, +92.42 dB); margin 56.83 / 56.83 / 56.84 / 56.84 dB. Largest remainder
+`1.2e-12`. Self-checks: the settled 10 Hz into the maximum equals the impulse response's `l1`
+(3.5286663711 at 44.1 kHz, to `1e-9`); the rows and the kernel as above. 9 to 10 s for the four
+rates (one thread per rate, six per scan). The verifier's independent oracle (forward impulse
+columns over recorded words, about 3,960 histories a rate) found at most 60.17, the same.
+
+**Mutation runs** (each applied, the release `tail_contract` run, the files restored; M2 with every
+test except the table test, the others L2 alone, since they change only L2's code):
+
+| mutant | red | green |
+|---|---|---|
+| M2 trim and window dropped, mirrored (`math` `tail_gain = L_1 L_2 SLACK^2`, L3' the same) | L2 only (`g_t` 15.87; first failing history 55.93) | the other 20 |
+| O1 the oracle's window part after the changing frames zeroed | L2 at its forward-sum check (`N + 200`: 2.1796 against 2.1934 at 44.1 kHz) | - |
+| K1 a single retarget modelled as the all-six mixture (the kernel's timing) | L2 at its kernel check (HPF disable, `N + 40`: kernel 4.750e-3, oracle 4.520e-3 at 44.1 kHz, 4.8 % under) | L2's soundness assertion |
+| K1b only an enable from rest modelled as the all-six mixture | L2 at its kernel check (HPF enable, `N + 40`: 5.439e-3 against 4.448e-3, 18 % under) | L2's soundness assertion |
+| K2 the words read one frame late (after the frame is processed) | L2 at its kernel check (retarget, `N + 40`: 4.953e-3 against 4.989e-3) | L2's soundness assertion |
+| K3 the clears not folded in | none: equivalent (an identity section's state neither moves nor reaches the output) | all |
+
+So the modelling matters to L2 through its kernel check, not through its soundness assertion: a
+mixture model of a disable or an enable under-reports the kernel's row (K1, K1b), and a one-frame
+timing error moves it (K2); with 56.8 dB of margin, no modelling mutation turns the soundness
+assertion itself red. M2 stays L2's unique catch; O1 stays red at the forward-sum check.
+
+**Gates.**
+- `cargo test --locked --release -p builtins --features builtins/test-support --test
+  tail_contract`: 22 passed (9.9 s), the table test unchanged; debug: 20 passed, 2 ignored
+  (release scale).
+- `cargo test --locked -p math`: passed. `cargo test --locked -p builtins --features
+  builtins/test-support --lib`: 16 passed.
+- `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings` clean.
+- `check-workspace-policy.sh` ok; `check-realtime-policy.sh` ok (89 regions, 25 files);
+  `check-cross-targets.sh` PASS (x86-64-v3; aarch64 iOS and Android checked and linted; #1018
+  expected failures; wasm simd128).
+- The worklet chain (`math` changed): `build-web-audioworklet.sh --named-twin` (fresh output
+  directories), `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts` (source total 3,358 of 3,648, unchanged),
+  `test-web-audioworklet.sh` (private TMPDIR, left empty): all exit 0.
+- No render code changed: `audit capi`, the builtins fixtures, gate 2 and gate 8 were not re-run
+  (attempt 1's and the verifier's runs stand; `nan_max` is value-neutral and control-plane only).
+
+**Open items.** As attempt 1: the `G_t` looseness (56.8 dB) is #1485's.
