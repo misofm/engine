@@ -57,40 +57,71 @@ const SPECTRUM_COLLECTION = {
 /**
  * Issue #1476 D1-D3: every SDK engine this entry creates, and its render-locked allocator count.
  *
- * `createSdkEngine` is the only way this file makes an engine, and `closeSdkEngine` the only way
- * it closes one: it reads `browser.host.renderAllocationCount()` and then closes. The rows are in
- * read order; `instances` counts every engine that booted, so an instance closed without its read
- * leaves the two lengths unequal.
+ * `createSdkEngine` is the only place this file calls `createEngine`, and `closeSdkEngine` the
+ * only way it closes an engine: it reads `browser.host.renderAllocationCount()` and then closes.
+ * The rows are in read order; `instances` counts every engine that booted, so an instance closed
+ * without its read leaves the two lengths unequal.
  */
 type SdkEngine = Awaited<ReturnType<typeof createEngine>>;
+type SdkEngineOptions = Parameters<typeof createEngine>[0];
 const sdkRenderAllocations = {
   instances: 0,
   rows: [] as { readonly workload: string; readonly count: number }[],
-  open: new Map<SdkEngine, { readonly workload: string; failure?: unknown }>(),
+  open: new Map<SdkEngine, { readonly workload: string; failure?: object }>(),
 };
 
-async function createSdkEngine<Engine extends SdkEngine>(
-  workload: string,
-  create: () => Promise<Engine>,
-): Promise<Engine> {
-  const browser = await create();
+/**
+ * Create, record and connect one SDK engine (D1). A failed connect still reads and closes the
+ * instance before its error propagates (D3).
+ */
+async function createSdkEngine(workload: string, options: SdkEngineOptions): Promise<SdkEngine> {
+  const browser = await createEngine(options);
   sdkRenderAllocations.instances += 1;
   sdkRenderAllocations.open.set(browser, { workload });
+  try {
+    browser.host.node.connect(browser.context.destination);
+  } catch (error) {
+    const failure = sdkEngineFailed(browser, error);
+    await closeSdkEngine(browser);
+    throw failure;
+  }
   return browser;
 }
 
-/** Record the first error an instance's body threw, so its close cannot mask it (D3). */
-function sdkEngineFailed(browser: SdkEngine, error: unknown): unknown {
+/** A thrown value as an object, so a later read or cleanup failure can be attached to it (D3). */
+function sdkFailureObject(error: unknown): object {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    ? error
+    : new Error(`non-object error: ${String(error)}`, { cause: error });
+}
+
+function attachSdkFailure(failure: object, key: "renderAllocationReadFailures" | "sdkCleanupFailures", message: string) {
+  const record = failure as Record<string, unknown>;
+  const list = Array.isArray(record[key]) ? record[key] as string[] : (record[key] = []) as string[];
+  list.push(message);
+}
+
+function sdkErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Record the first error an instance's body threw, so its close cannot mask it (D3), and return
+ * the value to throw: the error itself, or an `Error` that wraps a non-object throw.
+ */
+function sdkEngineFailed(browser: SdkEngine, error: unknown): object {
+  const failure = sdkFailureObject(error);
   const instance = sdkRenderAllocations.open.get(browser);
-  if (instance !== undefined && instance.failure === undefined) instance.failure = error;
-  return error;
+  if (instance !== undefined && instance.failure === undefined) instance.failure = failure;
+  return failure;
 }
 
 /**
  * Read the instance's count after its last render and before its close, then close it (D2).
- * A second call for an instance this helper already closed does nothing. After a recorded body
- * error, a failed read is attached to that error instead of thrown, so the body's error stays
- * the one that propagates.
+ * A running `AudioContext` is suspended first, so no render follows the read; an offline
+ * context has finished rendering. A second call for an instance this helper already closed
+ * does nothing. After a recorded body error, a failed read or close is attached to that error
+ * instead of thrown, so the body's error stays the one that propagates.
  */
 async function closeSdkEngine(browser: SdkEngine): Promise<void> {
   const instance = sdkRenderAllocations.open.get(browser);
@@ -98,6 +129,10 @@ async function closeSdkEngine(browser: SdkEngine): Promise<void> {
   sdkRenderAllocations.open.delete(browser);
   let readFailure: Error | undefined;
   try {
+    const context = browser.context as unknown as BaseAudioContext;
+    if (typeof AudioContext !== "undefined" && context instanceof AudioContext && context.state === "running") {
+      await context.suspend();
+    }
     const reply = await browser.host.renderAllocationCount();
     if (reply.result !== 0) {
       readFailure = new Error(`${instance.workload}: render allocation count refused: ${reply.result}`);
@@ -105,16 +140,70 @@ async function closeSdkEngine(browser: SdkEngine): Promise<void> {
       sdkRenderAllocations.rows.push({ workload: instance.workload, count: reply.count });
     }
   } catch (error) {
-    readFailure = new Error(`${instance.workload}: render allocation count failed: ${
-      error instanceof Error ? error.message : String(error)}`, { cause: error });
+    readFailure = new Error(`${instance.workload}: render allocation count failed: ${sdkErrorMessage(error)}`,
+      { cause: error });
   }
-  await browser.close();
-  if (readFailure === undefined) return;
-  if (instance.failure === undefined) throw readFailure;
-  if (instance.failure !== null && typeof instance.failure === "object") {
-    const failure = instance.failure as { renderAllocationReadFailures?: string[] };
-    (failure.renderAllocationReadFailures ??= []).push(readFailure.message);
+  let closeFailure: Error | undefined;
+  try {
+    await browser.close();
+  } catch (error) {
+    closeFailure = new Error(`${instance.workload}: close failed: ${sdkErrorMessage(error)}`, { cause: error });
   }
+  if (instance.failure !== undefined) {
+    if (readFailure !== undefined) attachSdkFailure(instance.failure, "renderAllocationReadFailures", readFailure.message);
+    if (closeFailure !== undefined) attachSdkFailure(instance.failure, "sdkCleanupFailures", closeFailure.message);
+    return;
+  }
+  if (readFailure !== undefined) {
+    if (closeFailure !== undefined) attachSdkFailure(readFailure, "sdkCleanupFailures", closeFailure.message);
+    throw readFailure;
+  }
+  if (closeFailure !== undefined) throw closeFailure;
+}
+
+/**
+ * The `finally` of an instance's body: run its other cleanups (subscription and stream closes),
+ * then read and close the instance whatever they did (D3). The first cleanup error becomes the
+ * instance's failure when its body did not throw, and is thrown after the close.
+ */
+async function finishSdkEngine(browser: SdkEngine, ...cleanups: Array<() => unknown>): Promise<void> {
+  const instance = sdkRenderAllocations.open.get(browser);
+  const bodyFailed = instance?.failure !== undefined;
+  let cleanupFailure: object | undefined;
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      if (instance === undefined) {
+        cleanupFailure ??= sdkFailureObject(error);
+      } else if (instance.failure === undefined) {
+        cleanupFailure = sdkEngineFailed(browser, error);
+      } else {
+        attachSdkFailure(instance.failure, "sdkCleanupFailures", sdkErrorMessage(error));
+      }
+    }
+  }
+  await closeSdkEngine(browser);
+  if (!bodyFailed && cleanupFailure !== undefined) throw cleanupFailure;
+}
+
+/**
+ * The run's backstop (D3): read and close every instance still open when the run ends, whatever
+ * path it took. On the error path, `failure` is the run's error and every read or close failure
+ * is attached to it; on the success path an instance left open here has no row in the returned
+ * rows, so the gate's length check is red.
+ */
+async function closeOpenSdkEngines(failure: object | undefined): Promise<void> {
+  let firstError: unknown;
+  for (const [browser, instance] of [...sdkRenderAllocations.open]) {
+    if (failure !== undefined && instance.failure === undefined) instance.failure = failure;
+    try {
+      await closeSdkEngine(browser);
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
 }
 
 function observationSelection(effectSlotId: string, channels: "left" | "right" | "both" = "both") {
@@ -306,7 +395,7 @@ async function createSpectrumBrowser(
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createSdkEngine(workload, () => createEngine({
+  const browser = await createSdkEngine(workload, {
     document,
     spectrum: query,
     policy: { sourceRingFrames: SPECTRUM_FRAMES },
@@ -331,8 +420,7 @@ async function createSpectrumBrowser(
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   return browser;
 }
 
@@ -421,7 +509,7 @@ async function createContinuousSpectrumBrowser(
   const raw = await (await fetch("/qualification/observation-session.json")).text();
   const document = spectrumDocument(raw, frames, peak);
   const workload = `spectrum-continuous-hop-${spectrumHopFrames ?? "default"}`;
-  const browser = await createSdkEngine(workload, () => createEngine({
+  const browser = await createSdkEngine(workload, {
     document,
     spectrum: query,
     policy: {
@@ -456,8 +544,7 @@ async function createContinuousSpectrumBrowser(
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   return browser;
 }
 
@@ -481,7 +568,7 @@ async function createSpectrumCollectionBrowser() {
   const raw = await (await fetch("/qualification/observation-session.json")).text();
   const frames = 16 * SPECTRUM_FRAMES;
   const document = spectrumCollectionDocument(raw, frames);
-  const browser = await createSdkEngine("spectrum-collection", () => createEngine({
+  const browser = await createSdkEngine("spectrum-collection", {
     document,
     spectrumCollection: SPECTRUM_COLLECTION,
     policy: { sourceRingFrames: frames },
@@ -507,8 +594,7 @@ async function createSpectrumCollectionBrowser() {
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   return browser;
 }
 
@@ -760,9 +846,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
   } catch (error) {
     throw sdkEngineFailed(browser, error);
   } finally {
-    await shared?.close();
-    await subscription?.close();
-    await closeSdkEngine(browser);
+    await finishSdkEngine(browser, () => shared?.close(), () => subscription?.close());
   }
 }
 
@@ -890,8 +974,7 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
   } catch (error) {
     throw sdkEngineFailed(browser, error);
   } finally {
-    await subscription?.close();
-    await closeSdkEngine(browser);
+    await finishSdkEngine(browser, () => subscription?.close());
   }
 }
 
@@ -1023,9 +1106,9 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
 }
 
 async function runSpectrumCollectionQualification(): Promise<Record<string, unknown>> {
-  const browser = await createSpectrumCollectionBrowser();
   const [entryA, entryB] = SPECTRUM_COLLECTION_ENTRIES;
   if (entryA === undefined || entryB === undefined) throw new Error("spectrum collection fixture is incomplete");
+  const browser = await createSpectrumCollectionBrowser();
   const query = (entry: typeof entryA) => ({
     ...entry,
     spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
@@ -1189,7 +1272,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createSdkEngine("track-response-subscription", () => createEngine({
+  const browser = await createSdkEngine("track-response-subscription", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
@@ -1216,8 +1299,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   return browser;
 }
 
@@ -1455,16 +1537,15 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   } catch (error) {
     throw sdkEngineFailed(browser, error);
   } finally {
-    headless.dispose();
-    await closeSdkEngine(browser);
+    await finishSdkEngine(browser, () => headless.dispose());
   }
 }
 
-async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<typeof createEngine>>> {
+async function createResidentObservationBrowser(): Promise<SdkEngine> {
   const document = observationDocumentWithGate(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createSdkEngine("resident-observation", () => createEngine({
+  const browser = await createSdkEngine("resident-observation", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
@@ -1490,8 +1571,7 @@ async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<ty
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   return browser;
 }
 
@@ -1639,7 +1719,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createSdkEngine("sdk-observation", () => createEngine({
+  const browser = await createSdkEngine("sdk-observation", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
@@ -1667,8 +1747,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   try {
     const selections = [observationSelection("comp")];
     const map = await browser.observationMap();
@@ -1880,7 +1959,7 @@ async function renderLiveBypass(
   bypassed: "desk-hi" | "ins-mid" | undefined,
   live?: { readonly target: "desk-hi" | "ins-mid"; readonly bypass: boolean },
 ): Promise<{ digest: string; energy: number; address?: readonly number[]; appliedAtSample?: string }> {
-  const browser = await createSdkEngine(liveBypassWorkload(bypassed, live), () => createEngine({
+  const browser = await createSdkEngine(liveBypassWorkload(bypassed, live), {
     document: liveBypassSession(bypassed),
     policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: { commandQueueRecords: 16 } },
     scratchBoot: async () => ({
@@ -1904,8 +1983,7 @@ async function renderLiveBypass(
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
-  }));
-  browser.host.node.connect(browser.context.destination);
+  });
   try {
     let address: readonly number[] | undefined;
     let appliedAtSample: string | undefined;
@@ -1994,6 +2072,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
     responseWorkerModuleUrl: "/sdk/response-worker.js",
     responseLimits: { requestDeadlineMs: 5_000 },
   });
+  let runFailure: object | undefined;
   try {
     const eq = await preview.query({
       configurationId: EQ_CONFIGURATION_ID,
@@ -2050,7 +2129,14 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
       renderAllocations: sdkRenderAllocations.rows.slice(),
       renderAllocationInstances: sdkRenderAllocations.instances,
     };
+  } catch (error) {
+    runFailure = sdkFailureObject(error);
+    throw runFailure;
   } finally {
-    await preview.close();
+    try {
+      await closeOpenSdkEngines(runFailure);
+    } finally {
+      await preview.close();
+    }
   }
 }
