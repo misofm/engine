@@ -2,6 +2,7 @@
 
 //! #1377 D3 through #1462's table: the prepared metadata carries the registry's tail-bound entry
 //! for the request's own rate and quality, and refuses another row's or another effect's entry.
+//! #1464 K4: `NodeTailBound::max` keeps the componentwise rule for the composition.
 
 mod support;
 
@@ -9,16 +10,24 @@ use effect_contract::*;
 use engine::LAUNCH_SAMPLE_RATES;
 
 /// Distinct values per rate in every field, so a copy from the wrong field or the wrong rate
-/// shows.
-fn tail_and_rest(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+/// shows. The composition is stated (#1464), consistently: a finite tail, the tail gain below the
+/// peak gain.
+fn tail_and_rest(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     let rate = u64::from(sample_rate);
-    EffectTailBound {
+    let millibels = |value: u64| i32::try_from(value).expect("a test level fits i32");
+    NodeTailBound {
         tail: TailSamples::Finite(rate / 1000),
         tail_every_peak: TailSamples::Finite(rate / 100),
         rest: RestBound::Bounded(RestSamples {
             peak_plus_24_dbfs: rate / 10,
             any_sanitized_input: rate,
         }),
+        composition: CompositionBound::Stated {
+            decay: TailDecay(rate / 20),
+            peak_gain: PeakGain::Millibels(millibels(rate / 50)),
+            tail_gain: PeakGain::Millibels(millibels(rate / 200)),
+            stall: FlushStall::Level(-millibels(rate / 40)),
+        },
     }
 }
 
@@ -121,12 +130,13 @@ fn request(sample_rate: u32, tail_bound: RegisteredTailBound) -> PrepareEffectRe
 }
 
 /// #1377 D3, through #1462's table: the prepared metadata, and the program key a cohort is
-/// grouped by, carry the three values the descriptor's `tail_and_rest` states for the request's
-/// own rate.
+/// grouped by, carry the four values the descriptor's `tail_and_rest` states for the request's
+/// own rate (#1464 K2: `composition` among them).
 ///
 /// Red mutations: the registry evaluates the function at a fixed rate, or
-/// `expected_prepared_metadata` copies one field into another, or writes `Unstated`/`Infinite` in
-/// place of the stated value; `program_key` drops or crosses `tail_every_peak` or `rest`.
+/// `expected_prepared_metadata` copies one field into another, or writes
+/// `Unstated`/`Infinite` in place of the stated value (a dropped `composition` among them);
+/// `program_key` drops or crosses `tail_every_peak`, `rest` or `composition`.
 #[test]
 fn prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate() {
     let registry = registry();
@@ -141,10 +151,12 @@ fn prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate() {
         assert_eq!(metadata.tail, stated.tail, "{rate}");
         assert_eq!(metadata.tail_every_peak, stated.tail_every_peak, "{rate}");
         assert_eq!(metadata.rest, stated.rest, "{rate}");
+        assert_eq!(metadata.composition, stated.composition, "{rate}");
         let key = metadata.program_key();
         assert_eq!(key.tail, stated.tail, "{rate}");
         assert_eq!(key.tail_every_peak, stated.tail_every_peak, "{rate}");
         assert_eq!(key.rest, stated.rest, "{rate}");
+        assert_eq!(key.composition, stated.composition, "{rate}");
     }
 }
 
@@ -201,4 +213,77 @@ fn a_request_with_another_rows_entry_is_refused() {
             .map_err(|error| error.code),
         Err("effect.quality.unsupported")
     );
+}
+
+fn stated(
+    decay: u64,
+    peak_gain: PeakGain,
+    tail_gain: PeakGain,
+    stall: FlushStall,
+) -> NodeTailBound {
+    NodeTailBound {
+        composition: CompositionBound::Stated {
+            decay: TailDecay(decay),
+            peak_gain,
+            tail_gain,
+            stall,
+        },
+        ..NodeTailBound::ZERO
+    }
+}
+
+/// #1464 K4: `NodeTailBound::max`, the bound of a node whose two channels are bounded by its
+/// operands, is `Unstated` in its composition when either channel's is, and otherwise takes each
+/// of the four values from whichever channel's is larger, with `Zero` below every level.
+///
+/// Red mutations: `max` keeps one side's `Stated` composition beside an `Unstated` one; takes
+/// any one of the four values from one fixed side, or by minimum; or orders `Zero` above a
+/// `Millibels` or a `Level`.
+#[test]
+fn max_states_a_composition_only_when_both_channels_state_one() {
+    let left = stated(
+        7,
+        PeakGain::Millibels(-300),
+        PeakGain::Zero,
+        FlushStall::Level(-14_000),
+    );
+    let right = stated(
+        3,
+        PeakGain::Zero,
+        PeakGain::Millibels(-900),
+        FlushStall::Zero,
+    );
+    let larger = stated(
+        7,
+        PeakGain::Millibels(-300),
+        PeakGain::Millibels(-900),
+        FlushStall::Level(-14_000),
+    );
+    assert_eq!(left.max(right).composition, larger.composition);
+    assert_eq!(right.max(left).composition, larger.composition);
+    // Each value from the side whose value is larger, mixed across the sides.
+    let crossed = stated(
+        2,
+        PeakGain::Millibels(600),
+        PeakGain::Millibels(-1_200),
+        FlushStall::Level(-13_000),
+    );
+    assert_eq!(
+        left.max(crossed).composition,
+        stated(
+            7,
+            PeakGain::Millibels(600),
+            PeakGain::Millibels(-1_200),
+            FlushStall::Level(-13_000),
+        )
+        .composition
+    );
+    // An unstated side makes the whole composition unstated, on either side.
+    let unstated = NodeTailBound::ZERO;
+    assert_eq!(unstated.composition, CompositionBound::Unstated);
+    assert_eq!(left.max(unstated).composition, CompositionBound::Unstated);
+    assert_eq!(unstated.max(left).composition, CompositionBound::Unstated);
+    // The other three values keep #1329's componentwise rule.
+    assert_eq!(left.max(unstated).tail, TailSamples::Finite(0));
+    assert_eq!(left.max(NodeTailBound::UNBOUNDED), NodeTailBound::UNBOUNDED);
 }

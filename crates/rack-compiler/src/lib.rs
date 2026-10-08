@@ -459,6 +459,7 @@ mod tests {
             tail: TailSamples::Finite(0),
             tail_every_peak: TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,

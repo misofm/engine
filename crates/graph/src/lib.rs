@@ -3634,10 +3634,11 @@ mod tests {
         parameters: &[],
         ports: &SUM_PORTS,
         qualities: &[],
-        tail_and_rest: |_, _| effect_contract::EffectTailBound {
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
             tail: effect_contract::TailSamples::Finite(0),
             tail_every_peak: effect_contract::TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
         },
         observations: &[],
     };
@@ -5200,6 +5201,7 @@ mod tests {
             tail: TailSamples::Finite(0),
             tail_every_peak: TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -6616,10 +6618,11 @@ mod tests {
         parameters: &GAIN_PARAMETERS,
         ports: &SUM_PORTS,
         qualities: &[],
-        tail_and_rest: |_, _| effect_contract::EffectTailBound {
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
             tail: effect_contract::TailSamples::Finite(0),
             tail_every_peak: effect_contract::TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
         },
         observations: &[],
     };
@@ -6747,6 +6750,7 @@ mod tests {
             tail: TailSamples::Finite(0),
             tail_every_peak: TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -7164,6 +7168,7 @@ mod tests {
             tail: TailSamples::Finite(0),
             tail_every_peak: TailSamples::Infinite,
             rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,

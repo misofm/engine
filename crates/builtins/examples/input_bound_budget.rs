@@ -44,9 +44,9 @@ use builtins::test_support::{
 };
 use builtins::{
     BuiltinParameters, ChannelParameters, INPUT_BOUND_BUDGET_FRAMES, InputBoundCache,
-    InputSectionBound, builtin_filter_cutoff_maximum_hz, input_section_bounds,
-    input_section_live_bound_table,
+    builtin_filter_cutoff_maximum_hz, input_section_bounds, input_section_live_bound_table,
 };
+use effect_contract::NodeTailBound;
 use std::time::Instant;
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -210,7 +210,7 @@ struct Run {
     frames: u64,
     computed: u64,
     charged: u64,
-    bounds: Vec<InputSectionBound>,
+    bounds: Vec<NodeTailBound>,
 }
 
 fn prepare(rate: u32, strips: &[BuiltinParameters], cache: Option<&mut InputBoundCache>) -> Run {

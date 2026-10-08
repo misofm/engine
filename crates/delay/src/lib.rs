@@ -275,11 +275,12 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
 /// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
 /// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
 /// finite tail over every peak (#1377 D4); #1374 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::EffectTailBound {
-    effect_contract::EffectTailBound {
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    effect_contract::NodeTailBound {
         tail: TailSamples::Infinite,
         tail_every_peak: TailSamples::Infinite,
         rest: effect_contract::RestBound::Unstated,
+        composition: effect_contract::CompositionBound::Unstated,
     }
 }
 

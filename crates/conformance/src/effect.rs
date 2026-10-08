@@ -9,9 +9,9 @@ use std::{
 use crate::prng::SplitMix64;
 
 use effect_contract::{
-    AutomationSpanKind, BankProcessReport, BankWidth, EffectDescriptor, EffectId,
-    EffectPrepareError, EffectProcessBlock, EffectQuality, EffectTailBound, LatencySamples,
-    LinkMode, LinkModeSet, NativeEffectFactory, NativeEffectRegistry, ParameterChannel,
+    AutomationSpanKind, BankProcessReport, BankWidth, CompositionBound, EffectDescriptor, EffectId,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet,
+    NativeEffectFactory, NativeEffectRegistry, NodeTailBound, ParameterChannel,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
     ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
@@ -101,11 +101,12 @@ const QUALITIES: [QualityDescriptor; 4] = [
 ];
 /// The mock's tail, tail over every peak and exact-rest bound (#1377 D1, D4): its declared
 /// three-sample tail, with no exact-rest bound stated, because its output accumulator never rests.
-fn tail_and_rest(_: u32, _: EffectQuality) -> EffectTailBound {
-    EffectTailBound {
+fn tail_and_rest(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
         tail: TailSamples::Finite(3),
         tail_every_peak: TailSamples::Infinite,
         rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
     }
 }
 pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptor = EffectDescriptor {

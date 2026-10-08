@@ -19,7 +19,7 @@
 //! designed `f32` words (D4), and for a live input lane the per-section suprema over every word a
 //! control history can reach (D5).
 
-use effect_contract::{RestSamples, TailSamples};
+use effect_contract::{CompositionBound, NodeTailBound, RestBound, RestSamples, TailSamples};
 use math::tail::{
     CascadeBound, EnvelopeSection, FlushLaw, LiveCascade, PoleDomain, SvfWords,
     fixed_cascade_within, live_cascade, output_rounding, state_rounding, v_dual_norm, v_norm,
@@ -29,66 +29,17 @@ use math::tail::{
 use crate::filter_control::INPUT_FILTER_RAMP_SAMPLES;
 use crate::{BUTTERWORTH_K, InputLane, SvfSection, builtin_filter_cutoff_maximum_hz, db_gain};
 
-/// The tail and exact-rest bounds of one builtin input section (#1329 D1, D2, Amendment 3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InputSectionBound {
-    /// `T_decay`: the tail every tail report uses (PDC, the C ABI, the browser). Valid for every
-    /// input peak at or above the section's flush floor `P*`.
-    pub tail: TailSamples,
-    /// `T_rest = max(T_decay, R(P*))`: the tail over every peak. From it on the output is below
-    /// `P * 10^(-144/20)` for `P >= P*` and exactly zero for `P < P*`.
-    pub tail_every_peak: TailSamples,
-    /// D2's exact-rest bound, the one silence skipping uses (#1107). `None` states no bound.
-    pub rest: Option<RestSamples>,
-}
-
-impl InputSectionBound {
-    /// A memoryless section (both filters disabled): trim and polarity have no tail.
-    pub const ZERO: Self = Self {
-        tail: TailSamples::Finite(0),
-        tail_every_peak: TailSamples::Finite(0),
-        rest: Some(RestSamples::ZERO),
-    };
-
-    /// No bound stated: what a section reports if the derivation cannot bound it.
-    pub const UNBOUNDED: Self = Self {
-        tail: TailSamples::Infinite,
-        tail_every_peak: TailSamples::Infinite,
-        rest: None,
-    };
-
-    fn from_cascade(bound: &CascadeBound) -> Self {
-        Self {
-            tail: TailSamples::Finite(bound.tail),
-            tail_every_peak: TailSamples::Finite(bound.tail_every_peak),
-            rest: Some(RestSamples {
-                peak_plus_24_dbfs: bound.rest_peak,
-                any_sanitized_input: bound.rest_any,
-            }),
-        }
-    }
-
-    /// The componentwise maximum: the bound of a section whose channels are bounded by `self` and
-    /// `other` (D4: max over left and right).
-    #[must_use]
-    pub fn max(self, other: Self) -> Self {
-        let tail = |left: TailSamples, right: TailSamples| match (left, right) {
-            (TailSamples::Finite(left), TailSamples::Finite(right)) => {
-                TailSamples::Finite(left.max(right))
-            }
-            _ => TailSamples::Infinite,
-        };
-        Self {
-            tail: tail(self.tail, other.tail),
-            tail_every_peak: tail(self.tail_every_peak, other.tail_every_peak),
-            rest: match (self.rest, other.rest) {
-                (Some(left), Some(right)) => Some(RestSamples {
-                    peak_plus_24_dbfs: left.peak_plus_24_dbfs.max(right.peak_plus_24_dbfs),
-                    any_sanitized_input: left.any_sanitized_input.max(right.any_sanitized_input),
-                }),
-                _ => None,
-            },
-        }
+/// A builtin input section's bound from a cascade's: its tail, tail over every peak and exact-rest
+/// bound (#1329 D1, D2, Amendment 3). Its composition is unstated until #1465 and #1467 derive it.
+fn bound_from_cascade(bound: &CascadeBound) -> NodeTailBound {
+    NodeTailBound {
+        tail: TailSamples::Finite(bound.tail),
+        tail_every_peak: TailSamples::Finite(bound.tail_every_peak),
+        rest: RestBound::Bounded(RestSamples {
+            peak_plus_24_dbfs: bound.rest_peak,
+            any_sanitized_input: bound.rest_any,
+        }),
+        composition: CompositionBound::Unstated,
     }
 }
 
@@ -152,7 +103,7 @@ fn section_words(section: &SvfSection) -> SvfWords {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChargedInputBound {
     /// The design's own certified bound ([`crate::input_section_bound`]).
-    pub bound: InputSectionBound,
+    pub bound: NodeTailBound,
     /// The frames `math::tail::fixed_cascade` walked to compute it, over both channels.
     pub frames: u64,
     /// What it charges a preparation's budget, in frame-equivalents, whether computed or read from
@@ -211,7 +162,7 @@ fn fixed_input_walk(
         }
         if count == 0 {
             let zero = ChargedInputBound {
-                bound: InputSectionBound::ZERO,
+                bound: NodeTailBound::ZERO,
                 frames: 0,
                 charge: 0,
             };
@@ -225,9 +176,7 @@ fn fixed_input_walk(
         let gain = f64::from(lane.trim_signed.abs());
         let walk = fixed_cascade_within(&sections[..count], gain, &law, peaks, horizon);
         let charged = walk.result.map(|result| ChargedInputBound {
-            bound: result.map_or(InputSectionBound::UNBOUNDED, |bound| {
-                InputSectionBound::from_cascade(&bound)
-            }),
+            bound: result.map_or(NodeTailBound::UNBOUNDED, |bound| bound_from_cascade(&bound)),
             frames: walk.frames,
             charge: walk.frames + fixed,
         });
@@ -432,12 +381,11 @@ pub const fn input_section_worst_case_pair(sample_rate: u32) -> Option<(f32, f32
 /// The HPF-to-LPF cascade is bounded frequency-aware (#1433, `math::tail::live_cascade`).
 /// `None` off the launch rates (only a launch rate has a cutoff domain).
 #[must_use]
-pub fn input_section_live_bound(sample_rate: u32) -> Option<InputSectionBound> {
+pub fn input_section_live_bound(sample_rate: u32) -> Option<NodeTailBound> {
     let terms = input_section_live_envelope(sample_rate)?;
     Some(
-        live_bound(sample_rate, &terms).map_or(InputSectionBound::UNBOUNDED, |bound| {
-            InputSectionBound::from_cascade(&bound)
-        }),
+        live_bound(sample_rate, &terms)
+            .map_or(NodeTailBound::UNBOUNDED, |bound| bound_from_cascade(&bound)),
     )
 }
 
@@ -449,15 +397,16 @@ pub fn input_section_live_bound(sample_rate: u32) -> Option<InputSectionBound> {
 /// (`tests/tail_contract.rs`) holds every entry equal to [`input_section_live_bound`], so a change
 /// to the derivation, the flush law or the cutoff domain turns it red until the table is restated.
 #[must_use]
-pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<InputSectionBound> {
-    const fn bound(tail: u64, every_peak: u64, rest_peak: u64, rest_any: u64) -> InputSectionBound {
-        InputSectionBound {
+pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<NodeTailBound> {
+    const fn bound(tail: u64, every_peak: u64, rest_peak: u64, rest_any: u64) -> NodeTailBound {
+        NodeTailBound {
             tail: TailSamples::Finite(tail),
             tail_every_peak: TailSamples::Finite(every_peak),
-            rest: Some(RestSamples {
+            rest: RestBound::Bounded(RestSamples {
                 peak_plus_24_dbfs: rest_peak,
                 any_sanitized_input: rest_any,
             }),
+            composition: CompositionBound::Unstated,
         }
     }
     match sample_rate {

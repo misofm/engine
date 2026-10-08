@@ -52,7 +52,8 @@ representable in `f32`. Enabled filters declare a certified finite tail, compute
 control thread from the designed `f32` words, by the compiler at preparation for each distinct
 design (issue #1329, decision 15 D15-4(b)): `T_decay` (`tail`, the value PDC and every tail report
 use), the tail over every peak `T_rest` (`tail_every_peak`) and the exact-rest bound (`rest`,
-`RestSamples`), the three fields of `builtins::InputSectionBound`. The prepared session keeps every
+`RestSamples`), three of the fields of `effect_contract::NodeTailBound`, whose `composition` is
+`Unstated` until #1465 and #1467 derive it. The prepared session keeps every
 strip's bounds beside its tail, control-side (`PreparedBuiltinsSession::input_bounds`; silence
 skipping, #1107, reads them there); the render-owned input section carries none of them. A strip
 whose input lane is live reports `builtins::input_section_live_bound`, which covers every live

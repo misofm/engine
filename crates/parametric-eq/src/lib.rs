@@ -674,11 +674,12 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
 fn tail_and_rest(
     _sample_rate: u32,
     _quality: effect_contract::EffectQuality,
-) -> effect_contract::EffectTailBound {
-    effect_contract::EffectTailBound {
+) -> effect_contract::NodeTailBound {
+    effect_contract::NodeTailBound {
         tail: TailSamples::Infinite,
         tail_every_peak: TailSamples::Infinite,
         rest: effect_contract::RestBound::Unstated,
+        composition: effect_contract::CompositionBound::Unstated,
     }
 }
 

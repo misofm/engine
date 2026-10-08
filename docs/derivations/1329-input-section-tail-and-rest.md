@@ -10,7 +10,7 @@ Nothing here runs on the render thread.
 For an input of peak `P` that is zero from sample `N` on, with no control event at or after `N`
 (a ramp may be in flight at `N`; every builtin ramp completes by `N + 64`), and `eps = 10^(-144/20)`:
 
-| value | name in code (`builtins::InputSectionBound`) | meaning |
+| value | name in code (`effect_contract::NodeTailBound`) | meaning |
 |---|---|---|
 | `T_decay` | `tail`, `TailSamples` | `|y[n]| < P eps` for `n >= N + T_decay`, for every `P >= P*` |
 | `T_rest = max(T_decay, R(P*))` | `tail_every_peak` | as above for `P >= P*`; exact `+-0.0` for `P < P*` |

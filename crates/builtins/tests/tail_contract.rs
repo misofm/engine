@@ -14,18 +14,26 @@ use builtins::input_section_bound_charged;
 use builtins::test_support::{input_section_words, input_state_words, input_trim_words};
 use builtins::{
     BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, InputBoundCache,
-    InputBuiltins, InputSectionBound, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
+    InputBuiltins, PreparedInputFilterTarget, builtin_filter_cutoff_maximum_hz,
     input_section_bound, input_section_bounds, input_section_flush_law, input_section_live_bound,
     input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
     input_section_worst_case_pair, prepare_input_filter_pair,
 };
-use effect_contract::{RestSamples, TailSamples};
+use effect_contract::{NodeTailBound, RestBound, RestSamples, TailSamples};
 use math::tail::{
     CascadeBound, LiveZones, SectionConstants, SvfWords, TAIL_FLOOR, fixed_cascade, live_cascade,
     live_cascade_groups, live_zones, pole_real, v_operator_norm,
 };
 
 const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// The stated exact-rest bound of `rest`; panics with `message` when it is unstated.
+fn stated_rest(rest: RestBound, message: &str) -> RestSamples {
+    match rest {
+        RestBound::Bounded(rest) => rest,
+        RestBound::Unstated => panic!("{message}"),
+    }
+}
 
 fn rates() -> &'static [u32] {
     if cfg!(debug_assertions) {
@@ -84,7 +92,7 @@ fn input(rate: u32, hpf: f32, lpf: f32, trim_db: f32, polarity_invert: bool) -> 
 }
 
 /// The prepared bounds of one design, as preparation computes them.
-fn bound(rate: u32, hpf: f32, lpf: f32, trim_db: f32) -> InputSectionBound {
+fn bound(rate: u32, hpf: f32, lpf: f32, trim_db: f32) -> NodeTailBound {
     input_section_bound(rate, parameters(hpf, lpf, trim_db, false)).expect("valid parameters")
 }
 
@@ -274,7 +282,7 @@ fn fixed_design_tail_is_sound_and_within_thirty_db_of_the_exact_tail() {
                 let Some(response) = &response else {
                     assert_eq!(tail, 0, "{rate} Hz: disabled filters have no tail");
                     assert_eq!(prepared.tail_every_peak, TailSamples::Finite(0));
-                    assert_eq!(prepared.rest, Some(RestSamples::ZERO));
+                    assert_eq!(prepared.rest, RestBound::Bounded(RestSamples::ZERO));
                     continue;
                 };
                 let gain = trim_gain(&input);
@@ -326,7 +334,7 @@ fn each_strip_is_bounded_by_its_own_design_when_designs_are_shared() {
         right_only,
         left_only,
     ];
-    let own: Vec<InputSectionBound> = strips
+    let own: Vec<NodeTailBound> = strips
         .iter()
         .map(|strip| input_section_bound(rate, *strip).expect("bound"))
         .collect();
@@ -418,7 +426,7 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
                 }
                 value.insert(index, if fits { charged[index].bound } else { live });
             }
-            let expected: Vec<InputSectionBound> = order.iter().map(|index| value[index]).collect();
+            let expected: Vec<NodeTailBound> = order.iter().map(|index| value[index]).collect();
             let what = format!("order {order:?}, budget {budget}");
             let none = input_section_bounds_within(rate, strips.clone(), budget, None);
             assert_eq!(none.expect("bounds"), expected, "{what}, no cache");
@@ -773,7 +781,7 @@ fn live_bound_covers_every_scanned_design_and_ramp_word() {
             envelope.rho_settled - 1.0
         );
         // A sampled design's own certified bound, at the top trim, never exceeds the live bound.
-        let live_rest = live.rest.expect("live rest");
+        let live_rest = stated_rest(live.rest, "live rest");
         let sampled = scan
             .iter()
             .step_by(scan.len() / 16)
@@ -782,7 +790,7 @@ fn live_bound_covers_every_scanned_design_and_ramp_word() {
         for hz in sampled {
             for (hpf, lpf) in [(hz, 0.0), (0.0, hz)] {
                 let own = bound(rate, hpf, lpf, 24.0);
-                let rest = own.rest.expect("fixed rest");
+                let rest = stated_rest(own.rest, "fixed rest");
                 assert!(
                     finite(own.tail) <= finite(live.tail)
                         && finite(own.tail_every_peak) <= finite(live.tail_every_peak)
@@ -927,7 +935,7 @@ fn tail_every_peak_is_the_rest_at_the_flush_floor_and_holds_on_the_real_kernel()
                 );
                 assert_eq!(
                     prepared.rest,
-                    Some(RestSamples {
+                    RestBound::Bounded(RestSamples {
                         peak_plus_24_dbfs: bound.rest_peak,
                         any_sanitized_input: bound.rest_any,
                     })
@@ -1618,7 +1626,7 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
         let oracle = live_oracle(rate);
         let cascade = input_section_live_cascade(rate).expect("launch rate");
         let live = input_section_live_bound(rate).expect("launch rate");
-        let rest = live.rest.expect("live rest");
+        let rest = stated_rest(live.rest, "live rest");
         let t_rest = oracle.t_decay.max(oracle.rest_at_p_star);
         eprintln!(
             "R3 {rate} Hz: recomputed T_decay {} (module {}), P* {:.6e} ({:.6e}), R(P*) {} ({}), \
@@ -1780,7 +1788,7 @@ fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
     const HISTORY: usize = 1_000_000;
     for &rate in rates() {
         let live = input_section_live_bound(rate).expect("launch rate");
-        let rest = live.rest.expect("live rest");
+        let rest = stated_rest(live.rest, "live rest");
         let t_decay = finite(live.tail);
         let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
         let response = extreme_response(rate, t_decay as usize + 1 + HISTORY);
@@ -2011,7 +2019,7 @@ fn live_rest_bounds_are_within_the_restated_contract_figures() {
     for (index, rate) in LAUNCH_RATES.into_iter().enumerate() {
         let cascade = input_section_live_cascade(rate).expect("launch rate");
         let live = input_section_live_bound(rate).expect("launch rate");
-        let rest = live.rest.expect("live rest");
+        let rest = stated_rest(live.rest, "live rest");
         eprintln!(
             "3 {rate} Hz: T_decay {} (crude {}), T_rest {}, peak_plus_24_dbfs {} (crude {}), \
              any_sanitized_input {} (crude {}), P* {:.4e}",
@@ -2046,7 +2054,7 @@ fn live_bounds_leave_headroom_to_the_tail_cap() {
     const CAP: u64 = 10_000_000;
     for rate in LAUNCH_RATES {
         let live = input_section_live_bound(rate).expect("launch rate");
-        let rest = live.rest.expect("live rest");
+        let rest = stated_rest(live.rest, "live rest");
         for (name, value) in [
             ("T_decay", finite(live.tail)),
             ("T_rest", finite(live.tail_every_peak)),

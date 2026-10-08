@@ -214,3 +214,110 @@ restored) with at least the mutants in "Test value"; each is red.
 - Hot-file slots and named exceptions: `STREAMS.md` (#1379 Amendment 1, H8).
 
 ## Attempt record
+
+### Attempt 1 (2026-10-08, implementer; branch `codex/d15-stream-g3`, on `ae3fcbf16`)
+
+**Anchors re-verified** after #1457, #1461, #1462 and #1469 landed: `EffectTailBound` at
+`crates/effect-contract/src/lib.rs:209`, `InputSectionBound` at `crates/builtins/src/tail.rs:34`
+(`max` at `:68`), the entry points at `crates/builtins/src/lib.rs:3486`, `:3531`, `tail.rs:435`,
+`:452`, `PreparedBuiltinsSession::input_bounds` at `crates/builtins-compiler/src/lib.rs:2172`, the
+tail-entry charge at `:3833`, `:3836`, the mismatch check at `crates/effect-compiler/src/prepare.rs:621-637`
+and its forgery table (16 rows). Since #1461 no processor holds a `PreparedEffectMetadata`; no
+render-owned structure holds an `EffectProgramKey` either (`crates/rack/src` and
+`crates/graph/src/runtime.rs` name none; `RackProgram<EffectProgramKey>` is the cohort planner's,
+control-side). No render-owned memory grows.
+
+**What changed.**
+
+- `effect_contract::EffectTailBound` is renamed `NodeTailBound` (no alias) and gains
+  `composition: CompositionBound`. New types exactly as K-D2: `CompositionBound { Stated { decay:
+  TailDecay, peak_gain: PeakGain, tail_gain: PeakGain, stall: FlushStall }, Unstated }`,
+  `TailDecay(pub u64)`, `PeakGain { Zero, Millibels(i32) }`, `FlushStall { Zero, Level(i32) }`; the
+  derived `Ord` puts `Zero` below every level. No name was refined. H1's contract (N1)-(N3) is on
+  `CompositionBound`'s doc and in `docs/EFFECT_CONTRACT_V1.md` (*Tail and exact rest*).
+- `NodeTailBound::ZERO`, `NodeTailBound::UNBOUNDED` (moved from `InputSectionBound`, same values,
+  composition `Unstated`) and `NodeTailBound::max` (K-D5's rule; composition by maximum, `Unstated`
+  if either side is). `builtins::tail`'s `from_cascade` is now the private `bound_from_cascade`.
+- `PreparedEffectMetadata` and `EffectProgramKey` carry `composition`; `program_key` and
+  `expected_prepared_metadata` copy it; the mismatch check compares it; the forgery table has 17
+  rows (`composition`).
+- `NativeEffectRegistry::new`'s consistency check gains rules (e) `Stated` needs a finite `tail`
+  and (f) `tail_gain <= peak_gain`. Both refuse with the existing typed error
+  `effect.tail_bound.inconsistent` (naming the effect), so the frozen error list does not change.
+- `builtins::InputSectionBound` is deleted; `input_section_bound`, `input_section_bounds`,
+  `input_section_live_bound`, `input_section_live_bound_table`, `ChargedInputBound::bound` and
+  `PreparedBuiltinsSession::input_bounds` use `NodeTailBound` (`rest: None` -> `RestBound::Unstated`,
+  `Some(r)` -> `RestBound::Bounded(r)`; the `Option` returns are kept).
+- All eight effects, the conformance mock and every builtin bound state `CompositionBound::Unstated`.
+
+**Files** (re-grep of `EffectTailBound`, `InputSectionBound`, `PreparedEffectMetadata {`,
+`EffectProgramKey {`): `crates/effect-contract/src/lib.rs`, `tests/{registry,response_analysis,tail_bound}.rs`,
+`tests/support/mod.rs` (a test helper the spec's list missed; rename and field only);
+`crates/effect-compiler/src/prepare.rs`, `tests/native_session.rs`; the eight effect crates'
+`tail_and_rest` (`compressor`, `delay`, `gate-expander`, `multiband-compressor`, `parametric-eq`,
+`soft-clip`, `transient-shaper`, `true-peak-limiter`); `crates/transient-shaper/src/corpus.rs`
+(field); `crates/conformance/src/effect.rs`; `crates/builtins/src/{tail,lib}.rs`,
+`tests/tail_contract.rs`, `examples/input_bound_budget.rs` (rename only; not in the spec's list,
+it names the deleted type); `crates/builtins-compiler/src/lib.rs`; `crates/graph/src/lib.rs`
+(rename and two test descriptors' field, three test `PreparedEffectMetadata {` literals' field);
+`crates/rack-compiler/src/lib.rs` and `crates/rack/tests/live_control_bank.rs` (one
+`EffectProgramKey {` test literal each, the field only); `hosts/host-web/src/tests.rs`;
+`tools/audit/src/{fixture_builtins,builtins_graph}.rs`; `fixtures/builtins/v1/{resources.jsonl,MANIFEST.tsv}`;
+the three docs. `crates/host-core/tests/live_lanes.rs` names neither type and is unchanged.
+`tail_contract.rs`'s only non-rename edit is mechanical: `Some(RestSamples ..)` became
+`RestBound::Bounded(..)`, and six `.rest.expect(msg)` reads became `stated_rest(.rest, msg)`, a
+local helper that panics with the same message on `Unstated` (K1: no assertion's value changed).
+The STREAMS row needs no change.
+
+**K5 re-pins (one size, its reason).** `(Box<str>, NodeTailBound)` is 104 bytes against 72 for
+`(Box<str>, InputSectionBound)`: +32, the `CompositionBound` (32 bytes, the niche of `PeakGain`'s
+tag holds `Unstated`). `audit`'s `BOXED_TAIL_ENTRY_BYTES` 72 -> 104 (its layout check passes).
+`resources.jsonl` moves in `engine_owned_processor_payload_bytes` and
+`engine_owned_retained_payload_bytes` only, by exactly 2 x 32 per track (the payload's and the
+seal's tail vectors): 2,069 -> 2,133 (1 track), 8,348 -> 8,604 (4), 139,035,061 -> 143,229,429
+(65,537 = 64 x 65,537); `maximum_single_allocation_bytes`, `retained_allocation_count` and the meter
+columns do not move. `MANIFEST.tsv`'s `resources.jsonl` row moves with it, so the accepted manifest
+identity `1a8fd9a1...` -> `cd2b9fe6...` in `builtins_graph.rs` and `fixture_builtins.rs`. No PCM,
+meter, response or benchmark fixture moved (every other manifest row is byte-identical after
+`audit fixture-builtins --write`). `audit capi` `pcm_digest` `cb10fbface44a3a4`, unchanged (0
+allocations, 0 syscalls, 0 violations); the wasm G5 digests pass; the browser expected resources
+did not move.
+
+**Gates.** All pass: `test-debug-a` (workspace debug tests, CI's command and features) and
+`test-debug-b` (DSP crates); `cargo test --release -p builtins --features builtins/test-support
+--test tail_contract` (13 passed); `check-effect-contract.sh`; `cargo build --release -p audit &&
+audit capi`; `check-builtins-fixtures.sh` (50 files); `cargo test -p audit` (33 passed);
+`check-workspace-policy.sh`; `conformance_fixtures -- --check`; `run-wasm-gates.sh`; clippy
+`-D warnings`; `cargo fmt --check`; `check-realtime-policy.sh`; `check-cross-targets.sh`; the worklet
+chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py`, `test-web-audioworklet.sh` with a private `TMPDIR`, nothing left).
+
+**Tests.** K1: existing assertions, rename only (above). K2: `tail_bound.rs`'s fixture now states a
+consistent `Stated` composition with distinct values per rate and field, and
+`prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate` compares
+`metadata.composition` and `key.composition`; the forgery table's `composition` row. K3:
+`registry.rs` `a_stated_composition_with_an_infinite_tail_is_refused` (with an admitted
+finite-tail twin and an admitted all-unstated descriptor) and `a_tail_gain_above_the_peak_gain_is_refused`
+(one millibel above, and any `Millibels` above `Zero`), each broken at one rate only. The eight
+effects and the mock are accepted by the existing `launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture`
+and the conformance suite; no test pins their `Unstated` (it is the value the later slices change,
+and no plausible defect of this slice sets it). K4: `tail_bound.rs`
+`max_states_a_composition_only_when_both_channels_state_one`.
+
+**Mutation table** (each applied, the named set run, the file restored; M3-M10 run against every
+`effect-contract` and `effect-compiler` test, M1-M2 against `tail_contract` in release; every
+listed test is the only one red; all green on revert):
+
+| # | defect | red |
+|---|---|---|
+| M1 | `bound_from_cascade` maps `rest` to `Unstated` (K1) | 7 `tail_contract` tests, e.g. `live_bound_table_is_the_computed_live_bound_at_every_launch_rate` |
+| M2 | the live table literal crosses `peak_plus_24_dbfs` and `any_sanitized_input` (K1) | `live_bound_table_is_the_computed_live_bound_at_every_launch_rate` |
+| M3 | `expected_prepared_metadata` writes `Unstated` for `composition` (K2) | `prepared_metadata_and_program_key_carry_the_stated_bounds_per_rate` |
+| M4 | `program_key` writes `Unstated` for `composition` (K2) | the same |
+| M5 | the mismatch check drops the `composition` comparison (K2) | `a_prepare_result_whose_metadata_differs_in_any_compared_field_is_refused` |
+| M6 | the registry drops rule (e) (K3) | `a_stated_composition_with_an_infinite_tail_is_refused` |
+| M7 | the registry drops rule (f) (K3) | `a_tail_gain_above_the_peak_gain_is_refused` |
+| M8 | the registry orders `Zero` above a `Millibels` (K3) | the same |
+| M9 | `max` keeps a `Stated` side beside an `Unstated` one (K4) | `max_states_a_composition_only_when_both_channels_state_one` |
+| M10 | `max` takes `peak_gain` by minimum (K4) | the same |

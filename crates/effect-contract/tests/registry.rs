@@ -45,15 +45,16 @@ const REST: RestBound = RestBound::Bounded(RestSamples {
 });
 
 /// A consistent bounded statement: `tail <= tail_every_peak`, both finite, the rest bounded.
-fn consistent(_: u32, _: EffectQuality) -> EffectTailBound {
-    EffectTailBound {
+fn consistent(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
         tail: TailSamples::Finite(5),
         tail_every_peak: TailSamples::Finite(10),
         rest: REST,
+        composition: CompositionBound::Unstated,
     }
 }
 
-fn at_broken_rate(sample_rate: u32, broken: EffectTailBound) -> EffectTailBound {
+fn at_broken_rate(sample_rate: u32, broken: NodeTailBound) -> NodeTailBound {
     if sample_rate == BROKEN_RATE {
         broken
     } else {
@@ -62,70 +63,147 @@ fn at_broken_rate(sample_rate: u32, broken: EffectTailBound) -> EffectTailBound 
 }
 
 /// Breaks only (a): a finite `tail_every_peak` shorter than the finite `tail`.
-fn finite_peak_below_tail(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+fn finite_peak_below_tail(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     at_broken_rate(
         sample_rate,
-        EffectTailBound {
+        NodeTailBound {
             tail: TailSamples::Finite(10),
             tail_every_peak: TailSamples::Finite(5),
             rest: REST,
+            composition: CompositionBound::Unstated,
         },
     )
 }
 
 /// Breaks only (a): a finite `tail_every_peak` under an infinite `tail` (`Infinite` is largest).
-fn finite_peak_below_infinite_tail(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+fn finite_peak_below_infinite_tail(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     at_broken_rate(
         sample_rate,
-        EffectTailBound {
+        NodeTailBound {
             tail: TailSamples::Infinite,
             tail_every_peak: TailSamples::Finite(10),
             rest: REST,
+            composition: CompositionBound::Unstated,
         },
     )
 }
 
 /// Breaks only (b): an unstated rest beside a finite `tail_every_peak`.
-fn unstated_rest_with_finite_peak(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+fn unstated_rest_with_finite_peak(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     at_broken_rate(
         sample_rate,
-        EffectTailBound {
+        NodeTailBound {
             tail: TailSamples::Finite(5),
             tail_every_peak: TailSamples::Finite(10),
             rest: RestBound::Unstated,
+            composition: CompositionBound::Unstated,
         },
     )
 }
 
 /// Breaks only (c): a bounded rest beside an infinite `tail_every_peak`.
-fn bounded_rest_with_infinite_peak(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+fn bounded_rest_with_infinite_peak(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     at_broken_rate(
         sample_rate,
-        EffectTailBound {
+        NodeTailBound {
             tail: TailSamples::Finite(5),
             tail_every_peak: TailSamples::Infinite,
             rest: REST,
+            composition: CompositionBound::Unstated,
         },
     )
 }
 
 /// Breaks only (d): a bounded rest whose bound for a +24 dBFS peak exceeds its bound for every
 /// sanitized input.
-fn peak_rest_above_any_input_rest(sample_rate: u32, _: EffectQuality) -> EffectTailBound {
+fn peak_rest_above_any_input_rest(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
     at_broken_rate(
         sample_rate,
-        EffectTailBound {
+        NodeTailBound {
             tail: TailSamples::Finite(5),
             tail_every_peak: TailSamples::Finite(10),
             rest: RestBound::Bounded(RestSamples {
                 peak_plus_24_dbfs: 41,
                 any_sanitized_input: 40,
             }),
+            composition: CompositionBound::Unstated,
         },
     )
 }
 
+/// A consistent composition (#1464): the tail gain below the peak gain.
+const COMPOSITION: CompositionBound = CompositionBound::Stated {
+    decay: TailDecay(30),
+    peak_gain: PeakGain::Millibels(-100),
+    tail_gain: PeakGain::Millibels(-200),
+    stall: FlushStall::Level(-14_000),
+};
+
+/// [`consistent`] with a consistent stated composition, at every rate.
+fn consistent_stated(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
+        composition: COMPOSITION,
+        ..consistent(0, EffectQuality::Normal)
+    }
+}
+
+/// Breaks only (e): a stated composition beside an infinite tail (the other rules hold: both
+/// tails infinite, the rest unstated).
+fn stated_composition_with_infinite_tail(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
+    at_broken_rate(
+        sample_rate,
+        NodeTailBound {
+            tail: TailSamples::Infinite,
+            tail_every_peak: TailSamples::Infinite,
+            rest: RestBound::Unstated,
+            composition: COMPOSITION,
+        },
+    )
+}
+
+/// Breaks only (f): a tail gain one millibel above the peak gain.
+fn tail_gain_above_peak_gain(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
+    at_broken_rate(
+        sample_rate,
+        NodeTailBound {
+            composition: CompositionBound::Stated {
+                decay: TailDecay(30),
+                peak_gain: PeakGain::Millibels(-100),
+                tail_gain: PeakGain::Millibels(-99),
+                stall: FlushStall::Zero,
+            },
+            ..consistent(sample_rate, EffectQuality::Normal)
+        },
+    )
+}
+
+/// Breaks only (f): a tail gain above a `Zero` peak gain (`Zero` is below every `Millibels`).
+fn tail_gain_above_zero_peak_gain(sample_rate: u32, _: EffectQuality) -> NodeTailBound {
+    at_broken_rate(
+        sample_rate,
+        NodeTailBound {
+            composition: CompositionBound::Stated {
+                decay: TailDecay(0),
+                peak_gain: PeakGain::Zero,
+                tail_gain: PeakGain::Millibels(i32::MIN),
+                stall: FlushStall::Zero,
+            },
+            ..consistent(sample_rate, EffectQuality::Normal)
+        },
+    )
+}
+
+/// No bound stated at all: an infinite tail with an unstated composition.
+fn unbounded(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound::UNBOUNDED
+}
+
 static CONSISTENT: EffectDescriptor = descriptor(1, consistent);
+static UNBOUNDED: EffectDescriptor = descriptor(1, unbounded);
+static CONSISTENT_STATED: EffectDescriptor = descriptor(1, consistent_stated);
+static RULE_E: EffectDescriptor = descriptor(1, stated_composition_with_infinite_tail);
+static RULE_F: EffectDescriptor = descriptor(1, tail_gain_above_peak_gain);
+static RULE_F_ZERO: EffectDescriptor = descriptor(1, tail_gain_above_zero_peak_gain);
 static RULE_A: EffectDescriptor = descriptor(1, finite_peak_below_tail);
 static RULE_A_INFINITE: EffectDescriptor = descriptor(1, finite_peak_below_infinite_tail);
 static RULE_B: EffectDescriptor = descriptor(1, unstated_rest_with_finite_peak);
@@ -179,4 +257,35 @@ fn a_bounded_rest_with_an_infinite_tail_over_every_peak_is_refused() {
 #[test]
 fn a_rest_for_a_limited_peak_above_the_rest_for_any_input_is_refused() {
     assert_refused_as_inconsistent(&RULE_D);
+}
+
+/// Issue #1464 K3 (e): a stated composition needs a finite tail. The same values beside a finite
+/// tail, and an unstated composition beside an infinite tail, are admitted.
+///
+/// Red mutation: the registry drops rule (e), or checks only the first quality row.
+#[test]
+fn a_stated_composition_with_an_infinite_tail_is_refused() {
+    assert!(
+        registry(&CONSISTENT_STATED).is_ok(),
+        "the finite-tail twin with the same composition is admitted"
+    );
+    assert!(
+        registry(&UNBOUNDED).is_ok(),
+        "an infinite tail with no composition is admitted"
+    );
+    assert_refused_as_inconsistent(&RULE_E);
+}
+
+/// Issue #1464 K3 (f): `tail_gain <= peak_gain`, with `Zero` below every `Millibels`.
+///
+/// Red mutation: the registry drops rule (f), compares the two gains the wrong way round, orders
+/// `Zero` above a `Millibels`, or checks only the first quality row.
+#[test]
+fn a_tail_gain_above_the_peak_gain_is_refused() {
+    assert!(
+        registry(&CONSISTENT_STATED).is_ok(),
+        "a tail gain below the peak gain is admitted"
+    );
+    assert_refused_as_inconsistent(&RULE_F);
+    assert_refused_as_inconsistent(&RULE_F_ZERO);
 }

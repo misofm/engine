@@ -44,13 +44,13 @@ pub use filter_response::{
 use tail::CachedDesign;
 pub use tail::{
     ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES,
-    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, InputSectionBound, input_section_flush_law,
-    input_section_live_bound, input_section_live_bound_table, input_section_live_cascade,
-    input_section_live_envelope, input_section_worst_case_pair,
+    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, input_section_flush_law, input_section_live_bound,
+    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
+    input_section_worst_case_pair,
 };
 
 use effect_contract::{
-    BankWidth, ChannelSymmetryWitness, EffectPrepareError, ResponseAnalysisError,
+    BankWidth, ChannelSymmetryWitness, EffectPrepareError, NodeTailBound, ResponseAnalysisError,
     ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
     ResponseSnapshotSummary,
 };
@@ -3486,7 +3486,7 @@ fn prepare_input_track(
 pub fn input_section_bound(
     sample_rate: u32,
     parameters: BuiltinParameters,
-) -> Result<InputSectionBound, BuiltinParameterError> {
+) -> Result<NodeTailBound, BuiltinParameterError> {
     Ok(input_section_bound_charged(sample_rate, parameters)?.bound)
 }
 
@@ -3531,7 +3531,7 @@ pub fn input_section_bounds(
     sample_rate: u32,
     strips: impl IntoIterator<Item = BuiltinParameters>,
     cache: Option<&mut InputBoundCache>,
-) -> Result<Vec<InputSectionBound>, BuiltinParameterError> {
+) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
     input_section_bounds_within(sample_rate, strips, INPUT_BOUND_BUDGET_FRAMES, cache)
 }
 
@@ -3542,9 +3542,8 @@ fn input_section_bounds_within(
     strips: impl IntoIterator<Item = BuiltinParameters>,
     budget: u64,
     mut cache: Option<&mut InputBoundCache>,
-) -> Result<Vec<InputSectionBound>, BuiltinParameterError> {
-    let fallback =
-        input_section_live_bound_table(sample_rate).unwrap_or(InputSectionBound::UNBOUNDED);
+) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
+    let fallback = input_section_live_bound_table(sample_rate).unwrap_or(NodeTailBound::UNBOUNDED);
     let mut remaining = budget;
     let mut designs = std::collections::BTreeMap::new();
     strips
@@ -3562,8 +3561,8 @@ fn input_section_bounds_within(
                 .iter()
                 .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
             {
-                designs.insert(key, InputSectionBound::ZERO);
-                return Ok(InputSectionBound::ZERO);
+                designs.insert(key, NodeTailBound::ZERO);
+                return Ok(NodeTailBound::ZERO);
             }
             // A spent budget walks nothing more: every other design reports the live bound
             // without a walk.
@@ -5726,7 +5725,7 @@ pub mod test_support {
         strips: impl IntoIterator<Item = crate::BuiltinParameters>,
         budget: u64,
         cache: Option<&mut crate::InputBoundCache>,
-    ) -> Result<Vec<crate::InputSectionBound>, BuiltinParameterError> {
+    ) -> Result<Vec<effect_contract::NodeTailBound>, BuiltinParameterError> {
         super::input_section_bounds_within(sample_rate, strips, budget, cache)
     }
 
