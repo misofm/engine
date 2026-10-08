@@ -612,6 +612,81 @@ impl DecayCertificate {
     }
 }
 
+/// The live cascade's composition values before rounding (#1379 Amendment 1 H1 as #1484 amended
+/// it, H3's live row; issue #1466, slice B1; `docs/derivations/1379-graph-tail-composition.md`,
+/// "The live input section"): the decay `D`, the peak gain and both stalls, per unit of the
+/// input's peak `X` with the largest trim word's magnitude and its rounding included.
+/// [`live_cascade_composition`] computes them. The live tail gain `G_t` is slice B2's (issue
+/// #1467), and no bound states these values until it is derived beside them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveComposition {
+    /// `D`: for every `k >= 1`, from `M + T + k D` on the relative output bound is below
+    /// `(eps / 2) 10^-k` per unit of the peak (`T` the live `T_decay`, `M` the first frame of the
+    /// silence); the largest of the groups' `D_c`.
+    pub decay: u64,
+    /// One decay certificate per settled zone group (the groups [`live_cascade`] reads, in its
+    /// order), each anchored at `T`, or at the window's end when `T` lies in the window.
+    pub groups: Vec<HalfCertificate>,
+    /// `g_p`: the output at any frame of any admitted history is at most
+    /// `peak_gain X + peak_stall` (H1 (N1)). The window's first frame with zero current input,
+    /// relative part, plus the current input through both sections' feedthroughs.
+    pub peak_gain: f64,
+    /// `sigma_p`: the flush part of the output bound with the tail at frame `0`, which bounds the
+    /// flush part at every frame (H1 (N1)).
+    pub peak_stall: f64,
+    /// `sigma_t`: the flush part of the output bound from `T` on (H1 (N2)); the smaller of
+    /// [`live_cascade`]'s stall from `T` and [`Self::peak_stall`], so never above it.
+    pub tail_stall: f64,
+}
+
+impl LiveComposition {
+    /// `T(k) - T`: frames after `T` from which every group's certified relative bound is below
+    /// `(eps / 2) 10^-k` per unit of the peak; `0` for `k = 0` (`T` itself).
+    #[must_use]
+    pub fn crossing(&self, k: u64) -> u64 {
+        if k == 0 {
+            0
+        } else {
+            self.groups
+                .iter()
+                .map(|group| group.crossing(k))
+                .max()
+                .unwrap_or(0)
+        }
+    }
+
+    /// `D_inf = max_c ceil(b_c)`: the certificates' asymptotic frames per decade.
+    #[must_use]
+    pub fn asymptotic_decay(&self) -> u64 {
+        let decade = self
+            .groups
+            .iter()
+            .map(|group| group.decade)
+            .fold(0.0_f64, f64::max);
+        -crate::floor(-decade) as u64
+    }
+
+    /// The largest of the groups' rates.
+    #[must_use]
+    pub fn lambda(&self) -> f64 {
+        self.groups
+            .iter()
+            .map(|group| group.lambda)
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// `T_lambda - T`: frames after `T` from which every certificate's own bound is below the
+    /// `k = 0` threshold.
+    #[must_use]
+    pub fn floor_crossing(&self) -> u64 {
+        self.groups
+            .iter()
+            .map(|group| group.crossing(0))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 /// Per-section suprema of the kernel over every word a control history can reach.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvelopeSection {
@@ -1237,6 +1312,11 @@ struct LiveWindow {
     energy: f64,
     /// The cascade's output bound at each window frame.
     outputs: Vec<f64>,
+    /// Whether a state bound above took the cap (the `V`-norm of finite `f32` words) instead of
+    /// its propagated value. A capped value bounds the kernel's state but not one part of the
+    /// split by drive (`docs/derivations/1379-graph-tail-composition.md`, "(P1)"), so the
+    /// composition values read only an uncapped window (issue #1466).
+    capped: bool,
 }
 
 /// The settled-phase terms of one zone a first section's settled design can lie in (or of the
@@ -1436,15 +1516,19 @@ impl<'a> LiveBound<'a> {
         let output_coefficient = (half_row * zones.largest_sum_norm + omega) * SLACK;
         let state =
             |charge: f64, direct_sum: f64, feedthrough: f64, rounding: f64, flush_sum: f64| {
-                ((envelope.input
+                (envelope.input
                     * (half_row * (potential + charge + direct_sum) + feedthrough + rounding)
                     + flush_sum)
-                    * SLACK)
-                    .min(self.cap)
+                    * SLACK
             };
+        let mut capped = false;
+        let mut cap = |value: f64| {
+            capped |= value >= self.cap;
+            value.min(self.cap)
+        };
         let mut outputs = Vec::with_capacity(self.ramp_frames as usize + 1);
         for frame in 0..=self.ramp_frames {
-            let sigma = state(charge, direct_sum, feedthrough, rounding, flush_sum);
+            let sigma = cap(state(charge, direct_sum, feedthrough, rounding, flush_sum));
             outputs.push(
                 (envelope.output_state * sigma
                     + envelope.output_input * (output_coefficient * energy + f)
@@ -1460,10 +1544,13 @@ impl<'a> LiveBound<'a> {
                 energy = (rho * energy + f) * SLACK;
             }
         }
+        let state = cap(state(charge, direct_sum, feedthrough, rounding, flush_sum));
+        let energy = cap(energy);
         LiveWindow {
-            state: state(charge, direct_sum, feedthrough, rounding, flush_sum),
-            energy: energy.min(self.cap),
+            state,
+            energy,
             outputs,
+            capped,
         }
     }
 
@@ -1633,10 +1720,11 @@ impl<'a> LiveBound<'a> {
             .ok_or(TailBoundError::Horizon)
     }
 
-    /// `T_decay`: the first frame from which the relative output bound (per unit of the peak,
-    /// without the flush) stays below `TAIL_FLOOR / 2`, over the window and every zone.
-    fn tail(&self, gain: f64) -> Result<u64, TailBoundError> {
-        let limit = TAIL_FLOOR / 2.0;
+    /// The first frame from which the relative output bound (per unit of the peak, without the
+    /// flush) stays below `limit`, over the window and every zone: `T_decay` at
+    /// `limit = TAIL_FLOOR / 2`, and the directly searched crossing of a lower decade
+    /// ([`live_cascade_crossing`], issue #1466).
+    fn tail(&self, gain: f64, limit: f64) -> Result<u64, TailBoundError> {
         let window = self.window(gain, 0.0);
         let mut tail = window
             .outputs
@@ -1712,6 +1800,88 @@ impl<'a> LiveBound<'a> {
         }
         Ok(stall * SLACK)
     }
+
+    /// The composition values of the cascade (issue #1466; the derivation's "The live input
+    /// section"), for the input scale `gain` (the largest trim word's magnitude times `1 + u`)
+    /// and the live `T_decay` `tail`. `None` when a window state bound the values read took the
+    /// cap, a group's start or step is outside the carry's rounding argument, a group's
+    /// certificate is not verified, or `D` is not below [`HORIZON_LIMIT`].
+    fn composition(&self, gain: f64, tail: u64) -> Result<Option<LiveComposition>, TailBoundError> {
+        let envelope = &self.live.envelope;
+        let relative = self.window(gain, 0.0);
+        let flush = self.window(0.0, self.law.per_step());
+        // (P1): a capped state bound bounds the kernel, not one part of the split by drive.
+        if relative.capped || flush.capped {
+            return Ok(None);
+        }
+        // (N1): the window's first frame bounds the output at any frame of any admitted history
+        // with the current input zero (P2); the current input adds `delta g X` through the first
+        // section's feedthrough, and that through the second's.
+        let feedthrough = envelope.output_input * envelope.output_input * gain * SLACK;
+        let peak_gain = (relative.outputs[0] + feedthrough) * SLACK;
+        let peak_stall = self.stall(0)?;
+        let tail_stall = self.stall(tail)?.min(peak_stall);
+        // (N2): one certificate per group on its relative system, anchored at `T` (or at the
+        // window's end, `offset` frames after `T`).
+        let start = self.ramp_frames + 1;
+        let (steps, offset) = match tail.checked_sub(start) {
+            Some(steps) => (steps, 0),
+            None => (0, start - tail),
+        };
+        let log_threshold = crate::log(TAIL_FLOOR / 2.0);
+        let mut groups = Vec::with_capacity(self.terms.len());
+        for terms in &self.terms {
+            // The relative system on `(tau, H, X)`: without the flush its constant component is
+            // zero and decoupled.
+            let (system, _, output_row) = self.settled_system(terms, 0.0);
+            let step = SquareMatrix {
+                n: 3,
+                m: (0..3)
+                    .flat_map(|i| (0..3).map(move |j| system[i][j]))
+                    .collect(),
+            };
+            let start_state = self.settled_start(terms, &relative, gain, 0.0);
+            // The carry's rounding argument (the derivation's "Rounding" of the live part):
+            // off-diagonal entries at most `8`, start components at most `2^132`.
+            let bounded_step = (0..3).all(|i| (0..3).all(|j| i == j || step.m[i * 3 + j] <= 8.0));
+            let bounded_start = start_state[..3]
+                .iter()
+                .all(|value| *value <= LIVE_STATE_LIMIT);
+            if !(bounded_step && bounded_start) {
+                return Ok(None);
+            }
+            // Carried to `T`, every component rounded up to at least `tau` (a positive start for
+            // the certificate).
+            let state: Vec<f64> = carry(&step, steps, &start_state[..3])
+                .into_iter()
+                .map(|value| value.max(TAU))
+                .collect();
+            let half = HalfSystem {
+                step: &step,
+                // `H` reads only itself, `tau` reads `H`, `X` only itself.
+                order: &[1, 0, 2],
+                state: &state,
+                row: &output_row[..3],
+                log_threshold,
+                offset,
+            };
+            let Some(certificate) = half.certificate() else {
+                return Ok(None);
+            };
+            groups.push(certificate);
+        }
+        let decay = groups.iter().map(HalfCertificate::decay).max().unwrap_or(1);
+        if decay >= HORIZON_LIMIT {
+            return Ok(None);
+        }
+        Ok(Some(LiveComposition {
+            decay,
+            groups,
+            peak_gain,
+            peak_stall,
+            tail_stall,
+        }))
+    }
 }
 
 /// One settled zone group of [`live_cascade`]'s rest at one input scale, with the quantities the
@@ -1761,6 +1931,51 @@ pub fn live_cascade_groups(
     let zones = live_cascade_zones(live)?;
     let bound = LiveBound::new(live, &zones, law, ramp_frames);
     bound.group_rests(gain * (1.0 + U) * peak)
+}
+
+/// The composition values of a live cascade (issue #1466; #1379 Amendment 1 H1, H3's live row;
+/// `docs/derivations/1379-graph-tail-composition.md`, "The live input section"): its decay `D`,
+/// linear peak gain and linear peak and tail stalls, for the trim word's magnitude `gain` (as
+/// [`live_cascade`]). `Ok(None)` when the values are not certified (a capped window, a group
+/// outside the carry's rounding argument or with no verified certificate). Evidence for the
+/// gates: no bound states these values until the live tail gain is derived beside them (issue
+/// #1467).
+///
+/// # Errors
+///
+/// As [`live_cascade`].
+pub fn live_cascade_composition(
+    live: &LiveCascade,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+) -> Result<Option<LiveComposition>, TailBoundError> {
+    let zones = live_cascade_zones(live)?;
+    let bound = LiveBound::new(live, &zones, law, ramp_frames);
+    let gain = gain * (1.0 + U);
+    let tail = bound.tail(gain, TAIL_FLOOR / 2.0)?;
+    bound.composition(gain, tail)
+}
+
+/// The frame (from the first frame of the silence) from which [`live_cascade`]'s relative output
+/// bound stays below `(TAIL_FLOOR / 2) 10^-decades` per unit of the peak, searched directly as
+/// `T_decay` is (`decades = 0` gives `T_decay`): evidence that the certified `D` of
+/// [`live_cascade_composition`] covers the module's own crossings (issue #1466, L4).
+///
+/// # Errors
+///
+/// As [`live_cascade`].
+pub fn live_cascade_crossing(
+    live: &LiveCascade,
+    gain: f64,
+    law: &FlushLaw,
+    ramp_frames: u64,
+    decades: u64,
+) -> Result<u64, TailBoundError> {
+    let zones = live_cascade_zones(live)?;
+    let bound = LiveBound::new(live, &zones, law, ramp_frames);
+    let limit = TAIL_FLOOR / 2.0 * crate::pow(10.0, -(decades as f64));
+    bound.tail(gain * (1.0 + U), limit)
 }
 
 /// [`live_zones`], after checking that both of the envelope's contractions are below `1` (a NaN
@@ -1814,7 +2029,7 @@ pub fn live_cascade(
     // `gain` is the trim word's magnitude; the kernel's `fl(x * trim)` is at most `(1 + u)` times
     // the product.
     let gain = gain * (1.0 + U);
-    let tail = bound.tail(gain)?;
+    let tail = bound.tail(gain, TAIL_FLOOR / 2.0)?;
     let p_star = bound.stall(tail)? / (TAIL_FLOOR / 2.0) * SLACK;
     let rest_star = bound.rest(gain * p_star)?;
     let rest_peak = bound.rest(gain * peaks[0])?;
@@ -2154,6 +2369,11 @@ fn carry(matrix: &SquareMatrix, steps: u64, z: &[f64]) -> Vec<f64> {
         .map(|value| value + TAU)
         .collect()
 }
+
+/// `2^132`: the largest start component the live certificate's carry accepts (issue #1466; the
+/// derivation's "Rounding" of the live part). An uncapped live start lies far below it (about
+/// `2^24` per unit of the peak at the launch rates); the carry's error bound needs it.
+const LIVE_STATE_LIMIT: f64 = f64::from_bits((1023 + 132) << 52);
 
 /// `2^-30`: the absolute margin on a difference of two logarithms (each within one ulp of at
 /// most `745`) and on the relative rounding of a threshold.

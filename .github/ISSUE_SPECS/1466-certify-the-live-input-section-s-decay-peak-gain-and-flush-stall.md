@@ -275,3 +275,127 @@ Root ruled the conflict above with option (2): the contract changes.
 - L6's test value is corrected in place (Test value, L6).
 
 The next attempt starts after #1484 has landed.
+
+### Attempt 1, restarted under root's ruling (2026-10-08, implementer)
+
+Anchors re-verified on `codex/d15-stream-g3` at `3954dce33` (after #1474, #1464, #1465 and its
+follow-ups, and #1484): `LiveCascade` (`crates/math/src/tail.rs:829` then, `:904` after this slice),
+`live_zones`, `LiveBound::window`, `settled_system`, `settled_start`, `tail`, `stall`,
+`live_cascade`; `builtins::input_section_live_bound` and its table; the recomputation test.
+`CompositionBound::Stated` carries `peak_stall` and `tail_stall` with the readers `peak_clause` and
+`tail_clause` and rule (g) (#1484).
+
+**Proof first.** The derivation's live part is written in
+`docs/derivations/1379-graph-tail-composition.md`, "The live input section (issue #1466, slice
+B1)": (P1) the split of #1433's bound into a relative part and a flush part by separate majorant
+runs (needed: at every launch rate 21 of the 60-63 groups take the window's state bound in one part
+and `Phi` in the other, so the split is not arithmetic of the minimum; a capped window refuses the
+composition); (P2) the window's first frame bounds the states at every frame of every admitted
+history (it reads only the frames before `N`); (N1) `G_p = ceil_mB((W_0(g, 0) + delta^2 g) SLACK)`
+and `sigma_p = ceil_mB(stall(0))` with `stall(0) >= W_0(0, F)`; (N2) `sigma_t =
+ceil_mB(min(stall(T), stall(0)))` (so rule (g) holds by construction) and `D` by the fixed design's
+certificate per settled group on its relative `3 x 3` system, anchored at `T`, with the carry's
+rounding argument redone for `n = 3` (off-diagonal at most 8, start at most `2^132`, both checked;
+carried error below `2^-807` against `tau = 2^-600`).
+
+**Changed.**
+- `crates/math/src/tail.rs`: `LiveComposition` (`decay`, `groups`, `peak_gain`, `peak_stall`,
+  `tail_stall`; `crossing`, `asymptotic_decay`, `lambda`, `floor_crossing`),
+  `LiveBound::composition`, the public accessors `live_cascade_composition` and
+  `live_cascade_crossing` (the directly searched crossing of `(eps / 2) 10^-k`, L4's evidence);
+  `LiveBound::tail` takes its threshold (`T_decay` at `TAIL_FLOOR / 2`, unchanged); `LiveWindow`
+  records whether a state bound took the cap (no value changes); `LIVE_STATE_LIMIT`.
+- `crates/builtins/tests/tail_contract.rs`: L1
+  (`live_peak_gain_bounds_a_retarget_after_a_nyquist_drive_on_the_real_kernel`), L3 (the
+  recomputation test and `live_oracle` gain `D`, `G_p`, `sigma_p`, `sigma_t`), L4
+  (`live_decay_covers_the_module_crossings_and_its_floor`), the helpers `live_composition` and
+  `settled_contraction` (the latter factored out of the recomputation test, unchanged).
+- `docs/derivations/1379-graph-tail-composition.md`: the live part, the title, the introduction and
+  the gates.
+- No change to `crates/builtins/src/tail.rs`: the accessors are `math::tail`'s (Deliverable 1); a
+  `builtins` accessor would need a re-export in `crates/builtins/src/lib.rs`, which this slice is
+  not authorized to edit. The millibel rounding at statement is B2's (`stated_composition`'s rule);
+  the gates read the raw values and the record gives `ceil(2000 log10)`.
+- `STREAMS.md` has no status column for this row; unchanged.
+
+**Values** (release, `live_cascade_composition` at the +24 dB trim word; mB = `ceil(2000 log10)`):
+
+| rate | `T` | `D` (= `D_inf`) | `lambda` | groups | `G_p` raw / mB | `sigma_p` raw / mB | `sigma_t` raw / mB |
+|---|---|---|---|---|---|---|---|
+| 44.1 kHz | 704,010 | 46,678 | 0.999950671973 | 60 | 1.629239e7 / 14,424 | 2.041952e-12 / -23,379 | 3.793538e-15 / -28,841 |
+| 48 kHz | 699,952 | 46,421 | 0.999950397971 | 61 | 1.613073e7 / 14,416 | 2.207801e-12 / -23,312 | 3.772735e-15 / -28,846 |
+| 88.2 kHz | 704,018 | 46,678 | 0.999950671973 | 62 | 1.631644e7 / 14,426 | 4.142272e-12 / -22,765 | 3.797574e-15 / -28,840 |
+| 96 kHz | 699,960 | 46,421 | 0.999950397971 | 63 | 1.615350e7 / 14,417 | 4.486749e-12 / -22,696 | 3.852977e-15 / -28,828 |
+
+`sigma_t = stall(T)` at every rate (the `min` with `stall(0)` never binds); `sigma_t <= sigma_p`
+by 54.6-61.3 dB. Every group's transient `a` is negative at `T` (largest -0.91 / -0.54 / -0.39 /
+-0.60), `T_lambda - T = 0`. `stall(0)` is the flush window's first frame plus 0.08-0.16 % (at most
+1.4 mB). Cost (descriptive, one probe run, release): `live_cascade_composition` 0.24-0.38 ms per
+rate, the 65 direct searches of L4 about 9 ms per rate; preparation never runs either.
+
+**Gates.**
+- L1: the real-kernel peak over the run is 3.4456e4 / 3.4281e4 / 3.4460e4 / 3.4285e4 (+90.75 /
+  +90.70 / +90.75 / +90.70 dB; 3.19 before the retarget) against `g_p + sigma_p`: ratio 472.8 /
+  470.5 / 473.5 / 471.2 (53.49 / 53.45 / 53.51 / 53.46 dB). Pass; the gap is #1485's.
+- L3: module against the plain-`f64` recomputation: `D` equal at every rate; `G_p`, `sigma_p`,
+  `sigma_t` above it by 3e-8, 1e-6 and 2e-6 relative at most (1 mB is 1.15e-4). The test also
+  asserts `sigma_t <= sigma_p`, raw and in mB (#1484 verdict note: rule (g) runs only in the
+  registry, and the live section is no registry row). Pass.
+- L4: the directly searched `T(k)` is `T` at `k = 0` and at most `T + k D` for `k = 1..64`;
+  `max (T(k) - T) / k = 46,099 / 45,846` (at `k = 1`), against `D` 46,678 / 46,421. `D_inf` is
+  above the floor 44,466 / 44,224. Pass.
+- L5: the release `tail_contract` (19 passed: every existing assertion unchanged; the live table
+  test pins `Unstated`); `audit capi` `pcm_digest` `cb10fbface44a3a4`, 0 allocations, 0
+  syscalls; `check-builtins-fixtures.sh` ok (50 files); `run-wasm-gates.sh` ok.
+- L6: gate 8 passed. Gate 2: one invocation, `taskset -c 7`, after the 1-minute load fell below 2
+  (`/proc/loadavg` before 1.76 3.20 3.40, after 1.59 3.10 3.36; the 5- and 15-minute loads were
+  still above 3 from other work): exit 0, 17.0 ns needed (committed 17 ns), worst median design
+  work 25.330 ms, 98.7 % of 25.67 ms. Not the figure of record (the batch verifier's is).
+- The debug gate command (`lane`, `math`, `builtins`, `dsp-reference`, all targets): exit 0;
+  `check-workspace-policy.sh` ok; `check-cross-targets.sh` PASS; workspace clippy `-D warnings`
+  clean; `cargo fmt --check` clean.
+
+**Mutation table** (each defect applied, the release `tail_contract -- live_` run (the ten live
+tests; nothing else reads the composition), the files restored; "mirrored" means the same defect
+also applied to the recomputation, a defect of the derivation itself):
+
+| mutant | red | green |
+|---|---|---|
+| M1 `G_p` = trim x settled `l1` (3.51), mirrored | L1 only (`3.4456e4 > 55.63`) | L3 (mirrored), L4 |
+| M2 `sigma_p` = `stall(T)` (attempt 1's reading) | L3 only | L1, L4 |
+| M3 `sigma_t` = `stall(0)` | L3 only | L1, L4 |
+| M4 `D` anchored at the settled start, not at `T` | L3 only (`D` 922,826) | L1, L4 |
+| M5 `D` = `ceil(ln 10 / -ln rho_max)` per group (no transient), mirrored | L4 only (`T(1) = T + 46,099 > T + 45,220`) | L3 (mirrored) |
+| M6 certificate's `tau` diagonal without the settled state rounding, mirrored | L4's crossing check only (`D` 45,264) | L3 (mirrored), L4's floor |
+| M7 `G_p` without the current input's feedthrough `delta^2 g` | L3 only (module 9.4e-7 below) | L1, L4 |
+| M8 `G_p` over the settled groups only, no window frame | L3 only (2.6 % below) | L1, L4 |
+| M9 the stalls swapped (`sigma_p = stall(T)`, `sigma_t = stall(0)`) | L3 at its `sigma_t <= sigma_p` assertion | L1, L4 |
+
+**Test value (restated with the measured evidence).**
+- L1: as the spec states (M1): a live `G_p` from the settled designs' `l1` is beaten by the
+  retarget transient by 55.8 dB; no other test drives a retarget after a Nyquist drive.
+- L3: a `sigma_p` read from `T` (M2, attempt 1's defect), a `sigma_t` read at every frame (M3), a
+  `D` anchored at the settled start (M4, sound but 20 times loose), a `G_p` without the current
+  input (M7) or without the window frame (M8) each leaves the recomputation's band; nothing else
+  reads these values, and the real kernel's 53.5 dB slack cannot see M7 or M8. Its
+  `sigma_t <= sigma_p` assertion is the live section's rule (g) (M9); M9 is also outside the
+  band, so the assertion claims no catch beyond L3's. The equality boundary: no live stall pair is
+  equal (61 dB apart), so a strict `<` mutant cannot be told apart here; `<=` is asserted
+  because equal stalls are admissible (#1484's registry tests pin that boundary).
+- L4: the crossing check catches a derivation that takes `D` from the settled contraction alone
+  (M5) or drops the state rounding from the certificate (M6), each mirrored, so L3 agrees: the
+  coupled `H -> tau` transient makes the first decade 46,099 frames against the 45,220 the rate
+  alone gives. The spec's sentence "a certificate rate that omits the state rounding falls below
+  the floor" is **false** for the live section: M6 leaves `D_inf` 45,264 above the floor 44,466
+  (the floor sits 5 % below `D`, set by the transient); M6 is red only at the crossing check. The
+  floor assertion is kept as the spec's L4 invariant and claims no unique catch.
+- L6 (reduced to a regression run, as the corrected text allows): this slice's `math::tail` edits
+  touch only the live code (`LiveBound::tail`'s threshold, the window's cap flag, the new
+  composition); the fixed walk is unchanged, and gate 2's figures stay at the committed 17 ns and
+  gate 8 exact. L6 claims no unique catch.
+
+**Open items.**
+- `G_p` is 53.5 dB above the real-kernel peak (#1485).
+- The live millibel statement (`ceil_mB` with the module's margins) and `G_t` are B2's (#1467).
+- A `builtins` accessor for the live composition needs a re-export in `crates/builtins/src/lib.rs`
+  (not authorized here); B2's statement makes it unnecessary.

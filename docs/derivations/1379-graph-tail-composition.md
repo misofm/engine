@@ -1,12 +1,13 @@
-# Issue #1379: node tail composition values (H1), the fixed input section (issue #1465)
+# Issue #1379: node tail composition values (H1), the input section (issues #1465, #1466)
 
 #1379 Amendment 1 (`docs/handoffs/decision-15-2026-10-05/1379-amendment1-design.md`, H1-H3) asks
 every node to state four values beside #1329's tail, so that a graph can carry a node's tail through
 the gain after it. This note states the contract and derives the values of the builtin input
 section with a fixed design (#1329 D4) and with both filters disabled, as `math::tail` and
-`crates/builtins/src/tail.rs` compute them at preparation (issue #1465, slice A2). The live input
-lane is slices B1 and B2 (#1466, #1467). Nothing here runs on the render thread. The notation and
-the bounds it reuses are #1329's (`docs/derivations/1329-input-section-tail-and-rest.md`).
+`crates/builtins/src/tail.rs` compute them at preparation (issue #1465, slice A2), and the decay,
+the peak gain and both stalls of a live input lane (issue #1466, slice B1; its tail gain and the
+statement are slice B2, #1467). Nothing here runs on the render thread. The notation and the bounds
+it reuses are #1329's and #1433's (`docs/derivations/1329-input-section-tail-and-rest.md`).
 
 ## The contract (H1)
 
@@ -299,6 +300,197 @@ A stereo input section states each value as the maximum over its two channels
 design with one disabled channel is still stated, and a design with both disabled takes the larger
 trim's gain (`crates/builtins/src/tail.rs`, `memoryless_input_bound`).
 
+## The live input section (issue #1466, slice B1)
+
+A live input lane (#1329 D5) may change its trim, polarity and filter targets at any frame before
+`N`; #1433's frequency-aware cascade (`math::tail::live_cascade`) bounds it over every admitted
+history. This part derives `D`, `G_p`, `sigma_p` and `sigma_t` from that bound
+(`math::tail::live_cascade_composition`, `LiveComposition`). `G_t` is slice B2's (#1467), and
+`input_section_live_bound` states `CompositionBound::Unstated` until B2 states all five values (H2:
+no partial statement); preparation reads the live bound from its table and never computes these
+values.
+
+Notation as #1433 (the #1329 note, "#1433: the frequency-aware cascade"): the trim word's largest
+magnitude `trim_max` (the `f32` word of +24 dB, #1408) and `g = trim_max (1 + u)`; `F` the per-step
+flush perturbation; the envelope's suprema over both sections' reachable words, `rho = rho_ramp`,
+`rho_s = rho_settled`, `iota` (input column), `gamma_2` (`output_state`) and `delta`
+(`output_input`, the feedthrough `|d|` with its rounding); the window `N ..= N + 64`; the settled
+groups `c` (#1433's `SettledTerms` that no other group covers, the HPF at the identity included). An
+*admitted history* is any input with `|x| <= X` and any sequence of words and resets #1433 admits:
+every word reachable, consecutive words related by #1433's moves, the trim at most `trim_max`.
+
+### What #1433 bounds, and two properties this part uses
+
+For an admitted history whose input is zero from `N` and which has no control event at or after
+`N`, #1433 bounds the output at every frame from `N` on:
+
+* *window* frame `N + j`, `0 <= j <= 64`: `|y[N + j]| <= W_j(g X, F)`, the window's output bound
+  (`LiveBound::window`, `outputs[j]`);
+* *settled* frame `N + 65 + m`, the HPF's settled design in a zone that group `c` covers:
+  `|y| <= r_c . M_c(F)^m u_c(g X, F)`, the non-negative system on `(tau, H, X, 1)`
+  (`settled_system`, `settled_start`; a covered zone has every term at most its group's, and the
+  system is non-negative and increasing in every term).
+
+**(P1) Superposition of the drives.** Every inequality #1433 propagates is a non-negative linear
+recursion in its bound, driven by the input's magnitude and by `F`: the first section's
+`E' <= rho_k E + beta_k |x| + F` along the zones `k` the history visits, the first section's output
+`|y_1| <= 1/2 |m| q_k E + delta |x| + omega E + F`, the second section's weighted sums, the
+potential's per-frame inequality, and the settled system with its joint-flush terms. Run each
+recursion twice along the same history (the same zones and resets at every frame): once with the
+input drive alone (`F = 0`) and once with `F` alone (input `0`). By induction over frames, the sum
+of the two runs satisfies the recursion with both drives and so bounds the kernel wherever #1433's
+bound does; and each run satisfies every bound #1433 derives, with its own drive, because each step
+of that derivation (the zone invariant `Phi`, the potential `Psi`, the window, the settled system,
+the covering of a zone by its group) holds for any non-negative drives. So at every frame the output
+is at most `X R + A`, with `R` the bound at unit peak and `F = 0` (the *relative part*, per unit of
+`X`) and `A` the bound at `X = 0` (the *flush part*). This is the split #1433 already reads
+(`T_decay` from the relative part, `P*` from the flush part).
+
+Two points of the split are not arithmetic of the bound's formula and must be stated:
+
+* *Smaller of two bounds.* Where #1433 takes the smaller of two bounds of one quantity (`H_0`, the
+  smaller of the window's state bound and the zone's `Phi`), each run takes its own smaller bound:
+  the run is at most each of its bounds. The split value can be below the joint one: in general
+  `min(a1, a2) + min(b1, b2) < min(a1 + b1, a2 + b2)`, and at every launch rate 21 of the 60 to 63
+  groups take the window's bound in one part and `Phi` in the other. The split is sound because
+  the runs are separate majorants, not because of the minimum.
+* *The cap.* #1433 caps a state bound at the `V`-norm of finite `f32` words. The cap bounds the
+  kernel's state, not a run, so a split value is a bound only where the cap was not taken. The
+  module states no composition when the window took the cap in either part (`LiveWindow::capped`);
+  at the launch rates the relative window's largest state bound is about `1.1e7` per unit of the
+  peak against a cap of `6.3e38`.
+
+**(P2) The window's first frame bounds every frame.** `W_0(g X, F)` reads only the frames before
+`N`: the first section's state at `N` (at most `sup Phi`, which holds at every frame of every
+admitted history), the second section's state at `N` (the weighted sums over every earlier frame,
+each at its supremum `1 / (1 - rho)` times the largest drive, for a history of any length), and the
+input at `N`, which is zero. Its hypotheses on those frames (`|x| <= X`, reachable words, #1433's
+moves, the trim) are those of any admitted history; silence and the absence of control events are
+hypotheses on the frames from `N` on, which `W_0` does not read. The state at a frame `n` depends
+only on the frames before `n`, and the frames before `n` of any admitted history are an admitted
+history; so the two sections' states at any frame `n` of any admitted history are at most #1433's
+bounds at `N`.
+
+### (N1): `G_p` and `sigma_p`
+
+At a frame `n` of an admitted history with `|x| <= X` at every frame, (P2) bounds both sections'
+states as at `N`. The output at `n` differs from the window's first frame only by the current input
+`x[n]`: the trimmed input `|x'| = |fl(x trim)| <= g |x|` enters the first section's output through
+its feedthrough (`|y_1| <= 1/2 |m| q E + delta |x'| + omega E + F`, #1433's inequality before
+`N`) and that output enters the second section's output through its feedthrough
+(`|y| <= gamma_2 sigma + delta |y_1| + F`), so the current input adds at most `delta^2 g X`. With
+(P1):
+
+```text
+|y[n]| <= X (W_0(g, 0) + delta^2 g) + W_0(0, F)        for every frame n of every admitted history.
+```
+
+So (N1) holds with `g_p >= W_0(g, 0) + delta^2 g` and `sigma_p >= W_0(0, F)`. The module computes
+`peak_gain = (W_0(g, 0) + delta^2 g SLACK) SLACK` (the computed `W_0` is an upper bound of the exact
+one, #1433; each product and sum is inflated by `SLACK`) and `G_p = ceil_mB(peak_gain)`.
+
+* *`sigma_p`* (root's ruling of 2026-10-08): `sigma_p = ceil_mB(stall(0))`, #1433's flush part with
+  the tail at frame `0` (`LiveBound::stall(0)`: the largest of the flush window's `W_j(0, F)` over
+  every window frame and of every group's fixed point plus its decaying start from the settled
+  phase's first frame, times `SLACK`). By construction `stall(0) >= W_0(0, F)`, so it bounds the
+  flush part at every frame. Measured, `stall(0)` is `W_0(0, F)` plus 0.08 % to 0.16 %, at most
+  1.4 mB.
+* *One frame suffices.* L-D2 asks for the supremum over every admitted history, over the window and
+  every settled group. Every frame `n` of (N1) is the frame `N` of the history before it, so `W_0`
+  bounds it; the window's later frames and the settled groups bound frames under more hypotheses
+  (silence and no control event from `N`), and a frame they bound is a frame `W_0` already bounds.
+* *The live loud-input deviation.* The live bound carries the kernel's `f32` deviation inside its
+  constants (#1433: `rho` includes `mu_state`, the input column `mu_input`, the output row
+  `omega_state`, the feedthrough `omega_input`), so `W_0(g, 0)` includes the deviation of a loud
+  input; `delta^2 g` adds the current input's.
+* *Not the settled designs' `l1`.* `W_0` contains `sup Psi Phi`: the state a slow pole built while
+  the input was loud, which a later retarget exposes. The settled designs' `l1` (3.51 for the
+  10 Hz HPF into the top LPF; +34.9 dB with the trim) does not bound it: #1379 H9's `f64` probe
+  reaches +67 dB before the trim, and the real kernel under gate L1's history reaches +90.75 dB with
+  it.
+* *Looseness.* The real-kernel peak under gate L1's history is 53.5 dB below `G_p` (the measured
+  ratio per rate is in the #1466 attempt record). The term that sets `G_p` is the second section's
+  state bound through `sup Psi Phi`; tightening it is #1485.
+
+### (N2): `sigma_t` and `D`
+
+Under (N2)'s hypotheses with the input zero from `M` (the `epsilon` part is slice B2's), #1433
+applies with its silence from `M`: no control event at or after `M`, and a retarget started before
+`N <= M` completes by `M + 64`. By (P1) the output at `M + n` is at most `X R(n) + A(n)`.
+
+* *`sigma_t`.* #1433's `stall(T)` bounds the flush part from `M + T` on (the flush window's
+  outputs from `T`, and per group the driven system's fixed point plus its decaying start from `T`:
+  `u = U + M_h^m (u_0 - U) <= U + M_h^m u_0`, with `M_h` the system without its constant, and the
+  decaying start's supremum is taken until it falls componentwise, after which it only falls).
+  `stall(0)` bounds the flush part at every frame (above), so both bound it from `T` on, and the
+  module states the smaller: `sigma_t = ceil_mB(min(stall(T), stall(0)))`. So `sigma_t <= sigma_p`
+  (#1484's rule (g)) holds by construction. At every launch rate `stall(T)` is the smaller, by
+  54.6 to 61.3 dB, and `sigma_t = ceil_mB(stall(T))`: the stall #1433's `P*` reads
+  (`P* = SLACK stall(T) / (eps / 2)`).
+* *`k = 0`.* `R(n) < eps / 2` for `n >= T` (#1433's `T_decay`).
+* *`k >= 1`, the certificate per group.* If `T >= 65` (every launch rate: `T` is about 700,000),
+  every frame from `M + T` on is settled, and the relative part at `M + 65 + m` is at most
+  `r_c . S_c^m z_c` for the group `c` that covers the HPF's settled zone: `S_c` is #1433's system
+  without the flush, whose constant component is then zero and decoupled, on `(tau, H, X)`,
+
+  ```text
+  S_c = [[rho_s, a_H, 0], [0, r_c, 0], [0, 0, max(rho_s, r_c)]],
+  ```
+
+  lower triangular in the order `H, tau, X`; `z_c` its relative start (`settled_start` at
+  `(g, 0)`) and `r_c` the first three entries of its output row. The fixed design's certificate
+  (above, "The certificate", "The crossings", "`D`") applies to each group unchanged, with
+  `G = S_c`, the threshold `h = eps / 2` per unit of `X` (`g` is inside `z_c`), and the anchor at
+  `T` (`z_c(T) = S_c^(T - 65) z_c`, carried by powers of the step and rounded up by `tau`); if
+  `T < 65`, the anchor is the window's end with `o = 65 - T`, so `D_c >= 66 - T` and `T + k D` lies
+  after every window frame for `k >= 1`. The HPF's zone is not known, so `D = max_c D_c` and
+  `T(k) = T + max_c j_k^c`; the claim `T + k D >= T(k)` and its proof are the fixed design's, per
+  group. So for every `k >= 1` and `n >= M + T + k D`:
+  `|y[n]| <= (eps / 2) 10^-k X + sigma_t <= (3/4) eps 10^-k X + sigma_t`.
+* *The transient.* Measured at `T`, every group's `a_c` is negative (the largest per rate is
+  -0.91, -0.54, -0.39 and -0.60 frames), so `D = max_c (floor(b_c) + 1)`, and `D = D_inf`. The certificate's
+  rate is not the largest diagonal entry `rho_s`: the coupling `a_H` of `H` into `tau` (a
+  polynomial factor `i rho_s^i` where `r_c` is near `rho_s`) makes a rate near `rho_s` cost a large
+  `B`, and the search settles at `1 - lambda = 4.93e-5` (44.1 kHz), about 3 % below
+  `1 - rho_s = 5.09e-5`. The module's
+  directly searched crossings (#1433's search at `(eps / 2) 10^-k`) show the same: 46,099 frames for
+  the first decade at 44.1 kHz, against `ceil(ln 10 / -ln rho_s) = 45,220`.
+
+**Rounding (the live part).** The fixed design's rounding argument holds with these changes for the
+carry of `z_c` to `T`. `S_c` has `n = 3` rows and one off-diagonal entry, `a_H`; the module states
+no composition unless every off-diagonal entry is at most `8` (measured `0.842`) and every start
+component at most `2^132` (`LIVE_STATE_LIMIT`; measured at most `1.08e7`, about `2^23.4`). A
+verified rate gives `1 / (1 - G_pp) < 2^29` for every diagonal entry (as above), so the resolvent's
+entries are below `2^29` on the diagonal and `a_H 2^29 2^29 <= 2^61` off it: `r < 2^61`. The powers
+are within `1.07` of the exact ones (at most 26 squarings). With at most 26 squarings of a `3 x 3`
+matrix (`26 * 27` products and `26 * 9` `SLACK` products) and 27 applications (`27 * 9` products
+and `27 * 3` `SLACK` products), fewer than `2^11` rounding sites lose at most `2^-1075` each, and a
+carried component errs by less than
+`2^11 2^-1075 (1.15 * 3 * 2^122 * 2^132 + 1.07 * 2^61) < 2^-807`. The carried state is rounded up by
+`tau = 2^-600` per component, and a start used without a carry (`T` at or before the anchor) is
+raised to at least `tau`, so every certificate state is positive, as the verification needs. The
+verification, `B`, the logarithms, `D`'s integer bound and `HORIZON_LIMIT` are the fixed design's.
+
+### Values at the launch rates
+
+Per rate (44.1 / 48 / 88.2 / 96 kHz), the module's raw values (`live_cascade_composition` at the
++24 dB trim word) and their millibels:
+
+| value | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
+|---|---|---|---|---|
+| `T` (#1433) | 704,010 | 699,952 | 704,018 | 699,960 |
+| `D` (= `D_inf`) | 46,678 | 46,421 | 46,678 | 46,421 |
+| `g_p` raw | 1.629239e7 | 1.613073e7 | 1.631644e7 | 1.615350e7 |
+| `sigma_p` raw (`stall(0)`) | 2.041952e-12 | 2.207801e-12 | 4.142272e-12 | 4.486749e-12 |
+| `sigma_t` raw (`stall(T)`) | 3.793538e-15 | 3.772735e-15 | 3.797574e-15 | 3.852977e-15 |
+| `G_p` mB | 14,424 | 14,416 | 14,426 | 14,417 |
+| `sigma_p` mB | -23,379 | -23,312 | -22,765 | -22,696 |
+| `sigma_t` mB | -28,841 | -28,846 | -28,840 | -28,828 |
+
+The millibels are `ceil(2000 log10)` of the raw values; slice B2 states them with the module's
+`ceil_mB` (below, "Numerical limits"). The groups, the certificate rates and the cost are in the
+#1466 attempt record.
+
 ## Numerical limits
 
 * `ceil_mB(g) = ceil(2000 log(g) / ln 10)` with `math::log`. For a value computed by rounded
@@ -315,7 +507,12 @@ trim's gain (`crates/builtins/src/tail.rs`, `memoryless_input_bound`).
 `crates/builtins/tests/tail_contract.rs`, #1465's F1-F3 (the decade law against the independent
 brute force, `D`'s tightness and asymptotic floor, the gains' soundness and tightness, the disabled
 values, `dev_loud`, the stall) and F4 (every #1329 assertion unchanged); #1457's gates 2 and 8 for
-the cost (F5). The measurements are in the #1465 attempt record.
+the cost (F5). The measurements are in the #1465 attempt record. The live part: #1466's L1 (`G_p`
+and `sigma_p` against the real kernel's peak after a Nyquist drive and a retarget), L3 (`D`, `G_p`,
+`sigma_p` and `sigma_t` against an independent plain-`f64` recomputation of this part), L4 (`D`
+against the module's directly searched crossings for `k = 0..64`, and `D_inf` against the settled
+contraction's floor) and L5 (nothing certified moves); the measurements are in the #1466 attempt
+record.
 
 ## Citations
 

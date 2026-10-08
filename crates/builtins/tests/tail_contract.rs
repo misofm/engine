@@ -23,7 +23,8 @@ use effect_contract::{
     FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay, TailSamples,
 };
 use math::tail::{
-    CascadeBound, LiveZones, SectionConstants, SvfWords, TAIL_FLOOR, fixed_cascade, live_cascade,
+    CascadeBound, LiveComposition, LiveZones, SectionConstants, SvfWords, TAIL_FLOOR,
+    fixed_cascade, live_cascade, live_cascade_composition, live_cascade_crossing,
     live_cascade_groups, live_zones, pole_real, v_operator_norm,
 };
 
@@ -1060,6 +1061,18 @@ fn independent_box_norm(box_: [f64; 3]) -> f64 {
     worst
 }
 
+/// The settled contraction the derivation requires at `rate` (#1329 Amendment 2, D5): the exact
+/// top design's radius, the `f32` design box `P(h)` and the state step's final rounding
+/// `kappa u rho`.
+fn settled_contraction(rate: u32) -> f64 {
+    let u = 1.0 / 16_777_216.0;
+    let kappa = 1.0 + core::f64::consts::SQRT_2;
+    let g_max = math::tan(core::f64::consts::PI * f64::from(maximum(rate)) / f64::from(rate));
+    let radius = math::sqrt(1.0 + g_max * g_max * g_max * g_max)
+        / (1.0 + core::f64::consts::SQRT_2 * g_max + g_max * g_max);
+    radius + independent_box_norm([u / 2.0, u / 4.0, u / 2.0]) + kappa * u * radius
+}
+
 /// The live bound recomputed from #1433's derivation in plain `f64`, sharing no code with
 /// `math::tail` (`docs/derivations/1329-input-section-tail-and-rest.md`, "#1433"): the pole
 /// domain and the first section's mix row from first principles, the zones, the state bound
@@ -1080,6 +1093,14 @@ struct LiveOracle {
     largest_state: [f64; 2],
     /// Every zone group's rest at +24 dBFS, with the quantities it reads.
     groups_peak: Vec<OracleGroupRest>,
+    /// #1466's composition values (`docs/derivations/1379-graph-tail-composition.md`, "The live
+    /// input section"): `D` by each group's certificate over the full rate grid, `g_p` from the
+    /// window's first frame and the feedthrough, `sigma_p` the flush part with the tail at frame
+    /// `0`, `sigma_t` the flush part from `T_decay` on.
+    decay: u64,
+    peak_gain: f64,
+    peak_stall: f64,
+    tail_stall: f64,
 }
 
 /// One zone group's rest ([`math::tail::LiveGroupRest`]): `r`, `c_y`, `c_d`, the window's
@@ -1516,6 +1537,72 @@ fn live_oracle(rate: u32) -> LiveOracle {
         stall = stall.max(fixed + decaying);
     }
     let p_star = stall / limit;
+
+    // #1466 (N1): the window's first frame bounds every frame of every admitted history; the
+    // current input adds `delta^2 g` through both feedthroughs.
+    let peak_gain = outputs[0] + oi * oi * gain;
+    // `sigma_p`: the flush part with the tail at frame `0`, the flush window over every frame and
+    // per group the fixed point plus the decaying start's peak, frame by frame until it falls.
+    let mut peak_stall = outputs_a.iter().fold(0.0_f64, |s, value| s.max(*value));
+    for t in &groups {
+        let f = f_step;
+        let a_h = rs * t.cd + mu_settled * t.cy + mu_x * t.cy * t.r;
+        let a_f = rs * (os + 2.0 + omega) + mu_settled + mu_x * (t.cy + 1.0) + 1.0;
+        let st = f / (1.0 - t.r);
+        let tau_star = (a_h * st + a_f * f) / (1.0 - rs);
+        let constant = f + 2.0 * (t.cy * st + f);
+        let fixed = os * (tau_star + t.cy * st + constant) + oi * (t.cy * (t.r * st + f) + f) + f;
+        let h0 = energy_a.min(t.phi[1] * f);
+        let (mut tau, mut h, mut x) = (sigma_a + t.cy * h0 + f, h0, 2.0 * t.cy * h0);
+        let mut peak = 0.0_f64;
+        loop {
+            peak = peak.max(os * (tau + t.cy * h + x) + oi * t.cy * t.r * h);
+            let next = (rs * tau + a_h * h, t.r * h, rs.max(t.r) * x);
+            if next.0 <= tau && next.1 <= h && next.2 <= x {
+                break;
+            }
+            (tau, h, x) = next;
+        }
+        peak_stall = peak_stall.max(fixed + peak);
+    }
+    // `sigma_t`: the smaller of the stall from `T_decay` and the stall at every frame.
+    let tail_stall = stall.min(peak_stall);
+    // `D`: per group, the relative state carried to `T_decay` in closed form, then the
+    // certificate `v_H = z_H`, `v_tau = max(z_tau, a_H v_H / (lambda - rho_s))`, `v_X = z_X` at
+    // every rate `lambda_j = rho + (1 - rho) 2^(-j/2)`, `j = 1..=32`, `rho` the largest diagonal
+    // entry; `D_c = floor(max(a, 0) + b) + 1` at the best rate, `D` the largest over the groups.
+    let h_log = math::log(limit);
+    let decay = groups
+        .iter()
+        .map(|t| {
+            assert!(t_decay >= start, "{rate} Hz: T_decay lies in the window");
+            let h0 = energy.min(t.phi[0] * gain);
+            let (tau, h, x) = closed(
+                t,
+                sigma + t.cy * h0,
+                h0,
+                2.0 * t.cy * h0,
+                0.0,
+                t_decay - start,
+            );
+            let a_h = rs * t.cd + mu_settled * t.cy + mu_x * t.cy * t.r;
+            let row = [os, os * t.cy + oi * t.cy * t.r, os];
+            let rho = rs.max(t.r);
+            (1..=32)
+                .map(|j| {
+                    let lambda = rho + (1.0 - rho) * math::pow(2.0, -f64::from(j) / 2.0);
+                    let v = [tau.max(a_h * h / (lambda - rs)), h, x];
+                    let b_value = row[0] * v[0] + row[1] * v[1] + row[2] * v[2];
+                    let rate_log = -math::log(lambda);
+                    let a = (math::log(b_value) - h_log) / rate_log;
+                    let b = core::f64::consts::LN_10 / rate_log;
+                    math::floor(a.max(0.0) + b) as u64 + 1
+                })
+                .min()
+                .expect("rates")
+        })
+        .max()
+        .expect("groups");
     LiveOracle {
         t_decay,
         p_star,
@@ -1527,6 +1614,10 @@ fn live_oracle(rate: u32) -> LiveOracle {
         direct_output: direct,
         largest_state: phi_max,
         groups_peak: group_rests(gain * rest_peaks()[0]),
+        decay,
+        peak_gain,
+        peak_stall,
+        tail_stall,
     }
 }
 
@@ -1563,6 +1654,10 @@ const REST_STATE_TOLERANCE: f64 = 4.0e-3;
 ///   the second section's state there within [`REST_STATE_TOLERANCE`]. Terms such as `X_0` and the
 ///   neighbour radius' use of the pole step move the final figures by at most a frame (#1433
 ///   verdict m2), so only these comparisons defend them.
+/// * #1466 L3: the live composition values ([`live_composition`]) against the recomputation of
+///   `docs/derivations/1379-graph-tail-composition.md`, "The live input section" ([`LiveOracle`]'s
+///   `decay`, `peak_gain`, `peak_stall`, `tail_stall`): `D` within `0.01 %` and 64 frames above it,
+///   each gain and stall within 1 mB above it. Nothing else reads these values.
 #[test]
 fn live_bound_carries_every_term_an_independent_recomputation_requires() {
     let u = 1.0 / 16_777_216.0;
@@ -1571,13 +1666,8 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
         let envelope = input_section_live_envelope(rate)
             .expect("launch rate")
             .envelope;
-        let g_max = math::tan(core::f64::consts::PI * f64::from(maximum(rate)) / f64::from(rate));
-        let radius = math::sqrt(1.0 + g_max * g_max * g_max * g_max)
-            / (1.0 + core::f64::consts::SQRT_2 * g_max + g_max * g_max);
-        let design_box = independent_box_norm([u / 2.0, u / 4.0, u / 2.0]);
+        let settled = settled_contraction(rate);
         let ramp_box = independent_box_norm([33.0 * u, 16.3 * u, 33.0 * u]);
-        let rounding = kappa * u * radius;
-        let settled = radius + design_box + rounding;
         let ramp = settled + ramp_box;
         eprintln!(
             "R3 {rate} Hz: rho_settled - 1 {:.6e} (needs {:.6e}), rho_ramp - 1 {:.6e} (needs \
@@ -1757,6 +1847,48 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
             assert!(
                 module >= recomputed && module <= recomputed + recomputed / 10_000 + 64,
                 "{rate} Hz {name}: module {module} against the recomputed {recomputed}"
+            );
+        }
+        // #1466 L3: the live composition values against the recomputation of
+        // `docs/derivations/1379-graph-tail-composition.md`, "The live input section": `D` within
+        // `0.01 %` and 64 frames above it, each gain and stall within 1 mB above it.
+        let composition = live_composition(rate);
+        eprintln!(
+            "L3 {rate} Hz: D {} (recomputed {}), G_p {:.9e} ({:.9e}), sigma_p {:.9e} ({:.9e}), \
+             sigma_t {:.9e} ({:.9e})",
+            composition.decay,
+            oracle.decay,
+            composition.peak_gain,
+            oracle.peak_gain,
+            composition.peak_stall,
+            oracle.peak_stall,
+            composition.tail_stall,
+            oracle.tail_stall
+        );
+        // #1484 rule (g) for the live section, which no registry checks (builtins are not
+        // registry rows): `sigma_t <= sigma_p`, raw and in millibels (equal stalls are admissible).
+        assert!(
+            composition.tail_stall <= composition.peak_stall
+                && ceil_mb(composition.tail_stall) <= ceil_mb(composition.peak_stall),
+            "{rate} Hz: sigma_t {:e} above sigma_p {:e}",
+            composition.tail_stall,
+            composition.peak_stall
+        );
+        assert!(
+            composition.decay >= oracle.decay
+                && composition.decay <= oracle.decay + oracle.decay / 10_000 + 64,
+            "{rate} Hz D: module {} against the recomputed {}",
+            composition.decay,
+            oracle.decay
+        );
+        for (name, module, recomputed) in [
+            ("G_p", composition.peak_gain, oracle.peak_gain),
+            ("sigma_p", composition.peak_stall, oracle.peak_stall),
+            ("sigma_t", composition.tail_stall, oracle.tail_stall),
+        ] {
+            assert!(
+                module >= recomputed && module <= recomputed * linear(1),
+                "{rate} Hz {name}: module {module:e} against the recomputed {recomputed:e}"
             );
         }
     }
@@ -2526,4 +2658,126 @@ fn a_design_with_filters_disabled_states_its_trim_gain() {
     let (_, peak, ..) =
         composition_values(input_section_bound(rate, mixed).expect("bound"), "mixed");
     assert!(peak >= ceil_mb(f64::from(math::pow(10.0, 24.0 / 20.0) as f32)));
+}
+
+// ---- #1466: the live input section's decay, peak gain and stalls (L1, L4; L3 above) ----------
+
+/// The live composition values at `rate`, as the gates read them: `math::tail`'s accessor at the
+/// +24 dB trim word, the flush law and the ramp the live bound uses.
+fn live_composition(rate: u32) -> LiveComposition {
+    live_cascade_composition(
+        &input_section_live_envelope(rate).expect("launch rate"),
+        rest_peaks()[0],
+        &input_section_flush_law(rate),
+        u64::from(INPUT_FILTER_RAMP_SAMPLES),
+    )
+    .expect("live composition")
+    .expect("a certified live composition")
+}
+
+/// #1466 L1. A real input section, trim +24 dB, both sections designed at the worst-case pair,
+/// driven by an alternating `+-1` input for 1,000,000 frames; then the HPF target moves to 10 Hz
+/// with the input still running (#1379 H9: the Nyquist drive builds a large first integrator
+/// while the output stays near 1, and the retarget exposes it). The largest `|y|` over the run is
+/// at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`; the ratio is printed.
+#[test]
+fn live_peak_gain_bounds_a_retarget_after_a_nyquist_drive_on_the_real_kernel() {
+    const DRIVE: usize = 1_000_000;
+    const AFTER: usize = 200_000;
+    for &rate in rates() {
+        let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
+        let mut section = input(rate, hpf, lpf, 24.0, false);
+        let composition = live_composition(rate);
+        let (mut before, mut peak) = (0.0_f32, 0.0_f32);
+        let mut left = [0.0_f32; 64];
+        let mut right = [0.0_f32; 64];
+        let mut frame = 0;
+        while frame < DRIVE + AFTER {
+            if frame == DRIVE {
+                section
+                    .apply_prepared_filter(target(rate, 0, 10.0))
+                    .expect("retarget");
+            }
+            let end = if frame < DRIVE { DRIVE } else { DRIVE + AFTER };
+            let len = 64.min(end - frame);
+            for index in 0..len {
+                let value = if (frame + index) % 2 == 0 { 1.0 } else { -1.0 };
+                left[index] = value;
+                right[index] = value;
+            }
+            process(
+                &mut section,
+                &mut left[..len],
+                &mut right[..len],
+                frame as u64,
+            );
+            let block = left[..len]
+                .iter()
+                .chain(&right[..len])
+                .fold(0.0_f32, |sup, value| sup.max(value.abs()));
+            if frame < DRIVE {
+                before = before.max(block);
+            }
+            peak = peak.max(block);
+            frame += len;
+        }
+        let stated = composition.peak_gain + composition.peak_stall;
+        eprintln!(
+            "L1 {rate} Hz: peak before the retarget {before:.4e}, over the run {peak:.4e} \
+             ({:.2} dB), g_p + sigma_p {stated:.4e} ({:.2} dB), ratio {:.1} ({:.2} dB)",
+            20.0 * math::log10(f64::from(peak)),
+            20.0 * math::log10(stated),
+            stated / f64::from(peak),
+            20.0 * math::log10(stated / f64::from(peak))
+        );
+        assert!(
+            f64::from(peak) <= stated,
+            "{rate} Hz: the real kernel's peak {peak:e} exceeds g_p + sigma_p = {stated:e}"
+        );
+    }
+}
+
+/// #1466 L4. The live decade law against the module's own crossings: the directly searched
+/// crossing of `(eps / 2) 10^-k` (`math::tail::live_cascade_crossing`, #1433's search at the lower
+/// threshold) is at most `T + k D` for `k = 0..64`, and `T` itself at `k = 0`; and `D_inf` is at
+/// least the floor `ceil(ln 10 / -ln rho_s)` of the settled contraction the derivation requires
+/// ([`settled_contraction`], as #1465's F1(d)).
+#[test]
+fn live_decay_covers_the_module_crossings_and_its_floor() {
+    for &rate in rates() {
+        let terms = input_section_live_envelope(rate).expect("launch rate");
+        let law = input_section_flush_law(rate);
+        let ramp = u64::from(INPUT_FILTER_RAMP_SAMPLES);
+        let composition = live_composition(rate);
+        let decay = composition.decay;
+        let tail = input_section_live_cascade(rate).expect("launch rate").tail;
+        let mut worst = 0.0_f64;
+        for k in 0..=64_u64 {
+            let crossing = live_cascade_crossing(&terms, rest_peaks()[0], &law, ramp, k)
+                .expect("live crossing");
+            if k == 0 {
+                assert_eq!(crossing, tail, "{rate} Hz: the crossing at k = 0 is T");
+            } else {
+                worst = worst.max((crossing - tail) as f64 / k as f64);
+            }
+            assert!(
+                crossing <= tail + k * decay,
+                "{rate} Hz: T({k}) = {crossing} > T + k D = {tail} + {k} {decay}"
+            );
+        }
+        let floor =
+            -math::floor(-core::f64::consts::LN_10 / -math::log(settled_contraction(rate))) as u64;
+        let d_inf = composition.asymptotic_decay();
+        eprintln!(
+            "L4 {rate} Hz: T {tail}, D {decay}, D_inf {d_inf}, floor {floor}, max (T(k) - T) / k \
+             {worst:.1}, lambda {:.12}, groups {}, T_lambda - T {}",
+            composition.lambda(),
+            composition.groups.len(),
+            composition.floor_crossing()
+        );
+        assert!(
+            d_inf >= floor,
+            "{rate} Hz: D_inf {d_inf} below the settled contraction's floor {floor}"
+        );
+    }
 }
