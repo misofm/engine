@@ -1,0 +1,28 @@
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-0106e2a6c0056a5a)
+test every_ramped_word_of_a_bank_lane_follows_its_own_target ... ok
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-7f45a91b80670d9a)
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.23s
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-6a714f1713e36e21)
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test every_ramped_word_of_a_bank_lane_follows_its_own_target ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-700da81b79f86d03)
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test every_ramped_word_of_a_bank_lane_follows_its_own_target ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-92a7677f02346157)
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test every_ramped_word_of_a_bank_lane_follows_its_own_target ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-ca68c7ffc6173d72)
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test every_ramped_word_of_a_bank_lane_follows_its_own_target ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/ramp_endpoint.rs (/tmp/claude-1002/v1458/target/debug/deps/ramp_endpoint-9df494b6fc15f567)
+test every_ramped_word_stays_inside_its_endpoints ... ok
+test every_ramped_word_of_a_bank_lane_follows_its_own_target ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+exit 0
