@@ -105,3 +105,85 @@ Documentation only. No code, gate or allowlist changes.
 - A test that greps source or prose is refused.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: under two hours.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-08)
+
+**Change.** `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", rewritten: one entry per
+allowlisted path, grouped as D1 asks (realtime primitives, lane intrinsics, C-ABI and browser-ABI
+boundaries, the browser render-locked allocator, test-only counting allocators, tool-only
+allocators and guests), with the introducing issue and a justification taken from the file's own
+header or `SAFETY` comments. `render_lock.rs` is its own category (D2). The stale
+`tools/audit/src/realtime.rs`/`protocol.rs` text moved to a "Retired exceptions" paragraph in the
+past tense (D3); the "fallen behind ... #104" paragraph is replaced by the statement that the gate's
+allowlist is the authority and the section lists it. The last paragraph's stale "exact
+protocol-audit `main.rs` allowlist" now names the real mutation case (`tools/audit/src/other.rs`).
+#1446 had not landed (`tools/realtime-policy` does not exist), so the awk gate is named.
+
+**Gate 1 (exact coverage).** Allowlist extracted from the `unsafe source exclusions` line
+(`scripts/check-realtime-policy.sh:31` at this commit; the spec's `:29` is the comment line before
+it), sorted; the section's backticked `.rs` paths before "Retired exceptions", sorted, minus the
+cited test `crates/lane/tests/fp_env.rs`. `diff` of the two: equal, 19 paths each:
+
+```
+  crates/builtins-compiler/tests/allocation_tracker.rs
+  crates/capi/src/ffi.rs
+  crates/capi/tests/plan_swap_race.rs
+  crates/capi/tests/resource_lifecycle.rs
+  crates/engine/src/realtime/disjoint.rs
+  crates/engine/src/realtime/spsc.rs
+  crates/lane/src/fpenv.rs
+  crates/lane/src/softfma.rs
+  crates/multiband-compressor/tests/no_alloc_render.rs
+  crates/session/tests/allocation_budget.rs
+  crates/soft-clip/tests/allocation.rs
+  crates/transient-shaper/tests/allocation.rs
+  crates/true-peak-limiter/tests/allocation.rs
+  hosts/host-web/src/ffi.rs
+  hosts/host-web/src/render_lock.rs
+  hosts/host-web/tests/boot_transient_budget.rs
+  tools/audit/src/capi.rs
+  tools/bench-support/src/alloc.rs
+  tools/wasm-gate-guest/src/lib.rs
+```
+
+**Code survey (not the spec's list alone).** `rg` of the gate's own regex over `crates hosts tools`
+finds unsafe sites in 14 of the 19 files. Five allowlisted files have none:
+
+- `tools/wasm-gate-guest/src/lib.rs` has `#![allow(unsafe_code)]` and `#[unsafe(no_mangle)]`
+  only, which the gate regex does not match; it is still a real boundary (and on
+  `scripts/check-bench-policy.sh`'s exact `tools/` set). Documented as such.
+- `crates/soft-clip/tests/allocation.rs`, `crates/transient-shaper/tests/allocation.rs`,
+  `crates/true-peak-limiter/tests/allocation.rs` and
+  `crates/multiband-compressor/tests/no_alloc_render.rs` carry no unsafe at all; they use
+  `bench_support::alloc`. Their wrappers were removed by (`git log -S'unsafe impl GlobalAlloc'`):
+  `568ad4087` (soft-clip), `cb4898437` (#1046, transient-shaper), `a6da0cade` (limiter),
+  `39c4651b1` (multiband). The section lists them as stale entries that approve nothing.
+
+`allow(unsafe_code)` also appears only in the 19 files plus doc comments in
+`crates/host-core/src/lib.rs` and `tools/bench-support/src/lib.rs` (prose, not allowances).
+
+**D3 `git log -S` lines.** `git log -S'unsafe' --follow -- tools/audit/src/realtime.rs` and the same
+for `protocol.rs` both give `d9a66a952 refactor(tools): one audited allocator, escaper, percentile
+and timer (#104 phase B, F4/F1)` as the commit that removed their unsafe.
+
+**Introducing issues** not stated in a file header were taken from the adding commit and the
+`.github/ISSUE_SPECS/README.md` text of that time: `crates/capi/src/ffi.rs` and
+`tools/audit/src/capi.rs` issue 022 (`947d7996f`, `434551bc0`); `hosts/host-web/src/ffi.rs` issue
+024 (`ef925e6cb`); `crates/capi/tests/resource_lifecycle.rs` issue 119 (checkpoint `1a3dde2`);
+`crates/builtins-compiler/tests/allocation_tracker.rs` issue 007 (`ff7546734`);
+`crates/session/tests/allocation_budget.rs` #107 (`c94f659b1`).
+
+**Gate 3.** `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+`bash scripts/check-realtime-policy.sh`: `realtime policy: ok (89 marked regions in 25 files)`.
+Docs job (`qualification.yml`, "docs and research evidence gates"): `bash scripts/check-dsp-research.sh`
+ok; `bash scripts/check-builtins-listening.sh` ok.
+
+**Test value.** No test added (D4).
+
+**Open item for root.** The four stale allowlist entries above (the three `allocation.rs` files and
+`no_alloc_render.rs`) admit unsafe code to files that need none. Removing them is a gate change
+and a non-goal here; it needs a successor issue (or folds into #1438/#1446's
+`tools/realtime-policy` allowlist). When it lands, the "Four further entries" paragraph of the
+section goes with it.
