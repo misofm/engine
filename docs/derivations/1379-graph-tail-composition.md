@@ -651,9 +651,10 @@ settled pair's `l1` and at most +35.6 dB on gate L2's scanned histories, so the 
 show the window term that the bound carries. The largest settled pair is not the 10 Hz HPF into
 the top LPF (3.53 at 44.1 kHz, +35.0 dB with the trim, and less at the other rates): over a
 61-point logarithmic grid of HPF cutoffs into the top LPF (and a coarser grid of both cutoffs),
-the largest settled `l1` is about 3.798, +35.59 dB with the trim at every launch rate, for an HPF
-near 150 Hz (44.1 kHz), 174 Hz (48 kHz), 287 Hz (88.2 kHz) and 342 Hz (96 kHz) into the top LPF
-(a scan of the #1467 attempt-2 record). The two frequency-blind steps
+the largest settled `l1` is about 3.798, +35.59 dB with the trim at every launch rate, on a flat
+maximum near an HPF of `0.00342 fs` into the top LPF: about 151 Hz (44.1 kHz), 164 Hz (48 kHz),
+301 Hz (88.2 kHz) and 328 Hz (96 kHz) (the #1467 attempt-2 verifier's golden-section refinement;
+the grid's points are within `1.1e-4` of it, and no bound depends on the frequencies). The two frequency-blind steps
 (`sum` of the second section over the window, and the tau system's `rho_settled` after it) set
 `W*`; tightening them is #1485's. `G_t` is still far below `G_p` (+144.2 dB), whose
 `sup Psi Phi` term a history of any length builds.

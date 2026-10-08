@@ -454,7 +454,10 @@ true. `G_t`, the proof and every value are unchanged; no frame-equivalent consta
   flight at `N`; before `N - 1`, weight 1/64 at `N` and the target at `N + 63`). A clear is read
   where a section's words become the identity (only a disable's completion writes it over other
   words) and is folded into the frame before it (`history_frames`); no row depends on it, because
-  an identity section's state neither moves nor reaches the output (K3 below). The adjoint
+  an identity section's state neither moves nor reaches the output and, in this scan, a cleared
+  section stays the identity to the end of the history (every event comes before `N` and every
+  clear at `N + 1` or later; an enable after a completed disable would need the clear, since rule
+  3 starts from zero integrators) (K3 below). The adjoint
   recursion is unchanged; the settled system's prefix `l1` is computed once per settled pair per
   thread (`SettledSum`), and the window's remainder is checked every 4,096 frames. The `mixture`
   function (with its false doc comment) is deleted: nothing uses it.
@@ -476,8 +479,10 @@ true. `G_t`, the proof and every value are unchanged; no frame-equivalent consta
   supremum is close to the largest settled pair's `l1`, not the 10 Hz pair's. Scratch scan (not
   committed; a 61-point logarithmic grid of HPF cutoffs into the top LPF and a coarser grid of both
   cutoffs, `f64` impulse responses of the designed words): the largest settled `l1` is 3.7980 /
-  3.7976 / 3.7980 / 3.7976 (+35.59 dB with the trim) at an HPF of 147.98 / 173.54 / 286.93 /
-  341.86 Hz into the top LPF at 44.1 / 48 / 88.2 / 96 kHz; the 10 Hz HPF gives 3.5287 / 3.5077 /
+  3.7977 / 3.7980 / 3.7977 (+35.59 dB with the trim) on a flat maximum near an HPF of `0.00342 fs`
+  (about 151 / 164 / 301 / 328 Hz) into the top LPF at 44.1 / 48 / 88.2 / 96 kHz (corrected in the
+  attempt-2 follow-up from the grid points 147.98 / 173.54 / 286.93 / 341.86 Hz, per the
+  verifier's refined search); the 10 Hz HPF gives 3.5287 / 3.5077 /
   3.3727 / 3.3516. The gate summary says L2 scans histories recorded from the real kernel.
 - This spec: L2's gate text and test value; the attempt-1 record's false `--help` sentence
   (MINOR 1, corrected in place) and a note on its scan statement.
@@ -491,7 +496,8 @@ maximum}`, the HPF below the LPF when both are enabled:
 - (b) 45: every settled pair of the cutoffs;
 - (c) 800: one section retargeted twice, `a -> b` then `-> c`, on `{the identity, 10 Hz, 200 Hz,
   1 kHz, one f32 below the maximum}` (HPF, LPF at the maximum) or `{the identity, 100 Hz, 1 kHz,
-  10 kHz, the maximum}` (LPF, HPF at 10 Hz), `a != b`, `c = b` a re-send (rule 1), the events
+  10 kHz, the maximum}` (LPF, HPF at 10 Hz), `a != b`, `c` any of the five (`c = b` a re-send,
+  rule 1), the events
   before `(N - 63, N - 1)`, `(N - 40, N - 8)`, `(N - 16, N - 15)`, `(N - 2, N - 1)`;
 - (d) 576: both sections retargeted, the HPF on `{the identity, 10 Hz, 200 Hz, 1 kHz}`, the LPF on
   `{the identity, 10 kHz, one f32 below the maximum, the maximum}`, the events before
@@ -504,8 +510,9 @@ disable included). What it covers: those histories only, with the kernel's own `
 timing, the input at `N` and later in exact arithmetic (every input `|x| <= 1` from `N`, so every
 `M >= N`), every frame (exact rows until the window's remainder is below `1e-12`, then the settled
 prefix `l1` plus both rigorous remainders). It does not cover other cutoffs or other offsets, a
-retarget at or after `N`, the trim ramp, or the rounding deviation (B1's part); it claims no more.
-L2's cutoffs step over the fine grid's settled maximum (3.7980 against the scan's 3.7966 at 48 kHz,
+retarget at or after `N`, the trim ramp, or the rounding deviation (`G_t`'s derivation bounds the
+late input's relative rounding; the flush part is B1's `sigma_t`); it claims no more.
+L2's cutoffs step over the fine grid's settled maximum (3.7977 against the scan's 3.7966 at 48 kHz,
 0.003 dB); no bound depends on that.
 
 **Results.** The largest `trim x supremum`: 44.1 kHz 60.1642 (+35.59 dB; HPF identity -> 200 Hz
@@ -528,7 +535,7 @@ test except the table test, the others L2 alone, since they change only L2's cod
 | K1 a single retarget modelled as the all-six mixture (the kernel's timing) | L2 at its kernel check (HPF disable, `N + 40`: kernel 4.750e-3, oracle 4.520e-3 at 44.1 kHz, 4.8 % under) | L2's soundness assertion |
 | K1b only an enable from rest modelled as the all-six mixture | L2 at its kernel check (HPF enable, `N + 40`: 5.439e-3 against 4.448e-3, 18 % under) | L2's soundness assertion |
 | K2 the words read one frame late (after the frame is processed) | L2 at its kernel check (retarget, `N + 40`: 4.953e-3 against 4.989e-3) | L2's soundness assertion |
-| K3 the clears not folded in | none: equivalent (an identity section's state neither moves nor reaches the output) | all |
+| K3 the clears not folded in | none: equivalent (an identity section's state neither moves nor reaches the output, and no event comes after a clear in this scan) | all |
 
 So the modelling matters to L2 through its kernel check, not through its soundness assertion: a
 mixture model of a disable or an enable under-reports the kernel's row (K1, K1b), and a one-frame
@@ -554,3 +561,31 @@ assertion itself red. M2 stays L2's unique catch; O1 stays red at the forward-su
   (attempt 1's and the verifier's runs stand; `nan_max` is value-neutral and control-plane only).
 
 **Open items.** As attempt 1: the `G_t` looseness (56.8 dB) is #1485's.
+
+### Attempt 2 follow-up (2026-10-08, worker): the verdict's MINOR and NITs
+
+Attempt 2 PASSED (verifier opus-xhigh, `12cebe828`). This follow-up changes wording only; no
+value, test logic or bound moves.
+- MINOR 1 (fixed): the rounding deviation had the wrong owner ("B1's part") in L2's coverage
+  statement above and in L2's doc comment (`tail_contract.rs`). Both now say that `G_t`'s
+  derivation bounds the late input's relative rounding and that the flush part is B1's `sigma_t`.
+  L2's oracle is exact arithmetic and does not cover the rounding deviation; the kernel check
+  samples it (ratios within `2e-5`).
+- NIT 1 (fixed): the stated maximizers were 61-point grid points. The derivation and the attempt-2
+  record now give the verifier's refined flat maximum, near an HPF of `0.00342 fs` (about 151 /
+  164 / 301 / 328 Hz) into the top LPF, settled `l1` 3.7980 / 3.7977 / 3.7980 / 3.7977. The 48 kHz
+  comparison with the scan reads 3.7977 (still about 0.003 dB). No bound depends on these.
+- NIT 2 (fixed): K3's reason now states its premise in the spec (the clear's description and the
+  K3 row) and in `record_history`'s doc comment: in this scan every event comes before `N` and
+  every clear at `N + 1` or later, so a cleared section stays the identity; an enable after a
+  completed disable would need the clear (rule 3 starts from zero integrators).
+- NIT 3 (fixed): scan part (c) now reads "`c` any of the five (`c = b` a re-send, rule 1)" in the
+  spec, and L2's doc comment says the same.
+- NIT 4 (`nan_max`): no action, as the verdict says.
+
+Gates (this follow-up): `cargo test --locked --release -p builtins --features
+builtins/test-support --test tail_contract`: 22 passed (9.8 s); `cargo fmt --all -- --check`
+clean; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean;
+`check-workspace-policy.sh` ok. Comments and prose only, so no other gate was re-run.
+
+**Open items.** None new. The `G_t` looseness (56.8 dB) stays #1485's.

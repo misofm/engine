@@ -3050,8 +3050,10 @@ fn apply_retargets(rate: u32, section: &mut InputBuiltins, events: &[Retarget], 
 /// recursion and ramps the mix, and the all-six ramp otherwise; its own event timing). A clear is
 /// read where a section's words become the identity: only a disable's completion writes the
 /// identity over other words, and it clears the integrators in the same step. (Once a section is
-/// the identity, its state neither moves nor reaches the output, so no row depends on the clear;
-/// the oracle applies it as the kernel does.)
+/// the identity, its state neither moves nor reaches the output; in L2's scan every event comes
+/// before `N` and every clear at `N + 1` or later, so a cleared section stays the identity to the
+/// end of the history and no row depends on the clear. An enable after a completed disable would
+/// need it, since rule 3 starts from zero integrators; the oracle applies it as the kernel does.)
 fn record_history(rate: u32, start: (f32, f32), events: &[Retarget]) -> KernelHistory {
     let mut section = input(rate, start.0, start.1, 0.0, false);
     let mut frames = Vec::with_capacity(HISTORY_AFTER);
@@ -3494,14 +3496,16 @@ fn l2_scan(rate: u32) -> Vec<ScanHistory> {
 ///   HPF at 10 Hz or the identity), the event before `N - s`, `s` in `{1, 2, 8, 16, 32, 48, 63}`;
 /// * (b) every settled pair of the cutoffs;
 /// * (c) one section retargeted twice, `a -> b` then `-> c`, on five cutoffs per section (the
-///   identity among them; `c = b` a re-send), the events before `(N - 63, N - 1)`,
+///   identity among them; `a != b`, `c` any of the five, `c = b` a re-send), the events before
+///   `(N - 63, N - 1)`,
 ///   `(N - 40, N - 8)`, `(N - 16, N - 15)` and `(N - 2, N - 1)`;
 /// * (d) both sections retargeted, the HPF on `{the identity, 10 Hz, 200 Hz, 1 kHz}` and the LPF
 ///   on `{the identity, 10 kHz, one f32 below the maximum, the maximum}`, the events before
 ///   `(N - 1, N - 1)`, `(N - 1, N - 63)`, `(N - 63, N - 1)` and `(N - 32, N - 8)`.
 ///
 /// It covers those histories only, the input at `N` and later in exact arithmetic on the kernel's
-/// `f32` words (not the rounding deviation, which is B1's part). The oracle checks itself against
+/// `f32` words (not the rounding deviation: `G_t`'s derivation bounds the late input's relative
+/// rounding, and the flush part is B1's `sigma_t`). The oracle checks itself against
 /// independent brute force (a settled impulse response; forward impulse sums) and against the
 /// real `f32` kernel, which a worst-sign input of `2^-12` drives to the oracle's row.
 #[test]
