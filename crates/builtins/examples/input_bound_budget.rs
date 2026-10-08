@@ -19,10 +19,17 @@
 //!   the walks really took, the bounds computed and the strips left on their exact bound. It
 //!   asserts what the gate states: the three results are identical, a preparation walks at most
 //!   the budget, and a warm rebuild walks no frame and computes no bound.
+//!   It also prints each preparation's charge and its design work per frame-equivalent of budget
+//!   consumed, which confirms the frame-equivalent against the families' real work: the consumed
+//!   amount is the charge when every design is exact, and otherwise the budget, which a
+//!   preparation that leaves a design on its live bound has spent to within one design's section
+//!   charges.
 //! * **Calibrate.** Two fixed-cost measurements, separate from gate 2, that set the charge
 //!   constants. First the frame classes: the time per frame of long near-top walks (an HPF at
 //!   0.50-0.99 of the maximum, and one `f32` below it, into the LPF at the maximum, at 0 and
-//!   +24 dB), whose slowest class defines the frame-equivalent (`FRAME_EQUIVALENT_NS`). Then per
+//!   +24 dB), whose slowest class defines the frame-equivalent (`FRAME_EQUIVALENT_NS`). Each
+//!   point's time is the median of `CLASS_RUNS` measured sweeps after one warmup sweep, reported
+//!   with its spread (minimum to maximum), so one noisy sample cannot move the class (#1474). Then per
 //!   design class (one or two channel cascades, one or two sections each), the least-squares line
 //!   of one design's computation time against the frames it walks, over a grid of designs: its
 //!   intercept is the class's fixed cost, and `INPUT_BOUND_SECTION_CHARGE` is the largest fixed
@@ -30,7 +37,8 @@
 #![allow(missing_docs)]
 
 use builtins::test_support::{
-    fixed_input_bounds_computed, fixed_input_frames_walked, input_section_bounds_within,
+    fixed_input_bounds_computed, fixed_input_charged, fixed_input_frames_walked,
+    input_section_bounds_within,
 };
 use builtins::{
     BuiltinParameters, ChannelParameters, INPUT_BOUND_BUDGET_FRAMES, InputBoundCache,
@@ -199,18 +207,21 @@ struct Run {
     ms: f64,
     frames: u64,
     computed: u64,
+    charged: u64,
     bounds: Vec<InputSectionBound>,
 }
 
 fn prepare(rate: u32, strips: &[BuiltinParameters], cache: Option<&mut InputBoundCache>) -> Run {
     let frames = fixed_input_frames_walked();
     let computed = fixed_input_bounds_computed();
+    let charged = fixed_input_charged();
     let (ms, bounds) =
         milliseconds(|| input_section_bounds(rate, strips.iter().copied(), cache).expect("bounds"));
     Run {
         ms,
         frames: fixed_input_frames_walked() - frames,
         computed: fixed_input_bounds_computed() - computed,
+        charged: fixed_input_charged() - charged,
         bounds,
     }
 }
@@ -222,10 +233,11 @@ fn gate_two() {
         builtins::INPUT_BOUND_SECTION_CHARGE
     );
     println!(
-        "family | rate | round | first ms | rebuild ms | no-cache ms | design work ms | frames | computed | exact"
+        "family | rate | round | first ms | rebuild ms | no-cache ms | design work ms | frames | computed | charged | ns per consumed frame-equivalent | exact"
     );
     let mut worst: Vec<(f64, String)> = Vec::new();
     let mut work: Vec<(f64, String)> = Vec::new();
+    let mut per_charge: Vec<(f64, String)> = Vec::new();
     for family in &FAMILIES {
         for rate in RATES {
             let strips = (family.strips)(rate);
@@ -259,29 +271,45 @@ fn gate_two() {
                 } else {
                     round.to_string()
                 };
+                let design_work = none.ms - rebuild.ms;
+                let consumed = if exact == strips.len() {
+                    none.charged
+                } else {
+                    INPUT_BOUND_BUDGET_FRAMES
+                };
+                let ns_per_charge = design_work * 1e6 / consumed as f64;
                 println!(
-                    "{} | {rate} | {label} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {exact} / {}",
+                    "{} | {rate} | {label} | {:.3} | {:.3} | {:.3} | {design_work:.3} | {} | {} | {} | {ns_per_charge:.2} | {exact} / {}",
                     family.name,
                     first.ms,
                     rebuild.ms,
                     none.ms,
-                    none.ms - rebuild.ms,
                     none.frames,
                     none.computed,
+                    none.charged,
                     strips.len()
                 );
                 if round > 0 {
                     let what = format!("{} at {rate} Hz, round {round}", family.name);
                     worst.push((first.ms.max(none.ms), what.clone()));
-                    work.push((none.ms - rebuild.ms, what));
+                    work.push((design_work, what.clone()));
+                    per_charge.push((ns_per_charge, what));
                 }
             }
         }
     }
-    for (heading, mut list) in [("preparation", worst), ("design work", work)] {
+    for (heading, unit, mut list) in [
+        ("preparation", "ms", worst),
+        ("design work", "ms", work),
+        (
+            "design work per consumed frame-equivalent",
+            "ns",
+            per_charge,
+        ),
+    ] {
         list.sort_by(|a, b| b.0.total_cmp(&a.0));
-        for (ms, what) in list.iter().take(5) {
-            println!("slowest {heading}: {ms:.3} ms, {what}");
+        for (value, what) in list.iter().take(5) {
+            println!("slowest {heading}: {value:.3} {unit}, {what}");
         }
     }
 }
@@ -360,55 +388,85 @@ fn one_design(rate: u32, design: BuiltinParameters) -> (f64, u64) {
     (ms, fixed_input_frames_walked() - frames)
 }
 
+/// Measured sweeps of the frame classes after the warmup sweep: each point's ns per frame is the
+/// median of these, reported with its spread (#1474).
+const CLASS_RUNS: usize = 5;
+
 /// The frame classes: ns per frame of long near-top walks, an HPF at 0.50-0.99 of the maximum
-/// (and one `f32` below it) into the LPF at the maximum, at 0 and +24 dB. Returns the slowest.
+/// (and one `f32` below it) into the LPF at the maximum, at 0 and +24 dB. Each sweep measures every
+/// point once, so a burst of interference reaches one sample of many points, not every sample of
+/// one; sweep 0 is the warmup. Returns the slowest point's median.
 fn frame_classes() -> f64 {
     println!(
-        "rate | round | trim dB | slowest HPF fraction | slowest ns per frame | fastest ns per frame | fractions above 18 ns"
+        "rate | trim dB | slowest HPF fraction | its ns per frame, median (min-max) | fastest median | fractions whose median is above 1.2 times the fastest"
     );
-    let mut slowest = 0.0_f64;
+    let mut slowest = (0.0_f64, String::new());
     for rate in RATES {
         let top = maximum(rate);
         let hpfs: Vec<(f32, f32)> = (50..100)
             .map(|percent| (percent as f32 / 100.0, percent as f32 / 100.0 * top))
             .chain([(1.0, below(top, 1))])
             .collect();
-        for round in 0..ROUNDS {
-            for trim in [0.0_f32, 24.0] {
-                let per_frame: Vec<(f32, f64)> = hpfs
-                    .iter()
-                    .map(|&(fraction, hpf)| {
-                        let (ms, frames) = one_design(rate, same(trim, hpf, top));
-                        (fraction, ms * 1e6 / frames as f64)
-                    })
-                    .collect();
-                let (fraction, high) = per_frame
-                    .iter()
-                    .copied()
-                    .fold((0.0, 0.0_f64), |a, b| if b.1 > a.1 { b } else { a });
-                let low = per_frame.iter().fold(f64::MAX, |low, p| low.min(p.1));
-                let band: Vec<String> = per_frame
-                    .iter()
-                    .filter(|p| p.1 > 18.0)
-                    .map(|p| format!("{:.2}", p.0))
-                    .collect();
-                let label = if round == 0 {
-                    "warmup".to_owned()
-                } else {
-                    round.to_string()
-                };
-                println!(
-                    "{rate} | {label} | {trim} | {fraction:.2} | {high:.2} | {low:.2} | {}",
-                    band.join(" ")
-                );
-                if round > 0 {
-                    slowest = slowest.max(high);
+        for trim in [0.0_f32, 24.0] {
+            let mut samples = vec![Vec::with_capacity(CLASS_RUNS); hpfs.len()];
+            for sweep in 0..=CLASS_RUNS {
+                for (point, &(_, hpf)) in hpfs.iter().enumerate() {
+                    let (ms, frames) = one_design(rate, same(trim, hpf, top));
+                    if sweep > 0 {
+                        samples[point].push(ms * 1e6 / frames as f64);
+                    }
                 }
+            }
+            let medians: Vec<(f32, f64, f64, f64)> = hpfs
+                .iter()
+                .zip(&mut samples)
+                .map(|(&(fraction, _), runs)| {
+                    runs.sort_by(f64::total_cmp);
+                    (
+                        fraction,
+                        runs[CLASS_RUNS / 2],
+                        runs[0],
+                        runs[CLASS_RUNS - 1],
+                    )
+                })
+                .collect();
+            let high = medians
+                .iter()
+                .copied()
+                .fold(
+                    (0.0, 0.0_f64, 0.0, 0.0),
+                    |a, b| if b.1 > a.1 { b } else { a },
+                );
+            let low = medians.iter().fold(f64::MAX, |low, p| low.min(p.1));
+            let band: Vec<String> = medians
+                .iter()
+                .filter(|p| p.1 > 1.2 * low)
+                .map(|p| format!("{:.2}", p.0))
+                .collect();
+            println!(
+                "{rate} | {trim} | {:.2} | {:.2} ({:.2}-{:.2}) | {low:.2} | {}",
+                high.0,
+                high.1,
+                high.2,
+                high.3,
+                band.join(" ")
+            );
+            if high.1 > slowest.0 {
+                slowest = (
+                    high.1,
+                    format!(
+                        "{rate} Hz, {trim} dB, HPF at {:.2} of the maximum, spread {:.2}-{:.2}",
+                        high.0, high.2, high.3
+                    ),
+                );
             }
         }
     }
-    println!("slowest frame class measured: {slowest:.2} ns per frame");
-    slowest
+    println!(
+        "slowest frame class measured: {:.2} ns per frame (median of {CLASS_RUNS}), {}",
+        slowest.0, slowest.1
+    );
+    slowest.0
 }
 
 fn calibrate() {

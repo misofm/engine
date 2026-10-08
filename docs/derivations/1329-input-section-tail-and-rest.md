@@ -261,6 +261,63 @@ about 60 groups).
   two roundings before the product with it (`(1 - u64)^3 (1 + 4 u64) >= 1`). The radius's growth
   term passes through three (a sum, a product, the outer addition); its relative shortfall of at
   most `10 u64^2` is absorbed by the margin of `8 u64 ||R||` above.
+* **The certified flush (#1474).** The walk's relative rounding model (`1 + 4 u64` per summand,
+  `nu = 8 u64 ||R||` for the first state's step) holds only when no result underflows. With
+  gradual underflow a rounding obeys `fl(x op y) = (x op y)(1 + d) + e`, `|d| <= u64`,
+  `|e| <= 2^-1075`, `d e = 0`, and `e = 0` for a sum or difference (a sum that underflows is
+  exact) [HIGHAM-ASNA, §2.1; IEEE-754, §7.5]. Without a flush, a band of near-top designs carried a
+  subnormal error radius or first state through its whole walk (#1474's diagnosis: about 450,000
+  frames each), outside that model and at about 1.8 times the cost per frame. The walk now fixes
+  `tau = 2^-600` and treats each quantity it propagates by its kind:
+  * **Non-negative radii and majorants** (the first section's error radius `e`, the later
+    sections' state majorants `Gbar_k`, each frame's input and output majorants `a_k`, `o`, and
+    the walked deviation components `E_k`, `x_k` and output value): each is stored as
+    `max(fl(step), tau)`, rounded up to `tau`, never down. A larger non-negative value is still a
+    majorant under the non-negative propagation, so by induction the computed recursion still
+    bounds the exact one. The step of the deviation that builds its matrix (`linear_map`) stays
+    linear; the floored step `F(x) = max(L x, tau)` is monotone, so `F(x1) <= x1` gives
+    `F(F(x1)) <= F(x1)`, and once the walked deviation falls it falls for good, and `L x <=
+    F(x_prev) = x` carries the non-increase to the closed-form powers.
+  * **The first section's signed state** `s`, propagated by its signed `A`: a word below `tau` in
+    magnitude is set to zero, and `tau` per flushed word is added to `e` in the same step, rounded
+    up (one rounded sum and the product with `1 + 4 u64`). Each column of `R` has a 2-norm of one,
+    so a flushed word's `V`-norm is its magnitude, below `tau`, and `e` still covers the exact
+    state. Rounding the state up to `tau` would bound nothing, since `A` is signed.
+* **The underflow term (the second of #1474's two proofs).** Every floored value bounds what it
+  should. Let `T` be the exact quantity, `E >= T` the real value of its bound's expression on the
+  computed inputs, and `r` the step's roundings. If `T <= tau`, the floor covers it. Otherwise
+  `E > tau`, and the computed step is at least `(1 + u64 - 9 u64^2) E - 2 r 2^-1075` (with
+  `1 + 2^-30` instead, `(1 + 2^-31) E - 2 r 2^-1075`), which is at least `E` because
+  `(u64 - 9 u64^2) tau >= 2^-54 tau = 2^-654` exceeds `2 r 2^-1075` for every `r` below `2^420`.
+  The first state's step: a word that is not flushed is zero or at least `tau`, so
+  `|s1| + |s2| >= tau` whenever the step is not exactly zero; its four products lose at most
+  `4 ||R|| 2^-1075` in the `V`-norm to underflow, far below the `3.7 u64 ||R|| tau` by which
+  `nu (|s1| + |s2|)` exceeds the relative step error `4.26 u64 ||R|| (|s1| + |s2|)`.
+* **The closing terms.** The suffix sums, the contraction remainder, the suprema, the deviation's
+  powers, `p_star` and the rest bound are sums of non-negative terms and products of computed
+  bounds; each is compared with a threshold of at least `TAIL_FLOOR / 4 / g_t` or enters a
+  quotient or a sum through an inflation of at least `1 + 2^-31` (`SLACK`, `accumulation`) on a
+  value at least that threshold or at least the impulse's first frames. An underflow there loses
+  at most `2^-1075` per rounding, and `v_norm` of the first state is replaced by the bound
+  `|s1| + |s2|` when both words are below `2^-500` (both squares can underflow there), so every
+  absolute loss is below `2^-1000` against a relative margin of at least `2^-31` times a value
+  near `1e-9` or more. The comparisons and quotients therefore keep their direction.
+* **`tau` cannot keep the walk from finishing.** Every floor adds at most `tau` per quantity per
+  frame. The remainder test needs `(I - M)^-1 m(now) < threshold / 16`: by monotonicity the
+  floored state is at most the unfloored one plus `tau (I - M)^-1 1` (plus `2 tau` per flushed
+  word in `e`), and the remainder applies `(I - M)^-1` once more. For the builtin cascades
+  (`K <= 2`; `beta_k <= 2`, `gamma_k <= 1.42`, `|d_k| <= 1` over the builtin designs on a 0.1 %
+  cutoff grid at the four launch rates; `1 / (1 - q_k) <= 2^53` for any `f64` `q_k` below one),
+  each entry of `(I - M)^-1` is at most `2^53 (1 + 2.84 * 2^53) < 2^108` and each input row at most
+  `2^110`, so the floors add less than `4 * 2^110 * 2^108 * tau = 2^-380` to the remainder,
+  against `threshold / 16 >= TAIL_FLOOR / 32 / 15.85 > 2^-34`. The falling test compares each floored component with
+  its previous floored value; a component held at `tau` compares equal, and a component above it
+  falls as it did, its coupling to floored ones adding at most `tau` times the step's entries.
+  The deviation's `eps / 4` test and `p_star`'s budget see at most `tau` times the output row.
+  If a cascade outside these ranges ever left a floor share near its threshold, the walk would
+  reach its horizon and state no bound (`TailBoundError::Horizon`): soundness never depends on it.
+  The walk's bounds are unchanged: every family of `input_bound_budget.rs` and a 3,984-cascade grid
+  give the same bounds and frames, bit for bit, with and without the flush (#1474's record).
 * The `1 + 2^-30` step inflation compounds: it lengthens the stated values by a few tens of frames
   (the live `T_decay` is 18 to 19 frames above an independent recomputation without it, every
   rest 17 to 43 frames above, both in plain `f64` (`tail_contract`) and in 60-digit decimal
@@ -305,7 +362,9 @@ scale. The measurements are in the #1329 and #1433 specs' attempt records.
 ## Citations
 
 [SIMPER-SVF] and [ZAVALISHIN-TPT] for the TPT SVF and its stored-integrator form; [ORFANIDIS-ISP]
-for finite-wordlength limit cycles and state-space norms; [SMITH-SASP] for impulse-response and
+for finite-wordlength limit cycles and state-space norms; [HIGHAM-ASNA] (N. J. Higham, *Accuracy
+and Stability of Numerical Algorithms*, 2nd ed., SIAM 2002, §2.1-2.2) for the rounding model with
+gradual underflow and [IEEE-754] (IEEE Std 754-2019, §7.5) for underflow and subnormal results; [SMITH-SASP] for impulse-response and
 state-space analysis of IIR filters. The W3C Web Audio `AudioNode.tailTime` notion (a node keeps
 producing non-silent output for a stated time after its input becomes silent) is the external
 analogue of `T_decay`.

@@ -106,6 +106,30 @@ const U64: f64 = 1.0 / 9_007_199_254_740_992.0;
 /// step error it bounds by a factor above 1.8 ([`FIRST_STEP_ERROR`]), which absorbs it.
 const STEP_UP: f64 = 1.0 + 4.0 * U64;
 
+/// `tau = 2^-600`, the certified flush of the fixed-cascade walk (issue #1474). Every non-negative
+/// radius and majorant the walk propagates (the first section's error radius, the later sections'
+/// state majorants, the input and output majorants of each frame, the deviation components) is
+/// rounded **up** to `tau` when it falls below it, and a word of the first section's signed state
+/// below `tau` in magnitude is flushed to zero with `tau` added to its error radius (each column of
+/// `R` has a 2-norm of one, so a flushed word's `V`-norm is its magnitude). So no propagated
+/// quantity is subnormal, and the walk's cost per frame does not depend on the design (#1474's
+/// diagnosis: subnormal operands made a band of near-top designs about 1.8 times as slow).
+///
+/// **Underflow.** [`STEP_UP`]'s and [`SLACK`]'s relative arguments assume no result underflows. A
+/// product whose result is subnormal errs by an absolute `2^-1075` at most (a sum or difference
+/// that underflows is exact). Every floored value is at least the value it bounds: if that value
+/// is at most `tau`, the floor covers it; if it is above `tau`, the evaluation's relative margin
+/// (at least `u - 9 u^2` of [`STEP_UP`], `2^-31` of [`SLACK`]) is at least `2^-54 tau = 2^-654`,
+/// far above the at most `2 r 2^-1075` that `r` roundings can lose to underflow for any `r` below
+/// `2^420`. A word of the first state that is not flushed is at least `tau` in magnitude, so the
+/// step error `nu (|s_1| + |s_2|)` keeps its margin of `3.7 u64 ||R|| tau` over the relative error
+/// it bounds, above the at most `4 ||R|| 2^-1075` its four products can lose to underflow. The
+/// derivation (`docs/derivations/1329-input-section-tail-and-rest.md`) states the closing terms.
+pub(crate) const TAU: f64 = f64::from_bits((1023 - 600) << 52);
+
+/// `2^-500`: a state word at or above it has a normal square ([`Majorants::remainders`]).
+const SQUARE_SAFE: f64 = f64::from_bits((1023 - 500) << 52);
+
 /// The relative error of a sum of `terms` non-negative `f64` values, as an inflation:
 /// `(n - 1) u / (1 - (n - 1) u)` at most, bounded here by `2 n u` (with `n u` far below one).
 fn accumulation(terms: u64) -> f64 {
@@ -1797,31 +1821,56 @@ impl<'a> Majorants<'a> {
             * (self.c_terms[0] * first[0].abs()
                 + self.c_terms[1] * first[1].abs()
                 + self.d_terms * impulse);
-        out.input[1] = ((c[0] * first[0] + c[1] * first[1] + self.d * impulse).abs()
+        // Every non-negative majorant is rounded up to [`TAU`] (issue #1474).
+        out.input[1] = (((c[0] * first[0] + c[1] * first[1] + self.d * impulse).abs()
             + output_rounding
             + self.constants[0].gamma * self.first_error)
-            * STEP_UP;
+            * STEP_UP)
+            .max(TAU);
         for i in 1..k {
             out.state[i] = self.later[i - 1];
-            out.input[i + 1] = (self.constants[i].gamma * out.state[i]
+            out.input[i + 1] = ((self.constants[i].gamma * out.state[i]
                 + self.constants[i].delta * out.input[i])
-                * STEP_UP;
+                * STEP_UP)
+                .max(TAU);
         }
         // Advance.
         let (a, b) = (self.a, self.b);
-        self.first_error = (self.constants[0].q * self.first_error
+        self.first_error = ((self.constants[0].q * self.first_error
             + FIRST_STEP_ERROR * (first[0].abs() + first[1].abs()))
-            * STEP_UP;
+            * STEP_UP)
+            .max(TAU);
         self.first = [
             a[0][0] * first[0] + a[0][1] * first[1] + b[0] * impulse,
             a[1][0] * first[0] + a[1][1] * first[1] + b[1] * impulse,
         ];
+        self.flush_first();
         for i in 1..k {
-            self.later[i - 1] = (self.constants[i].q * self.later[i - 1]
+            self.later[i - 1] = ((self.constants[i].q * self.later[i - 1]
                 + self.constants[i].beta * out.input[i])
-                * STEP_UP;
+                * STEP_UP)
+                .max(TAU);
         }
         self.frame += 1;
+    }
+
+    /// The certified flush of the first section's signed state (issue #1474): a word below [`TAU`]
+    /// in magnitude is set to zero, and `tau` per flushed word is added to the error radius, rounded
+    /// up. Each column of `R` has a 2-norm of one, so the flushed part's `V`-norm is at most the
+    /// flushed words' magnitudes, each below `tau`: the radius still covers the exact state. The
+    /// sum of two normal values rounds once and the product with [`STEP_UP`] once more, so each
+    /// summand keeps at least `(1 - u)^2 (1 + 4u) >= 1` times its value.
+    fn flush_first(&mut self) {
+        let mut flushed = 0.0;
+        for word in &mut self.first {
+            if *word != 0.0 && word.abs() < TAU {
+                *word = 0.0;
+                flushed += TAU;
+            }
+        }
+        if flushed > 0.0 {
+            self.first_error = (self.first_error + flushed) * STEP_UP;
+        }
     }
 
     /// Closed-form remainders `sum_{t >= now}` of every state majorant, every input majorant and
@@ -1832,8 +1881,16 @@ impl<'a> Majorants<'a> {
     /// `(I - M)^-1 m(now)`, solved by forward substitution.
     fn remainders(&self) -> (Vec<f64>, Vec<f64>) {
         let k = self.constants.len();
-        // The first section's exact state is within `first_error` of the computed one.
-        let mut current = std::vec![v_norm(self.first) * SLACK + self.first_error];
+        // The first section's exact state is within `first_error` of the computed one. `v_norm`
+        // squares the words, and below `2^-500` both squares can underflow (issue #1474), so a
+        // state that small is bounded by `|s_1| + |s_2|` instead (each column of `R` has a 2-norm
+        // of one); a larger word's square is normal and the smaller one's share is below `u`.
+        let norm = if self.first.iter().all(|word| word.abs() < SQUARE_SAFE) {
+            (self.first[0].abs() + self.first[1].abs()) * SLACK
+        } else {
+            v_norm(self.first) * SLACK
+        };
+        let mut current = std::vec![norm + self.first_error];
         current.extend(self.later.iter().copied());
         // `alpha[i][j]`: coefficient of `Gbar_j` in `a_i` for `t >= now >= 1`.
         let mut alpha = std::vec![std::vec![0.0; k]; k + 1];
@@ -2006,6 +2063,16 @@ impl<'a> Deviation<'a> {
         core::mem::swap(&mut self.error, &mut self.previous_error);
         core::mem::swap(&mut self.reference, &mut self.previous_reference);
         difference * SLACK
+    }
+
+    /// The certified flush of the walked deviation (issue #1474): every component below [`TAU`]
+    /// is rounded up to it. Kept out of [`Self::step`], so [`Self::linear_map`] stays the linear
+    /// step. The floored step `max(L x, tau)` is monotone, so once it falls it falls for good,
+    /// as the linear one does.
+    fn floor(&mut self) {
+        for value in self.error.iter_mut().chain(&mut self.reference) {
+            *value = value.max(TAU);
+        }
     }
 
     /// The current state `(E_1..E_K, x_1..x_K)`.
@@ -2253,6 +2320,7 @@ fn fixed_cascade_walk(
     let f = law.per_step();
     let stall = f * absolute_output;
     let mut deviation = Deviation::at_end(&constants, &state_sup, &input_sup);
+    deviation.floor();
     // The relative deviation must fall below half of its share (`eps / 4`) for good, leaving the
     // other half for the flush stall at `p_star`. The propagated system is non-negative, so once
     // every component falls it falls for good.
@@ -2266,7 +2334,8 @@ fn fixed_cascade_walk(
         if !take_frame(walked, horizon) {
             return None;
         }
-        let value = deviation.step();
+        let value = deviation.step().max(TAU);
+        deviation.floor();
         values.push(value);
         if value >= quarter {
             tail_deviation = frame + 1;
@@ -2352,7 +2421,214 @@ fn fixed_cascade_walk(
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushLaw, SvfWords, fixed_cascade, fixed_cascade_within, v_operator_norm};
+    use super::{
+        Deviation, FlushLaw, MajorantFrame, Majorants, STEP_UP, SectionConstants, SvfWords, TAU,
+        U64, fixed_cascade, fixed_cascade_within, v_norm, v_operator_norm,
+    };
+
+    /// The `f32` words `[c1, a2, a3, m0, m1, m2]` of a 48 kHz design (the builtin section design,
+    /// `builtins::test_support::section_words`).
+    fn words(bits: [u32; 6]) -> SvfWords {
+        SvfWords::from_f32(bits.map(f32::from_bits))
+    }
+
+    /// The HPF at 0.778, 0.80 and 0.74 of the 48 kHz maximum (18,671.559, 19,199.547 and
+    /// 17,759.582 Hz): the near-top band of #1474, where the first section's error radius (0.778)
+    /// or its state and radius (0.80, 0.74) stayed subnormal for the whole majorant pass.
+    const BAND_HPFS: [[u32; 6]; 3] = [
+        [
+            0x3f6b_715e,
+            0x3e62_2581,
+            0x3f1b_7ced,
+            0x3f80_0000,
+            0xbfb5_04f3,
+            0xbf80_0000,
+        ],
+        [
+            0x3f6e_ba8d,
+            0x3e54_99cd,
+            0x3f23_9020,
+            0x3f80_0000,
+            0xbfb5_04f3,
+            0xbf80_0000,
+        ],
+        [
+            0x3f65_5a61,
+            0x3e76_4aa0,
+            0x3f0e_469e,
+            0x3f80_0000,
+            0xbfb5_04f3,
+            0xbf80_0000,
+        ],
+    ];
+
+    /// The LPF at the 48 kHz maximum (23,999.434 Hz).
+    const TOP_LPF: [u32; 6] = [0x3f80_0000, 0x381b_7ad0, 0x3f7f_fc90, 0, 0, 0x3f80_0000];
+
+    /// A 300 Hz low-pass at 44.1 kHz.
+    const LOW_LPF: [u32; 6] = [0x3cf3_e39f, 0x3ca9_e351, 0x39e8_6719, 0, 0, 0x3f80_0000];
+
+    /// A subnormal value: what the unflushed walk propagated in the band.
+    const SUBNORMAL: f64 = 1.0e-310;
+
+    /// Issue #1474 gate 5: a non-negative radius or majorant below `tau` propagates as `tau`, never
+    /// below it. The exact values these bound are positive (`q e`, `beta a`, `gamma Gbar`), so a
+    /// flush that rounds down, keeps the subnormal, or flushes to zero is below `tau` here.
+    #[test]
+    fn a_non_negative_majorant_below_tau_propagates_as_tau() {
+        // A second section with `beta < 1` and `|d| < 1` (a 300 Hz low-pass at 44.1 kHz), so that
+        // `beta tau` and `|d| tau` are below `tau` and only the floor lifts them.
+        let sections = [words(BAND_HPFS[0]), words(LOW_LPF)];
+        let constants: [SectionConstants; 2] = [
+            SectionConstants::of(&sections[0]),
+            SectionConstants::of(&sections[1]),
+        ];
+        assert!(constants[1].beta < 0.5 && constants[1].delta < 0.5);
+        let mut majorants = Majorants::new(&constants, &sections[0]);
+        majorants.frame = 1;
+        majorants.first_error = SUBNORMAL;
+        majorants.later[0] = SUBNORMAL;
+        let mut frame = MajorantFrame::new(2);
+        majorants.step(&mut frame);
+        assert_eq!(
+            majorants.first_error, TAU,
+            "the first section's error radius"
+        );
+        assert_eq!(
+            majorants.later[0], TAU,
+            "the second section's state majorant"
+        );
+        assert_eq!(
+            frame.input[1..],
+            [TAU, TAU],
+            "the input and output majorants"
+        );
+
+        let mut deviation = Deviation {
+            constants: &constants,
+            error: std::vec![SUBNORMAL; 2],
+            reference: std::vec![SUBNORMAL; 2],
+            previous_error: std::vec![0.0; 2],
+            previous_reference: std::vec![0.0; 2],
+        };
+        deviation.step();
+        deviation.floor();
+        assert_eq!(deviation.state(), [TAU; 4], "the deviation components");
+    }
+
+    /// Issue #1474 gate 5: a word of the first section's signed state below `tau` is flushed to
+    /// zero and `tau` enters the error radius, so the radius still covers the exact state; a word
+    /// at or above `tau` is kept. Red when the state is flushed without the addition (the radius
+    /// then falls short of the flushed state), when it is rounded up to `tau` instead of flushed,
+    /// or when words above `tau` are flushed with only `tau` added.
+    #[test]
+    fn the_first_state_below_tau_is_flushed_to_zero_and_its_magnitude_enters_the_radius() {
+        let section = words(BAND_HPFS[1]);
+        let constants = [SectionConstants::of(&section)];
+        let mut majorants = Majorants::new(&constants, &section);
+        majorants.frame = 1;
+        let state = [0.75 * TAU, -0.5 * TAU];
+        majorants.first = state;
+        majorants.first_error = 4.0 * TAU;
+        let a = section.a();
+        let next = [
+            a[0][0] * state[0] + a[0][1] * state[1],
+            a[1][0] * state[0] + a[1][1] * state[1],
+        ];
+        assert!(next.iter().all(|word| *word != 0.0 && word.abs() < TAU));
+        majorants.step(&mut MajorantFrame::new(1));
+        assert_eq!(majorants.first, [0.0, 0.0], "flushed to zero");
+        // The exact state is within `q e + nu (|s_1| + |s_2|)` of the unflushed `next`, and the
+        // flush moved the computed state by `||next||_V`.
+        // `||next||_V`, scaled by `2^600` so that its squares do not underflow.
+        let flushed = v_norm(next.map(|word| word / TAU)) * TAU;
+        let propagated = constants[0].q * 4.0 * TAU;
+        assert!(
+            majorants.first_error >= propagated + flushed,
+            "radius {:e} against {:e}",
+            majorants.first_error,
+            propagated + flushed
+        );
+
+        let kept = [2.0 * TAU, -3.0 * TAU];
+        majorants.first = kept;
+        majorants.first_error = 4.0 * TAU;
+        majorants.flush_first();
+        assert_eq!(
+            (majorants.first, majorants.first_error),
+            (kept, 4.0 * TAU),
+            "words at or above tau"
+        );
+    }
+
+    /// Issue #1474: a first state too small for `v_norm`'s squares still enters the closed-form
+    /// remainder at its `V`-norm or more. Red when the remainder takes `v_norm` of this state (words
+    /// near `1e-170`, above `tau`): both squares round to zero and the state drops out of the sum.
+    #[test]
+    fn a_tiny_first_state_still_enters_the_remainder() {
+        let section = words(BAND_HPFS[0]);
+        let constants = [SectionConstants::of(&section)];
+        let mut majorants = Majorants::new(&constants, &section);
+        let state = [3.0e-170, -2.0e-170];
+        majorants.first = state;
+        majorants.first_error = 0.0;
+        let exact = v_norm(state.map(|word| word / TAU)) * TAU;
+        let (sums, _) = majorants.remainders();
+        assert!(
+            sums[0] >= exact / (1.0 - constants[0].q),
+            "{:e} against {:e}",
+            sums[0],
+            exact / (1.0 - constants[0].q)
+        );
+    }
+
+    /// Issue #1474 gate 5: the derivation's underflow condition holds on the band designs. After
+    /// every frame of each band design's majorant pass (as long as its real walk), every
+    /// propagated quantity is at least `tau` and every word of the first state is zero or at least
+    /// `tau` in magnitude, so a rounding that underflows loses at most `2^-1075` against a relative
+    /// margin of at least `2^-54 tau`. Red when the radius's floor or the state's flush is removed,
+    /// or when the flush runs before the state's step instead of after it: the band then leaves a
+    /// quantity below `tau` at the end of a frame. (The deviation walk of these designs is six
+    /// frames far above `tau`; its floor is checked by the first test.)
+    #[test]
+    fn the_band_designs_walk_with_every_propagated_quantity_at_least_tau() {
+        // `r` roundings lose at most `2 r 2^-1075`; the relative margin is at least `2^-54 tau`.
+        let underflow = 2.0 * 64.0 * f64::from_bits(1);
+        assert!(underflow < (U64 - 9.0 * U64 * U64) * TAU / 1.0e100);
+        assert!(STEP_UP > 1.0 && TAU.is_normal());
+        let law = FlushLaw {
+            flush_eps: 1.0e-20,
+            rest_eps: 1.0e-14,
+            silence_frames: 2_400,
+        };
+        for hpf in BAND_HPFS {
+            let sections = [words(hpf), words(TOP_LPF)];
+            let constants: [SectionConstants; 2] = [
+                SectionConstants::of(&sections[0]),
+                SectionConstants::of(&sections[1]),
+            ];
+            let walked =
+                fixed_cascade_within(&sections, 15.848_932, &law, [15.848_932, 1.0e6], u64::MAX);
+            assert!(walked.frames > 400_000, "{hpf:08x?}: a long near-top walk");
+            let mut majorants = Majorants::new(&constants, &sections[0]);
+            let mut frame = MajorantFrame::new(2);
+            for _ in 0..walked.frames {
+                majorants.step(&mut frame);
+                let at_least_tau = |value: f64| value >= TAU;
+                assert!(
+                    majorants
+                        .first
+                        .iter()
+                        .all(|word| *word == 0.0 || word.abs() >= TAU)
+                        && at_least_tau(majorants.first_error)
+                        && majorants.later.iter().all(|value| at_least_tau(*value))
+                        && frame.input[1..].iter().all(|value| at_least_tau(*value)),
+                    "{hpf:08x?}: frame {}",
+                    majorants.frame
+                );
+            }
+        }
+    }
 
     /// Issue #1457 (attempt 2 verdict, m2): a walk under every horizon from zero past its length
     /// takes at most that horizon, exactly the horizon when it stops, and finishes with
