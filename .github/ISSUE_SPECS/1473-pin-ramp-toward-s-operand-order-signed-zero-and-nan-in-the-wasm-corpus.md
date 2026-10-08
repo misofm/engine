@@ -114,3 +114,125 @@ digest reaches `process_block` today.
 - #1459 and #1455 (stream G).
 
 ## Attempt record
+
+### Attempt 1 (2026-10-08, implementer)
+
+All code anchors verified on `codex/d15-stream-g3` at `3c1f4ee23` before starting: `ramp_toward`
+(`crates/lane/src/kernels/builtins.rs:222-227`), `run_case`/`D1_DIGESTS` in
+`crates/effect-runtime/src/corpus.rs`, the multiband corpus that never calls `process_block`, and
+`process_block`/`run_segment`/`Side::arms` in `crates/multiband-compressor/src/lib.rs`. No product
+code changed (D4).
+
+**The ramp case (D1, D2).** Home: the effect-runtime D1 corpus, case 9 `ramp_toward` (G5 global
+case 98), because it is a lane-generic function and no production effect reaches signed-zero
+endpoints in a reachable state (every effect admits parameter words through `normalize_zero`).
+Points 0..269 are the directed triples `current x step x target` over `current` in
+`{+0, -0, 1, -1, 0.25}`, `step` in `{+0, -0, 1, -1, 0.5, -0.5, 2, -2, NaN (0x7fd0_1473)}` and
+`target` in `{+0, -0, 1, -1, 0.25, 0.75}`: `next` equal in value to an endpoint of the opposite zero
+sign (as `low` and as `high`), `current` and `target` zeros of opposite sign, `next` NaN from a NaN
+`step`, and ordinary in-range and out-of-range points. Points 270.. are drawn on a `2^-16` grid
+(`current`, `target` in `[-2, 2]`, `step` in `[-1, 1]`), exact on every target. Every NaN result
+word is replaced by `NAN_TOKEN = 0x7fc0_0000` (an integer test on the bits) before hashing, so the
+pin depends on NaN-ness only. The module's "No NaN" doc now states this one exception and its
+reason; `tests/determinism.rs` `the_corpus_is_nan_free` is amended, not removed: every other case
+is still NaN-free, `ramp_toward` emits NaN only as the token, and it emits the token at least once.
+`every_case_has_a_wide_output_spread` keeps the `POINTS / 4` floor for the case (a `2^-12` grid
+first failed it with 15,988 distinct words; the `2^-16` grid passes).
+
+**The multiband case (D3).** Case 6 `process_block/segment_dispatch` (G5 global case 110). Eight
+tracks, prepared in groups of `W` as one `Instance<L, W>` from `initial_defaults` and
+`expected_prepared_metadata` with the registry's tail-bound entry, rendered through `render` and so
+the product `process_block`, 4 blocks of 128 frames at 48 kHz, in `DualMono` then `Maximum`, read
+back lane major (`mode, track, channel, frame`): 2 x 8 x 2 x 512 = `POINTS` words, so the crate's
+existing `POINTS`-shaped finiteness test covers it unchanged. Arming needs `N_SILENCE` = 4,096 zero
+frames, which no 512-frame render reaches, so four channels start from a restored crossover state
+through the product's plan-swap door (`Instance::snapshot`, patched filter and silence words,
+`Instance::restore`, validated like any payload): 80 Hz crossover, words of order `1e-16` (inside
+`[FLUSH_EPS, REST_EPS)`), unequal band makeups so an unzeroed word reaches the output.
+
+| track | channel | counter | held stages | arming segment | defends |
+|---|---|---|---|---|---|
+| 0 | left | 3,990 | `a` only | block 0, first after restore | stage `b`-only, right-only, all-unarmed |
+| 1 | left | 3,900 | `b` only | block 1 | stage `a`-only, right-only, all-unarmed |
+| 2 | right | 3,800 | both | block 2's ramping head (armed) | left-only, all-unarmed |
+| 3 | right | 3,620 | both | block 3's flat tail (head unarmed) | left-only, all-unarmed |
+
+Automation points on tracks 2 and 3 (their own seeded channels) split blocks 2 and 3 into a 63-frame
+ramping head and a flat tail, so all four `run_segment` forms run (ramping x armable) and block 3
+advances the counter over its unarmed head with `silence_skip_block`. Every other channel is live
+with 23-frame zero gaps. First draft found a width dependence: with the split point on a live track
+(5), the W8 bank split track 0's block and its stage `a` fed stage `b` before the arming segment,
+so the stage-`b`-only mutant moved scalar and simd4 but not simd8; the points were moved to the
+seeded tracks, so each arming segment is the same at every width, and the case was re-derived
+before its pin was written.
+
+**Pins.** Both rows come from the scalar oracle `g5_native_digests_match_pins` prints, equal at
+scalar, simd4 and simd8 before pinning, and no other case moved: `D1_DIGESTS[9]` =
+`ae134091…97f24de6`, `corpus_digests.in` row 7 = `8e2cee2c…a93b14a1`. Inserting the two cases
+moves later G5 global indices up (the gate-expander `clamped_ramp` case, 124 at #1459, is now
+126); every family's pins are indexed in their own crates, and `wasm-gate-corpus` derives its
+counts from `CASE_COUNT` (doc changes only there).
+
+**Gate 2 (red, operand order).** Each mutant applied to `ramp_toward`, then
+`cargo test --release -p wasm-gates --test g5_native_corpus g5_native_digests_match_pins`:
+
+| mutant | G5 | other G5 cases moved | existing native tests red |
+|---|---|---|---|
+| `L::min(L::max(next, low), high)` | case 98 red at scalar, simd4, simd8 | none | `lane` `ramp_toward_holds_the_target_and_keeps_in_range_bits_at_every_width`, `effect-runtime` `negative_zero_remains_armed_and_snaps_back_to_its_sign`, `the_corpus_is_nan_free` (no token) |
+| `L::max(L::min(next, high), low)` | case 98 red at all three | none | same three |
+| NaN hider `r = min(high, max(low, next)); select(r == r, r, low)` | case 98 red at all three | none | `ramp_toward_holds_…`, `the_corpus_is_nan_free` |
+
+Reverted: green (7 of 7 G5 tests).
+
+**Gate 3 (red, dispatch).** Each mutant applied to `process_block`/`Side::arms`, same command:
+
+| mutant | G5 | other G5 cases moved | existing native tests red (`-p multiband-compressor`) |
+|---|---|---|---|
+| arming reads the left channel only | case 110 red at all three | none | `either_channel_and_either_stage_arm_the_crossover` |
+| arming reads the right channel only | case 110 red at all three | none | same |
+| `svf_state_held([a])` (stage `a` only) | case 110 red at all three | none | same |
+| `svf_state_held([b])` (stage `b` only) | case 110 red at all three | none | same |
+| every segment unarmed (`armable = BYPASS`) | case 110 red at all three | none | same, and `the_crossover_joint_flush_arms_after_its_inputs_silence` |
+| every segment armed (`armable = true`) | green, by construction | none | — |
+
+Every segment forced armed changes no bit, by construction: a segment runs unarmed only when
+`Side::arms` is false on both sides, and there `silence_armable_holding` proves every lane's rest
+threshold is `+0.0` or the lane holds no word for the joint term to zero, so `flush_pair(n1, n2,
+rest)` equals two per-word flushes, and `silence_skip_block` leaves each counter where the frame
+loop's `silence_step` would. Reverted: green.
+
+**Gate 4.** No existing G5 case moved under any mutant above. Each mutant is also caught natively
+by an existing crate test (listed), as expected: those tests do not run in the wasm guest. The new
+cases are the only G5 digests that do, so a `simd128` lowering of `Lane::min`/`max` that swaps
+operands or hides a NaN, or a wasm difference in the per-segment dispatch, turns them red under
+wasm and nothing else in the wasm leg.
+
+**Test value.**
+- `runtime/ramp_toward`: a wasm `simd128` lowering (or a `ramp_toward` rewrite) that swaps the
+  `pmin`/`pmax` operands, nests them the other way, or hides a NaN `next` turns it red under wasm;
+  no other wasm digest reaches those points (#1459 verdict; measured again above).
+- `multiband/process_block/segment_dispatch`: a wasm difference in which segments arm (either
+  channel, either stage) or in the unarmed form's bits turns it red under wasm; no other wasm digest
+  reaches `process_block`.
+- `the_corpus_is_nan_free` (amended): a case that hashes a NaN payload instead of the token, or a
+  `ramp_toward` case that no longer reaches its NaN arm, turns it red. The NaN `step` carries the
+  payload `0x7fd0_1473`, not the token's, so a native `current + step` keeps a payload the token
+  mapping must replace: dropping the mapping (`if false && …`) turned it red natively ("ramp_toward
+  point 48 is a NaN payload"), reverted green; the pin is unchanged by the payload choice, since
+  only NaN-ness is hashed. It is also red under all three gate-2 mutants, which hide the NaN.
+
+**Gates (final tree).**
+
+| gate | command | result |
+|---|---|---|
+| 1 (pins) | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` | pass, 128 tests, 0 failed; `g5_native_digests_match_pins` green with no existing pin moved |
+| 1 (wasm) | `bash scripts/run-wasm-gates.sh` | pass: native leg 146 cases / 370 comparisons, wasm `simd128` leg 146 cases / 258 comparisons, 0 mismatches each (both new cases replayed at scalar and simd4); V8 spill gate ok |
+| crates | `cargo test --locked --release -p effect-runtime -p multiband-compressor` | pass, 149 tests, 0 failed |
+| 5 | `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; `bash scripts/check-workspace-policy.sh` | all pass |
+| extra | `bash scripts/check-realtime-policy.sh` | pass |
+| worklet | shipped AudioWorklet module (`build-web-audioworklet.sh --module-only`) at the parent `3c1f4ee23` (export) and as built by `run-wasm-gates.sh` on this tree | identical: `70fd8a43…29deddcc` (3,115,873 B), named twin `1d350cfa…8fdbc032`; the corpus modules do not reach the browser artifact, so the rest of the worklet chain has nothing to check |
+
+**Open items.** `tools/wasm-gates/tests/g5_native_corpus.rs`'s module doc still says "the corpus
+carries no NaN into a digest"; it is outside this slice's authorized paths, and its
+`g5_lane_corpus_is_finite` test covers lane cases only, which stay NaN-free, so nothing there is
+wrong in behaviour, only in that sentence's reach.

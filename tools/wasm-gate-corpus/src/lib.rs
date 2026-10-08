@@ -15,9 +15,11 @@
 //!    on every target — which is why every case is digested at every width a build has: all
 //!    three where `avx2` is enabled, and `W = 1` and `W = 4` in the 4-lane (NEON/simd128) builds,
 //!    which have no eight-lane type (issues #1110 and #1112; see [`WIDTHS`]).
-//! 2. **No NaN reaches a digest.** D5 excludes NaN payloads because wasm canonicalises them. Every
-//!    case is built so its outputs are finite, and the host crate asserts that rather than assuming
-//!    it.
+//! 2. **No NaN payload reaches a digest.** D5 excludes NaN payloads because wasm canonicalises
+//!    them. Every case is built so its outputs are finite, and the host crate asserts that rather
+//!    than assuming it, with one exception: the delegated `runtime/ramp_toward` case pins that a
+//!    NaN `next` passes through `lane::kernels::ramp_toward`, so it replaces every NaN result word
+//!    with one fixed token before hashing and pins NaN-ness, never a payload (issue #1473).
 //! 3. **The corpus is frozen.** [`LANE_DIGESTS`] pins this case list, these seeds and this
 //!    operation order. Changing one of them is a re-pin, permitted only from the scalar `Lane`
 //!    oracle and only with the change stated in the commit message (master plan §8).
@@ -131,8 +133,10 @@ pub const MATH_CASE_COUNT: usize = math_corpus::CASE_COUNT;
 
 /// Cases delegated to [`effect_runtime::corpus`] (gate D1, replayed under wasm).
 ///
-/// These are lane-generic — the dB curve a compressor rides, the followers that ride it, and the
-/// level conversions between them — so unlike the math cases they are digested at every width.
+/// These are lane-generic — the dB curve a compressor rides, the followers that ride it, the
+/// level conversions between them, and the clamped ramp step every effect ramp takes, at the
+/// points where its `min`/`max` operand order decides the bits (signed zeros and a NaN `next`,
+/// issue #1473) — so unlike the math cases they are digested at every width.
 pub const RUNTIME_CASE_COUNT: usize = runtime_corpus::CASE_COUNT;
 
 /// Cases delegated to [`transient_shaper::corpus`], replayed under wasm.
@@ -155,7 +159,9 @@ pub const DELAY_CASE_COUNT: usize = delay_corpus::CASE_COUNT;
 ///
 /// Lane generic, and their pins live in that crate: the Linkwitz-Riley split with its fused
 /// all-pass tap and the D7 flush of its four filter words, the band's dB chain through
-/// `log2_lane`/`exp2_lane`, the branching gain smoother and the stereo detector link.
+/// `log2_lane`/`exp2_lane`, the branching gain smoother and the stereo detector link, and one
+/// case rendered through the product `process_block` whose segments run the armed and the
+/// unarmed crossover, so a target that dispatched a segment differently moves it (issue #1473).
 pub const MULTIBAND_CASE_COUNT: usize = multiband_corpus::CASE_COUNT;
 
 /// Cases delegated to [`soft_clip::corpus`] (issue #91), replayed under wasm.
