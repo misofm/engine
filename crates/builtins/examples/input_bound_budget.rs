@@ -34,10 +34,16 @@
 //!   it, into the LPF at the maximum, at 0 and +24 dB), of typical designs (an HPF at 20-80 Hz into
 //!   an LPF at 16-20 kHz, at 0 and +24 dB) and of gate 2's cheap two-section designs (at 0, +12 and
 //!   +24 dB). Each point's time is the median of `CLASS_RUNS` measured sweeps after one warmup
-//!   sweep, reported with its spread (minimum to maximum), so one noisy sample cannot move the
-//!   class. The frame-equivalent (`FRAME_EQUIVALENT_NS`) is the maximum sample over every point
-//!   of every class, rounded up (root's 2026-10-08 rulings: a stated worst case is a bound, and a
-//!   bound does not pick which outlier to believe).
+//!   sweep, reported with its spread (minimum to maximum); descriptive. The frame-equivalent
+//!   (`FRAME_EQUIVALENT_NS`, root's ruling of 2026-10-08 on #1465) is the smallest value on a
+//!   half-nanosecond grid such that every recorded (measured) sample, of the fixed-cost grid and of
+//!   the frame classes, takes at most its charged frame-equivalents (frames walked plus the section
+//!   charge per section) times the frame-equivalent; the section charge is the largest fixed cost
+//!   per section in frame-equivalents, rounded up to a ten, so the two are found together. A bound
+//!   does not pick which outlier to believe; charging each sample's fixed cost with its sections
+//!   keeps a short walk's timing noise from being divided by its few frames. Calibrate prints the
+//!   binding sample, its work and its charged frame-equivalents; gate 2 prints the value its own
+//!   samples need, and the committed value is the larger.
 #![allow(missing_docs)]
 
 use builtins::test_support::{
@@ -52,10 +58,10 @@ use effect_contract::NodeTailBound;
 use std::time::Instant;
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-/// The frame-equivalent in ns: the maximum measured time of one frame over every calibration point,
-/// rounded up (#1457 Amendment 4, restated by #1474), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s
-/// doc states it.
-const FRAME_EQUIVALENT_NS: f64 = 18.5;
+/// The frame-equivalent in ns: the smallest half nanosecond that bounds every recorded sample's
+/// work by its charged frame-equivalents, of the calibration and of gate 2 (root's ruling of
+/// 2026-10-08, #1465), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s doc states it.
+const FRAME_EQUIVALENT_NS: f64 = 48.5;
 const ROUNDS: usize = 3;
 
 fn channel(trim_db: f32, hpf_hz: f32, lpf_hz: f32) -> ChannelParameters {
@@ -303,6 +309,13 @@ fn gate_two() {
             }
         }
     }
+    let need = per_charge
+        .iter()
+        .fold(0.0_f64, |need, sample| need.max(sample.0));
+    println!(
+        "frame-equivalent gate 2's measured samples need: {:.1} ns (largest design work per consumed frame-equivalent {need:.3} ns, rounded up to a half nanosecond; committed {FRAME_EQUIVALENT_NS} ns)",
+        (need * 2.0).ceil() / 2.0
+    );
     for (heading, unit, mut list) in [
         ("preparation", "ms", worst),
         ("design work", "ms", work),
@@ -383,14 +396,66 @@ fn line(points: &[(f64, f64)]) -> (f64, f64) {
 }
 
 /// One design's computation alone: a one-strip preparation with a fresh cache and no budget limit
-/// (its keying, the walk and the cache insertion). Milliseconds and frames walked.
-fn one_design(rate: u32, design: BuiltinParameters) -> (f64, u64) {
+/// (its keying, the walk and the cache insertion). Milliseconds, frames walked and sections
+/// charged (the charge net of the frames, in units of `INPUT_BOUND_SECTION_CHARGE`).
+fn one_design(rate: u32, design: BuiltinParameters) -> (f64, u64, u64) {
     let mut cache = InputBoundCache::new();
     let frames = fixed_input_frames_walked();
+    let charged = fixed_input_charged();
     let (ms, _) = milliseconds(|| {
         input_section_bounds_within(rate, [design], u64::MAX, Some(&mut cache)).expect("bounds")
     });
-    (ms, fixed_input_frames_walked() - frames)
+    let frames = fixed_input_frames_walked() - frames;
+    let fixed = fixed_input_charged() - charged - frames;
+    assert_eq!(
+        fixed % builtins::INPUT_BOUND_SECTION_CHARGE,
+        0,
+        "section charges"
+    );
+    (ms, frames, fixed / builtins::INPUT_BOUND_SECTION_CHARGE)
+}
+
+/// One recorded calibration sample: a design's measured work (ns), the frames it walked, the
+/// sections it charged and what it is.
+struct Sample {
+    ns: f64,
+    frames: u64,
+    sections: u64,
+    what: String,
+}
+
+/// The section charge a frame-equivalent of `frame_ns` gives: the largest measured fixed cost per
+/// section (`per_section_ns`) in frame-equivalents, rounded up to a ten.
+fn section_charge(per_section_ns: f64, frame_ns: f64) -> u64 {
+    ((per_section_ns / frame_ns / 10.0).ceil() as u64) * 10
+}
+
+/// Root's 2026-10-08 statistic: the smallest frame-equivalent on a half-nanosecond grid such that
+/// every recorded sample's measured work is at most its charged frame-equivalents (frames walked
+/// plus the section charge per section, the charge itself following from the frame-equivalent by
+/// [`section_charge`]) times the frame-equivalent. Returns the frame-equivalent, its section
+/// charge and the binding sample's index (the largest work per charged frame-equivalent).
+fn frame_equivalent(samples: &[Sample], per_section_ns: f64) -> (f64, u64, usize) {
+    let required = |charge: u64| {
+        samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                let charged = sample.frames + charge * sample.sections;
+                (sample.ns / charged as f64, index)
+            })
+            .fold((0.0_f64, 0), |a, b| if b.0 > a.0 { b } else { a })
+    };
+    let mut half_ns = 1_u32;
+    loop {
+        let frame_ns = f64::from(half_ns) * 0.5;
+        let charge = section_charge(per_section_ns, frame_ns);
+        let (need, binding) = required(charge);
+        if need <= frame_ns {
+            return (frame_ns, charge, binding);
+        }
+        half_ns += 1;
+    }
 }
 
 /// Measured sweeps of the frame classes after the warmup sweep: each point's ns per frame is the
@@ -447,9 +512,11 @@ fn frame_class_points(rate: u32) -> Vec<(String, Vec<(String, BuiltinParameters)
 /// the rate's measured intercept of one cascade of two sections), so that short walks are compared
 /// frame for frame with long ones. Each sweep measures every point once, so a burst of
 /// interference reaches one sample of many points, not every sample of one; sweep 0 is the
-/// warmup. Returns the slowest point's median and the maximum sample over every point (the
-/// frame-equivalent's statistic).
-fn frame_classes(fixed_ns: &[f64; 4]) -> (f64, f64) {
+/// warmup. Every measured sample is also recorded whole in `recorded` (the frame-equivalent's
+/// statistic, [`frame_equivalent`]). Returns the slowest point's median and the maximum sample
+/// over every point, both net of the fixed cost (descriptive: a short walk divides the timing
+/// noise by its few frames).
+fn frame_classes(fixed_ns: &[f64; 4], recorded: &mut Vec<Sample>) -> (f64, f64) {
     println!(
         "rate | class | slowest point | its ns per frame net of the fixed cost, median (min-max) | fastest median | frames"
     );
@@ -460,11 +527,17 @@ fn frame_classes(fixed_ns: &[f64; 4]) -> (f64, f64) {
             let mut samples = vec![Vec::with_capacity(CLASS_RUNS); points.len()];
             let mut frames = vec![0_u64; points.len()];
             for sweep in 0..=CLASS_RUNS {
-                for (point, (_, design)) in points.iter().enumerate() {
-                    let (ms, walked) = one_design(rate, *design);
+                for (point, (name, design)) in points.iter().enumerate() {
+                    let (ms, walked, sections) = one_design(rate, *design);
                     frames[point] = walked;
                     if sweep > 0 {
                         samples[point].push((ms * 1e6 - fixed_ns[slot]) / walked as f64);
+                        recorded.push(Sample {
+                            ns: ms * 1e6,
+                            frames: walked,
+                            sections,
+                            what: format!("{rate} Hz, {class}, {name}, sweep {sweep}"),
+                        });
                     }
                 }
             }
@@ -524,8 +597,9 @@ fn frame_classes(fixed_ns: &[f64; 4]) -> (f64, f64) {
 
 /// Per design class, the least-squares line of one design's time against its frames walked
 /// (warmup round 0, then two measured rounds). Returns each rate's mean measured intercept of one
-/// cascade of two sections (ns) and the largest measured fixed cost per section (ns).
-fn fixed_costs() -> ([f64; 4], f64) {
+/// cascade of two sections (ns) and the largest measured fixed cost per section (ns). Every
+/// measured design is also recorded whole in `recorded` (the frame-equivalent's statistic).
+fn fixed_costs(recorded: &mut Vec<Sample>) -> ([f64; 4], f64) {
     println!(
         "rate | round | class | designs | frames min-max | intercept us | ns per frame (slope) | intercept us per section"
     );
@@ -549,8 +623,17 @@ fn fixed_costs() -> ([f64; 4], f64) {
                 // the cache insertion), however many strips share it.
                 let points: Vec<(f64, f64)> = designs
                     .iter()
-                    .map(|design| {
-                        let (ms, frames) = one_design(rate, *design);
+                    .enumerate()
+                    .map(|(index, design)| {
+                        let (ms, frames, sections) = one_design(rate, *design);
+                        if round > 0 {
+                            recorded.push(Sample {
+                                ns: ms * 1e6,
+                                frames,
+                                sections,
+                                what: format!("{rate} Hz, round {round}, {name}, design {index}"),
+                            });
+                        }
                         (frames as f64, ms)
                     })
                     .collect();
@@ -606,16 +689,28 @@ fn fixed_costs() -> ([f64; 4], f64) {
 
 fn calibrate() {
     // The fixed costs first: the frame classes are read net of them.
-    let (two_sections, per_section) = fixed_costs();
-    let (median, maximum) = frame_classes(&two_sections);
+    let mut recorded = Vec::new();
+    let (two_sections, per_section) = fixed_costs(&mut recorded);
+    let (median, maximum) = frame_classes(&two_sections, &mut recorded);
     println!(
-        "frame-equivalent {FRAME_EQUIVALENT_NS} ns (committed); slowest class's median {median:.2} ns; largest sample over every point {maximum:.2} ns"
+        "descriptive, net of the fixed cost: slowest class's median {median:.2} ns; largest sample over every point {maximum:.2} ns"
+    );
+    let (frame_ns, charge, binding) = frame_equivalent(&recorded, per_section);
+    let sample = &recorded[binding];
+    let charged = sample.frames + charge * sample.sections;
+    println!(
+        "largest fixed cost per section {:.2} us: {:.1} frame-equivalents of {frame_ns} ns, section charge {charge} (rounded up to a ten)",
+        per_section * 1e-3,
+        per_section / frame_ns
     );
     println!(
-        "largest fixed cost per section {:.2} us: {:.1} frame-equivalents of the largest sample, {:.1} of the committed frame-equivalent",
-        per_section * 1e-3,
-        per_section / maximum,
-        per_section / FRAME_EQUIVALENT_NS
+        "frame-equivalent over {} recorded samples: {frame_ns} ns (committed {FRAME_EQUIVALENT_NS} ns); binding sample {}: work {:.0} ns, {} frames + {charge} x {} sections = {charged} charged frame-equivalents, {:.3} ns per charged frame-equivalent",
+        recorded.len(),
+        sample.what,
+        sample.ns,
+        sample.frames,
+        sample.sections,
+        sample.ns / charged as f64
     );
 }
 

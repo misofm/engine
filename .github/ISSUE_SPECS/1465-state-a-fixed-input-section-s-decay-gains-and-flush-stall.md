@@ -142,6 +142,17 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   `docs/derivations/1329-input-section-tail-and-rest.md` (a pointer to the new note),
   `docs/EFFECT_CONTRACT_V1.md` (the fixed section's statement)
 - This spec, and its row in `docs/handoffs/decision-15-2026-10-05/STREAMS.md`
+- Named exceptions, root's rulings of 2026-10-08 (after the restarted attempt 1):
+  - `crates/builtins-compiler/src/lib.rs`, the assertion in
+    `tests::live_input_lane_reports_the_live_bound_and_plain_input_its_own` that expected
+    `NodeTailBound::ZERO` for a disabled-filter strip (`:12011-12014` at `f3e6b1539`): its expected
+    value is now `input_section_bound`'s for that strip;
+  - `crates/builtins/src/lib.rs`, the doc comment of `input_section_bounds` (`:3520-3521` at
+    `f3e6b1539`, "reports the zero bound"), made true;
+  - `crates/builtins/examples/input_bound_budget.rs`, `calibrate` and the frame-equivalent
+    (root's frame-equivalent statistic, F5);
+  - the stale budget figures in the local specs of #1468 (`:152`), #1470 (`:28-31`, `:48`) and
+    #1471 (`:21`), as under #1474's authorization.
 
 ## Non-goals
 
@@ -207,13 +218,16 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   and the 64 near-top designs among them, first preparation and rebuild) and 8 (every 64-track
   console document bounded exactly at every launch rate) pass after this change, within #1457's D1
   budget. A change to the walk's cost also reruns `target/release/examples/input_bound_budget
-  calibrate` and restates the frame-equivalent (the slowest frame class) and
-  `builtins::INPUT_BOUND_SECTION_CHARGE` from it (#1457 Amendments 3 and 4; the per-design charge
-  was removed in Amendment 4). The restated slowest class is a robust statistic, never the maximum
-  of single-shot samples (#1457 attempt 3 verdict n3): each point's ns per frame is the median of
-  repeated runs within the one invocation, stated with its spread (minimum to maximum), and
-  confirmed against gate 2's band families (their design work divided by their charged
-  frame-equivalents).
+  calibrate` and restates the frame-equivalent and
+  `builtins::INPUT_BOUND_SECTION_CHARGE` (#1457 Amendments 3 and 4; the per-design charge was
+  removed in Amendment 4). **Root's ruling of 2026-10-08 replaces the per-frame statistic:** the
+  frame-equivalent is the smallest value, rounded up to 0.5 ns, such that every recorded
+  calibration sample and every gate-2 sample satisfies: measured design work <= (frames walked +
+  `INPUT_BOUND_SECTION_CHARGE` x sections) x frame-equivalent; the section charge comes from the
+  largest measured fixed cost per section, in frame-equivalents, rounded up to a ten. `calibrate`
+  computes and prints it (the binding sample, its work, its charged frame-equivalents, the
+  value); gate 2 prints what its own samples need. The per-frame medians and spreads stay
+  descriptive.
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
@@ -238,26 +252,31 @@ restored) with at least the mutants below; each is red.
   today.
 - F1(b): a needlessly loose `D` from a certificate rate halfway between the floor rate and 1
   (`lambda' = (1 + max_s (q_s + mu_s)) / 2`, so `D_inf` is about 2 `D_floor`) exceeds the 1.5 line
-  on every row, whatever certificate the implementation builds.
+  (mutation M2: red at the first row it reaches, the 10 Hz HPF at +24 dB, `D` 3,758 against
+  1.5 x 2,299.75; the test stops at its first failure, so the other rows were not confirmed and no
+  claim is made for them).
 - F1(c): a `D` with no transient term (the asymptotic rate alone) falls below the module's own
   crossing at `k = 1`, where the module's majorant takes its longest step (the polynomial factor of
-  near-equal poles; steps 48,531, 48,136, 47,816, ... at the top pair); the brute force cannot see
-  it, because the certified `T`'s slack absorbs it.
+  near-equal poles; steps 48,531, 48,136, 47,816, ... at the top pair). It is caught first by (a)
+  (mutation M3: the 10 Hz LPF, `T_b` at `k = 1` 19,895 against 17,408 + 2,286); (c) alone still
+  catches it with (a) disabled (M3b: `T(1)` 22,066 against the same line).
 - F1(d): a certificate whose rate omits the `f32` state rounding (`lambda` from `q_s` alone, about
   2 % of the decade length at the top of the domain) is below the floor; F1(a) and F1(c) cannot see
   it, because the per-decade transient allowance absorbs it.
 - F2(a): a gain that drops the trim, or the cascade's second section (10 Hz HPF into the top LPF:
   `l1` 3.51 against the HPF's alone), falls below the brute-force `l1`.
 - F2(b): a gain from the two sections' state norms (`||c|| ||b|| / (1 - q) + |d|` each) exceeds the
-  line by about 1.07 dB at the top pair and about 1.06 dB at the HPF at 10 Hz into the LPF one `f32`
-  above 10 Hz.
+  line. With (d)'s equality disabled it first fires at the HPF at 10 Hz into the 1 kHz LPF
+  (mutation M7b: 1,516 mB against the line's 14.497 dB), not at the top pair; with (d) in place,
+  (d)'s equality catches it first (M7).
 - F2(c): a trim-only section that states 0 dB for a non-power-of-two trim (the rounding dropped),
   drops the trim, or states `D > 0`.
 - F2(d): a `G_p` built on `dev_core` (#1329's deviation from `T_decay` on) instead of `dev_loud` is
   about 59 mB low at the top pair and fails the equality; a `CascadeBound` that returns `dev_core`
   as `dev_loud` falls below the recomputation's lower edge. F2(a) has about 14 dB of slack at the
   top pair and F2(b) is an upper line, so neither can see it.
-- F3: a stall of zero, or one rounded down, gives `P^` below the module's `P*`.
+- F3: a stall of zero gives `P^` below the module's `P*` (mutation M13). A stall rounded down is
+  caught by the equality with `ceil_mB(stall)`, not by `P^ < P*` (M14).
 - F5: reuses #1457's gates; a decade law that extends the horizon past the budget (for example one
   run per `k`) is red there.
 
@@ -466,3 +485,107 @@ kept; the calibration's frame classes measured above it, though gate 2's real wo
 frame-equivalent stays below it. (3) The doc comment of `builtins::input_section_bounds`
 (`crates/builtins/src/lib.rs:3520-3521`, "reports the zero bound") is outside the named exception's
 branch; it now reads loosely (the bound has a zero tail and a stated composition).
+
+### Root's rulings (2026-10-08, after the restarted attempt 1's stop)
+
+1. **Named exceptions, authorized** (also in the authorized-paths list): the assertion in
+   `builtins-compiler`'s `tests::live_input_lane_reports_the_live_bound_and_plain_input_its_own`
+   (`crates/builtins-compiler/src/lib.rs:12011-12014` at `f3e6b1539`), whose expected value
+   becomes `input_section_bound`'s for the disabled-filter strip; and the doc comment of
+   `builtins::input_section_bounds` (`crates/builtins/src/lib.rs:3520-3521`), made true.
+2. **The frame-equivalent statistic** replaces the per-frame maximum: the smallest value, rounded
+   up to 0.5 ns, such that every recorded calibration sample and every gate-2 sample satisfies
+   measured design work <= (frames walked + `INPUT_BOUND_SECTION_CHARGE` x sections) x
+   frame-equivalent; the section charge from the largest fixed cost per section.
+   `examples/input_bound_budget.rs` (authorized) computes and prints it. One calibration and one
+   gate-2 invocation, each after a 1-minute load below about 2. Restate `FRAME_EQUIVALENT_NS`, the
+   budget's milliseconds, the worst case's share, the cache-cap doc and the stale figures of
+   #1468, #1470 and #1471. Gate 8 stays exact. A gate-2 family over the budget stops the slice.
+3. **The spec's test-value text** is corrected to what was measured (F1(b), F1(c), F2(b), F3).
+
+### Attempt 1, fold-in under root's rulings (2026-10-08, implementer)
+
+**The exception test.** The disabled-filter strip's expected input bound is now
+`builtins::input_section_bound` of the strip's own parameters (a zero tail; composition `Stated {
+decay: 0, peak_gain: 0 mB, tail_gain: 0 mB, stall: Level(-75,859) }` at 0 dB). Green at this
+commit. Mutation: `input_section_bounds_within`'s both-disabled branch returning
+`NodeTailBound::ZERO` again: red (`composition: Unstated` against the `Stated` value); restored:
+green. The `input_section_bounds` doc now says a memoryless design reports its own bound (zero tail,
+trim-only composition), whatever the remaining budget, and charges nothing.
+
+**Why the per-frame maximum is ill-conditioned for short walks.** It reads each sample as
+`(time - fixed) / frames`: the timing noise of one sample (a preemption, a cache miss) is divided
+by the walk's frame count, which is 513 for gate 2's cheap designs. The restarted attempt's
+calibration recorded 34.18 ns a frame for a 513-frame walk (cheap two-section, 5.12 into
+10.24 kHz, +24 dB, 88.2 kHz) whose point's median was 7.99 ns; this run's largest such sample is
+30.51 ns (cheap two-section, 1 kHz into 1.28 kHz, 0 dB, 48 kHz; median 13.79 ns). Root's statistic
+charges the whole sample, fixed cost included, against frames plus section charges.
+
+**The statistic in the example.** `one_design` now also returns the sections charged (the charge
+net of the frames, divided by the section charge, read from the test-support counter); `fixed_costs`
+and `frame_classes` record every measured sample whole (warmup round and sweep excluded, as before:
+they are not measurements); `frame_equivalent` searches the half-nanosecond grid upward for the
+first value `F` at which, with the section charge `C(F) = ceil_10(P / F)` (`P` the largest
+measured fixed cost per section), every sample's work is at most `(frames + C(F) sections) F`.
+The two are found together because each follows from the other. Gate 2 prints the value its own
+measured samples need (its largest design work per consumed frame-equivalent, rounded up to
+0.5 ns; the consumed amount is the charge when every design is exact, and otherwise the budget,
+which a preparation that stops a design has spent to within one channel's section charges).
+
+**Calibration** (one invocation, `taskset -c 7`, one warmup and two measured rounds, no retry;
+`/proc/loadavg` before 0.92 1.35 1.86, after 1.15 1.37 1.84; built with charge 520):
+
+- 44,592 recorded samples. Largest measured fixed cost per section **9.86 us** (88.2 kHz, round 1,
+  one cascade of two sections; the measured rounds' per-section intercepts 9.26-11.21 us of the
+  one/two-section difference, the per-design term -2.70 to -1.56 us).
+- **Frame-equivalent 48.5 ns, section charge 210** (9.86 us / 48.5 ns = 203.3, rounded up to a
+  ten; 210 x 48.5 ns = 10.19 us). **Binding sample:** 44.1 kHz, round 2, one cascade of two
+  sections, grid design 3059: work 57,119 ns, 769 frames + 210 x 2 sections = 1,189 charged
+  frame-equivalents, 48.04 ns per charged frame-equivalent. It is one sample: that class's
+  measured slope at 44.1 kHz is 16.7-16.8 ns a frame and its intercept 17.1 us, about 30 us for
+  769 frames, so the sample carries about 27 us of interference. Under root's rule (a bound does
+  not pick which outlier to believe) it binds.
+- Descriptive (net of the fixed cost): each class's slowest point's median 13.88-17.70 ns a frame
+  (slowest: cheap two-section, 1 kHz into 1.28 kHz, +24 dB, 44.1 kHz, spread 16.72-17.87 ns).
+
+**Gate 2** (one invocation on charge 210 and 48.5 ns, `taskset -c 7`, one warmup and two measured
+rounds, no retry; `/proc/loadavg` before 1.38 1.40 1.83, after 1.33 1.38 1.82): exit 0, every
+family's three results identical, every preparation within its budget in frames, every warm
+rebuild walking nothing. The budget is 1,510,000 x 48.5 ns = **73.235 ms**. Worst design work
+**45.11 ms** (4,096 cheap two-section designs, 1 kHz into 1.28 kHz, +24 dB, 48 kHz, round 2; 1,269
+of 4,096 exact): **61.6 %** of the budget. Gate 2's samples need **30.0 ns** (largest design work
+per consumed frame-equivalent 29.87 ns, the same row), below 48.5 ns, so the calibration binds. No
+family is over the budget. Per family (design work, measured rounds, every rate): top pair
+7.26-7.45 ms; LPF at the maximum 3.72-3.76; 64 near-top 21.02-21.46; 65,537 near-top 20.90-21.70
+(whole preparation up to 60.78 ms, the O(strips) keying of 65,537 strips outside the budget, as in
+#1457); 64 band 20.25-23.17; 4,096 band 20.11-20.59; 64 typical 11.23-21.62 (64 of 64 exact); 256
+typical 22.95-25.29; cheap one-section 23.72-29.77; cheap two-section 32.73-45.11; cheap
+two-cascade 24.00-26.48. The lower section charge lets more cheap designs fit (1,044-1,618
+two-section designs exact a preparation, against fewer at 520), so the worst design work rose from the restarted attempt's
+24.93 ms with the budget.
+
+**Gate 8** (charge 210): passed, every 64-track console document exact at every rate. Stereo
+documents (charged, frames walked, margin): 44.1 kHz 664,192 (610,432, 845,808); 48 kHz 712,576
+(658,816, 797,424); 88.2 kHz 1,211,520 (1,157,760, 298,480); 96 kHz 1,307,776 (1,254,016,
+**202,224**, the least). Mono: 343,360 (margin 1,166,640), 368,704 (1,141,296), 628,032 (881,968),
+677,696 (832,304). Frames walked unchanged.
+
+**Restated.** `FRAME_EQUIVALENT_NS` = 48.5 (`examples/input_bound_budget.rs`, with its statistic
+in the module doc); `INPUT_BOUND_SECTION_CHARGE` = 210 and its doc; `INPUT_BOUND_BUDGET_FRAMES`'s
+doc (73.235 ms); the cache cap's doc (a computed design charges at least 257 + 210 = 467, so at
+most 1,510,000 / 467 = 3,233 designs a preparation; the cap of 8,192 holds them); the stale figures
+of #1468 (`:152`), #1470 (`:28-31`, `:48`) and #1471 (`:21`).
+
+**Gates.** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
+--features math/lane,builtins/test-support,lane/test-support` (includes `math`): pass. Release
+`tail_contract`: 17 passed. `cargo test --locked -p builtins-compiler --features test-support
+--lib`: 57 passed (the formerly red test green). Gate 8: pass. `cargo fmt --all -- --check`: clean.
+`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` (CI's flags) and
+without `--all-features`: clean. `check-workspace-policy.sh`: ok. `check-realtime-policy.sh`: ok.
+`check-cross-targets.sh`: PASS. `audit capi`: 0 allocations, 0 locks, 0 syscalls, `pcm_digest`
+`cb10fbface44a3a4` (unchanged). `check-builtins-fixtures.sh`: ok (50 files).
+
+**Open for root.** The frame-equivalent rose from 18.5 to 48.5 ns and the section charge fell from
+520 to 210 on one interference sample of 44,592; the budget's milliseconds rose from 27.94 to
+73.235 ms, and the real worst case with it (45.11 ms), because a lower charge admits more cheap
+designs. This is the ruling's statistic applied as written; it is reported for root's view.

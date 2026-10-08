@@ -3518,7 +3518,9 @@ pub fn input_section_bound_charged(
 /// ([`input_section_live_bound_table`]), which is certified for every history of trim, polarity and
 /// filter targets and so for every fixed design, and the remaining budget is then spent: every
 /// later design with an enabled section reports the live bound without a walk. A memoryless design
-/// (both filters disabled on both channels) reports the zero bound and charges nothing. The result
+/// (both filters disabled on both channels) reports its own bound, as [`input_section_bound`] does
+/// (a zero tail and its trim-only composition, #1465), whatever the remaining budget, and charges
+/// nothing. The result
 /// is a function of the session only.
 ///
 /// `cache` (#1457 D2) keeps bounds across calls. A design it holds charges its stored charge

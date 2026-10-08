@@ -307,35 +307,34 @@ fn fixed_input_walk(
 /// #1457 D1 (Amendments 3 and 4): the fixed charge of each enabled section a design's computation
 /// walks, in frame-equivalents (both channels' sections when they differ, one channel's when they
 /// are the same). A design carries no other charge: its sections' charges cover every measured
-/// class's fixed cost (the calibration's per-design term is within its noise, -1.39 to +2.83 us
-/// in #1465's measured rounds).
+/// class's fixed cost (the calibration's per-design term is negative, -2.70 to -1.56 us in #1465's
+/// measured rounds).
 ///
-/// A frame-equivalent is 18.5 ns on the CI-class runner: the maximum over every calibration point
-/// measured, rounded up to the next half nanosecond (#1474 and root's rulings: every class, and a
-/// stated worst case is a bound, so the maximum, not the median, over all points, not only the
-/// slowest class's). Since the walk's certified flush (`math::tail`'s `tau`, #1474) no propagated
-/// quantity is subnormal, and a frame's cost depends on the walk's length, not its cutoffs: net of
-/// the design's fixed cost, long near-top walks take 13.6-13.7 ns a frame, gate 2's
-/// cheap two-section designs 12.8-16.1 ns and typical designs (an HPF at 20-80 Hz into an LPF at
-/// 16-20 kHz) 15.0-16.5 ns (medians of five runs). The largest single sample is 18.25 ns (a typical
-/// design at +24 dB, 44.1 kHz, median 16.52 ns), so 18.5 ns is above every sample recorded. The
-/// largest measured fixed cost per section is 9.49 us since #1465 added each walk's composition
-/// closed form (a two-section cascade at 96 kHz, 512.7 frame-equivalents; it was 7.03 us, 380,
-/// before), so 520 frame-equivalents (rounded up to a ten, 9.62 us) bound the fixed cost of every
-/// class measured. #1465's calibration also measured frame classes above 18.5 ns net of the fixed
-/// cost (its attempt record); the frame-equivalent is restated only by root's ruling on it.
-/// Calibrated with `examples/input_bound_budget.rs calibrate` and confirmed against every gate-2
-/// family; the classes, rates and runs are in #1474's and #1465's attempt records (#1465's
-/// measured intercepts: one section at most 9.20 us, two at most 18.97 us, against 9.62 and
-/// 19.24 us charged). A change to the walk reruns the calibration and restates the
+/// A frame-equivalent is 48.5 ns on the CI-class runner (root's ruling of 2026-10-08, #1465): the
+/// smallest value on a half-nanosecond grid such that every recorded sample, of the calibration and
+/// of gate 2, takes at most its charged frame-equivalents (frames walked plus this charge per
+/// section) times the frame-equivalent. The statistic charges each sample's fixed cost with its
+/// sections, so a short walk is not read as a per-frame rate: the per-frame maximum it replaces
+/// divided a sample's timing noise by its few frames (in #1465's first calibration one 513-frame
+/// walk measured 34.18 ns a frame net of the fixed cost, against its point's median of 7.99 ns).
+/// #1465's calibration binds it: one design of the 44.1 kHz grid (a cascade of two sections, 769
+/// frames) took 57.12 us in one measured round, 48.04 ns a charged frame-equivalent of 1,189; gate
+/// 2's samples need 30.0 ns (the 4,096 cheap two-section designs, 1 kHz into 1.28 kHz, +24 dB, 48
+/// kHz). The largest measured fixed cost per section is 9.86 us (a two-section cascade at 88.2
+/// kHz), 203.3 frame-equivalents of 48.5 ns, so 210 (rounded up to a ten, 10.19 us) bound the fixed
+/// cost of every class measured; the frame-equivalent and this charge are found together, since
+/// each follows from the other. Net of the fixed cost, each class's slowest point takes 13.9-17.7
+/// ns a frame (medians of five runs; descriptive). Calibrated with `examples/input_bound_budget.rs
+/// calibrate` and confirmed against every gate-2 family; the classes, rates and runs are in #1474's
+/// and #1465's attempt records. A change to the walk reruns the calibration and restates the
 /// frame-equivalent and this charge.
-pub const INPUT_BOUND_SECTION_CHARGE: u64 = 520;
+pub const INPUT_BOUND_SECTION_CHARGE: u64 = 210;
 
 /// #1457 D1: the budget of one preparation's design bounds, in frame-equivalents, charged in strip
 /// order (`crate::input_section_bounds`). Each distinct design computed charges the frames it walks
 /// plus [`INPUT_BOUND_SECTION_CHARGE`] per section; a cache hit charges the same stored amount.
 ///
-/// At 18.5 ns a frame-equivalent ([`INPUT_BOUND_SECTION_CHARGE`]) it is 27.94 ms of design-bound
+/// At 48.5 ns a frame-equivalent ([`INPUT_BOUND_SECTION_CHARGE`]) it is 73.235 ms of design-bound
 /// work on the CI-class runner; this workstation (x86-64-v3, release, one pinned core) stood in
 /// for that runner. Its purpose is that typical sessions bound every distinct design exactly: the
 /// 64-track console documents (64 distinct designs) fit at every launch rate. Every frame and every
@@ -346,9 +345,9 @@ pub const INPUT_BOUND_SECTION_CHARGE: u64 = 520;
 pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
 
 /// #1457 D2: the entry cap of [`InputBoundCache::new`]. The cache holds only designs with an
-/// enabled section, and such a design charges at least 777 frame-equivalents (a walk of at least
+/// enabled section, and such a design charges at least 467 frame-equivalents (a walk of at least
 /// 257 frames, one 256-frame block of the majorant pass and one deviation frame, plus one section's
-/// charge). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 777` = 1,943 designs
+/// charge). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 467` = 3,233 designs
 /// exactly, and stops one more: the cap holds a whole preparation's designs. A rebuild of an
 /// unchanged session is served entirely from the cache only while the cache has not been cleared
 /// since that session's designs were inserted: a cache shared by several sessions (an engine's,

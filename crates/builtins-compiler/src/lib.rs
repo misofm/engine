@@ -12002,15 +12002,28 @@ mod tests {
             },
         )
         .expect("compile");
-        // Disabled filters: trim and polarity are memoryless (#1329 D4).
+        // Disabled filters: trim and polarity are memoryless (#1329 D4). The strip reports its
+        // own bound: a zero tail with its trim-only composition stated (#1465, root's named
+        // exception of 2026-10-08).
         let plain = prepare_session_builtins(&compiled, &[], caps()).expect("plain");
         assert_eq!(
             plain.tails().collect::<Vec<_>>(),
             vec![("vocal", TailSamples::Finite(0))]
         );
+        let normalized = compiled.normalized_model();
+        let (strip, fader) = normalized
+            .strips()
+            .zip(normalized.effective_strip_faders())
+            .next()
+            .expect("one strip");
+        let parameters =
+            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).expect("parameters");
+        let own =
+            builtins::input_section_bound(compiled.sample_rate().0, parameters).expect("bound");
+        assert_eq!(own.tail, TailSamples::Finite(0));
         assert_eq!(
             plain.input_bounds().collect::<Vec<_>>(),
-            vec![("vocal", NodeTailBound::ZERO)]
+            vec![("vocal", own)]
         );
 
         let live = prepare_session_builtins_with_live_controls(
