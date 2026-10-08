@@ -855,21 +855,24 @@ impl SpectrumCaptureCollection {
         self.captures.is_empty()
     }
 
-    /// Return the accepted entry at `index`, including its stable target identity and mask.
+    /// Return the accepted entry at `index`: its stable target identity and its mask.
+    ///
+    /// The target is borrowed, so this accessor clones and allocates nothing. A caller that needs
+    /// an owned [`SpectrumCaptureCollectionEntry`] builds it on its own thread.
     #[must_use]
-    pub fn entry(&self, index: usize) -> Option<SpectrumCaptureCollectionEntry> {
+    pub fn entry(&self, index: usize) -> Option<(&SpectrumTarget, SpectrumChannels)> {
         self.captures
             .get(index)
-            .map(|capture| SpectrumCaptureCollectionEntry {
-                target: capture.target.clone(),
-                channels: capture.channels,
-            })
+            .map(|capture| (capture.target(), capture.channels()))
     }
 
-    /// Return the currently selected entry, if any.
-    #[must_use]
-    pub fn selected_entry(&self) -> Option<SpectrumCaptureCollectionEntry> {
-        self.selected.and_then(|index| self.entry(index))
+    /// Build the owned entry that `select` returns on the control thread.
+    fn owned_entry(&self, index: usize) -> Option<SpectrumCaptureCollectionEntry> {
+        self.entry(index)
+            .map(|(target, channels)| SpectrumCaptureCollectionEntry {
+                target: target.clone(),
+                channels,
+            })
     }
 
     /// Return the selected target identity without cloning it.
@@ -957,7 +960,7 @@ impl SpectrumCaptureCollection {
         };
         if self.selected == Some(index) {
             return self
-                .entry(index)
+                .owned_entry(index)
                 .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry);
         }
 
@@ -989,7 +992,7 @@ impl SpectrumCaptureCollection {
         self.cancel_except(Some(index));
         self.selected = Some(index);
         self.selection_epoch = next_selection_epoch;
-        self.entry(index)
+        self.owned_entry(index)
             .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
     }
 

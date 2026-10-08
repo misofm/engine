@@ -734,8 +734,14 @@ fn prepared_collection_switches_exact_taps_without_audio_or_render_allocation() 
         resources.retained_bytes
     );
     assert_eq!(collection_capture.len(), 2);
-    assert_eq!(collection_capture.entry(0), Some(track_b.clone()));
-    assert_eq!(collection_capture.entry(1), Some(track_a.clone()));
+    assert_eq!(
+        collection_capture.entry(0),
+        Some((&track_b.target, track_b.channels))
+    );
+    assert_eq!(
+        collection_capture.entry(1),
+        Some((&track_a.target, track_a.channels))
+    );
 
     let invalid_target = SpectrumTarget::TrackPostInputBuiltins("not-prepared".into());
     assert_eq!(
