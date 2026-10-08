@@ -258,3 +258,44 @@ private PulseAudio null sink per run; module rebuilt from this branch with
 
 Test value: no new test; the gate and its two mutations are unchanged and still red.
 
+
+### Follow-ups 2 (2026-10-08, after the follow-ups PASS; verdict NIT 1, NIT 2)
+
+Verdict: `/home/bl/misofm/submix-verdicts/1476-followups.md` (PASS, two NITs). Only
+`hosts/host-web/qualification/sdk-response-entry.ts` changes.
+
+- **NIT 1: the suspend is bounded.** `closeSdkEngine` now waits for `context.suspend()` against a
+  10 s timer (`sdkSuspendTimeoutMs`), with the same pattern as the file's `resume()` bounds: a
+  promise that the timer rejects with a diagnostic, the timer cleared in a `finally`. On expiry the
+  read is a failure that names the workload, there is no read and no row, and nothing retries. The
+  close still runs. The failure is thrown, or attached to the body's error when there is one.
+  Temporary plant (chromium; `suspend()` replaced by a promise that never settles for
+  `spectrum-continuous-hop-1024`, file restored and checked by SHA-256): exit 1 after 19 s with
+  `spectrum-continuous-hop-1024: render allocation count failed: audio suspend timed out after
+  10000 ms (state=running)`.
+- **NIT 2: a cleanup error never replaces a body error.** `sdkEngineFailed` now also keeps each
+  instance's first error in `sdkRenderAllocations.failures` (a `WeakMap`), which outlives the
+  instance's `open` entry. `finishSdkEngine` reads the body's error from `open` or from that map,
+  so a cleanup error is attached to it (`sdkCleanupFailures`) also when the instance has already
+  left `open`. With no body error, the first cleanup error is recorded the same way and later
+  cleanup errors are attached to it. Temporary plant (chromium; the hop-1024 body closes its
+  instance and then throws `planted body error after close`, and its cleanup throws `planted
+  cleanup error`; restored by SHA-256): with the fix, the run fails with the body's error and
+  `sdkCleanupFailures: ["planted cleanup error"]`; with the previous `finishSdkEngine` in the same
+  plant, the run fails with `planted cleanup error` and the body's error is lost.
+- **Artifacts.** The local `target/ci/qualification-artifacts` were from before `ca6b89d3c` and
+  did not match the verifier's module, so they were rebuilt with the CI invocation
+  (`bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin
+  target/ci/qualification-artifacts`): module `7c6ee7357eaa...`, the verifier's.
+- **Browser qualification.** `npm run qualify -- --artifacts <worktree>/target/ci/qualification-artifacts
+  --sdk-root <worktree>/sdk --browser <b> --check-matrix --self-test-mutations`, once per browser,
+  each with a private PulseAudio null sink as `qualification.yml` sets it up. Each log says "sdk
+  bundle: the source at .../sdk/src (CI's mode)"; `sdk/dist` did not exist before or after any
+  run. Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5: all qualification gates passed, each
+  with all 17 SDK rows `=0`.
+- **Other checks.** `bash scripts/check-workspace-policy.sh`: ok. An ad-hoc `tsc --noEmit` of the
+  entry has the same error count before and after this change, and none in the changed lines. No
+  SDK, engine or worklet source changed.
+
+Test value: no new test; the gate and its two mutations are unchanged and still red
+(`--self-test-mutations` in every browser).

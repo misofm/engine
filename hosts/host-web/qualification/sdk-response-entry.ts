@@ -68,6 +68,8 @@ const sdkRenderAllocations = {
   instances: 0,
   rows: [] as { readonly workload: string; readonly count: number }[],
   open: new Map<SdkEngine, { readonly workload: string; failure?: object }>(),
+  /** The first error each instance's body threw, kept after the instance leaves `open`. */
+  failures: new WeakMap<SdkEngine, object>(),
 };
 
 /**
@@ -111,17 +113,23 @@ function sdkErrorMessage(error: unknown): string {
  */
 function sdkEngineFailed(browser: SdkEngine, error: unknown): object {
   const failure = sdkFailureObject(error);
+  if (!sdkRenderAllocations.failures.has(browser)) sdkRenderAllocations.failures.set(browser, failure);
   const instance = sdkRenderAllocations.open.get(browser);
   if (instance !== undefined && instance.failure === undefined) instance.failure = failure;
   return failure;
 }
+
+/** The bound on the `suspend()` before a read, the same 10 s as this file's `resume()` bounds. */
+const sdkSuspendTimeoutMs = 10_000;
 
 /**
  * Read the instance's count after its last render and before its close, then close it (D2).
  * A running `AudioContext` is suspended first, so no render follows the read; an offline
  * context has finished rendering. A second call for an instance this helper already closed
  * does nothing. After a recorded body error, a failed read or close is attached to that error
- * instead of thrown, so the body's error stays the one that propagates.
+ * instead of thrown, so the body's error stays the one that propagates. A `suspend()` that does
+ * not settle within `sdkSuspendTimeoutMs` is a failed read that names the workload: no read, no
+ * row, no retry.
  */
 async function closeSdkEngine(browser: SdkEngine): Promise<void> {
   const instance = sdkRenderAllocations.open.get(browser);
@@ -131,7 +139,17 @@ async function closeSdkEngine(browser: SdkEngine): Promise<void> {
   try {
     const context = browser.context as unknown as BaseAudioContext;
     if (typeof AudioContext !== "undefined" && context instanceof AudioContext && context.state === "running") {
-      await context.suspend();
+      let suspendTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          suspendTimer = setTimeout(() => reject(new Error(
+            `audio suspend timed out after ${sdkSuspendTimeoutMs} ms (state=${context.state})`,
+          )), sdkSuspendTimeoutMs);
+          context.suspend().then(resolve, reject);
+        });
+      } finally {
+        if (suspendTimer !== undefined) clearTimeout(suspendTimer);
+      }
     }
     const reply = await browser.host.renderAllocationCount();
     if (reply.result !== 0) {
@@ -164,22 +182,24 @@ async function closeSdkEngine(browser: SdkEngine): Promise<void> {
 /**
  * The `finally` of an instance's body: run its other cleanups (subscription and stream closes),
  * then read and close the instance whatever they did (D3). The first cleanup error becomes the
- * instance's failure when its body did not throw, and is thrown after the close.
+ * instance's failure when its body did not throw, and is thrown after the close. When the body
+ * threw, every cleanup error is attached to the body's error, also when the instance has already
+ * left `open`, so a cleanup error never replaces the body's error.
  */
 async function finishSdkEngine(browser: SdkEngine, ...cleanups: Array<() => unknown>): Promise<void> {
-  const instance = sdkRenderAllocations.open.get(browser);
-  const bodyFailed = instance?.failure !== undefined;
+  const recordedFailure = () =>
+    sdkRenderAllocations.open.get(browser)?.failure ?? sdkRenderAllocations.failures.get(browser);
+  const bodyFailed = recordedFailure() !== undefined;
   let cleanupFailure: object | undefined;
   for (const cleanup of cleanups) {
     try {
       await cleanup();
     } catch (error) {
-      if (instance === undefined) {
-        cleanupFailure ??= sdkFailureObject(error);
-      } else if (instance.failure === undefined) {
+      const failure = recordedFailure();
+      if (failure === undefined) {
         cleanupFailure = sdkEngineFailed(browser, error);
       } else {
-        attachSdkFailure(instance.failure, "sdkCleanupFailures", sdkErrorMessage(error));
+        attachSdkFailure(failure, "sdkCleanupFailures", sdkErrorMessage(error));
       }
     }
   }
