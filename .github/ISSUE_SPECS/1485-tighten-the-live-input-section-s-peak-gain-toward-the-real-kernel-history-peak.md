@@ -185,19 +185,20 @@ restored) with at least the mutants below; each is red.
 
 ## Test value
 
-*(Gate 1's and gate 1t's entries corrected in the attempt record's "Follow-ups"; each defect named
+*(Gate 1's and gate 1t's entries corrected in the attempt record's "Follow-ups", and gate 1's and
+gate 2's figures in "Follow-ups 2"; each defect named
 here is a mutation run recorded there, red on the named test and green on revert.)*
 
 - Gate 1: a `G_p` derivation that drops the pre-retarget state a retarget exposes falls below the
   real kernel's measured peak. Mutant G1Z: `G_t`'s late-input bound, which starts from zero state,
   reused as `G_p` in the module and in L3's recomputation alike (`g_p` about 816 against the peak
-  3.4456e4): gate 1 is red, and every other test except the table pin is green. Gate 1's
-  worst-sign history adds no unique catch; it sets `g_meas`, gate 2's reference.
+  3.4456e4): gate 1 is red, and every other test except the table pin is green. Gate 1's two
+  worst-sign histories add no unique catch; they set `g_meas`, gate 2's reference.
 - Gate 1t: a `G_t` derivation that drops the trim word, in the module and in the L3' recomputation
   alike (mutant G1T, `g_t` 51.5 to 51.9), falls below the exact supremum (53.1 to 55.9) at every
   launch rate: L2 is red, and every other test except the table pin is green.
 - Gate 2: a step that does not tighten (#1466's `sup Psi Phi` bound left in place, mutant MP, a
-  ratio of about 287 against the worst-sign `g_meas`) misses the factor `F_p`; no other test
+  ratio of about 273 against the three-event worst-sign `g_meas`) misses the factor `F_p`; no other test
   compares the live certified gain with the measured one from above.
 - Gate 2t: a step that does not tighten `G_t` (#1467's window term left in place, about 57 dB, a
   ratio of about 695) misses `F_t`; no other test bounds the live `g_t` from above against the
@@ -578,8 +579,10 @@ history: the HPF to 10 Hz, then the LPF to 10 Hz 16 frames later, at output fram
 grid row peaks 6 to 8 frames after its last event, so a 16-frame search is enough. The verifier's
 other worst-sign histories (both to 10 Hz together, the HPF from 1 kHz, the HPF to 0.00342 fs, the
 LPF before the HPF) are lower at 44.1 kHz, and the verifier found the other rates within 1 %. The
-grid includes the verifier's other two-event histories. So one history is enough at every rate,
-and gate 1 now has six histories. The lead is long enough: at 1,400,000 lead frames, every row
+grid includes the verifier's other two-event histories. *(Corrected in "Follow-ups 2": a
+three-event history is 5.3 % larger at every rate, so this history is not the largest, and a
+finite grid shows no such thing. Gate 1 now has seven histories.)* Gate 1 then had six histories.
+The lead is long enough: at 1,400,000 lead frames, every row
 `l1`, every kernel peak and every ratio are the same to the printed seven digits.
 
 *V-D3 step 1, restated* (release, the five Nyquist-drive histories unchanged from phase A's table):
@@ -595,7 +598,8 @@ The worst-sign peak is 1.646 to 1.648 times L1's (+4.33 dB) at every rate. The r
 looseness is 27.1 to 27.2 dB, not 31.5 dB.
 
 *The factor, by root's ruling 2.* `r_p,max` is 22.7986 (stated, at 44.1 and 88.2 kHz), and
-`22.7986 x 1.05 = 23.9385`. Rounded up, **`F_p = 23.94`** (+27.6 dB). This is below 39.44, so the
+`22.7986 x 1.05 = 23.9385`. Rounded up, **`F_p = 23.94`** (+27.6 dB; restated to 22.75 in
+"Follow-ups 2"). This is below 39.44, so the
 ruling needs no report to root. `F_P` in `tail_contract.rs` carries it. `F_t = 14.37` does not
 change, because L2's scan and `s_scan` do not change.
 
@@ -659,3 +663,70 @@ does not change. **Pending GitHub sync:** the #1487 body (and, as before, the #1
   then restored, and SHA-256 confirms each restore).
 * Soundness (V-D2) holds: every measured peak, the worst-sign peak included, is at least 22.69
   times below `g_p`. V-D4 holds: no bound value or table entry moves.
+
+### Attempt 1, follow-ups 2 (implementer, 2026-10-08)
+
+The verifier passed the follow-ups with one MINOR and one NIT
+(`/home/bl/misofm/submix-verdicts/1485-followups.md`). This pass closes MINOR 1. NIT 1 is an
+observation and needs no change.
+
+**MINOR 1: a larger history.** The verifier's search found a three-event history that beats the
+two-event worst-sign history by 5.26 % at every launch rate: the HPF to 0.9 times the maximum
+cutoff at +0, the LPF to 10 Hz at +36, then the HPF to 10 Hz at +39. Its largest row is at +42.
+Gate 1 now runs it through the same `worst_sign_history`, at every rate, after the two-event one.
+`SIGN_SEARCH = 16` covers the rows +39 to +55, so it covers +42; the test finds +42 at every rate.
+Gate 1 now has seven histories: five after a Nyquist drive and two worst-sign histories.
+
+The record's earlier claim "one history is enough at every rate" is false and is withdrawn (the
+follow-ups paragraph carries a note). **The schedule search is a finite grid.** No search here
+covers every event schedule, so `g_meas` is a measured lower bound of the true worst-case peak,
+not the supremum. `r_p` is therefore an upper bound of the true looseness, and the verifier's
+search was still rising at the edge of its grid. An exhaustive or optimised search is #1487's
+scope.
+
+*V-D3 step 1, restated* (release; the five Nyquist-drive histories and the two-event worst-sign
+history unchanged from the tables above; the verifier's figures reproduced to the printed digit):
+
+| rate | three-event: exact x trim / kernel peak | `g_meas` | `g_p` raw / stated | `r_p` raw / stated |
+|---|---|---|---|---|
+| 44.1 kHz | 5.976576e4 / 5.974981e4 | 5.974981e4 (+95.53 dB) | 1.294092e6 / 1.294196e6 | 21.6585 / 21.6602 |
+| 48 kHz | 5.941791e4 / 5.940206e4 | 5.940206e4 (+95.48 dB) | 1.280357e6 / 1.280855e6 | 21.5541 / 21.5625 |
+| 88.2 kHz | 5.976595e4 / 5.974994e4 | 5.974994e4 (+95.53 dB) | 1.294087e6 / 1.294196e6 | 21.6584 / 21.6602 |
+| 96 kHz | 5.941805e4 / 5.940219e4 | 5.940219e4 (+95.48 dB) | 1.280352e6 / 1.280855e6 | 21.5540 / 21.5624 |
+
+The kernel's peak reaches the exact row times the trim within 2.7e-4 at every rate. The remaining
+`G_p` looseness is at most 26.7 dB (21.55 to 21.66 times), not 27.2 dB.
+
+*The factor, by root's ruling 2.* `r_p,max` is 21.6602 (stated, at 44.1 and 88.2 kHz), and
+`21.6602 x 1.05 = 22.7432`. Rounded up, **`F_p = 22.75`** (+27.1 dB), as the verifier expected.
+This is below 39.44, so the ruling needs no report to root. `F_P` carries it. `F_t = 14.37` does
+not change.
+
+*Gate 2 is still red on its mutant.* MP (as above, applied to `crates/math/src/tail.rs`, then
+restored and checked by SHA-256): red on gate 2 (`44100 Hz gate 2: the stated g_p
+1.6292960326397214e7 exceeds F_p g_meas = 1.359308234375e6 (ratio 272.69)`, after every gate 1
+history at 44.1 kHz passed), the table test and L3. The other 19 tests are green.
+
+**Derivation.** The "Looseness" paragraph and the "Gates" section of
+`docs/derivations/1379-graph-tail-composition.md` now state the three-event history, 26.7 dB,
+seven histories, and that the peak is a measured lower bound.
+
+**#1487.** Its local Context now has `r_p` 21.66 / 21.56 / 21.66 / 21.56 (+26.7 dB) against
+`g_meas` 5.9750e4, gate 1's seven histories, `F_p = 22.75` and the measured 3.77e3 per unit of the
+trim word. Its gate 1 reads "its seven histories". Its diagnosis scope adds an exhaustive or
+optimised worst-schedule search for the real kernel's peak. **Pending GitHub sync:** the #1487
+body (and, as before, the #1485 title and body).
+
+**Gates run (follow-ups 2).**
+
+* `cargo test --locked --release -p builtins --features builtins/test-support --test
+  tail_contract`: 22 passed (10.8 s).
+* The same in debug (48 kHz only): 20 passed, 2 ignored release-scale (63.5 s on this 32-core
+  host; 66.9 s with the build). The three-event history gives the release figures at 48 kHz.
+* `cargo clippy --locked -p builtins -p math --all-targets --features
+  builtins/test-support,math/lane -- -D warnings`, `cargo fmt --all -- --check`,
+  `scripts/check-workspace-policy.sh`: green.
+* Not rerun: this pass changes only `tail_contract.rs` (test code), this spec, #1487's spec and the
+  derivation. No library, render or CI file changes.
+* Soundness (V-D2) holds: every measured peak is at least 21.55 times below `g_p`. V-D4 holds: no
+  bound value or table entry moves.

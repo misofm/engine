@@ -476,9 +476,11 @@ reads neither the window nor (P2): the bound holds at every frame of every admit
   `C = 5.25`, `V = 1.60e5`. The terms: `delta A` 7.27e3, the fast part 6.07e3, the potential
   `h Gammabar(m0) V` 3.02e4, the slow charges `C sum Gamma_s` 3.82e4; in all `8.17e4`, `g_p`
   `1.294e6` (+122.24 dB) against #1466's `1.629e7` (+144.24 dB).
-* *Looseness.* The real kernel's largest peak over gate 1's histories (the worst-sign history's,
-  +95.08 dB at 44.1 kHz) is 27.1 to 27.2 dB below `G_p` (22.7 to 22.8 times; the ratios per
-  history and rate are in the #1485 attempt record, "Follow-ups"). The
+* *Looseness.* The real kernel's largest peak over gate 1's histories (the three-event worst-sign
+  history's, +95.53 dB at 44.1 kHz) is 26.7 dB below `G_p` (21.55 to 21.66 times; the ratios per
+  history and rate are in the #1485 attempt record, "Follow-ups 2"). The histories come from a
+  finite search, so this peak is a measured lower bound of the worst case and the looseness is an
+  upper bound of the true one. The
   rest is frequency-blindness at the top of the domain: either section's state grows there in the
   `V`-norm at `rho_ramp` per frame, where the kernel's own resonance is narrower, and the
   potential charges every frame of input at the top with the mass a later retarget could expose.
@@ -766,8 +768,8 @@ exact supremum of the late part on gate L2's scanned histories is at most +35.59
 brute force, `D`'s tightness and asymptotic floor, the gains' soundness and tightness, the disabled
 values, `dev_loud`, the stall) and F4 (every #1329 assertion unchanged); #1457's gates 2 and 8 for
 the cost (F5). The measurements are in the #1465 attempt record. The live part: #1485's gate 1,
-#1466's L1 widened (`G_p` and `sigma_p` against the real kernel's peak on six named histories:
-five after a Nyquist drive and a retarget, and one driven by the exact row's own worst-sign input),
+#1466's L1 widened (`G_p` and `sigma_p` against the real kernel's peak on seven named histories:
+five after a Nyquist drive and a retarget, and two driven by the exact row's own worst-sign input),
 #1485's gate 2 on the same runs (`g_meas <= g_p` and the stated `G_p` at most `F_p g_meas`, with
 `g_meas` the largest measured peak), L3 (`D`, `G_p`,
 `sigma_p` and `sigma_t` against an independent plain-`f64` recomputation of this part), L4 (`D`

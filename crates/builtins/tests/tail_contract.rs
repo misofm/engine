@@ -2889,12 +2889,12 @@ fn live_composition(rate: u32) -> LiveComposition {
     .expect("a certified live composition")
 }
 
-/// #1485 `F_p` (V-D3, by root's formula of 2026-10-08, ruling 2): the measured `r_p,max` 22.7986
-/// (the stated `G_p` over gate 1's largest peak, the worst-sign history's, at 44.1 and 88.2 kHz)
-/// times `1 + 5 %`, rounded up to two decimals. The margin covers the millibel rounding of the
-/// statement and a restatement of a constant at rounding level; every quantity in gate 2 is
+/// #1485 `F_p` (V-D3, by root's formula of 2026-10-08, ruling 2): the measured `r_p,max` 21.6602
+/// (the stated `G_p` over gate 1's largest peak, the three-event worst-sign history's, at 44.1 and
+/// 88.2 kHz) times `1 + 5 %`, rounded up to two decimals. The margin covers the millibel rounding
+/// of the statement and a restatement of a constant at rounding level; every quantity in gate 2 is
 /// deterministic.
-const F_P: f64 = 23.94;
+const F_P: f64 = 22.75;
 
 /// #1485 `F_t` (V-D3, confirmed by root on 2026-10-08): the measured `r_t,max` 13.677 (the stated
 /// `G_t` over L2's largest trim x exact supremum, at 96 kHz) times `1 + 5 %`, rounded up to two
@@ -2985,7 +2985,8 @@ fn peak_history(rate: u32, events: &[(usize, PeakEvent)], block: usize) -> (f32,
 /// first event. The settled pair's response decays slowly, so the lead is long; at twice this
 /// lead every row's `l1` and peak are the same to seven digits.
 const SIGN_LEAD: usize = 700_000;
-/// Output frames searched for the largest row, from the history's last event on.
+/// Output frames searched for the largest row, from the history's last event on. It covers the
+/// rows found largest: +22 (last event +16) and +42 (last event +39).
 const SIGN_SEARCH: usize = 16;
 
 /// The cascade frames of a worst-sign history, recorded from the real kernel: the lead's frame
@@ -3082,7 +3083,7 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 }
 
 /// #1485 gate 1 (#1466 L1, widened). The real kernel's largest `|y|` per unit of the input's peak
-/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on six histories.
+/// is at most `g_p + sigma_p`, the live peak gain and peak stall at `X = 1`, on seven histories.
 /// Five follow the Nyquist drive of [`peak_history`] (#1379 H9: the drive builds a large first
 /// integrator in both sections at the top of the domain while the output stays near 1, and a
 /// retarget exposes it). Each history, with its reason:
@@ -3096,17 +3097,19 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 ///   charges;
 /// * both sections moving: the HPF to 10 Hz, then the LPF to 10 Hz 4 frames later.
 ///
-/// The sixth is the worst-sign history ([`worst_sign_history`]): the HPF to 10 Hz, then the LPF
-/// to 10 Hz 16 frames later, driven by the exact row's own worst-case input. It is the largest
-/// peak found at every launch rate (#1485 attempt 1's verifier, and its follow-up's grid of 120
-/// two-event histories, its record), about 1.65 times the Nyquist drive's, so it sets `g_meas`.
-/// The kernel's peak must reach the row's `l1` times the trim within `10^-3`, so the history is
-/// the worst-case input it claims to be.
+/// The sixth and seventh are worst-sign histories ([`worst_sign_history`]), driven by the exact
+/// row's own worst-case input: the HPF to 10 Hz, then the LPF to 10 Hz 16 frames later (#1485
+/// attempt 1's verifier); and the HPF to 0.9 times the maximum cutoff, the LPF to 10 Hz 36 frames
+/// later and the HPF to 10 Hz 3 frames after that (row at +42, the follow-ups' verifier), the
+/// larger by 5.3 % at every launch rate, so it sets `g_meas`. Both were found by finite searches
+/// over event schedules, so `g_meas` is a measured lower bound of the true worst-case peak, not
+/// the supremum. The kernel's peak must reach the row's `l1` times the trim within `10^-3`, so
+/// each history is the worst-case input it claims to be.
 ///
 /// Prints, per history and rate, the peak (`g_meas` of the largest) and the ratio
 /// `g_p / peak` (issue #1485, V-D3).
 ///
-/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the six histories at the
+/// #1485 gate 2 on the same runs: with `g_meas` the largest peak over the seven histories at the
 /// rate, `g_meas <= g_p` (the raw gain, without `sigma_p`) and the stated `G_p` is at most
 /// [`F_P`] `g_meas`. No other test bounds the live peak gain from above against the real kernel:
 /// #1466's `W_0` bound (a ratio of about 473) passes every other assertion here.
@@ -3114,6 +3117,7 @@ fn worst_sign_history(rate: u32, events: &[(usize, PeakEvent)], trim: f64) -> (u
 fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
     use PeakEvent::{Flip, Retarget};
     type History = (&'static str, Vec<(usize, PeakEvent)>, usize);
+    type SignHistory = (&'static str, Vec<(usize, PeakEvent)>);
     let histories: [History; 5] = [
         ("L1, HPF to 10 Hz", vec![(0, Retarget(0, 10.0))], 64),
         ("L1 in blocks of 1", vec![(0, Retarget(0, 10.0))], 1),
@@ -3151,27 +3155,41 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
                  {stated:e}"
             );
         }
-        let name = "worst sign, HPF to 10 Hz, LPF to 10 Hz at +16";
-        let (frame, exact, peak) = worst_sign_history(
-            rate,
-            &[(0, Retarget(0, 10.0)), (16, Retarget(1, 10.0))],
-            f64::from(math::pow(10.0, 24.0 / 20.0) as f32),
-        );
-        largest = largest.max(peak);
-        eprintln!(
-            "G1 {rate} Hz {name}: row at +{frame}, exact x trim {exact:.6e}, kernel peak \
-             {peak:.6e} ({:.2} dB), ratio g_p / peak {:.2}",
-            20.0 * math::log10(f64::from(peak)),
-            composition.peak_gain / f64::from(peak)
-        );
-        assert!(
-            f64::from(peak) >= exact * (1.0 - 1.0e-3),
-            "{rate} Hz {name}: the kernel's peak {peak:e} does not reach the exact row {exact:e}"
-        );
-        assert!(
-            f64::from(peak) <= stated,
-            "{rate} Hz {name}: the real kernel's peak {peak:e} exceeds g_p + sigma_p = {stated:e}"
-        );
+        let sign_histories: [SignHistory; 2] = [
+            (
+                "worst sign, HPF to 10 Hz, LPF to 10 Hz at +16",
+                vec![(0, Retarget(0, 10.0)), (16, Retarget(1, 10.0))],
+            ),
+            (
+                "worst sign, HPF to 0.9 max, LPF to 10 Hz at +36, HPF to 10 Hz at +39",
+                vec![
+                    (0, Retarget(0, 0.9 * maximum(rate))),
+                    (36, Retarget(1, 10.0)),
+                    (39, Retarget(0, 10.0)),
+                ],
+            ),
+        ];
+        let trim = f64::from(math::pow(10.0, 24.0 / 20.0) as f32);
+        for (name, events) in &sign_histories {
+            let (frame, exact, peak) = worst_sign_history(rate, events, trim);
+            largest = largest.max(peak);
+            eprintln!(
+                "G1 {rate} Hz {name}: row at +{frame}, exact x trim {exact:.6e}, kernel peak \
+                 {peak:.6e} ({:.2} dB), ratio g_p / peak {:.2}",
+                20.0 * math::log10(f64::from(peak)),
+                composition.peak_gain / f64::from(peak)
+            );
+            assert!(
+                f64::from(peak) >= exact * (1.0 - 1.0e-3),
+                "{rate} Hz {name}: the kernel's peak {peak:e} does not reach the exact row \
+                 {exact:e}"
+            );
+            assert!(
+                f64::from(peak) <= stated,
+                "{rate} Hz {name}: the real kernel's peak {peak:e} exceeds g_p + sigma_p = \
+                 {stated:e}"
+            );
+        }
         // Gate 2: never below the measured peak, within `F_p` of it.
         let (_, peak_gain, ..) = composition_values(
             input_section_live_bound(rate).expect("launch rate"),
