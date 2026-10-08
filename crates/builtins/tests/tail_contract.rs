@@ -460,9 +460,9 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
 }
 
 /// #1457 gate 7 at the bound level (attempt 1, MJ2): a design's computation walks at most the
-/// budget it is given, counted frame by frame by the walk itself, finished or stopped. A design
-/// first reserves its fixed charge (`INPUT_BOUND_DESIGN_CHARGE`), then each channel cascade
-/// reserves `INPUT_BOUND_SECTION_CHARGE` per section before it walks to the rest of the budget: a
+/// budget it is given, counted frame by frame by the walk itself, finished or stopped. Each
+/// channel cascade reserves `INPUT_BOUND_SECTION_CHARGE` per section before it walks to the rest
+/// of the budget: a
 /// stopped cascade walks exactly what is left after its reservation, and nothing when the budget
 /// does not cover that. The right channel of a design whose channels differ gets what the left
 /// channel's charge left. The near-top pairs' majorant passes are hundreds of thousands of frames,
@@ -471,8 +471,8 @@ fn the_live_bound_is_taken_exactly_when_the_budget_is_exhausted() {
 #[cfg(feature = "test-support")]
 #[test]
 fn a_design_walks_at_most_the_budget_it_is_given() {
+    use builtins::INPUT_BOUND_SECTION_CHARGE;
     use builtins::test_support::{fixed_input_frames_walked, input_section_bounds_within};
-    use builtins::{INPUT_BOUND_DESIGN_CHARGE, INPUT_BOUND_SECTION_CHARGE};
     let cascade = 2 * INPUT_BOUND_SECTION_CHARGE;
     for &rate in rates() {
         let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch rate");
@@ -486,22 +486,19 @@ fn a_design_walks_at_most_the_budget_it_is_given() {
         };
         let [left_alone, right_alone, split_charged] = [left, right, split]
             .map(|design| input_section_bound_charged(rate, design).expect("bound"));
-        // A channel cascade's charge is its frames plus two sections; a design adds its own charge
-        // once, and a design whose channels differ is its two cascades.
-        assert_eq!(
-            left_alone.charge,
-            INPUT_BOUND_DESIGN_CHARGE + cascade + left_alone.frames
-        );
+        // A channel cascade's charge is its frames plus two sections, and a design whose channels
+        // differ is its two cascades.
+        assert_eq!(left_alone.charge, cascade + left_alone.frames);
         assert_eq!(
             (split_charged.frames, split_charged.charge),
             (
                 left_alone.frames + right_alone.frames,
-                left_alone.charge + right_alone.charge - INPUT_BOUND_DESIGN_CHARGE
+                left_alone.charge + right_alone.charge
             )
         );
         // The frames a design of these cascades walks under `budget` when it is stopped.
         let stopped_walk = |budget: u64, channels: &[u64]| -> u64 {
-            let mut left_over = budget.saturating_sub(INPUT_BOUND_DESIGN_CHARGE);
+            let mut left_over = budget;
             let mut walked = 0;
             for &frames in channels {
                 let horizon = left_over.saturating_sub(cascade);
@@ -522,7 +519,7 @@ fn a_design_walks_at_most_the_budget_it_is_given() {
             ),
         ];
         for (design, charged, channels) in cases {
-            let fixed = INPUT_BOUND_DESIGN_CHARGE + cascade;
+            let fixed = cascade;
             let mut budgets = std::vec![
                 1,
                 fixed - 1,

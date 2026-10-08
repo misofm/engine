@@ -12222,7 +12222,7 @@ mod tests {
 
     /// #1457 D1, D2: a preparation walks at most the budget, and a warm cache walks nothing. The
     /// first three strips carry distinct near-top designs, more than the budget covers: a cold
-    /// preparation walks exactly the budget less the three designs' fixed charges (the design that
+    /// preparation walks exactly the budget less the three designs' section charges (the design that
     /// crosses it is stopped there, and every later one walks nothing), and a second preparation
     /// with the same cache computes no bound and walks no frame, the stopped design included, with
     /// the same prepared bounds.
@@ -12277,9 +12277,8 @@ mod tests {
                 builtins::test_support::fixed_input_frames_walked() - frames,
             )
         };
-        // Each design reserves its fixed charge before it walks: two sections on one cascade.
-        let fixed =
-            3 * (builtins::INPUT_BOUND_DESIGN_CHARGE + 2 * builtins::INPUT_BOUND_SECTION_CHARGE);
+        // Each design reserves its sections' charge before it walks: two sections on one cascade.
+        let fixed = 3 * 2 * builtins::INPUT_BOUND_SECTION_CHARGE;
         let spent = builtins::INPUT_BOUND_BUDGET_FRAMES - fixed;
         let (none, _, walked) = prepare(None);
         assert_eq!(walked, spent, "no cache");

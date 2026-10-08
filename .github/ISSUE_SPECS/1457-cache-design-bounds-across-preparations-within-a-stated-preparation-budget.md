@@ -169,6 +169,8 @@ D1's budget states it beside the design bounds.
 ## Dependencies
 
 - #1329. Coordinate with #1332 (stream H) for the browser's preparation thread.
+- Successors: #1470 (browser cache), #1471 (C ABI caches), #1474 (the near-top walk's
+  data-dependent cost, Amendment 4).
 
 ## Amendment 1 (root rulings, 2026-10-07): D1-D3, the split and restated gates
 
@@ -345,6 +347,8 @@ Made by the decision-15 root coordinator under the owner's no-shortcuts delegati
   constant (1,510,000) does not change without a ruling. A frame-equivalent is one near-top frame
   on the CI-class runner (1 / 75,500 ms, D1's reference); this workstation (x86-64-v3, release, one
   pinned core) stands in for that runner, and both the code and this spec say so.
+  *(Superseded by Amendment 4: a frame-equivalent is one frame of the slowest frame class, 23.5 ns;
+  the per-design charge is removed.)*
 - **MJ2: a stopped walk reports the frames it walked.** `math::tail::fixed_cascade_within` reports
   the frames actually walked, finished or stopped, and the test-support counter adds those, not the
   horizon. A test asserts `walked <= budget`, and it is shown red on a majorant pass that counts
@@ -379,6 +383,49 @@ section) and gate 8 holds the charge, not only the frames, inside the budget. Ga
    design included (red on X3: a pass that counts frames but does not stop at the horizon), and a
    second preparation with the same cache walks no frame and computes no bound, the stopped design
    included.
+
+## Amendment 4 (root rulings, 2026-10-08): the frame-equivalent from the slowest frame class
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation, after attempt
+2's verdict (`/home/bl/misofm/submix-verdicts/1457-attempt2.md`: FAIL on MJ1, the stated worst
+case 22.7 ms against a measured 33.6-34.0 ms in a band of near-top designs).
+
+- **D1, option (a): restate.** The frame-equivalent is defined from the slowest frame class: the
+  near-top band where the HPF is at about 0.74-0.85 of its maximum into the LPF at its maximum,
+  +24 dB, costing 21-23 ns a frame. The section charge is recalibrated in those units. The band
+  family joins the committed gate-2 workload (`crates/builtins/examples/input_bound_budget.rs`).
+  The worst case is stated as the measured maximum across all families (about 34 ms), with its
+  spread and the per-frame cause. Gate 8 stays exact (every 64-track console document at every
+  launch rate); if the new unit breaks it, the slice stops and reports with numbers. Option (b),
+  lowering the budget, is refused; `INPUT_BOUND_BUDGET_FRAMES` stays 1,510,000.
+- **D1, option (c): a successor.** *Remove the data-dependent cost of the near-top tail walk*
+  (#1474) diagnoses the band's per-frame cost by measurement (subnormal state or error radius in
+  the first section, by subnormal-operand counts or a flush-to-zero A/B), and if confirmed uses a
+  certified flush in the analysis (a radius rounded up to a stated tiny bound, proven sound), then
+  recalibrates and restates the worst case down. Its gates include the band family's bound
+  identical or soundly larger, and the timing evidence. It is ordered in stream G after #1457 and
+  before #1465, and #1465 depends on it.
+- **m1: no per-design charge.** `INPUT_BOUND_DESIGN_CHARGE` and its reservation code are removed:
+  the measured per-design term is negative at every rate. A future non-zero charge brings its own
+  test.
+- **m2.** One math-level test sweeps the horizon over a cheap design and catches the verifier's
+  X3, X5, X7 and X9, each shown with a mutation run.
+- **n1.** The 11-12 ms on the first preparation is allocator first-touch, not a cache cost (with
+  heap trimming off, a cold cache costs the same as no cache, 39 ms). The record is corrected, and
+  #1471's scope explains and measures the first-touch cost.
+- **n2-n4.** The example's doc names the real constants; `tail.rs`'s long doc line is wrapped; the
+  record states how many calibration runs happened and why, and that the constants come from the
+  fixed-cost measurement, not from gate-2 timings.
+- Root's earlier ruling stands: if a verifier rules a gate-2 figure tainted, the batch verdict's
+  single invocation is the figure of record.
+
+### Gates as of Amendment 4
+
+Gates 2, 3, 5, 6, 7 and 8 stand as Amendment 3 states them, with these changes: the budget is in
+frame-equivalents of the slowest frame class, each design charging its frames walked plus
+`INPUT_BOUND_SECTION_CHARGE` per section (no per-design charge); gate 2's workload includes the
+band families; and gate 7's walk is also checked at the math level, under every horizon of a cheap
+design (red on X3, X5, X7 and X9).
 
 ## Attempt record
 
@@ -614,6 +661,10 @@ budget.
   the same preparation without a cache although both run the same code once the budget is spent
   (three cache insertions apart); not investigated (probably fresh page faults for the
   per-preparation design map, which is the first large allocation of each round).
+  *(Corrected in attempt 3, verdict n1 and root ruling: this is allocator first-touch of the
+  preparation's own memory, not a cache cost. With glibc heap trimming off, a cold cache costs the
+  same as no cache, 39 ms, and only the process's first preparation pays the extra; the 22.6 ms
+  keying figure holds on warm heap memory. #1471 explains and measures the first-touch cost.)*
 - **Measurement history, candidly.** The calibration and gate 2 were each run more than once:
   a gate-2 trial at a provisional section charge of 640 (before the calibration was final); one
   invocation of both while another workload loaded the box (every workload about 1.7x slower, the
@@ -722,3 +773,182 @@ was M12b (budget 1,200,000), now C6 and C7.
   abi-layout-v1 and parameter-metadata-v1): all exit 0. (`check-host-core-policy.sh` now passes;
   attempt 1 saw it fail on its base.)
 - AArch64 runs only in CI.
+
+### Attempt 3 (2026-10-08): the frame-equivalent from the slowest frame class (Amendment 4)
+
+**What changed.**
+- `builtins` (`tail.rs`, `lib.rs`): `INPUT_BOUND_DESIGN_CHARGE` and its reservation and addition
+  are removed (m1): a design charges its frames walked plus `INPUT_BOUND_SECTION_CHARGE` per
+  section. A frame-equivalent is 23.5 ns, one frame of the slowest frame class measured, rounded
+  up; `INPUT_BOUND_SECTION_CHARGE` is 290 in those units (was 520 in units of 13.25 ns). The
+  budget stays 1,510,000 frame-equivalents, now 35.5 ms. The constants' docs say so; the cache
+  cap's arithmetic is restated (a design charges at least 547, so at most 2,760 designs a
+  preparation); the 122-column doc line is wrapped (n3).
+- `math::tail`: one unit test sweeps the horizon over a cheap design (m2, below).
+- `crates/builtins/examples/input_bound_budget.rs`: two band families (64 and 4,096 designs, the
+  HPF at 0.778 of the maximum plus 1-N `f32` steps into the LPF at the maximum, +24 dB); a
+  design-work column (no cache less rebuild) and its five slowest rows; the calibration measures
+  the frame classes first (ns per frame of long near-top walks, the HPF at 0.50-0.99 of the
+  maximum and one `f32` below it, at 0 and +24 dB) and states the fixed costs in frames of the
+  slowest class it measured; the doc names the real constants (n2).
+- Tests: the design charge's terms leave `tail_contract::a_design_walks_at_most_the_budget_it_is_given`
+  and `builtins_compiler`'s gate-7 test (their assertions are otherwise unchanged).
+- Specs: Amendment 4 here, the n1 correction in attempt 2's record; the successor #1474 (filed,
+  local spec, STREAMS row 24 after #1457 and before #1465, the hot-file order); #1465's
+  Dependencies and F5 name #1474 and the removed charge; #1471's Context drops the design charge
+  and gate 4 gains the first-touch measurement (root ruling, n1).
+- No render path changed.
+
+**Calibration** (one invocation, `taskset -c 7 target/release/examples/input_bound_budget
+calibrate`, release, x86-64-v3, this workstation as the CI-class runner; load average 0.78 before
+and 0.84 after). The constants come from this fixed-cost measurement only, never from a gate-2
+timing.
+- Frame classes, measured rounds 1 and 2: the slowest class costs 22.58-23.15 ns a frame at every
+  rate and both trims, with the HPF at 0.73-0.87 of the maximum (the fractions above 18 ns; 0.66
+  once); the points outside the band cost from 11.96 ns to below 18 ns (attempt 2's verifier
+  measured 12.0-14.7 ns there). The warmup rounds (not measurements) reached 23.85 ns once and
+  28.06 ns once (96 kHz, 0 dB). Slowest measured: **23.15 ns**, so a frame-equivalent is 23.5 ns.
+- Fixed costs per class (measured rounds; intercepts of the time-against-frames line over walks of
+  at most 16,384 frames): one cascade of two sections 11.31-13.55 us; two cascades of two sections
+  18.58-21.82 us; per design -2.52 to -1.56 us at every rate (negative: no per-design charge). The
+  largest fixed cost per section is 13.55 / 2 = 6.78 us (88.2 kHz, round 2), 292.7 frames of the
+  23.15 ns class and 288.3 frame-equivalents of 23.5 ns, so `INPUT_BOUND_SECTION_CHARGE` = 290.
+- Every frame of every design measured costs at most one frame-equivalent (short two-section walks
+  13.6-15.5 ns, long near-top walks 11.96-23.15 ns), and every section's fixed cost at most its charge,
+  so the budget bounds the real design-bound work at 35.5 ms.
+
+**Gate 2** (one invocation after the constants were fixed, `taskset -c 7
+target/release/examples/input_bound_budget`, one warmup and two measured rounds, no retry; load
+average 1.59 before and 1.54 after, a shared box). "design work" is no cache less rebuild (the
+O(strips) keying taken out). Ranges over rounds 1 and 2; ms:
+
+| family | rates | first | rebuild | no cache | design work | frames walked | exact |
+|---|---|---|---|---|---|---|---|
+| top pair (HPF one `f32` below the maximum into the LPF at it, +24 dB) | all | 6.43-6.73 | 0.001 | 6.42-6.67 | 6.42-6.67 | 525,520 / 528,640 | 1 / 1 |
+| LPF at the maximum, +24 dB | all | 3.31-3.37 | 0.001 | 3.32-3.42 | 3.32-3.42 | 448,513 / 451,073 | 1 / 1 |
+| 64-design near-top family | all | 18.56-19.58 | 0.018 | 18.60-19.36 | 18.58-19.34 | 1,507,680 | 3 / 64 |
+| 65,537 distinct near-top designs | all | 52.99-63.18 | 22.67-24.84 | 41.00-42.73 | 17.05-19.85 | 1,508,260 | 2 / 65,537 |
+| **64 band designs** | all | 33.79-34.50 | 0.019 | 33.73-34.92 | **33.71-34.90** | 1,507,680 | 3 / 64 |
+| **4,096 band designs** | all | 35.10-40.49 | 1.37-1.39 | 35.36-35.78 | **33.97-34.40** | 1,507,680 | 3 / 4,096 |
+| 64 typical (20 Hz HPF + steps into a 20 kHz LPF, 0 dB) | 44.1 / 48 | 9.88-10.73 | 0.020 | 9.85-10.58 | 9.83-10.56 | 664,896 / 718,656 | 64 / 64 |
+| 64 typical | 88.2 / 96 | 17.69-19.22 | 0.020 | 17.70-19.13 | 17.68-19.11 | 1,278,528 / 1,388,352 | 64 / 64 |
+| 256 typical | all | 20.71-21.62 | 0.070-0.081 | 20.39-21.52 | 20.32-21.45 | 1,423,580-1,469,980 | 148 / 137 / 74 / 68 of 256 |
+| 4,096 one-section (1 kHz LPF + steps, 0 dB) | all | 18.82-19.20 | 1.45-1.50 | 18.46-20.33 | 17.00-18.87 | 964,510 / 1,096,460 | 1,880 / 1,425 of 4,096 |
+| 4,096 two-section (1 kHz into 1.28 kHz, +24 dB) | all | 27.75-36.27 | 1.68-1.80 | 27.90-31.22 | 26.19-29.54 | 708,453-964,220 | 1,381 / 1,119 / 1,119 / 940 |
+| 4,096 two-section (1.28 kHz into 5.12 kHz, +12 dB) | all | 26.23-27.93 | 1.67-1.73 | 26.52-28.29 | 24.79-26.61 | 708,453 / 860,511 | 1,381 / 1,119 |
+| 4,096 two-section (2.56 kHz into 5.12 kHz, +24 dB) | all | 24.53-27.44 | 1.70-1.90 | 24.34-27.62 | 22.58-25.92 | 708,453 | 1,381 |
+| 4,096 two-section (5.12 kHz into 10.24 kHz, 0 dB) | all | 22.74-25.88 | 1.59-1.71 | 22.29-25.36 | 20.63-23.75 | 708,453 | 1,381 |
+| 4,096 two-cascade (left 1 kHz LPF + steps, right 1 kHz HPF, 0 dB) | all | 18.54-18.86 | 1.40-1.42 | 18.36-30.49 | 16.95-29.07 | 964,510 / 1,096,460 | 940 / 712 |
+
+The example asserts, for every row, that first, rebuild and no cache report identical bounds,
+that the rebuild walks no frame and computes no bound, and that a preparation walks at most the
+budget.
+
+- **The stated worst case.** Design-bound work under the budget: measured maximum **34.90 ms**
+  (64 band designs, 44.1 kHz, round 2), inside the budget's 35.5 ms. Spread of the design work
+  over rounds and rates: the band families 33.71-34.90 ms; the cheap two-section families
+  20.63-29.54 ms; typical 9.83-21.45 ms; cheap one-section and two-cascade 16.95-18.87 ms (one
+  two-cascade round at 44.1 kHz took 29.07 ms while its first preparation took 18.75 ms: noise on
+  a shared box, not repeated); near-top 17.05-19.85 ms; the single top designs 3.32-6.67 ms. **The per-frame cause:** the band walks about the same frames as the 64-design
+  near-top family (1,507,680), but each costs about 23 ns against about 12.8 ns; attempt 2's
+  verifier found the first section's state or error radius subnormal on almost every band frame
+  (likely cause, not proven; #1474 diagnoses it and, if confirmed, removes it).
+- **A whole preparation of up to 4,096 strips**, keying included: at most 35.8 ms, apart from two
+  single-round first preparations (40.49 ms, 4,096 band designs at 88.2 kHz; 36.27 ms, the 1 kHz /
+  1.28 kHz family at 88.2 kHz) whose no-cache runs in the same round took 35.78 and 31.22 ms.
+- **Beside it, outside the budget: the O(strips) keying**, 1.4-1.9 ms for 4,096 strips and
+  22.7-24.8 ms for 65,537 on warm heap memory. The 65,537-strip first preparation's extra 11-21 ms
+  over no cache is allocator first-touch (n1, above), not a cache cost; #1471 measures it.
+
+**Gate 8** (`every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`,
+`--nocapture`): every document exact at every rate. Charged (frames walked), margin to 1,510,000:
+
+| documents | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
+|---|---|---|---|---|
+| `console-sixty-four-track`, `-app`, `-intended`, `-sends` | 684,672 (610,432), margin 825,328 | 733,056 (658,816), margin 776,944 | 1,232,000 (1,157,760), margin 278,000 | 1,328,256 (1,254,016), margin **181,744** (88 % used) |
+| `console-sixty-four-track-mono` | 353,600 (316,480), margin 1,156,400 | 378,944 (341,824), margin 1,131,056 | 638,272 (601,152), margin 871,728 | 687,936 (650,816), margin 822,064 |
+
+The new unit lowers each section's charge, so gate 8 gains margin at every rate (96 kHz: 122,864
+to 181,744).
+
+**Measurement history (n4).**
+- Attempt 2, from its record and its verifier: the calibration ran twice (once while another
+  workload loaded the box, about 1.7x slower, discarded; once clean, the record's figures). Gate 2
+  ran four times: a trial at a provisional section charge of 640 before the calibration was final,
+  the loaded run (discarded), a run at 500, and, after the clean calibration showed that 500 does
+  not cover the two-section cascade at 88.2 kHz (13.71 us against 13.25 us), the run at 520 that
+  the record reports. The 500-to-520 change came from the calibration, not from a gate-2 timing.
+- Attempt 3: the calibration ran once and gate 2 ran once, after the constants were fixed. The
+  constants come from the calibration's fixed-cost and frame-class measurements only.
+
+**Tests** (test-value sentences: which plausible defect turns each red that no other test catches):
+- New: `math::tail::tests::a_walk_takes_at_most_its_horizon_and_finishes_exactly_when_the_horizon_covers_it`
+  (m2): red when the replay of the crossing block counts frames without stopping at its horizon
+  (X7), which no other test catches; also red on X3 (majorant pass), X5 (deviation walk) and X9
+  (`take_frame` lets one frame past the horizon). Its design (a 300 Hz LPF at 44.1 kHz) walks
+  three majorant blocks, the replay and one deviation frame (1,025 frames), and every horizon from
+  0 to 1,026 is checked: a stopped walk takes exactly its horizon and returns `None`, a covered
+  walk returns `fixed_cascade`'s result bit for bit.
+- Changed (the design charge's zero terms removed; assertions otherwise unchanged):
+  `tail_contract::a_design_walks_at_most_the_budget_it_is_given` and
+  `builtins_compiler::tests::a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing`
+  keep attempt 2's catches (C4 and C8 the first's alone; M4 and M8 the second's alone).
+- Gate 8 (`every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate`,
+  unchanged code) under the new charge: red, and only it, at a section charge of 1,100 or a budget
+  of 1,300,000.
+
+**Mutation runs** (each applied alone in the worktree, then the file restored; debug,
+`--no-fail-fast`; `tc` = `tail_contract` with `test-support`, `bc` = the builtins-compiler lib,
+`hc` = the host-core test `a_design_bound_cache_changes_no_prepared_value`):
+
+| id | mutation | red |
+|---|---|---|
+| X3 | the majorant pass counts, does not stop (`take_frame(walked, u64::MAX)`) | the new math test (horizon 0 walked 768) |
+| X5 | the deviation walk counts, does not stop | the new math test (horizon 1,024 finished at 1,025) |
+| X7 | the replay counts, does not stop | the new math test (horizon 768 walked 1,024) |
+| X9 | `take_frame` stops at `walked > horizon` | the new math test (horizon 0 walked 1) |
+| C1 | the sections' charge not reserved before the walk | tc: `a_design_walks_at_most_the_budget_it_is_given`, gate 5; bc: gate 7; hc green |
+| C3 | a design's charge omits its section charge | tc: the same two; bc: gate 7; hc green |
+| C6 | `INPUT_BOUND_SECTION_CHARGE` 1,100 | bc: gate 8 only |
+| C7 | `INPUT_BOUND_BUDGET_FRAMES` 1,300,000 | bc: gate 8 only |
+
+All four X mutations restored: the math lib's three tests pass.
+
+**Gates run** (on the attempt-3 tree, x86-64, `CARGO_INCREMENTAL=0`; all exit 0):
+- `cargo fmt --all -- --check`; test-debug-a (`cargo test -p builtins-compiler --no-run`, the
+  workspace step with its exact `--exclude` and `--features` list, its doctests); test-debug-b
+  (the DSP step with `math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`,
+  its doctests, `conformance_fixtures -- --check`).
+- Release: `-p lane -p math -p wasm-gates --features math/lane`, `filter_liveness`,
+  `tail_contract`; `tail_contract --no-run` without `test-support` compiles.
+- `cargo clippy --workspace --all-targets -D warnings`, with and without `--all-features`;
+  `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`.
+- Release `audit`, `bench`, `capi`, `session-validator` build and the release audit tests;
+  `target/release/audit capi`: 0 allocations, 0 deallocations, 0 locks, 0 syscalls, 0 violations,
+  `pcm_digest` `cb10fbface44a3a4` (unchanged); `check-builtins-fixtures.sh`,
+  `check-console-fixtures.sh`, `check-effect-contract.sh`, the three
+  `test-realtime-audit-probes.sh` legs, `run-protocol-allocation-audit.sh`; `check-capi-abi.sh`
+  and `--self-test`, then `check-scalar-oracle-absent.py --native` and `--self-test`;
+  `check-cross-targets.sh`, `check-graph-determinism.sh`, `check-protocol-wasm-parity.sh`,
+  `run-wasm-gates.sh --without-v8-spill --without-native`.
+- The worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `check-scalar-oracle-absent.py --wasm`, `check-web-audioworklet-v8-spill.py` and `--self-test`;
+  SDK `npm ci`, `check-sdk-generated.sh`, `check-sdk-deletions.py` and `--self-test`,
+  `check-sdk-types.sh`, `check-sdk-headless.sh`, `sdk-package.sh check`;
+  `test-web-audioworklet.sh`.
+- Every lint-job `scripts/check-*.sh` (workspace, session, bench, host-core, protocol-control,
+  realtime, realtime-audit-leak, artifact-evidence-leak, lane, rack, builtins, graph,
+  effect-runtime policies and fixtures, env-vocabulary, conformance-boundaries,
+  console-benchmark-fixture, bench-preconditions, unfused-seal and `--self-test`,
+  parametric-eq-render-contract, dsp-research, builtins-listening), every `scripts/test-*.sh`
+  self-test that runs locally (the same list plus builtins-fixtures, console-benchmark,
+  realtime-trace-validator, gate-lib, sdk-artifact-builder-output-contract), and the Python checks
+  and self-tests (ci-path-routing, test-support-ci, script-reachability, release-shape and
+  `--self-test`, npm-publish-modes, session-map-shape, the command-kind and command-reason
+  vocabularies, `--self-test` of abi-layout-v1 and parameter-metadata-v1).
+- AArch64 runs only in CI.
+
+**Open items for root.** #1468's and #1470's local specs still name `INPUT_BOUND_DESIGN_CHARGE`
+(and #1470 "about 20 ms of near-top design work"); they are outside this attempt's named paths.
+The GitHub bodies of #1465 and #1471 need a sync with their local specs.

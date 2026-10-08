@@ -89,7 +89,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/graph-compiler/src/*` | G #1460 (`estimate.rs` live-control owner charge and its `lib.rs` test mirror) → G #1461 (`banks.rs` bind check, `estimate.rs` bank reads, test factories) → A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases; G #1469 (test-module `launch_native_effect_registry` call sites only, and only if its return-type change forces them) in any order, the later slice rebases |
 | `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → G #1462 (three test requests' `tail_bound` field) → A payload (#1279, #1280) → G #1337 → G #1372; G #1464 (the `tail_and_rest` rename and field only) before G #1372, in either order with A's payload slices and G #1337, the later slice rebases |
 | The other `PreparedEffectMetadata {` literals in the effect crates' payload code and test helpers (`crates/transient-shaper/src/corpus.rs:190` and its peers) | G #1464 (the `composition` field only) in either order with A's payload slices; the later slice rebases |
-| `crates/builtins/src/tail.rs`, `crates/builtins/tests/tail_contract.rs`, `crates/math/src/tail.rs` | G #1464 (`builtins` only) → G #1465 → G #1466 → G #1467 → G #1468; G #1457 before #1464 |
+| `crates/builtins/src/tail.rs`, `crates/builtins/tests/tail_contract.rs`, `crates/math/src/tail.rs` | G #1464 (`builtins` only) → G #1465 → G #1466 → G #1467 → G #1468; G #1457 before #1464; G #1474 (`math` and `builtins` tail, after #1457) before #1465, in either order with #1464, the later slice rebases |
 | `hosts/host-web/src/lib.rs` | H owns; J #1423 (record construction in `into_track_record` and the coalescing sites) lands after B #1312 and #1346; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381; H #1448 (`poll_meters`, unmarked) lands in any order with the B, D, E and J slices that land before H #1332, the later slice rebases; then "H #1448's guard, landed by J after C2" (two markers replacing blank lines, in the J tool batch) after H #1448, in any order with the rest, the later slice rebases |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
@@ -381,32 +381,33 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 21 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
 | 22 | #1433 | Tighten the cascade exact-rest bound with a frequency-aware cascade analysis | #1329 | — |
 | 23 | #1457 | Cache design bounds across preparations within a stated preparation budget | #1329 | — (the C ABI cache is #1471, the browser cache #1470) |
-| 24 | #1471 | Wire the engine and session design-bound caches into the C ABI | #1457 | #1309 |
-| 25 | #1470 | Cache design bounds across browser preparations in the control Worker | #1457 | #1332 |
-| 26 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
-| 27 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
-| 28 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
-| 29 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
-| 30 | #1460 | Keep only render-read effect fields in the render node table | — | — |
-| 31 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329, #1460 | — |
-| 32 | #1461 | Keep each effect processor's render memory free of its prepared metadata | #1377 | — |
-| 33 | #1462 | Compute and validate each effect's tail bound once per rate and quality at registry build | #1377 | — |
-| 34 | #1469 | Build the launch effect registry once per process and share it | #1462 | — |
-| 35 | #1464 | Carry every node's tail bound in one node-neutral struct | #1457, #1461, #1462 | — |
-| 36 | #1465 | State a fixed input section's decay, gains and flush stall | #1457, #1464 | — |
-| 37 | #1466 | Certify the live input section's decay, peak gain and flush stall | #1457, #1465 | — |
-| 38 | #1467 | Derive the live input section's tail gain and state its composition | #1466 | — |
-| 39 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 40 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377, #1464, #1465, #1466, #1467 | #1237, #1285, #1384, #1287 (first slice) |
-| 41 | #1468 | Tighten the fixed input section's peak gain past the cascade triangle inequality | #1465, #1467 | — |
-| 42 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 43 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379, #1461, #1462, #1464, #1469 | — |
-| 44 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1461, #1462, #1464, #1465, #1469 | — |
-| 45 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 46 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
-| 47 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
-| 48 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1461, #1462, #1464, #1465, #1469 | — |
-| 49 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379, #1469 | — |
+| 24 | #1474 | Remove the data-dependent cost of the near-top tail walk | #1457 | — |
+| 25 | #1471 | Wire the engine and session design-bound caches into the C ABI | #1457 | #1309 |
+| 26 | #1470 | Cache design bounds across browser preparations in the control Worker | #1457 | #1332 |
+| 27 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
+| 28 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
+| 29 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
+| 30 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
+| 31 | #1460 | Keep only render-read effect fields in the render node table | — | — |
+| 32 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329, #1460 | — |
+| 33 | #1461 | Keep each effect processor's render memory free of its prepared metadata | #1377 | — |
+| 34 | #1462 | Compute and validate each effect's tail bound once per rate and quality at registry build | #1377 | — |
+| 35 | #1469 | Build the launch effect registry once per process and share it | #1462 | — |
+| 36 | #1464 | Carry every node's tail bound in one node-neutral struct | #1457, #1461, #1462 | — |
+| 37 | #1465 | State a fixed input section's decay, gains and flush stall | #1457, #1464, #1474 | — |
+| 38 | #1466 | Certify the live input section's decay, peak gain and flush stall | #1457, #1465 | — |
+| 39 | #1467 | Derive the live input section's tail gain and state its composition | #1466 | — |
+| 40 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 41 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377, #1464, #1465, #1466, #1467 | #1237, #1285, #1384, #1287 (first slice) |
+| 42 | #1468 | Tighten the fixed input section's peak gain past the cascade triangle inequality | #1465, #1467 | — |
+| 43 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 44 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379, #1461, #1462, #1464, #1469 | — |
+| 45 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1461, #1462, #1464, #1465, #1469 | — |
+| 46 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 47 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
+| 48 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379, #1461, #1462, #1464, #1469 | — |
+| 49 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1461, #1462, #1464, #1465, #1469 | — |
+| 50 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379, #1469 | — |
 
 ## Stream H
 

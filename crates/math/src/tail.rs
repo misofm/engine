@@ -2352,7 +2352,50 @@ fn fixed_cascade_walk(
 
 #[cfg(test)]
 mod tests {
-    use super::{SvfWords, v_operator_norm};
+    use super::{FlushLaw, SvfWords, fixed_cascade, fixed_cascade_within, v_operator_norm};
+
+    /// Issue #1457 (attempt 2 verdict, m2): a walk under every horizon from zero past its length
+    /// takes at most that horizon, exactly the horizon when it stops, and finishes with
+    /// [`fixed_cascade`]'s result, bit for bit, exactly when the horizon covers its frames. The
+    /// design is cheap and its walk has every frame-by-frame part: three blocks of the majorant
+    /// pass, the replay of the crossing block and the deviation walk (1,025 frames), so the sweep
+    /// stops the walk inside each part and on each part's last frame. A loop that counts its frames
+    /// but does not stop at the horizon, or a horizon test that lets one frame past, walks past
+    /// some horizon here.
+    #[test]
+    fn a_walk_takes_at_most_its_horizon_and_finishes_exactly_when_the_horizon_covers_it() {
+        // A 300 Hz low-pass at 44.1 kHz, the Butterworth design's `f32` words; unity trim.
+        let words = SvfWords::from_f32(
+            [0x3cf3_e39f, 0x3ca9_e351, 0x39e8_6719, 0, 0, 0x3f80_0000].map(f32::from_bits),
+        );
+        // The frames walked do not depend on the flush law; any law whose stall is below its rest
+        // threshold lets the finished walk state a bound.
+        let law = FlushLaw {
+            flush_eps: 1.0e-20,
+            rest_eps: 1.0e-14,
+            silence_frames: 64,
+        };
+        let peaks = [15.848_932, 1.0e6];
+        let complete = fixed_cascade(&[words], 1.0, &law, peaks).expect("the design is bounded");
+        let frames = fixed_cascade_within(&[words], 1.0, &law, peaks, u64::MAX).frames;
+        assert_eq!(frames, 3 * 256 + 256 + 1, "the walk's parts");
+        for horizon in 0..=frames + 1 {
+            let walk = fixed_cascade_within(&[words], 1.0, &law, peaks, horizon);
+            if horizon < frames {
+                assert_eq!(
+                    (walk.result, walk.frames),
+                    (None, horizon),
+                    "horizon {horizon}"
+                );
+            } else {
+                assert_eq!(
+                    (walk.result, walk.frames),
+                    (Some(Ok(complete)), frames),
+                    "horizon {horizon}"
+                );
+            }
+        }
+    }
 
     /// The certified operator norm is never below the exact `||A||_V` of a near-rotation, and
     /// within `1e-13` of it. The references are the exact norms of the kernel's own `f32` words,

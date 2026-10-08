@@ -18,10 +18,10 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
 
 - **What #1457 ships.** In `builtins`: `InputBoundCache` (keyed by `InputBoundKey`, which carries the
   rate; entry cap `INPUT_BOUND_CACHE_ENTRIES` = 8,192, cleared when full), the per-preparation
-  budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frame-equivalents, charged in strip order: each
-  design computed charges the frames it walks plus `INPUT_BOUND_DESIGN_CHARGE` and
-  `INPUT_BOUND_SECTION_CHARGE` per section, #1457 Amendment 3; past it a design reports the rate's
-  live bound), and `input_section_bounds(rate, strips, cache)`. A cached design charges the budget
+  budget `INPUT_BOUND_BUDGET_FRAMES` (1,510,000 frame-equivalents of 23.5 ns, about 35.5 ms,
+  charged in strip order: each design computed charges the frames it walks plus
+  `INPUT_BOUND_SECTION_CHARGE` per section, #1457 Amendments 3 and 4; past it a design reports the
+  rate's live bound), and `input_section_bounds(rate, strips, cache)`. A cached design charges the budget
   its stored charge, so every prepared value is a pure function of the session, with or without a
   cache, cold or warm.
 - **Cache memory and clearing (#1457 Amendment 3, attempt-1 verdict m3).** A full cache of 8,192
@@ -91,6 +91,15 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
    on a first compile and on a rebuild of the unchanged session (release, one invocation, one warmup,
    two measured rounds); the design-bound work is within #1457's budget on the first, and zero on
    the rebuild (gate 1).
+   *(Root ruling, #1457 Amendment 4, n1.)* The first preparation in a process pays an allocator
+   first-touch cost that is not a cache cost: #1457 attempt 2 saw a 65,537-strip first preparation
+   with a fresh cache take 11-12 ms more than the same preparation without a cache, and its
+   verifier showed that with glibc heap trimming off a cold cache costs the same as no cache
+   (39 ms) and only the process's first preparation pays the extra (about 54 ms;
+   `/tmp/claude-1002/v1457b/evidence/probe-order.log`, `probe-order-notrim.log`). This slice
+   explains and measures that first-touch cost on the C ABI's first compile: how much of the first
+   compile it is, at the 9-track and 64-track documents and at 65,537 strips, with heap trimming on
+   (the default) and off, recorded beside the first-compile and rebuild figures.
 
 ## Non-goals
 

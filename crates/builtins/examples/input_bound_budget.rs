@@ -19,11 +19,14 @@
 //!   the walks really took, the bounds computed and the strips left on their exact bound. It
 //!   asserts what the gate states: the three results are identical, a preparation walks at most
 //!   the budget, and a warm rebuild walks no frame and computes no bound.
-//! * **Calibrate.** Per design class (one or two channel cascades, one or two sections each), the
-//!   least-squares line of one design's computation time against the frames it walks, over a grid
-//!   of designs: its intercept is the class's fixed cost. The cascade and section constants
-//!   (`INPUT_BOUND_CASCADE_CHARGE`, `INPUT_BOUND_SECTION_CHARGE`) are those fixed costs in
-//!   frame-equivalents of the budget's reference rate (`REFERENCE_FRAMES_PER_MS`).
+//! * **Calibrate.** Two fixed-cost measurements, separate from gate 2, that set the charge
+//!   constants. First the frame classes: the time per frame of long near-top walks (an HPF at
+//!   0.50-0.99 of the maximum, and one `f32` below it, into the LPF at the maximum, at 0 and
+//!   +24 dB), whose slowest class defines the frame-equivalent (`FRAME_EQUIVALENT_NS`). Then per
+//!   design class (one or two channel cascades, one or two sections each), the least-squares line
+//!   of one design's computation time against the frames it walks, over a grid of designs: its
+//!   intercept is the class's fixed cost, and `INPUT_BOUND_SECTION_CHARGE` is the largest fixed
+//!   cost per section in frame-equivalents.
 #![allow(missing_docs)]
 
 use builtins::test_support::{
@@ -37,8 +40,9 @@ use builtins::{
 use std::time::Instant;
 
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-/// The budget's reference rate: near-top two-section designs, 20 ms for the budget (#1457 D1).
-const REFERENCE_FRAMES_PER_MS: f64 = 75_500.0;
+/// The frame-equivalent in ns: the time of one frame of the slowest frame class measured (#1457
+/// Amendment 4), as `builtins::INPUT_BOUND_SECTION_CHARGE`'s doc states it.
+const FRAME_EQUIVALENT_NS: f64 = 23.5;
 const ROUNDS: usize = 3;
 
 fn channel(trim_db: f32, hpf_hz: f32, lpf_hz: f32) -> ChannelParameters {
@@ -97,7 +101,16 @@ fn distinct(count: u32, trim_db: f32, hpf_hz: f32, lpf_hz: f32) -> Vec<BuiltinPa
         .collect()
 }
 
-const FAMILIES: [Family; 12] = [
+/// `count` distinct designs in the slowest frame class (#1457 Amendment 4): the HPF at 0.778 of
+/// the maximum, raised by 1 to `count` `f32` steps, into the LPF at the maximum, +24 dB.
+fn band(rate: u32, count: u32) -> Vec<BuiltinParameters> {
+    let hpf = 0.778 * maximum(rate);
+    (1..=count)
+        .map(|index| same(24.0, f32::from_bits(hpf.to_bits() + index), maximum(rate)))
+        .collect()
+}
+
+const FAMILIES: [Family; 14] = [
     Family {
         name: "top pair (HPF one f32 below the maximum into the LPF at it, +24 dB)",
         strips: |rate| vec![same(24.0, below(maximum(rate), 1), maximum(rate))],
@@ -121,6 +134,14 @@ const FAMILIES: [Family; 12] = [
                 .map(|index| same(24.0, below(maximum(rate), index), maximum(rate)))
                 .collect()
         },
+    },
+    Family {
+        name: "64 band designs (HPF at 0.778 of the maximum + 1-64 f32 steps into the LPF at it, +24 dB)",
+        strips: |rate| band(rate, 64),
+    },
+    Family {
+        name: "4,096 band designs (HPF at 0.778 of the maximum + 1-4,096 f32 steps into the LPF at it, +24 dB)",
+        strips: |rate| band(rate, 4_096),
     },
     Family {
         name: "64 typical designs (20 Hz HPF + 0.05 Hz steps into a 20 kHz LPF, 0 dB)",
@@ -196,14 +217,15 @@ fn prepare(rate: u32, strips: &[BuiltinParameters], cache: Option<&mut InputBoun
 
 fn gate_two() {
     println!(
-        "budget {INPUT_BOUND_BUDGET_FRAMES} frame-equivalents; charges: design {}, section {}",
-        builtins::INPUT_BOUND_DESIGN_CHARGE,
+        "budget {INPUT_BOUND_BUDGET_FRAMES} frame-equivalents of {FRAME_EQUIVALENT_NS} ns ({:.2} ms); section charge {}",
+        INPUT_BOUND_BUDGET_FRAMES as f64 * FRAME_EQUIVALENT_NS * 1e-6,
         builtins::INPUT_BOUND_SECTION_CHARGE
     );
     println!(
-        "family | rate | round | first ms | rebuild ms | no-cache ms | frames | computed | exact"
+        "family | rate | round | first ms | rebuild ms | no-cache ms | design work ms | frames | computed | exact"
     );
     let mut worst: Vec<(f64, String)> = Vec::new();
+    let mut work: Vec<(f64, String)> = Vec::new();
     for family in &FAMILIES {
         for rate in RATES {
             let strips = (family.strips)(rate);
@@ -238,27 +260,29 @@ fn gate_two() {
                     round.to_string()
                 };
                 println!(
-                    "{} | {rate} | {label} | {:.3} | {:.3} | {:.3} | {} | {} | {exact} / {}",
+                    "{} | {rate} | {label} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {} | {exact} / {}",
                     family.name,
                     first.ms,
                     rebuild.ms,
                     none.ms,
+                    none.ms - rebuild.ms,
                     none.frames,
                     none.computed,
                     strips.len()
                 );
                 if round > 0 {
-                    worst.push((
-                        first.ms.max(none.ms),
-                        format!("{} at {rate} Hz, round {round}", family.name),
-                    ));
+                    let what = format!("{} at {rate} Hz, round {round}", family.name);
+                    worst.push((first.ms.max(none.ms), what.clone()));
+                    work.push((none.ms - rebuild.ms, what));
                 }
             }
         }
     }
-    worst.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for (ms, what) in worst.iter().take(5) {
-        println!("slowest: {ms:.3} ms, {what}");
+    for (heading, mut list) in [("preparation", worst), ("design work", work)] {
+        list.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (ms, what) in list.iter().take(5) {
+            println!("slowest {heading}: {ms:.3} ms, {what}");
+        }
     }
 }
 
@@ -325,8 +349,76 @@ fn line(points: &[(f64, f64)]) -> (f64, f64) {
     (my - slope * mx, slope)
 }
 
+/// One design's computation alone: a one-strip preparation with a fresh cache and no budget limit
+/// (its keying, the walk and the cache insertion). Milliseconds and frames walked.
+fn one_design(rate: u32, design: BuiltinParameters) -> (f64, u64) {
+    let mut cache = InputBoundCache::new();
+    let frames = fixed_input_frames_walked();
+    let (ms, _) = milliseconds(|| {
+        input_section_bounds_within(rate, [design], u64::MAX, Some(&mut cache)).expect("bounds")
+    });
+    (ms, fixed_input_frames_walked() - frames)
+}
+
+/// The frame classes: ns per frame of long near-top walks, an HPF at 0.50-0.99 of the maximum
+/// (and one `f32` below it) into the LPF at the maximum, at 0 and +24 dB. Returns the slowest.
+fn frame_classes() -> f64 {
+    println!(
+        "rate | round | trim dB | slowest HPF fraction | slowest ns per frame | fastest ns per frame | fractions above 18 ns"
+    );
+    let mut slowest = 0.0_f64;
+    for rate in RATES {
+        let top = maximum(rate);
+        let hpfs: Vec<(f32, f32)> = (50..100)
+            .map(|percent| (percent as f32 / 100.0, percent as f32 / 100.0 * top))
+            .chain([(1.0, below(top, 1))])
+            .collect();
+        for round in 0..ROUNDS {
+            for trim in [0.0_f32, 24.0] {
+                let per_frame: Vec<(f32, f64)> = hpfs
+                    .iter()
+                    .map(|&(fraction, hpf)| {
+                        let (ms, frames) = one_design(rate, same(trim, hpf, top));
+                        (fraction, ms * 1e6 / frames as f64)
+                    })
+                    .collect();
+                let (fraction, high) = per_frame
+                    .iter()
+                    .copied()
+                    .fold((0.0, 0.0_f64), |a, b| if b.1 > a.1 { b } else { a });
+                let low = per_frame.iter().fold(f64::MAX, |low, p| low.min(p.1));
+                let band: Vec<String> = per_frame
+                    .iter()
+                    .filter(|p| p.1 > 18.0)
+                    .map(|p| format!("{:.2}", p.0))
+                    .collect();
+                let label = if round == 0 {
+                    "warmup".to_owned()
+                } else {
+                    round.to_string()
+                };
+                println!(
+                    "{rate} | {label} | {trim} | {fraction:.2} | {high:.2} | {low:.2} | {}",
+                    band.join(" ")
+                );
+                if round > 0 {
+                    slowest = slowest.max(high);
+                }
+            }
+        }
+    }
+    println!("slowest frame class measured: {slowest:.2} ns per frame");
+    slowest
+}
+
 fn calibrate() {
-    println!("reference {REFERENCE_FRAMES_PER_MS} frames per ms");
+    let slowest = frame_classes();
+    // The fixed costs are stated in frames of the slowest class this run measured; the committed
+    // frame-equivalent rounds that class's time up, so a charge in these units covers it.
+    println!(
+        "frame-equivalent {FRAME_EQUIVALENT_NS} ns (committed); slowest measured {slowest:.2} ns, the unit below"
+    );
+    let per_ms = 1e6 / slowest;
     println!(
         "rate | round | class | designs | frames min-max | intercept us | ns per frame | intercept frame-equivalents"
     );
@@ -338,6 +430,7 @@ fn calibrate() {
                 round.to_string()
             };
             let mut intercepts = [0.0_f64; 4];
+            let mut charge = 0.0_f64;
             let mut sections = [0_u64; 4];
             for (slot, (name, walked, designs)) in calibration_classes(rate).into_iter().enumerate()
             {
@@ -347,13 +440,8 @@ fn calibrate() {
                 let points: Vec<(f64, f64)> = designs
                     .iter()
                     .map(|design| {
-                        let mut cache = InputBoundCache::new();
-                        let frames = fixed_input_frames_walked();
-                        let (ms, _) = milliseconds(|| {
-                            input_section_bounds_within(rate, [*design], u64::MAX, Some(&mut cache))
-                                .expect("bounds")
-                        });
-                        ((fixed_input_frames_walked() - frames) as f64, ms)
+                        let (ms, frames) = one_design(rate, *design);
+                        (frames as f64, ms)
                     })
                     .collect();
                 let short: Vec<(f64, f64)> = points
@@ -373,8 +461,9 @@ fn calibrate() {
                     points.len(),
                     intercept * 1e3,
                     slope * 1e6,
-                    intercept * REFERENCE_FRAMES_PER_MS
+                    intercept * per_ms
                 );
+                charge = charge.max(intercept * per_ms / walked as f64);
             }
             // One cascade of one section is `D + S`, of two sections `D + 2S`; the two-cascade
             // classes check the model (`D + 2S`, `D + 4S`).
@@ -390,11 +479,9 @@ fn calibrate() {
                 })
                 .collect();
             println!(
-                "{rate} | {label} | per design {:.2} us = {:.0} frame-equivalents; per section {:.2} us = {:.0} frame-equivalents; two cascades: {}",
+                "{rate} | {label} | per design {:.2} us; per section {:.2} us; two cascades: {}; largest fixed cost per section {charge:.1} frame-equivalents",
                 design * 1e3,
-                design * REFERENCE_FRAMES_PER_MS,
                 section * 1e3,
-                section * REFERENCE_FRAMES_PER_MS,
                 predicted.join(", ")
             );
         }

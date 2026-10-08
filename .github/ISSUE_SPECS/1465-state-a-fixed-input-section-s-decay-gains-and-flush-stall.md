@@ -186,8 +186,9 @@ Notation: `eps = 10^(-144/20)`; `u = 2^-24`; latency `L`; `N` the first sample o
   and the 64 near-top designs among them, first preparation and rebuild) and 8 (every 64-track
   console document bounded exactly at every launch rate) pass after this change, within #1457's D1
   budget. A change to the walk's cost also reruns `target/release/examples/input_bound_budget
-  calibrate` and restates `builtins::INPUT_BOUND_DESIGN_CHARGE` and `INPUT_BOUND_SECTION_CHARGE`
-  from it (#1457 Amendment 3).
+  calibrate` and restates the frame-equivalent (the slowest frame class) and
+  `builtins::INPUT_BOUND_SECTION_CHARGE` from it (#1457 Amendments 3 and 4; the per-design charge
+  was removed in Amendment 4).
 - **Commands:** `cargo test --locked --all-targets -p lane -p math -p builtins -p dsp-reference
   --features math/lane,builtins/test-support,lane/test-support`; `cargo test --locked --release -p
   builtins --features builtins/test-support --test tail_contract`; #1457's gate 2 and gate 8
@@ -240,6 +241,9 @@ restored) with at least the mutants below; each is red.
 - *Carry every node's tail bound in one node-neutral struct* (slice A1, #1464): the carrier.
 - *Cache design bounds across preparations within a stated preparation budget* (#1457): the gated
   budget.
+- *Remove the data-dependent cost of the near-top tail walk* (#1474, #1457 Amendment 4): it edits
+  `crates/math/src/tail.rs`, `crates/builtins/src/tail.rs` and `tail_contract` before this slice,
+  and restates the frame-equivalent and the section charge this slice's F5 reruns against.
 - *State a bounded tail and an exact-rest bound for every node* (#1329, passed): the module and the
   gates this slice extends.
 - Named exceptions: `STREAMS.md` (#1379 Amendment 1, H8).
