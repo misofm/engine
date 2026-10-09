@@ -126,6 +126,16 @@ Documentation and comments only. No code, gate or allowlist change.
   and `:102-104` (comments and `SAFETY` text only) are corrected: the helpers' only non-test caller
   is `fpenv.rs`, which runs at every native x86 render entry; gate G6 reaches the word through
   `lane::fpenv`; the `SAFETY` premise is D-M3's. No code token in the file changes.
+- **D-hdr. The gate header's `fpenv.rs` sentence (Amendment (root, 2026-10-09)).**
+  `scripts/check-realtime-policy.sh:19-23` says `fpenv.rs` carries no `unsafe` of its own on
+  `x86` and that "its one unsafe site is the AArch64 `mrs`/`msr FPCR` pair". Both are false on
+  `e9798393e`: `fpenv.rs` also has the empty `asm!` scheduling barrier (`scheduling_barrier`,
+  `crates/lane/src/fpenv.rs:322-329`, its `unsafe` block at `:326`), compiled on both `x86_64`
+  and `aarch64`. The comment lines are corrected to name both sites (the AArch64 `mrs`/`msr`
+  pair at `:166` and `:181`, and the barrier on both architectures) and to keep the `x86` reuse
+  of `softfma.rs`'s MXCSR helpers (`fpenv.rs:141`, `:148`). Comment lines only; no code token,
+  pattern or allowlist entry changes. If #1446 has deleted the gate before this slice lands,
+  D-hdr lapses and the attempt record says so.
 - **D-test. No checking test.** A test that compares this prose with the allowlist or the code
   greps prose and is refused (AGENTS.md, "Test value"). The verifier is the gate.
 
@@ -134,6 +144,8 @@ Documentation and comments only. No code, gate or allowlist change.
 - `docs/REALTIME_DEPENDENCY_POLICY.md` ("Unsafe-code ownership" only)
 - `crates/lane/src/softfma.rs` (comments and `SAFETY` comments only; stream G's file, named
   exception in STREAMS)
+- `scripts/check-realtime-policy.sh`, the header comment lines `:19-23` only (D-hdr). Amendment
+  (root, 2026-10-09).
 - this spec
 
 ## Non-goals
@@ -141,9 +153,10 @@ Documentation and comments only. No code, gate or allowlist change.
 - Any change to the allowlist, to either gate, or to any code token (#1438's Amendment removes
   the five entries).
 - `render_lock.rs`, `hosts/host-web/src/ffi.rs` and the browser assets (#1488).
-- The awk gate's header comment (`scripts/check-realtime-policy.sh:16-26`, including its
+- ~~The awk gate's header comment (`scripts/check-realtime-policy.sh:16-26`, including its
   "one unsafe site" wording for `fpenv.rs`, which also has an empty `asm!` barrier at `:326`):
-  #1446 deletes the gate.
+  #1446 deletes the gate.~~ Struck by the Amendment (root, 2026-10-09): lines `:19-23` are in
+  scope (D-hdr). The rest of the header (`:16-18`, `:24-26`) stays out of scope.
 - `crates/lane/src/fpenv.rs`, the rest of the policy document, `docs/REALTIME_MEMORY.md`.
 
 ## Hazards
@@ -188,3 +201,10 @@ Documentation and comments only. No code, gate or allowlist change.
 - A test that greps source or prose is refused.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: under three hours.
+
+### Amendment record (root, 2026-10-09)
+
+- Scope gains D-hdr and its Authorized-paths entry (`scripts/check-realtime-policy.sh:19-23`,
+  comment lines only); the matching Non-goals bullet is struck. Verifier gate 2 checks D-hdr's
+  corrected sentence against `fpenv.rs` like every other claim.
+- The GitHub #1489 body predates this amendment and needs a sync from this spec.

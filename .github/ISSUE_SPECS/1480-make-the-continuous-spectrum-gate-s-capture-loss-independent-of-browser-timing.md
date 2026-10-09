@@ -197,3 +197,9 @@ whether each needs its own issue.
   `/home/bl/misofm/submix-verdicts/1480-d1-traces/`: `run-N.log` is the qualify output of run N,
   `trace-N.json` is the continuous probe's read and notification trace of run N, and `summary.txt`
   lists each run's exit code (runs 16, 21, 38 and 40 exit 1).
+
+### Root record (2026-10-09): the two pre-fix single failures
+
+- Before the fix, `sdk-spectrum-hop` (D1 run 16) and `sdk-spectrum-collection` (D1 run 38) each
+  failed once in the 50 instrumented Firefox runs. Neither failed in the verifier's 110 runs or in
+  the batch run. No issue is filed unless either recurs (root, 2026-10-09).

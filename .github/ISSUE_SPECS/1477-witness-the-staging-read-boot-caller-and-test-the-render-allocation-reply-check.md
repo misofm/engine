@@ -66,7 +66,9 @@ No engine source changes. No rendered bit moves.
 
 ## Hazards
 
-- The boot contract runs the real worklet class with the real module. If the collection shape
+- The boot contract runs the real worklet class on fake exports (`createFakeExports`), not the
+  real module (corrected (root, 2026-10-09), per verdict NIT 2; was "runs the real worklet class
+  with the real module"; a worklet that skips collection staging is #1491). If the collection shape
   cannot boot hermetically, stop and report; do not weaken the sentinel or the witness counts.
 - `qualification.js` is also read by the browser runner; exporting one more name changes no
   browser behaviour.
@@ -254,3 +256,5 @@ RESULT_OK` dropped) on the new suite: red, `'result 6: resolved with count 0'`.
   green on both suites; only a browser leg shows it. The Hazards line "runs the real worklet class
   with the real module" is also not correct for the same reason. A successor issue is needed if
   root wants it caught hermetically.
+  (Root, 2026-10-09: the Hazards line is corrected above, and the successor is #1491, *Make the
+  boot contract red when the worklet skips spectrum collection staging*.)
