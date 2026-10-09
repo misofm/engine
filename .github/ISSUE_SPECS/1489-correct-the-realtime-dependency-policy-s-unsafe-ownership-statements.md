@@ -355,3 +355,27 @@ Open items for root (in addition to attempt 1's):
 1. `crates/lane/src/fpenv.rs:73-75` ("no call at all: the bodies are `#[inline]`", "two register
    writes") is false on the shipped `x86_64` cdylib (the verdict's open item 2: out-of-line GOT
    calls and stack-slot `LDMXCSR`). `fpenv.rs` is a non-goal of this issue; it needs its own fix.
+
+### Follow-ups (2026-10-09, after attempt 2's PASS)
+
+Attempt 2's verdict NITs (`/home/bl/misofm/submix-verdicts/1489-attempt2.md`), comment and doc
+lines only:
+
+- n1: `crates/lane/src/softfma.rs`, `write_mxcsr`'s `SAFETY` comment. "the other words are a
+  test-only exposure" did not say that the exit write itself installs a non-default word whenever
+  the caller had one. It now says so, names the DAW callback with FTZ and DAZ set (`fpenv.rs:16-17`:
+  "every DAW audio callback arrives with FTZ and DAZ already set"), and says that after the exit
+  write the entry runs no floating-point code, so the caller's word reaches no engine computation,
+  and that tests are the only engine computation that runs under another word. The clauses the
+  policy quotes are unchanged.
+- n2: `docs/REALTIME_DEPENDENCY_POLICY.md`, `render_lock.rs` entry. The uncounted calls now
+  include `render_allocation_count`, which is post-boot and unwrapped
+  (`hosts/host-web/src/ffi.rs:3652-3653` calls `render_lock::render_allocation_count` with no
+  `render_locked`). The entry was rewrapped to 100 columns; its line count is unchanged.
+- n3: the policy's `softfma.rs` entry is rewrapped so that no line passes 100 columns (it was
+  103); its line count is unchanged. No other line in "Unsafe-code ownership" passes 100 columns.
+
+Every file:line citation in the section stays exact: the policy's line count is the same, the
+section cites no `softfma.rs` line (the `softfma.rs` edit replaces three comment lines at
+`:114-116` with six), and no other cited file changed.
+

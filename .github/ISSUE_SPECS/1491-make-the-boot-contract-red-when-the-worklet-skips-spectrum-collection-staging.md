@@ -42,17 +42,21 @@ No product change. No rendered bit moves.
 - **D1. The fake's boot reads the staged collection.** In `withSpectrumCollectionStaging`, the fake
   wraps whichever boot exports the fake carries (`miso_engine_web_v1_boot` and
   `miso_engine_web_v1_boot_with_spectrum_hop`). Before delegating, the wrapper decodes the staged
-  collection from the fake's memory the way the bridge lays it out: the request header (struct
-  size, ABI version, entry count, `maximumCaptureBytes`), each 24-byte entry (target code, channel
-  code, identity byte length) and the concatenated identity bytes. It records the decoded
-  collection, or `null` when the request header's entry count is 0 or the request pointer was
-  never asked for, as the boot's staging witness. It does not change the fake's boot result.
+  collection from the fake's memory the way the bridge lays it out, taking every offset, field
+  type, struct size and entry stride from the generated layout the suite already loads
+  (`preparedAbiLayout`, `sdk/assets/miso-engine-v1-abi-layout.json`): every field of
+  `spectrumCollectionRequest` (struct size, ABI version, entry count, `maximumCaptureBytes` and the
+  reserved words), every field of each `spectrumCollectionEntry` (target code, channel code,
+  identity byte length and the reserved words) and the concatenated identity bytes. It records the
+  decoded collection, or `null` when the request header's entry count is 0 or the request pointer
+  was never asked for, as the boot's staging witness. It does not change the fake's boot result.
 - **D2. The staged collection equals the options.** For `runStagingReadRun`, the suite asserts
   the staging witness equals the collection in the caller's own witnessed boot options: the same
-  entry count and order, each entry's target code and channel code (the worklet's constants for
-  `trackPostPan`, `output` and `both`), each identity string, and `maximumCaptureBytes`. The
-  expected value is derived from the witnessed options, not hard-coded, so D2 tests the staging,
-  not the caller's values (those stay #1477 D2's).
+  entry count and order, each entry's target code and channel code (the generated layout's codes
+  for `trackPostPan`, `output` and `both`), each identity string, and `maximumCaptureBytes`; the
+  struct size and ABI version are the generated layout's, and every reserved word is zero. The
+  expected value is derived from the witnessed options and the generated layout, not hard-coded,
+  so D2 tests the staging, not the caller's values (those stay #1477 D2's).
 - **D3. Callers with no collection stage none.** For each of the five other callers, the staging
   witness is `null`.
 - **D4. Placement.** All changes stay inside `testQualificationBoot` (the fake wrapper and the
@@ -228,3 +232,12 @@ worklet's hand-typed layout drifts from the bridge's generated layout; each is g
 before #1491. D3 is red when another qualification caller starts to boot a spectrum collection.
 
 Open items: none.
+
+### Follow-ups (2026-10-09, after attempt 2's PASS)
+
+- Attempt 2's verdict NIT n1 (`/home/bl/misofm/submix-verdicts/1491-attempt2.md`): D1 said "each
+  24-byte entry" and D2 said "the worklet's constants", which described attempt 1's hand-typed
+  layout. D1 and D2 now name the generated layout (`preparedAbiLayout`,
+  `sdk/assets/miso-engine-v1-abi-layout.json`) as the source of every offset, field type, size,
+  stride, ABI version and code, and D1/D2 name the reserved words that attempt 2 decodes and
+  holds at zero. This matches what attempt 2 does; no test or behavior changed.

@@ -112,7 +112,10 @@ pub fn write_mxcsr(value: u32) {
     // FTZ/DAZ bits, and restore the saved word before they return. The `core::arch` documentation
     // of `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ, so a
     // non-default word is outside the language model: `fpenv`'s scheduling barriers keep the
-    // render's memory-dependent computation between its two writes, under the default word, and
-    // the other words are a test-only exposure.
+    // render's memory-dependent computation between its two writes, under the default word. The
+    // exit write itself installs a non-default word whenever the caller had one, as every DAW
+    // callback does with FTZ and DAZ set, but after it the entry runs no floating-point code, so
+    // the caller's word reaches no engine computation; tests are the only engine computation that
+    // runs under another word.
     unsafe { _mm_setcsr(value) }
 }

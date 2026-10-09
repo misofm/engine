@@ -95,10 +95,10 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
   bits, and restore the saved word before they return". It also records that the `core::arch`
   documentation of `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ,
   so a non-default word is outside the language model. `write_mxcsr` itself does not restore the
-  previous word; `fpenv` restores it in its guard's `Drop`, and each test before it returns. Until #163
-  phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128` promote/demote
-  intrinsics; that phase retired the emulation, and the file kept its name because the policy
-  files name its path. No `Lane` value or vector type escapes the crate as unsafe.
+  previous word; `fpenv` restores it in its guard's `Drop`, and each test before it returns. Until
+  #163 phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128`
+  promote/demote intrinsics; that phase retired the emulation, and the file kept its name because
+  the policy files name its path. No `Lane` value or vector type escapes the crate as unsafe.
 - `crates/lane/src/fpenv.rs` (issue 146): the canonical floating-point environment that every
   native render entry pins.
 
@@ -287,11 +287,11 @@ Approved unsafe code that runs on a render thread, per entry:
   `spectrum_stream_analysis`, `spectrum_stream_analysis_configure`, `track_response_analysis` and
   `response_query`), none of which is render-locked or called by either worklet. Its
   `CountingAllocator` is test-only.
-- `render_lock.rs`: its allocator methods run on every allocator call the browser module makes.
-  They count a call exactly when it is made inside a render-locked window, at boot or after it;
-  the count runs from instantiation and is never reset. Calls outside every window are not
-  counted: the boot exports themselves, the unwrapped boot accessors and `dispose`. The worklet
-  calls render-locked exports during boot too: the eleven staging accessors of set 2, and
+- `render_lock.rs`: its allocator methods run on every allocator call the browser module makes. They
+  count a call exactly when it is made inside a render-locked window, at boot or after it; the count
+  runs from instantiation and is never reset. Calls outside every window are not counted: the boot
+  exports themselves, the unwrapped boot accessors, `dispose` and `render_allocation_count`. The
+  worklet calls render-locked exports during boot too: the eleven staging accessors of set 2, and
   `spectrum_target_id_ptr` and `spectrum_target_id_capacity`, which `stageSpectrumRequest` calls
   before the boot export. Those calls are counted, and today they make no allocator call: the
   stagings they touch are allocated outside any window, by boot's `reserve_stagings`
