@@ -66,8 +66,11 @@ codegen change.
 - **D3. `fpenv.rs:16-17` is either cited or narrowed.** Keep a universal claim only with a primary
   source for it. Otherwise narrow it to what the engine needs: a native host's audio thread can run
   with FTZ and DAZ set (for example, a host that sets them to avoid denormal stalls), and nothing in
-  the C ABI contract forbids it. `softfma.rs:116-117` keeps citing `fpenv.rs:16-17`; if the line
-  numbers move, update that citation in the same commit.
+  the C ABI contract forbids it. *Amended by root, 2026-10-09:* #1494's D1 replaced
+  `write_mxcsr`'s `SAFETY` comment, and with it `softfma.rs`'s citation of `fpenv.rs:16-17`
+  (base `softfma.rs:116-117`), so no `softfma.rs` citation remains and `softfma.rs` does not
+  change for D3. (Was: "`softfma.rs:116-117` keeps citing `fpenv.rs:16-17`; if the line numbers
+  move, update that citation in the same commit.")
 - **D4. Keep line counts.** Comment lines only. Each edited passage keeps its line count, so every
   `fpenv.rs` and `softfma.rs` line citation in `docs/REALTIME_DEPENDENCY_POLICY.md` stays exact
   (`fpenv.rs:141`, `:148`, `:166`, `:181`, `:322-329`). If a passage cannot keep its count, the
@@ -76,8 +79,9 @@ codegen change.
 ## Authorized paths
 
 - `crates/lane/src/fpenv.rs` (module doc lines `:10-17` and `:71-76` only)
-- `crates/lane/src/softfma.rs` (the `fpenv.rs:16-17` citation in `write_mxcsr`'s `SAFETY`
-  comment, only if D3 or D4 moves it)
+- ~~`crates/lane/src/softfma.rs` (the `fpenv.rs:16-17` citation in `write_mxcsr`'s `SAFETY`
+  comment, only if D3 or D4 moves it)~~ Removed by root, 2026-10-09: #1494's D1 removed that
+  citation, so this slice has nothing to edit in `softfma.rs` (D3, amended).
 - `crates/capi/src/ffi.rs` (B's; the comment `:813-816` only, only if D2 finds it false)
 - `docs/REALTIME_DEPENDENCY_POLICY.md` (citations only, only if D4 needs it)
 - this spec

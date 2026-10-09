@@ -205,3 +205,56 @@ to the originals in `submix-verdicts/`.
   twin), the shared clone with its synthetic merge, and the 38 MB `libcapi.so` with its full
   disassembly.
 - **The worktree:** `/home/bl/misofm/wt-d15-fp` was not changed. It is clean at `4d6f18625`.
+
+## Root's rulings (2026-10-09) and recorded items
+
+Added by root to this copy only; the original verdict is unchanged.
+
+**Rulings.**
+
+1. **Accepted: `1c838fba9`** (`scripts/test-bench-policy.sh`; #1494 verdict n1). Recorded in
+   #1494's spec ("Root's rulings after attempt 1") and added to its Authorized paths with
+   "(root, 2026-10-09)".
+2. **Accepted: #1494's extra doc edits**: the `fpenv.rs` module-doc paragraph in "Why this file
+   carries `unsafe`", `g6_ftz_inert.rs:10-12` and `fp_env.rs:12-14` (#1494 record's out-of-scope
+   list, verdict n2). Recorded in #1494's spec the same way.
+3. **#1495 D3 amended** (#1494 verdict m4): `softfma.rs`'s citation of `fpenv.rs:16-17` went with
+   #1494 D1, so D3 and #1495's `softfma.rs` authorized-path line are amended (root, 2026-10-09).
+4. **#1494's *Test value* sentence reworded** (#1494 verdict m5): the D4 `compile_fail` doctest
+   alone catches the full revert (the writer made safe again and the callers' `unsafe` blocks
+   removed); a signature-only revert is also caught by clippy's `unused_unsafe` under
+   `-D warnings` in the callers, including the AArch64 `-D warnings` legs.
+5. **Filed #1498** *Narrow the universal DAW-callback FTZ/DAZ claim in host-core and the C ABI
+   tests* (stream G lead; named exceptions: `crates/host-core/src/render_session.rs:8-9` and
+   `crates/host-core/src/lib.rs:78`, which no stream lists, and
+   `crates/capi/src/runtime/tests.rs:3080-3081`, B's), from the #1495 verdict's m1, with #1495
+   D3's narrowing of `fpenv.rs:16-17` as its model.
+6. **Filed #1499** *Build the shipped mobile C ABI libraries with the release profile's fat LTO,
+   and gate it* (stream B: `crates/capi` and its crate-type list are B's, and no stream owns mobile
+   build tooling), from the #1495 verdict's open item 1. Root's re-check:
+   `cargo build --locked --release -p capi -v` passes no `-C lto` to `capi` (crate types `rlib`,
+   `staticlib`, `cdylib`); `cargo rustc --locked --release -p capi --lib --crate-type staticlib -v`
+   passes `-C lto=fat`. The non-LTO `libcapi.a` has 386 members (per crate); the fat-LTO one has
+   309 (one `capi` module, plus `compiler_builtins` and C builtins objects). #1472's ratchet and
+   #1495's `x86_64` sentence in `fpenv.rs` ("Realtime properties") depend on it.
+
+**Recorded, no change.**
+
+- `scripts/check-realtime-policy.sh:21-23` lists an incomplete set of `fpenv.rs` unsafe sites
+  (#1494 verdict n3); #1446 deletes that script.
+- `g6_ftz_inert.rs`'s write-back is not panic-safe (#1494 verdict n6); unchanged from the base.
+- Stale `fpenv.rs` line citations in older specs (#1321 `:288`, #1422 `:278`/`:360`, #1478,
+  #1489) are records of their own commits and stay as they are.
+- This verdict's NITs n2-n6: FTZ (and, on AArch64, "only the canonical word") is placed outside the
+  environment without a cited source (n2; the classification is right, and "the caller treats
+  every other word as outside it" keeps the rule safe); n3 is fixed in #1494's record
+  (`afea51c57`); the `Drop` comment's "the word the caller already ran under" is exact only when
+  the guard is dropped in the scope that entered it (n4); "the compiler makes every caller take on
+  that contract" holds for Rust callers only, not C callers of the `capi` exports (n5); and
+  `core::arch` calls a changed control word immediate UB even when it is restored, so the
+  measured-test exception is the engine's own rule, not a Rust-level guarantee (n6).
+- `afea51c57` (doc only) landed after this batch run (which ran on `4d6f18625`); `cargo fmt`, the
+  policy gates and the docs-gates steps were re-run on it.
+
+**GitHub bodies to sync** (not edited by root's workers): #1494 (Authorized paths, *Test value*,
+attempt record) and #1495 (D3, Authorized paths).

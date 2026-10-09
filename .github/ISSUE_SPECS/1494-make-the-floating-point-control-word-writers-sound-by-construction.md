@@ -98,6 +98,12 @@ call meets the contract. No change to what any render writes.
 - `scripts/check-bench-policy.sh` (J's; the expected `tools/` unsafe set, one path)
 - `docs/REALTIME_DEPENDENCY_POLICY.md` ("Unsafe-code ownership" only: the `softfma.rs` and
   `fpenv.rs` entries and one entry per new file)
+- `scripts/test-bench-policy.sh` (J's; the `unsafe-owner-grep-error` case's expected `tools/` set,
+  one path, and the four `count-*` cases' count, `3` to `4`; accepted by root, 2026-10-09: the
+  necessary result of the `check-bench-policy.sh` edit above, `1c838fba9`)
+- the extra doc lines of attempt 1 (accepted by root, 2026-10-09): `crates/lane/src/fpenv.rs`, the
+  module doc's "Why this file carries `unsafe`" paragraph on the `unsafe fn` writer;
+  `crates/lane/tests/g6_ftz_inert.rs:10-12` and `crates/lane/tests/fp_env.rs:12-14` (module doc)
 - this spec
 
 ## Non-goals
@@ -138,9 +144,12 @@ call meets the contract. No change to what any render writes.
    `cargo fmt --all -- --check`, `RUSTDOCFLAGS="-D warnings" cargo doc --locked -p lane --no-deps`,
    `bash scripts/check-cross-targets.sh` exit 0.
 
-*Test value.* Each D4 doctest is red when its writer is made callable from safe code again (the
-defect #1489's verdict names); no existing test fails on that change, because every existing
-caller still compiles.
+*Test value.* The D4 `compile_fail` doctest alone catches the full revert: the writer made safe
+again *and* the callers' `unsafe` blocks removed (no other test and no lint fails on that change).
+A signature-only revert (the writer made safe, the callers' `unsafe` blocks kept) is also caught by
+clippy's `unused_unsafe` under `-D warnings` in the callers (lane's own forwarder and guard
+blocks), including the AArch64 legs' `-D warnings` builds. (Reworded by root's ruling of
+2026-10-09, from the attempt-1 verdict's m5.)
 
 ## Evidence
 
@@ -382,3 +391,20 @@ doc --locked -p lane --no-deps` exit 0; `cargo test --locked -p lane --doc`: 3 p
 `fpenv.rs` unsafe sites), n6 (G6's write-back is not a guard), the `scripts/test-bench-policy.sh`
 commit (n1), the n2 paragraph, the m4 amendment of #1495, and the m5 wording of the *Test value*
 sentence.
+
+### Root's rulings after attempt 1 (2026-10-09)
+
+- **(1) Accepted: `1c838fba9`** (`scripts/test-bench-policy.sh`, the attempt-1 verdict's n1). The
+  self-test pins the `tools/` unsafe set and its count, so the authorized `check-bench-policy.sh`
+  edit cannot pass without it. The path is added to Authorized paths.
+- **(2) Accepted: the extra doc edits** (the attempt-1 record's out-of-scope list and the verdict's
+  n2): the `fpenv.rs` module-doc paragraph in "Why this file carries `unsafe`",
+  `g6_ftz_inert.rs:10-12` and `fp_env.rs:12-14`. Added to Authorized paths.
+- **(3) #1495 D3 amended** (m4): its `softfma.rs` citation of `fpenv.rs:16-17` is gone after D1;
+  root amended #1495's D3 and its `softfma.rs` path line.
+- **(4) The *Test value* sentence reworded** (m5), as above.
+- **Recorded, no change:** n3 (`scripts/check-realtime-policy.sh:21-23` lists an incomplete set of
+  `fpenv.rs` unsafe sites; #1446 deletes that script) and n6 (`g6_ftz_inert.rs`'s write-back is not
+  panic-safe; unchanged from the base). Root's record:
+  `docs/handoffs/decision-15-2026-10-05/verdicts/batch-fp/batch-fp-batch-verdict.md`, "Root's
+  rulings (2026-10-09) and recorded items".
