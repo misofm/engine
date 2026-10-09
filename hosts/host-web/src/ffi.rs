@@ -29,13 +29,12 @@
 //!   seek handlers);
 //! - live control: `prepared_command_submit`, `meter_lease`, `eq_target_config_copy`,
 //!   `eq_target_config_ptr` and `input_filters_config_copy`;
-//! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start` and
-//!   `spectrum_stream_stop`.
+//! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start`,
+//!   `spectrum_stream_stop`, `spectrum_select` and `spectrum_stream_select` (issue #1492).
 //!
-//! Four post-boot calls are named exceptions. `dispose` is teardown: it frees the host by design,
+//! Two post-boot calls are named exceptions. `dispose` is teardown: it frees the host by design,
 //! and it is also the boot-failure path. `render_allocation_count` is the reader of the count;
-//! wrapping it would measure nothing. `spectrum_select` and `spectrum_stream_select` allocate
-//! today; issue #1492 removes that allocation and wraps them. The spectrum request and collection
+//! wrapping it would measure nothing. The spectrum request and collection
 //! accessors (`spectrum_request_*`, `spectrum_collection_*`) are not in the set: the worklet calls
 //! them only before boot, where the collection staging is sized and allocated by design.
 
@@ -87,8 +86,8 @@ use host_core::{
     ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
     SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop,
-    SpectrumSmoothingConfig, SpectrumTarget, SpectrumWindow, prepare_response_preview,
-    query_response_snapshot_into,
+    SpectrumSmoothingConfig, SpectrumTarget, SpectrumTargetRef, SpectrumWindow,
+    prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -933,17 +932,29 @@ fn spectrum_channels(raw: u32) -> Result<SpectrumChannels, u32> {
     }
 }
 
-fn spectrum_target(raw: u32, id: &str) -> Result<SpectrumTarget, u32> {
+/// Validate a raw target kind and identity and borrow them as a target. Allocates nothing, so the
+/// select path calls it on the browser's audio thread.
+fn spectrum_target_ref(raw: u32, id: &str) -> Result<SpectrumTargetRef<'_>, u32> {
     if id.is_empty() || id.len() > SPECTRUM_MAXIMUM_ID_BYTES {
         return Err(RESULT_INVALID_ARGUMENT);
     }
-    let id: Box<str> = id.into();
     match raw {
-        SPECTRUM_TARGET_TRACK_POST_INPUT => Ok(SpectrumTarget::TrackPostInputBuiltins(id)),
-        SPECTRUM_TARGET_TRACK_POST_PAN => Ok(SpectrumTarget::TrackPostMatrix(id)),
-        SPECTRUM_TARGET_OUTPUT => Ok(SpectrumTarget::Output(id)),
+        SPECTRUM_TARGET_TRACK_POST_INPUT => Ok(SpectrumTargetRef::TrackPostInputBuiltins(id)),
+        SPECTRUM_TARGET_TRACK_POST_PAN => Ok(SpectrumTargetRef::TrackPostMatrix(id)),
+        SPECTRUM_TARGET_OUTPUT => Ok(SpectrumTargetRef::Output(id)),
         _ => Err(RESULT_INVALID_ARGUMENT),
     }
+}
+
+/// Build an owned target for preparation, before boot.
+fn spectrum_target(raw: u32, id: &str) -> Result<SpectrumTarget, u32> {
+    Ok(match spectrum_target_ref(raw, id)? {
+        SpectrumTargetRef::TrackPostInputBuiltins(id) => {
+            SpectrumTarget::TrackPostInputBuiltins(id.into())
+        }
+        SpectrumTargetRef::TrackPostMatrix(id) => SpectrumTarget::TrackPostMatrix(id.into()),
+        SpectrumTargetRef::Output(id) => SpectrumTarget::Output(id.into()),
+    })
 }
 
 fn spectrum_configured(staging: &SpectrumStaging) -> bool {
@@ -2853,7 +2864,7 @@ fn select_spectrum_with_smoothing(
             Ok(value) => value,
             Err(_) => return RESULT_INVALID_ARGUMENT,
         };
-        let target = match spectrum_target(target, id) {
+        let target = match spectrum_target_ref(target, id) {
             Ok(value) => value,
             Err(result) => return result,
         };
@@ -2863,7 +2874,7 @@ fn select_spectrum_with_smoothing(
         };
         let smoothing_changed = smoothing.is_some() && staging.stream_smoothing != smoothing;
         let selection_would_change = match with_host(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
-            host.spectrum_selection_would_change(&target, channels)
+            host.spectrum_selection_would_change(target, channels)
         }) {
             Ok(value) => value,
             Err(result) => return result,
@@ -2880,7 +2891,7 @@ fn select_spectrum_with_smoothing(
         let selection_epoch_before =
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
         let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.select_spectrum(&target, channels)
+            host.select_spectrum(target, channels)
         });
         let selection_epoch_after =
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
@@ -2960,7 +2971,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_select(
     channels: u32,
     target_id_bytes: u32,
 ) -> u32 {
-    select_spectrum_internal(handle, target, channels, target_id_bytes)
+    render_locked(|| select_spectrum_internal(handle, target, channels, target_id_bytes))
 }
 
 /// Atomically select one prepared stream entry and commit its smoothing configuration.
@@ -2976,14 +2987,16 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
-        Ok(value) => value,
-        Err(_) => return RESULT_INVALID_ARGUMENT,
-    };
-    select_spectrum_with_smoothing(handle, target, channels, target_id_bytes, Some(smoothing))
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
+        }
+        let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
+            Ok(value) => value,
+            Err(_) => return RESULT_INVALID_ARGUMENT,
+        };
+        select_spectrum_with_smoothing(handle, target, channels, target_id_bytes, Some(smoothing))
+    })
 }
 
 /// Return the monotonic identity of the currently committed collection selection.

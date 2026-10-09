@@ -560,7 +560,10 @@ Chromium leg of `qualification/run.mjs`.
 | `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
 | same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
 | same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
-| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1; mutation rewritten by #1479, which removed `selected_entry`) | `PreparedSpectrumCapture::channels`'s collection arm runs `let _ = capture.selected_target().cloned();` before `capture.selected_channels()` | `a collection capture's spectrum read allocated`: 4 |
+| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1; mutation rewritten by #1479, which removed `selected_entry`) | `PreparedSpectrumCapture::channels`'s collection arm runs `let _ = capture.selected_target().cloned();` before `capture.selected_channels()` | `a collection capture's spectrum read allocated`: 6 (re-measured by #1492: #1488 wrapped `spectrum_stream_start`, which also reads the channel mask, so its 2 calls now count too) |
+| `tests/render_locked_staging.rs` phase 2 select legs (#1492) | `SpectrumCaptureCollection::select` runs `let _ = self.entry(index).map(\|(t, c)\| (t.clone(), c));` after it finds the entry | `the first select allocated`: 2 |
+| same | `select_spectrum_with_smoothing` runs `let _ = spectrum_target(target, id);` before it borrows the target | `the first select allocated`: 2 |
+| same, control | the first mutation kept, and both select exports unwrapped from `render_locked` | green: the count sees a select's allocation only through the wrap |
 | `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
 | `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
 | same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |

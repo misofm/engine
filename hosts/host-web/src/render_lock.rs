@@ -4,10 +4,9 @@
 //! static call-graph gate cannot prove that for the render export, because the whole plan executor
 //! sits behind `Box<dyn PreparedPlanExecutor>` and is reached by a `call_indirect`. This module
 //! is the runtime proof: every export the engine worklet or the SDK's PCM-feed worklet calls on
-//! its render thread after boot runs inside [`render_locked`] (the set and its four named
-//! exceptions, `dispose`, `render_allocation_count`, `spectrum_select` and
-//! `spectrum_stream_select`, are listed in the `ffi` module header), and the module's global
-//! allocator counts each allocator call made while the flag is set. Browser qualification reads the
+//! its render thread after boot runs inside [`render_locked`] (the set and its two named
+//! exceptions, `dispose` and `render_allocation_count`, are listed in the `ffi` module header),
+//! and the module's global allocator counts each allocator call made while the flag is set. Browser qualification reads the
 //! count through `miso_engine_web_v1_render_allocation_count` and asserts it is exactly zero.
 //!
 //! The flag is a const-initialised `Cell<bool>` thread local. It has no destructor, so it

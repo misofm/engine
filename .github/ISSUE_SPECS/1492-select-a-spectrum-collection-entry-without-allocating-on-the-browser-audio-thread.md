@@ -143,3 +143,87 @@ counts a select.
 - Size: half a day.
 
 ## Attempt record
+
+### Attempt 1 (2026-10-09, worktree `wt-d15-misc2`, branch `codex/d15-batch-misc2`, on #1479 and #1488)
+
+**Changes.**
+
+- D1/D2 (`crates/host-core/src/spectrum.rs`, `lib.rs`): new `SpectrumTargetRef<'a>` (`Clone, Copy,
+  Debug, Eq, PartialEq`; the three kinds over `&'a str`), re-exported, and `SpectrumTarget::as_ref()`.
+  `select` and `selection_would_change` take `SpectrumTargetRef<'_>` (old signatures replaced).
+  Both find the entry through one private `position` helper that compares
+  `capture.target.as_ref() == target` and the mask. `select` returns `Result<usize, _>` (the
+  index in preparation order). `owned_entry` is removed. The `entry` doc and the `select` doc
+  name the browser audio thread. Unit-test and `tests/spectrum.rs` call sites pass
+  `target.as_ref()`.
+- D3 (`hosts/host-web/src/ffi.rs`, `lib.rs`): new `spectrum_target_ref(raw, id)` does the
+  validation that `spectrum_target` did and borrows the identity. `spectrum_target` (boot-time
+  callers only) now builds its owned target from it, so the validation stays in one place.
+  `select_spectrum_with_smoothing` calls `spectrum_target_ref`. `select_spectrum` and
+  `spectrum_selection_would_change` take `SpectrumTargetRef<'_>`. `src/tests.rs` passes
+  `target.as_ref()`.
+- D4: `miso_engine_web_v1_spectrum_select` and `miso_engine_web_v1_spectrum_stream_select` wrap
+  their whole bodies in `render_locked`. The `ffi.rs` header adds them to the spectrum-observer
+  bullet and has two named exceptions now (`dispose`, `render_allocation_count`). The
+  `render_lock.rs` module header said "four named exceptions" and named the two selects; it now
+  names the two exceptions only.
+- Gate 1 (`tests/render_locked_staging.rs` phase 2): `before` is read right after boot, before
+  the first select. The phase selects `output` twice (a change, then a repeat) and checks the
+  count after each. It then renders, reads, starts the stream, renders and reads the stream, as
+  before. Then it stream-selects the `trackPostPan` entry with `smoothing_ms` 50 (the stream
+  started at 100), so the entry and the smoothing both change and the continuous cadence
+  restarts. It checks the count, renders 64 quanta, reads the stream (`RESULT_OK`) and checks
+  the count again. The module doc says why.
+- `hosts/host-web/MUTATIONS.md`: three new rows (below). Row `:563` (A #1479's phase 2 read
+  mutation) re-measured: it now reads 6, not 4. The reason: #1488 wrapped
+  `spectrum_stream_start`, which also calls `AudioWorkletEngineHost::spectrum_channels`
+  (`ffi.rs`, the stream-start body), so the mutated clone's two allocator calls there now count
+  too. The failing assertion is unchanged. This edit is to A's row (STREAMS row 101 gives A row
+  `:563`), and its only purpose is to keep the row's number true. Root can move it.
+
+**D5.** Gate 1 reads zero with D1-D4 in, including the stream select's continuous restart. No
+other allocation is on the select path.
+
+**Gate 1.** `cargo test --locked -p host-web --test render_locked_staging`: 1 passed.
+
+**Gate 2 (mutations; each applied alone and then reverted, with gate 1 green again after each):**
+
+| Mutation | Result |
+|---|---|
+| `select` runs `let _ = self.entry(index).map(\|(t, c)\| (t.clone(), c));` after it finds the entry | red: `the first select allocated`, left 2, right 0 |
+| `select_spectrum_with_smoothing` runs `let _ = spectrum_target(target, id);` before it borrows the target | red: `the first select allocated`, left 2, right 0 |
+| the first mutation kept, and both exports unwrapped from `render_locked` (D4 reverted) | green (1 passed): the count sees the select's allocation only through the wrap |
+| (re-check of row `:563`) `PreparedSpectrumCapture::channels`'s collection arm clones the selected target | red: `a collection capture's spectrum read allocated`, left 6, right 0 |
+
+**Gate 3.**
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo test --locked -p host-core`: all binaries ok, 0 failed.
+- `cargo test --locked -p host-web --all-targets`: lib 185 passed (2 ignored); every integration
+  binary (`render_locked_staging`, `render_locked_source`, `boot_transient_budget`,
+  `retained_ceilings`) passed.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: exit 0.
+- `bash scripts/check-workspace-policy.sh`: exit 0. `bash scripts/check-realtime-policy.sh`:
+  `realtime policy: ok (89 marked regions in 25 files)`.
+- `bash scripts/check-cross-targets.sh`: exit 0, `cross-target matrix: PASS` (the #1018 expected
+  failures only).
+- Worklet chain, qualification.yml's exact invocations:
+  `bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`
+  exit 0 (shipped module `9ea229e2f9c3158ac1e00896c509a83deeb83840b07969edacf9eb06cb70c939`,
+  3129171 B; named twin `3d6c0068...`; CHANGED against the pin, as the Hazards expect);
+  `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`
+  exit 0; `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts`
+  exit 0; `bash scripts/test-web-audioworklet.sh` with a fresh private `TMPDIR` (the CI step's
+  shape) exit 0 and nothing left in the `TMPDIR`.
+- Browser qualification, Chromium only, run locally in the CI step's shape (private pulseaudio
+  null sink; `npm run qualify -- --artifacts ... --sdk-root sdk --browser chromium --check-matrix --self-test-mutations`):
+  exit 0, `all qualification gates passed (151.0.7922.34)`. Every `render-allocations` and
+  `sdk-render-allocations` row reads 0, `spectrum-collection=0` included (that workload selects
+  through the now render-locked exports). Firefox and WebKit run in CI only.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p host-core -p host-web --features host-core/control-provider`: exit 0.
+
+*Test value.* Phase 2's select legs are red when `select` or the bridge's select path allocates
+(a cloned owned entry, or an owned target built from the staged identity) on the audio thread.
+Before this slice, phase 2 read `before` after its select and neither select export was
+render-locked, so no test counted a select. The two red mutations and the green control above
+show this.

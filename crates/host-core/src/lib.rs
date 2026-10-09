@@ -176,8 +176,9 @@ pub use spectrum::{
     SpectrumCaptureResources, SpectrumChannels, SpectrumContinuousCaptureError,
     SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop, SpectrumOutput,
     SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget,
-    SpectrumWindow, spectrum_analysis_history_resources, spectrum_capture_collection_resources,
-    spectrum_capture_resources, spectrum_capture_resources_for,
+    SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
+    spectrum_capture_collection_resources, spectrum_capture_resources,
+    spectrum_capture_resources_for,
 };
 pub use vca::{LiveVcaFaderDelta, LiveVcaState};
 

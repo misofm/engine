@@ -746,19 +746,19 @@ fn prepared_collection_switches_exact_taps_without_audio_or_render_allocation() 
     let invalid_target = SpectrumTarget::TrackPostInputBuiltins("not-prepared".into());
     assert_eq!(
         collection_capture
-            .select(&invalid_target, SpectrumChannels::Stereo)
+            .select(invalid_target.as_ref(), SpectrumChannels::Stereo)
             .expect_err("unknown selection accepted"),
         SpectrumCaptureCollectionSelectionError::UnknownEntry
     );
     assert_eq!(collection_capture.selected_index(), None);
 
     collection_capture
-        .select(&track_a.target, track_a.channels)
+        .select(track_a.target.as_ref(), track_a.channels)
         .expect("first prepared tap selects");
     assert_eq!(collection_capture.selected_index(), Some(1));
     assert_eq!(
         collection_capture
-            .select(&track_b.target, SpectrumChannels::Right)
+            .select(track_b.target.as_ref(), SpectrumChannels::Right)
             .expect_err("unprepared channel mask accepted"),
         SpectrumCaptureCollectionSelectionError::UnknownEntry
     );
@@ -830,13 +830,13 @@ fn prepared_collection_switches_exact_taps_without_audio_or_render_allocation() 
         match block {
             4 => {
                 collection_capture
-                    .select(&track_b.target, track_b.channels)
+                    .select(track_b.target.as_ref(), track_b.channels)
                     .expect("second prepared tap selects");
                 assert_eq!(collection_capture.selected_index(), Some(0));
             }
             8 => {
                 collection_capture
-                    .select(&track_a.target, track_a.channels)
+                    .select(track_a.target.as_ref(), track_a.channels)
                     .expect("selection returns to first tap");
                 assert_eq!(collection_capture.selected_index(), Some(1));
             }
@@ -851,7 +851,7 @@ fn prepared_collection_switches_exact_taps_without_audio_or_render_allocation() 
                     Some(track_a.channels)
                 );
                 collection_capture
-                    .select(&track_b.target, track_b.channels)
+                    .select(track_b.target.as_ref(), track_b.channels)
                     .expect("second tap re-arms after first result is consumed");
             }
             40 => {
