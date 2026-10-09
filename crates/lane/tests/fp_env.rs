@@ -9,6 +9,11 @@
 //!
 //! Red mutations (recorded in `tests/MUTATIONS.md`): drop the `Drop` implementation of
 //! `CanonicalFpEnv`, or make `enter` install the caller's word instead of the canonical one.
+//!
+//! The raw writers are `unsafe fn` (issue #1494): each write below states which word it installs
+//! and what writes the previous word back.
+
+#![allow(unsafe_code)]
 
 use lane::fpenv::{
     CanonicalFpEnv, attest_fp_environment, canonical_fp_control_word, read_fp_control_word,
@@ -60,7 +65,9 @@ mod x86 {
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            write_mxcsr(self.0);
+            // SAFETY: `self.0` is the word the test read from this thread before it changed it, so
+            // it sets no reserved bit, and writing it hands the thread its own word back.
+            unsafe { write_mxcsr(self.0) };
         }
     }
 
@@ -75,7 +82,10 @@ mod x86 {
         let saved = read_mxcsr();
         let _restore = Restore(saved);
         let hostile = hostile_word(saved);
-        write_mxcsr(hostile);
+        // SAFETY: `hostile_word` sets FTZ, DAZ, RC and a status flag on a word read from this thread,
+        // all below bit 16. The test measures the guard under it, and `_restore` writes `saved`
+        // back.
+        unsafe { write_mxcsr(hostile) };
         assert_eq!(
             read_mxcsr(),
             hostile,
@@ -102,7 +112,10 @@ mod x86 {
         let saved = read_mxcsr();
         let _restore = Restore(saved);
         let hostile = hostile_word(saved);
-        write_mxcsr(hostile);
+        // SAFETY: `hostile_word` sets FTZ, DAZ, RC and a status flag on a word read from this thread,
+        // all below bit 16. The test measures the guard under it, and `_restore` writes `saved`
+        // back.
+        unsafe { write_mxcsr(hostile) };
 
         let outcome = std::panic::catch_unwind(|| {
             let _pinned = CanonicalFpEnv::enter();
@@ -121,7 +134,10 @@ mod x86 {
     fn denormal_arithmetic_is_correct_inside_the_guard_and_flushed_outside_it() {
         let saved = read_mxcsr();
         let _restore = Restore(saved);
-        write_mxcsr(hostile_word(saved));
+        // SAFETY: `hostile_word` sets FTZ, DAZ, RC and a status flag on a word read from this thread,
+        // all below bit 16. The test measures the guard under it, and `_restore` writes `saved`
+        // back.
+        unsafe { write_mxcsr(hostile_word(saved)) };
 
         // `2^-100 * 2^-30 = 2^-130` is exactly representable as an `f32` subnormal (the normal
         // range stops at `2^-126`), so flush-to-zero is observable on it and nothing else is.
@@ -163,7 +179,9 @@ mod x86 {
 
         // Every sticky exception flag set, control state exactly canonical.
         let flagged = fpenv::CANONICAL_MXCSR | 0x003F;
-        write_mxcsr(flagged);
+        // SAFETY: 0x1F80 with the six sticky status flags (0x003F) sets no reserved bit, and its
+        // control state is canonical. `_restore` writes `saved` back.
+        unsafe { write_mxcsr(flagged) };
         assert!(
             fpenv::in_canonical_fp_environment(),
             "sticky status flags must not be read as a non-canonical environment"
@@ -176,12 +194,16 @@ mod x86 {
         );
 
         // One control bit, and the answer changes.
-        write_mxcsr(fpenv::CANONICAL_MXCSR | MXCSR_FTZ);
+        // SAFETY: 0x1F80 with FTZ (bit 15) sets no reserved bit; only the attestation's read runs
+        // under it, and `_restore` writes `saved` back.
+        unsafe { write_mxcsr(fpenv::CANONICAL_MXCSR | MXCSR_FTZ) };
         assert!(
             !fpenv::in_canonical_fp_environment(),
             "a set FTZ bit must be read as a non-canonical environment"
         );
-        write_mxcsr(fpenv::CANONICAL_MXCSR | MXCSR_DAZ);
+        // SAFETY: 0x1F80 with DAZ (bit 6) sets no reserved bit; only the attestation's read runs
+        // under it, and `_restore` writes `saved` back.
+        unsafe { write_mxcsr(fpenv::CANONICAL_MXCSR | MXCSR_DAZ) };
         assert!(
             !fpenv::in_canonical_fp_environment(),
             "a set DAZ bit must be read as a non-canonical environment"
@@ -193,7 +215,10 @@ mod x86 {
         let saved = read_mxcsr();
         let _restore = Restore(saved);
         let hostile = hostile_word(saved);
-        write_mxcsr(hostile);
+        // SAFETY: `hostile_word` sets FTZ, DAZ, RC and a status flag on a word read from this thread,
+        // all below bit 16. The test measures the guard under it, and `_restore` writes `saved`
+        // back.
+        unsafe { write_mxcsr(hostile) };
         attest_fp_environment().expect("a hostile word must still be pinnable");
         assert_eq!(
             read_fp_control_word(),
@@ -225,7 +250,9 @@ mod aarch64 {
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            write_fp_control_word(self.0);
+            // SAFETY: `self.0` is the word the test read from this thread before it changed it, so
+            // it sets no `RES0` bit, and writing it hands the thread its own word back.
+            unsafe { write_fp_control_word(self.0) };
         }
     }
 
@@ -239,7 +266,10 @@ mod aarch64 {
         let saved = read_fp_control_word();
         let _restore = Restore(saved);
         let hostile = hostile_word(saved);
-        write_fp_control_word(hostile);
+        // SAFETY: `hostile_word` sets FZ, DN and RMode on a word read from this thread, all defined
+        // FPCR fields, so no `RES0` bit. The test measures the guard under it, and `_restore`
+        // writes `saved` back.
+        unsafe { write_fp_control_word(hostile) };
         assert_eq!(
             read_fp_control_word(),
             hostile,
@@ -266,7 +296,10 @@ mod aarch64 {
         let saved = read_fp_control_word();
         let _restore = Restore(saved);
         let hostile = hostile_word(saved);
-        write_fp_control_word(hostile);
+        // SAFETY: `hostile_word` sets FZ, DN and RMode on a word read from this thread, all defined
+        // FPCR fields, so no `RES0` bit. The test measures the guard under it, and `_restore`
+        // writes `saved` back.
+        unsafe { write_fp_control_word(hostile) };
 
         let outcome = std::panic::catch_unwind(|| {
             let _pinned = CanonicalFpEnv::enter();
@@ -285,7 +318,10 @@ mod aarch64 {
     fn denormal_arithmetic_is_correct_inside_the_guard_and_flushed_outside_it() {
         let saved = read_fp_control_word();
         let _restore = Restore(saved);
-        write_fp_control_word(hostile_word(saved));
+        // SAFETY: `hostile_word` sets FZ, DN and RMode on a word read from this thread, all defined
+        // FPCR fields, so no `RES0` bit. The test measures the guard under it, and `_restore`
+        // writes `saved` back.
+        unsafe { write_fp_control_word(hostile_word(saved)) };
 
         // `2^-100 * 2^-30 = 2^-130`, an exact `f32` subnormal: FZ flushes it and nothing else.
         // Each product is black-boxed inside its own region, as in the x86 arm.
@@ -315,10 +351,14 @@ mod aarch64 {
         let saved = read_fp_control_word();
         let _restore = Restore(saved);
 
-        write_fp_control_word(fpenv::CANONICAL_FPCR);
+        // SAFETY: the canonical word (0) sets no `RES0` bit and is the environment Rust assumes.
+        // `_restore` writes `saved` back.
+        unsafe { write_fp_control_word(fpenv::CANONICAL_FPCR) };
         assert!(fpenv::in_canonical_fp_environment());
         for bit in [FPCR_FZ, FPCR_DN, FPCR_RMODE_UP] {
-            write_fp_control_word(fpenv::CANONICAL_FPCR | bit);
+            // SAFETY: `bit` is FZ, DN or an RMode value, defined FPCR fields, so no `RES0` bit;
+            // only the attestation's read runs under it, and `_restore` writes `saved` back.
+            unsafe { write_fp_control_word(fpenv::CANONICAL_FPCR | bit) };
             assert!(
                 !fpenv::in_canonical_fp_environment(),
                 "FPCR bit {bit:#x} must be read as a non-canonical environment"
@@ -326,7 +366,10 @@ mod aarch64 {
         }
 
         let hostile = hostile_word(saved);
-        write_fp_control_word(hostile);
+        // SAFETY: `hostile_word` sets FZ, DN and RMode on a word read from this thread, all defined
+        // FPCR fields, so no `RES0` bit. The test measures the guard under it, and `_restore`
+        // writes `saved` back.
+        unsafe { write_fp_control_word(hostile) };
         attest_fp_environment().expect("a hostile word must still be pinnable");
         assert_eq!(
             read_fp_control_word(),

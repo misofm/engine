@@ -48,7 +48,9 @@ The workspace denies unsafe code (`unsafe_code = "deny"`, `unsafe_op_in_unsafe_f
 `clippy::undocumented_unsafe_blocks = "deny"`, root `Cargo.toml:90`, `:91`, `:102`). An exception
 is one named file, never a crate or a pattern. The introducing issue must use a local, minimal lint
 allowance; state the invariant next to the operation; include a `SAFETY` explanation; add tests;
-and obtain explicit review. Unsafe code must not leak through a public API.
+and obtain explicit review. Unsafe code must not leak through a public API. A `pub unsafe fn` whose
+`# Safety` section states the caller's contract is not a leak: the compiler makes every caller take
+on that contract in an `unsafe` block of its own (#1494's control-word writers below).
 
 The authority is the unsafe allowlist of `scripts/check-realtime-policy.sh` (its `unsafe source
 exclusions` line), the list that CI runs; this section lists it, one entry per path, and adds
@@ -83,24 +85,37 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
 - `crates/lane/src/softfma.rs` (issue 083): the `x86_64` MXCSR helpers `read_mxcsr` and
   `write_mxcsr`, whose two unsafe blocks call `_mm_getcsr` and `_mm_setcsr`. They use these
   deprecated intrinsics rather than the inline assembly their deprecation note recommends. Their
-  only non-test caller is `fpenv.rs` (`:141`, `:148`), at every native `x86_64` render entry; the
+  only non-test caller is `fpenv.rs` (`:145`, `:195`), at every native `x86_64` render entry; the
   direct test callers are `crates/lane/tests/fp_env.rs` and `crates/capi/src/runtime/tests.rs`,
   and gate G6 (`crates/lane/tests/g6_ftz_inert.rs`) reaches the control word through
-  `lane::fpenv`. The `write_mxcsr` `SAFETY` comment states the soundness ground: `_mm_setcsr`
-  needs SSE, which every `x86_64` host has; "No caller writes a word with a reserved bit (16-31)
-  set, which would raise #GP"; on the render path "The entry write installs only
-  `CANONICAL_MXCSR` (0x1F80, the architectural default), which is the environment Rust assumes,
-  whatever word the caller had. The exit write restores the caller's own word, which `fpenv` read
-  from this thread on entry"; and tests "also write words with other RC, status-flag and FTZ/DAZ
-  bits, and restore the saved word before they return". It also records that the `core::arch`
-  documentation of `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ,
-  so a non-default word is outside the language model. `write_mxcsr` itself does not restore the
-  previous word; `fpenv` restores it in its guard's `Drop`, and each test before it returns. Until
-  #163 phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128`
+  `lane::fpenv`. Since #1494 `write_mxcsr` is an `unsafe fn`, so its soundness no longer rests on
+  what its callers happen to pass. Its `# Safety` section is the contract: the word sets no
+  reserved bit (16-31), which would raise #GP; only `CANONICAL_MXCSR` (0x1F80, the architectural
+  default), or a word that differs from it only in the status flags, is inside the floating-point
+  environment Rust assumes (the `core::arch` documentation of `_mm_setcsr` says Rust assumes the
+  default exception masks, rounding and DAZ), and a word handed back can be outside it, because a
+  host can run with FTZ or DAZ set; the caller lets no compiled floating-point code run under a
+  word outside it except the code it deliberately measures, and a hand-back meets this by returning
+  the thread to the word its caller already ran under, with no floating-point code after it in the
+  writer; and unless the write installs a word inside the environment or is a hand-back, the caller
+  restores the previous word, itself or through `CanonicalFpEnv`'s `Drop`. Its `SAFETY` comment
+  states only what the body relies on: SSE, which every `x86_64` host has, and that contract. A
+  `compile_fail` doctest with a passing twin checks, on each `x86_64` doctest run, that safe code
+  cannot call it; `read_mxcsr` stays safe. `write_mxcsr` itself does not restore the previous word.
+  Until #163 phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128`
   promote/demote intrinsics; that phase retired the emulation, and the file kept its name because
   the policy files name its path. No `Lane` value or vector type escapes the crate as unsafe.
 - `crates/lane/src/fpenv.rs` (issue 146): the canonical floating-point environment that every
-  native render entry pins.
+  native render entry pins. Since #1494 its three `write_fp_control_word` variants (`x86_64`,
+  AArch64, and the no-op on targets without a control word) are `unsafe fn` with the
+  `write_mxcsr` contract (on AArch64: no `RES0` bit of FPCR). Each variant carries a
+  `compile_fail` doctest with a passing twin: the `x86_64` pair runs in every `x86_64` doctest run
+  and the AArch64 pair in CI's `aarch64-debug` doctest leg, and each checks there that safe code
+  cannot call the writer; the no-op variant's pair is documentation only, because no doctest run
+  compiles it. `CanonicalFpEnv` is the only safe way to change the word: `enter` (`:477`)
+  writes the canonical word, and `Drop` (`:502`) writes the word `enter` read from this thread; each
+  call's `SAFETY` comment says why that word meets the contract, and `enter`'s says why the guard
+  stays sound when safe code passes it to `mem::forget`. `read_fp_control_word` stays safe.
 
 `fpenv.rs` is reachable from a render path deliberately -- pinning the environment is the render
 entry's first act and unpinning it is its last. The guard reads the control word, writes the
@@ -110,18 +125,19 @@ On AArch64 the read and the writes are `mrs`/`msr` register accesses with no mem
 `x86_64` they are the `softfma.rs` helpers, and x86 has no register form of these instructions:
 `_mm_getcsr`/`_mm_setcsr` lower to `STMXCSR m32`/`LDMXCSR m32` through a stack slot (the
 workspace's `+avx2,+fma` build emits the VEX forms, `vstmxcsr -4(%rsp)` and `vldmxcsr -4(%rsp)`).
-`fpenv.rs` carries unsafe for two reasons, and both are inline assembly -- the workspace's only
-inline assembly, and the reason the softfma entry above says "rather than the inline assembly
-their deprecation note recommends" and this one does not.
+`fpenv.rs` carries unsafe inline assembly for two reasons -- the workspace's only inline
+assembly, and the reason the softfma entry above says "rather than the inline assembly their
+deprecation note recommends" and this one does not. Its other unsafe sites are the raw writer's
+calls (#1494, above).
 
-First, AArch64's `mrs`/`msr FPCR` pair (`:166`, `:181`), because the standard library exposes no
+First, AArch64's `mrs`/`msr FPCR` pair (`:213`, `:271`), because the standard library exposes no
 stable FPCR intrinsic (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point
 Control Register). On `x86_64` there is no counterpart: `fpenv.rs` calls `softfma.rs`'s
 already-approved MXCSR helpers. On the render path the blocks write only a value previously read
 from the same thread or `CANONICAL_FPCR`, and they affect no other thread.
 
 Second, on both, an empty `asm!` block as the guard's scheduling barrier (`scheduling_barrier`,
-`:322-329`). Installing a control word is a side effect the optimizer does not model --
+`:456-463`). Installing a control word is a side effect the optimizer does not model --
 `_mm_setcsr` lowers to an intrinsic declared as touching only its own argument's memory -- so
 without a barrier nothing stops a computation being scheduled outside the region it was meant to
 run in. The empty block is deliberately **not** `nomem`: being a memory clobber is its entire
@@ -135,6 +151,28 @@ The exemption is the file, not the crate: `scripts/check-realtime-policy.sh` and
 `scripts/check-lane-policy.sh` (through `scripts/policies/lane-source.toml`) both name `fpenv.rs`
 explicitly, and both have a mutation test that proves a third lane file does not inherit it
 (`scripts/test-realtime-policy.sh`, `scripts/test-lane-policy.sh`, `fpenv_extra.rs`).
+
+### Control-word test writers
+
+Each file below calls the `unsafe fn` control-word writers (#1494) to install a word a host might
+arrive with -- FTZ, DAZ, a directed rounding mode, sticky status flags or FPCR's `FZ` and `DN` --
+and measure the engine under it: through the guard, and with no guard as a control
+(`g6_ftz_inert.rs` measures only the D7 flush arms, with no guard). The calls are the file's only
+unsafe code. Each call sits in an `unsafe` block whose `SAFETY` comment names the word, says it sets
+no reserved (or `RES0`) bit, and names the guard or write-back that restores the previous word.
+
+- `crates/lane/tests/fp_env.rs` (#146, #1017): the guard's own tests. It calls `write_mxcsr` on
+  `x86_64` and `write_fp_control_word` on AArch64, and restores through its `Restore` guard.
+- `crates/lane/tests/g6_ftz_inert.rs` (#83, gate G6): sets the flush bits around one pass of its
+  arms and writes the saved word back.
+- `crates/capi/src/runtime/tests.rs` (#146): the `#[cfg(test)]` capi runtime tests. Only its
+  `x86_64` `fp_environment` module carries `#[allow(unsafe_code)]`; it calls `write_mxcsr` and
+  restores through `Restore` and explicit write-backs.
+- `crates/host-core/tests/fp_environment.rs` (#146, #1017): the host facade's arms. It restores
+  through `Restore`.
+- `tools/wasm-gates/tests/g6_full_corpus_ftz.rs` (#144, #146): gate G6 over the full corpus. It
+  restores through `WordGuard`'s `Drop`, and `scripts/check-bench-policy.sh` names it in its
+  `tools/` set.
 
 ### C-ABI and browser-ABI boundaries
 
@@ -272,6 +310,8 @@ Approved unsafe code that runs on a render thread, per entry:
 - `fpenv.rs`: yes, at every native render entry, on both `x86_64` and AArch64. On wasm its guard is
   a zero-sized value with no code.
 - `softfma.rs`: yes, on `x86_64` only, through `fpenv.rs`.
+- The control-word test writers: no. They are test code, and each writes the word on its test
+  thread between render calls, never inside one.
 - `crates/capi/src/ffi.rs`: yes. `miso_engine_v1_render_f32_planar` (`:807`) pins the environment
   and then dereferences the plan handle and the output descriptor through unsafe blocks before it
   renders.

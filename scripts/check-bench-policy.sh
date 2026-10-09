@@ -206,9 +206,11 @@ for subject in "${timed_subjects[@]}"; do
     fi
 done
 
-# `allow(unsafe_code)` is denied workspace-wide; these three files are the approved exceptions under
+# `allow(unsafe_code)` is denied workspace-wide; these four files are the approved exceptions under
 # `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
-# `hosts/`. A fourth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# `hosts/`. A fifth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# (#1494 added gate G6's corpus test, whose only unsafe is its calls of the `unsafe fn`
+# `lane::fpenv::write_fp_control_word`.)
 # (#1033 removed `tools/native-pcm-runner` and its row; #1075 removed `tools/bench/src/protocol.rs`,
 # whose hand-written FlatBuffers table accessors were its only unsafe code, with that benchmark.)
 #
@@ -220,7 +222,8 @@ done
 if printf '%s\n' \
     tools/bench-support/src/alloc.rs \
     tools/audit/src/capi.rs \
-    tools/wasm-gate-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+    tools/wasm-gate-guest/src/lib.rs \
+    tools/wasm-gates/tests/g6_full_corpus_ftz.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
 ((sort_status == 0)) || fail "unsafe expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-unsafe"); stderr: $(captured "$scratch/sort.err")"
 expected_unsafe="$(<"$scratch/expected-unsafe")"
 if grep -rlE --include='*.rs' '^#!\[allow\(unsafe_code\)\]' tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi

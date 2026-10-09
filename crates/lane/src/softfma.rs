@@ -96,26 +96,53 @@ pub fn read_mxcsr() -> u32 {
 /// Called by [`crate::fpenv`] at every native `x86_64` render entry, and by tests. Gate G6 shows
 /// that the D7 state flush does not depend on FTZ or DAZ, but the full render does, so `fpenv`
 /// installs a word with both clear. The write affects only the calling thread, and this function
-/// does not restore the previous word: every user restores it, `fpenv` in its guard's `Drop` and
-/// tests before they return.
+/// does not restore the previous word. [`crate::fpenv::CanonicalFpEnv`] is the safe way to change
+/// the word: it installs `CANONICAL_MXCSR` and writes the caller's own word back on drop.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit (16-31). `LDMXCSR` raises #GP on one (Intel SDM Vol. 1, "MXCSR
+///   Control and Status Register").
+/// - Rust assumes the floating-point environment of `CANONICAL_MXCSR` (0x1F80, the architectural
+///   default): the `core::arch` documentation of `_mm_setcsr` says Rust assumes the default
+///   exception masks, rounding and DAZ. Only `CANONICAL_MXCSR`, or a word that differs from it
+///   only in the status flags (bits 0-5), is inside that environment; the caller treats every
+///   other word as outside it. A word read from this thread and handed back can be outside it too,
+///   because a host can run with FTZ or DAZ set. The caller lets no compiled floating-point code
+///   run under a word outside the environment except the code it deliberately measures. A
+///   hand-back write meets this when it returns the thread to the word its caller already ran
+///   under and the writer runs no floating-point code after it.
+/// - Unless the write installs a word inside the environment or hands back a word read from this
+///   thread, the caller restores the previous word before it returns, itself or through a guard
+///   that does (`CanonicalFpEnv`'s `Drop`). A hand-back write is itself that restore. A word inside
+///   the environment needs no restore, because compiled code may run under it.
+///
+/// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
+/// the first fence; the fence carries no code because stable rustdoc does not check one (issue
+/// #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::softfma::read_mxcsr();
+/// lane::softfma::write_mxcsr(word);
+/// ```
+///
+/// The twin differs from it only in the `unsafe` block and its `SAFETY` comment, so a renamed item
+/// turns it red:
+///
+/// ```
+/// let word = lane::softfma::read_mxcsr();
+/// // SAFETY: `word` was just read from this thread, so it sets no reserved bit, and writing it
+/// // back leaves the thread's word unchanged.
+/// unsafe { lane::softfma::write_mxcsr(word) };
+/// ```
 #[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
-pub fn write_mxcsr(value: u32) {
+pub unsafe fn write_mxcsr(value: u32) {
     use core::arch::x86_64::_mm_setcsr;
     // SAFETY: `_mm_setcsr` writes a control register and needs SSE, which every x86_64 host has
-    // (and the crate's x86-64-v3 compile guard requires). No caller writes a word with a reserved
-    // bit (16-31) set, which would raise #GP (Intel SDM Vol. 1, "MXCSR Control and Status
-    // Register"). On the render path `fpenv` makes two writes. The entry write installs only
-    // `CANONICAL_MXCSR` (0x1F80, the architectural default), which is the environment Rust
-    // assumes, whatever word the caller had. The exit write restores the caller's own word, which
-    // `fpenv` read from this thread on entry. Tests also write words with other RC, status-flag and
-    // FTZ/DAZ bits, and restore the saved word before they return. The `core::arch` documentation
-    // of `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ, so a
-    // non-default word is outside the language model: `fpenv`'s scheduling barriers keep the
-    // render's memory-dependent computation between its two writes, under the default word. The
-    // exit write itself installs a non-default word whenever the caller had one, as a host audio
-    // callback that runs with FTZ and DAZ set does (`fpenv.rs:16-17`), but after it the entry runs
-    // no floating-point code, so the caller's word reaches no engine computation; tests are the
-    // only engine computation that runs under another word.
+    // (and the crate's x86-64-v3 compile guard requires). The caller upholds this function's
+    // `# Safety` contract: `value` sets no reserved bit, so the write cannot raise #GP, and the
+    // caller confines a word outside Rust's floating-point model and restores the previous word
+    // where the contract requires it.
     unsafe { _mm_setcsr(value) }
 }

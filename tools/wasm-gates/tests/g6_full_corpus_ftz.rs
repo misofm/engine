@@ -28,6 +28,8 @@
 //! render entry -- modelled here by dropping it from `guarded_report` -- and the guarded arm
 //! collapses onto the control arm's ~70 diverging rows.
 
+#![allow(unsafe_code)]
+
 use wasm_gate_corpus as corpus;
 
 fn render_corpus() -> Vec<(usize, usize, [u8; 32])> {
@@ -78,7 +80,11 @@ mod pinned {
     impl WordGuard {
         fn set(value: FpControlWord) -> Self {
             let saved = read_word();
-            write_word(value);
+            // SAFETY: every caller in this file passes a word read from this thread with only
+            // `FLUSH_BITS` (MXCSR FTZ|DAZ, bits 15 and 6, or FPCR.FZ, bit 24) set or cleared, so no
+            // reserved or `RES0` bit. The gate measures the corpus under it, and this guard's
+            // `Drop` writes `saved` back.
+            unsafe { write_word(value) };
             assert_eq!(
                 read_word(),
                 value,
@@ -90,7 +96,9 @@ mod pinned {
 
     impl Drop for WordGuard {
         fn drop(&mut self) {
-            write_word(self.saved);
+            // SAFETY: `set` read `self.saved` from this thread, so it sets no reserved or `RES0`
+            // bit; this hands the thread its own word back.
+            unsafe { write_word(self.saved) };
         }
     }
 
