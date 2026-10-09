@@ -13,7 +13,7 @@ use std::process::Command;
 
 use bench_support::digest::sha256_hex as sha256;
 use lane::Lane;
-use lane::kernels::{SvfCoef, SvfState, gain_block, sum2_block, svf_block};
+use lane::kernels::{SvfCoef, SvfState, UnarmedRest, gain_block, sum2_block, svf_block};
 
 const DEFAULT_ALLOWLIST: &str = "tools/audit/vectorization-allowlist.tsv";
 const PROBE_FRAMES: usize = 32;
@@ -40,9 +40,19 @@ const ACTIVE_BACKEND: &str = "aarch64-neon";
 const ACTIVE_BACKEND: &str = "unsupported";
 
 #[cfg(target_feature = "avx2")]
-const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd8", "probe_sum2_simd8", "probe_svf_simd8"];
+const ACTIVE_REGISTRY: &[&str] = &[
+    "probe_gain_simd8",
+    "probe_sum2_simd8",
+    "probe_svf_simd8",
+    "probe_svf_unarmed_simd8",
+];
 #[cfg(target_feature = "neon")]
-const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd4", "probe_sum2_simd4", "probe_svf_simd4"];
+const ACTIVE_REGISTRY: &[&str] = &[
+    "probe_gain_simd4",
+    "probe_sum2_simd4",
+    "probe_svf_simd4",
+    "probe_svf_unarmed_simd4",
+];
 #[cfg(not(any(target_feature = "avx2", target_feature = "neon")))]
 const ACTIVE_REGISTRY: &[&str] = &[];
 
@@ -89,6 +99,25 @@ fn probe_svf_simd8(
     );
 }
 
+// The unarmed form (`UnarmedRest`, issue #1490): the loop that the settled, non-HPF/LPF sections of
+// a ramping parametric-EQ block run when no lane can arm the joint flush. It loads no rest plane,
+// so the probe passes none.
+#[cfg(target_feature = "avx2")]
+#[inline(never)]
+fn probe_svf_unarmed_simd8(
+    io: &mut [f32; PROBE_FRAMES * 8],
+    coefficients: &SvfCoef<lane::Simd8>,
+    state: &mut SvfState<lane::Simd8>,
+) {
+    svf_block::<lane::Simd8, UnarmedRest>(
+        io,
+        PROBE_FRAMES,
+        black_box(coefficients),
+        black_box(state),
+        UnarmedRest,
+    );
+}
+
 // Same rationale as the 8-lane (AVX2) gain probe above: opaque value, static length (#372).
 #[cfg(target_feature = "neon")]
 #[inline(never)]
@@ -126,6 +155,25 @@ fn probe_svf_simd4(
     );
 }
 
+// The unarmed form (`UnarmedRest`, issue #1490): the loop that the settled, non-HPF/LPF sections of
+// a ramping parametric-EQ block run when no lane can arm the joint flush. It loads no rest plane,
+// so the probe passes none.
+#[cfg(target_feature = "neon")]
+#[inline(never)]
+fn probe_svf_unarmed_simd4(
+    io: &mut [f32; PROBE_FRAMES * 4],
+    coefficients: &SvfCoef<lane::Simd4>,
+    state: &mut SvfState<lane::Simd4>,
+) {
+    svf_block::<lane::Simd4, UnarmedRest>(
+        io,
+        PROBE_FRAMES,
+        black_box(coefficients),
+        black_box(state),
+        UnarmedRest,
+    );
+}
+
 fn execute_probes() {
     #[cfg(target_feature = "avx2")]
     {
@@ -147,6 +195,7 @@ fn execute_probes() {
         probe_gain_simd8(&mut io, &[0.75; 8]);
         probe_sum2_simd8(&mut io, &a, &b);
         probe_svf_simd8(&mut io, &coefficients, &mut state, &[0.0; PROBE_FRAMES * 8]);
+        probe_svf_unarmed_simd8(&mut io, &coefficients, &mut state);
         black_box((io, state));
     }
     #[cfg(target_feature = "neon")]
@@ -169,6 +218,7 @@ fn execute_probes() {
         probe_gain_simd4(&mut io, &[0.75; 4]);
         probe_sum2_simd4(&mut io, &a, &b);
         probe_svf_simd4(&mut io, &coefficients, &mut state, &[0.0; PROBE_FRAMES * 4]);
+        probe_svf_unarmed_simd4(&mut io, &coefficients, &mut state);
         black_box((io, state));
     }
 }

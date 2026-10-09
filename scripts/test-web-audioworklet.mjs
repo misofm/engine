@@ -2570,30 +2570,94 @@ async function testQualificationBoot({
   // pre-boot collection staging exports with the bridge's sizing rules (`hosts/host-web/src/ffi.rs`):
   // the entry capacity is the request header's entry count, and the identity capacity is the sum
   // of the staged entries' identity byte lengths.
+  //
+  // Issue #1491 D1: the fake's boot exports read the staged collection back the way the bridge
+  // lays it out (`staged_spectrum_request`) and record it as the boot's staging witness, so a
+  // worklet that skips the staging, or stages bytes that differ from its options, is visible
+  // before boot. The witness is `null` when the request pointer was never asked for or the
+  // request header's entry count is 0; the boot result is unchanged.
+  //
+  // Every offset, size, field type, entry stride and wire code here comes from the generated
+  // layout (`sdk/assets/miso-engine-v1-abi-layout.json`, made from the Rust structs by
+  // `parameter-metadata`), never from the worklet's hand-typed copy, so a bridge layout change
+  // the worklet misses is red here. The identity decoder keeps a leading U+FEFF, as the bridge's
+  // `core::str::from_utf8` does.
+  const identityDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const collectionRequestLayout = preparedAbiLayout.structures.spectrumCollectionRequest;
+  const collectionEntryLayout = preparedAbiLayout.structures.spectrumCollectionEntry;
+  const layoutField = (layout, name) => {
+    const field = layout.fields.find((candidate) => candidate.name === name);
+    assert.ok(field, `qualification boot contract: the generated layout has no field ${name}`);
+    return field;
+  };
+  const readLayoutField = (bytes, base, { type }, offset) => {
+    if (type === "u32") return bytes.getUint32(base + offset, true);
+    if (type === "u64") return bytes.getBigUint64(base + offset, true);
+    const array = /^u32\[(\d+)\]$/.exec(type);
+    assert.ok(array, `qualification boot contract: unknown generated field type ${type}`);
+    return Array.from({ length: Number(array[1]) },
+      (_, index) => bytes.getUint32(base + offset + 4 * index, true));
+  };
+  // Decodes every field of one generated structure at `base`, keyed by its generated name.
+  const readLayoutStruct = (bytes, base, layout) => Object.fromEntries(
+    layout.fields.map((field) => [field.name, readLayoutField(bytes, base, field, field.offset)]));
+  const requestEntryCountOffset = layoutField(collectionRequestLayout, "entryCount").offset;
+  const entryTargetIdBytesOffset = layoutField(collectionEntryLayout, "targetIdBytes").offset;
   const withSpectrumCollectionStaging = (fake) => {
     const requestPointer = 42000;
     const entryPointer = 42100;
     const idPointer = 42600;
+    let requested = false;
     let entryCapacity = 0;
     let idCapacity = 0;
     const view = () => new DataView(fake.exports.memory.buffer);
+    const decodeStagedCollection = () => {
+      if (!requested) return null;
+      const bytes = view();
+      const request = readLayoutStruct(bytes, requestPointer, collectionRequestLayout);
+      if (request.entryCount === 0) return null;
+      const entries = [];
+      let idOffset = idPointer;
+      for (let index = 0; index < request.entryCount; index += 1) {
+        const entry = readLayoutStruct(
+          bytes, entryPointer + index * collectionEntryLayout.bytes, collectionEntryLayout);
+        entry.targetId = identityDecoder.decode(
+          new Uint8Array(fake.exports.memory.buffer, idOffset, entry.targetIdBytes).slice(),
+        );
+        entries.push(entry);
+        idOffset += entry.targetIdBytes;
+      }
+      return { request, entries };
+    };
+    fake.spectrumStagingWitnesses = [];
+    for (const name of ["miso_engine_web_v1_boot", "miso_engine_web_v1_boot_with_spectrum_hop"]) {
+      const boot = fake.exports[name];
+      if (typeof boot !== "function") continue;
+      fake.exports[name] = (...args) => {
+        fake.spectrumStagingWitnesses.push(decodeStagedCollection());
+        return boot(...args);
+      };
+    }
     Object.assign(fake.exports, {
       miso_engine_web_v1_spectrum_collection_request_ptr: () => {
+        requested = true;
         entryCapacity = 0;
         idCapacity = 0;
         return requestPointer;
       },
-      miso_engine_web_v1_spectrum_collection_request_bytes: () => 32,
+      miso_engine_web_v1_spectrum_collection_request_bytes: () => collectionRequestLayout.bytes,
       miso_engine_web_v1_spectrum_collection_entry_ptr: () => {
-        entryCapacity = view().getUint32(requestPointer + 8, true);
-        return entryCapacity * 24 <= idPointer - entryPointer ? entryPointer : 0;
+        entryCapacity = view().getUint32(requestPointer + requestEntryCountOffset, true);
+        return entryCapacity * collectionEntryLayout.bytes <= idPointer - entryPointer
+          ? entryPointer : 0;
       },
       miso_engine_web_v1_spectrum_collection_entry_capacity: () => entryCapacity,
-      miso_engine_web_v1_spectrum_collection_entry_bytes: () => 24,
+      miso_engine_web_v1_spectrum_collection_entry_bytes: () => collectionEntryLayout.bytes,
       miso_engine_web_v1_spectrum_collection_target_ids_ptr: () => {
         idCapacity = 0;
         for (let index = 0; index < entryCapacity; index += 1) {
-          idCapacity += view().getUint32(entryPointer + index * 24 + 8, true);
+          idCapacity += view().getUint32(
+            entryPointer + index * collectionEntryLayout.bytes + entryTargetIdBytesOffset, true);
         }
         return idPointer;
       },
@@ -2615,11 +2679,12 @@ async function testQualificationBoot({
       this.onprocessorerror = null;
       this.disconnectCount = 0;
       const processorOptions = options.processorOptions?.options;
-      setNextFake(withSpectrumCollectionStaging(makeFake(
+      this.fake = withSpectrumCollectionStaging(makeFake(
         context.renderQuantumSize,
         1,
         processorOptions?.liveControlCommandQueueRecords !== 0n,
-      )));
+      ));
+      setNextFake(this.fake);
       setProcessorPortFactory(() => processorPort);
       try {
         this.processor = new registered({ processorOptions: options.processorOptions });
@@ -2706,6 +2771,12 @@ async function testQualificationBoot({
       );
     }
     assert.equal(host.backend, "simd128", `qualification boot contract: ${label} backend`);
+    // Issue #1491 D1: exactly one boot per caller, and its staging witness is kept with the
+    // caller's witnessed options.
+    const stagingWitnesses = QualificationNode.latest.fake.spectrumStagingWitnesses;
+    assert.equal(stagingWitnesses.length, 1,
+      `qualification boot contract: ${label} must boot exactly once`);
+    observed.at(-1).stagedSpectrumCollection = stagingWitnesses[0];
     realReady += 1;
     try {
       await bounded(host.dispose(), `${label} real dispose`);
@@ -2811,6 +2882,48 @@ async function testQualificationBoot({
       ],
       "qualification boot contract: staging-read spectrum collection changed",
     );
+    // Issue #1491 D2: the collection the worklet staged before boot is the caller's witnessed
+    // collection, entry for entry. The header, the wire codes and the reserved words (which the
+    // bridge refuses unless zero) come from the generated layout; the entries and the budget come
+    // from the witnessed options.
+    const wireCodes = (table) => Object.fromEntries(
+      preparedAbiLayout.constants[table].map(({ name, value }) => [name, value]));
+    const spectrumTargetCodes = wireCodes("spectrumTargets");
+    const spectrumChannelCodes = wireCodes("spectrumChannels");
+    const zeroReserved = (layout) => Object.fromEntries(layout.fields
+      .filter(({ name }) => name.startsWith("reserved"))
+      .map(({ name, type }) => {
+        const array = /^u32\[(\d+)\]$/.exec(type);
+        return [name, array ? Array(Number(array[1])).fill(0) : type === "u64" ? 0n : 0];
+      }));
+    const stagingReadCollection = stagingReadOptions.spectrumCollection;
+    assert.deepEqual(
+      observed.find(({ label }) => label === "runStagingReadRun").stagedSpectrumCollection,
+      {
+        request: {
+          ...zeroReserved(collectionRequestLayout),
+          structSize: collectionRequestLayout.bytes,
+          abiVersion: preparedAbiLayout.abiVersion,
+          entryCount: stagingReadCollection.entries.length,
+          maximumCaptureBytes: BigInt(stagingReadCollection.maximumCaptureBytes),
+        },
+        entries: stagingReadCollection.entries.map(({ target, targetId, channels }) => ({
+          ...zeroReserved(collectionEntryLayout),
+          target: spectrumTargetCodes[target],
+          channels: spectrumChannelCodes[channels],
+          targetIdBytes: new mainRealmTextEncoder().encode(targetId).length,
+          targetId,
+        })),
+      },
+      "qualification boot contract: staging-read staged collection differs from its options",
+    );
+    // Issue #1491 D3: the five callers with no collection stage none.
+    for (const { label, stagedSpectrumCollection } of observed) {
+      if (label === "runStagingReadRun") continue;
+      assert.equal(stagedSpectrumCollection, null,
+        `qualification boot contract: ${label} stages a spectrum collection; `
+        + "only runStagingReadRun boots one");
+    }
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
     assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");

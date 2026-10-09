@@ -2,3 +2,4 @@
 x86_64-avx2	feedforward-gain	probe_gain_simd8	vmulps,%ymm	mulss,addss,subss,divss	call|callq
 x86_64-avx2	feedforward-sum	probe_sum2_simd8	vaddps,%ymm	mulss,addss,subss,divss	call|callq
 x86_64-avx2	recursive-svf	probe_svf_simd8	vmulps,%ymm,vaddps,%ymm	mulss,addss,subss,divss,vfmadd|vfnmadd|vfmsub|vfnmsub	call|callq
+x86_64-avx2	recursive-svf-unarmed	probe_svf_unarmed_simd8	vmulps,%ymm,vaddps,%ymm	mulss,addss,subss,divss,vfmadd|vfnmadd|vfmsub|vfnmsub	call|callq

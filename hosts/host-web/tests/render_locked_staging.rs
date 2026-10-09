@@ -12,6 +12,12 @@
 //! `String` on every read. The browser gate sees that only when a qualification workload reads a
 //! collection; the second phase reads one on a second fresh thread.
 //!
+//! Selecting a collection entry once built an owned target from the staged identity and cloned
+//! the selected target into the returned entry, on the browser's audio thread (issue #1492). The
+//! second phase therefore counts from before its first select, and selects through both select
+//! exports: a change, a repeat, a stream select that changes the entry and its smoothing, and a
+//! stream select that changes only the smoothing.
+//!
 //! This binary registers the module's own counting allocator and holds exactly one test, so
 //! nothing else shares the process-wide counter (decision 15: host-web's native allocation-count
 //! gates live in an integration binary, never in `src/tests.rs`, which registers its own).
@@ -198,22 +204,32 @@ fn booted_stagings_never_allocate_in_the_render_locked_window() {
     assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
-/// Phase 2 (Amendment 1, A1): a collection capture's spectrum read and spectrum-stream read.
+/// Phase 2 (Amendment 1, A1, and issue #1492): a collection capture's selects, spectrum read and
+/// spectrum-stream read.
 fn collection_spectrum_reads_never_allocate_in_the_render_locked_window() {
     let handle = boot_collection();
     assert_ne!(handle, 0, "the observation session boots with a collection");
-    // Select the second entry, so a read that resolved the wrong entry would not find it armed.
-    native_staging::spectrum_target_id(OUTPUT_ID);
-    assert_eq!(
-        host_web::miso_engine_web_v1_spectrum_select(
-            handle,
-            SPECTRUM_TARGET_OUTPUT,
-            SPECTRUM_CHANNEL_BOTH,
-            OUTPUT_ID.len() as u32,
-        ),
-        RESULT_OK
-    );
     let before = host_web::miso_engine_web_v1_render_allocation_count();
+    // Select the second entry, so a read that resolved the wrong entry would not find it armed.
+    // The first select changes the entry; the second is a repeat that changes nothing.
+    native_staging::spectrum_target_id(OUTPUT_ID);
+    for call in ["the first select", "the repeated select"] {
+        assert_eq!(
+            host_web::miso_engine_web_v1_spectrum_select(
+                handle,
+                SPECTRUM_TARGET_OUTPUT,
+                SPECTRUM_CHANNEL_BOTH,
+                OUTPUT_ID.len() as u32,
+            ),
+            RESULT_OK,
+            "{call} was refused"
+        );
+        assert_eq!(
+            host_web::miso_engine_web_v1_render_allocation_count(),
+            before,
+            "{call} allocated"
+        );
+    }
     render(handle, 64);
     assert_eq!(
         host_web::miso_engine_web_v1_spectrum_read(handle, SPECTRUM_CHANNEL_BOTH),
@@ -234,6 +250,63 @@ fn collection_spectrum_reads_never_allocate_in_the_render_locked_window() {
         host_web::miso_engine_web_v1_render_allocation_count(),
         before,
         "a collection capture's spectrum read allocated"
+    );
+    // A stream select to the other entry with new smoothing: the continuous cadence restarts on
+    // the new entry and the analysis history resets.
+    native_staging::spectrum_target_id(TRACK_ID);
+    assert_eq!(
+        host_web::miso_engine_web_v1_spectrum_stream_select(
+            handle,
+            SPECTRUM_TARGET_TRACK_POST_PAN,
+            SPECTRUM_CHANNEL_BOTH,
+            TRACK_ID.len() as u32,
+            50.0,
+        ),
+        RESULT_OK
+    );
+    assert_eq!(
+        host_web::miso_engine_web_v1_render_allocation_count(),
+        before,
+        "the stream select allocated"
+    );
+    render(handle, 64);
+    assert_eq!(
+        host_web::miso_engine_web_v1_spectrum_stream_read(handle),
+        RESULT_OK,
+        "the newly selected entry streamed a window"
+    );
+    assert_eq!(
+        host_web::miso_engine_web_v1_render_allocation_count(),
+        before,
+        "a collection capture's stream read allocated after the stream select"
+    );
+    // A stream select that keeps the entry and changes only the smoothing: the bridge restarts
+    // the continuous cadence on the same entry and resets the analysis history.
+    assert_eq!(
+        host_web::miso_engine_web_v1_spectrum_stream_select(
+            handle,
+            SPECTRUM_TARGET_TRACK_POST_PAN,
+            SPECTRUM_CHANNEL_BOTH,
+            TRACK_ID.len() as u32,
+            25.0,
+        ),
+        RESULT_OK
+    );
+    assert_eq!(
+        host_web::miso_engine_web_v1_render_allocation_count(),
+        before,
+        "the smoothing-only stream select allocated"
+    );
+    render(handle, 64);
+    assert_eq!(
+        host_web::miso_engine_web_v1_spectrum_stream_read(handle),
+        RESULT_OK,
+        "the entry streamed a window after the smoothing-only stream select"
+    );
+    assert_eq!(
+        host_web::miso_engine_web_v1_render_allocation_count(),
+        before,
+        "a collection capture's stream read allocated after the smoothing-only stream select"
     );
     assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
 }

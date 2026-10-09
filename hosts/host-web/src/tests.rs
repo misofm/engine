@@ -8802,7 +8802,7 @@ fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
     )
     .expect("collection explicit-hop boot");
     assert_eq!(
-        collection.select_spectrum(&target, SpectrumChannels::Stereo),
+        collection.select_spectrum(target.as_ref(), SpectrumChannels::Stereo),
         RESULT_OK
     );
     assert_eq!(collection.spectrum_hop, Some(collection_hop));

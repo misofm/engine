@@ -46,7 +46,7 @@ use host_core::{
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels,
     SpectrumContinuousCaptureError, SpectrumContinuousReadError, SpectrumContinuousWindow,
-    SpectrumHop, SpectrumTarget, SpectrumWindow,
+    SpectrumHop, SpectrumTarget, SpectrumTargetRef, SpectrumWindow,
 };
 use session::CompileCaps;
 
@@ -2573,7 +2573,14 @@ impl AudioWorkletEngineHost {
     ///
     /// The collection performs all fallible admission before retiring its current capture. A
     /// refusal therefore leaves the old stream, queued window and effective configuration intact.
-    pub fn select_spectrum(&mut self, target: &SpectrumTarget, channels: SpectrumChannels) -> u32 {
+    ///
+    /// The worklet calls this on the browser's audio thread, so the target is borrowed and the
+    /// selection allocates nothing.
+    pub fn select_spectrum(
+        &mut self,
+        target: SpectrumTargetRef<'_>,
+        channels: SpectrumChannels,
+    ) -> u32 {
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -2597,7 +2604,7 @@ impl AudioWorkletEngineHost {
     /// Validate a collection selection and report whether it would replace the current entry.
     pub fn spectrum_selection_would_change(
         &self,
-        target: &SpectrumTarget,
+        target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
     ) -> Result<bool, u32> {
         if self.status.state != STATE_READY {

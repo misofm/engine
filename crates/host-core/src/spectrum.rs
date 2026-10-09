@@ -199,6 +199,33 @@ impl SpectrumTarget {
             | Self::Output(track_id) => track_id,
         }
     }
+
+    /// Borrow this target as a [`SpectrumTargetRef`], without cloning its identity.
+    #[must_use]
+    pub fn as_ref(&self) -> SpectrumTargetRef<'_> {
+        match self {
+            Self::TrackPostInputBuiltins(track_id) => {
+                SpectrumTargetRef::TrackPostInputBuiltins(track_id)
+            }
+            Self::TrackPostMatrix(track_id) => SpectrumTargetRef::TrackPostMatrix(track_id),
+            Self::Output(output_id) => SpectrumTargetRef::Output(output_id),
+        }
+    }
+}
+
+/// A borrowed [`SpectrumTarget`]: the same three kinds over a borrowed identity.
+///
+/// Selection takes this form so that a caller can name a prepared entry from bytes it already
+/// holds, without building an owned target. The browser selects on its audio thread, where an
+/// allocation is not permitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumTargetRef<'a> {
+    /// The selected track immediately after its input builtins.
+    TrackPostInputBuiltins(&'a str),
+    /// The selected track immediately after its fader/matrix stage.
+    TrackPostMatrix(&'a str),
+    /// The designated final output node.
+    Output(&'a str),
 }
 
 /// Preparation-time request for one fixed, bounded spectrum capture.
@@ -857,8 +884,9 @@ impl SpectrumCaptureCollection {
 
     /// Return the accepted entry at `index`: its stable target identity and its mask.
     ///
-    /// The target is borrowed, so this accessor clones and allocates nothing. A caller that needs
-    /// an owned [`SpectrumCaptureCollectionEntry`] builds it on its own thread.
+    /// The target is borrowed, so this accessor clones and allocates nothing. The browser calls
+    /// selection on its audio thread, so an owned [`SpectrumCaptureCollectionEntry`] is never built
+    /// here: a caller that needs one clones the borrowed target off that thread.
     #[must_use]
     pub fn entry(&self, index: usize) -> Option<(&SpectrumTarget, SpectrumChannels)> {
         self.captures
@@ -866,14 +894,11 @@ impl SpectrumCaptureCollection {
             .map(|capture| (capture.target(), capture.channels()))
     }
 
-    /// Build the owned entry that `select` returns. Like selection, this is control-side and runs
-    /// between render calls.
-    fn owned_entry(&self, index: usize) -> Option<SpectrumCaptureCollectionEntry> {
-        self.entry(index)
-            .map(|(target, channels)| SpectrumCaptureCollectionEntry {
-                target: target.clone(),
-                channels,
-            })
+    /// Index of the prepared entry that matches `target` and `channels` exactly.
+    fn position(&self, target: SpectrumTargetRef<'_>, channels: SpectrumChannels) -> Option<usize> {
+        self.captures
+            .iter()
+            .position(|capture| capture.target.as_ref() == target && capture.channels == channels)
     }
 
     /// Return the selected target identity without cloning it.
@@ -947,22 +972,20 @@ impl SpectrumCaptureCollection {
     /// The target and mask are validated before touching the current capture. A successful
     /// replacement clears every old partial or queued result and arms the new entry. If the old
     /// entry was running continuously, the same cadence is restarted for the new entry.
+    ///
+    /// Returns the selected entry's index in preparation order; [`Self::entry`] borrows it. The
+    /// browser calls this on its audio thread (from the worklet's message handler, between render
+    /// quanta), so it takes a borrowed target and allocates nothing.
     pub fn select(
         &mut self,
-        target: &SpectrumTarget,
+        target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
-    ) -> Result<SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionSelectionError> {
-        let Some(index) = self
-            .captures
-            .iter()
-            .position(|capture| capture.target == *target && capture.channels == channels)
-        else {
+    ) -> Result<usize, SpectrumCaptureCollectionSelectionError> {
+        let Some(index) = self.position(target, channels) else {
             return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
         };
         if self.selected == Some(index) {
-            return self
-                .owned_entry(index)
-                .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry);
+            return Ok(index);
         }
 
         let next_selection_epoch = self
@@ -993,21 +1016,16 @@ impl SpectrumCaptureCollection {
         self.cancel_except(Some(index));
         self.selected = Some(index);
         self.selection_epoch = next_selection_epoch;
-        self.owned_entry(index)
-            .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
+        Ok(index)
     }
 
     /// Validate a selection and report whether it would replace the current entry.
     pub fn selection_would_change(
         &self,
-        target: &SpectrumTarget,
+        target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
     ) -> Result<bool, SpectrumCaptureCollectionSelectionError> {
-        let Some(index) = self
-            .captures
-            .iter()
-            .position(|capture| capture.target == *target && capture.channels == channels)
-        else {
+        let Some(index) = self.position(target, channels) else {
             return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
         };
         if self.selected == Some(index) {
@@ -3356,7 +3374,11 @@ mod tests {
 
         // With nothing selected, `select` arms capture 1, which is one-shot and idle, so it
         // reaches `cancel_except(Some(1))` instead of returning `Busy`.
-        assert!(collection.select(&second_target, second_channels).is_ok());
+        assert!(
+            collection
+                .select(second_target.as_ref(), second_channels)
+                .is_ok()
+        );
         assert_eq!(collection.captures[0].consumer.available_at_entry(), 0);
         assert_eq!(collection.captures[1].consumer.available_at_entry(), 1);
 
@@ -3378,7 +3400,7 @@ mod tests {
 
         assert!(
             collection
-                .select(&second_target, SpectrumChannels::Right)
+                .select(second_target.as_ref(), SpectrumChannels::Right)
                 .is_ok()
         );
         assert_eq!(
@@ -3668,7 +3690,7 @@ mod tests {
             let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
             let mut collection = SpectrumCaptureCollection::new(vec![capture]);
             collection
-                .select(&target, SpectrumChannels::Stereo)
+                .select(target.as_ref(), SpectrumChannels::Stereo)
                 .expect("prepared collection selection");
             let cadence = collection
                 .start_continuous_with_hop(
@@ -3684,7 +3706,7 @@ mod tests {
         let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
         let mut legacy = SpectrumCaptureCollection::new(vec![capture]);
         legacy
-            .select(&target, SpectrumChannels::Stereo)
+            .select(target.as_ref(), SpectrumChannels::Stereo)
             .expect("prepared legacy collection selection");
         let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
         assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
