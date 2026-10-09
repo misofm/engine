@@ -186,15 +186,20 @@ identical before and after the edit):
   3e6bd0: mov %edi,-0x4(%rsp); vldmxcsr -0x4(%rsp); ret
 ```
 
-Every exit of the render entry jumps to `0x808eb`/`0x808f1` (`0x80915`, `0x8091c`, `0x80958`,
-`0x809de`, `0x809f1`, `0x80a04`, `0x80e94` and the fall-throughs), so each call makes exactly one
-exit `write_mxcsr` call: per block, two guard calls on entry and one on exit, plus one attestation
+Every exit of the render entry reaches the exit block at `0x808eb`/`0x808f1`: the six early
+conditional branches (`0x808ad`, `0x808c2`, `0x808c9`, `0x808d3`, `0x808d8`, `0x808df`), the jumps
+at `0x80915`, `0x8091c`, `0x80958`, `0x809de`, `0x809f1`, `0x80a04` and `0x80e94`, and `0x809cb`
+through `0x80e90`/`0x80e94`. The function has one `ret` (`0x8090d`) and no branch leaves it, so
+each call makes exactly one exit `write_mxcsr` call: per block, two guard calls on entry and one on exit, plus one attestation
 read on a plan's first block. `panic = "abort"` in the release profile, so there is no landing pad.
 The only other site in the cdylib that enters the guard is `builtins::tail::fixed_input_bound`
 (`0x3cda80`, reached from session builtins preparation, off the render thread): the same shape,
 `read_mxcsr` `0x3cda9d`, `write_mxcsr` `0x3cdaaa` on entry, `write_mxcsr` `0x3cdf69` on its single
-exit block. No other `miso_engine_v1_*` export enters the guard (`grep` of the disassembly for the
-two GOT slots finds only these seven calls). The `#[inline]` `fpenv` wrappers are inlined; the
+exit block. No other `miso_engine_v1_*` export contains a guard site (`grep` of the disassembly
+for the two GOT slots finds only these seven calls). Other exports can still reach the guard
+through `fixed_input_bound`: builtins preparation
+(`prepare_session_builtins_with_live_controls_and_policy`, `0x16482f`, through GOT `0x43c020`)
+calls it. The `#[inline]` `fpenv` wrappers are inlined; the
 `softfma` helpers carry no `#[inline]` and are called out of line, so the old "no call at all"
 was false.
 
@@ -216,8 +221,11 @@ miso_engine_v1_render_f32_planar:
 ```
 
 The guard emits no call on AArch64: its `mrs`/`msr` are inline and the barriers emit nothing (no
-instruction between `//APP`/`//NO_APP` in the `.s`). `builtins`' object (the other crate that enters
-the guard, `libbuiltins-*.rlib`) also has only inline `mrs`/`msr FPCR`. This is the crate object
+instruction between `//APP`/`//NO_APP` in the `.s`). `builtins`' object (`libbuiltins-*.rlib`) also has
+only inline `mrs`/`msr FPCR`. It is not the only other crate whose code enters the guard: the
+`host-core` rlib (`StartedRenderSession::render_planar`) and the `lane` rlib
+(`attest_fp_environment`) also hold guard code, and the attempt-1 verdict (n4) found only inline
+`mrs`/`msr` there too. In the linked library, `builtins` is the only other crate that enters it. This is the crate object
 before linking, not a linked `.so`; the cross-crate calls it shows are relocations. iOS was not
 read.
 
@@ -243,3 +251,13 @@ offsets `0x18`, `0x20`, `0x84`, `0x31c`. "Cost": the raw JSONL records `guard_ns
 **Open items.** None in scope. Outside the authorized lines, `fpenv.rs:33` ("Refusing a DAW's
 callback thread") and `ffi.rs:798` ("A DAW audio callback that arrives with FTZ and DAZ set") are
 conditional, not universal, and were left alone.
+
+**Corrections after the attempt-1 verdict (PASS).** The exit list, the "no other export" sentence
+and the AArch64 "other crate" phrase above were corrected in place for the verdict's n2, n3 and
+n4. The verdict's m1 (three live files outside the authorized paths that repeat the universal DAW
+claim: `crates/host-core/src/render_session.rs:8-9`, `crates/host-core/src/lib.rs:78`,
+`crates/capi/src/runtime/tests.rs:3080`) and its open item on `lto = "fat"` not reaching the
+`x86_64` cdylib go to root. #1494's follow-up commit, after this attempt, moved the policy's
+`fpenv.rs` citations (`:187` -> `:195`, `:205` -> `:213`, `:254` -> `:271`, `:431-438` ->
+`:456-463`, `:449` -> `:477`, `:473` -> `:502`); the line-shift paragraph above records this
+attempt's head.

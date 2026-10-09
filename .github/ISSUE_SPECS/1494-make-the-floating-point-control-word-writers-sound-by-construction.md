@@ -306,3 +306,77 @@ qualification.yml's "DSP crates doctests" command exit 0 (lane: 3 plain + 4 `com
 "Workspace doctests" command exit 0. AArch64 tests and doctests run only in CI.
 
 **Open items.** Root to accept or drop the `scripts/test-bench-policy.sh` commit (unlisted path).
+
+### Follow-ups after the attempt-1 verdict (PASS)
+
+Doc and comment lines only; no signature, code or doctest changed. Each change keeps D1's
+three-point structure.
+
+- **m1 (bullet 2).** The `# Safety` text of `softfma::write_mxcsr` and of the three
+  `write_fp_control_word` variants now says: only the canonical word, or an `x86_64` word that
+  differs from it only in the MXCSR status flags (bits 0-5, which the `core::arch` documentation of
+  `_mm_setcsr` leaves out of Rust's assumption), is inside the environment Rust assumes, and the
+  caller treats every other word as outside it; a word read from this thread and handed back can be
+  outside it, because a host can run with FTZ/DAZ (AArch64: `FZ`) set; a hand-back write meets the
+  confinement rule when it returns the thread to the word its caller already ran under and the
+  writer runs no floating-point code after it. The stricter ground "no engine floating-point code
+  runs under the handed-back word" is not true for every guard user: builtins preparation
+  (`crates/builtins/src/tail.rs`, `fixed_input_walk`, `live_bound`, `live_composition`) keeps
+  computing on its thread after the guard drops, under the host's word, as it did before `enter`.
+  So the text claims only what is true: the hand-back puts no code under a word the caller was not
+  already under.
+- **m2 (bullet 3).** The restore duty now applies only to a write that neither installs a word
+  inside the environment nor hands back a read word; a hand-back write is itself the restore, and
+  a word inside the environment needs no restore. `enter`'s `SAFETY` comment now says why the guard
+  is sound when safe code passes it to `mem::forget`: the canonical word stays installed, which
+  loses the caller's word but leaves no code outside Rust's model. `Drop`'s `SAFETY` comment now
+  states the hand-back ground (the caller's own prior word, and no floating-point code in the guard
+  after the write; the barrier is before it). The writers' body `SAFETY` comments say "restores
+  the previous word where the contract requires it".
+- **m3.** `docs/REALTIME_DEPENDENCY_POLICY.md`, "Control-word test writers": "measure the guard
+  under it" became "measure the engine under it: the guard, or in `g6_ftz_inert.rs` the D7 flush
+  arms, which run with no guard".
+- **n4.** The policy's two doctest sentences no longer say "proves" for a target where the pair
+  never runs: the `write_mxcsr` pair "checks, on each `x86_64` doctest run"; for
+  `write_fp_control_word`, the `x86_64` pair runs in every `x86_64` doctest run, the AArch64 pair
+  in CI's `aarch64-debug` leg, and the no-op variant's pair is documentation only.
+- **n5.** "Unsafe code must not leak through a public API" is in the "Unsafe-code ownership"
+  section, so it now adds: a `pub unsafe fn` whose `# Safety` section states the caller's contract
+  is not a leak, because the compiler makes every caller take the contract on in an `unsafe` block
+  of its own.
+- **The policy's contract quote** (the `softfma.rs` entry) follows the new bullets 2 and 3.
+- **Line citations refreshed** in the policy (the edit added lines above them): `fpenv.rs` `:187`
+  -> `:195` (the forwarder's `write_mxcsr` call), `:205` -> `:213` and `:254` -> `:271` (the AArch64
+  `unsafe` blocks), `:431-438` -> `:456-463` (`scheduling_barrier`), `:449` -> `:477` and `:473` ->
+  `:502` (the guard's two writes); `:145` did not move. The attempt-1 record above cites the
+  attempt-1 head; at this head the doctests are `softfma.rs` `:124`/`:132` and `fpenv.rs`
+  `:177`/`:185` (x86_64), `:248`/`:256` (AArch64), `:317`/`:322` (no-op).
+
+**Notes on the attempt-1 record (verdict findings recorded, body unchanged).**
+
+- **n2.** One more edit outside the listed scope, missing from the list above: a module-doc
+  paragraph in `crates/lane/tests/fp_env.rs` (`:12-14`). It is true; root to accept or drop it.
+- **m4.** D1 removed `softfma.rs`'s citation of `fpenv.rs:16-17` (base `softfma.rs:117`, in the
+  `write_mxcsr` `SAFETY` comment), because the new `SAFETY` comment says only what the body relies
+  on. The line "#1495's lines ... are unchanged" above is true for `fpenv.rs` only. #1495's D3
+  clause and authorized path for that `softfma.rs` citation now have nothing to act on (#1495's
+  attempt-1 record says so); amending #1495's body is root's.
+- **m5.** The body's *Test value* sentence is true as worded for the tests, but not the whole
+  story: the signature-only revert (writer made safe, callers keep their `unsafe` blocks) is also
+  caught by `cargo clippy -D warnings` (`unused_unsafe` on lane's own forwarder block) and, for
+  the AArch64 pair, by the AArch64 legs' `RUSTFLAGS: -D warnings` build. The defect that only the
+  doctest catches is the full revert: the writer made safe and the callers' `unsafe` blocks
+  removed (the verifier ran it: `cargo clippy -p lane -p capi --all-targets -- -D warnings` exits
+  0 and only the `write_mxcsr` fence turns red). The body sentence is root's text and is left as
+  it is.
+
+**Gates (this follow-up).** `cargo fmt --all -- --check` exit 0; `RUSTDOCFLAGS="-D warnings" cargo
+doc --locked -p lane --no-deps` exit 0; `cargo test --locked -p lane --doc`: 3 plain and 4
+`compile_fail`, all ok; `cargo clippy --locked -p lane --all-targets -- -D warnings` exit 0;
+`check-workspace-policy.sh`, `check-realtime-policy.sh` (89 marked regions in 25 files),
+`check-lane-policy.sh`, `check-bench-policy.sh` (4 unsafe owners) and `test-bench-policy.sh`: ok.
+
+**Left for root.** n3 (`scripts/check-realtime-policy.sh:21-23` lists an incomplete set of
+`fpenv.rs` unsafe sites), n6 (G6's write-back is not a guard), the `scripts/test-bench-policy.sh`
+commit (n1), the n2 paragraph, the m4 amendment of #1495, and the m5 wording of the *Test value*
+sentence.

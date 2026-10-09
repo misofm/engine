@@ -48,7 +48,9 @@ The workspace denies unsafe code (`unsafe_code = "deny"`, `unsafe_op_in_unsafe_f
 `clippy::undocumented_unsafe_blocks = "deny"`, root `Cargo.toml:90`, `:91`, `:102`). An exception
 is one named file, never a crate or a pattern. The introducing issue must use a local, minimal lint
 allowance; state the invariant next to the operation; include a `SAFETY` explanation; add tests;
-and obtain explicit review. Unsafe code must not leak through a public API.
+and obtain explicit review. Unsafe code must not leak through a public API. A `pub unsafe fn` whose
+`# Safety` section states the caller's contract is not a leak: the compiler makes every caller take
+on that contract in an `unsafe` block of its own (#1494's control-word writers below).
 
 The authority is the unsafe allowlist of `scripts/check-realtime-policy.sh` (its `unsafe source
 exclusions` line), the list that CI runs; this section lists it, one entry per path, and adds
@@ -83,31 +85,37 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
 - `crates/lane/src/softfma.rs` (issue 083): the `x86_64` MXCSR helpers `read_mxcsr` and
   `write_mxcsr`, whose two unsafe blocks call `_mm_getcsr` and `_mm_setcsr`. They use these
   deprecated intrinsics rather than the inline assembly their deprecation note recommends. Their
-  only non-test caller is `fpenv.rs` (`:145`, `:187`), at every native `x86_64` render entry; the
+  only non-test caller is `fpenv.rs` (`:145`, `:195`), at every native `x86_64` render entry; the
   direct test callers are `crates/lane/tests/fp_env.rs` and `crates/capi/src/runtime/tests.rs`,
   and gate G6 (`crates/lane/tests/g6_ftz_inert.rs`) reaches the control word through
   `lane::fpenv`. Since #1494 `write_mxcsr` is an `unsafe fn`, so its soundness no longer rests on
   what its callers happen to pass. Its `# Safety` section is the contract: the word sets no
-  reserved bit (16-31), which would raise #GP; a word other than `CANONICAL_MXCSR` (0x1F80, the
-  architectural default), or other than a word read from this thread that is being handed back,
-  leaves the floating-point environment Rust assumes (the `core::arch` documentation of
-  `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ), so the caller
-  lets no compiled floating-point code run under it except the code it deliberately measures; and
+  reserved bit (16-31), which would raise #GP; only `CANONICAL_MXCSR` (0x1F80, the architectural
+  default), or a word that differs from it only in the status flags, is inside the floating-point
+  environment Rust assumes (the `core::arch` documentation of `_mm_setcsr` says Rust assumes the
+  default exception masks, rounding and DAZ), and a word handed back can be outside it, because a
+  host can run with FTZ or DAZ set; the caller lets no compiled floating-point code run under a
+  word outside it except the code it deliberately measures, and a hand-back meets this by
+  returning the thread to the word its caller already ran under, with no floating-point code after
+  it in the writer; and unless the write installs a word inside the environment or is a hand-back,
   the caller restores the previous word, itself or through `CanonicalFpEnv`'s `Drop`. Its
   `SAFETY` comment states only what the body relies on: SSE, which every `x86_64` host has, and
-  that contract. A `compile_fail` doctest with a passing twin proves that safe code cannot call
-  it; `read_mxcsr` stays safe. `write_mxcsr` itself does not restore the previous word. Until
+  that contract. A `compile_fail` doctest with a passing twin checks, on each `x86_64` doctest
+  run, that safe code cannot call it; `read_mxcsr` stays safe. `write_mxcsr` itself does not restore the previous word. Until
   #163 phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128`
   promote/demote intrinsics; that phase retired the emulation, and the file kept its name because
   the policy files name its path. No `Lane` value or vector type escapes the crate as unsafe.
 - `crates/lane/src/fpenv.rs` (issue 146): the canonical floating-point environment that every
   native render entry pins. Since #1494 its three `write_fp_control_word` variants (`x86_64`,
   AArch64, and the no-op on targets without a control word) are `unsafe fn` with the
-  `write_mxcsr` contract (on AArch64: no `RES0` bit of FPCR), and a `compile_fail` doctest with a
-  passing twin proves that safe code cannot call it. `CanonicalFpEnv` is the only safe way to
-  change the word: `enter` (`:449`) writes the canonical word, and `Drop` (`:473`) writes the word
-  `enter` read from this thread; each call's `SAFETY` comment says why that word meets the
-  contract. `read_fp_control_word` stays safe.
+  `write_mxcsr` contract (on AArch64: no `RES0` bit of FPCR). Each variant carries a
+  `compile_fail` doctest with a passing twin: the `x86_64` pair runs in every `x86_64` doctest run
+  and the AArch64 pair in CI's `aarch64-debug` doctest leg, and each checks there that safe code
+  cannot call the writer; the no-op variant's pair is documentation only, because no doctest run
+  compiles it. `CanonicalFpEnv` is the only safe way to change the word: `enter` (`:477`)
+  writes the canonical word, and `Drop` (`:502`) writes the word `enter` read from this
+  thread; each call's `SAFETY` comment says why that word meets the contract, and `enter`'s says
+  why the guard stays sound when safe code passes it to `mem::forget`. `read_fp_control_word` stays safe.
 
 `fpenv.rs` is reachable from a render path deliberately -- pinning the environment is the render
 entry's first act and unpinning it is its last. The guard reads the control word, writes the
@@ -122,14 +130,14 @@ assembly, and the reason the softfma entry above says "rather than the inline as
 deprecation note recommends" and this one does not. Its other unsafe sites are the raw writer's
 calls (#1494, above).
 
-First, AArch64's `mrs`/`msr FPCR` pair (`:205`, `:254`), because the standard library exposes no
+First, AArch64's `mrs`/`msr FPCR` pair (`:213`, `:271`), because the standard library exposes no
 stable FPCR intrinsic (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point
 Control Register). On `x86_64` there is no counterpart: `fpenv.rs` calls `softfma.rs`'s
 already-approved MXCSR helpers. On the render path the blocks write only a value previously read
 from the same thread or `CANONICAL_FPCR`, and they affect no other thread.
 
 Second, on both, an empty `asm!` block as the guard's scheduling barrier (`scheduling_barrier`,
-`:431-438`). Installing a control word is a side effect the optimizer does not model --
+`:456-463`). Installing a control word is a side effect the optimizer does not model --
 `_mm_setcsr` lowers to an intrinsic declared as touching only its own argument's memory -- so
 without a barrier nothing stops a computation being scheduled outside the region it was meant to
 run in. The empty block is deliberately **not** `nomem`: being a memory clobber is its entire
@@ -148,7 +156,8 @@ explicitly, and both have a mutation test that proves a third lane file does not
 
 Each file below calls the `unsafe fn` control-word writers (#1494) to install a word a host might
 arrive with -- FTZ, DAZ, a directed rounding mode, sticky status flags or FPCR's `FZ` and `DN` --
-and measure the guard under it. The calls are the file's only unsafe code. Each call sits in an
+and measure the engine under it: the guard, or in `g6_ftz_inert.rs` the D7 flush arms, which run
+with no guard. The calls are the file's only unsafe code. Each call sits in an
 `unsafe` block whose `SAFETY` comment names the word, says it sets no reserved (or `RES0`) bit,
 and names the guard or write-back that restores the previous word.
 

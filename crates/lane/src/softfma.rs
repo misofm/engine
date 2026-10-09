@@ -103,13 +103,19 @@ pub fn read_mxcsr() -> u32 {
 ///
 /// - `value` sets no reserved bit (16-31). `LDMXCSR` raises #GP on one (Intel SDM Vol. 1, "MXCSR
 ///   Control and Status Register").
-/// - A word other than `CANONICAL_MXCSR` (0x1F80, the architectural default), or other than a word
-///   read from this thread that is being handed back, leaves the floating-point environment Rust
-///   assumes: the `core::arch` documentation of `_mm_setcsr` says Rust assumes the default
-///   exception masks, rounding and DAZ. The caller lets no compiled floating-point code run under
-///   such a word except the code it deliberately measures.
-/// - The caller restores the previous word before it returns, itself or through a guard that does
-///   (`CanonicalFpEnv`'s `Drop`).
+/// - Rust assumes the floating-point environment of `CANONICAL_MXCSR` (0x1F80, the architectural
+///   default): the `core::arch` documentation of `_mm_setcsr` says Rust assumes the default
+///   exception masks, rounding and DAZ. Only `CANONICAL_MXCSR`, or a word that differs from it
+///   only in the status flags (bits 0-5), is inside that environment; the caller treats every
+///   other word as outside it. A word read from this thread and handed back can be outside it too,
+///   because a host can run with FTZ or DAZ set. The caller lets no compiled floating-point code
+///   run under a word outside the environment except the code it deliberately measures. A
+///   hand-back write meets this when it returns the thread to the word its caller already ran
+///   under and the writer runs no floating-point code after it.
+/// - Unless the write installs a word inside the environment or hands back a word read from this
+///   thread, the caller restores the previous word before it returns, itself or through a guard
+///   that does (`CanonicalFpEnv`'s `Drop`). A hand-back write is itself that restore. A word inside
+///   the environment needs no restore, because compiled code may run under it.
 ///
 /// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
 /// the first fence; the fence carries no code because stable rustdoc does not check one (issue
@@ -136,6 +142,7 @@ pub unsafe fn write_mxcsr(value: u32) {
     // SAFETY: `_mm_setcsr` writes a control register and needs SSE, which every x86_64 host has
     // (and the crate's x86-64-v3 compile guard requires). The caller upholds this function's
     // `# Safety` contract: `value` sets no reserved bit, so the write cannot raise #GP, and the
-    // caller confines a word outside Rust's floating-point model and restores the previous word.
+    // caller confines a word outside Rust's floating-point model and restores the previous word
+    // where the contract requires it.
     unsafe { _mm_setcsr(value) }
 }
