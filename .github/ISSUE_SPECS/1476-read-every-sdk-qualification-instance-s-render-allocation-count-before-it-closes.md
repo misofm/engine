@@ -119,3 +119,183 @@ an instance closes without its read (gate 4).
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-08, base `859fb98a8`)
+
+Change:
+- `sdk-response-entry.ts`: `createSdkEngine(workload, () => createEngine({...}))` is the one way
+  the entry makes an engine (all seven `createEngine` sites); it counts the instance and records
+  its label. `closeSdkEngine(browser)` is the one way it closes one: it reads
+  `browser.host.renderAllocationCount()`, pushes `{ workload, count }` (a nonzero `result` is a
+  refusal), then calls `browser.close()`; a second call for the same instance does nothing (the
+  spectrum-query and SDK-observation bodies close mid-flow and again in `finally`). D3: each body
+  gained `catch (error) { throw sdkEngineFailed(browser, error); }`, which records the body's
+  first error; after one, a failed read is attached to that error as
+  `renderAllocationReadFailures` and not thrown, so the body's error propagates. The returned
+  object carries `renderAllocations` and `renderAllocationInstances`; the registry resets at the
+  start of `runSdkResponseQualification`. Labels: `spectrum-query:<target>`,
+  `spectrum-query-closed`, `spectrum-continuous-hop-<hop>`, `spectrum-collection`,
+  `track-response-subscription`, `resident-observation`, `sdk-observation`, and
+  `live-bypass:authored-<bypass>[:live-<target>-<bypass|lift>]`. The headless engine has no row.
+  In the continuous-spectrum region (#1480's) only the `createEngine` line, its closing `}));`,
+  the added `catch` and the close line changed.
+- `run.mjs`: frozen `SDK_RENDER_ALLOCATION_WORKLOADS` (17 labels, read order);
+  `validateSdkRenderAllocations` (gate `sdk-render-allocations`: array, length equals
+  `renderAllocationInstances`, labels equal the frozen list, every `count` 0, the message names
+  each nonzero row), called first in `validateSdkResponse`; mutations `sdk-render-allocations`
+  (row 0 `count = 1`) and `sdk-render-allocations-missing` (row 1 removed); a stdout line
+  `<browser>: sdk-render-allocations: <workload>=<count> ...`.
+- `MUTATIONS.md`: four rows (gate 3, gate 4, the two self-test mutations).
+
+Read timing: for the offline instances the read follows `startRendering()`; the two live
+`AudioContext` instances (`spectrum-collection`, `spectrum-continuous-hop-1024`) keep rendering
+until close, so their read is immediately before close and covers every quantum up to it.
+
+Evidence (local, SDK source-bundle mode, no `sdk/dist`; artifact built by
+`scripts/build-web-audioworklet.sh --named-twin ...`, module `37274bf1...`):
+- Gate 1: `npm run qualify -- --artifacts <artifacts> --sdk-root <sdk> --browser <b> --check-matrix
+  --self-test-mutations` exits 0 in chromium 151.0.7922.34, firefox 153.0 and webkit 26.5. Each log
+  prints `<b>: sdk-render-allocations:` with all 17 rows `=0` (and the ten raw rows `=0`).
+- Gate 2 (temporary uncommitted print in `mutationProofs`, all three browsers): `sdk-render-allocations`
+  red with `<b>: sdk-render-allocations: an SDK worklet instance allocated on its render thread:
+  resident-observation=1`; `sdk-render-allocations-missing` red with `<b>: sdk-render-allocations:
+  an SDK instance closed without its render allocation read: 16 rows for 17 instances`.
+- Gate 3: planted `drop(std::hint::black_box(Vec::<u8>::with_capacity(1)))` in
+  `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (`crates/effect-contract/src/live.rs`),
+  rebuilt the module. Path: the render thread's control drain applying a live bypass record. Why no
+  raw workload reaches it: the raw workloads' only `command()` records are `COMMAND_MATRIX`
+  (live-control, stall) and their other control is `observe()` (Observe records); none submits a
+  bypass. Chromium with the SDK leg: red, `chromium: sdk-render-allocations: an SDK worklet instance
+  allocated on its render thread: live-bypass:authored-none:live-desk-hi-bypass=2
+  live-bypass:authored-none:live-ins-mid-bypass=2 live-bypass:authored-desk-hi:live-desk-hi-lift=2
+  live-bypass:authored-ins-mid:live-ins-mid-lift=2` (2 = one record per dual-mono lane; the three
+  authored-only renders stay 0). `render-allocations` precedes it in `validate` and passed; the same
+  planted module without `--sdk-root` passes with all ten raw rows `=0`. Reverted (the clean module
+  above): both green (gate 1).
+- Gate 4: both `closeSdkEngine(closedBrowser)` calls replaced by `closedBrowser.close()`
+  (one instance): chromium red, `chromium: sdk-render-allocations: an SDK instance closed without
+  its render allocation read: 16 rows for 17 instances`. Restored.
+- Gate 5: `bash scripts/check-workspace-policy.sh` ok; the `sdk` job's checks
+  (`check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh`, `sdk-package.sh check`) exit 0; the `sdk/dist` they left was deleted.
+- No engine source or worklet artifact changed, so the worklet chain was not rerun.
+
+Test value: `sdk-render-allocations` is red when a render-locked path only an SDK instance reaches
+allocates (gate 3, which `render-allocations` passes), and red on the length check when an
+instance closes without its read (gate 4).
+
+### Follow-ups (2026-10-08, after the attempt 1 PASS; verdict m1, n2, n3, n4)
+
+Change (`sdk-response-entry.ts` only):
+- **n4.** `createSdkEngine(workload, options)` takes the `createEngine` options and calls
+  `createEngine` itself, so the file calls `createEngine` at exactly one site (`:78`); the other
+  references are the import and two types. A raw call would now be a second visible call site.
+- **n2 (D3 escapes).** (1) `createSdkEngine` also makes the `node.connect` that each builder made
+  after it; a throwing connect records the error, reads and closes the instance, then rethrows.
+  (2) `finishSdkEngine(browser, ...cleanups)` is each body's `finally` where other cleanups run
+  (`shared?.close()`, `subscription?.close()`, `headless.dispose()`): it runs every cleanup, then
+  reads and closes the instance whatever they did; a cleanup error is thrown after the close when
+  the body did not throw, and is attached (`sdkCleanupFailures`) when it did. (3) The collection's
+  "fixture is incomplete" check now runs before its engine exists. (4) Backstop for any other
+  throw outside a body's `try` (for example the headless boot in the track-response probe):
+  `runSdkResponseQualification` reads and closes every instance still open when the run ends, on
+  every path. On the error path every read or close failure is attached to the run's error; on the
+  success path a swept instance has no row, so the length check is red. A failing
+  `browser.close()` is now also attached when a body error came first, not thrown over it.
+- **n3.** `sdkEngineFailed` wraps a non-object throw in an `Error` (`non-object error: <value>`,
+  `cause` = the value) and returns that, so a read failure always has an object to attach to.
+- **m1 (D2).** `closeSdkEngine` awaits `suspend()` before the read when the context is a running
+  `AudioContext` (`spectrum-continuous-hop-1024`, `spectrum-collection`), so no render follows the
+  read. Offline contexts are unchanged (their render has finished before the read).
+- #1480's continuous region is unchanged except that its `finally` calls `finishSdkEngine`; the
+  read hold and `renderLoss` are intact.
+
+Evidence (worktree tree, CI browser-leg command `npm run qualify -- --artifacts <a> --sdk-root
+sdk --browser <b> --check-matrix --self-test-mutations`, SDK source-bundle mode, no `sdk/dist`, a
+private PulseAudio null sink per run; module rebuilt from this branch with
+`build-web-audioworklet.sh --named-twin`, `7c6ee735...`):
+- **Gate 1.** Exit 0 in chromium 151.0.7922.34, firefox 153.0 and webkit 26.5; each prints all 17
+  SDK rows `=0`.
+- **Gate 2 (#1476 mutations, temporary print in `mutationProofs`, reverted).** In all three
+  browsers `sdk-render-allocations` is red with `<b>: sdk-render-allocations: an SDK worklet
+  instance allocated on its render thread: resident-observation=1`, and
+  `sdk-render-allocations-missing` is red with `... 16 rows for 17 instances`.
+- **#1480 mutations, still red.** `nativeMissedWindows: 0n`, `skippedPublications: 0n` in
+  `#notifySpectrum`: red in chromium, firefox and webkit (1 run each), `false: gap`. Read hold
+  deleted (`await readsHeld` and the `Promise.allSettled`): firefox red on 5 of 5 runs, 4 naming
+  `renderLoss` (status 3, 4-12 drops) and 1 naming `gap, renderLoss` (status 6, 0 drops).
+- **m1, planted render after the stream stops.** Planted
+  `if self.continuous.started_epoch != 0 { drop(black_box(Vec::<u8>::with_capacity(1))) }` in
+  the one-shot branch of `SpectrumCaptureObserver::capture` (`crates/host-core/src/spectrum.rs`),
+  rebuilt (`aaf33dde...`), reverted after. The plant reaches renders after the hop-1024 stream
+  stops: with a temporary 250 ms wait before the suspend, chromium reads
+  `spectrum-continuous-hop-1024=200`. A temporary probe that reads again 250 ms after the read and
+  fails on a change: with the old read point (no suspend), a render followed the read in every
+  browser (chromium `0 -> 182`, firefox `14 -> 212`, webkit `6 -> 198`); with the suspend, the
+  probe never fired in any browser. So D2's "after the instance's last render" now holds.
+  **Detection did not change**, as the verdict predicted: chromium reads hop-1024 `=0` at both
+  read points (old: 2 runs, new: 3 runs, all exit 0), and firefox and webkit read it nonzero at
+  both (new: firefox 14, webkit 2). The renders after the old read point are stopped, not counted,
+  so this planted defect is not red under the strict read and green under the old one. The brief's
+  "0 at the old read point and nonzero now" result was not obtained; the change is kept because
+  it makes D2's claim true, not because it catches more.
+- **D3 escapes (temporary plants, chromium, each with a planted read failure for the same
+  instance).** Throwing `subscription.close()` in hop-1024's `finally`; throwing connect for
+  `resident-observation`; a throw before the track-response body's `try`; `throw "planted
+  string"` in a live-bypass body. Each run fails with the planted error (the string as
+  `non-object error: planted string`), and each error carries
+  `renderAllocationReadFailures: ["<workload>: render allocation count failed: planted read
+  failure"]`, so every one of these instances was read and then closed.
+- **Gate 5 and other checks.** `bash scripts/check-workspace-policy.sh`: ok. No SDK, engine or
+  worklet source changed, so the SDK checks and the worklet chain were not rerun. An ad-hoc
+  `tsc --noEmit` of the entry (CI does not typecheck it) has 26 errors, 31 before. The
+  pre-existing mismatch between the injected contexts and `AudioContextLike` is now reported as 6
+  TS2322 at `createContext` instead of 6 of the 7 TS2769 at the `createEngine` calls, and the six
+  `destination` TS2339 at the builders' connects are now one at the single connect; no other
+  error changed.
+
+Test value: no new test; the gate and its two mutations are unchanged and still red.
+
+
+### Follow-ups 2 (2026-10-08, after the follow-ups PASS; verdict NIT 1, NIT 2)
+
+Verdict: `/home/bl/misofm/submix-verdicts/1476-followups.md` (PASS, two NITs). Only
+`hosts/host-web/qualification/sdk-response-entry.ts` changes.
+
+- **NIT 1: the suspend is bounded.** `closeSdkEngine` now waits for `context.suspend()` against a
+  10 s timer (`sdkSuspendTimeoutMs`), with the same pattern as the file's `resume()` bounds: a
+  promise that the timer rejects with a diagnostic, the timer cleared in a `finally`. On expiry the
+  read is a failure that names the workload, there is no read and no row, and nothing retries. The
+  close still runs. The failure is thrown, or attached to the body's error when there is one.
+  Temporary plant (chromium; `suspend()` replaced by a promise that never settles for
+  `spectrum-continuous-hop-1024`, file restored and checked by SHA-256): exit 1 after 19 s with
+  `spectrum-continuous-hop-1024: render allocation count failed: audio suspend timed out after
+  10000 ms (state=running)`.
+- **NIT 2: a cleanup error never replaces a body error.** `sdkEngineFailed` now also keeps each
+  instance's first error in `sdkRenderAllocations.failures` (a `WeakMap`), which outlives the
+  instance's `open` entry. `finishSdkEngine` reads the body's error from `open` or from that map,
+  so a cleanup error is attached to it (`sdkCleanupFailures`) also when the instance has already
+  left `open`. With no body error, the first cleanup error is recorded the same way and later
+  cleanup errors are attached to it. Temporary plant (chromium; the hop-1024 body closes its
+  instance and then throws `planted body error after close`, and its cleanup throws `planted
+  cleanup error`; restored by SHA-256): with the fix, the run fails with the body's error and
+  `sdkCleanupFailures: ["planted cleanup error"]`; with the previous `finishSdkEngine` in the same
+  plant, the run fails with `planted cleanup error` and the body's error is lost.
+- **Artifacts.** The local `target/ci/qualification-artifacts` were from before `ca6b89d3c` and
+  did not match the verifier's module, so they were rebuilt with the CI invocation
+  (`bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin
+  target/ci/qualification-artifacts`): module `7c6ee7357eaa...`, the verifier's.
+- **Browser qualification.** `npm run qualify -- --artifacts <worktree>/target/ci/qualification-artifacts
+  --sdk-root <worktree>/sdk --browser <b> --check-matrix --self-test-mutations`, once per browser,
+  each with a private PulseAudio null sink as `qualification.yml` sets it up. Each log says "sdk
+  bundle: the source at .../sdk/src (CI's mode)"; `sdk/dist` did not exist before or after any
+  run. Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5: all qualification gates passed, each
+  with all 17 SDK rows `=0`.
+- **Other checks.** `bash scripts/check-workspace-policy.sh`: ok. An ad-hoc `tsc --noEmit` of the
+  entry has the same error count before and after this change, and none in the changed lines. No
+  SDK, engine or worklet source changed.
+
+Test value: no new test; the gate and its two mutations are unchanged and still red
+(`--self-test-mutations` in every browser).

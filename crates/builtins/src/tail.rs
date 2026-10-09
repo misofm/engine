@@ -544,8 +544,8 @@ pub fn input_section_live_bound(sample_rate: u32) -> Option<NodeTailBound> {
 
 /// [`input_section_live_bound`] at each launch rate, as a table (#1457 D2): the live bound depends
 /// only on the rate, so preparation reads it here and computes it nowhere (it costs about 0.25 ms
-/// per computation, #1433, and its composition about 0.5 ms more, #1466 and #1467). `None` off
-/// the launch rates, as there.
+/// per computation, #1433, and its composition about 0.25 s more, almost all of it the tail
+/// gain's paths through the ramp window, #1485). `None` off the launch rates, as there.
 ///
 /// The test `live_bound_table_is_the_computed_live_bound_at_every_launch_rate`
 /// (`tests/tail_contract.rs`) holds every entry equal to [`input_section_live_bound`], so a change
@@ -579,22 +579,22 @@ pub const fn input_section_live_bound_table(sample_rate: u32) -> Option<NodeTail
         44_100 => Some(bound(
             [704_010, 704_010, 1_067_207, 2_384_997],
             46_678,
-            [14_424, 9_242, -23_379, -28_841],
+            [12_224, 5_824, -23_379, -28_841],
         )),
         48_000 => Some(bound(
             [699_952, 699_952, 1_061_497, 2_372_008],
             46_421,
-            [14_416, 9_242, -23_312, -28_846],
+            [12_215, 5_825, -23_312, -28_846],
         )),
         88_200 => Some(bound(
             [704_018, 704_018, 1_071_057, 2_388_800],
             46_678,
-            [14_426, 9_242, -22_765, -28_840],
+            [12_224, 5_829, -22_765, -28_840],
         )),
         96_000 => Some(bound(
             [699_960, 699_960, 1_065_688, 2_376_147],
             46_421,
-            [14_417, 9_242, -22_696, -28_828],
+            [12_215, 5_830, -22_696, -28_828],
         )),
         _ => None,
     }

@@ -37,7 +37,31 @@ const MUTATIONS = [
   // Issue #1333 D3: one render-locked allocator call on one instance, and a staging-read workload
   // whose spectrum read never completed a window.
   "render-allocations", "staging-reads",
+  // Issue #1476 D5: one SDK instance's allocator call, and one SDK instance closed without its read.
+  "sdk-render-allocations", "sdk-render-allocations-missing",
 ];
+
+// Issue #1476 D4: every SDK engine `sdk-response-entry.ts` creates, in the order its count is
+// read (with repeats). A new SDK instance adds its label here.
+const SDK_RENDER_ALLOCATION_WORKLOADS = Object.freeze([
+  "resident-observation",
+  "track-response-subscription",
+  "sdk-observation",
+  "spectrum-query:trackPostInput:track",
+  "spectrum-query:trackPostPan:track",
+  "spectrum-query:output:main-out",
+  "spectrum-query-closed",
+  "spectrum-continuous-hop-256",
+  "spectrum-collection",
+  "spectrum-continuous-hop-1024",
+  "live-bypass:authored-none",
+  "live-bypass:authored-desk-hi",
+  "live-bypass:authored-ins-mid",
+  "live-bypass:authored-none:live-desk-hi-bypass",
+  "live-bypass:authored-none:live-ins-mid-bypass",
+  "live-bypass:authored-desk-hi:live-desk-hi-lift",
+  "live-bypass:authored-ins-mid:live-ins-mid-lift",
+]);
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -276,7 +300,30 @@ function validateSdkLiveBypass(browserName, live) {
   "the live bypass edits did not carry the console/insert addresses or apply at the first quantum");
 }
 
+/**
+ * Issue #1476 D4: every SDK engine, read before its close, made no allocator call in any export
+ * its processor calls on the render thread -- including paths no raw workload reaches. Every
+ * instance the entry created has exactly one row, under its frozen label.
+ */
+function validateSdkRenderAllocations(browserName, response) {
+  const rows = response?.renderAllocations;
+  gate(browserName, "sdk-render-allocations", Array.isArray(rows)
+    && Number.isSafeInteger(response?.renderAllocationInstances)
+    && rows.length === response.renderAllocationInstances,
+  `an SDK instance closed without its render allocation read: ${
+    Array.isArray(rows) ? rows.length : "no"} rows for ${response?.renderAllocationInstances} instances`);
+  gate(browserName, "sdk-render-allocations",
+    JSON.stringify(rows.map((row) => row?.workload)) === JSON.stringify(SDK_RENDER_ALLOCATION_WORKLOADS),
+  `the SDK render allocation rows are not the frozen workload list: ${
+    JSON.stringify(rows.map((row) => row?.workload))}`);
+  const allocating = rows.filter((row) => row?.count !== 0);
+  gate(browserName, "sdk-render-allocations", allocating.length === 0,
+    `an SDK worklet instance allocated on its render thread: ${allocating
+      .map((row) => `${row?.workload}=${row?.count}`).join(" ")}`);
+}
+
 function validateSdkResponse(browserName, response) {
+  validateSdkRenderAllocations(browserName, response);
   validateSdkLiveBypass(browserName, response?.liveBypass);
   gate(browserName, "sdk-response", response?.capabilities?.some(
     (row) => row.owner === "effect" && row.target === "miso.parametric-eq",
@@ -517,6 +564,11 @@ function validateSdkResponse(browserName, response) {
     ["automaticDelivery", continuous?.automaticDelivery === true],
     [`windows >= 1 (windows=${continuous?.windows})`, continuous?.windows >= 1],
     ["gap", continuous?.gap === true],
+    // Issue #1480 D2: no read runs during the render, so all 17 windows of 6,144 frames at hop 256
+    // meet the one-record native queue: one is queued, 16 are dropped, and the first read after
+    // the render reports that gap (status 3).
+    [`renderLoss (status=${continuous?.renderLoss?.status}, dropped=${continuous?.renderLoss?.droppedCaptures})`,
+      continuous?.renderLoss?.status === 3 && continuous?.renderLoss?.droppedCaptures === "16"],
     ["ownedArrays", continuous?.ownedArrays === true],
     ["sharedAfterFirstClose", continuous?.sharedAfterFirstClose === true],
     ["staleReadRefused", continuous?.staleReadRefused === true],
@@ -706,6 +758,8 @@ function mutate(result, mutation) {
   if (mutation === "sdk-live-bypass-address") copy.sdkResponse.liveBypass.consoleAddress = [3, 0];
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;
   if (mutation === "staging-reads") copy.stagingReads.oneShot.spectrumReadResult = 6;
+  if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
+  if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
   return copy;
 }
 
@@ -873,6 +927,11 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     if (Array.isArray(result.renderAllocations)) {
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
+        .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
+    }
+    if (Array.isArray(result.sdkResponse?.renderAllocations)) {
+      // Issue #1476 D4: the per-SDK-instance counts the sdk-render-allocations gate just held to zero.
+      process.stdout.write(`${browserName}: sdk-render-allocations: ${result.sdkResponse.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
     }
     process.stdout.write(`${browserName}: all qualification gates passed (${browser.version()})\n`);
