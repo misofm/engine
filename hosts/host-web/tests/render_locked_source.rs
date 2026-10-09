@@ -148,8 +148,9 @@ fn configuration_and_command_exports(handle: u32, before: u32) {
         host_web::miso_engine_web_v1_eq_target_config_copy(handle, 0, u32::from(RACK_CONSOLE), 0),
         RESULT_OK,
     );
-    // A native address does not fit the export's `u32`, so both calls return zero here; the
-    // claim is about the window, not the address.
+    // The export returns the config's address as a `u32`, or zero when it does not fit. A native
+    // heap address usually does not fit, so the result is not checked here; the claim is about
+    // the window, not the address.
     let pointer = host_web::miso_engine_web_v1_eq_target_config_ptr(handle);
     unchanged(before, "eq_target_config_ptr", pointer, pointer);
     unchanged(

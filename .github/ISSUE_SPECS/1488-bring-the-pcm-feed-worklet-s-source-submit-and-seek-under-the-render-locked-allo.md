@@ -61,7 +61,10 @@ unwrapped post-boot calls are `dispose` (`:992`, the `miso.dispose.v1` handler; 
 boot-failure path) and `render_allocation_count` (`:1073`).
 
 **`spectrum_selection_epoch` has no call site in either worklet file.** Its only callers are the
-`ffi.rs` unit tests; the only other mention is the export-name list in `sdk/src/generated/abi.ts`.
+`ffi.rs` unit tests. The other mentions are export-name lists, none a caller:
+`sdk/src/generated/abi.ts`, `sdk/assets/miso-engine-v1-abi-layout.json`,
+`scripts/check-web-audioworklet.sh`, `scripts/check-abi-layout-v1.py` and its self-test fixture,
+and `tools/parameter-metadata/src/abi_layout.rs`.
 The amendment's premise does not hold for it, so it is not wrapped, and the coordinator reports
 this to root. The header sentence speaks only of exports the worklets call after boot on the
 AudioWorklet thread, so it stays true without it.
@@ -164,13 +167,16 @@ reason").**
    (wrapped or not) and against both worklet files (called after boot on the AudioWorklet thread
    or not).
 
-*Test value.* `render_locked_source.rs` is red if any of the eleven exports of D1 allocates on
-the render thread, on its accepted or its tested refused path. No existing test catches it for
-nine of them: none calls them under a counting allocator. `render_locked_staging.rs` calls the
-accepted paths of `spectrum_arm` and `spectrum_stream_start` inside its measured span, so once D1
-wraps them it also catches an allocation on those two accepted paths. It never calls their
-refused paths (arm while a stream is active, start with NaN smoothing), and only this binary
-catches an allocation there.
+*Test value.* `render_locked_source.rs` is red if any of the eleven exports of D1 allocates or
+frees inside its render-locked window, on its accepted or its tested refused path. For an
+allocation in an export's own body, no existing test catches it: none calls these exports under a
+counting allocator. Two existing tests overlap on accepted paths. `render_locked_staging.rs` calls
+`spectrum_arm` and `spectrum_stream_start` inside its measured span. The `test-support` lib tests
+`prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation` and
+`prepared_mixed_eq_builtin_fader_commits_and_refuses_atomically` measure
+`AudioWorkletEngineHost::submit_prepared_commands`, which `prepared_command_submit` forwards to, on
+accepted batches. Only this binary catches an allocation on the tested refused paths (for example
+arm while a stream is active, start with NaN smoothing, a truncated companion).
 
 ## Evidence
 
@@ -232,7 +238,7 @@ thread, with call sites in `hosts/host-web/web/miso-engine-v1-audio-worklet.js` 
 | `spectrum_stream_read`, `spectrum_stream_metadata_ptr`, `spectrum_stream_metadata_bytes` | yes | E:1365, 1459, 1460 |
 | `spectrum_target_id_ptr`, `spectrum_target_id_capacity` | yes | E:1296, 1297 |
 | `source_submit` | yes (this issue) | F:386 `process()`; E:1525 `receiveSource` |
-| `source_seek` | yes (this issue) | F:445 `process()` via `applySharedSeek`; E:1746 `receiveSeek` |
+| `source_seek` | yes (this issue) | F:445 `applySharedSeek`, from `process()` (F:341) and from the attach node's `prepare-seek` handler via `prepareSharedSeeks` (F:540, 482); E:1746 `receiveSeek` |
 | `spectrum_arm`, `spectrum_cancel` | yes (this issue) | E:1426, 1428 `receiveSpectrum` |
 | `spectrum_stream_start`, `spectrum_stream_stop` | yes (this issue) | E:1362, 1364 `receiveSpectrum` |
 | `input_filters_config_copy`, `eq_target_config_copy`, `eq_target_config_ptr` | yes (this issue) | E:1599, 1600, 1612 `receiveEqTargetConfig` |
@@ -294,3 +300,26 @@ Reverted to the real code: green.
 `test-web-audioworklet.mjs` answers `miso.renderallocations.v1` with a fake zero. The browser
 count is therefore unverified until CI runs. `docs/REALTIME_DEPENDENCY_POLICY.md` is not edited
 (#1489 has not landed).
+
+### Attempt 1 follow-ups (implementer, 2026-10-09; verdict PASS, MINOR 1 and NITs 1-3)
+
+- MINOR 1: the *Test value* paragraph now says what the test catches exactly. The two
+  `test-support` lib tests in `hosts/host-web/src/tests.rs` (`:3625`, `:3957`) count allocations
+  and frees around `AudioWorkletEngineHost::submit_prepared_commands` on accepted batches, and
+  `miso_engine_web_v1_prepared_command_submit` only forwards to that method (`ffi.rs`, inside
+  `render_locked(|| with_host_mut(..., |host| host.submit_prepared_commands(...)))`). The overlap
+  is named; the claim of uniqueness is now limited to an allocation in an export's own body and to
+  the tested refused paths.
+- NIT 1: the `ffi.rs` header and the D2 table name the feed attach node's `prepare-seek` handler
+  (F:540 -> `prepareSharedSeeks` F:482 -> `applySharedSeek` F:445 -> `source_seek`). Comment and
+  prose only; the wrapped set does not change.
+- NIT 2: not changed. The export returns `u32::try_from(address).unwrap_or(0)`. An exact native
+  check needs the config's address, and no public accessor gives it; a new test-only accessor
+  would only repeat `pointer_u32`'s mapping, and on a 64-bit host the heap address usually does
+  not fit, so the live handle and handle 0 both return zero and the check would not discriminate.
+  The address itself is used by the worklet in the browser chain. The test comment now says this
+  without the false "both calls return zero" claim (the address can fit `u32`).
+- NIT 3: the root's-amendment paragraph lists every non-caller mention of
+  `spectrum_selection_epoch` (abi.ts, the ABI layout JSON, `check-web-audioworklet.sh`,
+  `check-abi-layout-v1.py` and its fixture, `abi_layout.rs`).
+

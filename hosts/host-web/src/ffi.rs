@@ -24,8 +24,9 @@
 //!   `spectrum_stream_read`;
 //! - the pointer, capacity and byte-count accessors of the three stagings that the worklet calls
 //!   after boot;
-//! - source control: `source_submit` and `source_seek` (the feed's `process()` and the engine
-//!   worklet's source and seek handlers);
+//! - source control: `source_submit` and `source_seek` (the feed's `process()`, the feed attach
+//!   node's `prepare-seek` handler, which calls `source_seek`, and the engine worklet's source and
+//!   seek handlers);
 //! - live control: `prepared_command_submit`, `meter_lease`, `eq_target_config_copy`,
 //!   `eq_target_config_ptr` and `input_filters_config_copy`;
 //! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start` and
