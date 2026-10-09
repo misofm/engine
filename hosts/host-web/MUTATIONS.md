@@ -564,6 +564,7 @@ Chromium leg of `qualification/run.mjs`.
 | `tests/render_locked_staging.rs` phase 2 select legs (#1492) | `SpectrumCaptureCollection::select` runs `let _ = self.entry(index).map(\|(t, c)\| (t.clone(), c));` after it finds the entry | `the first select allocated`: 2 |
 | same | `select_spectrum_with_smoothing` runs `let _ = spectrum_target(target, id);` before it borrows the target | `the first select allocated`: 2 |
 | same, control | the first mutation kept, and both select exports unwrapped from `render_locked` | green: the count sees a select's allocation only through the wrap |
+| same, smoothing-only stream select leg (#1492 attempt 1 follow-ups) | `select_spectrum_with_smoothing`'s smoothing-only restart branch (before `restart_spectrum_stream`) runs `std::hint::black_box(vec![0_u8; 16]);` | `the smoothing-only stream select allocated`: 2 |
 | `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
 | `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
 | same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |

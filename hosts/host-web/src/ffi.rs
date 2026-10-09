@@ -34,9 +34,9 @@
 //!
 //! Two post-boot calls are named exceptions. `dispose` is teardown: it frees the host by design,
 //! and it is also the boot-failure path. `render_allocation_count` is the reader of the count;
-//! wrapping it would measure nothing. The spectrum request and collection
-//! accessors (`spectrum_request_*`, `spectrum_collection_*`) are not in the set: the worklet calls
-//! them only before boot, where the collection staging is sized and allocated by design.
+//! wrapping it would measure nothing. The spectrum request and collection accessors
+//! (`spectrum_request_*`, `spectrum_collection_*`) are not in the set: the worklet calls them only
+//! before boot, where the collection staging is sized and allocated by design.
 
 #![allow(unsafe_code)]
 

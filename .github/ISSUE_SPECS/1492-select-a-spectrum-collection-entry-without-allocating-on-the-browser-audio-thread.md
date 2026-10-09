@@ -80,7 +80,20 @@ it.
 - `hosts/host-web/src/tests.rs` (the `select_spectrum` call site only)
 - `hosts/host-web/tests/render_locked_staging.rs` (phase 2 only)
 - `hosts/host-web/MUTATIONS.md` (the new rows)
+- `hosts/host-web/src/render_lock.rs` (the module header's exception list only; coordinator
+  amendment after attempt 1, pending root's ratification)
 - this spec
+
+**Coordinator note (after attempt 1's verdict, MINOR 1 and NIT 1).** Attempt 1 made two edits
+outside the original list. Both were needed to keep existing text true, and neither is reverted.
+Root is asked to ratify both:
+
+- `hosts/host-web/MUTATIONS.md` row `:563` (A #1479's phase 2 read mutation): the count changed
+  from 4 to 6. #1488's wrap of `spectrum_stream_start` made 4 false, because that body also reads
+  the channel mask. The verifier re-measured it: 4 at `1d294c700`, 6 at `40a1ead6f` and at
+  `b0256b89d`, with the same failing assertion.
+- `hosts/host-web/src/render_lock.rs` module header: without the edit it would still name the two
+  selects as exceptions, which D4 made false. It is added above as a coordinator amendment.
 
 ## Non-goals
 
@@ -227,3 +240,27 @@ other allocation is on the select path.
 Before this slice, phase 2 read `before` after its select and neither select export was
 render-locked, so no test counted a select. The two red mutations and the green control above
 show this.
+
+### Attempt 1 follow-ups (2026-10-09, after the PASS verdict)
+
+**Changes.**
+
+- NIT 4: `tests/render_locked_staging.rs` phase 2 has a fourth select leg. After the last stream
+  read it stream-selects the same `trackPostPan` entry with `smoothing_ms` 25 (was 50), so only
+  the smoothing changes and the bridge takes its `restart_spectrum_stream` branch. It checks the
+  count, renders 64 quanta, reads the stream (`RESULT_OK`) and checks the count again. The module
+  doc names the leg. `hosts/host-web/MUTATIONS.md` has a row for it, next to #1492's rows.
+- NITs 2 and 3: the `render_lock.rs` header paragraph and the `ffi.rs` header's "named exceptions"
+  paragraph are reflowed to 99 columns. The text is unchanged.
+- MINOR 1 and NIT 1: the coordinator note and the `render_lock.rs` amendment under Authorized
+  paths. Nothing is reverted.
+
+**Mutation (applied alone, then reverted and the file touched before the rebuild).**
+
+| Mutation | Result |
+|---|---|
+| the smoothing-only restart branch of `select_spectrum_with_smoothing` (before `restart_spectrum_stream`) runs `std::hint::black_box(vec![0_u8; 16]);` | red: `the smoothing-only stream select allocated`, left 2, right 0; reverted: green (1 passed) |
+
+*Test value.* The new leg is red when the bridge allocates only in its smoothing-only restart
+branch; attempt 1's legs never reach that branch, so no other test catches it (verdict NIT 4,
+mutation `mrestart`: green before this leg).

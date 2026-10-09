@@ -15,7 +15,8 @@
 //! Selecting a collection entry once built an owned target from the staged identity and cloned
 //! the selected target into the returned entry, on the browser's audio thread (issue #1492). The
 //! second phase therefore counts from before its first select, and selects through both select
-//! exports: a change, a repeat, and a stream select that changes the entry and its smoothing.
+//! exports: a change, a repeat, a stream select that changes the entry and its smoothing, and a
+//! stream select that changes only the smoothing.
 //!
 //! This binary registers the module's own counting allocator and holds exactly one test, so
 //! nothing else shares the process-wide counter (decision 15: host-web's native allocation-count
@@ -278,6 +279,34 @@ fn collection_spectrum_reads_never_allocate_in_the_render_locked_window() {
         host_web::miso_engine_web_v1_render_allocation_count(),
         before,
         "a collection capture's stream read allocated after the stream select"
+    );
+    // A stream select that keeps the entry and changes only the smoothing: the bridge restarts
+    // the continuous cadence on the same entry and resets the analysis history.
+    assert_eq!(
+        host_web::miso_engine_web_v1_spectrum_stream_select(
+            handle,
+            SPECTRUM_TARGET_TRACK_POST_PAN,
+            SPECTRUM_CHANNEL_BOTH,
+            TRACK_ID.len() as u32,
+            25.0,
+        ),
+        RESULT_OK
+    );
+    assert_eq!(
+        host_web::miso_engine_web_v1_render_allocation_count(),
+        before,
+        "the smoothing-only stream select allocated"
+    );
+    render(handle, 64);
+    assert_eq!(
+        host_web::miso_engine_web_v1_spectrum_stream_read(handle),
+        RESULT_OK,
+        "the entry streamed a window after the smoothing-only stream select"
+    );
+    assert_eq!(
+        host_web::miso_engine_web_v1_render_allocation_count(),
+        before,
+        "a collection capture's stream read allocated after the smoothing-only stream select"
     );
     assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
