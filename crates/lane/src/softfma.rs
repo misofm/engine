@@ -1,4 +1,4 @@
-//! The MXCSR helpers gate G6 needs.
+//! The `x86_64` MXCSR helpers of [`crate::fpenv`], and the unfused multiply-add oracle.
 //!
 //! # Why this file kept its name
 //!
@@ -23,10 +23,11 @@
 //!
 //! # Why this file carries `unsafe`
 //!
-//! The `x86` MXCSR helpers below are used by gate G6 to prove that hardware flush-to-zero is inert
-//! under the D7 flush law. The workspace denies `unsafe` outside an enumerated allowlist and
-//! forbids inline assembly, so the helpers live here, in one of the two lane files
-//! `scripts/check-realtime-policy.sh` allows to carry `unsafe`, and use the deprecated
+//! The `x86_64` MXCSR helpers below read and write the control word for [`crate::fpenv`], which
+//! pins the canonical floating-point environment at every native `x86_64` render entry; it is
+//! their only non-test caller. Gate G6 reaches the word through `lane::fpenv`. The workspace
+//! denies `unsafe` outside an enumerated allowlist, so the helpers live here, in one of the two
+//! lane files `scripts/check-realtime-policy.sh` allows to carry `unsafe`, and use the deprecated
 //! `_mm_getcsr`/`_mm_setcsr` intrinsics rather than the inline assembly their deprecation note
 //! recommends.
 
@@ -79,7 +80,7 @@ pub const MXCSR_DAZ: u32 = 0x0040;
 
 /// Reads the current thread's MXCSR control word.
 ///
-/// Gate G6 support, never called from a render path.
+/// Called by [`crate::fpenv`] at every native `x86_64` render entry, and by tests.
 #[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
 #[must_use]
@@ -92,15 +93,22 @@ pub fn read_mxcsr() -> u32 {
 
 /// Writes the current thread's MXCSR control word.
 ///
-/// Gate G6 support, never called from a render path: FTZ and DAZ are *observed*, never relied on
-/// (D7). The write affects only the calling thread, so a test must restore the previous value
-/// before it returns.
+/// Called by [`crate::fpenv`] at every native `x86_64` render entry, and by tests. FTZ and DAZ are
+/// *observed*, never relied on (D7). The write affects only the calling thread, so every caller
+/// restores the previous value before it returns.
 #[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
 pub fn write_mxcsr(value: u32) {
     use core::arch::x86_64::_mm_setcsr;
-    // SAFETY: `_mm_setcsr` writes a control register and is sound on any SSE host. The value is a
-    // control word previously read by `read_mxcsr` with at most the FTZ and DAZ bits changed, so no
-    // rounding mode or exception mask is disturbed.
+    // SAFETY: `_mm_setcsr` writes a control register and needs SSE, which every x86_64 host has
+    // (and the crate's x86-64-v3 compile guard requires). No caller sets a reserved bit (16-31),
+    // which would raise #GP (Intel SDM Vol. 1, "MXCSR Control and Status Register"). On the render
+    // path `fpenv` writes only `CANONICAL_MXCSR` (0x1F80, the architectural default) on entry and
+    // the word it read from this thread on exit, so it never installs an environment the caller
+    // did not already run under. Tests also write words with other RC, status-flag and FTZ/DAZ
+    // bits, and restore the saved word before they return. The `core::arch` documentation of
+    // `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ, so such a word
+    // is outside the language model: `fpenv`'s scheduling barrier keeps the render's memory
+    // operations inside its canonical window, and the other words are a test-only exposure.
     unsafe { _mm_setcsr(value) }
 }

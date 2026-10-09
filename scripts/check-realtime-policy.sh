@@ -17,10 +17,10 @@ realtime_root="crates/engine/src/realtime"
 [[ -d "$realtime_root" ]] || fail "missing realtime module"
 
 # Issue #146 adds `crates/lane/src/fpenv.rs`, the canonical floating-point environment
-# pinned at every native render entry. On `x86` it carries no `unsafe` of its own -- it reuses the
-# already-listed `_mm_getcsr`/`_mm_setcsr` helpers of `softfma.rs` -- and its one unsafe site is the
-# AArch64 `mrs`/`msr FPCR` pair, for which the standard library exposes no `core::arch` intrinsic
-# (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point Control Register).
+# pinned at every native render entry. On `x86_64` it reaches MXCSR through the already-listed
+# `_mm_getcsr`/`_mm_setcsr` helpers of `softfma.rs`. Its own unsafe sites are the AArch64
+# `mrs`/`msr FPCR` pair, for which the standard library exposes no `core::arch` intrinsic (Arm
+# Architecture Reference Manual for A-profile, `FPCR`), and the empty `asm!` barrier on both.
 # Issue #240's exact `boot_transient_budget.rs` fixture owns a `GlobalAlloc` forwarding wrapper so
 # it can measure the parser/model-builder high-water mark; it changes no allocation operation and
 # is one of the two non-FFI web-host files admitted here. Issue #1333's `render_lock.rs` is the

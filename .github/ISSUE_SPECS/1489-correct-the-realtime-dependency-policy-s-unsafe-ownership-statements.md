@@ -208,3 +208,104 @@ Documentation and comments only. No code, gate or allowlist change.
   comment lines only); the matching Non-goals bullet is struck. Verifier gate 2 checks D-hdr's
   corrected sentence against `fpenv.rs` like every other claim.
 - The GitHub #1489 body predates this amendment and needs a sync from this spec.
+
+## Attempt record
+
+### Attempt 1 (Terra worker, 2026-10-09, branch `codex/d15-batch-misc2` on `b0256b89d`)
+
+Base: H #1488 (`cca903769`, `40a1ead6f`) and #1492 (`b0256b89d`, under review) are on this
+branch, so D-M2 is written in its exact form (no exception clause). The J tool batch has not
+landed (`tools/realtime-policy` does not exist), so the allowlist is the awk gate's
+`unsafe source exclusions` line (`scripts/check-realtime-policy.sh:31`). #1446 has not landed, so
+D-hdr applies. Every line number below is on this branch.
+
+Changes: `docs/REALTIME_DEPENDENCY_POLICY.md` "Unsafe-code ownership" rewritten from attempt 2's
+draft (`e403684d9`), each sentence re-checked; `crates/lane/src/softfma.rs` comment and `SAFETY`
+lines `:1`, `:26-32`, `:83`, `:96-98`, `:103-112` (no code token changed: `git diff -U0` shows
+only `//` lines); `scripts/check-realtime-policy.sh:20-23` (comment lines only). In `softfma.rs`
+the old `:28` also said the workspace "forbids inline assembly", which is false since #146
+(`fpenv.rs:167`, `:182`, `:327`); the corrected paragraph drops it.
+
+**Gate 1 (coverage).** Allowlist (19): `crates/builtins-compiler/tests/allocation_tracker.rs`,
+`crates/capi/src/ffi.rs`, `crates/capi/tests/plan_swap_race.rs`,
+`crates/capi/tests/resource_lifecycle.rs`, `crates/engine/src/realtime/disjoint.rs`,
+`crates/engine/src/realtime/spsc.rs`, `crates/lane/src/fpenv.rs`, `crates/lane/src/softfma.rs`,
+`crates/multiband-compressor/tests/no_alloc_render.rs`, `crates/session/tests/allocation_budget.rs`,
+`crates/soft-clip/tests/allocation.rs`, `crates/transient-shaper/tests/allocation.rs`,
+`crates/true-peak-limiter/tests/allocation.rs`, `hosts/host-web/src/ffi.rs`,
+`hosts/host-web/src/render_lock.rs`, `hosts/host-web/tests/boot_transient_budget.rs`,
+`tools/audit/src/capi.rs`, `tools/bench-support/src/alloc.rs`, `tools/wasm-gate-guest/src/lib.rs`.
+The section's `.rs` paths before "Render-path reachability": the same 19, plus three cited tests
+(`crates/capi/src/runtime/tests.rs`, `crates/lane/tests/fp_env.rs`,
+`crates/lane/tests/g6_ftz_inert.rs`). `comm` of the two sorted lists: allowlist-only empty. Fifteen
+paths head their own entry; the four stale test paths are listed together, as entries that approve
+nothing, with #1438's Amendment as the pending removal; wasm-gate-guest says the same.
+
+**Gate 2 (claims checked against code).**
+
+| Claim | Code site | Verdict |
+|---|---|---|
+| Workspace lints | `Cargo.toml:90`, `:91`, `:102` | true |
+| lane gate confines intrinsics to softfma/fpenv | `scripts/policies/lane-source.toml:28` | true |
+| builtins gate repeats allocation_tracker | `scripts/check-builtins-policy.sh:23` | true |
+| bench gate exact tools set (3 files) | `scripts/check-bench-policy.sh:209-233` | true |
+| spsc push/pop unsafe inside region | `spsc.rs:381`, `:449` in `:295-459` | true |
+| disjoint safe `read_stereo`/`write_stereo`, raw `write_read_stereo` (n3) | `disjoint.rs:145`, `:169`, `:317-345`; unsafe `:208`, `:303`, `:334` in `:106-347` | true |
+| softfma only non-test caller is fpenv | grep: `fpenv.rs:141`, `:148`; tests `capi/src/runtime/tests.rs:3094+`, `lane/tests/fp_env.rs:49+` | true |
+| G6 reaches the word through `lane::fpenv` | `g6_ftz_inert.rs:10`, `:105`, `:115`, `:117` | true |
+| fpenv writes CANONICAL on entry, saved on exit | `fpenv.rs:85`, `:336-338`, `:357-359`; non-test `write_fp_control_word` callers only these | true |
+| No caller sets an MXCSR bit above 15 | every `write_mxcsr`/`write_fp_control_word` caller: `0x1F80`, read words, and test words built from bits `0x003F`, `0x0040`, `0x6000`, `0x8000` (`fp_env.rs:52-71`, `:165-184`; `capi/src/runtime/tests.rs:3229-3230`, `:3262`; `host-core/tests/fp_environment.rs:138-150`; `g6_ftz_inert.rs:96`; `wasm-gates/tests/g6_full_corpus_ftz.rs:51`) | true |
+| Tests restore the saved word | `Restore` guards (`fp_env.rs:58-65`, `capi/src/runtime/tests.rs:3101-3108`, `host-core/tests/fp_environment.rs:190-200`), `g6_ftz_inert.rs:117`, `wasm-gates/tests/g6_full_corpus_ftz.rs:93` | true |
+| core::arch: Rust assumes default masks/rounding/DAZ | `core_arch/src/x86/sse.rs` (nightly-2026-08-20 rust-src; 1.97.1 ships none) doc of `_mm_setcsr`, "immediate Undefined Behavior" paragraph | true |
+| Reserved bit raises #GP | Intel SDM Vol. 1, "MXCSR Control and Status Register"; Vol. 2, `LDMXCSR` #GP(0) | true |
+| x86 memory-operand forms (D-M3) | `sse.rs:1513-1519` (`stmxcsr(addr_of_mut!(result))`), `:1662-1664` (`ldmxcsr(addr_of!(val))`); emitted (`cargo rustc --release -p lane --lib -- --emit asm`): `read_mxcsr`: `movl $0, -4(%rsp)`; `vstmxcsr -4(%rsp)`; `movl -4(%rsp), %eax`; `write_mxcsr`: `movl %edi, -4(%rsp)`; `vldmxcsr -4(%rsp)` | true |
+| AArch64 mrs/msr register-only; barrier on both | `fpenv.rs:166-168`, `:181-183` (`out(reg)`/`in(reg)`); `:322-329` cfg x86_64+aarch64 | true |
+| Only inline assembly in workspace | grep `asm!` over crates/hosts/tools: `fpenv.rs:167`, `:182`, `:327` only | true |
+| Third-lane-file mutations | `test-realtime-policy.sh:581`, `test-lane-policy.sh:301-302` | true |
+| capi render pins then derefs | `capi/src/ffi.rs:807`, enter `:817`, unsafe `:819`, `:827`, `:841`, `:843` | true |
+| web ffi unsafe sites (non-test) | `:878`, `:894`, `:1805`, `:3929`, `:3936`, `:3939`, `:3982` (script over every `unsafe` line) | true |
+| web test CountingAllocator | module `:4881`, `#[global_allocator]` `:4896`, null-checked counting `:4917+` | true |
+| D-M1 chain | `spectrum_read` `:3010` -> `write_spectrum_window` `:3045` -> `copy_live_record` `:1293`, `spectrum_failure` `:1098`; `spectrum_stream_read` `:3136` -> `:3276`; `track_response_capture` `:3509` -> `run_live_response_capture` `:3522` -> `:1791`, `live_response_failure` `:1563`, `LiveResponseCaptureSink` `:1621`, `:1642`. `read_live_record` callers only `imported_stream_configuration` (<- `spectrum_stream_analysis_configure` `:3312`), `run_spectrum_analysis` (<- `spectrum_analysis` `:2778`, `spectrum_stream_analysis` `:3297`), `parse_live_*` (<- `run_live_response_analysis` <- `track_response_analysis` `:3535`); `response_header_bytes` only via `run_response_query` <- `response_query` `:2467`. None render-locked; neither worklet calls them | true |
+| D-M2 set 1 (33 post-boot exports) | engine worklet call sites at `:983` and later (`receive` and handlers, `process()`); boot-only calls are in `initialize`/`bindLiveControls` (`:275-861`) and `failInitialization` (`:866`, dispose); feed worklet `:306-328`, `:386`, `:445`, `:539`; no dynamic `exports[...]` access in either file | true |
+| D-M2 set 2 (42 render-locked exports) | script over every `miso_engine_web_v1_*` body in `ffi.rs`: `render_locked` present in 42; set 1 minus set 2 = {`dispose` `:4570`, `render_allocation_count` `:3652`}; set 2 minus set 1 = the 11 boot-time accessors named | true |
+| `spectrum_selection_epoch` not wrapped, not called | `ffi.rs:3004-3006`; absent from both worklet files | true |
+| `spectrum_request_*`/`spectrum_collection_*` boot-only | worklet `:453-456`, `:485-542` in `stageSpectrumRequest`/`stageSpectrumCollectionRequest`, called only from `initialize` `:320-321` | true |
+| ffi header and render_lock header agree | `ffi.rs:14-39`, `render_lock.rs:6-10` | true |
+| render_lock registration cfg; forwarding | `render_lock.rs:58-82`, `:87-90` | true |
+| qualification asserts zero | `hosts/host-web/qualification/run.mjs:266-270` | true |
+| resource_lifecycle calls C render (n1) | `resource_lifecycle.rs` (8 lines with `miso_engine_v1_render_f32_planar(`); `LifecycleAllocator` `:22-25`, `:55` | true |
+| allocation_tracker three direct std::alloc calls (n2) | `allocation_tracker.rs:802`, `:805`, `:809` | true |
+| plan_swap_race races control and render through C entries | header `:1-8`; `render_f32_planar` referenced | true |
+| bench-support Abort default, `Mode::Count` | `tools/bench-support/src/alloc.rs:27-31`, `:62-63`, `:173-174` | true |
+| wasm-gate-guest only `#[unsafe(no_mangle)]` | grep `unsafe` in `lib.rs`: `:15` (allow), `:22` (doc), `no_mangle` attributes only | true |
+| first allowlist five files (m1 reworded) | `git show 68ff477e4:scripts/check-realtime-policy.sh:16-22` (miso-engine-prefixed paths) | true |
+| `d9a66a952` removed realtime-audit, protocol-audit, effect-contract-bench entries | its diff of the gate | true |
+| `tools/audit/src/{realtime,protocol}.rs` hold no unsafe | grep count 0 | true |
+| Runtime probes | `tools/audit/src/realtime.rs:115-129`, `:196-206` | true |
+| D-hdr: fpenv x86_64 reuse; AArch64 pair and barrier | `fpenv.rs:141`, `:148`, `:166`, `:181`, `:322-329` | true |
+
+**Gate 3.** `cargo build --locked -p lane` (after `touch`, recompiled): ok.
+`cargo fmt --all -- --check`: exit 0. `bash scripts/check-workspace-policy.sh`: `workspace policy:
+ok`. `bash scripts/check-realtime-policy.sh`: `realtime policy: ok (89 marked regions in 25
+files)`. `bash scripts/check-lane-policy.sh`: `lane policy: ok`. `bash scripts/check-dsp-research.sh`:
+`dsp research corpus: ok`. `bash scripts/check-builtins-listening.sh`: `issue-007 listening
+preregistrations: ok (human evidence pending)`. Also run: `cargo clippy --locked -p lane
+--all-targets -- -D warnings` ok; `RUSTDOCFLAGS="-D warnings" cargo doc --locked -p lane --no-deps`
+ok (the new intra-doc links resolve); `bash scripts/test-realtime-policy.sh` exit 0.
+
+*Test value.* No test added (D-test); no mutation run applies.
+
+Open items for root:
+
+1. `softfma::write_mxcsr` and `fpenv::write_fp_control_word` are safe `pub fn`s that accept any
+   `u32`/`u64`. The restated `SAFETY` premise holds for every caller in the workspace, but the type
+   cannot enforce it, and the `core::arch` documentation calls any non-default mask, rounding or
+   DAZ word immediate UB. Making these `unsafe fn` (or restricting them to the guard and a
+   test-only path) is a code change outside this issue.
+2. Eleven render-locked accessors are called by the worklet only during boot (set 2 minus set 1).
+   The `ffi.rs` header's list does not name them; it is not false, but the policy section names
+   them.
+3. `fpenv.rs:73-77` ("a register read, two register writes ... no call at all") and the AArch64
+   `msr` `SAFETY` text (`:176-180`, "the value written is either `CANONICAL_FPCR` or a word
+   previously read") describe the render path only; tests also write other words through
+   `write_fp_control_word`. `fpenv.rs` is a non-goal here.
