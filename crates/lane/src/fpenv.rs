@@ -13,8 +13,8 @@
 //! the feed-forward lane, scalar math and the effect/builtin chains, none of which is a *state*
 //! word the D7 flush can reach. Browser Wasm is unaffected -- the core specification mandates
 //! denormal correctness and forbids a flush-to-zero mode, confirmed by the three-browser digest
-//! parity -- so the exposure is exactly the native hosts, and every DAW audio callback arrives with
-//! FTZ and DAZ already set.
+//! parity -- so the exposure is exactly the native hosts, whose audio thread may run with FTZ and
+//! DAZ set (a host can set them to avoid denormal stalls; the C ABI contract does not forbid it).
 //!
 //! # The decision
 //!
@@ -74,10 +74,10 @@
 //!
 //! # Realtime properties
 //!
-//! Entering and leaving the guard is a register read, two register writes and two empty assembly
-//! blocks that emit nothing. No allocation, no lock, no syscall, no call at all: the bodies are
-//! `#[inline]` and the `Drop` is a barrier and a single store. Measured cost over a real 128-frame
-//! render, both arms on one plan: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
+//! No allocation, lock or syscall; the barriers emit nothing. Shipped `x86_64` cdylib: `enter`
+//! calls `softfma::read_mxcsr` then `write_mxcsr` out of line, and `Drop` calls `write_mxcsr` on
+//! each exit path; each helper is a stack-slot `STMXCSR`/`LDMXCSR`. AArch64 (Android object):
+//! inline `mrs`/`msr`, no call. Cost: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
 
 #![allow(unsafe_code)]
 
