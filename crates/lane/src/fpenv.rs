@@ -68,6 +68,10 @@
 //!    through the already-approved `_mm_getcsr`/`_mm_setcsr` helpers of [`crate::softfma`].
 //! 2. An empty `asm!` on both, as the guard's scheduling barrier. See `scheduling_barrier`.
 //!
+//! Since issue #1494 the raw writer [`write_fp_control_word`] is also an `unsafe fn`, because its
+//! soundness depends on the word its caller passes; [`CanonicalFpEnv`] calls it in `unsafe` blocks
+//! that state why each word it writes meets the contract.
+//!
 //! # Realtime properties
 //!
 //! Entering and leaving the guard is a register read, two register writes and two empty assembly
@@ -142,10 +146,45 @@ pub fn read_fp_control_word() -> FpControlWord {
 }
 
 /// Writes this thread's floating-point control word.
+///
+/// [`CanonicalFpEnv`] is the safe way to change the word: it installs the canonical word and writes
+/// the caller's own word back on drop. This raw writer is for that guard and for tests that install
+/// other words on purpose. The write affects only the calling thread.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit: on `x86_64` none of MXCSR bits 16-31, where `LDMXCSR` raises
+///   #GP; on AArch64 no `RES0` bit of FPCR.
+/// - A word other than [`canonical_fp_control_word`], or other than a word read from this thread
+///   that is being handed back, leaves the floating-point environment Rust assumes (on `x86_64`,
+///   the `core::arch` documentation of `_mm_setcsr`). The caller lets no compiled floating-point
+///   code run under such a word except the code it deliberately measures.
+/// - The caller restores the previous word before it returns, itself or through a guard that does
+///   ([`CanonicalFpEnv`]'s `Drop`).
+///
+/// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
+/// the first fence; the fence carries no code because stable rustdoc does not check one (issue
+/// #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::fpenv::read_fp_control_word();
+/// lane::fpenv::write_fp_control_word(word);
+/// ```
+///
+/// The twin differs from it only in the `unsafe` block and its `SAFETY` comment, so a renamed item
+/// turns it red:
+///
+/// ```
+/// let word = lane::fpenv::read_fp_control_word();
+/// // SAFETY: `word` was just read from this thread, so it sets no reserved bit, and writing it
+/// // back leaves the thread's word unchanged.
+/// unsafe { lane::fpenv::write_fp_control_word(word) };
+/// ```
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub fn write_fp_control_word(value: FpControlWord) {
-    crate::softfma::write_mxcsr(value);
+pub unsafe fn write_fp_control_word(value: FpControlWord) {
+    // SAFETY: this function's `# Safety` contract is `write_mxcsr`'s, and the caller upholds it.
+    unsafe { crate::softfma::write_mxcsr(value) };
 }
 
 /// Reads this thread's floating-point control word.
@@ -170,14 +209,48 @@ pub fn read_fp_control_word() -> FpControlWord {
 }
 
 /// Writes this thread's floating-point control word.
+///
+/// [`CanonicalFpEnv`] is the safe way to change the word: it installs the canonical word and writes
+/// the caller's own word back on drop. This raw writer is for that guard and for tests that install
+/// other words on purpose. The write affects only the calling thread.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit: on `x86_64` none of MXCSR bits 16-31, where `LDMXCSR` raises
+///   #GP; on AArch64 no `RES0` bit of FPCR.
+/// - A word other than [`canonical_fp_control_word`], or other than a word read from this thread
+///   that is being handed back, leaves the floating-point environment Rust assumes (on `x86_64`,
+///   the `core::arch` documentation of `_mm_setcsr`). The caller lets no compiled floating-point
+///   code run under such a word except the code it deliberately measures.
+/// - The caller restores the previous word before it returns, itself or through a guard that does
+///   ([`CanonicalFpEnv`]'s `Drop`).
+///
+/// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
+/// the first fence; the fence carries no code because stable rustdoc does not check one (issue
+/// #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::fpenv::read_fp_control_word();
+/// lane::fpenv::write_fp_control_word(word);
+/// ```
+///
+/// The twin differs from it only in the `unsafe` block and its `SAFETY` comment, so a renamed item
+/// turns it red:
+///
+/// ```
+/// let word = lane::fpenv::read_fp_control_word();
+/// // SAFETY: `word` was just read from this thread, so it sets no reserved bit, and writing it
+/// // back leaves the thread's word unchanged.
+/// unsafe { lane::fpenv::write_fp_control_word(word) };
+/// ```
 #[cfg(target_arch = "aarch64")]
 #[inline]
-pub fn write_fp_control_word(value: FpControlWord) {
+pub unsafe fn write_fp_control_word(value: FpControlWord) {
     // SAFETY: `MSR FPCR, Xt` writes an unprivileged, always-accessible system register on every
-    // AArch64 profile the engine targets. The value written is either `CANONICAL_FPCR` or a word
-    // previously read from this same thread's FPCR, so no reserved encoding is introduced, and the
-    // write affects only the calling thread. It cannot trap at EL0. `nomem` is omitted for the
-    // reason given on the read.
+    // AArch64 profile the engine targets, affects only the calling thread, and cannot trap at EL0.
+    // The caller upholds this function's `# Safety` contract: `value` sets no `RES0` bit, and the
+    // caller confines a word outside Rust's floating-point model and restores the previous word.
+    // `nomem` is omitted for the reason given on the read.
     unsafe {
         core::arch::asm!("msr fpcr, {value}", value = in(reg) value, options(nostack));
     }
@@ -189,10 +262,46 @@ pub fn write_fp_control_word(value: FpControlWord) {
 #[must_use]
 pub fn read_fp_control_word() -> FpControlWord {}
 
-/// Writes this thread's floating-point control word; there is none on this target.
+/// Writes this thread's floating-point control word; there is none on this target, so the write
+/// does nothing.
+///
+/// It is `unsafe` all the same, so the API has one shape on every target and code written against
+/// it here keeps compiling where the word exists.
+///
+/// [`CanonicalFpEnv`] is the safe way to change the word: it installs the canonical word and writes
+/// the caller's own word back on drop. This raw writer is for that guard and for tests that install
+/// other words on purpose. The write affects only the calling thread.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit: on `x86_64` none of MXCSR bits 16-31, where `LDMXCSR` raises
+///   #GP; on AArch64 no `RES0` bit of FPCR.
+/// - A word other than [`canonical_fp_control_word`], or other than a word read from this thread
+///   that is being handed back, leaves the floating-point environment Rust assumes (on `x86_64`,
+///   the `core::arch` documentation of `_mm_setcsr`). The caller lets no compiled floating-point
+///   code run under such a word except the code it deliberately measures.
+/// - The caller restores the previous word before it returns, itself or through a guard that does
+///   ([`CanonicalFpEnv`]'s `Drop`).
+///
+/// The two fences below are documentation only: this variant exists only on targets without a
+/// control word (wasm32 here), rustdoc does not run doctests for `wasm32-unknown-unknown` in this
+/// repository, and a native doctest run never compiles them. rustc reports E0133 (call to unsafe
+/// function) for the first; the fence carries no code because stable rustdoc does not check one
+/// (issue #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::fpenv::read_fp_control_word();
+/// lane::fpenv::write_fp_control_word(word);
+/// ```
+///
+/// ```
+/// let word = lane::fpenv::read_fp_control_word();
+/// // SAFETY: there is no control word on this target, so the write does nothing.
+/// unsafe { lane::fpenv::write_fp_control_word(word) };
+/// ```
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
-pub fn write_fp_control_word(value: FpControlWord) {
+pub unsafe fn write_fp_control_word(value: FpControlWord) {
     let () = value;
 }
 
@@ -335,7 +444,9 @@ impl CanonicalFpEnv {
     #[must_use]
     pub fn enter() -> Self {
         let saved = read_fp_control_word();
-        write_fp_control_word(canonical_fp_control_word());
+        // SAFETY: the canonical word sets no reserved bit and is the environment Rust assumes, so
+        // compiled code may run under it; this guard's `Drop` writes `saved` back.
+        unsafe { write_fp_control_word(canonical_fp_control_word()) };
         scheduling_barrier();
         Self {
             saved,
@@ -356,7 +467,10 @@ impl Drop for CanonicalFpEnv {
     #[inline]
     fn drop(&mut self) {
         scheduling_barrier();
-        write_fp_control_word(self.saved);
+        // SAFETY: `enter` read `self.saved` from this thread (the guard is `!Send`, so this is the
+        // same thread), so it sets no reserved bit, and writing it hands the caller's own word
+        // back, which restores the word `enter` replaced.
+        unsafe { write_fp_control_word(self.saved) };
     }
 }
 
