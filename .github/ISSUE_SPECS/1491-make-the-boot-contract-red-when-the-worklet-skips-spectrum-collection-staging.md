@@ -164,3 +164,67 @@ change (gate 2's base column). D3 has no mutation run (the spec names none); it 
 five callers without a collection stage nothing.
 
 Open items: none.
+
+### Attempt 2 (2026-10-09, implementer; base `fb303f836` on `codex/d15-batch-misc2`)
+
+Answers attempt 1's verdict (`/home/bl/misofm/submix-verdicts/1491-attempt1.md`: FAIL on M1).
+All changes stay inside `testQualificationBoot` (D4).
+
+- **M1.** The witness decode, #1477's fake collection sizing (it is inside the same function, so
+  it is in scope) and D2's expected value now take every offset, field type, struct size, entry
+  stride, the ABI version and the target and channel codes from the generated layout the suite
+  already loads (`preparedAbiLayout`, `sdk/assets/miso-engine-v1-abi-layout.json`). No
+  hand-typed offset, size or code table is left. The decode reads every field of
+  `spectrumCollectionRequest` and of each `spectrumCollectionEntry` by its generated name, offset
+  and type (`u32`, `u64`, `u32[N]`); the witness is `{ request, entries }` with those field names
+  (plus each entry's decoded `targetId`).
+- **n3.** Because the decode reads every generated field, it reads the reserved words (the
+  request's `reserved0` and `reserved`, each entry's `reserved`). D2's expected value holds every
+  generated field whose name starts with `reserved` at zero, with the shape the layout gives.
+- **n2.** The identity decoder is `new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`,
+  so a leading U+FEFF stays, as in the bridge's `core::str::from_utf8`.
+- **n1.** D3's message is now `<caller> stages a spectrum collection; only runStagingReadRun
+  boots one`.
+- **m1.** D3's test value: D3 is red when one of the five other qualification callers starts to
+  boot a spectrum collection; no other assertion reads those callers' `spectrumCollection`. It
+  holds no worklet defect (the worklet asks for the collection request pointer only when the
+  options carry a collection). Proven below (`d3-bootoptions`); a `MUTATIONS.md` row records it.
+
+Gates:
+
+1. `bash scripts/test-web-audioworklet.sh` in qualification.yml's wrapper (private `mktemp -d`
+   `TMPDIR`, `set -o pipefail`, leftover `find`): exit 0, leftover empty, `qualification boot
+   contract passed: callers=6 real-ready=6 real-disposed=6 diagnose-ready=1` twice.
+2. Mutations, each applied alone, run with `node scripts/test-web-audioworklet.mjs` (this suite)
+   and with the suite at `d1b17d216` (before #1491, copied beside it for the run and deleted),
+   then reverted with `git checkout --`; `git diff --quiet` on the mutated file was clean after
+   each, and this suite was green again after each revert:
+
+   | mutation | file | this suite | before #1491 |
+   | --- | --- | --- | --- |
+   | p7 (collection branch -> `stageSpectrumRequest`) | worklet | red: D2, actual `null` | green |
+   | collection `both` -> `SPECTRUM_CHANNEL_LEFT` | worklet | red: D2, `channels: 1` where 3 | green |
+   | `BigInt(options.maximumCaptureBytes / 2)` | worklet | red: D2, `1048576n` where `2097152n` | green |
+   | `request.setUint32(28, 1, true)` (n3) | worklet | red: D2, `reserved` `[0, 1]` where `[0, 0]` | green |
+   | layout drift: `spectrumChannels` `both` = 4 | generated layout | red: D2, `channels: 3` where 4 | green |
+   | layout drift: `maximumCaptureBytes` at 24, `reserved` at 16 | generated layout | red: D2, `maximumCaptureBytes: 0n` where `2097152n` | green |
+   | layout drift: 28-byte entry (`reserved` `u32[4]`) | generated layout | red: the worklet refuses the fake's entry size, `runStagingReadRun real host guard rejected (miso.error.v1 result=255)` | green |
+   | D3: a default `spectrumCollection` (and `spectrum: null`) in `qualification.js` `bootOptions` | qualification.js | red: D3, `renderCorpusSegment stages a spectrum collection; only runStagingReadRun boots one` | green |
+
+   The layout drifts were made by loading the JSON, changing the named values and rewriting it
+   (`json.dumps(indent=2)`). A control run of that rewrite with no value change was green on this
+   suite, so the reformatting alone does not turn it red. Attempt 1's hand-typed suite was green
+   on all three drifts (verifier evidence, `evidence/1491-attempt1/layout-drift.log`). After each
+   drift, `git checkout -- sdk/assets/miso-engine-v1-abi-layout.json` restored the file and
+   `git diff --quiet` on it was clean.
+3. `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+No browser-compiled code changed, so the build and artifact steps of the worklet chain were not
+rerun.
+
+Test value: D1-D2 are red when the worklet skips collection staging (p7), stages a channel code,
+capture budget or reserved word that differs from its options and the bridge's rules, or when the
+worklet's hand-typed layout drifts from the bridge's generated layout; each is green on the suite
+before #1491. D3 is red when another qualification caller starts to boot a spectrum collection.
+
+Open items: none.
