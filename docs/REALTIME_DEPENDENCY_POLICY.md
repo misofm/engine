@@ -87,13 +87,15 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
   direct test callers are `crates/lane/tests/fp_env.rs` and `crates/capi/src/runtime/tests.rs`,
   and gate G6 (`crates/lane/tests/g6_ftz_inert.rs`) reaches the control word through
   `lane::fpenv`. The `write_mxcsr` `SAFETY` comment states the soundness ground: `_mm_setcsr`
-  needs SSE, which every `x86_64` host has; "No caller sets a reserved bit (16-31), which would
-  raise #GP"; "On the render path `fpenv` writes only `CANONICAL_MXCSR` (0x1F80, the
-  architectural default) on entry and the word it read from this thread on exit, so it never
-  installs an environment the caller did not already run under"; and tests "also write words with
-  other RC, status-flag and FTZ/DAZ bits, and restore the saved word before they return". It also
-  records that the `core::arch` documentation of `_mm_setcsr` says Rust assumes the default
-  exception masks, rounding and DAZ, so a non-default word is outside the language model. Until #163
+  needs SSE, which every `x86_64` host has; "No caller writes a word with a reserved bit (16-31)
+  set, which would raise #GP"; on the render path "The entry write installs only
+  `CANONICAL_MXCSR` (0x1F80, the architectural default), which is the environment Rust assumes,
+  whatever word the caller had. The exit write restores the caller's own word, which `fpenv` read
+  from this thread on entry"; and tests "also write words with other RC, status-flag and FTZ/DAZ
+  bits, and restore the saved word before they return". It also records that the `core::arch`
+  documentation of `_mm_setcsr` says Rust assumes the default exception masks, rounding and DAZ,
+  so a non-default word is outside the language model. `write_mxcsr` itself does not restore the
+  previous word; `fpenv` restores it in its guard's `Drop`, and each test before it returns. Until #163
   phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128` promote/demote
   intrinsics; that phase retired the emulation, and the file kept its name because the policy
   files name its path. No `Lane` value or vector type escapes the crate as unsafe.
@@ -175,7 +177,7 @@ explicitly, and both have a mutation test that proves a third lane file does not
   allocator with their arguments unchanged. Its only additions are one thread-local flag read per
   call and, inside a render-locked window, one relaxed increment of the process-wide counter; it
   never alters a pointer, layout, size or lifetime. The registration is
-  `cfg(all(target_family = "wasm", not(test)))` (`:87-90`), so native test binaries and tools keep
+  `cfg(all(target_family = "wasm", not(test)))` (`:88-91`), so native test binaries and tools keep
   their own allocator. `render_locked` itself is safe code.
 
 It is the runtime proof behind D15-10: the static call-graph gate cannot see behind the plan
@@ -210,7 +212,7 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
 
 Since #1488 the two sets are equal for the worklets' post-boot calls, apart from two named
 exceptions, as the `ffi` module header (`hosts/host-web/src/ffi.rs:14-39`) and
-`render_lock.rs:6-10` state: `dispose`, which is teardown and frees the host by design (it is also
+`render_lock.rs:5-11` state: `dispose`, which is teardown and frees the host by design (it is also
 the boot-failure path), and `render_allocation_count`, the reader of the count. The spectrum
 request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are outside both
 sets: the worklet calls them only before boot, where the collection staging is sized and allocated
@@ -286,12 +288,20 @@ Approved unsafe code that runs on a render thread, per entry:
   `response_query`), none of which is render-locked or called by either worklet. Its
   `CountingAllocator` is test-only.
 - `render_lock.rs`: its allocator methods run on every allocator call the browser module makes.
-  On the AudioWorklet thread after boot they count every call made inside the render-locked set,
-  and qualification asserts that count is zero; calls made during boot and by `dispose` are not
-  counted, by design.
+  They count a call exactly when it is made inside a render-locked window, at boot or after it;
+  the count runs from instantiation and is never reset. Calls outside every window are not
+  counted: the boot exports themselves, the unwrapped boot accessors and `dispose`. The worklet
+  calls render-locked exports during boot too: the eleven staging accessors of set 2, and
+  `spectrum_target_id_ptr` and `spectrum_target_id_capacity`, which `stageSpectrumRequest` calls
+  before the boot export. Those calls are counted, and today they make no allocator call: the
+  stagings they touch are allocated outside any window, by boot's `reserve_stagings`
+  (`hosts/host-web/src/ffi.rs:617-626`) or, before boot, on first touch by the unwrapped
+  `spectrum_request_ptr`. Qualification reads the count of each instance before its `dispose` and
+  asserts it is zero, so a boot-time allocation inside a window fails it as a render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs` and
-  `tools/audit/src/capi.rs` call the C render entry from threads of their own, but their own unsafe
-  is the caller side of the C contract.
+  `tools/audit/src/capi.rs` call the C render entry from threads of their own. Their own unsafe is
+  the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
+  which runs on the same test thread as its render calls.
 
 ### Retired exceptions
 

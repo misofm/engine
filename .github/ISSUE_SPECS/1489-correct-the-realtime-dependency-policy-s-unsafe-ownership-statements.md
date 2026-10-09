@@ -309,3 +309,49 @@ Open items for root:
    `msr` `SAFETY` text (`:176-180`, "the value written is either `CANONICAL_FPCR` or a word
    previously read") describe the render path only; tests also write other words through
    `write_fp_control_word`. `fpenv.rs` is a non-goal here.
+
+### Attempt 2 (worker, 2026-10-09, branch `codex/d15-batch-misc2` on `bb84a30fc`)
+
+Attempt 1's verdict (`/home/bl/misofm/submix-verdicts/1489-attempt1.md`) failed it on one MAJOR
+(M1), two MINOR (m1, m2) and three NIT (n1-n3) findings. Attempt 2 fixes each, in the same
+authorized paths: `crates/lane/src/softfma.rs` (the `write_mxcsr` doc and `SAFETY` lines only;
+`git diff -U0` shows only `//` lines) and `docs/REALTIME_DEPENDENCY_POLICY.md` ("Unsafe-code
+ownership" only). `scripts/check-realtime-policy.sh:19-23` needs no change: the verdict found
+D-hdr true. Since `fb303f836` (the verdict's head), `bb84a30fc` changed only
+`scripts/test-web-audioworklet.mjs`, `hosts/host-web/MUTATIONS.md` and a spec, none of them cited
+here; every line number below is on `bb84a30fc`.
+
+| Finding | Fix | Checked against |
+|---|---|---|
+| M1: "never installs an environment the caller did not already run under" is false for the entry write | `softfma.rs` `SAFETY` and the policy's quote now say: no caller writes a word with a reserved bit (16-31) set; the entry write installs only `CANONICAL_MXCSR` (0x1F80), the environment Rust assumes, whatever word the caller had; the exit write restores the caller's own word, read from this thread on entry. The closing clause says `fpenv`'s scheduling barriers keep the render's memory-dependent computation between its two writes, under the default word (the register-only limit stays stated in the `fpenv.rs` paragraph of the policy) | `fpenv.rs:85` (`CANONICAL_MXCSR`), `:336-338` (`enter`: read, write canonical, barrier), `:357-360` (`Drop`: barrier, write saved); `fp_env.rs:73-97` (hostile caller word replaced by `0x1F80`) |
+| m1: "every caller restores the previous value before it returns" is false for `write_fp_control_word` and `enter` | The doc comment now says `write_mxcsr` does not restore the previous word; every user restores it, `fpenv` in its guard's `Drop` and tests before they return. The policy entry says the same | `fpenv.rs:147-149` (writes and returns), `:357-360` (`Drop`); tests' `Restore`/`WordGuard` guards and write-backs (attempt 1's table) |
+| m2: the C-caller files' "own unsafe is the caller side of the C contract" is false for `resource_lifecycle.rs` | "apart from `resource_lifecycle.rs`'s `LifecycleAllocator`, which runs on the same test thread as its render calls" | `crates/capi/tests/resource_lifecycle.rs:55-88`; the section's own entry for the file |
+| n1: "calls made during boot and by `dispose` are not counted" names the wrong rule | Rewritten: a call is counted exactly when it is made inside a render-locked window, at boot or after it; the count runs from instantiation and is never reset; calls outside every window (boot exports, unwrapped boot accessors, `dispose`) are not. The boot-time render-locked calls are named (the eleven set-2 accessors; `spectrum_target_id_ptr`/`_capacity` from `stageSpectrumRequest` before the boot export); they are counted and today make no allocator call, because their stagings are allocated outside any window by `reserve_stagings` (`ffi.rs:617-626`) or, before boot, on first touch by the unwrapped `spectrum_request_ptr`; qualification reads each instance's count before its `dispose` and asserts zero | `render_lock.rs:32`, `:51-55`, `:96-108` (only `fetch_add` and `load`; no reset); worklet `:288-325` (boot exports, all unwrapped: `boot`, `boot_with_spectrum_hop`, `boot_options_ptr`, `document_ptr`, `boot_result`, `abi_version`, `spectrum_hop_capability`), `:453-456` (`spectrum_request_ptr`, unwrapped, before `spectrum_target_id_ptr`/`_capacity`, both wrapped `ffi.rs:2676`, `:2689`), `:339-346`, `:702-703`, `:749-751` (the eleven, all after `boot` at `:330`; each body only borrows a staging and returns a pointer or a constant); `ffi.rs:579-603` (`leaked_staging` allocates only on first touch); worklet `:1073` and `qualification.js` (`renderAllocationCount` per workload); `run.mjs:266-270` |
+| n2: "FTZ and DAZ are *observed*, never relied on (D7)" reads as if `fpenv` does not need them clear | "Gate G6 shows that the D7 state flush does not depend on FTZ or DAZ, but the full render does, so `fpenv` installs a word with both clear" | `fpenv.rs:5-17`; `g6_ftz_inert.rs:93-117` (G6 sets FTZ and DAZ); `CANONICAL_MXCSR` = `0x1F80` has both clear |
+| n3: stale `render_lock.rs` citations | `:87-90` -> `:88-91` (the `cfg` line through the `static`); `:6-10` -> `:5-11` (the sentence "This module is the runtime proof ..." through "exactly zero") | `render_lock.rs:5-11`, `:88-91` at `bb84a30fc` |
+
+n3's re-check of every other citation in the section at `bb84a30fc`: `Cargo.toml:90`, `:91`, `:102`;
+`spsc.rs:381`, `:449`; `disjoint.rs:145`, `:169`, `:208`, `:303`, `:317`, `:334`; capi
+`ffi.rs:807`; `fpenv.rs:141`, `:148`, `:166`, `:181`, `:322-329`; feed worklet `:306-328`, `:386`,
+`:445`, `:539`; web `ffi.rs:14-39`, `:878`, `:894`, `:1805`, `:3929`, `:3936`, `:3939`, `:3982`,
+`:4881`, `:617-626`; `allocation_tracker.rs:802-809`; `run.mjs:266-270`: each exact (read line by
+line).
+
+**Gate 1** is unchanged from attempt 1: no path was added to or removed from the section, and the
+allowlist at `scripts/check-realtime-policy.sh:31` is unchanged.
+
+**Gate 3** (on the attempt-2 tree): `cargo build --locked -p lane` (after `touch`, recompiled)
+ok; `cargo fmt --all -- --check` exit 0; `bash scripts/check-workspace-policy.sh` `workspace
+policy: ok`; `bash scripts/check-realtime-policy.sh` `realtime policy: ok (89 marked regions in 25
+files)`; `bash scripts/check-lane-policy.sh` `lane policy: ok`; `bash scripts/check-dsp-research.sh`
+`dsp research corpus: ok`; `bash scripts/check-builtins-listening.sh` `issue-007 listening
+preregistrations: ok (human evidence pending)`. Also `RUSTDOCFLAGS="-D warnings" cargo doc --locked
+-p lane --no-deps` ok and `cargo clippy --locked -p lane --all-targets -- -D warnings` ok.
+
+*Test value.* No test added (D-test); no mutation run applies.
+
+Open items for root (in addition to attempt 1's):
+
+1. `crates/lane/src/fpenv.rs:73-75` ("no call at all: the bodies are `#[inline]`", "two register
+   writes") is false on the shipped `x86_64` cdylib (the verdict's open item 2: out-of-line GOT
+   calls and stack-slot `LDMXCSR`). `fpenv.rs` is a non-goal of this issue; it needs its own fix.
