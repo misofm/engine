@@ -99,8 +99,9 @@ fn probe_svf_simd8(
     );
 }
 
-// The unarmed form (`UnarmedRest`, issue #1490): the loop every non-stationary parametric-EQ block
-// runs when no lane can arm the joint flush. It loads no rest plane, so the probe passes none.
+// The unarmed form (`UnarmedRest`, issue #1490): the loop that the settled, non-HPF/LPF sections of
+// a ramping parametric-EQ block run when no lane can arm the joint flush. It loads no rest plane,
+// so the probe passes none.
 #[cfg(target_feature = "avx2")]
 #[inline(never)]
 fn probe_svf_unarmed_simd8(
@@ -154,8 +155,9 @@ fn probe_svf_simd4(
     );
 }
 
-// The unarmed form (`UnarmedRest`, issue #1490): the loop every non-stationary parametric-EQ block
-// runs when no lane can arm the joint flush. It loads no rest plane, so the probe passes none.
+// The unarmed form (`UnarmedRest`, issue #1490): the loop that the settled, non-HPF/LPF sections of
+// a ramping parametric-EQ block run when no lane can arm the joint flush. It loads no rest plane,
+// so the probe passes none.
 #[cfg(target_feature = "neon")]
 #[inline(never)]
 fn probe_svf_unarmed_simd4(
