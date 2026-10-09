@@ -374,6 +374,9 @@ lines only:
   `render_locked`). The entry was rewrapped to 100 columns; its line count is unchanged.
 - n3: the policy's `softfma.rs` entry is rewrapped so that no line passes 100 columns (it was
   103); its line count is unchanged. No other line in "Unsafe-code ownership" passes 100 columns.
+- n4 (batch verdict): n1's "as every DAW callback does" was unevidenced; `softfma.rs:116-119` now
+  says "as a host audio callback that runs with FTZ and DAZ set does (`fpenv.rs:16-17`)", same
+  line count. The policy does not quote that clause, so it is unchanged.
 
 Every file:line citation in the section stays exact: the policy's line count is the same, the
 section cites no `softfma.rs` line (the `softfma.rs` edit replaces three comment lines at
