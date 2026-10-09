@@ -13,15 +13,30 @@
 //!
 //! # Render-locked exports
 //!
-//! Issue #1333 D2: every export the AudioWorklet calls on its render thread after boot wraps its
-//! body in `render_locked`, and `miso_engine_web_v1_render_allocation_count` reports the allocator
-//! calls made inside those windows. The set is the three exports the static gate checks (`render`,
-//! `command_submit`, `meter_poll`), the worklet's staging reads (`observation_read`,
-//! `track_response_capture`, `spectrum_read`, `spectrum_stream_read`), and the pointer, capacity
-//! and byte-count accessors of the three stagings that the worklet calls after boot. The spectrum
-//! request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are not in the
-//! set: the worklet calls them only before boot, where the collection staging is sized and
-//! allocated by design.
+//! Issue #1333 D2 and issue #1488: every export that either AudioWorklet calls on its render
+//! thread after boot wraps its body in `render_locked`, and
+//! `miso_engine_web_v1_render_allocation_count` reports the allocator calls made inside those
+//! windows. "Either AudioWorklet" is the engine worklet (`process()` and its port handlers) and the
+//! SDK's PCM-feed worklet, whose `process()` drains its shared rings before it renders. The set:
+//!
+//! - the three exports the static gate checks: `render`, `command_submit`, `meter_poll`;
+//! - the staging reads: `observation_read`, `track_response_capture`, `spectrum_read`,
+//!   `spectrum_stream_read`;
+//! - the pointer, capacity and byte-count accessors of the three stagings that the worklet calls
+//!   after boot;
+//! - source control: `source_submit` and `source_seek` (the feed's `process()` and the engine
+//!   worklet's source and seek handlers);
+//! - live control: `prepared_command_submit`, `meter_lease`, `eq_target_config_copy`,
+//!   `eq_target_config_ptr` and `input_filters_config_copy`;
+//! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start` and
+//!   `spectrum_stream_stop`.
+//!
+//! Four post-boot calls are named exceptions. `dispose` is teardown: it frees the host by design,
+//! and it is also the boot-failure path. `render_allocation_count` is the reader of the count;
+//! wrapping it would measure nothing. `spectrum_select` and `spectrum_stream_select` allocate
+//! today; issue #1492 removes that allocation and wraps them. The spectrum request and collection
+//! accessors (`spectrum_request_*`, `spectrum_collection_*`) are not in the set: the worklet calls
+//! them only before boot, where the collection staging is sized and allocated by design.
 
 #![allow(unsafe_code)]
 
@@ -2799,11 +2814,13 @@ pub extern "C" fn miso_engine_web_v1_spectrum_result_bytes() -> u32 {
 /// Arm the prepared spectrum observer for its next complete window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_arm(handle: u32) -> u32 {
-    with_host_mut(
-        handle,
-        RESULT_INVALID_ARGUMENT,
-        AudioWorkletEngineHost::arm_spectrum,
-    )
+    render_locked(|| {
+        with_host_mut(
+            handle,
+            RESULT_INVALID_ARGUMENT,
+            AudioWorkletEngineHost::arm_spectrum,
+        )
+    })
 }
 
 fn select_spectrum_internal(handle: u32, target: u32, channels: u32, target_id_bytes: u32) -> u32 {
@@ -3022,79 +3039,81 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
 /// duration is validated before the prepared capture changes state.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
-        Ok(value) => value,
-        Err(_) => return RESULT_INVALID_ARGUMENT,
-    };
-    with_spectrum_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        // An existing history is reset at this control boundary. The analysis owner initializes a
-        // missing history when it first evaluates a window, so stream start itself never creates a
-        // second host-side analyzer allocation.
-        if staging
-            .stream_history
-            .as_ref()
-            .is_some_and(|history| history.analysis_epoch() == u64::MAX)
-        {
-            staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
-            return RESULT_REFUSED_BUDGET;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        let cadence = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
-            host.start_spectrum_stream()
-        });
-        let cadence = match cadence {
+        let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
             Ok(value) => value,
-            Err(result) => {
-                staging.stream_metadata.result = result;
-                return result;
+            Err(_) => return RESULT_INVALID_ARGUMENT,
+        };
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            // An existing history is reset at this control boundary. The analysis owner
+            // initializes a missing history when it first evaluates a window, so stream start
+            // itself never creates a second host-side analyzer allocation.
+            if staging
+                .stream_history
+                .as_ref()
+                .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+            {
+                staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
+                return RESULT_REFUSED_BUDGET;
             }
-        };
-        if staging.reset_stream_analysis().is_err() {
-            let _ = with_host_mut(
-                handle,
-                RESULT_INTERNAL,
-                AudioWorkletEngineHost::stop_spectrum_stream,
+            let cadence = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
+                host.start_spectrum_stream()
+            });
+            let cadence = match cadence {
+                Ok(value) => value,
+                Err(result) => {
+                    staging.stream_metadata.result = result;
+                    return result;
+                }
+            };
+            if staging.reset_stream_analysis().is_err() {
+                let _ = with_host_mut(
+                    handle,
+                    RESULT_INTERNAL,
+                    AudioWorkletEngineHost::stop_spectrum_stream,
+                );
+                staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
+                return RESULT_REFUSED_BUDGET;
+            }
+            let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+            let channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+            let epoch = with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
+            staging.stream_active = true;
+            staging.stream_cadence = Some(cadence);
+            staging.stream_smoothing = Some(smoothing);
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            staging.stream_window = None;
+            let analysis_epoch = staging
+                .stream_history
+                .as_ref()
+                .map_or(0, |history| history.analysis_epoch());
+            staging.stream_metadata = WebSpectrumStreamMetadata::default();
+            stream_metadata_profile(
+                &mut staging,
+                target,
+                channels,
+                cadence,
+                SPECTRUM_STREAM_STATUS_WARMING,
+                RESULT_OK,
             );
-            staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
-            return RESULT_REFUSED_BUDGET;
-        }
-        let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
-        let channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
-        let epoch = with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
-        staging.stream_active = true;
-        staging.stream_cadence = Some(cadence);
-        staging.stream_smoothing = Some(smoothing);
-        staging.capture_len = 0;
-        staging.result_len = 0;
-        staging.stream_window = None;
-        let analysis_epoch = staging
-            .stream_history
-            .as_ref()
-            .map_or(0, |history| history.analysis_epoch());
-        staging.stream_metadata = WebSpectrumStreamMetadata::default();
-        stream_metadata_profile(
-            &mut staging,
-            target,
-            channels,
-            cadence,
-            SPECTRUM_STREAM_STATUS_WARMING,
-            RESULT_OK,
-        );
-        staging.stream_metadata = WebSpectrumStreamMetadata {
-            struct_size: SPECTRUM_STREAM_METADATA_BYTES,
-            abi_version: ABI_VERSION,
-            result: RESULT_OK,
-            capture_epoch: epoch,
-            analysis_epoch,
-            smoothing_ms: smoothing.smoothing_ms(),
-            ..staging.stream_metadata
-        };
-        RESULT_OK
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                capture_epoch: epoch,
+                analysis_epoch,
+                smoothing_ms: smoothing.smoothing_ms(),
+                ..staging.stream_metadata
+            };
+            RESULT_OK
+        })
     })
 }
 
@@ -3314,31 +3333,33 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
 /// Stop the managed native stream and retain its final normalized profile in metadata.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    with_spectrum_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        let result = with_host_mut(
-            handle,
-            RESULT_INVALID_ARGUMENT,
-            AudioWorkletEngineHost::stop_spectrum_stream,
-        );
-        if result == RESULT_OK {
-            staging.stream_active = false;
-            staging.stream_cadence = None;
-            staging.stream_smoothing = None;
-            staging.capture_len = 0;
-            staging.result_len = 0;
-            staging.stream_window = None;
-            staging.stream_metadata.result = RESULT_OK;
-            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
-        } else {
-            staging.stream_metadata.result = result;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        result
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            let result = with_host_mut(
+                handle,
+                RESULT_INVALID_ARGUMENT,
+                AudioWorkletEngineHost::stop_spectrum_stream,
+            );
+            if result == RESULT_OK {
+                staging.stream_active = false;
+                staging.stream_cadence = None;
+                staging.stream_smoothing = None;
+                staging.capture_len = 0;
+                staging.result_len = 0;
+                staging.stream_window = None;
+                staging.stream_metadata.result = RESULT_OK;
+                staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
+            } else {
+                staging.stream_metadata.result = result;
+            }
+            result
+        })
     })
 }
 
@@ -3366,23 +3387,25 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    with_spectrum_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        if staging.stream_active {
-            staging.stream_metadata.result = RESULT_WRONG_STATE;
-            return RESULT_WRONG_STATE;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        staging.capture_len = 0;
-        with_host_mut(
-            handle,
-            RESULT_INVALID_ARGUMENT,
-            AudioWorkletEngineHost::cancel_spectrum,
-        )
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            if staging.stream_active {
+                staging.stream_metadata.result = RESULT_WRONG_STATE;
+                return RESULT_WRONG_STATE;
+            }
+            staging.capture_len = 0;
+            with_host_mut(
+                handle,
+                RESULT_INVALID_ARGUMENT,
+                AudioWorkletEngineHost::cancel_spectrum,
+            )
+        })
     })
 }
 
@@ -3852,68 +3875,70 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
     frames: u32,
     end_of_region: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if end_of_region > 1 || host.status().state != STATE_READY {
-            return if end_of_region > 1 {
-                host.record_boundary_result(RESULT_INVALID_ARGUMENT)
-            } else {
-                host.submit_source(&[], 0, 0, 0, &[], 0, false)
-            };
-        }
-        let quantum = host.status().quantum_frames as usize;
-        let channel_count = channels as usize;
-        let frame_count = frames as usize;
-        let id_count = source_id_bytes as usize;
-        let sample_rate = host.status().sample_rate_hz;
-        let Some((pcm, plane_slots, ids)) = host.ffi_source_staging_mut() else {
-            return host.record_boundary_result(RESULT_INTERNAL);
-        };
-        if channel_count == 0
-            || channel_count > plane_slots.len()
-            || frame_count > quantum
-            || id_count > ids.len()
-        {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        }
-        let Some(required_samples) = channel_count.checked_mul(quantum) else {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        };
-        if required_samples > pcm.len() {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        }
-        let pcm_pointer = pcm.as_ptr();
-        let id_pointer = ids.as_ptr();
-        for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
-            let offset = channel * quantum;
-            // SAFETY: Preparation allocated `maximum_source_channels * quantum` stable PCM
-            // samples. The checked channel bound/product and `frames <= quantum` prove this
-            // exact plane prefix is readable for the synchronous source submission below.
-            let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };
-            slot.write(plane);
-        }
-        let plane_pointer = plane_slots.as_ptr().cast::<&[f32]>();
-        // SAFETY: Every element in this exact prefix was initialized above with a valid slice
-        // into stable PCM staging. `MaybeUninit<T>` has the same layout as `T`; the borrow ends
-        // before this function returns and the host does not mutate staging during submission.
-        let planes = unsafe { slice::from_raw_parts(plane_pointer, channel_count) };
-        // SAFETY: The checked ID prefix lies in stable source-ID staging. It is read only for
-        // the synchronous lookup and is not retained by the safe host.
-        let source_id = unsafe { slice::from_raw_parts(id_pointer, id_count) };
-        let result = host.submit_source(
-            source_id,
-            generation,
-            start_frame,
-            sample_rate,
-            planes,
-            frames,
-            end_of_region == 1,
-        );
-        if let Some((_, slots, _)) = host.ffi_source_staging_mut() {
-            for slot in &mut slots[..channel_count] {
-                *slot = MaybeUninit::uninit();
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if end_of_region > 1 || host.status().state != STATE_READY {
+                return if end_of_region > 1 {
+                    host.record_boundary_result(RESULT_INVALID_ARGUMENT)
+                } else {
+                    host.submit_source(&[], 0, 0, 0, &[], 0, false)
+                };
             }
-        }
-        result
+            let quantum = host.status().quantum_frames as usize;
+            let channel_count = channels as usize;
+            let frame_count = frames as usize;
+            let id_count = source_id_bytes as usize;
+            let sample_rate = host.status().sample_rate_hz;
+            let Some((pcm, plane_slots, ids)) = host.ffi_source_staging_mut() else {
+                return host.record_boundary_result(RESULT_INTERNAL);
+            };
+            if channel_count == 0
+                || channel_count > plane_slots.len()
+                || frame_count > quantum
+                || id_count > ids.len()
+            {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            let Some(required_samples) = channel_count.checked_mul(quantum) else {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            };
+            if required_samples > pcm.len() {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            let pcm_pointer = pcm.as_ptr();
+            let id_pointer = ids.as_ptr();
+            for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
+                let offset = channel * quantum;
+                // SAFETY: Preparation allocated `maximum_source_channels * quantum` stable PCM
+                // samples. The checked channel bound/product and `frames <= quantum` prove this
+                // exact plane prefix is readable for the synchronous source submission below.
+                let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };
+                slot.write(plane);
+            }
+            let plane_pointer = plane_slots.as_ptr().cast::<&[f32]>();
+            // SAFETY: Every element in this exact prefix was initialized above with a valid slice
+            // into stable PCM staging. `MaybeUninit<T>` has the same layout as `T`; the borrow ends
+            // before this function returns and the host does not mutate staging during submission.
+            let planes = unsafe { slice::from_raw_parts(plane_pointer, channel_count) };
+            // SAFETY: The checked ID prefix lies in stable source-ID staging. It is read only for
+            // the synchronous lookup and is not retained by the safe host.
+            let source_id = unsafe { slice::from_raw_parts(id_pointer, id_count) };
+            let result = host.submit_source(
+                source_id,
+                generation,
+                start_frame,
+                sample_rate,
+                planes,
+                frames,
+                end_of_region == 1,
+            );
+            if let Some((_, slots, _)) = host.ffi_source_staging_mut() {
+                for slot in &mut slots[..channel_count] {
+                    *slot = MaybeUninit::uninit();
+                }
+            }
+            result
+        })
     })
 }
 
@@ -3925,22 +3950,24 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
     generation: u64,
     source_frame: u64,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if host.status().state != STATE_READY {
-            return host.seek_source(&[], 0, 0);
-        }
-        let id_count = source_id_bytes as usize;
-        let Some(ids) = host.source_id_mut() else {
-            return host.record_boundary_result(RESULT_INTERNAL);
-        };
-        let Some(source_id) = ids.get(..id_count) else {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        };
-        let source_id_pointer = source_id.as_ptr();
-        // SAFETY: The checked ID prefix lies in stable staging and is only read during the
-        // synchronous safe-host lookup; the seek operation does not mutate staging.
-        let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
-        host.seek_source(source_id, generation, source_frame)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if host.status().state != STATE_READY {
+                return host.seek_source(&[], 0, 0);
+            }
+            let id_count = source_id_bytes as usize;
+            let Some(ids) = host.source_id_mut() else {
+                return host.record_boundary_result(RESULT_INTERNAL);
+            };
+            let Some(source_id) = ids.get(..id_count) else {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            };
+            let source_id_pointer = source_id.as_ptr();
+            // SAFETY: The checked ID prefix lies in stable staging and is only read during the
+            // synchronous safe-host lookup; the seek operation does not mutate staging.
+            let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
+            host.seek_source(source_id, generation, source_frame)
+        })
     })
 }
 
@@ -3986,8 +4013,10 @@ pub extern "C" fn miso_engine_web_v1_prepared_command_submit(
     count: u32,
     companion_bytes: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.submit_prepared_commands(count, companion_bytes)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.submit_prepared_commands(count, companion_bytes)
+        })
     })
 }
 
@@ -4018,17 +4047,21 @@ pub extern "C" fn miso_engine_web_v1_eq_target_config_copy(
     rack: u32,
     effect_index: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.copy_eq_target_config(track_index, rack, effect_index)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.copy_eq_target_config(track_index, rack, effect_index)
+        })
     })
 }
 
 /// Return the fixed addressed EQ configuration workspace.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.eq_target_config()
-            .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.eq_target_config()
+                .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
+        })
     })
 }
 
@@ -4038,8 +4071,10 @@ pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
     handle: u32,
     track_index: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.copy_input_filter_config(track_index)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.copy_input_filter_config(track_index)
+        })
     })
 }
 
@@ -4054,14 +4089,16 @@ pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if enabled > 1 {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        host.set_meter_lease(enabled == 1)
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if enabled > 1 {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            host.set_meter_lease(enabled == 1)
+        })
     })
 }
 
@@ -4654,6 +4691,59 @@ pub mod native_staging {
             staging.live_track_id[..track_id.len()].copy_from_slice(track_id);
             *staging.live_request = request;
         });
+    }
+
+    /// Stage a source identity, as the worklet writes it through
+    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID)` before `source_submit` or
+    /// `source_seek`. Returns `false` when the handle owns no staging that fits it.
+    pub fn source_id(handle: u32, id: &[u8]) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.source_id_mut()
+                .and_then(|staging| staging.get_mut(..id.len()))
+                .map(|staging| staging.copy_from_slice(id))
+                .is_some()
+        })
+    }
+
+    /// Fill the planar source-PCM staging with `value`, as the worklet copies a chunk's planes
+    /// through `miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM)`.
+    pub fn source_pcm(handle: u32, value: f32) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.source_pcm_mut().map(|pcm| pcm.fill(value)).is_some()
+        })
+    }
+
+    /// Stage live-control command records, as the worklet writes them through
+    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`.
+    pub fn command_records(handle: u32, records: &[u8]) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.command_staging_mut()
+                .and_then(|staging| staging.get_mut(..records.len()))
+                .map(|staging| staging.copy_from_slice(records))
+                .is_some()
+        })
+    }
+
+    /// Stage a prepared-command companion, as the worklet writes it through
+    /// `miso_engine_web_v1_prepared_companion_ptr`.
+    pub fn prepared_companion(handle: u32, companion: &[u8]) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.prepared_companion_mut()
+                .and_then(|staging| staging.get_mut(..companion.len()))
+                .map(|staging| staging.copy_from_slice(companion))
+                .is_some()
+        })
+    }
+
+    /// Copy out the addressed configuration workspace's prefix, as the worklet reads it through
+    /// `miso_engine_web_v1_eq_target_config_ptr` after a copy export succeeds.
+    pub fn eq_target_config(handle: u32, output: &mut [u8]) -> bool {
+        super::with_host(handle, false, |host| {
+            host.eq_target_config()
+                .and_then(|config| config.get(..output.len()))
+                .map(|config| output.copy_from_slice(config))
+                .is_some()
+        })
     }
 }
 
