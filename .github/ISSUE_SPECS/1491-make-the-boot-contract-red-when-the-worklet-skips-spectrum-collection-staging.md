@@ -112,3 +112,55 @@ because the fake sizes the staging but nothing reads it before boot (gate 2 reco
 - Size: under three hours.
 
 ## Attempt record
+
+### Attempt 1 (2026-10-09, implementer; base `d1b17d216` on `codex/d15-batch-misc2`)
+
+Changes, all inside `testQualificationBoot` (D4):
+
+- D1: `withSpectrumCollectionStaging` wraps the fake's `miso_engine_web_v1_boot` and
+  `miso_engine_web_v1_boot_with_spectrum_hop`. Before it delegates, the wrapper decodes the staged
+  collection through a fresh `DataView` (request header: struct bytes, ABI version, entry count,
+  `maximumCaptureBytes`; each 24-byte entry's target code, channel code and identity byte length;
+  the concatenated identities through a fatal test-realm `TextDecoder`) and pushes it onto
+  `fake.spectrumStagingWitnesses`. The witness is `null` when the request pointer was never asked
+  for or the entry count is 0. The boot result is unchanged. `QualificationNode` keeps its fake;
+  `forwardingCreateHost` asserts exactly one boot per caller and keeps that boot's witness with
+  the caller's witnessed options.
+- D2: for `runStagingReadRun` the witness must deep-equal a value derived from the witnessed
+  options: `structBytes` 32, `abiVersion` `0x00010000`, each entry mapped through the worklet's
+  wire codes (targets `trackPostInput` 1, `trackPostPan` 2, `output` 3; channels `left` 1,
+  `right` 2, `both` 3), in order, with its identity, and `maximumCaptureBytes` as a `BigInt`.
+  The worklet does not export its constants, so the code tables are the test's own copy of the
+  wire values; the entries and the budget come from the options.
+- D3: each of the other five callers' witnesses is `null`.
+- Three rows in `hosts/host-web/MUTATIONS.md`, after #1477's boot contract rows.
+
+Gates:
+
+1. `bash scripts/test-web-audioworklet.sh` with qualification.yml's private-`TMPDIR` wrapper
+   (`mktemp -d`, `export TMPDIR`, leftover `find`): exit 0, leftover empty, the log carries
+   `qualification boot contract passed: callers=6 real-ready=6 real-disposed=6 diagnose-ready=1`
+   (twice: the plain run and the safe-integer host run).
+2. Mutations, each applied alone in place to `hosts/host-web/web/miso-engine-v1-audio-worklet.js`,
+   run with `node scripts/test-web-audioworklet.mjs` (this suite) and with the suite at `HEAD`
+   (`d1b17d216`, copied beside it for the run and deleted), then reverted with
+   `git checkout --`; `git diff --quiet` on the worklet confirmed clean after each, and this suite
+   was rerun green:
+
+   | mutation | this suite | base suite | after revert |
+   | --- | --- | --- | --- |
+   | p7: `spectrumResult = this.stageSpectrumRequest(init.options.spectrum)` | red: `staging-read staged collection differs from its options`, actual `null` | green (`callers=6 ...`) | green |
+   | collection channel map `both` -> `SPECTRUM_CHANNEL_LEFT` | red: same assertion, `channels: 1` where `3` is held | green | green |
+   | `BigInt(options.maximumCaptureBytes / 2)` | red: same assertion, `1048576n` where `2097152n` is held | green | green |
+
+3. `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+No browser-compiled code changed (the worklet, host and bridge are untouched), so the build and
+artifact steps of the worklet chain were not rerun.
+
+Test value: D1-D2 are red when the worklet skips collection staging (p7) or stages a channel code
+or a capture budget that differs from its options; all three are green on the suite before this
+change (gate 2's base column). D3 has no mutation run (the spec names none); it holds that the
+five callers without a collection stage nothing.
+
+Open items: none.

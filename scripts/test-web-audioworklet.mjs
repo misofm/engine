@@ -2570,15 +2570,59 @@ async function testQualificationBoot({
   // pre-boot collection staging exports with the bridge's sizing rules (`hosts/host-web/src/ffi.rs`):
   // the entry capacity is the request header's entry count, and the identity capacity is the sum
   // of the staged entries' identity byte lengths.
+  //
+  // Issue #1491 D1: the fake's boot exports read the staged collection back the way the bridge
+  // lays it out (`staged_spectrum_request`) and record it as the boot's staging witness, so a
+  // worklet that skips the staging, or stages bytes that differ from its options, is visible
+  // before boot. The witness is `null` when the request pointer was never asked for or the
+  // request header's entry count is 0; the boot result is unchanged.
+  const identityDecoder = new TextDecoder("utf-8", { fatal: true });
   const withSpectrumCollectionStaging = (fake) => {
     const requestPointer = 42000;
     const entryPointer = 42100;
     const idPointer = 42600;
+    let requested = false;
     let entryCapacity = 0;
     let idCapacity = 0;
     const view = () => new DataView(fake.exports.memory.buffer);
+    const decodeStagedCollection = () => {
+      if (!requested) return null;
+      const bytes = view();
+      const entryCount = bytes.getUint32(requestPointer + 8, true);
+      if (entryCount === 0) return null;
+      const entries = [];
+      let idOffset = idPointer;
+      for (let index = 0; index < entryCount; index += 1) {
+        const entry = entryPointer + index * 24;
+        const idBytes = bytes.getUint32(entry + 8, true);
+        entries.push({
+          target: bytes.getUint32(entry, true),
+          channels: bytes.getUint32(entry + 4, true),
+          targetId: identityDecoder.decode(
+            new Uint8Array(fake.exports.memory.buffer, idOffset, idBytes).slice(),
+          ),
+        });
+        idOffset += idBytes;
+      }
+      return {
+        structBytes: bytes.getUint32(requestPointer, true),
+        abiVersion: bytes.getUint32(requestPointer + 4, true),
+        entries,
+        maximumCaptureBytes: bytes.getBigUint64(requestPointer + 16, true),
+      };
+    };
+    fake.spectrumStagingWitnesses = [];
+    for (const name of ["miso_engine_web_v1_boot", "miso_engine_web_v1_boot_with_spectrum_hop"]) {
+      const boot = fake.exports[name];
+      if (typeof boot !== "function") continue;
+      fake.exports[name] = (...args) => {
+        fake.spectrumStagingWitnesses.push(decodeStagedCollection());
+        return boot(...args);
+      };
+    }
     Object.assign(fake.exports, {
       miso_engine_web_v1_spectrum_collection_request_ptr: () => {
+        requested = true;
         entryCapacity = 0;
         idCapacity = 0;
         return requestPointer;
@@ -2615,11 +2659,12 @@ async function testQualificationBoot({
       this.onprocessorerror = null;
       this.disconnectCount = 0;
       const processorOptions = options.processorOptions?.options;
-      setNextFake(withSpectrumCollectionStaging(makeFake(
+      this.fake = withSpectrumCollectionStaging(makeFake(
         context.renderQuantumSize,
         1,
         processorOptions?.liveControlCommandQueueRecords !== 0n,
-      )));
+      ));
+      setNextFake(this.fake);
       setProcessorPortFactory(() => processorPort);
       try {
         this.processor = new registered({ processorOptions: options.processorOptions });
@@ -2706,6 +2751,12 @@ async function testQualificationBoot({
       );
     }
     assert.equal(host.backend, "simd128", `qualification boot contract: ${label} backend`);
+    // Issue #1491 D1: exactly one boot per caller, and its staging witness is kept with the
+    // caller's witnessed options.
+    const stagingWitnesses = QualificationNode.latest.fake.spectrumStagingWitnesses;
+    assert.equal(stagingWitnesses.length, 1,
+      `qualification boot contract: ${label} must boot exactly once`);
+    observed.at(-1).stagedSpectrumCollection = stagingWitnesses[0];
     realReady += 1;
     try {
       await bounded(host.dispose(), `${label} real dispose`);
@@ -2811,6 +2862,32 @@ async function testQualificationBoot({
       ],
       "qualification boot contract: staging-read spectrum collection changed",
     );
+    // Issue #1491 D2: the collection the worklet staged before boot is the caller's witnessed
+    // collection, entry for entry, encoded with the worklet's wire codes (target `trackPostPan`
+    // 2, `output` 3; channels `both` 3) and the bridge's header (32-byte struct, ABI 1.0).
+    const spectrumTargetCodes = { trackPostInput: 1, trackPostPan: 2, output: 3 };
+    const spectrumChannelCodes = { left: 1, right: 2, both: 3 };
+    const stagingReadCollection = stagingReadOptions.spectrumCollection;
+    assert.deepEqual(
+      observed.find(({ label }) => label === "runStagingReadRun").stagedSpectrumCollection,
+      {
+        structBytes: 32,
+        abiVersion: 0x00010000,
+        entries: stagingReadCollection.entries.map(({ target, targetId, channels }) => ({
+          target: spectrumTargetCodes[target],
+          channels: spectrumChannelCodes[channels],
+          targetId,
+        })),
+        maximumCaptureBytes: BigInt(stagingReadCollection.maximumCaptureBytes),
+      },
+      "qualification boot contract: staging-read staged collection differs from its options",
+    );
+    // Issue #1491 D3: the five callers with no collection stage none.
+    for (const { label, stagedSpectrumCollection } of observed) {
+      if (label === "runStagingReadRun") continue;
+      assert.equal(stagedSpectrumCollection, null,
+        `qualification boot contract: ${label} staged a spectrum collection it does not boot`);
+    }
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
     assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");
