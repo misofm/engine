@@ -59,7 +59,8 @@ No engine source changes. No rendered bit moves.
 
 - `tools/audit/src/vectorization.rs` (the two SVF probes and their callers in `execute_probes`)
 - `.github/workflows/nightly.yml` (the `native-vectorization-report` step's `continue-on-error`
-  line and its comment only)
+  line and its comment, and the file's header bullet that describes that job (lines `:6-8`), which
+  D3 makes false; Amendment (root, 2026-10-09))
 - `scripts/test-test-support-ci.py` (lines `:149` and `:152` only)
 - this spec
 
