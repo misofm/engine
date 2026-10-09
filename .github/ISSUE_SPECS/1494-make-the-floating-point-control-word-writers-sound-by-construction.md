@@ -320,11 +320,13 @@ three-point structure.
   outside it, because a host can run with FTZ/DAZ (AArch64: `FZ`) set; a hand-back write meets the
   confinement rule when it returns the thread to the word its caller already ran under and the
   writer runs no floating-point code after it. The stricter ground "no engine floating-point code
-  runs under the handed-back word" is not true for every guard user: builtins preparation
-  (`crates/builtins/src/tail.rs`, `fixed_input_walk`, `live_bound`, `live_composition`) keeps
-  computing on its thread after the guard drops, under the host's word, as it did before `enter`.
-  So the text claims only what is true: the hand-back puts no code under a word the caller was not
-  already under.
+  runs under the handed-back word" is not true for every guard user: the guard users in
+  `crates/builtins/src/tail.rs` (`fixed_input_walk`, on the builtins-preparation path, and
+  `live_bound` and `live_composition`, which only the gate and the tests reach, through
+  `input_section_live_bound` and `input_section_live_cascade`; preparation reads the `const fn`
+  `input_section_live_bound_table`) keep computing on their thread after the guard drops, under the
+  host's word, as they did before `enter`. So the text claims only what is true: the hand-back puts
+  no code under a word the caller was not already under.
 - **m2 (bullet 3).** The restore duty now applies only to a write that neither installs a word
   inside the environment nor hands back a read word; a hand-back write is itself the restore, and
   a word inside the environment needs no restore. `enter`'s `SAFETY` comment now says why the guard

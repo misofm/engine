@@ -95,14 +95,14 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
   environment Rust assumes (the `core::arch` documentation of `_mm_setcsr` says Rust assumes the
   default exception masks, rounding and DAZ), and a word handed back can be outside it, because a
   host can run with FTZ or DAZ set; the caller lets no compiled floating-point code run under a
-  word outside it except the code it deliberately measures, and a hand-back meets this by
-  returning the thread to the word its caller already ran under, with no floating-point code after
-  it in the writer; and unless the write installs a word inside the environment or is a hand-back,
-  the caller restores the previous word, itself or through `CanonicalFpEnv`'s `Drop`. Its
-  `SAFETY` comment states only what the body relies on: SSE, which every `x86_64` host has, and
-  that contract. A `compile_fail` doctest with a passing twin checks, on each `x86_64` doctest
-  run, that safe code cannot call it; `read_mxcsr` stays safe. `write_mxcsr` itself does not restore the previous word. Until
-  #163 phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128`
+  word outside it except the code it deliberately measures, and a hand-back meets this by returning
+  the thread to the word its caller already ran under, with no floating-point code after it in the
+  writer; and unless the write installs a word inside the environment or is a hand-back, the caller
+  restores the previous word, itself or through `CanonicalFpEnv`'s `Drop`. Its `SAFETY` comment
+  states only what the body relies on: SSE, which every `x86_64` host has, and that contract. A
+  `compile_fail` doctest with a passing twin checks, on each `x86_64` doctest run, that safe code
+  cannot call it; `read_mxcsr` stays safe. `write_mxcsr` itself does not restore the previous word.
+  Until #163 phase 2 (`477dc15ee`) the file also held the software FMA and its wasm `simd128`
   promote/demote intrinsics; that phase retired the emulation, and the file kept its name because
   the policy files name its path. No `Lane` value or vector type escapes the crate as unsafe.
 - `crates/lane/src/fpenv.rs` (issue 146): the canonical floating-point environment that every
@@ -113,9 +113,9 @@ removed from `scripts/check-realtime-policy.sh` in the same change.)
   and the AArch64 pair in CI's `aarch64-debug` doctest leg, and each checks there that safe code
   cannot call the writer; the no-op variant's pair is documentation only, because no doctest run
   compiles it. `CanonicalFpEnv` is the only safe way to change the word: `enter` (`:477`)
-  writes the canonical word, and `Drop` (`:502`) writes the word `enter` read from this
-  thread; each call's `SAFETY` comment says why that word meets the contract, and `enter`'s says
-  why the guard stays sound when safe code passes it to `mem::forget`. `read_fp_control_word` stays safe.
+  writes the canonical word, and `Drop` (`:502`) writes the word `enter` read from this thread; each
+  call's `SAFETY` comment says why that word meets the contract, and `enter`'s says why the guard
+  stays sound when safe code passes it to `mem::forget`. `read_fp_control_word` stays safe.
 
 `fpenv.rs` is reachable from a render path deliberately -- pinning the environment is the render
 entry's first act and unpinning it is its last. The guard reads the control word, writes the
@@ -156,10 +156,10 @@ explicitly, and both have a mutation test that proves a third lane file does not
 
 Each file below calls the `unsafe fn` control-word writers (#1494) to install a word a host might
 arrive with -- FTZ, DAZ, a directed rounding mode, sticky status flags or FPCR's `FZ` and `DN` --
-and measure the engine under it: the guard, or in `g6_ftz_inert.rs` the D7 flush arms, which run
-with no guard. The calls are the file's only unsafe code. Each call sits in an
-`unsafe` block whose `SAFETY` comment names the word, says it sets no reserved (or `RES0`) bit,
-and names the guard or write-back that restores the previous word.
+and measure the engine under it: through the guard, and with no guard as a control
+(`g6_ftz_inert.rs` measures only the D7 flush arms, with no guard). The calls are the file's only
+unsafe code. Each call sits in an `unsafe` block whose `SAFETY` comment names the word, says it sets
+no reserved (or `RES0`) bit, and names the guard or write-back that restores the previous word.
 
 - `crates/lane/tests/fp_env.rs` (#146, #1017): the guard's own tests. It calls `write_mxcsr` on
   `x86_64` and `write_fp_control_word` on AArch64, and restores through its `Restore` guard.
