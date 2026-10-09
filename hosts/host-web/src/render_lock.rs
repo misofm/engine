@@ -10,6 +10,35 @@
 //! qualification reads the count through `miso_engine_web_v1_render_allocation_count` and asserts
 //! it is exactly zero.
 //!
+//! "Boot" here and in the `ffi` header is the engine worklet's whole construction path through its
+//! `initialize` (`hosts/host-web/web/miso-engine-v1-audio-worklet.js`), up to the `miso.ready.v1`
+//! post, and not only the `boot` export: `initialize` calls exports before the `boot` export and
+//! after it returns. "After boot" is after that post. Boot is outside the render-locked rule:
+//!
+//! - Before the `boot` export (or `boot_with_spectrum_hop`), it calls, as its options require,
+//!   `abi_version`, `spectrum_hop_capability`, `boot_options_ptr`, the spectrum request and
+//!   collection accessors (`spectrum_request_*`, `spectrum_collection_*`) and `document_ptr`.
+//!   None of them is wrapped, and neither is the `boot` export: there the collection staging is
+//!   sized and allocated by design.
+//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 28:
+//!   `buffer_ptr`, `buffer_capacity`, `status_ptr`, `resource_ptr`, `command_report_ptr`,
+//!   `prepared_companion_ptr`, `prepared_companion_capacity`, `live_control_track_count`,
+//!   `live_control_track_id`, `live_control_submix_count`, `live_control_submix_id`,
+//!   `live_control_route_count`, `live_control_route_id`, `live_control_vca_count`,
+//!   `live_control_vca_id`, `source_count`, `source_id`, `source_channels`, `source_frames`,
+//!   `observation_count`, `observation_track_index`, `observation_rack`,
+//!   `observation_effect_index`, `observation_effect_slot_id`, `observation_native_effect_id`,
+//!   `observation_tap_count`, `observation_tap_id` and `meter_header_ptr`.
+//! - When `document_ptr` or the `boot` export returns 0, it calls `boot_result`, which is not
+//!   wrapped either.
+//! - It can also call render-locked exports, and those calls are counted: `spectrum_target_id_ptr`
+//!   and `spectrum_target_id_capacity` before the `boot` export, and after it eleven staging
+//!   accessors: `observation_id_ptr`, `observation_id_capacity`, `observation_selection_ptr`,
+//!   `observation_selection_bytes`, `observation_selection_capacity`,
+//!   `track_response_request_ptr`, `track_response_request_bytes`, `track_response_track_id_ptr`,
+//!   `track_response_track_id_capacity`, `track_response_snapshot_ptr` and
+//!   `track_response_snapshot_capacity`.
+//!
 //! The flag is a const-initialised `Cell<bool>` thread local. It has no destructor, so it
 //! registers nothing with std: it is a plain static on today's non-atomic module and an
 //! instance-local slot once the module is built with atomics. The counter is a process-wide

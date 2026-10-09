@@ -82,6 +82,9 @@ reason").**
   `spectrum_stream_select` (they allocate today; #1492 removes the allocation and wraps them).
 - D4 applies to every wrapped export.
 
+**Root's confirmation (2026-10-09).** Root confirmed the report above, verbatim: "confirmed:
+spectrum_selection_epoch stays unwrapped (no worklet calls it), as recorded."
+
 ## Decisions
 
 - **D1. Eleven exports run inside `render_locked`** (amended 2026-10-09).

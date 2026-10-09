@@ -13,8 +13,10 @@
 //!
 //! # Render-locked exports
 //!
-//! Issue #1333 D2 and issue #1488: every export that either AudioWorklet calls on its render
-//! thread after boot wraps its body in `render_locked`, and
+//! "Boot" is the engine worklet's whole construction path through its `initialize`
+//! (`web/miso-engine-v1-audio-worklet.js`) up to the `miso.ready.v1` post, not only the `boot`
+//! export. Issue #1333 D2 and issue #1488: every export that either AudioWorklet calls on its
+//! render thread after boot wraps its body in `render_locked`, and
 //! `miso_engine_web_v1_render_allocation_count` reports the allocator calls made inside those
 //! windows. "Either AudioWorklet" is the engine worklet (`process()` and its port handlers) and the
 //! SDK's PCM-feed worklet, whose `process()` drains its shared rings before it renders. The set:
@@ -24,19 +26,17 @@
 //!   `spectrum_stream_read`;
 //! - the pointer, capacity and byte-count accessors of the three stagings that the worklet calls
 //!   after boot;
-//! - source control: `source_submit` and `source_seek` (the feed's `process()`, the feed attach
-//!   node's `prepare-seek` handler, which calls `source_seek`, and the engine worklet's source and
-//!   seek handlers);
+//! - source control: `source_submit` and `source_seek` (the feed's `process()` and its attach
+//!   node's `prepare-seek` handler, and the engine worklet's source and seek handlers);
 //! - live control: `prepared_command_submit`, `meter_lease`, `eq_target_config_copy`,
 //!   `eq_target_config_ptr` and `input_filters_config_copy`;
 //! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start`,
 //!   `spectrum_stream_stop`, `spectrum_select` and `spectrum_stream_select` (issue #1492).
 //!
-//! Two post-boot calls are named exceptions. `dispose` is teardown: it frees the host by design,
-//! and it is also the boot-failure path. `render_allocation_count` is the reader of the count;
-//! wrapping it would measure nothing. The spectrum request and collection accessors
-//! (`spectrum_request_*`, `spectrum_collection_*`) are not in the set: the worklet calls them only
-//! before boot, where the collection staging is sized and allocated by design.
+//! Two post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
+//! and is also the boot-failure path; and `render_allocation_count`, the reader of the count. Boot
+//! is outside the rule. The `render_lock` module header names the exports it calls, wrapped or
+//! not, among them the 28 unwrapped ones it calls after the `boot` export returns a handle.
 
 #![allow(unsafe_code)]
 

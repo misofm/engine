@@ -382,3 +382,8 @@ Every file:line citation in the section stays exact: the policy's line count is 
 section cites no `softfma.rs` line (the `softfma.rs` edit replaces three comment lines at
 `:114-116` with six), and no other cited file changed.
 
+
+Batch NIT "boot" (root, 2026-10-09): the `render_lock.rs` header grew by 29 lines, so the policy's
+registration citation moved from `:88-91` to `:117-120`, and the policy's two "before boot"
+phrases now say "before the `boot` export"; the `ffi.rs` header kept its line count, so every
+other citation is unchanged.

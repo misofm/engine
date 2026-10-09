@@ -81,12 +81,13 @@ it.
 - `hosts/host-web/tests/render_locked_staging.rs` (phase 2 only)
 - `hosts/host-web/MUTATIONS.md` (the new rows)
 - `hosts/host-web/src/render_lock.rs` (the module header's exception list only; coordinator
-  amendment after attempt 1, pending root's ratification)
+  amendment after attempt 1, ratified by root 2026-10-09)
 - this spec
 
 **Coordinator note (after attempt 1's verdict, MINOR 1 and NIT 1).** Attempt 1 made two edits
 outside the original list. Both were needed to keep existing text true, and neither is reverted.
-Root is asked to ratify both:
+Root ratified both on 2026-10-09 ("Ratified: #1492's edits to hosts/host-web/MUTATIONS.md:563
+(count 4→6) and the render_lock.rs header"):
 
 - `hosts/host-web/MUTATIONS.md` row `:563` (A #1479's phase 2 read mutation): the count changed
   from 4 to 6. #1488's wrap of `spectrum_stream_start` made 4 false, because that body also reads

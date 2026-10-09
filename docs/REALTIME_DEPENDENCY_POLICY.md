@@ -177,8 +177,8 @@ explicitly, and both have a mutation test that proves a third lane file does not
   allocator with their arguments unchanged. Its only additions are one thread-local flag read per
   call and, inside a render-locked window, one relaxed increment of the process-wide counter; it
   never alters a pointer, layout, size or lifetime. The registration is
-  `cfg(all(target_family = "wasm", not(test)))` (`:88-91`), so native test binaries and tools keep
-  their own allocator. `render_locked` itself is safe code.
+  `cfg(all(target_family = "wasm", not(test)))` (`:117-120`), so native test binaries and tools
+  keep their own allocator. `render_locked` itself is safe code.
 
 It is the runtime proof behind D15-10: the static call-graph gate cannot see behind the plan
 executor's `call_indirect` (`Box<dyn PreparedPlanExecutor>`), so the allocator counts each call
@@ -215,9 +215,9 @@ exceptions, as the `ffi` module header (`hosts/host-web/src/ffi.rs:14-39`) and
 `render_lock.rs:5-11` state: `dispose`, which is teardown and frees the host by design (it is also
 the boot-failure path), and `render_allocation_count`, the reader of the count. The spectrum
 request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are outside both
-sets: the worklet calls them only before boot, where the collection staging is sized and allocated
-by design. `miso_engine_web_v1_spectrum_selection_epoch` is outside both sets too: neither worklet
-calls it, and it is not wrapped.
+sets: the worklet calls them only during boot, before the `boot` export, where the collection
+staging is sized and allocated by design. `miso_engine_web_v1_spectrum_selection_epoch` is outside
+both sets too: neither worklet calls it, and it is not wrapped.
 
 ### Test-only counting allocators
 
@@ -295,9 +295,10 @@ Approved unsafe code that runs on a render thread, per entry:
   `spectrum_target_id_ptr` and `spectrum_target_id_capacity`, which `stageSpectrumRequest` calls
   before the boot export. Those calls are counted, and today they make no allocator call: the
   stagings they touch are allocated outside any window, by boot's `reserve_stagings`
-  (`hosts/host-web/src/ffi.rs:617-626`) or, before boot, on first touch by the unwrapped
-  `spectrum_request_ptr`. Qualification reads the count of each instance before its `dispose` and
-  asserts it is zero, so a boot-time allocation inside a window fails it as a render-time one does.
+  (`hosts/host-web/src/ffi.rs:617-626`) or, before the `boot` export, on first touch by the
+  unwrapped `spectrum_request_ptr`. Qualification reads the count of each instance before its
+  `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
+  render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs` and
   `tools/audit/src/capi.rs` call the C render entry from threads of their own. Their own unsafe is
   the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
