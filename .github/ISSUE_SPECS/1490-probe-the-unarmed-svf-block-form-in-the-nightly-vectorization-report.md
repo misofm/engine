@@ -117,3 +117,51 @@ instantiates `svf_block_form::<L, false>`, so today nothing catches it (gate 2 r
 - Size: under two hours.
 
 ## Attempt record
+
+### Attempt 1 (2026-10-09, implementer)
+
+Changes, as D1-D4 name them: `probe_svf_unarmed_simd8` (`avx2`) and `probe_svf_unarmed_simd4`
+(`neon`) in `tools/audit/src/vectorization.rs`, each `#[inline(never)]` and calling
+`svf_block::<L, UnarmedRest>` with `black_box` coefficients and state on a static-length array;
+`execute_probes` calls each after its armed twin; both `ACTIVE_REGISTRY` lists gain the name; one
+`x86_64-avx2` allowlist row `recursive-svf-unarmed / probe_svf_unarmed_simd8` with the
+`recursive-svf` row's three rule columns unchanged. `crates/lane` is not edited (D5).
+
+- **Gate 1.** `bash scripts/run-native-vectorization-report.sh`: `"status":"pass"`,
+  `"kernel_rules":4`, `"failures":[]`. The probe's frame loop (`llvm-objdump -d`, release
+  `audit`), 8 frames per iteration, 32 iterations:
+
+  ```
+  vmovups   (%rdi,%rcx,4), %ymm10
+  vsubps    %ymm1, %ymm10, %ymm11
+  vmulps    %ymm3, %ymm11, %ymm12
+  vmulps    %ymm2, %ymm0, %ymm13
+  vaddps    %ymm12, %ymm13, %ymm12
+  ...                                  (vmulps/vaddps on ymm; vandps/vcmplt_oqps/vandnps flush)
+  vmulps    %ymm5, %ymm10, %ymm10
+  vaddps    %ymm10, %ymm13, %ymm10
+  vaddps    %ymm10, %ymm14, %ymm10
+  vmovups   %ymm10, (%rdi,%rcx,4)
+  addq $0x8, %rcx ; cmpq $0x100, %rcx ; jne <loop>
+  ```
+
+  Whole body: 0 `call`, 0 `vfmadd*`/`vfnmadd*`/`vfmsub*`/`vfnmsub*`, no scalar `mulss`/`addss`/
+  `subss`/`divss` (the only `*ss` mnemonics are three `vbroadcastss` constant/sign loads outside
+  the loop, which no rule names), and no rest-plane load in the loop.
+- **Gate 2 (mutation, PR evidence; scratch copy of the tree, own target dir, deleted after).**
+  Mutation: in `svf_block_form`'s frame loop, after `y.store(frame)`, `if !ARMED {
+  mutation_1490_hook(); }` with `#[inline(never)] fn mutation_1490_hook() {
+  core::hint::black_box(()); }`.
+  - With this slice: `"status":"fail"`, `"kernel_rules":4`, `"failures":["recursive-svf-unarmed /
+    probe_svf_unarmed_simd8: forbidden call 'call|callq' is present"]`, exit 1;
+    `probe_svf_simd8` is not named.
+  - Same mutation, `tools/audit` at the pre-slice `HEAD`: `"status":"pass"`, `"kernel_rules":3`,
+    `"failures":[]`, exit 0.
+  - Revert (the real tree): gate 1, green.
+- **Gate 3.** `bash scripts/test-native-vectorization-report.sh target/release/audit`: `native
+  vectorization red mutations: ok`. `cargo test --locked -p audit vectorization`: 13 passed.
+  `cargo clippy --locked -p audit --all-targets -- -D warnings`, `cargo fmt --all -- --check`,
+  `bash scripts/check-workspace-policy.sh`: exit 0.
+- **Gate 4.** `cargo check --locked -p audit --target aarch64-unknown-linux-gnu`: exit 0 (`neon`
+  is a baseline feature of that target, so the `Simd4` twin compiled). Its disassembly is not a
+  gate.
