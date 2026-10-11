@@ -20,7 +20,7 @@ use super::Ctx;
 use super::count;
 use super::scope::BindingKind;
 use super::shapes::{Place, cap, is_int, method, method0, path_name};
-use super::tree::{Node, Step, from_fn_call, pos};
+use super::tree::{Node, Step, array_from_fn_call, pos};
 
 /// Whether the loop at `steps[at]` runs a finite number of passes.
 pub(super) fn finite<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize) -> bool {
@@ -52,19 +52,17 @@ fn range_to_a_bound(expr: &syn::Expr) -> bool {
 /// Whether the step `at`, a closure, is the argument of `core::array::from_fn` or
 /// `std::array::from_fn` with no generic arguments.
 fn array_from_fn(steps: &[Step<'_>], at: usize) -> bool {
-    let Some(call) = from_fn_call(steps, at) else {
+    let Some(call) = array_from_fn_call(steps, at) else {
         return false;
     };
     let syn::Expr::Path(callee) = &*call.func else {
         return false;
     };
-    let segments: Vec<_> = callee.path.segments.iter().collect();
-    callee.qself.is_none()
-        && segments.len() == 3
-        && segments.iter().all(|segment| segment.arguments.is_none())
-        && matches!(segments[0].ident.to_string().as_str(), "core" | "std")
-        && segments[1].ident == "array"
-        && segments[2].ident == "from_fn"
+    callee
+        .path
+        .segments
+        .iter()
+        .all(|segment| segment.arguments.is_none())
 }
 
 /// `&<fields>`, `<fields>.iter()`, `<fields>.iter_mut()` or a slice or array parameter, with any

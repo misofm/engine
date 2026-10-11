@@ -92,13 +92,15 @@ impl<'f> Node<'f> {
 }
 
 /// Whether the step `at` of a path is a loop of the drain rule: a `for`, `while` or `loop`, or the
-/// closure argument of a call whose callee ends in `from_fn`, which runs that closure repeatedly.
+/// closure argument of `core::array::from_fn` or `std::array::from_fn`, which runs that closure a
+/// constant number of times (D3). Every other `from_fn` is refused by its token, wherever it is.
 pub(super) fn is_loop_at(steps: &[Step<'_>], at: usize) -> bool {
-    steps[at].node.is_loop() || from_fn_call(steps, at).is_some()
+    steps[at].node.is_loop() || array_from_fn_call(steps, at).is_some()
 }
 
-/// The call whose closure argument is the step `at`, when its callee's last segment is `from_fn`.
-pub(super) fn from_fn_call<'f>(steps: &[Step<'f>], at: usize) -> Option<&'f syn::ExprCall> {
+/// The call of `core::array::from_fn` or `std::array::from_fn` (a leading `::` and generic
+/// arguments allowed) whose closure argument is the step `at`.
+pub(super) fn array_from_fn_call<'f>(steps: &[Step<'f>], at: usize) -> Option<&'f syn::ExprCall> {
     let Node::Expr(syn::Expr::Closure(_)) = steps.get(at)?.node else {
         return None;
     };
@@ -112,13 +114,14 @@ pub(super) fn from_fn_call<'f>(steps: &[Step<'f>], at: usize) -> Option<&'f syn:
     let syn::Expr::Path(callee) = &*call.func else {
         return None;
     };
+    let segments: Vec<_> = callee.path.segments.iter().collect();
     (slot >= 1
-        && callee
-            .path
-            .segments
-            .last()
-            .is_some_and(|last| bare(&last.ident) == "from_fn"))
-    .then_some(call)
+        && callee.qself.is_none()
+        && segments.len() == 3
+        && matches!(bare(&segments[0].ident).as_str(), "core" | "std")
+        && bare(&segments[1].ident) == "array"
+        && bare(&segments[2].ident) == "from_fn")
+        .then_some(call)
 }
 
 /// The slot of a parent that a child fills.

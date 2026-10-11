@@ -141,6 +141,13 @@ fn the_finite_outer_loops_pass() {
                 counted_drain("")
             ),
         ),
+        (
+            "outer-slice-parameter-of-a-method",
+            format!(
+                "impl Drain {{\n    fn run(&mut self, control: &mut Consumer<Record>, rounds: &[u8]) {{\n        for _ in rounds {{\n{}        }}\n    }}\n}}",
+                counted_drain("")
+            ),
+        ),
         ("outer-core-array-from-fn", from_fn("core::array::from_fn")),
         ("outer-std-array-from-fn", from_fn("std::array::from_fn")),
         (
@@ -195,13 +202,9 @@ fn the_outer_loops_that_may_not_end_are_refused() {
             around(CONFIG, "", "for _ in cfg.controls", ""),
         ),
         (
-            "outer-slice-parameter-of-another-name",
-            around(", rounds: &[u8]", "", "for _ in other", ""),
-        ),
-        (
             "outer-slice-parameter-with-a-pattern",
             around(
-                ", (rounds, other): (&[u8], &[u8])",
+                ", [rounds, other]: [core::ops::RangeFrom<u32>; 2]",
                 "",
                 "for _ in rounds",
                 "",
