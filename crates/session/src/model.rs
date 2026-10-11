@@ -113,12 +113,83 @@ pub struct SessionModel {
     /// VCA groups, order-insensitive by stable ID (#1240). Control-only: applied at preparation
     /// through [`Self::effective_strip_faders`] (#1242).
     pub vcas: Vec<Vca>,
+    /// The live-ramp lengths this session sets (#1054, decision 15 D15-1): `None` is the schema's
+    /// `{ "kind": "default" }` and means [`CONTROL_SMOOTHING_DEFAULT`]; `Some` is
+    /// `{ "kind": "explicit", .. }` and carries the session's own lengths. Read only through
+    /// [`Self::control_smoothing_samples`].
+    pub control_smoothing: Option<ControlSmoothing>,
     /// Outputs, order-insensitive by stable ID.
     pub outputs: Vec<Output>,
     /// Declarative routes; graph semantics are owned by issue 006.
     pub routes: Vec<Route>,
     /// Ordered sample-time automation programs.
     pub automation: Vec<Automation>,
+}
+
+/// Inclusive maximum of each [`ControlSmoothing`] length, in milliseconds: 96,000 samples at
+/// 96 kHz, inside `u32` and the kernels' exact `f32` countdown (`2^24`), and about as long as a
+/// ramp can run before it is a fade.
+pub const CONTROL_SMOOTHING_MS_MAXIMUM: f32 = 1000.0;
+
+/// The ramp lengths of a session's live mute, fader and pan changes, in milliseconds (#1054).
+///
+/// Every length is finite and in `[0, CONTROL_SMOOTHING_MS_MAXIMUM]`; `0` (`-0.0` too, which keeps
+/// its canonical spelling) is the hard switch that sample-exact edits and bit-comparison tests use.
+/// The table that maps each live row to one of the three keys is in `docs/SESSION_SCHEMA_V1.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlSmoothing {
+    /// Mute, solo, polarity invert (twice this), send mute, send `follows_mute`, VCA mute and the
+    /// effect bypass crossfade.
+    pub mute_ms: f32,
+    /// Fader, input trim, send gain, VCA offset and the detector link glide.
+    pub fader_ms: f32,
+    /// Pan, matrix and send matrix.
+    pub pan_ms: f32,
+}
+
+/// The researched default lengths a session that says `{ "kind": "default" }` uses (#1055,
+/// `docs/handoffs/control-smoothing-defaults/FINDINGS.md` sections 1 and 9). A blinded listening
+/// result (#1388) can change these values and nothing else.
+pub const CONTROL_SMOOTHING_DEFAULT: ControlSmoothing = ControlSmoothing {
+    mute_ms: 10.0,
+    fader_ms: 20.0,
+    pan_ms: 20.0,
+};
+
+/// A session's [`ControlSmoothing`] lengths in sample frames at its own sample rate: what
+/// [`SessionModel::control_smoothing_samples`] returns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlSmoothingSamples {
+    /// The `mute_ms` key.
+    pub mute: u32,
+    /// The `fader_ms` key.
+    pub fader: u32,
+    /// The `pan_ms` key.
+    pub pan: u32,
+}
+
+/// Round a length in milliseconds to sample frames: `floor(ms * rate / 1000 + 1/2)`, round half up,
+/// evaluated in `f64` from the `f32` value so that every host gets the same integer. The product is
+/// exact in `f64` (24 significant bits times at most 17) and a non-tie sits far from `k + 1/2`
+/// (#1055, `FINDINGS.md` section 1). Ties do occur at launch rates: 5 ms at 44.1 kHz is 220.5
+/// samples, which becomes 221.
+fn control_smoothing_ms_to_samples(ms: f32, sample_rate_hz: u32) -> u32 {
+    (f64::from(ms) * f64::from(sample_rate_hz) / 1000.0 + 0.5).floor() as u32
+}
+
+impl SessionModel {
+    /// This session's live-ramp lengths in sample frames: the session's `control_smoothing` or
+    /// [`CONTROL_SMOOTHING_DEFAULT`], each rounded by the one conversion in this crate. Every host
+    /// reads its ramp lengths through this method.
+    #[must_use]
+    pub fn control_smoothing_samples(&self) -> ControlSmoothingSamples {
+        let lengths = self.control_smoothing.unwrap_or(CONTROL_SMOOTHING_DEFAULT);
+        ControlSmoothingSamples {
+            mute: control_smoothing_ms_to_samples(lengths.mute_ms, self.sample_rate_hz),
+            fader: control_smoothing_ms_to_samples(lengths.fader_ms, self.sample_rate_hz),
+            pan: control_smoothing_ms_to_samples(lengths.pan_ms, self.sample_rate_hz),
+        }
+    }
 }
 
 /// Renderer selection declaration, not a host capability query.

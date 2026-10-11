@@ -71,6 +71,26 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
         );
     }
 
+    // The live-ramp lengths (#1054): the parser's domain, kept here for a model that was built
+    // rather than parsed.
+    if let Some(lengths) = &session.control_smoothing {
+        let path = root.key("control_smoothing");
+        for (key, value) in [
+            ("mute_ms", lengths.mute_ms),
+            ("fader_ms", lengths.fader_ms),
+            ("pan_ms", lengths.pan_ms),
+        ] {
+            if !(0.0..=crate::CONTROL_SMOOTHING_MS_MAXIMUM).contains(&value) {
+                error(
+                    &mut diagnostics,
+                    DiagnosticCode::NumericOutOfSchemaRange,
+                    &path.key(key),
+                    "control_smoothing lengths must be finite and in [0, 1000] ms",
+                );
+            }
+        }
+    }
+
     // One pass establishes uniqueness and builds every global cross-reference index.
     let sources_path = root.key("sources");
     let mut sources = HashMap::with_capacity(session.sources.len());

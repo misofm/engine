@@ -109,6 +109,7 @@ export interface SessionModel extends ModelRecord {
   readonly tracks: readonly ModelRecord[];
   readonly submixes: readonly ModelRecord[];
   readonly vcas: readonly ModelRecord[];
+  readonly control_smoothing: ModelRecord;
   readonly outputs: readonly ModelRecord[];
   readonly routes: readonly ModelRecord[];
   readonly automation: readonly ModelRecord[];
@@ -1698,6 +1699,9 @@ function normalize(state: BuilderState): SessionModel {
     tracks,
     submixes,
     vcas,
+    // #1054: every session says its live-ramp lengths. The builder writes the researched default
+    // table until #1364 lets an author set lengths.
+    control_smoothing: { kind: "default" },
     outputs,
     routes,
     automation,

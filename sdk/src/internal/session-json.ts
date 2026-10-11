@@ -23,6 +23,7 @@ const ROOT_KEYS = [
   "tracks",
   "submixes",
   "vcas",
+  "control_smoothing",
   "outputs",
   "routes",
   "automation",
@@ -63,6 +64,9 @@ const FLOAT_KEYS: ReadonlySet<string> = new Set([
   "value",
   "start_value",
   "end_value",
+  "mute_ms",
+  "fader_ms",
+  "pan_ms",
 ]);
 
 const OBJECT_KEY_ORDERS = {
@@ -98,6 +102,10 @@ function taggedOrder(record: ModelRecord, key: string): readonly string[] {
     if (kind === "none") return ["kind"];
     if (kind === "routed") return ["kind", "source", "port_id"];
   }
+  if (key === "control_smoothing") {
+    if (kind === "default") return ["kind"];
+    if (kind === "explicit") return ["kind", "mute_ms", "fader_ms", "pan_ms"];
+  }
   if (key === "source") {
     if (kind === "track") return ["kind", "track_id", "tap"];
     if (kind === "submix") return ["kind", "submix_id", "tap"];
@@ -127,7 +135,7 @@ function objectOrder(record: ModelRecord, key: string): readonly string[] {
     return "pre_insert" in record ? ["pre_insert", "post_insert"] : ["slot", "bypass", "params"];
   }
   if (key === "left" || key === "right") return OBJECT_KEY_ORDERS.channel_builtins;
-  if (["identity", "sidechain", "source", "destination"].includes(key)) {
+  if (["identity", "sidechain", "source", "destination", "control_smoothing"].includes(key)) {
     return taggedOrder(record, key);
   }
   const order = OBJECT_KEY_ORDERS[key as keyof typeof OBJECT_KEY_ORDERS];
