@@ -20,24 +20,134 @@ use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
 
-/// Check the boundaries of `regions`, the regions of `source`, which parsed as `file`.
+/// A file's leaves and container layout, and the innermost container of each of its markers.
+pub(crate) struct Boundaries {
+    leaves: Leaves,
+    layout: Layout,
+    /// The innermost container of each marker in source order: each region's begin, then its end.
+    innermost: Vec<usize>,
+}
+
+impl Boundaries {
+    /// Lay out `file`, which parsed from `source`, against the markers of `regions`.
+    pub(crate) fn new(source: &Source, file: &syn::File, regions: &[Region]) -> Self {
+        let leaves = Leaves::new(&source.tokens);
+        let layout = Layout::of(file, &leaves);
+        let lines: Vec<usize> = regions
+            .iter()
+            .flat_map(|region| [region.begin, region.end])
+            .collect();
+        let innermost = layout.innermost_containers(&lines);
+        Self {
+            leaves,
+            layout,
+            innermost,
+        }
+    }
+
+    /// The first token position at or after `position` once the outer attributes that start there
+    /// are skipped; `position` itself when there is no token.
+    pub(crate) fn after_attributes(&self, position: LineColumn) -> LineColumn {
+        self.leaves
+            .after_attributes(position)
+            .map_or(position, |leaf| leaf.start)
+    }
+
+    /// How many times the identifier `name` (a raw identifier is its bare name) is a token that
+    /// starts in `from..to`, in whatever role: a use, a binding, a field, a method.
+    pub(crate) fn words_in(&self, name: &str, from: (usize, usize), to: (usize, usize)) -> usize {
+        let first = self
+            .leaves
+            .all
+            .partition_point(|leaf| key(leaf.start) < from);
+        self.leaves.all[first..]
+            .iter()
+            .take_while(|leaf| key(leaf.start) < to)
+            .filter(|leaf| matches!(&leaf.kind, Kind::Word(word) if word.strip_prefix("r#").unwrap_or(word) == name))
+            .count()
+    }
+
+    /// The nodes of region number `index` (A2-D1): the maximal children of the file's containers
+    /// whose extent lies wholly between its markers. A region with a marker in a macro token tree
+    /// is tokens, not syntax: it has no nodes.
+    pub(crate) fn region_nodes(&self, index: usize, region: &Region) -> RegionNodes {
+        let (begin, end) = (self.innermost[2 * index], self.innermost[2 * index + 1]);
+        let tokens_only =
+            self.layout.containers[begin].macro_tree || self.layout.containers[end].macro_tree;
+        let (begin_at, end_at) = (
+            key(marker_position(region.begin)),
+            key(marker_position(region.end)),
+        );
+        let mut inside: Vec<((usize, usize), (usize, usize))> = Vec::new();
+        if !tokens_only {
+            for container in self.layout.containers.iter().filter(|c| !c.macro_tree) {
+                let first = container
+                    .children
+                    .partition_point(|child| key(child.start) <= begin_at);
+                inside.extend(
+                    container.children[first..]
+                        .iter()
+                        .take_while(|child| key(child.start) < end_at)
+                        .filter(|child| key(child.end) < end_at)
+                        .map(|child| (key(child.start), key(child.end))),
+                );
+            }
+        }
+        // The widest first at each start, so a node inside an earlier one is skipped.
+        inside.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+        let mut nodes: Vec<((usize, usize), (usize, usize))> = Vec::new();
+        for node in inside {
+            if nodes.last().is_none_or(|last| last.1 <= node.0) {
+                nodes.push(node);
+            }
+        }
+        RegionNodes {
+            begin: begin_at,
+            end: end_at,
+            tokens_only,
+            nodes,
+        }
+    }
+}
+
+/// The nodes of one region (A2-D1): its maximal syntax nodes, or nothing when the region is
+/// tokens of a macro's token tree.
+pub(crate) struct RegionNodes {
+    begin: (usize, usize),
+    end: (usize, usize),
+    tokens_only: bool,
+    /// The maximal nodes' extents, sorted, from the first token after attributes to the end.
+    nodes: Vec<((usize, usize), (usize, usize))>,
+}
+
+impl RegionNodes {
+    /// True when a marker sits in a macro token tree, so the region has no syntax tree.
+    pub(crate) fn is_tokens(&self) -> bool {
+        self.tokens_only
+    }
+
+    /// Whether `start..end` is one of the region's maximal nodes.
+    pub(crate) fn is_node(&self, start: (usize, usize), end: (usize, usize)) -> bool {
+        self.nodes
+            .binary_search_by(|node| node.0.cmp(&start))
+            .is_ok_and(|index| self.nodes[index].1 == end)
+    }
+
+    /// Whether `start..end` lies wholly between the markers.
+    pub(crate) fn holds(&self, start: (usize, usize), end: (usize, usize)) -> bool {
+        self.begin < start && end < self.end
+    }
+}
+
+/// Check the boundaries of `regions`, the regions of `source`.
 pub(crate) fn check(
     source: &Source,
-    file: &syn::File,
+    boundaries: &Boundaries,
     regions: &[Region],
     findings: &mut Vec<Finding>,
 ) {
-    if regions.is_empty() {
-        return;
-    }
-    let leaves = Leaves::new(&source.tokens);
-    let layout = Layout::of(file, &leaves);
-    // The markers in source order: each region's begin, then its end.
-    let lines: Vec<usize> = regions
-        .iter()
-        .flat_map(|region| [region.begin, region.end])
-        .collect();
-    let innermost = layout.innermost_containers(&lines);
+    let layout = &boundaries.layout;
+    let innermost = &boundaries.innermost;
     for (index, region) in regions.iter().enumerate() {
         let (begin, end) = (innermost[2 * index], innermost[2 * index + 1]);
         for (line, container) in [(region.begin, begin), (region.end, end)] {
@@ -63,6 +173,17 @@ pub(crate) fn check(
     }
 }
 
+/// The extent of a child: from its first token after its outer attributes to its end. `None`
+/// for a node with no tokens.
+fn extent(leaves: &Leaves, node: &impl Spanned) -> Option<(LineColumn, LineColumn)> {
+    let span = node.span();
+    if span.start().line == 0 {
+        return None;
+    }
+    let first = leaves.after_attributes(span.start())?;
+    (key(first.start) < key(span.end())).then_some((first.start, span.end()))
+}
+
 /// A position as a sortable pair.
 fn key(position: LineColumn) -> (usize, usize) {
     (position.line, position.column)
@@ -75,7 +196,7 @@ fn marker_position(line: usize) -> LineColumn {
 }
 
 /// A file's leaf tokens in source order, with the closing delimiter of every opening one.
-struct Leaves {
+pub(crate) struct Leaves {
     all: Vec<Leaf>,
     /// `close[i]` is the index of the closing delimiter of the opening delimiter `all[i]`.
     close: Vec<usize>,
@@ -232,20 +353,8 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    /// The extent of a child: from its first token after its outer attributes to its end. `None`
-    /// for a node with no tokens.
-    fn extent(&self, node: &impl Spanned) -> Option<(LineColumn, LineColumn)> {
-        let span = node.span();
-        if span.start().line == 0 {
-            return None;
-        }
-        let first = self.leaves.after_attributes(span.start())?;
-        (key(first.start) < key(span.end())).then_some((first.start, span.end()))
-    }
-
     fn child(&self, node: &impl Spanned, name: &'static str) -> Option<Child> {
-        self.extent(node)
-            .map(|(start, end)| Child { start, end, name })
+        extent(self.leaves, node).map(|(start, end)| Child { start, end, name })
     }
 
     fn push(&mut self, open: LineColumn, close: LineColumn, children: Vec<Child>) {

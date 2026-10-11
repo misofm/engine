@@ -1,5 +1,6 @@
-//! Checks the marked realtime regions, the C ABI's whole-plan rule and the unsafe-ownership
-//! boundary of the workspace from Rust's own lexer and syntax tree.
+//! Checks the marked realtime regions (their boundaries, forbidden spellings and `try_pop` drains),
+//! the C ABI's whole-plan rule and the unsafe-ownership boundary of the workspace from Rust's own
+//! lexer and syntax tree.
 //!
 //! [`check`] walks `crates`, `hosts` and `tools` under a workspace root and returns a [`Report`].
 //! [`run`] is the binary's whole behaviour with its environment passed in. [`Policy`] holds the
@@ -10,6 +11,7 @@
 
 mod boundary;
 mod cli;
+mod drain;
 mod forbidden;
 mod leaf;
 mod markers;
@@ -60,7 +62,11 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         if (markers.mentions_marker || source.path == whole_plan::CAPI_FFI)
             && let Some(file) = syntax::parse(&source, &mut findings)
         {
-            boundary::check(&source, &file, &markers.regions, &mut findings);
+            if !markers.regions.is_empty() {
+                let boundaries = boundary::Boundaries::new(&source, &file, &markers.regions);
+                boundary::check(&source, &boundaries, &markers.regions, &mut findings);
+                drain::check(&source, &file, &boundaries, &markers.regions, &mut findings);
+            }
             if source.path == whole_plan::CAPI_FFI {
                 capi_ffi = Some((source, file));
             }

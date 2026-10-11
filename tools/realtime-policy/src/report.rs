@@ -42,6 +42,8 @@ pub enum Class {
     RegionSplitsMacroTree,
     /// A marked region holds a forbidden spelling.
     ForbiddenBody,
+    /// A `try_pop` in a marked region that the drain rule cannot prove bounded.
+    UnboundedTryPop,
     /// `crates/capi/src/ffi.rs` does not exist.
     MissingCapiFfi,
     /// `crates/capi/src/ffi.rs` has no production render entry point.
@@ -76,6 +78,9 @@ impl fmt::Display for Class {
             Self::RegionSplits(node) => write!(out, "region boundary splits {node}"),
             Self::RegionSplitsMacroTree => out.write_str("region boundary splits a macro token tree"),
             Self::ForbiddenBody => out.write_str("marked realtime forbidden-body predicate"),
+            Self::UnboundedTryPop => out.write_str(
+                "marked realtime unbounded try_pop drain (bound it with available_at_entry)",
+            ),
             Self::MissingCapiFfi => write!(out, "missing {}", whole_plan::CAPI_FFI),
             Self::NoRenderEntry => out.write_str("has no production render entry point to scan"),
             Self::WholePlanReference => out.write_str(

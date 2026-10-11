@@ -6,6 +6,7 @@
 mod binary;
 mod boundary;
 mod common;
+mod drain;
 mod forbidden;
 mod markers;
 mod run;
