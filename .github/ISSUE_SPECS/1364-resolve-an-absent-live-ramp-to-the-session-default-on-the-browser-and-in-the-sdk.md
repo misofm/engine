@@ -187,3 +187,110 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 
 *Refuse automation on effect parameters that are not block-rate* (#1335) edits
 `sdk/src/core/session.ts` too. Land after it, or rebase.
+
+## Attempt record
+
+**Attempt 1** (implementer, branch `codex/d15-stream-e2`, base `5abf225f2`, the end of #1394). Commits in
+deliverable order: D1/D2 with the `LiveRamps` move and the gate 1 tests (`11269ef80`), D3/D4 with the SDK
+evals and the shipped declaration (`d0439731d`), the parity test with its dev-dependencies
+(`751523524`), then the realtime-policy allowlist row and this record.
+
+**Where the spec and the tree differed (recorded, not improvised around).**
+
+1. *`LiveRamps` was not reachable from host-web.* It lived in `host-core`'s `live_delta` module, which is
+   behind the `control-provider` feature (that feature pulls `protocol` and the classifier into the
+   crate). Enabling it for host-web would link both into the browser module. `LiveRamps` and
+   `LiveRampRow` moved unchanged to a new ungated `crates/host-core/src/live_ramps.rs` and are
+   re-exported at the same names; `live_delta.rs` imports them. No logic moved or changed.
+2. *The shipped declaration has two copies.* `scripts/check-sdk-generated.sh` requires
+   `sdk/src/browser/shipped-host.d.ts` to equal `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+   byte for byte, so the docs-only edit the spec authorizes in the SDK copy is made in the origin too.
+3. *Gate 1, input filters.* A sentinel on a bypass record is refused end to end through
+   `submit_commands`. A plain `submit_commands` refuses an input-filter record as `UNSUPPORTED_KIND`
+   before it reads the word (only a prepared submission reaches the shape check), so the test checks the
+   kind at the decode level: the sentinel survives `with_session_ramp` for input filters, bypass, effect
+   parameter and both observation kinds, and `into_input_filter_edit` refuses it as `MALFORMED` while the
+   same record with 0 is well formed.
+4. *The `follows_mute` row* is a record the follow pass builds from the strip mute record that moved the
+   send, not a wire kind. It has its own test (`a_followed_mute_send_ramps_over_the_resolved_mute_length`):
+   it takes the resolved mute length, 240 at `mute_ms` 5.
+5. *Gate 4.* The existing host-web allocation gates pass. They do not send a sentinel record, so a new test
+   (`resolving_a_sentinel_allocates_nothing`, `ffi::live_response_ffi_tests::measured`) admits one record of
+   each of the twelve kinds and asserts 0 allocations and 0 frees.
+6. *The per-strip pan windows are charged.* `SessionRamps::strip_pan` (4 bytes per strip) is retained
+   bridge state, so `compile_ready` adds it to the bridge metadata and retained rows with the VCA state.
+   The two exact-sum tests that predict those rows (`decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_meters`,
+   `effect_control_browser_table_and_payload_reach_exact_budget_gate`) gained a `ramp_table_bytes` term. The
+   browser expected-resources budgets and `expected.json` are unchanged (every row within its ceiling).
+7. *Parity scope.* The browser keeps the pan window the session prepared; it has no committed model to
+   change it (#1382 moves admission to the committed model). The C ABI keeps the committed model's window.
+   The test's pan edit therefore carries the window the track was prepared with. A C ABI pan edit that
+   changes `smoothing_samples` has no browser counterpart until #1382.
+8. *Effect parameter and observation records* carry the word unchanged, as before: the parameter path never
+   reads it and the observation path reads it as a window in blocks. The SDK never writes the sentinel there.
+
+**Files outside the authorized list (compiler- or gate-forced).** `crates/host-core/src/{live_ramps.rs,
+live_delta.rs,lib.rs}` (item 1); `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` (item 2);
+`tools/realtime-policy/src/policy.rs` and `docs/REALTIME_DEPENDENCY_POLICY.md` (the parity test calls the exported
+C entries, so it is an `unsafe` file; one `UNSAFE_ALLOWLIST` entry and its "Unsafe-code ownership" entry); `Cargo.lock` and `hosts/host-web/Cargo.toml` (`capi` as the spec says, and
+`protocol` for the test's command frames, both dev-dependencies only).
+
+**What changed.** `SESSION_DEFAULT_RAMP` (`u32::MAX`) and `SessionRamps` (`LiveRamps::for_session` plus one
+pan window per strip, built once in `compile_ready`); `CommandRecord::with_session_ramp` runs right after
+decode, by kind, for the twelve ramped kinds, before any shape check; a pan or matrix record takes its
+strip's window, else `pan_ms`; a send matrix takes `pan_ms`. SDK: `SESSION_DEFAULT_RAMP`, `smoothing()`
+returns it for an absent length and throws on `4294967295`; `ControlSmoothingOptions` /
+`SessionOptions.controlSmoothing` emit `{ kind: "explicit", mute_ms, fader_ms, pan_ms }`, checked as finite
+`f32` in `[0, 1000]`; the strict authoring request takes a root `controlSmoothing`. Three existing evals
+that compared a literal 0 for an absent length now say `smoothingSamples: 0` (the send edit, the VCA edit
+and the left-lane VCA mute); the absent case has its own eval.
+
+**Digests that moved: none.** `audit capi` `pcm_digest a9738fa800afcab3`, 0 allocations, 0 syscalls;
+`check-browser-expected-resources.py --artifacts` green with no edit (32 red mutations); no render digest,
+fixture or byte pin moved, and none was re-pinned.
+
+**Test value and mutation runs** (defect applied by a text edit, test run, file restored; "R" red).
+
+| Test | Plausible defect (mutation) | Result |
+|---|---|---|
+| `an_absent_ramp_resolves_to_the_sessions_row_and_a_given_one_is_kept` (gate 1) | trim arm removed; polarity on the fader key; polarity at the plain mute length; solo on the fader key; send gain on the mute key; VCA mute on the fader key; a finite word replaced; the session table ignored | R each (8 runs) |
+| `a_followed_mute_send_ramps_over_the_resolved_mute_length` | the follow record built with a step; the session table ignored | R, R |
+| `a_pan_or_matrix_without_a_length_takes_its_strips_window` | strip windows ignored; window read from strip 0; a send matrix reading a strip window; a window-less strip falling back to the fader length; a finite word replaced | R each |
+| `the_kinds_without_a_ramp_keep_the_sentinel_and_refuse_it` | every kind resolved (`_ => Mute`) | R |
+| `resolving_a_sentinel_allocates_nothing` | one boxed value built per record in `with_session_ramp` | R |
+| `control_smoothing_parity.rs` (gate 3) | strip windows ignored; a window-less strip at `pan_ms + 1`; the window taken even when 0; fader on the mute key; mute on the fader key; sentinel never resolved; the table rounded at 48 kHz at every rate | R each (7 runs) |
+| SDK `every ramped builder method writes the session-default marker...` | `smoothing()` defaults to 0; the marker constant off by one | R, R |
+| SDK `the kinds that carry no ramp still write 0` | `trackEdit` defaults to the marker | R |
+| SDK `the marker is not a length` | the marker accepted as an explicit length | R |
+| SDK `a fader move without a length ramps over the session's fader length...` (through the shipped module) | `smoothing()` defaults to 0 | R |
+| builder-evals `explicit controlSmoothing round-trips...` / `omitted ... default` / `refused at its path` | the option dropped; an unset option written as `explicit`; upper bound 1001; lower bound dropped; a missing key tolerated | R each |
+| builder-evals strict request | the request key dropped; two lengths swapped | R, R |
+
+Which defect each new test catches that no existing test does: gate 1, a kind that skips resolution, a row
+on the wrong key (polarity on the fader key is told apart only by the non-default table) or a pan that
+ignores its strip's window (no test sent a sentinel before); the follow test, a send follow record that does
+not take the resolved mute length; the strip-window test, the #1054 D5 precedence on the browser; the
+allocation test, a resolution that allocates per record; gate 3, two hosts that disagree on a length, a rate
+or a window (no test compares them); the SDK evals, an absent length still written as a step, and a marker
+that passes as a length. Not mutated: the engine side of the SDK's engine-level eval (the sentinel left
+unresolved in the shipped module is covered by gate 1 and the parity test at the Rust level, and a module
+rebuild per mutation was not repeated).
+
+**Gates run (final tree).** `cargo test --locked -p host-web --features test-support` and `-p capi` inside
+the `test-debug-a` leg (`--no-fail-fast`, the CI feature list: 1574 passed, 0 failed) and its doctest leg
+(24 passed); `scripts/build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh` (private `TMPDIR`, nothing left behind); `check-sdk-generated.sh`,
+`check-sdk-deletions.py`, `check-sdk-types.sh` (after an offline `npm ci`, `node_modules` deleted again),
+`check-sdk-headless.sh` (371 evals), `sdk-package.sh check`; `check-workspace-policy.sh`,
+`check-realtime-policy.sh` and `test-realtime-policy.sh`, `check-host-core-policy.sh`,
+`check-session-policy.sh`, `check-test-support-ci.py`, `check-ci-path-routing.py`, `check-cross-targets.sh`
+(PASS), `check-capi-abi.sh`, `audit capi`; `cargo clippy --locked --workspace --all-targets --all-features
+-- -D warnings`; `cargo fmt --all -- --check`. `cargo test -p host-web` without `test-support` does not
+compile its existing unit tests (they use the feature's counters); that predates this slice. Not run: the
+Chromium legs and anything AArch64-only.
+
+**Open items.** `sdk/README.md` still shows only `smoothingSamples: 64` in its live-controls example and
+says nothing about the absent-length default or `controlSmoothing`; it is outside this slice's paths. #1382
+(Worker admission) must keep the browser's strip windows in step with the committed model, which item 7
+describes. #1393 reads `LiveRamps::mute_samples` from `SessionRamps::live`.
