@@ -80,11 +80,18 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
       `pinned` and `published` a later publication made stale, does not compile. One stamp serves
       every cell write of one transaction: take it, write the cells, read `stamp.revision()` into
       a local, then publish. The cost is zero at run time (follow-ups after the follow-ups, m2).
-    - `publish` and `stamp` debug-assert that `revision` is above `last_published` and at most
-      `GATE_REVISION_MAX`. A stamp at or below a revision already published would make the
-      in-place rule below rewrite a slot render may be reading. They also debug-assert the rule
-      "publish every stamped revision before a higher one is stamped": `stamp` refuses a second
-      revision while `open` is set, and `publish` refuses a revision below `open`. `publish` also
+    - `GatePin::stamp(&mut self, revision) -> Result<LiveStamp<'_>, StampRefused>` refuses, in
+      every build, a `revision` at or below `last_published` or above `GATE_REVISION_MAX`. A
+      refused stamp changes nothing in the pin. Such a stamp would make the in-place rule below
+      rewrite a slot render may be reading. All slot fields are atomics, so the result is
+      memory-safe, but render could apply mixed words or a new sequence with old words, or lose the
+      write. The cost is two integer compares on the control thread. `PlanRevisionGate::stamp`
+      returns the same `Result`. `publish` keeps its checks as debug assertions: it is a commit's
+      last write and cannot fail. A caller publishes the revision its stamp returned, read into a
+      local, so the always-on check covers it. The open-stamp rule stays debug-only (#1312 D7):
+      breaking it leaks an abandoned value, but never a torn one. In debug builds `stamp` refuses
+      (panics on) a second revision while `open` is set, and `publish` panics on a revision below
+      `open`. `publish` also
       debug-asserts that the gate's old revision is `last_published`. That catches a pin used with
       another gate only when the two gates hold different revisions; it cannot see a wrong gate at
       the same revision (two fresh gates at 0). The real protection is that the plan's handle owns
@@ -221,8 +228,11 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
      - two writes in one revision: the read applies the second, with 1 superseded;
      - 9,999 commits after one read: one read applies the last, with 9,998 superseded, and no
        write failed;
-     - in debug builds, a stamp at or below the last published revision panics, and so does a
-       publish of one.
+     - a stamp at or below the last published revision or above `GATE_REVISION_MAX` is refused in
+       every build and changes nothing in the pin (root ruling n3), then a legal stamp, write and
+       publish apply intact; in debug builds, a publish at or below the last published revision
+       panics.
+   - Command for the release leg: `cargo test --locked --release -p engine --lib latest_cell`.
 2. **Realtime.** `bash scripts/check-realtime-policy.sh` (no `unsafe` in the new module; raise its
    floors by the regions this adds) and `bash scripts/test-realtime-policy.sh`.
 3. **Workspace.** `cargo test --locked -p engine --features realtime-audit`;
@@ -242,8 +252,11 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
 - L4: a candidate's pin not honoured across its claim (red under `protect_only_a`,
   `reader_load_not_rmw` and `reader_never_defers`).
 - The peek test: a peek that consumes.
-- The debug-panic tests: a stamp or publish at or below the last published revision, which would
-  rewrite a published slot in place.
+- The debug-panic test: a publish at or below the last published revision, which would rewrite a
+  published slot in place.
+- The refusal test (n3): a `stamp` bound that is debug-only again or removed (a release build then
+  accepts a stamp at a published revision and rewrites the slot render reads), or a refusal that
+  leaves the pin changed.
 
 ## Amendment 1 (root, 2026-10-05)
 

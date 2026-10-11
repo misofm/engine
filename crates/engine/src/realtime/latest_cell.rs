@@ -25,7 +25,9 @@
 //! A gate and its [`GatePin`] are born together ([`RevisionGate::pair`]), so a pin cannot start
 //! below, or apart from, its gate's initial revision. Control keeps one rule: it publishes each
 //! revision it stamped before it stamps a higher one. `stamp` and `publish` debug-assert it; the
-//! choice of `A` makes a violation harmless to a reader even in a release build. A
+//! choice of `A` makes a violation harmless to a reader even in a release build. `stamp` also
+//! refuses, in every build, a revision at or below the last published one or above the ceiling
+//! ([`StampRefused`]); a refusal changes nothing. A
 //! [`LiveStamp`] borrows its pin, so a stamp cannot outlive its own publication: the compiler,
 //! not a check, refuses a write with a stamp made stale by a later `publish`.
 //!
@@ -89,6 +91,16 @@ impl LiveSnapshot {
     }
 }
 
+/// A refused [`GatePin::stamp`]: the revision is at or below the last published one, or above
+/// [`GATE_REVISION_MAX`]. The pin is unchanged. It borrows nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StampRefused {
+    /// The refused revision.
+    pub revision: u64,
+    /// The pin's last published revision.
+    pub last_published: u64,
+}
+
 /// The revision a transaction commits as, and the snapshot render may still hold, as of the time
 /// control stamps it. Only [`GatePin::stamp`] makes one.
 ///
@@ -103,7 +115,7 @@ impl LiveSnapshot {
 /// let (gate, mut pin) = RevisionGate::pair(0);
 /// let (cells, dirty) = ([LatestCell::<1>::new(), LatestCell::<1>::new()], DirtyWord::new());
 /// let mut writers = [CellWriter::<1>::new(), CellWriter::<1>::new()];
-/// let stamp = pin.stamp(1);
+/// let stamp = pin.stamp(1).expect("a legal revision");
 /// for (bit, (writer, cell)) in writers.iter_mut().zip(&cells).enumerate() {
 ///     writer.write(cell, &dirty, bit as u32, stamp, [7]);
 /// }
@@ -119,7 +131,7 @@ impl LiveSnapshot {
 ///
 /// let (gate, mut pin) = RevisionGate::pair(0);
 /// let (cell, dirty, mut writer) = (LatestCell::<1>::new(), DirtyWord::new(), CellWriter::<1>::new());
-/// let stamp = pin.stamp(1);
+/// let stamp = pin.stamp(1).expect("a legal revision");
 /// writer.write(&cell, &dirty, 0, stamp, [7]);
 /// pin.publish(&gate, 1);
 /// // The stamp's `published` and `pinned` are now stale; this write would target a published slot.
@@ -276,32 +288,36 @@ impl GatePin {
     /// transaction that stamps `revision` writes all its cells and then calls `publish(revision)`;
     /// no other revision is stamped between. Cell writes choose their slot on this rule.
     ///
-    /// In debug builds, these panic: a revision at or below the last published one, or above
-    /// [`GATE_REVISION_MAX`] (the in-place rule would rewrite a slot render may be reading); and a
-    /// second revision while one is stamped and not yet published (the rule above).
-    #[must_use]
-    pub fn stamp(&mut self, revision: u64) -> LiveStamp<'_> {
-        debug_assert!(
-            revision <= GATE_REVISION_MAX,
-            "stamped revision {revision} is above the ceiling {GATE_REVISION_MAX}"
-        );
-        debug_assert!(
-            revision > self.last_published,
-            "stamped revision {revision} is not above the last published {}",
-            self.last_published
-        );
+    /// # Errors
+    ///
+    /// Refuses, in every build, a `revision` at or below the last published one or above
+    /// [`GATE_REVISION_MAX`]: the in-place rule would rewrite a slot render may be reading, and
+    /// render could apply mixed words or lose the write. A refusal changes nothing in the pin. The
+    /// cost is two integer compares on the control thread. A caller publishes the revision its
+    /// stamp returned, read into a local, so this check covers the publication too.
+    ///
+    /// In debug builds a second revision stamped while one is stamped and not yet published panics
+    /// (the rule above). That rule stays debug-only: breaking it leaks an abandoned value, never a
+    /// torn one.
+    pub fn stamp(&mut self, revision: u64) -> Result<LiveStamp<'_>, StampRefused> {
+        if revision > GATE_REVISION_MAX || revision <= self.last_published {
+            return Err(StampRefused {
+                revision,
+                last_published: self.last_published,
+            });
+        }
         debug_assert!(
             self.open.is_none_or(|open| open == revision),
             "stamped revision {revision} while revision {:?} is stamped and not yet published",
             self.open
         );
         self.open = Some(revision);
-        LiveStamp {
+        Ok(LiveStamp {
             revision,
             pinned: self.pinned,
             published: self.last_published,
             pin: PhantomData,
-        }
+        })
     }
 }
 
@@ -672,7 +688,7 @@ mod tests {
                 &self.cell,
                 &self.dirty,
                 0,
-                self.pin.stamp(revision),
+                self.pin.stamp(revision).expect("a legal revision"),
                 value_words(revision, k),
             );
         }
@@ -819,20 +835,28 @@ mod tests {
     fn the_pin_follows_the_announcement_and_survives_unannounced_publications() {
         let mut f = Fixture::new();
         f.publish(1);
-        assert_eq!(f.pin.stamp(2).pinned(), None, "no announcement yet");
+        assert_eq!(
+            f.pin.stamp(2).expect("a legal revision").pinned(),
+            None,
+            "no announcement yet"
+        );
         assert_eq!(f.gate.snapshot().revision(), 1);
         f.publish(2);
-        assert_eq!(f.pin.stamp(3).pinned(), Some(1), "render holds snapshot 1");
+        assert_eq!(
+            f.pin.stamp(3).expect("a legal revision").pinned(),
+            Some(1),
+            "render holds snapshot 1"
+        );
         f.publish(3);
         f.publish(4);
         assert_eq!(
-            f.pin.stamp(5).pinned(),
+            f.pin.stamp(5).expect("a legal revision").pinned(),
             Some(1),
             "no newer announcement, so the pin stays"
         );
         assert_eq!(f.gate.snapshot().revision(), 4);
         f.publish(5);
-        assert_eq!(f.pin.stamp(6).pinned(), Some(4));
+        assert_eq!(f.pin.stamp(6).expect("a legal revision").pinned(), Some(4));
     }
 
     #[test]
@@ -864,13 +888,33 @@ mod tests {
         let _ = RevisionGate::pair(GATE_REVISION_MAX + 1);
     }
 
-    #[cfg(debug_assertions)]
+    /// Root ruling n3 (#1432 D1): the stamp's revision bound is on in every build and a refusal
+    /// changes nothing. In a release build an unchecked stamp at the published revision would
+    /// make the in-place rule rewrite the slot render may be reading.
     #[test]
-    #[should_panic(expected = "is not above the last published")]
-    fn a_stamp_at_the_last_published_revision_panics() {
-        let mut f = Fixture::new();
-        f.publish(4);
-        let _ = f.pin.stamp(4);
+    fn a_stamp_at_or_below_the_published_revision_or_above_the_ceiling_is_refused_and_changes_nothing()
+     {
+        let (gate, mut pin) = RevisionGate::pair(5);
+        let (cell, dirty) = (LatestCell::<2>::new(), DirtyWord::new());
+        let (mut writer, mut reader, mut stage) = (
+            CellWriter::<2>::new(),
+            CellReader::new(),
+            DirtyReader::new(),
+        );
+        for revision in [5, 3, GATE_REVISION_MAX + 1] {
+            assert!(pin.stamp(revision).is_err(), "revision {revision}");
+        }
+        assert_eq!(pin.last_published(), 5);
+        // In a debug build this stamp would panic if a refusal had set `open`.
+        let stamp = pin.stamp(7).expect("a revision above the published one");
+        writer.write(&cell, &dirty, 0, stamp, value_words(7, 0));
+        pin.publish(&gate, 7);
+        let snapshot = gate.snapshot();
+        assert_eq!(stage.pending(&dirty), 1);
+        let CellRead::Applied { words, .. } = reader.read(&cell, snapshot, &mut stage, 0) else {
+            panic!("the value applies in the first block");
+        };
+        assert_eq!(words, value_words(7, 0));
     }
 
     #[cfg(debug_assertions)]
@@ -887,8 +931,8 @@ mod tests {
     #[should_panic(expected = "is stamped and not yet published")]
     fn a_second_revision_is_not_stamped_before_the_first_is_published() {
         let mut f = Fixture::new();
-        let _ = f.pin.stamp(3);
-        let _ = f.pin.stamp(4);
+        let _ = f.pin.stamp(3).expect("a legal revision");
+        let _ = f.pin.stamp(4).expect("a legal revision");
     }
 
     #[cfg(debug_assertions)]
@@ -896,7 +940,7 @@ mod tests {
     #[should_panic(expected = "is below the stamped, unpublished revision")]
     fn a_publication_below_the_stamped_revision_panics() {
         let mut f = Fixture::new();
-        let _ = f.pin.stamp(5);
+        let _ = f.pin.stamp(5).expect("a legal revision");
         f.publish(4);
     }
 
@@ -1079,7 +1123,7 @@ mod loom_tests {
                             &control_shared.cells[cell],
                             &control_shared.dirty,
                             u32::try_from(cell).expect("small"),
-                            pin.stamp(revision),
+                            pin.stamp(revision).expect("a legal revision"),
                             value_words(revision, 0),
                         );
                     }
@@ -1115,7 +1159,7 @@ mod loom_tests {
                 &shared.cells[0],
                 &shared.dirty,
                 0,
-                pin.stamp(1),
+                pin.stamp(1).expect("a legal revision"),
                 value_words(1, 0),
             );
             pin.publish(&shared.gate, 1);
@@ -1126,7 +1170,7 @@ mod loom_tests {
                         &control_shared.cells[0],
                         &control_shared.dirty,
                         0,
-                        pin.stamp(revision),
+                        pin.stamp(revision).expect("a legal revision"),
                         value_words(revision, 0),
                     );
                     pin.publish(&control_shared.gate, revision);
@@ -1160,7 +1204,7 @@ mod loom_tests {
                         &control_shared.cells[0],
                         &control_shared.dirty,
                         0,
-                        pin.stamp(revision),
+                        pin.stamp(revision).expect("a legal revision"),
                         value_words(revision, 0),
                     );
                     pin.publish(&control_shared.gate, revision);
@@ -1195,7 +1239,7 @@ mod loom_tests {
                 &shared.cells[0],
                 &shared.dirty,
                 0,
-                pin.stamp(1),
+                pin.stamp(1).expect("a legal revision"),
                 value_words(1, 0),
             );
             pin.publish(&shared.gate, 1);
@@ -1207,7 +1251,7 @@ mod loom_tests {
                             &control_shared.cells[0],
                             &control_shared.dirty,
                             0,
-                            pin.stamp(revision),
+                            pin.stamp(revision).expect("a legal revision"),
                             value_words(revision, k),
                         );
                     }
@@ -1271,7 +1315,7 @@ mod loom_tests {
                 &both.plans[0].cells[0],
                 &both.plans[0].dirty,
                 0,
-                pin_p.stamp(1),
+                pin_p.stamp(1).expect("a legal revision"),
                 value_words(1, 0),
             );
             pin_p.publish(&both.plans[0].gate, 1);
@@ -1281,7 +1325,7 @@ mod loom_tests {
                 &both.plans[1].cells[0],
                 &both.plans[1].dirty,
                 0,
-                pin_c.stamp(2),
+                pin_c.stamp(2).expect("a legal revision"),
                 value_words(2, 0),
             );
             pin_c.publish(&both.plans[1].gate, 2);
@@ -1296,7 +1340,7 @@ mod loom_tests {
                         &both.plans[1].cells[0],
                         &both.plans[1].dirty,
                         0,
-                        pin_c.stamp(revision),
+                        pin_c.stamp(revision).expect("a legal revision"),
                         value_words(revision, 0),
                     );
                     pin_c.publish(&both.plans[1].gate, revision);

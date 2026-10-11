@@ -2,6 +2,7 @@
 
 use super::{
     BufferArena, BufferArenaError, GatePin, LiveSnapshot, LiveStamp, PlanarBufferMut, RevisionGate,
+    StampRefused,
 };
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
 use core::{alloc::Layout, cell::Cell, num::NonZeroUsize, sync::atomic::AtomicUsize};
@@ -616,8 +617,14 @@ impl PlanRevisionGate {
 
     /// Stamp the writes of a transaction that commits as `revision` (#1432 `GatePin::stamp`). The
     /// stamp borrows the handle, so the revision cannot be published while a write holds it.
-    #[must_use]
-    pub fn stamp(&mut self, revision: u64) -> LiveStamp<'_> {
+    ///
+    /// # Errors
+    ///
+    /// Refuses, in every build, a revision at or below the last published one or above the gate's
+    /// ceiling, and changes nothing. A caller takes the stamp as its last fallible step, maps the
+    /// refusal to its internal-error refusal with nothing written, and publishes the stamp's
+    /// revision.
+    pub fn stamp(&mut self, revision: u64) -> Result<LiveStamp<'_>, StampRefused> {
         self.pin.stamp(revision)
     }
 

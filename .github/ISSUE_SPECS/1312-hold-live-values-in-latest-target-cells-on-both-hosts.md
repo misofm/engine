@@ -122,9 +122,12 @@ drain strip cells alike* (#1399).
       (review m2). #1432's `GatePin` checks that a stamp is above the last published revision.
   - **Where the stamp is taken (root, 2026-10-11; #1432 follow-ups m3).**
     - *The handle of a published plan* (the current epoch, a pending epoch, or the worklet's plan before
-      #1382). A live or model-only commit, and a browser admission, takes its stamp only after its last
-      fallible check. On the C ABI that is step 5, the protocol commit's predicate, which includes
-      #1503's revision bound; the stamp's revision is taken after that bound. Its first cell write comes
+      #1382). A live or model-only commit, and a browser admission, takes its stamp as its last fallible
+      step, after step 5's predicate (including #1503's bound). A refused stamp (#1432 D1) returns
+      the transaction's internal-error refusal with nothing written or pushed and no revision used.
+      A commit that publishes takes the stamp even when it writes no cell, and publishes the stamp's
+      revision. On the C ABI step 5 is the protocol commit's predicate, which includes #1503's
+      revision bound; the stamp's revision is taken after that bound. Its first cell write comes
       after the stamp. Every step from the stamp to the revision publication on that handle cannot
       fail: the cell writes, the pushes whose room was checked, the protocol commit and the owner
       commits, each an `expect` on a checked invariant. So every revision stamped on such a handle is
@@ -133,7 +136,11 @@ drain strip cells alike* (#1399).
     - *The handle of a candidate that is not yet published.* A rebuild's carry retargets (#1277 D5,
       #1280) are stamped with the structural revision `r` inside preparation, and fallible steps
       follow: the replacement peak, the pending check, `reserve_replacement`, the report table, the
-      protocol commit, and #1310 D4's checks. Render cannot reach the candidate before its publication.
+      protocol commit, and #1310 D4's checks. Render cannot reach the candidate before its publication. A rebuild stamps `r`
+      on the candidate's handle before its protocol commit, inside preparation when it writes
+      retargets. A refused stamp refuses the rebuild like any other refusal of this list. On a fresh
+      gate with `1 <= r <= GATE_REVISION_MAX` (#1503 D1, checked when the transaction is prepared),
+      it cannot be refused.
       On any refusal, the same call drops the candidate plan and its provider epoch, with the gate
       handle and the cells. A refused candidate, handle or cell is never kept, cached or reused. On
       success, `r` is published on that handle before `reservation.commit()` (#1502 D6), and nothing
@@ -143,17 +150,21 @@ drain strip cells alike* (#1399).
       on a candidate's handle before it hands that handle to the worklet. A withdrawn candidate, which
       #1310 D4 may republish, holds no open stamp, because its rebuild published `r`.
     - *The browser's revision.* The worklet takes its host-local revision after the batch's last check
-      (for example `last_published + 1`), so a refused batch uses no revision.
-    - *What checks the rule.* `GatePin`'s debug assertions check the order only: a higher revision
+      (for example `last_published + 1`), so a refused batch uses no revision. Before #1382 the
+      browser's host-local counter is not bounded by #1503's store, so the ceiling compare in `stamp`
+      is its only always-on guard; keep the ceiling in the check.
+    - *What checks the rule.* The stamp's revision bound is always on and returns a refusal, not a
+      panic (#1432 D1). Only the open-stamp rule stays debug-only. `GatePin`'s debug assertions check the order only: a higher revision
       stamped while one is open. They cannot see a cell written before a fallible check. A refused C ABI
       transaction uses no revision, so the next transaction stamps the same `r` again, which `GatePin`
       allows, and its publication would make a refused write visible (#1432: an abandoned value's leak
       is the caller's contract). Gate 2 defends that on the C ABI, and gate 9 defends it in the browser.
-      Release builds keep the debug-only check: a violation never loses an acked value, because the
-      newest published value and the pinned value stay protected (#1432 D1); its effect would be a
-      refused value that is applied, which the structure above and gates 2 and 9 prevent. An always-on
-      assert is not used: it still cannot see the same-revision leak, and on the C ABI `catch_unwind`
-      would turn a mid-commit panic into RESULT_INTERNAL on a half-committed session.
+      Release builds keep the open-stamp check debug-only: a violation never loses an acked value,
+      because the newest published value and the pinned value stay protected (#1432 D1); its effect
+      would be a refused value that is applied, which the structure above and gates 2 and 9 prevent.
+      An always-on assert is not used for it: it still cannot see the same-revision leak, and on the
+      C ABI `catch_unwind` would turn a mid-commit panic into RESULT_INTERNAL on a half-committed
+      session.
   - **The browser (review M1).** The thread that writes a plan's cells publishes on that plan's
     gate.
     - Until *Admit browser live edits in the Worker through the committed model* (#1382), the

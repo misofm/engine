@@ -68,7 +68,9 @@ then structural edit" (D15-7, carry then retarget).
     own dirty cells at block entry. So the record applies on the swap block's first sample, exactly
     where a live edit written to the predecessor just before the swap would apply.
   - A cell write cannot fail. There is no room check, and preparation gains no failure and never
-    returns BACKPRESSURE for a retarget (D15-2). No ack precedes a drop: every fallible step of
+    returns BACKPRESSURE for a retarget (D15-2), except the stamp's refusal (#1432 D1). A fresh
+    candidate gate cannot return it. If it is returned, it fails the rebuild with the internal
+    refusal, and the candidate is dropped (#1312 D7). No ack precedes a drop: every fallible step of
     preparation runs before the writes, and the transaction commits after them.
   - The retargets are written exactly once, at preparation, before the transaction commits. Nothing
     writes them again: not at publication, not at adoption. A live edit committed after the
