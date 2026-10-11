@@ -338,3 +338,65 @@ Test value: `a_strip_behind_an_effect_still_carries_at_eight_lanes` catches a ch
 stops at an effect slot, which no effect-free session shows (found first by capi's double-live
 oracle). The `a_retarget_leaves_its_revision_open_*` draft was deleted: the engine test already
 catches the only defect that could turn it red.
+
+### Attempt 3
+
+Fixes for the attempt 2 verdict (FAIL: BLOCKER 1, MAJOR 2, MINOR 3), on top of `9994001ad`.
+
+- **BLOCKER 1, `cargo doc`.** `live_delta.rs`'s classifier doc linked `checked_fader_gain` and
+  `lower_matrix_or_pan` by bare name; attempt 2 moved their imports away. The links now use their
+  crate paths (`builtins::`, `builtins_compiler::`).
+- **MAJOR 2, a followed mute is prepared (D3).** The classifier refuses a mute change on a track that
+  a `follows_mute` route sends from (`LiveRebuild::FollowedMute`), so by D3 the difference is
+  prepared. `prepare.rs` now owns one predicate, `followed_mute_changes`, beside `fader_records`;
+  the classifier calls it (its private `follows_mute_from` is deleted, so nothing is duplicated)
+  and so does `join_strips`. A strip it refuses carries neither stage and is in
+  `restarted_strips()`, with no retarget written.
+  - Audit of the other `LiveRebuild` refusals the classifier can return for this family:
+    `Vca` is `vca_in_play`; `Structure` (track set) is a strip with no counterpart; a submix strip
+    has no live family; `Domain` (a fader dB refused by `checked_fader_gain`, a pan/matrix refused
+    by `lower_matrix_or_pan`) was already `Prepared` for the family that errs. One gap: the
+    classifier refuses a strip as a whole, so an error in one family leaves the other family with
+    no record too, while the join could still carry the other family live. The join now makes both
+    families of a strip prepared when either errs or the mute is followed. A compiled session
+    cannot hold an out-of-domain value, so the `Domain` branch has no test; the shared
+    `followed_mute_changes` branch has the new gate. The remaining refusals (`PreparedBypass`,
+    `Prepared`, `AutomationTarget`) concern effect instances and automation, not this family.
+  - A decision recorded here: the refusal is per strip, so the strip's matrix stage also starts at
+    rest when the mute is followed and its pan changes in the same transaction. That is the
+    classifier's own whole-strip result.
+  - D7 note (verdict NIT 5): a change of the matrix's smoothing window alone is no record
+    (`matrix_record`), so a carried matrix stage keeps the predecessor's window; every retarget
+    passes its own, so this is inert. The `join_strips` doc says so.
+- **MINOR 3, realtime floors.** Under STREAMS' standing exception (the awk gate's two floor lines
+  and the self-test's pad), `scripts/check-realtime-policy.sh` now requires 111 marked regions (27
+  files unchanged), re-measured on this tree; `scripts/test-realtime-policy.sh` pads one file to
+  29 regions so the fixture sits exactly on the floors, and its floor message follows. The edit is
+  named here; no other policy edit.
+- **MINOR 4.** The two tests in `crates/engine/src/realtime/mod.rs` stay where they are; root is
+  asked for a named exception.
+
+Gate (new): `a_followed_mute_change_restarts_the_stage_at_{four,eight}_lanes` (both forms). A
+nine-track session with `eq0` sent through a submix by a `follows_mute` route; B adds a muted track
+and mutes `eq0`. `restarted_strips()` is exactly `[eq0]` and the swap block onward equals a fresh
+B; the control (the same change with `follows_mute: false`) is live, carries and restarts nothing.
+Test value: catches a join that treats a followed mute as live, whose restart set would then omit
+the strip that #1324 must duck-swap, and whose carried stage would ramp the mute (once #1054 gives
+mutes a ramp) while the following route steps.
+
+Mutation evidence: the join's `followed_mute_changes` guard disabled (`|| true`): both new tests red
+(`restarted` is `[]`, expected `["eq0"]`); reverted: green.
+
+Gates run (all green): every run step of the `lint` job of `qualification.yml` in order (31 steps:
+fmt, clippy `--all-features -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked
+--workspace --no-deps`, workspace/realtime/lane/rack/effect policies and their mutation tests, and
+the rest); gate 7: `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core
+--features builtins-compiler/test-support,graph/test-support,host-core/test-support`,
+`cargo test --locked -p capi`, `cargo test --locked -p console-workload`, release `audit` with
+`trace-builtins-audit.sh` and `trace-builtins-graph-audit.sh` (PASS), `check-realtime-policy.sh`
+(111 regions in 27 files), `check-workspace-policy.sh`, `check-cross-targets.sh` (PASS), fmt and
+clippy; also `check-capi-abi.sh`, `target/release/audit capi` (0 allocations, 0 syscalls),
+`cargo test -p engine --lib`, `cargo test -p control-plane --features test-support`, and the
+worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+`test-web-audioworklet.sh` with a private TMPDIR, empty afterwards). AArch64 runs in CI only.
