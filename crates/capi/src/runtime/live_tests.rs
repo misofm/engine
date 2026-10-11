@@ -701,6 +701,157 @@ fn a_live_mute_under_an_explicit_zero_is_the_muted_control_from_the_first_block(
     }
 }
 
+/// `edits` with every fader edit's `ramp_samples` set to `ramp` (#1394).
+fn with_ramp(edits: Vec<SessionEdit>, ramp: Option<u32>) -> Vec<SessionEdit> {
+    edits
+        .into_iter()
+        .map(|mut edit| {
+            let SessionEdit::SetTrackFader { ramp_samples, .. } = &mut edit else {
+                panic!("a fader edit");
+            };
+            *ramp_samples = ramp;
+            edit
+        })
+        .collect()
+}
+
+impl Rig {
+    /// [`Rig::step`] with the calling thread's allocator events inside the `render` call.
+    fn step_counted(&mut self) -> (Vec<f32>, bench_support::alloc::Counters) {
+        let [left, right] = source_chunk(self.fed, self.quantum);
+        submit_c(
+            self.session,
+            self.generation,
+            self.fed,
+            self.rate,
+            &left,
+            &right,
+            false,
+        );
+        self.fed += self.quantum as u64;
+        self.render_counted()
+    }
+}
+
+/// Gate 6 (#1394). On a playing session with the default table, a mute transaction whose edits
+/// carry `ramp_samples = 0` is bit-identical to a control booted muted from the first block. The
+/// same edit with `ramp_samples = 96` equals neither control on the first block and equals the
+/// muted control from the first block that begins 96 frames or more after the commit. A following
+/// transaction with no length ramps over the session's 480 again: no block that begins before 480
+/// frames equals the unmuted control, the first that begins at 480 does. Every ramp block renders
+/// with no allocation.
+///
+/// Test value: red if `commit_live` passes no edit ramps (the 0 would ramp over 480 and the 96 over
+/// 480), if an explicit 0 is read as "default", or if a length leaks into the next transaction (the
+/// unmute would settle after 96 frames).
+#[test]
+fn a_live_edits_own_ramp_length_overrides_the_session_and_does_not_outlive_its_transaction() {
+    bench_support::alloc::assert_installed();
+    let (document, muted_document) = mute_ramp_documents(None);
+    let model = parse_session_json(&document).expect("model");
+    assert_eq!(
+        model.control_smoothing_samples().mute,
+        480,
+        "the default table"
+    );
+    let warmed = |document: &str| {
+        let mut rig = Rig::new(document);
+        assert_eq!(rig.latency(), 0, "no latency: a mute lands at the fader");
+        let mut unmuted = Reference::new(document);
+        let mut muted = Reference::new(&muted_document);
+        for _ in 0..4 {
+            assert_eq!(bits(&rig.step()), bits(&unmuted.step()), "warm-up");
+            muted.step();
+        }
+        (rig, unmuted, muted)
+    };
+
+    // An explicit 0 on the edit steps it, though the session says 480.
+    let (mut rig, mut unmuted, mut muted) = warmed(&document);
+    assert_eq!(
+        rig.apply(&with_ramp(mute_all(&model, true), Some(0))),
+        crate::RESULT_OK
+    );
+    for offset in 0..3 {
+        let live = rig.step();
+        assert!(unmuted.step().iter().any(|sample| *sample != 0.0));
+        assert_eq!(
+            bits(&live),
+            bits(&muted.step()),
+            "block {offset} after an explicit 0 is the muted control"
+        );
+    }
+
+    // 96 frames: neither control on the first block, the muted control once 96 frames are past.
+    let (mut rig, mut unmuted, mut muted) = warmed(&document);
+    let quantum = rig.quantum as u64;
+    assert_eq!(
+        rig.apply(&with_ramp(mute_all(&model, true), Some(96))),
+        crate::RESULT_OK
+    );
+    for offset in 0..4_u64 {
+        let (live, used) = rig.step_counted();
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "ramp block {offset} allocated or freed"
+        );
+        let (loud, quiet) = (unmuted.step(), muted.step());
+        if offset * quantum < 96 {
+            assert_ne!(
+                bits(&live),
+                bits(&loud),
+                "block {offset} has left the unmuted control"
+            );
+            assert_ne!(
+                bits(&live),
+                bits(&quiet),
+                "block {offset} has not reached the muted control"
+            );
+        } else {
+            assert_eq!(
+                bits(&live),
+                bits(&quiet),
+                "block {offset} begins 96 frames or more after"
+            );
+        }
+    }
+
+    // The next transaction carries no length: the session's 480 again, not the previous 96.
+    assert_eq!(
+        rig.apply(&with_ramp(mute_all(&model, false), None)),
+        crate::RESULT_OK
+    );
+    let settled = 480_u64.div_ceil(quantum);
+    assert!(
+        settled > 96_u64.div_ceil(quantum) + 1,
+        "480 and 96 frames settle in different blocks"
+    );
+    for offset in 0..settled + 2 {
+        let (live, used) = rig.step_counted();
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "unmute block {offset} allocated or freed"
+        );
+        let (loud, _) = (unmuted.step(), muted.step());
+        if offset * quantum < 480 {
+            assert_ne!(
+                bits(&live),
+                bits(&loud),
+                "block {offset} begins {} frames after the commit and is still ramping",
+                offset * quantum
+            );
+        } else {
+            assert_eq!(
+                bits(&live),
+                bits(&loud),
+                "block {offset} begins 480 frames or more after"
+            );
+        }
+    }
+}
+
 /// How gate 2's run mutes every other track.
 #[derive(Clone, Copy, PartialEq)]
 enum Mute {
@@ -720,10 +871,17 @@ enum Mute {
 fn persistence_run(mute: Mute) -> Vec<Vec<f32>> {
     // A hard switch (#1054 D6): the live mute steps one block before the rebuild and the baked
     // mute is the rebuild's own retarget, so with a ramp the two would start it a block apart.
-    let document = long_session_with(10, 48_000, HARD_SWITCH);
-    let mut rig = Rig::new(&document);
-    let model = parse_session_json(&document).expect("model");
-    let muted: Vec<SessionEdit> = mute_all(&model, true).into_iter().step_by(2).collect();
+    rebuild_run(&long_session_with(10, 48_000, HARD_SWITCH), mute, None)
+}
+
+/// [`persistence_run`] on `document`, with `ramp` as the `ramp_samples` of the mute edits.
+fn rebuild_run(document: &str, mute: Mute, ramp: Option<u32>) -> Vec<Vec<f32>> {
+    let mut rig = Rig::new(document);
+    let model = parse_session_json(document).expect("model");
+    let muted: Vec<SessionEdit> = with_ramp(
+        mute_all(&model, true).into_iter().step_by(2).collect(),
+        ramp,
+    );
     for _ in 0..3 {
         rig.step();
     }
@@ -779,6 +937,33 @@ fn a_live_mute_survives_a_later_rebuild() {
         "the unmuted half plays"
     );
     assert_ne!(live, unmuted, "the mute is audible after the rebuild");
+}
+
+/// #1394 D6 on a rebuild: the plan a content edit rebuilds carries each strip and retargets it to
+/// the transaction's values, over the length the transaction's own edit gave (an explicit 0 steps),
+/// else the session's. On the default session (mute 480 samples), a rebuild whose mute edits say
+/// `ramp_samples` 0 sounds exactly like the same rebuild on a session that steps every ramp; the
+/// same edits with no length ramp, and sound otherwise.
+///
+/// Test value: red if the control plane prepares the successor without the transaction's edit
+/// ramps (`SuccessorBase::edit_ramps`): the explicit 0 would ramp over the session's 480 and differ
+/// from the step. The host-core join test cannot see that, and the live-path test never rebuilds.
+#[test]
+fn a_rebuilds_carried_strip_retargets_over_its_edits_own_ramp() {
+    let blocks = |run: Vec<Vec<f32>>| run.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>();
+    let default_session = long_session(10, 48_000);
+    let step_session = long_session_with(10, 48_000, HARD_SWITCH);
+    let stepped = blocks(rebuild_run(&step_session, Mute::Baked, None));
+    let explicit_zero = blocks(rebuild_run(&default_session, Mute::Baked, Some(0)));
+    let session_ramp = blocks(rebuild_run(&default_session, Mute::Baked, None));
+    assert_eq!(
+        explicit_zero, stepped,
+        "an explicit 0 on the edit steps the carried strip's retarget, whatever the session says"
+    );
+    assert_ne!(
+        session_ramp, stepped,
+        "with no length the same retarget ramps over the session's"
+    );
 }
 
 fn left_db_edit(track_id: &str, left_db: f32) -> SessionEdit {

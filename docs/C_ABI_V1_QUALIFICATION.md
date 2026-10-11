@@ -342,7 +342,16 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   changes ramp over the session's `control_smoothing` (#1054): its `fader_ms`, `mute_ms` and
   `pan_ms`, or the researched default table (20, 10 and 20 ms) when the session says `default`,
   rounded at the session's sample rate; an explicit 0 is a step. A pan or matrix record whose
-  committed model carries its own non-zero `smoothing_samples` uses that window instead. Editing
+  committed model carries its own non-zero `smoothing_samples` uses that window instead. A live
+  edit may carry its own length (#1394): the optional `ramp_samples` of `SetTrackFader` and
+  `SetTrackMatrixOrPan` overrides the session's length for the records that edit writes -- the
+  fader and mute records, or the matrix record, which it also puts ahead of a model window --
+  and an explicit 0 steps that edit only. An edit with no length uses the session's. A length
+  above one second at the session rate refuses the whole transaction with
+  `session.edit.ramp_out_of_range` before anything commits. The length is not model state: it is
+  never in canonical JSON, and the next transaction without one ramps over the session's again.
+  A transaction that also rebuilds the plan keeps these lengths: each strip the new plan carries
+  retargets its fader, mute and matrix over the same ones (#1277 D5, #1394 D6). Editing
   `control_smoothing` itself is not a live delta until #1365 (it is a structural difference).
 - **Model-only (#1260).** A delta that changes only fields no prepared plan reads -- the session
   ID, the render profile's `id`, the output profile's `id` and the stored `automation` table --
