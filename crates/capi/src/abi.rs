@@ -338,8 +338,11 @@ pub struct Watermark {
     /// The highest committed revision in effect together with every revision before it.
     pub revision: u64,
     /// The absolute render sample at the start of the block that reported `revision`.
-    /// Never early; at most one block late (a mid-block commit can span two blocks until #1312 and
-    /// #1345 land, and #1502 to #1504 make it exact).
+    /// Never early. It is the start of the first block that begins after the commit's last write,
+    /// so at most one block after the submit returns. A live value of that revision can apply
+    /// earlier, in any block that ran while the submit pushed its records. One transaction's
+    /// values can spread across those blocks until #1502, #1503, #1504, #1312 and #1345 have all
+    /// landed, which together make it exact.
     pub first_sample: u64,
     /// The OR of the `OUTCOME_*` flags over the revisions the last advance covered.
     pub outcome_flags: u64,

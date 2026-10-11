@@ -70,12 +70,12 @@ extern "C" {
  * miso_engine_v1_plan_watermark copies (revision, first_sample, outcome_flags) and per-outcome
  * counters: revision is the highest committed revision in effect together with every revision
  * before it, and first_sample the absolute render sample at the start of the block that reported
- * it. The watermark is never early: a revision is in effect no later than the block it names. It
- * is at most one block late: a live value can already have applied, and its ramp started, in
- * the block before first_sample. A live transaction committed while a render call is running can
- * take effect across two consecutive blocks, some of its values in one and the rest in the next,
- * until issues 1312 and 1345 land; issues 1502, 1503 and 1504 make first_sample exact. A
- * replacement plan renders from first_sample. A revision committed while a replacement is
+ * it. The watermark is never early: a revision is in effect no later than the block it names.
+ * first_sample is the start of the first block that begins after the commit's last write, so at
+ * most one block after the submit returns. A live value of that revision can apply earlier, in
+ * any block that ran while the submit pushed its records. One transaction's values can spread
+ * across those blocks until issues 1502, 1503, 1504, 1312 and 1345 have all landed, which
+ * together make it exact. A replacement plan renders from first_sample. A revision committed while a replacement is
  * pending completes when render adopts that replacement, never earlier. A host that renders
  * nothing completes nothing: a paused host's revisions stay pending until render resumes. The
  * watermark is a level, not a queue: render overwrites it, so a host that polls it late still
@@ -103,7 +103,7 @@ extern "C" {
  * makes session calls, the same duty as draining events. A host that renders but never calls
  * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
  * successor that misses its deadline falls back only at the host's next session call. The plan
- * watermark shows when each edit took effect. While edits are pending, call
+ * watermark covers every edit that is in effect. While edits are pending, call
  * miso_engine_v1_service (or another session call) at least once per render-buffer period. A host
  * checks MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
  *

@@ -1007,8 +1007,9 @@ pub unsafe extern "C" fn miso_engine_v1_plan_resources(
 }
 
 /// Copy the plan's applied-revision watermark (#1314): the highest committed revision in effect
-/// together with every revision before it, the render sample it took effect at, the outcome flags
-/// of the last advance and the per-outcome counters.
+/// together with every revision before it, the render sample at the start of the block that
+/// reported it (never early; see `Watermark::first_sample` for the bound), the outcome flags of
+/// the last advance and the per-outcome counters.
 ///
 /// The watermark is a level render overwrites; this copies it whole or not at all. A copy that
 /// keeps landing inside render's publication gives up after a bounded number of attempts with

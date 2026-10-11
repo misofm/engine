@@ -275,19 +275,26 @@ plan. D1-D8 above stay the record of what this issue delivered. They describe th
 
 **The truth on `main` once batch 1 merges.**
 
-- The watermark is conservative by at most one block. It never reports a revision before that
-  revision is in effect. It can report a revision one block late.
+- The watermark is never early: it never reports a revision before that revision is in effect.
+  `first_sample` is the start of the first block that begins after the commit's last write, so at
+  most one block after the submit returns. A live value of that revision can apply earlier, in
+  any block that ran while the submit pushed its records.
   - Render loads the running plan's revision word before `render_inner` (D3), but each strip
-    drains its live lane at its own node inside `render_inner`.
+    drains its live lane at its own node inside `render_inner`, and the control plane releases
+    one record at a time and stores the revision word last.
   - So a record pushed after the load and before that strip's drain renders in this block, while
-    the watermark reports it at the next block's first sample (the attempt record's batch
+    the watermark reports it at a later block's first sample (the attempt record's batch
     follow-up, F2).
-- A transaction committed while render is mid-block can apply across two blocks: one strip's
-  drain can take it in block `k` and another strip's in block `k+1`.
+- One transaction's values can spread across the blocks that ran while the submit pushed its
+  records, until #1502, #1503, #1504, #1312 and #1345 have all landed, which together make it
+  exact.
 - D3's sentence "Every drain inside `render_inner` then sees every record released before that
   store" holds. Its converse does not: a drain can also see records released after the load.
-- The header comment on `miso_engine_v1_plan_watermark`, `docs/C_ABI_V1_QUALIFICATION.md` and
-  AGENTS.md state this bound; none claims `first_sample` is the exact first block in effect.
+- These places state this bound: `crates/capi/include/miso_engine_v1.h` (the Completion paragraph),
+  `crates/capi/src/abi.rs` (`Watermark::first_sample`), `crates/capi/src/ffi.rs` (the doc comment
+  on `miso_engine_v1_plan_watermark`), `docs/C_ABI_V1_QUALIFICATION.md`, AGENTS.md (the
+  block-snapshot sentence) and the D15-2 ruling. None claims `first_sample` is the exact first
+  block in effect.
 
 **The successors that make both exact.**
 

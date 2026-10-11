@@ -129,7 +129,7 @@ include it; no other struct, size or `ABI_VERSION` changes. Like `miso_engine_v1
 it runs on any thread, concurrently with render, and is pure: it writes nothing through the plan
 handle, its diagnostic word included. It copies `(revision, first_sample, outcome_flags)` and
 saturating `exact`, `transition_fallback` and `superseded` counts: the highest committed revision
-in effect together with every revision before it, the render sample of the block that reported it (never early and at most one block late; a mid-block commit can span two blocks until #1312 and #1345 land, and #1502 to #1504 make it exact), and the OR
+in effect together with every revision before it, the render sample of the block that reported it (never early: it is the start of the first block that begins after the commit's last write, so at most one block after the submit returns; a live value of that revision can apply earlier, in any block that ran while the submit pushed its records, and one transaction's values can spread across those blocks until #1502, #1503, #1504, #1312 and #1345 have all landed, which together make it exact), and the OR
 of `MISO_ENGINE_V1_OUTCOME_*` over the revisions the last advance covered. Submit stays
 synchronous only for what can fail (validate, classify, prepare a rebuild and reserve its
 credits, commit); every committed revision is pending until the watermark covers it, and a paused
@@ -175,7 +175,7 @@ source calls already set for it. The host's duty, in the header: a pending edit 
 while the host makes session calls, the same duty as draining events. A host that renders but
 never calls keeps retired plans allocated, and its next structural edit waits for that reclaim; a
 warm successor that misses its deadline falls back only at the host's next session call (#1358,
-#1360); the watermark shows when each edit took effect. While edits are pending, the host calls
+#1360); the watermark covers every edit that is in effect. While edits are pending, the host calls
 `service` (or another session call) at least once per render-buffer period. The frozen exported
 set is now 17 `miso_engine_v1_*` definitions; `abi_smoke.c` checks the bit against the queried
 mask and calls `service(NULL)` for `INVALID_ARGUMENT`, `header_smoke.cpp` pins the bit inside the

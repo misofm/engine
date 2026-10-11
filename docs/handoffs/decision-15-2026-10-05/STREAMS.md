@@ -67,9 +67,8 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 A file edited by more than one stream is merged in this order; a later stream rebases. The order
 never overrides an issue's "## Dependencies": where they seem to disagree, the dependencies govern.
 
-Stream B's next batch is #1502 (X1a) → #1503 (X1b) → #1504 (X2), in that order. No other slice
-builds on `store_revision`, `active_revision`, `RevisionTarget` or `set_revision` (#1502 deletes
-them), so a slice in another stream must not call them.
+No other slice builds on `store_revision`, `active_revision`, `RevisionTarget` or `set_revision`
+(#1502 deletes them), so a slice in another stream must not call them.
 
 | File | Order |
 |---|---|
@@ -302,17 +301,18 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 | 31 | #1482 | Attribute each claim's revisions exactly in the watermark and share one seqlock | #1314 | — |
 | 32 | #1499 | Build the shipped mobile C ABI libraries with the release profile's fat LTO, and gate it | — | G #1495 |
 
-- **Batches (root, 2026-10-05).** Batch 1 is orders 1-5. Batch 2 is orders 6-10, the
-  revision-bounded cells: root's binding requirement that one committed revision takes effect in
-  one block and that the watermark's `first_sample` is exact. Its design and review are in
-  `revision-bounded-cells/`, and root's five rulings are recorded in #1432 Amendment 1. The rest
+- **Batches (root, 2026-10-05).** Batch 1 is orders 1-5. Batch 2 is orders 6-10,
+  #1432 → #1502 → #1503 → #1504 → #1312, the revision-bounded cells: root's binding requirement
+  that one committed revision takes effect in one block and that the watermark's `first_sample`
+  is exact. Its design and review are in `revision-bounded-cells/`, and root's five rulings are recorded in #1432 Amendment 1. The rest
   follows in this order, starting with #1447 (order 11), which waits only for batch 1.
-- **Stream B's next batch is #1502 (X1a) → #1503 (X1b) → #1504 (X2), in that order**, after #1432
-  and before #1312. No other slice builds on `store_revision`, `active_revision`, `RevisionTarget`
-  or `set_revision` (#1502 deletes them).
-- **Watermark bound on `main` today.** The watermark never reports a revision early and reports
-  at most one block late. A transaction committed while render is mid-block can span two blocks
-  until #1312 and #1345 land; #1502 and #1503 (X1) with #1504 (X2) make `first_sample` exact.
+- No other slice builds on `store_revision`, `active_revision`, `RevisionTarget` or `set_revision`
+  (#1502 deletes them).
+- **Watermark bound on `main` today.** Never early. `first_sample` is the start of the first block
+  that begins after the commit's last write, so at most one block after the submit returns. A
+  live value of that revision can apply earlier, in any block that ran while the submit pushed
+  its records. One transaction's values can spread across those blocks until #1502, #1503, #1504,
+  #1312 and #1345 have all landed, which together make it exact.
 
 #1447 is stream B batch 1's successor in `crates/source/src/lib.rs` and merges before #1318 (the
 hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 as a dependent.

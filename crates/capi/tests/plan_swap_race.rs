@@ -928,7 +928,7 @@ impl LiveControl<'_> {
 /// (measured single-threaded by [`live_levels`]): the ramp started at or before the block's first
 /// sample and ends within the block. The reverse does not hold, and the test does not ask it: an
 /// edit whose record a drain takes after render loaded the revision word is applied in a block the
-/// watermark reports one block later.
+/// watermark reports later.
 ///
 /// Loading the revision after `render_inner` lets a commit that lands after the block's drains
 /// advance the watermark at that block, which renders the previous level throughout.

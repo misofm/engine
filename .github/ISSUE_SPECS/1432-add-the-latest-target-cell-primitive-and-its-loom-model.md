@@ -29,9 +29,9 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
 - **Root's binding requirement (2026-10-05).** Today each strip drains its live lanes at its own
   node inside `render_inner`. So a transaction ("mute A, unmute B") committed while render is
   mid-block can apply to A in block `k` and to B in block `k+1`, and the watermark's
-  `first_sample` can be one block late (#1314's attempt record). The contract is now: every live
-  value of one committed revision takes effect in the same block, and the watermark's
-  `first_sample` is exact.
+  `first_sample` can name a later block than the one that applied a value (#1314's attempt
+  record). The contract is now: every live value of one committed revision takes effect in the
+  same block, and the watermark's `first_sample` is exact.
 - **Design and review.** The design, its proofs and the measured loom mutations are in
   `docs/handoffs/decision-15-2026-10-05/revision-bounded-cells/design.md`. The adversarial review
   (verdict SOUND, with findings) is `review.md` beside it, with the prototype and the review's
