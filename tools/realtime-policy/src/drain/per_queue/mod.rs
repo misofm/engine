@@ -195,6 +195,9 @@ struct Located<'a, 'f> {
     /// The step of the block that holds the set loop.
     block_at: usize,
     set: &'a SetLoop<'f>,
+    /// Where the set loop starts (its first outer attribute counts): the macro and attribute span
+    /// starts there.
+    set_start: Pos,
     /// Where the set loop ends: the window starts there.
     set_end: Pos,
     queue_root: &'a Binding<'f>,
@@ -255,6 +258,7 @@ impl<'f> Pass<'_, 'f> {
                     steps,
                     block_at,
                     set: &set,
+                    set_start: set_extent.full,
                     set_end: set_extent.end,
                     queue_root: &pass_q,
                     counter_root: &pass_k,

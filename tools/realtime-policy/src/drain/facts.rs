@@ -1,9 +1,10 @@
-//! What one visit of a parsed file records: its pops, its uses of local names, and its parsed
-//! `debug_assert!` arguments.
+//! What one visit of a parsed file records: its pops, its uses of local names, its parsed
+//! `debug_assert!` arguments, and where its macro invocations and attributes stand.
 
 use std::collections::HashMap;
 
 use syn::parse::Parser;
+use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use super::names::bare;
@@ -102,13 +103,19 @@ pub(super) struct Use {
     pub(super) kind: UseKind,
 }
 
-/// The uses of every name and the parsed `debug_assert!` arguments of one file.
+/// The uses of every name, the parsed `debug_assert!` arguments, and the macro invocations and
+/// attributes of one file.
 #[derive(Default)]
 pub(super) struct Facts {
     /// The uses of each name (a raw identifier is its bare name), sorted by position.
     pub(super) uses: HashMap<String, Vec<Use>>,
     /// The arguments of each `debug_assert!`, parsed as expressions, by [`macro_key`].
     pub(super) debug_args: HashMap<Pos, Vec<syn::Expr>>,
+    /// Where each macro invocation starts, by any path and in any position (expression,
+    /// statement, item, pattern or type), sorted by position.
+    macros: Vec<Pos>,
+    /// Where each attribute, outer or inner, starts, sorted by position.
+    attributes: Vec<Pos>,
 }
 
 impl Facts {
@@ -118,7 +125,18 @@ impl Facts {
         for uses in facts.uses.values_mut() {
             uses.sort_by_key(|used| used.pos);
         }
+        facts.macros.sort_unstable();
+        facts.attributes.sort_unstable();
         facts
+    }
+
+    /// Whether a macro invocation or an attribute starts in `from..to`.
+    pub(super) fn has_macro_or_attribute_in(&self, from: Pos, to: Pos) -> bool {
+        let any = |list: &[Pos]| {
+            let first = list.partition_point(|at| *at < from);
+            list.get(first).is_some_and(|at| *at < to)
+        };
+        any(&self.macros) || any(&self.attributes)
     }
 
     /// The uses of `name` that start in `from..to`.
@@ -168,7 +186,13 @@ impl<'ast> Visit<'ast> for Facts {
         visit::visit_expr_path(self, node);
     }
 
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        self.attributes.push(pos(node.pound_token.span.start()));
+        visit::visit_attribute(self, node);
+    }
+
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.macros.push(pos(node.path.span().start()));
         let parsed = is_debug_assert(node)
             .then(|| {
                 syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
@@ -189,6 +213,8 @@ impl<'ast> Visit<'ast> for Facts {
             self.uses.entry(name).or_default().extend(uses);
         }
         self.debug_args.extend(inner.debug_args);
+        self.macros.extend(inner.macros);
+        self.attributes.extend(inner.attributes);
         self.debug_args.insert(macro_key(node), args);
     }
 }

@@ -12,6 +12,8 @@ const DRAIN: Class = Class::UnboundedTryPop;
 struct Poll {
     /// The root of the queues and the counters: `self`, or a `ready` parameter.
     root: &'static str,
+    /// Statements before the set loop.
+    before: String,
     /// The set loop.
     set: String,
     /// Statements between the set loop and the sum loop.
@@ -31,11 +33,12 @@ impl Poll {
     fn passing(root: &'static str) -> Self {
         Self {
             root,
+            before: String::new(),
             set: "for (lane, left) in R.lanes.iter().zip(&mut R.remaining) {\n    *left = lane.consumer.available_at_entry().min(DEPTH);\n}".to_owned(),
             between: String::new(),
             pass_header: "((lane, slot), left) in R\n    .lanes\n    .iter_mut()\n    .zip(&mut R.slots)\n    .zip(&mut R.remaining)".to_owned(),
             pass_body: "if slot.is_some() || *left == 0 {\n    continue;\n}\n*left -= 1;\nif let Ok(record) = lane.consumer.try_pop() {\n    *slot = Some(record);\n}".to_owned(),
-            after: "if R.slots.iter().any(Option::is_none) {\n    break;\n}\nlet aligned = R.slots.iter().enumerate().all(|(index, slot)| {\n    slot.is_some() && R.lanes.get(index).is_some()\n});\nif !aligned {\n    R.lost = R.lost.saturating_add(1);\n    continue;\n}\nif R.lost > 9 {\n    R.reset_delivery(false);\n    return 0;\n}".to_owned(),
+            after: "if R.slots.iter().any(Option::is_none) {\n    break;\n}\nlet aligned = R.slots.iter().enumerate().all(|(index, slot)| {\n    slot.is_some() && R.lanes.get(index).is_some()\n});\nif !aligned {\n    R.lost = R.lost.saturating_add(1);\n    continue;\n}\nif R.lost > 9 {\n    R.reset_delivery(false);\n    R.lost = 1;\n    return 0;\n}".to_owned(),
         }
     }
 
@@ -46,7 +49,8 @@ impl Poll {
             "fn poll(ready: &mut Ready) -> u32 {"
         };
         let body = format!(
-            "{set}\n{between}\nlet mut passes = 1_usize;\nfor left in R.remaining.iter() {{\n    passes = passes.saturating_add(*left as usize);\n}}\nfor _ in 0..passes {{\n    for {pass_header} {{\n{pass_body}\n    }}\n{after}\n}}\n0",
+            "{before}\n{set}\n{between}\nlet mut passes = 1_usize;\nfor left in R.remaining.iter() {{\n    passes = passes.saturating_add(*left as usize);\n}}\nfor _ in 0..passes {{\n    for {pass_header} {{\n{pass_body}\n    }}\n{after}\n}}\n0",
+            before = self.before,
             set = self.set,
             between = self.between,
             pass_header = self.pass_header,
@@ -288,10 +292,88 @@ fn per_queue_root_reborrowed() {
     refuses("per-queue-root-reborrowed", &poll);
 }
 
-/// Condition 6: a local macro writes the counters. Defect: macro token trees skipped.
+/// Condition 6: a macro defined before the set loop writes the counters, and its call in the window
+/// names no root. Defect: a macro in the window judged only by the root mentions in its own
+/// tokens.
 #[test]
-fn per_queue_counters_written_by_macro() {
+fn per_queue_counters_written_by_macro_defined_before() {
     let mut poll = Poll::passing("ready");
-    poll.after = "macro_rules! refill {\n    ($r:expr) => {\n        for left in $r.remaining.iter_mut() {\n            *left = 8;\n        }\n    };\n}\nrefill!(ready);".to_owned();
-    refuses("per-queue-counters-written-by-macro", &poll);
+    poll.before = "macro_rules! refill {\n    () => {\n        for left in R.remaining.iter_mut() {\n            *left = 8;\n        }\n    };\n}".to_owned();
+    poll.after = "refill!();".to_owned();
+    refuses("per-queue-counters-written-by-macro-defined-before", &poll);
+}
+
+/// Condition 6: a local `macro_rules!` shadows `debug_assert!` and writes the counters. Defect:
+/// `debug_assert!` exempt from the macro rule.
+#[test]
+fn per_queue_debug_assert_shadowed() {
+    let mut poll = Poll::passing("ready");
+    poll.before = "macro_rules! debug_assert {\n    ($e:expr) => {\n        for left in R.remaining.iter_mut() {\n            *left = 8;\n        }\n    };\n}".to_owned();
+    poll.after = "debug_assert!(true);".to_owned();
+    refuses("per-queue-debug-assert-shadowed", &poll);
+}
+
+/// Condition 6: the terminal tail has an `if` around a `continue`, so the refilled counters reach
+/// the next pass. Defect: the tail judged by a deny-list that does not refuse `if` or `continue`.
+#[test]
+fn per_queue_continue_in_terminal_tail() {
+    let mut poll = Poll::passing("ready");
+    poll.after = "if R.lost > 9 {\n    R.refill_counters();\n    if flag {\n        continue;\n    }\n    return 0;\n}".to_owned();
+    refuses("per-queue-continue-in-terminal-tail", &poll);
+}
+
+/// Condition 6: the operand of the tail's last statement holds a `continue`. Defect: the operands
+/// of the last statement not held to the allow-list.
+#[test]
+fn per_queue_continue_in_terminal_return() {
+    let mut poll = Poll::passing("ready");
+    poll.after = "if R.lost > 9 {\n    R.refill_counters();\n    return {\n        if flag {\n            continue;\n        }\n        0\n    };\n}".to_owned();
+    refuses("per-queue-continue-in-terminal-return", &poll);
+}
+
+/// Condition 6: `cfg` removes the set loop, so the counters keep values from an earlier call.
+/// Defect: the attribute span starts at the window (the end of the set loop), not at the set loop.
+#[test]
+fn per_queue_set_loop_under_cfg() {
+    let mut poll = Poll::passing("self");
+    poll.set = format!("#[cfg(any())]\n{}", poll.set);
+    refuses("per-queue-set-loop-under-cfg", &poll);
+}
+
+/// Condition 6: `cfg` removes the terminal `return`, so the block falls through with refilled
+/// counters. Defect: attributes not read on nested statements.
+#[test]
+fn per_queue_terminal_return_under_cfg() {
+    let mut poll = Poll::passing("ready");
+    poll.after =
+        "if R.lost > 9 {\n    R.refill_counters();\n    #[cfg(any())]\n    return 0;\n}".to_owned();
+    refuses("per-queue-terminal-return-under-cfg", &poll);
+}
+
+/// Condition 5: a second pop, of a disjoint queue in a nested counted drain, follows the counted
+/// pop in the pass body. It names no `<r'>`, so only the pass body's one-pop check refuses it.
+/// Defect: that check dropped (`per_queue_two_pops_one_decrement`'s second pop also names `<r'>`).
+#[test]
+fn per_queue_second_pop_in_counted_inner_drain() {
+    let mut poll = Poll::passing("self");
+    poll.pass_body.push_str("\nlet extra = R.other.available_at_entry();\nfor _ in 0..extra {\n    if let Ok(record) = R.other.try_pop() {\n        apply(record);\n    }\n}");
+    refuses("per-queue-second-pop-in-counted-inner-drain", &poll);
+}
+
+/// Condition 6, accepted: the terminal tail ends in a `break` out of the form's outermost loop.
+/// Defect: such a `break` refused, or its target resolved to the wrong loop.
+#[test]
+fn per_queue_terminal_break() {
+    let mut poll = Poll::passing("self");
+    poll.after = "if R.lost > 9 {\n    R.reset_delivery(false);\n    break;\n}".to_owned();
+    accepts("per-queue-terminal-break", &poll);
+}
+
+/// Condition 6: the tail's `break` leaves a loop inside the outermost loop, and the next pass
+/// starts with the refilled counters. Defect: any `break` accepted as the end of the form.
+#[test]
+fn per_queue_terminal_break_leaves_an_inner_loop() {
+    let mut poll = Poll::passing("self");
+    poll.after = "for _ in 0..2 {\n    if R.lost > 9 {\n        R.refill_counters();\n        break;\n    }\n}".to_owned();
+    refuses("per-queue-terminal-break-leaves-an-inner-loop", &poll);
 }

@@ -6,6 +6,11 @@
 //! path that leaves both, the pass loop's own header, a shared read of `<Q>`, a read loop over
 //! `<K>`, or a terminal call. Any other use refuses the form, inside closures and macro token trees
 //! too.
+//!
+//! The mentions are not the whole list of what can write the counters: a macro defined earlier
+//! writes them with no root in the window, and an attribute can remove the guard, the set loop or
+//! the terminal `return`. So any macro invocation and any attribute from the start of the set loop
+//! to the end of the outermost loop refuses the form first (root Amendment 1).
 
 use super::super::Ctx;
 use super::super::facts::{POP, Use, UseKind};
@@ -32,6 +37,13 @@ pub(super) fn holds<'f>(pass: &Pass<'_, 'f>, ctx: &Ctx<'f>, found: &Located<'_, 
     else {
         return false;
     };
+    // Macros and attributes: from the start of the set loop, not from the window.
+    if ctx
+        .facts
+        .has_macro_or_attribute_in(found.set_start, outer_extent.end)
+    {
+        return false;
+    }
     let window = Window {
         pass,
         found,
@@ -167,9 +179,10 @@ impl<'f> Window<'_, '_, 'f> {
         })
     }
 
-    /// Item 5: a method-call statement on a root or a prefix of `<K>` or `<Q>`, directly in a
-    /// block of the function body, after which the block holds no loop, no pop, no closure and no
-    /// macro call, and ends in `return` or a `break` out of the form's outermost loop.
+    /// Item 5: a method-call statement on a root or a prefix of `<K>` or `<Q>`, in a block B that
+    /// the form's function reaches through blocks, `if` and `else` branches, `match` arm bodies and
+    /// loop bodies only. Its tail is not empty, ends in `return` or a `break` out of the form's
+    /// outermost loop, and is made of simple statements and expressions only.
     fn terminal_call(&self, steps: &[Step<'f>], top: usize) -> bool {
         // The use's receiver chain, the call, the statement and its block.
         if top < 3 {
@@ -190,45 +203,39 @@ impl<'f> Window<'_, '_, 'f> {
         else {
             return false;
         };
-        // In the form's own function, not in a closure, a macro or a nested function.
+        // The form's own function, reached through the allowed nodes only.
         let Some(function) = steps[..top]
             .iter()
             .rposition(|step| step.node.is_function())
         else {
             return false;
         };
-        if steps[function].node.id() != self.function {
-            return false;
-        }
-        if steps[function + 1..top - 2].iter().any(|step| {
-            matches!(step.node, Node::Expr(syn::Expr::Closure(_)))
-                || step.node.macro_call().is_some()
-                || matches!(step.node, Node::Item(_))
-        }) {
+        if steps[function].node.id() != self.function
+            || !steps[function + 1..top - 2].iter().all(reaches_a_block)
+        {
             return false;
         }
         let tail = &block.stmts[index + 1..];
-        let Some(last) = tail.last() else {
+        let Some((last, others)) = tail.split_last() else {
             return false;
         };
-        let mut banned = Banned::default();
-        for stmt in tail {
-            syn::visit::Visit::visit_stmt(&mut banned, stmt);
-        }
-        if banned.found {
+        if !others.iter().all(simple_statement) {
             return false;
         }
         match last {
-            syn::Stmt::Expr(syn::Expr::Return(_), _) => true,
-            syn::Stmt::Expr(syn::Expr::Break(exit), _) => {
-                self.breaks_out_of_outer(steps, top - 3, exit.label.as_ref())
+            syn::Stmt::Expr(syn::Expr::Return(exit), Some(_)) => {
+                exit.expr.as_deref().is_none_or(simple_expr)
+            }
+            syn::Stmt::Expr(syn::Expr::Break(exit), Some(_)) => {
+                exit.expr.as_deref().is_none_or(simple_expr)
+                    && self.breaks_out_of_outer(steps, top - 3, exit.label.as_ref())
             }
             _ => false,
         }
     }
 
     /// Whether a `break` (with `label`) standing in the block at `steps[block]` leaves the form's
-    /// outermost loop.
+    /// outermost loop. The blocks above it admit no labelled block, so a label names a loop.
     fn breaks_out_of_outer(
         &self,
         steps: &[Step<'f>],
@@ -243,18 +250,6 @@ impl<'f> Window<'_, '_, 'f> {
                 syn::Expr::ForLoop(node) => node.label.as_ref(),
                 syn::Expr::While(node) => node.label.as_ref(),
                 syn::Expr::Loop(node) => node.label.as_ref(),
-                syn::Expr::Block(node) => {
-                    // A labeled block can be a `break` target too, and it is not a loop.
-                    if let Some(wanted) = label
-                        && node
-                            .label
-                            .as_ref()
-                            .is_some_and(|own| own.name.ident == wanted.ident)
-                    {
-                        return false;
-                    }
-                    continue;
-                }
                 _ => continue,
             };
             let targeted = match label {
@@ -266,6 +261,79 @@ impl<'f> Window<'_, '_, 'f> {
             }
         }
         false
+    }
+}
+
+/// Whether the path continues through a node that item 5 allows between the function body and the
+/// terminal call's block: a block, a statement that is an expression, an `if` or `else` branch
+/// (not its condition), a `match` arm and its body (not its scrutinee or guard), the body of a
+/// loop (not its header), or an unlabelled block expression. Anything else is a closure, an
+/// `async`, `const`, `unsafe` or labelled block, a macro, a nested item, or a node in the middle
+/// of an expression.
+fn reaches_a_block(step: &Step<'_>) -> bool {
+    match (step.node, step.via) {
+        (Node::Block(_), Some(Via::Stmt(_))) => true,
+        (Node::Stmt(syn::Stmt::Expr(..)), Some(Via::Operand(0))) => true,
+        (Node::Arm(_), Some(Via::Body)) => true,
+        (Node::Expr(expr), Some(via)) => match expr {
+            syn::Expr::If(_) => matches!(via, Via::Then | Via::Else),
+            syn::Expr::Match(_) => matches!(via, Via::Arm(_)),
+            syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_) => via == Via::Body,
+            syn::Expr::Block(block) => block.label.is_none() && via == Via::Body,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// A statement of item 5's tail before its last: `<e>;` or `let <pat> = <e>;` with no `else`.
+fn simple_statement(stmt: &syn::Stmt) -> bool {
+    match stmt {
+        syn::Stmt::Expr(expr, Some(_)) => simple_expr(expr),
+        syn::Stmt::Local(local) => local
+            .init
+            .as_ref()
+            .is_some_and(|init| init.diverge.is_none() && simple_expr(&init.expr)),
+        syn::Stmt::Item(_) | syn::Stmt::Macro(_) | syn::Stmt::Expr(_, None) => false,
+    }
+}
+
+/// An expression of item 5's tail: a literal, a path, a field access, an index, a call, a method
+/// call other than a pop, an assignment, a binary or unary operation (compound assignment
+/// included), a reference, a parenthesis, a cast, or a tuple, array or struct literal, with every
+/// operand one of these. Anything else (`continue`, `break`, `return`, `?`, `.await`, `if`,
+/// `match`, a block, a loop, a closure, a macro, a range, a pop) is not.
+fn simple_expr(expr: &syn::Expr) -> bool {
+    use syn::Expr as E;
+    match expr {
+        E::Lit(_) => true,
+        E::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_none_or(|last| bare(&last.ident) != POP),
+        E::Field(node) => simple_expr(&node.base),
+        E::Index(node) => simple_expr(&node.expr) && simple_expr(&node.index),
+        E::Call(node) => simple_expr(&node.func) && node.args.iter().all(simple_expr),
+        E::MethodCall(node) => {
+            bare(&node.method) != POP
+                && simple_expr(&node.receiver)
+                && node.args.iter().all(simple_expr)
+        }
+        E::Assign(node) => simple_expr(&node.left) && simple_expr(&node.right),
+        E::Binary(node) => simple_expr(&node.left) && simple_expr(&node.right),
+        E::Unary(node) => simple_expr(&node.expr),
+        E::Reference(node) => simple_expr(&node.expr),
+        E::Paren(node) => simple_expr(&node.expr),
+        E::Cast(node) => simple_expr(&node.expr),
+        E::Tuple(node) => node.elems.iter().all(simple_expr),
+        E::Array(node) => node.elems.iter().all(simple_expr),
+        E::Repeat(node) => simple_expr(&node.expr) && simple_expr(&node.len),
+        E::Struct(node) => {
+            node.fields.iter().all(|field| simple_expr(&field.expr))
+                && node.rest.as_deref().is_none_or(simple_expr)
+        }
+        _ => false,
     }
 }
 
@@ -349,51 +417,4 @@ fn is_assign_op(op: &syn::BinOp) -> bool {
             | syn::BinOp::ShlAssign(_)
             | syn::BinOp::ShrAssign(_)
     )
-}
-
-/// Finds a loop, a pop, a closure or a macro call.
-#[derive(Default)]
-struct Banned {
-    found: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for Banned {
-    fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {
-        self.found = true;
-    }
-
-    fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {
-        self.found = true;
-    }
-
-    fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {
-        self.found = true;
-    }
-
-    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {
-        self.found = true;
-    }
-
-    fn visit_macro(&mut self, _: &'ast syn::Macro) {
-        self.found = true;
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if bare(&node.method) == POP {
-            self.found = true;
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        if node
-            .path
-            .segments
-            .last()
-            .is_some_and(|last| bare(&last.ident) == POP)
-        {
-            self.found = true;
-        }
-        syn::visit::visit_expr_path(self, node);
-    }
 }

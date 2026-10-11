@@ -104,7 +104,6 @@ impl Boundaries {
         RegionNodes {
             begin: begin_at,
             end: end_at,
-            tokens_only,
             nodes,
         }
     }
@@ -115,17 +114,11 @@ impl Boundaries {
 pub(crate) struct RegionNodes {
     begin: (usize, usize),
     end: (usize, usize),
-    tokens_only: bool,
     /// The maximal nodes' extents, sorted, from the first token after attributes to the end.
     nodes: Vec<((usize, usize), (usize, usize))>,
 }
 
 impl RegionNodes {
-    /// True when a marker sits in a macro token tree, so the region has no syntax tree.
-    pub(crate) fn is_tokens(&self) -> bool {
-        self.tokens_only
-    }
-
     /// Whether `start..end` is one of the region's maximal nodes.
     pub(crate) fn is_node(&self, start: (usize, usize), end: (usize, usize)) -> bool {
         self.nodes

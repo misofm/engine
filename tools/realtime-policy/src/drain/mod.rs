@@ -132,7 +132,7 @@ pub(crate) fn check(
 /// Whether the pop is bounded (D1, D4, D8, D8b).
 fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
     let steps = ctx.tree.descend(site.pos);
-    if !reached(&steps, site) || ctx.region.is_tokens() {
+    if !reached(&steps, site) {
         return false;
     }
     // The outermost node of the region on the path.
