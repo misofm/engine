@@ -228,3 +228,32 @@ default snapshot.
    probe seam without an effect.
 6. **A direct executor render** (graph `render_host` helper) now names `LiveSnapshot::ALL` through
    `begin_live_block`; the only direct callers are those tests.
+
+### Follow-up: rack policy
+
+**Defect.** `bash scripts/check-rack-policy.sh` (required by `qualification.yml`) failed at `3120682d5`:
+`crates/rack/src/lib.rs:6191` `use std::sync::{Arc, Mutex};`. Attempt 1's rack unit test
+`run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block` used `Arc<Mutex<..>>` in the inline
+module, and the script forbids `std::sync` anywhere under `crates/rack/src` (render code).
+
+**Base and regression.** The script run against `git archive` copies: `ed62ed794` (parent of
+`70017bf09`) prints `rack policy: PASS`; `70017bf09` fails at the line above. The script and policy are
+unchanged.
+
+**Fix.** The test moved, body unchanged, to `crates/rack/tests/live_control_bank.rs` (an integration
+test is not render code; `tests/mono_reengage.rs` already shares stages through `Arc<Mutex<..>>` for the
+same reason). It uses only the public surface (`BankChain`, `BankSlot`, `BankStage`, `RevisionGate`).
+`a_slot_with_a_live_lane_must_have_an_active_lane` takes no sync primitive and stays inline. The inline
+copy is deleted in the same commit.
+
+**Mutation (moved test).**
+
+| Defect | Moved test | After revert |
+|---|---|---|
+| `BankChain::run_with_input` hands `LiveSnapshot::ALL` to `begin_block` | red (every drain saw `ALL`'s revision 9223372036854775807, expected 0/3/3/9) | green |
+| the slot guard also skips the drain when the block's lane-0 input is all zero (silence skip) | red (no drain recorded in any of the 4 silent blocks) | green |
+
+**Gates.** `scripts/check-rack-policy.sh` PASS; `cargo test --locked -p rack` (41 unit, 12
+`live_control_bank`, 4 `mono_reengage`) ok; `cargo test --locked -p graph --features test-support`,
+`check-realtime-policy.sh` (100 regions in 27 files), `check-workspace-policy.sh`, `cargo fmt --all -- --check`
+and clippy `--workspace --all-targets --all-features -D warnings`: all pass.
