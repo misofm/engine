@@ -67,7 +67,7 @@ Use objective gates: allocation counters, deterministic fixtures, SIMD/scalar to
 
 ## Issue-first execution and review workflow
 
-Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes, and git history keeps it.  Do not make cross-cutting architecture changes without a new or amended issue.
+Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes, and git history keeps it; a handoff record's line cites into a spec are read at the commit its header names as reviewed, and a cite that needs any other commit names that commit inline.  Do not make cross-cutting architecture changes without a new or amended issue.
 
 Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable.  Push those checkpoints promptly when the current delivery mode calls for checkpoint pushes.  When the user requests CI-conscious batching, checkpoint locally on one dedicated feature branch and defer upstream pushes until the coherent batch boundary; batching changes push frequency, never local commit frequency.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
 

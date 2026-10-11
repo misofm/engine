@@ -351,7 +351,7 @@ No tests were added or changed. This is a docs-only research note with draft spe
 
 - **Gate 4.** `git diff --name-only 423b9d4a1 d79bc9cb3` lists only
   `docs/handoffs/stored-automation-1058/` (the README and 28 drafts) and
-  `2a589d360:.github/ISSUE_SPECS/1058-research-render-stored-session-automation-in-the-engine-identically-on-every-pla.md`.
+  `.github/ISSUE_SPECS/1058-research-render-stored-session-automation-in-the-engine-identically-on-every-pla.md`.
   PASS.
 - **No code moved.** `git diff --stat 6ee64f484 d79bc9cb3 -- crates hosts sdk tools scripts` is
   empty.
