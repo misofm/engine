@@ -123,3 +123,96 @@ None. *Apply value-only input HPF and LPF edits to the running C ABI plan throug
 - No allocation, lock or unbounded work on the render thread.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Decision record
+
+**D1 result (gate 1 on `main` at `7d5362dc2`, the branch base with G #1407 and #1329 landed).**
+The test `a_settled_live_disable_is_re_elided_and_bit_identical_to_never_enabled`
+(`crates/builtins/tests/filter_liveness.rs`) was written first and run with no production change:
+`cargo test --locked -p builtins --features builtins/test-support --test filter_liveness a_settled_live`
+gave `test ... ok`, `1 passed`. Both legs (dual body through `process` with a `Left`-addressed target;
+one-plane body through `process_mono` with a `Both`-addressed target) are green: lane 1's integrators
+are all `+0.0` and `bank_elision_plan` elides the HPF section after the block in which the ramp
+completes, and lane 1 is bit-identical to the twin from the next block. **D2 applies: the premise is
+stale. No production code changed.** The two ramp bodies already clear the integrators of a lane
+whose ramp completes onto identity.
+
+**Corrections to this body's Context (found while writing the test; the anchors moved with #1328,
+#1407 and #1329).**
+
+- The clears are at `crates/lane/src/kernels/builtins.rs:1166-1167` (dual body,
+  `input_chain_ramp_block_filter_body`) and `:1410-1411` (mono body,
+  `input_chain_ramp_block_filter_mono_body`); `section_is_identity` is at `:1590`; `svf_step_when`
+  is `crates/lane/src/kernels.rs:1093`.
+- "No existing test reads the integrators or the plan after a disable" is false.
+  `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time` (`filter_liveness.rs:368`)
+  reads `state_words`, `current_words` and the elision plan on the scalar chain and on one bank lane
+  (dual body only), and `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths`
+  (`crates/builtins/src/tests.rs`) reads the plan of a one-lane stage on both bodies. So removing
+  either clear is already caught (mutation table below). The new test's unique catches are listed in
+  its test-value sentence.
+- The signed-zero output claim does not hold for a stale non-zero integrator, so the output leg
+  cannot prove the clear by itself. With identity coefficients and a stale pair `(ic1, ic2)`, the
+  settled section's output is `fma(0, ic2, fma(0, ic1, 1 * x))`; the next section, elided or running
+  over `+0.0` integrators, ends in `v + 0.0`, which sends `-0.0` to `+0.0`, so a stale non-zero
+  state never changes an output bit. (It changes only the cost, because the section is never
+  elided again.) Only a `-0.0` integrator word is observable, and `andnot(identity)` writes `+0.0`
+  exactly. The output legs of the test are therefore a lane-isolation guard (below), not the proof of
+  the clear. The test still asserts the twin comparison, as the spec requires.
+
+## Attempt record
+
+**Attempt 1** (implementer, D2 path). Only `crates/builtins/tests/filter_liveness.rs` and this spec
+changed.
+
+The test runs both bodies over `history_blocks` in `6..14` (the history's sawtooth phase moves the
+integrators the ramp leaves at the disable) and two scenarios: the spec's (lane 1 enabled, then
+disabled; the twin never enables anything) and a `neighbour` scenario in which lane 3 also holds a
+settled HPF in the bank and in the twin, so its integrators are live while lane 1 settles. Per block
+after the disable (24 frames; the 64-update ramp completes mid-block 2): from block 2 lane 1's
+eight state words are `+0.0` and the plan elides the HPF on both channels (with the neighbour, the
+left HPF stays live because lane 3 needs it); from block 3 lane 1 is bit-identical to the twin; the
+other lanes' outputs and state words equal the twin's in every block. The `neighbour` scenario is a
+deviation from the body's letter that the test-value claim needs (a clear that reaches a lane that
+never ramped is invisible if every other lane has zero state).
+
+**Test value.** Which plausible defect turns this red that no existing test catches? A one-plane
+(`process_mono`) block whose ramp completion clears the integrators of every lane when any lane
+settles, so a neighbouring lane with a live HPF loses its state: `M4b-mono` below is green in every
+other builtins test. The state and plan legs also pin both bodies on a four-lane bank at 24-frame
+blocks with a mid-block completion; the clear's removal is caught by older tests too (table).
+
+**Mutation runs** (applied locally to `crates/lane/src/kernels/builtins.rs`, reverted, not
+committed; "builtins suite" is `cargo test --locked --no-fail-fast --all-targets -p builtins
+--features builtins/test-support`; the new test alone is `... --test filter_liveness a_settled_live`).
+
+| Mutation | New test | Other builtins tests red |
+|---|---|---|
+| M1: dual body, the two `ic` clear lines (`:1166-1167`) replaced by no-ops | RED (`filter_liveness.rs:1341`, lane 1 state) | `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths`, `a_disable_in_the_enables_drain_still_completes_and_elides`, `a_disable_freezes_the_recursion_words_and_moves_only_the_mix`, `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time`, `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs` |
+| M2: mono body, the two `ic` clear lines (`:1410-1411`) replaced by no-ops | RED (`:1341`) | `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths` only |
+| M4a: both bodies, `identity = done` (drops `current_target_identity`; clears every settled lane) | RED (`:1265` output leg, when run before the history change) | `symmetric_bank_target_keeps_mono_and_dual_paths_equal`, and in the dual run `live_peak_gain_bounds_the_real_kernel_on_its_worst_histories` |
+| M4b dual: any settled lane makes the mask all lanes | RED (`:1265` output leg) | `bank_filter_target_updates_one_member_and_leaves_padding_identity` |
+| **M4b mono: any settled lane makes the mask all lanes** | **RED** (`:1266`, output leg) | **none** |
+| M4b mono with the state and plan assertions removed from the test | RED (`:1266`, output leg alone) | n/a |
+| none (restored) | green | none |
+
+M1 and M2 each turn the matching leg red (spec gate 2), but older tests already catch both, so gate 2
+is evidence for the regression guard, not a unique catch. M4a and M4b were run with the first
+revision of the history (a sine, replaced by an integer sawtooth because `f32::sin` is a
+disallowed method); M1, M2, M4b mono and the restored run were repeated on the final test.
+
+**Gates.** Final test, no production change:
+
+- `cargo test --locked --all-targets -p builtins --features builtins/test-support`: all green
+  (16 test binaries, 0 failed; the `filter_liveness` binary 15 passed).
+- `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`: green.
+- `bash scripts/check-workspace-policy.sh`, `check-builtins-policy.sh`, `check-lane-policy.sh`: pass.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: clean (the first
+  run caught `f32::sin`; replaced).
+- `cargo fmt --all -- --check`: clean.
+- D3-only gates (audit, bench, console-workload, worklet chain, cross-targets) do not apply: no
+  production code changed. 4-lane (NEON) is CI-only.
+
+**Open items for root.** (1) The body's "no existing test" claim and the signed-zero output claim
+are false as written (above); the spec's Context is left as filed and corrected here. (2) The
+issue closes under D2 once verified.
