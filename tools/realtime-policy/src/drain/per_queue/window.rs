@@ -286,15 +286,17 @@ fn reaches_a_block(step: &Step<'_>) -> bool {
     }
 }
 
-/// A statement of item 5's tail before its last: `<e>;` or `let <pat> = <e>;` with no `else`.
+/// A statement of item 5's tail before its last: `<e>;` or `let <pat> = <e>;` with no `else`. An
+/// expression statement without its `;` is block-like (`if`, `match`, a loop, a block), which
+/// [`simple_expr`] refuses.
 fn simple_statement(stmt: &syn::Stmt) -> bool {
     match stmt {
-        syn::Stmt::Expr(expr, Some(_)) => simple_expr(expr),
+        syn::Stmt::Expr(expr, _) => simple_expr(expr),
         syn::Stmt::Local(local) => local
             .init
             .as_ref()
             .is_some_and(|init| init.diverge.is_none() && simple_expr(&init.expr)),
-        syn::Stmt::Item(_) | syn::Stmt::Macro(_) | syn::Stmt::Expr(_, None) => false,
+        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
     }
 }
 
