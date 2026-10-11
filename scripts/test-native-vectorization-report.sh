@@ -17,6 +17,11 @@ else
     exit 2
 fi
 
+command -v rg >/dev/null 2>&1 || {
+    printf 'native vectorization mutations require rg (ripgrep)\n' >&2
+    exit 2
+}
+
 if [[ ! -x "$binary" ]]; then
     (cd "$repository_root" && cargo build --locked --release \
         -p audit --bin audit)

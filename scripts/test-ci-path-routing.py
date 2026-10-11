@@ -655,6 +655,15 @@ def test_self_test_contract_mutations(checker) -> None:
             workflow_mutation_fails("nightly.yml", f"        run: {commands[0]}\n",
                                     "        continue-on-error: true\n"
                                     f"        run: {commands[0]}\n")
+        # Issue #1513: a step of any job the notice reports must not continue on error.
+        workflow_mutation_fails("nightly.yml",
+                                "      - name: Generate report and run red mutations\n",
+                                "      - name: Generate report and run red mutations\n"
+                                "        continue-on-error: true\n")  # native-vectorization-report
+        workflow_mutation_fails("nightly.yml",
+                                "      - name: Workspace release build (single panic variant, --no-run)\n",
+                                "      - name: Workspace release build (single panic variant, --no-run)\n"
+                                "        continue-on-error: true\n")  # release-link-proof
         workflow_mutation_fails("nightly.yml",
                                 "            moved-mutation-suites, release-budgets, full-size-tests]",
                                 "            release-budgets, full-size-tests]")  # the notice stops reporting it
