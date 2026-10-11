@@ -2,6 +2,7 @@
 //! syntax, pops, count bindings, reads before the loop and the innermost bounding loop.
 
 mod forms;
+mod outer;
 mod per_queue;
 mod ported;
 

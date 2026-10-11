@@ -67,6 +67,21 @@ impl Boundaries {
             .count()
     }
 
+    /// The position of the start of the marker on `line`.
+    pub(crate) fn marker_start(line: usize) -> (usize, usize) {
+        key(marker_position(line))
+    }
+
+    /// The leaves that start at or after `from` and before `to`, in source order.
+    pub(crate) fn leaves_between(&self, from: (usize, usize), to: (usize, usize)) -> &[Leaf] {
+        let first = self
+            .leaves
+            .all
+            .partition_point(|leaf| key(leaf.start) < from);
+        let last = self.leaves.all.partition_point(|leaf| key(leaf.start) < to);
+        &self.leaves.all[first..last.max(first)]
+    }
+
     /// The nodes of region number `index` (A2-D1): the maximal children of the file's containers
     /// whose extent lies wholly between its markers. A region with a marker in a macro token tree
     /// is tokens, not syntax: it has no nodes.
@@ -119,6 +134,11 @@ pub(crate) struct RegionNodes {
 }
 
 impl RegionNodes {
+    /// The positions of the begin and end markers.
+    pub(crate) fn bounds(&self) -> ((usize, usize), (usize, usize)) {
+        (self.begin, self.end)
+    }
+
     /// Whether `start..end` is one of the region's maximal nodes.
     pub(crate) fn is_node(&self, start: (usize, usize), end: (usize, usize)) -> bool {
         self.nodes

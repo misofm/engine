@@ -299,23 +299,29 @@ fn a_count_binding_above_the_region_is_not_read() {
     );
 }
 
-/// D1: a region opened inside a loop body does not read that loop as a bounded outer loop.
+/// D1: a region opened inside a loop body does not read that loop as a bounded outer loop, even
+/// when the loop is one that the finite-outer-loop rule accepts inside the region.
 #[test]
 fn a_loop_that_encloses_the_region_is_refused() {
     let body = format!(
         "    // {BEGIN}\n    let available = control.available_at_entry();\n    for _ in 0..available {{\n        {POP}\n    }}\n    // {END}\n"
     );
-    let around = format!(
-        "fn drain_around(control: &mut Consumer<Record>) {{\n    loop {{\n{body}        break;\n    }}\n}}\n"
-    );
-    expect_failure(
-        "loop-around-the-region",
-        &[Edit::Append {
-            path: BUFFER,
-            text: &around,
-        }],
-        &[DRAIN],
-    );
+    for (name, header) in [
+        ("loop-around-the-region", "loop"),
+        ("finite-loop-around-the-region", "for _ in 0..4"),
+    ] {
+        let around = format!(
+            "fn drain_around(control: &mut Consumer<Record>) {{\n    {header} {{\n{body}        break;\n    }}\n}}\n"
+        );
+        expect_failure(
+            name,
+            &[Edit::Append {
+                path: BUFFER,
+                text: &around,
+            }],
+            &[DRAIN],
+        );
+    }
     let plain = format!("fn drain_plain(control: &mut Consumer<Record>) {{\n{body}}}\n");
     expect_valid(
         "no-loop-around-the-region",

@@ -15,15 +15,30 @@
 //!   other node is not reached, and an unreached pop is refused.
 //! - **Pops (D5), counts (D6), reads (D7) and the bounding loop (D8)** are in [`facts`], [`count`]
 //!   and [`shapes`]; D8b's per-queue form is [`per_queue`].
+//! - **Outer loops (D1)** are in [`outer`]: every other loop around a pop, inside its region,
+//!   must be finite. **Attributes and items (D2)** are in [`count`] and [`items`]: a count binding
+//!   under a `cfg`-family attribute, and a `static`, `const` or `use` of the region that can name
+//!   the count, are refused. **Constructors (D3)** are in [`items`]: `from_fn`, `repeat_with` and
+//!   `successors` are refused anywhere in a region, except `core::array::from_fn` and
+//!   `std::array::from_fn`, whose closure is a finite outer loop and never bounds a pop of its own.
 //!
-//! Outer loops are not judged yet: any loop around the innermost bounding loop is accepted here,
-//! and a later slice adds the finite-outer-loop rule, the attribute and item rules and the
-//! constructor rules. This is a temporary gap in the tool only: the awk gate still runs and
-//! refuses those shapes.
+//! What stays outside the rule (D4): recursion; a pop in a helper function (`begin_block` calling
+//! `drain_controls` is one); a loop in a caller, outside the region (a loop that encloses the
+//! region inside the same function is refused above, not a limit); and a macro, defined elsewhere,
+//! that expands to a loop. A pop in a closure or a macro is judged by the loops around it as if
+//! the closure or macro were not there; a later slice refuses it.
+//!
+//! It refuses these bounded drains (D7; restructure the drain to pass): a count used other than as
+//! the left operand of a comparison before its loop (`0 == available`, `apply(available)`,
+//! `available as u32`); a count capped other than by `.min(..)` (`cmp::min`, `.clamp(..)`); an outer
+//! range other than `0..<bound>` (`1..n`, `0..=n`, `.rev()`, `.take(n)`); a bare local iterated by
+//! value; and a pop once per pass of a collection loop, with no count.
 
 mod count;
 mod facts;
+mod items;
 mod names;
+mod outer;
 mod per_queue;
 mod scope;
 mod shapes;
@@ -32,12 +47,13 @@ mod tree;
 use std::collections::BTreeSet;
 
 use crate::boundary::{Boundaries, RegionNodes};
+use crate::leaf::Leaf;
 use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
 use facts::{Facts, PopSite, Use};
 use scope::{Binding, nearest};
-use tree::{Node, Pos, Step, Tree, Via};
+use tree::{Node, Pos, Step, Tree, Via, is_loop_at};
 
 /// What a judgment reads: the file's tree, its facts, the pop's region, and every pop of the file.
 struct Ctx<'f> {
@@ -45,6 +61,8 @@ struct Ctx<'f> {
     tree: &'f Tree<'f>,
     facts: &'f Facts,
     region: &'f RegionNodes,
+    /// The leaves between the pop's region's markers.
+    leaves: &'f [Leaf],
     pops: &'f [PopSite],
 }
 
@@ -60,6 +78,11 @@ impl<'f> Ctx<'f> {
             _ => return None,
         }
         nearest(&steps, name)
+    }
+
+    /// Whether a `static`, `const` or `use` of the pop's region can name `name` (D2).
+    fn names_item(&self, name: &str) -> bool {
+        items::names_item(self.leaves, name)
     }
 
     /// The uses of `name` in `from..to` that resolve to `binding`. A use that sits where the walk
@@ -84,6 +107,16 @@ pub(crate) fn check(
     regions: &[Region],
     findings: &mut Vec<Finding>,
 ) {
+    let mut refused = BTreeSet::new();
+    // D3: a constructor that loops with no loop keyword is refused anywhere in a region, whether or
+    // not a pop stands in it.
+    for region in regions {
+        let leaves = boundaries.leaves_between(
+            Boundaries::marker_start(region.begin),
+            Boundaries::marker_start(region.end),
+        );
+        refused.extend(items::constructor_lines(leaves));
+    }
     let mut sites = facts::pops(file);
     sites.sort_by_key(|site| site.pos);
     // The region number of each pop that stands between markers.
@@ -96,27 +129,27 @@ pub(crate) fn check(
                 .map(|index| (index, *site))
         })
         .collect();
-    if placed.is_empty() {
-        return;
-    }
-    let facts = Facts::of(file);
-    let tree = Tree::new(file, boundaries, &facts.debug_args);
-    let nodes: Vec<RegionNodes> = regions
-        .iter()
-        .enumerate()
-        .map(|(index, region)| boundaries.region_nodes(index, region))
-        .collect();
-    let mut refused = BTreeSet::new();
-    for (index, site) in placed {
-        let ctx = Ctx {
-            boundaries,
-            tree: &tree,
-            facts: &facts,
-            region: &nodes[index],
-            pops: &sites,
-        };
-        if !bounded(&ctx, &site) {
-            refused.insert(site.pos.0);
+    if !placed.is_empty() {
+        let facts = Facts::of(file);
+        let tree = Tree::new(file, boundaries, &facts.debug_args);
+        let nodes: Vec<RegionNodes> = regions
+            .iter()
+            .enumerate()
+            .map(|(index, region)| boundaries.region_nodes(index, region))
+            .collect();
+        for (index, site) in placed {
+            let (from, to) = nodes[index].bounds();
+            let ctx = Ctx {
+                boundaries,
+                tree: &tree,
+                facts: &facts,
+                region: &nodes[index],
+                leaves: boundaries.leaves_between(from, to),
+                pops: &sites,
+            };
+            if !bounded(&ctx, &site) {
+                refused.insert(site.pos.0);
+            }
         }
     }
     findings.extend(refused.into_iter().map(|line| {
@@ -140,7 +173,7 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
         return false;
     };
     // A loop that encloses the region is not a bounded outer loop.
-    if steps[..top].iter().any(|step| step.node.is_loop()) {
+    if (0..top).any(|at| is_loop_at(&steps, at)) {
         return false;
     }
     // A pop in a loop header runs once per iteration.
@@ -151,12 +184,16 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
         return false;
     }
     // The innermost loop whose body holds the pop.
-    let Some(at) = steps
-        .iter()
-        .rposition(|step| step.node.is_loop() && step.via == Some(Via::Body))
+    let Some(at) = (0..steps.len())
+        .rev()
+        .find(|&at| is_loop_at(&steps, at) && steps[at].via == Some(Via::Body))
     else {
         return true;
     };
+    // D1: every other loop of the region around the pop is finite.
+    if !(top..at).all(|outer| !is_loop_at(&steps, outer) || outer::finite(ctx, &steps, outer)) {
+        return false;
+    }
     count::bounds(ctx, &steps, at) || per_queue::bounds(ctx, &steps, at, site)
 }
 

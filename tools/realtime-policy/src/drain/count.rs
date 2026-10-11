@@ -8,6 +8,7 @@
 
 use super::Ctx;
 use super::facts::{Use, UseKind};
+use super::names::bare;
 use super::scope::{Binding, BindingKind};
 use super::shapes::{entry_count, is_int, method0, path_name, receiver, simple_binding};
 use super::tree::{Node, Pos, Step, Via, pos};
@@ -106,6 +107,11 @@ fn counted<'f>(ctx: &Ctx<'f>, name: &str, at: Pos, header: (Pos, Pos)) -> Option
     {
         return None;
     }
+    // D2: a `static`, `const` or `use` of the region that can name the count may be the thing the
+    // loop reads, wherever it sits in its block.
+    if ctx.names_item(name) {
+        return None;
+    }
     let bound = ctx.tree.extent(Node::Stmt(stmt))?;
     if !ctx.region.holds(bound.core, bound.end) || !entry_binding(ctx, &binding, 0) {
         return None;
@@ -121,7 +127,7 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> bool
     let Some(init) = &local.init else {
         return false;
     };
-    if init.diverge.is_some() || simple_binding(&local.pat).is_none() {
+    if init.diverge.is_some() || simple_binding(&local.pat).is_none() || under_cfg(local) {
         return false;
     }
     if entry_count(&init.expr) {
@@ -131,6 +137,9 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> bool
         return false;
     };
     if depth != 0 {
+        return false;
+    }
+    if ctx.names_item(&entry_name) {
         return false;
     }
     let Some(entry) = ctx.binding_of_path(&entry_name, entry_at) else {
@@ -155,6 +164,18 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> bool
             == 1
         && only_reads(ctx, &entry_name, &entry, first.end, alias.core)
         && entry_binding(ctx, &entry, 1)
+}
+
+/// D2: whether the `let` carries a `cfg`-family attribute (`cfg`, `cfg_attr`, or a path ending in
+/// either). A binding that may not be compiled leaves an earlier binding of the name as the count.
+fn under_cfg(local: &syn::Local) -> bool {
+    local.attrs.iter().any(|attribute| {
+        attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|last| matches!(bare(&last.ident).as_str(), "cfg" | "cfg_attr"))
+    })
 }
 
 /// D7: every use of the binding in `from..to` is the left operand of a comparison.

@@ -4,11 +4,13 @@
 //! down to the place of the use) and looks upward: the statements of a block before the one the
 //! path goes through, the pattern of a `for` loop or a closure for its body, the patterns of an
 //! `if let` or `while let` chain for its body, an arm's pattern, and a function's parameters, where
-//! the search ends. Items declared in a block do not shadow here (B1b).
+//! the search ends. Items declared in a block do not shadow here: the rules that read a binding ask
+//! [`super::items::names_item`] whether a `static`, `const` or `use` of the region can name it.
 
 use syn::visit::{self, Visit};
 
 use super::names::{bare, tokens_name};
+use super::shapes::simple_binding;
 use super::tree::{Node, Step, Via};
 
 /// What a name resolved to.
@@ -26,8 +28,9 @@ pub(super) enum BindingKind<'f> {
         stmt: &'f syn::Stmt,
         local: &'f syn::Local,
     },
-    /// A function parameter.
-    Param,
+    /// A function parameter. `ty` is its type when the parameter is one plain name (`name` or
+    /// `mut name`), and `None` for a receiver or a destructuring pattern.
+    Param { ty: Option<&'f syn::Type> },
     /// The pattern of a `for`, `if let`, `while let`, `match` arm or closure.
     Pattern,
 }
@@ -117,11 +120,13 @@ fn parameter<'f>(signature: &'f syn::Signature, name: &str) -> Option<Binding<'f
     signature.inputs.iter().find_map(|input| match input {
         syn::FnArg::Receiver(receiver) if name == "self" => Some(Binding {
             id: (11, std::ptr::from_ref(receiver) as usize),
-            kind: BindingKind::Param,
+            kind: BindingKind::Param { ty: None },
         }),
         syn::FnArg::Typed(typed) if pat_binds(&typed.pat, name) => Some(Binding {
             id: (11, std::ptr::from_ref(typed) as usize),
-            kind: BindingKind::Param,
+            kind: BindingKind::Param {
+                ty: (simple_binding(&typed.pat).as_deref() == Some(name)).then_some(&*typed.ty),
+            },
         }),
         _ => None,
     })

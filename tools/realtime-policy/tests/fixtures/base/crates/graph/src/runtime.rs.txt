@@ -3,6 +3,25 @@ struct Runtime;
 impl Runtime {
     // REALTIME_POLICY_BEGIN
     fn execute_op() {}
+    fn drain(&mut self) -> usize {
+        let available = self.control.consumer.available_at_entry();
+        let mut applied = 0;
+        for _ in 0..available {
+            let Ok(record) = self.control.consumer.try_pop() else {
+                break;
+            };
+            debug_assert!(record.length() <= crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+            self.ramp = IndexedRamp::new(
+                self.ramp.coefficients_at(self.position),
+                record.target(),
+                record.length(),
+            );
+            self.mute = record.mute();
+            self.position = 0;
+            applied += 1;
+        }
+        applied
+    }
     // REALTIME_POLICY_END
 }
 

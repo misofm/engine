@@ -1,0 +1,167 @@
+//! Finite outer loops (D1): every loop that surrounds a counted drain, inside its region, must run
+//! a finite number of passes. The gate bounds each pass, not the product of the passes, so
+//! "finite" is not "small": `0..usize::MAX` around a drain that re-reads its count passes.
+//!
+//! A loop around the innermost bounding loop is one of:
+//!
+//! - a bounded loop of D8 ([`count::bounds`]);
+//! - `for P in 0..<bound>`, with `<bound>` an integer literal or an identifier followed by
+//!   `.field` or `::segment` steps;
+//! - `&<fields>`, `&mut <fields>`, `<fields>.iter()` or `<fields>.iter_mut()`, or a slice or array
+//!   parameter of the enclosing `fn` that nothing names before the loop and no `static`, `const`
+//!   or `use` of the region names, each optionally followed by any number of `.enumerate()` and
+//!   `.zip(<literal | fields | &fields | &mut fields>)` steps (a zip ends with its receiver);
+//! - the closure of `core::array::from_fn` or `std::array::from_fn`.
+//!
+//! `while` and `loop` are refused. So is every other `for` header (`1..n`, `0..=n`, `(0..)`,
+//! `.rev()`, `.take(n)`, a bare local), the over-refusals that D7 keeps.
+
+use super::Ctx;
+use super::count;
+use super::scope::BindingKind;
+use super::shapes::{Place, cap, is_int, method, method0, path_name};
+use super::tree::{Node, Step, from_fn_call, pos};
+
+/// Whether the loop at `steps[at]` runs a finite number of passes.
+pub(super) fn finite<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize) -> bool {
+    match steps[at].node {
+        Node::Expr(syn::Expr::ForLoop(each)) => {
+            count::bounds(ctx, steps, at)
+                || range_to_a_bound(&each.expr)
+                || collection(ctx, steps, at, each)
+        }
+        Node::Expr(syn::Expr::While(_)) => count::bounds(ctx, steps, at),
+        Node::Expr(syn::Expr::Closure(_)) => array_from_fn(steps, at),
+        _ => false,
+    }
+}
+
+/// `0..<bound>`.
+fn range_to_a_bound(expr: &syn::Expr) -> bool {
+    let syn::Expr::Range(range) = expr else {
+        return false;
+    };
+    matches!(range.limits, syn::RangeLimits::HalfOpen(_))
+        && range
+            .start
+            .as_deref()
+            .is_some_and(|start| is_int(start, "0"))
+        && range.end.as_deref().is_some_and(cap)
+}
+
+/// Whether the step `at`, a closure, is the argument of `core::array::from_fn` or
+/// `std::array::from_fn` with no generic arguments.
+fn array_from_fn(steps: &[Step<'_>], at: usize) -> bool {
+    let Some(call) = from_fn_call(steps, at) else {
+        return false;
+    };
+    let syn::Expr::Path(callee) = &*call.func else {
+        return false;
+    };
+    let segments: Vec<_> = callee.path.segments.iter().collect();
+    callee.qself.is_none()
+        && segments.len() == 3
+        && segments.iter().all(|segment| segment.arguments.is_none())
+        && matches!(segments[0].ident.to_string().as_str(), "core" | "std")
+        && segments[1].ident == "array"
+        && segments[2].ident == "from_fn"
+}
+
+/// `&<fields>`, `<fields>.iter()`, `<fields>.iter_mut()` or a slice or array parameter, with any
+/// `.enumerate()` and `.zip(..)` steps after it.
+fn collection<'f>(
+    ctx: &Ctx<'f>,
+    steps: &[Step<'f>],
+    at: usize,
+    each: &'f syn::ExprForLoop,
+) -> bool {
+    let mut base = &*each.expr;
+    loop {
+        if let Some(call) = method0(base, "enumerate") {
+            base = &call.receiver;
+        } else if let Some(call) = method(base, "zip")
+            && call.args.len() == 1
+            && zip_argument(&call.args[0])
+        {
+            base = &call.receiver;
+        } else {
+            break;
+        }
+    }
+    match base {
+        syn::Expr::Reference(reference) => Place::of(&reference.expr).is_some(),
+        syn::Expr::MethodCall(call) => {
+            (method0(base, "iter").is_some() || method0(base, "iter_mut").is_some())
+                && Place::of(&call.receiver).is_some()
+        }
+        syn::Expr::Path(_) => path_name(base)
+            .is_some_and(|(name, name_at)| slice_parameter(ctx, steps, at, &name, name_at)),
+        _ => false,
+    }
+}
+
+/// A zip's argument: an integer literal, `<fields>`, `&<fields>` or `&mut <fields>`.
+fn zip_argument(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(_),
+            ..
+        }) => true,
+        syn::Expr::Reference(reference) => Place::of(&reference.expr).is_some(),
+        other => Place::of(other).is_some(),
+    }
+}
+
+/// Whether `name`, used at `name_at` as the iterator of the loop at `steps[at]`, is a slice or
+/// array parameter of the enclosing `fn`: the parameter is a plain name of type `&[T]`, `&mut [T]`,
+/// `&[T; N]` or `[T; N]`; the signature and the loop lie in the pop's region; nothing names it
+/// between the `fn`'s body and the loop (a rebinding would); and no `static`, `const` or `use` of
+/// the region can name it (a block item shadows the parameter for its whole block).
+fn slice_parameter<'f>(
+    ctx: &Ctx<'f>,
+    steps: &[Step<'f>],
+    at: usize,
+    name: &str,
+    name_at: super::tree::Pos,
+) -> bool {
+    let Some(binding) = ctx.binding_of_path(name, name_at) else {
+        return false;
+    };
+    let BindingKind::Param { ty: Some(ty) } = binding.kind else {
+        return false;
+    };
+    let finite = match ty {
+        syn::Type::Array(_) => true,
+        syn::Type::Reference(reference) => {
+            matches!(&*reference.elem, syn::Type::Slice(_) | syn::Type::Array(_))
+        }
+        _ => false,
+    };
+    let Some(function) = steps[..at].iter().rposition(|step| step.node.is_function()) else {
+        return false;
+    };
+    let Some(body) = body_open(steps[function].node) else {
+        return false;
+    };
+    let (Some(signature), Some(this)) = (
+        ctx.tree.extent(steps[function].node),
+        ctx.tree.extent(steps[at].node),
+    ) else {
+        return false;
+    };
+    finite
+        && ctx.region.holds(signature.core, this.end)
+        && ctx.boundaries.words_in(name, body, this.full) == 0
+        && !ctx.names_item(name)
+}
+
+/// Where the body of a function node opens.
+fn body_open(node: Node<'_>) -> Option<super::tree::Pos> {
+    let block = match node {
+        Node::Item(syn::Item::Fn(function)) => &function.block,
+        Node::ImplFn(function) => &function.block,
+        Node::TraitFn(function) => function.default.as_ref()?,
+        _ => return None,
+    };
+    Some(pos(block.brace_token.span.open().start()))
+}

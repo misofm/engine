@@ -14,6 +14,41 @@ fn drain_fader_records(controls: &mut [Option<Consumer<Record>>]) {
         }
     }
 }
+impl BankProcessor {
+    fn drain_controls(&mut self, carry: bool) -> Result<usize, ParameterError> {
+        let Self {
+            bank,
+            controls,
+            live,
+            ..
+        } = self;
+        let mut refused = 0_usize;
+        for (lane, control) in controls.iter_mut().enumerate() {
+            let Some(control) = control.as_mut() else {
+                continue;
+            };
+            let available = control.available_at_entry();
+            for _ in 0..available {
+                let Ok(record) = control.try_pop() else {
+                    break;
+                };
+                if let Some(witness) = live.get_mut(lane) {
+                    witness.admit(&record);
+                }
+                let applied = match record {
+                    Record::Trim { lanes, db } => bank.set_trim_db(lane, lanes, db),
+                    Record::Filter { target } => bank.apply_prepared_filter(lane, target),
+                };
+                match applied {
+                    Ok(()) => {}
+                    Err(error) if !carry => return Err(error),
+                    Err(_) => refused = refused.saturating_add(1),
+                }
+            }
+        }
+        Ok(refused)
+    }
+}
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN

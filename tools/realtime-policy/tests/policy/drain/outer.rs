@@ -1,0 +1,459 @@
+//! The rest of the drain rule (B1b): finite outer loops (D1), attributes and items (D2) and
+//! constructors (D3).
+
+use realtime_policy::Class;
+
+use super::super::common::{BEGIN, END, Edit, expect_failure, expect_valid};
+use super::{accepts, each_row, refuses};
+
+const BUFFER: &str = "crates/engine/src/realtime/buffer.rs";
+
+/// The pop-and-apply body that every drain below shares.
+const POP: &str = "let Ok(record) = control.try_pop() else {\n                break;\n            };\n            apply(record);";
+
+/// A counted drain, with `opening` as the first statements of the outer loop's body.
+fn counted_drain(opening: &str) -> String {
+    format!(
+        "{opening}        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n"
+    )
+}
+
+/// A drain function with the extra parameters `params` and `prelude` statements, whose counted
+/// drain stands in the loop `header`.
+fn around(params: &str, prelude: &str, header: &str, opening: &str) -> String {
+    format!(
+        "fn drain(control: &mut Consumer<Record>{params}) {{\n{prelude}    {header} {{\n{}    }}\n}}",
+        counted_drain(opening)
+    )
+}
+
+/// The same drain, with a block item after the loop that can name `name`.
+fn shadowed_by(params: &str, header: &str, item: &str) -> String {
+    format!(
+        "fn drain(control: &mut Consumer<Record>{params}) {{\n    let available = control.available_at_entry();\n    {{\n        {header} {{\n            {POP}\n        }}\n        {item}\n    }}\n}}"
+    )
+}
+
+const CONFIG: &str = ", cfg: &Config";
+
+/// D1: a loop around a counted drain that runs a finite number of passes by its form.
+#[test]
+fn the_finite_outer_loops_pass() {
+    let from_fn = |path: &str| {
+        format!(
+            "fn drain(control: &mut Consumer<Record>) {{\n    let _lanes: [u8; 4] = {path}(|_| {{\n{}        0\n    }});\n}}",
+            counted_drain("")
+        )
+    };
+    let rows: Vec<(&'static str, String)> = vec![
+        ("outer-literal-bound", around("", "", "for _ in 0..4", "")),
+        (
+            "outer-suffixed-literal-bound",
+            around("", "", "for _ in 0..4_usize", ""),
+        ),
+        (
+            "outer-identifier-bound",
+            around(", lanes: usize", "", "for _ in 0..lanes", ""),
+        ),
+        (
+            "outer-field-bound",
+            around(CONFIG, "", "for _ in 0..cfg.lanes", ""),
+        ),
+        (
+            "outer-segment-bound",
+            around("", "", "for _ in 0..usize::MAX", ""),
+        ),
+        (
+            "outer-reference",
+            around(CONFIG, "", "for _ in &cfg.controls", ""),
+        ),
+        (
+            "outer-mutable-reference",
+            around(CONFIG, "", "for _ in &mut cfg.controls", ""),
+        ),
+        (
+            "outer-iter",
+            around(CONFIG, "", "for _ in cfg.controls.iter()", ""),
+        ),
+        (
+            "outer-iter-mut-enumerate",
+            around(
+                CONFIG,
+                "",
+                "for (_, _) in cfg.controls.iter_mut().enumerate()",
+                "",
+            ),
+        ),
+        (
+            "outer-zip-chain",
+            around(
+                CONFIG,
+                "",
+                "for _ in cfg.a.iter().zip(&cfg.b).enumerate().zip(&mut cfg.c).zip(cfg.d).zip(4)",
+                "",
+            ),
+        ),
+        (
+            "outer-slice-reference",
+            around(", rounds: &[u8]", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-slice-mutable",
+            around(", rounds: &mut [u8]", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-slice-lifetime",
+            around(", rounds: &'static [u8]", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-array-value",
+            around(", rounds: [u8; 4]", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-mutable-array-value",
+            around(", mut rounds: [u8; 4]", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-array-reference",
+            around(", rounds: &[u8; 4]", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-labelled",
+            around("", "", "'lanes: for _ in 0..4", ""),
+        ),
+        (
+            "outer-counted-for-header",
+            around("", "", "for _ in 0..control.available_at_entry()", ""),
+        ),
+        (
+            "outer-counted-while",
+            around(
+                "",
+                "    let mut passes = control.available_at_entry();\n",
+                "while passes != 0",
+                "        passes -= 1;\n",
+            ),
+        ),
+        (
+            "outer-two-finite-loops",
+            format!(
+                "fn drain(control: &mut Consumer<Record>{CONFIG}) {{\n    for _ in 0..4 {{\n        for _ in &cfg.controls {{\n{}        }}\n    }}\n}}",
+                counted_drain("")
+            ),
+        ),
+        ("outer-core-array-from-fn", from_fn("core::array::from_fn")),
+        ("outer-std-array-from-fn", from_fn("std::array::from_fn")),
+        (
+            "outer-rooted-array-from-fn",
+            from_fn("::core::array::from_fn"),
+        ),
+    ];
+    each_row(rows, |name, text| accepts(name, &text));
+}
+
+/// D1, D7: a loop around a counted drain that may run forever, or that the form cannot prove
+/// finite, is refused. Each row names the form it breaks.
+#[test]
+fn the_outer_loops_that_may_not_end_are_refused() {
+    let rows: Vec<(&'static str, String)> = vec![
+        ("outer-loop", around("", "", "loop", "")),
+        (
+            "outer-while-condition",
+            around(CONFIG, "", "while cfg.enabled", ""),
+        ),
+        (
+            "outer-while-let",
+            around(CONFIG, "", "while let Some(_) = cfg.next()", ""),
+        ),
+        ("outer-open-range", around("", "", "for _ in 0..", "")),
+        (
+            "outer-range-from-one",
+            around(CONFIG, "", "for _ in 1..cfg.lanes", ""),
+        ),
+        (
+            "outer-inclusive-range",
+            around(CONFIG, "", "for _ in 0..=cfg.lanes", ""),
+        ),
+        (
+            "outer-reversed",
+            around(CONFIG, "", "for _ in cfg.controls.iter().rev()", ""),
+        ),
+        (
+            "outer-taken",
+            around(CONFIG, "", "for _ in cfg.controls.iter().take(4)", ""),
+        ),
+        (
+            "outer-cycled",
+            around(CONFIG, "", "for _ in cfg.controls.iter().cycle()", ""),
+        ),
+        (
+            "outer-vec-parameter-by-value",
+            around(", rounds: Vec<u8>", "", "for _ in rounds", ""),
+        ),
+        (
+            "outer-field-by-value",
+            around(CONFIG, "", "for _ in cfg.controls", ""),
+        ),
+        (
+            "outer-slice-parameter-of-another-name",
+            around(", rounds: &[u8]", "", "for _ in other", ""),
+        ),
+        (
+            "outer-slice-parameter-with-a-pattern",
+            around(
+                ", (rounds, other): (&[u8], &[u8])",
+                "",
+                "for _ in rounds",
+                "",
+            ),
+        ),
+        (
+            "outer-array-from-fn-with-generic-arguments",
+            format!(
+                "fn drain(control: &mut Consumer<Record>) {{\n    let _lanes = core::array::from_fn::<u8, 4, _>(|_| {{\n{}        0\n    }});\n}}",
+                counted_drain("")
+            ),
+        ),
+        (
+            "outer-array-from-fn-in-a-loop-that-never-ends",
+            format!(
+                "fn drain(control: &mut Consumer<Record>) {{\n    loop {{\n        let _lanes: [u8; 4] = core::array::from_fn(|_| {{\n{}            0\n        }});\n    }}\n}}",
+                counted_drain("")
+            ),
+        ),
+        (
+            "outer-finite-loop-inside-an-unbounded-one",
+            format!(
+                "fn drain(control: &mut Consumer<Record>) {{\n    loop {{\n        for _ in 0..4 {{\n{}        }}\n    }}\n}}",
+                counted_drain("")
+            ),
+        ),
+    ];
+    each_row(rows, |name, text| refuses(name, &text));
+}
+
+/// D1: the slice parameter's `fn` signature lies in the pop's region, like the loop.
+#[test]
+fn a_slice_parameter_of_a_function_outside_the_region_is_not_read() {
+    let inside = format!(
+        "fn drain_params(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    // {BEGIN}\n    for _ in rounds {{\n{}    }}\n    // {END}\n}}\n",
+        counted_drain("")
+    );
+    expect_failure(
+        "slice-parameter-outside-the-region",
+        &[Edit::Append {
+            path: BUFFER,
+            text: &inside,
+        }],
+        &[Class::UnboundedTryPop],
+    );
+    let whole = format!(
+        "// {BEGIN}\nfn drain_params(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    for _ in rounds {{\n{}    }}\n}}\n// {END}\n",
+        counted_drain("")
+    );
+    expect_valid(
+        "slice-parameter-inside-the-region",
+        &[Edit::Append {
+            path: BUFFER,
+            text: &whole,
+        }],
+    );
+}
+
+/// D2: a `static`, `const` or `use` of the region that can name the count or the slice parameter
+/// shadows it for its whole block, wherever it is declared; an item that names something else
+/// does not.
+#[test]
+fn an_item_that_can_name_the_count_refuses_the_drain() {
+    let count = "for _ in 0..available";
+    let slice = "for _ in rounds";
+    let rows: Vec<(&'static str, String)> = vec![
+        (
+            "count-shadowed-by-block-const",
+            shadowed_by("", count, "const available: usize = usize::MAX;"),
+        ),
+        (
+            "count-shadowed-by-block-static-mut",
+            shadowed_by("", count, "static mut available: usize = usize::MAX;"),
+        ),
+        (
+            "count-shadowed-by-use",
+            shadowed_by("", count, "use other::available;"),
+        ),
+        (
+            "count-shadowed-by-glob-use",
+            shadowed_by("", count, "use other::*;"),
+        ),
+        (
+            "count-shadowed-by-nested-use",
+            shadowed_by("", count, "use other::{first, available as third};"),
+        ),
+        (
+            "slice-shadowed-by-block-static",
+            shadowed_by(", rounds: &[u8]", slice, "static rounds: [u8; 1] = [0];"),
+        ),
+        (
+            "slice-shadowed-by-use",
+            shadowed_by(", rounds: &[u8]", slice, "use other::rounds;"),
+        ),
+        (
+            "slice-shadowed-by-glob-use",
+            shadowed_by(", rounds: &[u8]", slice, "use other::*;"),
+        ),
+    ];
+    each_row(rows, |name, text| refuses(name, &text));
+    let unrelated: Vec<(&'static str, String)> = vec![
+        (
+            "unrelated-const-after-the-loop",
+            shadowed_by("", count, "const LIMIT: usize = 4;"),
+        ),
+        (
+            "unrelated-use-after-the-loop",
+            shadowed_by("", count, "use core::cmp::max;"),
+        ),
+        (
+            "unrelated-static-after-a-slice-loop",
+            format!(
+                "fn drain(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    for _ in rounds {{\n{}    }}\n    static LIMIT: usize = 4;\n}}",
+                counted_drain("")
+            ),
+        ),
+    ];
+    each_row(unrelated, |name, text| accepts(name, &text));
+}
+
+/// D2: a count binding under a `cfg`-family attribute, on the entry binding or on the one alias
+/// of it, may not be compiled; any other attribute is no reason to refuse.
+#[test]
+fn a_count_binding_that_may_not_be_compiled_is_refused() {
+    let drain = |binding: &str| {
+        format!(
+            "fn drain(control: &mut Consumer<Record>) {{\n{binding}    for _ in 0..available {{\n        {POP}\n    }}\n}}"
+        )
+    };
+    let refused: Vec<(&'static str, String)> = vec![
+        (
+            "count-under-cfg-attr",
+            drain(
+                "    let available = usize::MAX;\n    #[cfg_attr(debug_assertions, allow(unused))]\n    let available = control.available_at_entry();\n",
+            ),
+        ),
+        (
+            "count-under-a-path-ending-in-cfg",
+            drain(
+                "    let available = usize::MAX;\n    #[core::cfg(debug_assertions)]\n    let available = control.available_at_entry();\n",
+            ),
+        ),
+        (
+            "count-under-cfg-after-another-attribute",
+            drain(
+                "    let available = usize::MAX;\n    #[allow(unused)]\n    #[cfg(debug_assertions)]\n    let available = control.available_at_entry();\n",
+            ),
+        ),
+        (
+            "alias-source-under-cfg",
+            drain(
+                "    #[cfg(debug_assertions)]\n    let entry = control.available_at_entry();\n    let available = entry;\n",
+            ),
+        ),
+    ];
+    each_row(refused, |name, text| refuses(name, &text));
+    let accepted: Vec<(&'static str, String)> = vec![
+        (
+            "count-under-allow",
+            drain("    #[allow(unused)]\n    let available = control.available_at_entry();\n"),
+        ),
+        (
+            "alias-source-under-allow",
+            drain(
+                "    #[allow(unused)]\n    let entry = control.available_at_entry();\n    let available = entry;\n",
+            ),
+        ),
+    ];
+    each_row(accepted, |name, text| accepts(name, &text));
+}
+
+/// D3: `from_fn`, `repeat_with` and `successors` run a closure repeatedly with no loop keyword.
+/// A region refuses them anywhere, a pop or not, except `core::array::from_fn` and
+/// `std::array::from_fn`.
+#[test]
+fn a_constructor_that_loops_is_refused_anywhere_in_a_region() {
+    let rows: Vec<(&'static str, &'static str)> = vec![
+        (
+            "successors-without-a-pop",
+            "fn build() {\n    let _ = core::iter::successors(Some(1_u32), |n| n.checked_mul(2));\n}",
+        ),
+        (
+            "from-fn-without-a-pop",
+            "fn build() {\n    let _ = core::iter::from_fn(|| None::<u8>);\n}",
+        ),
+        (
+            "repeat-with-without-a-pop",
+            "fn build() {\n    let _ = core::iter::repeat_with(|| 0_u8);\n}",
+        ),
+        (
+            "raw-identifier-from-fn",
+            "fn build() {\n    let _ = core::iter::r#from_fn(|| None::<u8>);\n}",
+        ),
+        (
+            "array-from-fn-after-a-use",
+            "fn build() {\n    let _: [u8; 2] = array::from_fn(|_| 0);\n}",
+        ),
+        (
+            "a-longer-path-ending-in-array-from-fn",
+            "fn build() {\n    let _: [u8; 2] = other::core::array::from_fn(|_| 0);\n}",
+        ),
+        (
+            "array-from-fn-with-another-root",
+            "fn build() {\n    let _: [u8; 2] = alloc::array::from_fn(|_| 0);\n}",
+        ),
+        (
+            "from-fn-in-a-macro-call",
+            "fn build() {\n    note!(core::iter::from_fn);\n}",
+        ),
+        ("a-function-named-from-fn", "fn from_fn() {}"),
+    ];
+    each_row(rows, refuses);
+    let accepted: Vec<(&'static str, &'static str)> = vec![
+        (
+            "core-array-from-fn-without-a-pop",
+            "fn build() {\n    let _: [u8; 2] = core::array::from_fn(|i| 0);\n}",
+        ),
+        (
+            "std-array-from-fn-without-a-pop",
+            "fn build() {\n    let _: [u8; 2] = std::array::from_fn(|i| 0);\n}",
+        ),
+        (
+            "rooted-array-from-fn-without-a-pop",
+            "fn build() {\n    let _: [u8; 2] = ::core::array::from_fn(|i| 0);\n}",
+        ),
+        (
+            "rooted-std-array-from-fn",
+            "fn build() {\n    let _: [u8; 2] = (1, ::std::array::from_fn(|i| 0)).1;\n}",
+        ),
+    ];
+    each_row(accepted, accepts);
+    // Outside every region the constructors are no concern of this rule.
+    let outside = "fn unmarked() {\n    let _ = core::iter::from_fn(|| None::<u8>);\n    let _ = core::iter::successors(Some(1_u32), |n| n.checked_mul(2));\n}\n";
+    expect_valid(
+        "constructors-outside-every-region",
+        &[Edit::Append {
+            path: BUFFER,
+            text: outside,
+        }],
+    );
+}
+
+/// D3: a pop that runs directly in the closure of `array::from_fn` is a constant-bound drain, and
+/// a pop in a counted drain inside that closure is not.
+#[test]
+fn a_pop_directly_in_an_array_from_fn_closure_is_refused() {
+    refuses(
+        "std-array-from-fn-pop",
+        "fn drain(control: &mut Consumer<Record>) {\n    let _: [Result<Record, Empty>; 4] = std::array::from_fn(|_| control.try_pop());\n}",
+    );
+    refuses(
+        "array-from-fn-block-pop",
+        "fn drain(control: &mut Consumer<Record>) {\n    let _: [u8; 4] = core::array::from_fn(|_| {\n        let Ok(record) = control.try_pop() else {\n            return 0;\n        };\n        apply(record);\n        0\n    });\n}",
+    );
+}

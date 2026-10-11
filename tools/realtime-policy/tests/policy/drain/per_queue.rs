@@ -24,6 +24,8 @@ struct Poll {
     pass_body: String,
     /// The statements after the pass loop, inside the outer loop.
     after: String,
+    /// A loop header that encloses the whole form, set loop included.
+    around: Option<&'static str>,
 }
 
 impl Poll {
@@ -38,6 +40,7 @@ impl Poll {
             between: String::new(),
             pass_header: "((lane, slot), left) in R\n    .lanes\n    .iter_mut()\n    .zip(&mut R.slots)\n    .zip(&mut R.remaining)".to_owned(),
             pass_body: "if slot.is_some() || *left == 0 {\n    continue;\n}\n*left -= 1;\nif let Ok(record) = lane.consumer.try_pop() {\n    *slot = Some(record);\n}".to_owned(),
+            around: None,
             after: "if R.slots.iter().any(Option::is_none) {\n    break;\n}\nlet aligned = R.slots.iter().enumerate().all(|(index, slot)| {\n    slot.is_some() && R.lanes.get(index).is_some()\n});\nif !aligned {\n    R.lost = R.lost.saturating_add(1);\n    continue;\n}\nif R.lost > 9 {\n    R.reset_delivery(false);\n    R.lost = 1;\n    return 0;\n}".to_owned(),
         }
     }
@@ -48,17 +51,22 @@ impl Poll {
         } else {
             "fn poll(ready: &mut Ready) -> u32 {"
         };
-        let body = format!(
-            "{before}\n{set}\n{between}\nlet mut passes = 1_usize;\nfor left in R.remaining.iter() {{\n    passes = passes.saturating_add(*left as usize);\n}}\nfor _ in 0..passes {{\n    for {pass_header} {{\n{pass_body}\n    }}\n{after}\n}}\n0",
+        let form = format!(
+            "{before}\n{set}\n{between}\nlet mut passes = 1_usize;\nfor left in R.remaining.iter() {{\n    passes = passes.saturating_add(*left as usize);\n}}\nfor _ in 0..passes {{\n    for {pass_header} {{\n{pass_body}\n    }}\n{after}\n}}",
             before = self.before,
             set = self.set,
             between = self.between,
             pass_header = self.pass_header,
             pass_body = indent(&self.pass_body, 8),
             after = indent(&self.after, 4),
-        )
-        .replace("R.", &format!("{}.", self.root))
-        .replace("R\n", &format!("{}\n", self.root));
+        );
+        let form = match self.around {
+            Some(header) => format!("{header} {{\n{}\n}}", indent(&form, 4)),
+            None => form,
+        };
+        let body = format!("{form}\n0")
+            .replace("R.", &format!("{}.", self.root))
+            .replace("R\n", &format!("{}\n", self.root));
         let text = format!("{signature}\n{}\n}}", indent(&body, 4));
         if self.root == "self" {
             format!("impl Meters {{\n{text}\n}}")
@@ -376,4 +384,36 @@ fn per_queue_terminal_break_leaves_an_inner_loop() {
     let mut poll = Poll::passing("self");
     poll.after = "for _ in 0..2 {\n    if R.lost > 9 {\n        R.refill_counters();\n        break;\n    }\n}".to_owned();
     refuses("per-queue-terminal-break-leaves-an-inner-loop", &poll);
+}
+
+/// D1, condition 3: the loops that enclose the set loop are the drain's outer loops, judged like
+/// any other: a finite one passes.
+#[test]
+fn per_queue_inside_a_finite_outer_loop() {
+    let mut poll = Poll::passing("self");
+    poll.around = Some("'rounds: for _ in 0..4");
+    accepts("per-queue-inside-a-finite-outer-loop", &poll);
+}
+
+/// D1, condition 3: a loop that may not end around the whole form is refused. Defect: the loops
+/// that enclose the set loop left unjudged.
+#[test]
+fn per_queue_inside_an_unbounded_outer_loop() {
+    let mut poll = Poll::passing("self");
+    poll.around = Some("loop");
+    refuses("per-queue-inside-an-unbounded-outer-loop", &poll);
+}
+
+/// D1, condition 3: the pass count loop between the set loop and the pass loop must be finite
+/// too. Defect: only the loops that enclose the set loop judged.
+#[test]
+fn per_queue_pass_count_loop_may_not_end() {
+    let text = Poll::passing("self")
+        .render()
+        .replace("for _ in 0..passes {", "loop {");
+    expect_failure(
+        "per-queue-pass-count-loop-may-not-end",
+        &edit(&text),
+        &[DRAIN],
+    );
 }

@@ -91,6 +91,36 @@ impl<'f> Node<'f> {
     }
 }
 
+/// Whether the step `at` of a path is a loop of the drain rule: a `for`, `while` or `loop`, or the
+/// closure argument of a call whose callee ends in `from_fn`, which runs that closure repeatedly.
+pub(super) fn is_loop_at(steps: &[Step<'_>], at: usize) -> bool {
+    steps[at].node.is_loop() || from_fn_call(steps, at).is_some()
+}
+
+/// The call whose closure argument is the step `at`, when its callee's last segment is `from_fn`.
+pub(super) fn from_fn_call<'f>(steps: &[Step<'f>], at: usize) -> Option<&'f syn::ExprCall> {
+    let Node::Expr(syn::Expr::Closure(_)) = steps.get(at)?.node else {
+        return None;
+    };
+    let Step {
+        node: Node::Expr(syn::Expr::Call(call)),
+        via: Some(Via::Operand(slot)),
+    } = steps[at.checked_sub(1)?]
+    else {
+        return None;
+    };
+    let syn::Expr::Path(callee) = &*call.func else {
+        return None;
+    };
+    (slot >= 1
+        && callee
+            .path
+            .segments
+            .last()
+            .is_some_and(|last| bare(&last.ident) == "from_fn"))
+    .then_some(call)
+}
+
 /// The slot of a parent that a child fills.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Via {
