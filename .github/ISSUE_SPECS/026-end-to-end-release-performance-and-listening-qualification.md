@@ -96,3 +96,29 @@ What this issue owes is one re-run of that matrix against the post-audit tree, r
 commit. The C ABI's live gates today are `scripts/check-capi-abi.sh`, the `capi` tests and
 `audit capi`. See [#114's spec](https://github.com/misofm/engine/blob/80c4119b9e6814cb450e87568243d6df9b6be7bc/.github/ISSUE_SPECS/114-qualify-native-c-abi-and-reference-runner-target-matrix.md)
 for the list of drifted paths.
+
+> Folded verbatim from GitHub issue #26's body on 2026-10-11 (root ruling on the body-sync unmatched set, decision D2); the two sections below exist on no commit of main, and came from branch `codex/audit-349-priority-handoff` (blob `4d456271`, commit `a3b03618c`, 2026-09-11). Main's newer C-ABI text above is kept.
+
+
+## Causal compressor listening handoff — #737
+
+PR #743 (`8b1f0cb3`) removes the launch compressor's fixed 20 ms delay, detector
+lookahead and staged path. Preserve its changed causal attack in matched-loudness
+blinded release listening: finite attack permits initial transients, and the old
+default 5 ms lookahead sound is intentionally not a null target. Independent f64,
+transient/causality, native/Wasm/browser and realtime gates pass; no human listening
+verdict or sonic-superiority claim is supplied by #737. This standing release issue
+owns human scheduling and listening evidence, without reopening the delivered
+minimum causal compressor slice. Gate #738 and multiband #739 remain separately
+queued; limiter and softclip guarantees are unchanged.
+
+
+## Causal gate listening handoff — #738
+
+PR #747, main `17d755e9`, removes the gate/expander lookahead and fixed 10 ms
+audio delay. Preserve the changed causal opening and transient behavior in
+matched-level blinded release listening. Independent oracle, causal/state tests,
+realtime audit and native/Wasm/browser qualification pass; #738 provides no
+performed human listening or sound-superiority verdict. #738 is completed, while
+#739 is now the separately scoped active multiband change. CPU measurement is
+queued in #746 and does not stand in for listening.
