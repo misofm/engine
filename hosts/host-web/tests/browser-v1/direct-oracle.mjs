@@ -427,8 +427,10 @@ async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
   reports.matrix = submitCommands(control, [matrix]);
   step(1);
   reports.unknownTrack = submitCommands(control, [{ ...matrix, trackIndex: 5 }]);
+  // A flood of bypass records, which stay a queue: a matrix or fader value is a latest-target
+  // cell with no room to overfill (#1312).
   reports.flood = submitCommands(
-    control, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => matrix),
+    control, Array.from({ length: COMMAND_QUEUE_RECORDS + 1 }, () => bypassOn),
   );
   reports.unknownParameter = submitCommands(control, [unknownParameter]);
   step(2);

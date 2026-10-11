@@ -1525,6 +1525,13 @@ struct ReadyOwnership {
     /// declared first so they are released before the plan that owns their consumer endpoints.
     /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
     controls: Vec<TrackControlProducer>,
+    /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
+    /// stamps those writes from this handle and publishes their revision on it, as the control
+    /// plane does through its provider epoch; the plan's own render takes its snapshot from the
+    /// same gate. Until Worker admission (#1382) this is the one handle on the one plan. It is
+    /// never moved while a stamp is open: every revision stamped here is published in the same
+    /// admission.
+    plan_gate: engine::realtime::PlanRevisionGate,
     /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
     /// reaches its queue with one index and no search.
@@ -1778,14 +1785,13 @@ impl ReadyOwnership {
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
+    /// The free room of one destination queue. The matrix and fader bands are latest-target cells
+    /// (#1312), which have no room to want and are never asked: they answer `None`, as an
+    /// unaddressable queue does.
     fn queue_available(&self, slot: usize) -> Option<u32> {
         let tracks = self.strip_count();
-        if slot < tracks {
-            return u32::try_from(self.controls.get(slot)?.producer.available_capacity()).ok();
-        }
         if slot < tracks * 2 {
-            return u32::try_from(self.controls.get(slot - tracks)?.fader.available_capacity())
-                .ok();
+            return None;
         }
         if slot < tracks * 3 {
             return u32::try_from(
@@ -1816,7 +1822,7 @@ impl ReadyOwnership {
     }
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
-    /// free-room pass has already ruled out.
+    /// free-room pass has already ruled out, or on a cell record, which is never pushed.
     fn push(
         &mut self,
         slot: usize,
@@ -1825,14 +1831,9 @@ impl ReadyOwnership {
     ) -> Result<(), ()> {
         let tracks = self.strip_count();
         match record {
-            AdmittedCommand::Matrix(record) => {
-                let producer = self.controls.get_mut(slot).ok_or(())?;
-                producer.producer.try_push(record).map_err(|_| ())
-            }
-            AdmittedCommand::Fader(record) => {
-                let producer = self.controls.get_mut(slot - tracks).ok_or(())?;
-                producer.fader.try_push(record).map_err(|_| ())
-            }
+            // The strips' fader, mute and matrix values are cells, written under the batch's
+            // stamp by the admission itself (`write_strip_cells`), never pushed.
+            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) => Err(()),
             AdmittedCommand::Input(record) => {
                 let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
                 let input = producer.input.as_mut().ok_or(())?;
@@ -4680,6 +4681,73 @@ fn admit_commands(
     }
 }
 
+/// Write the admitted fader, mute and matrix/pan records of one batch into the strips' cells as
+/// one transaction (#1312 D7), then publish its revision on the plan's gate.
+///
+/// A batch that stages none takes no stamp and no revision. The stamp is the batch's last
+/// fallible step: its refusal (a revision past the gate's ceiling) writes nothing and returns the
+/// internal refusal. After the stamp nothing can fail but a missing producer, an invariant
+/// violation like a failed push; the revision is published on that path too, so an open stamp
+/// never outlives the batch and a higher revision is never stamped over it.
+fn write_strip_cells(
+    ready: &mut ReadyOwnership,
+    lowered: usize,
+    strip_count: usize,
+) -> Result<(), CommandRejection> {
+    let writes_cells = ready.command_decoded[..lowered].iter().any(|staged| {
+        matches!(
+            staged.kind,
+            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
+        )
+    });
+    if !writes_cells {
+        return Ok(());
+    }
+    let first_wire_index = ready.command_decoded[..lowered]
+        .iter()
+        .find(|staged| {
+            matches!(
+                staged.kind,
+                StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
+            )
+        })
+        .map_or(0, |staged| staged.original_wire_index);
+    let internal = |index: u32| CommandRejection {
+        result: RESULT_INTERNAL,
+        reason: COMMAND_REASON_BACKPRESSURE,
+        index,
+    };
+    let revision = ready.plan_gate.last_published().saturating_add(1);
+    let Ok(stamp) = ready.plan_gate.stamp(revision) else {
+        return Err(internal(first_wire_index));
+    };
+    let mut failure = None;
+    for entry in 0..lowered {
+        let staged = ready.command_decoded[entry];
+        let slot = staged.queue_slot as usize;
+        let written = match staged.kind {
+            StagedCommandKind::Command(AdmittedCommand::Matrix(record)) => {
+                ready.controls.get_mut(slot).map(|control| {
+                    control.producer.write(stamp, record);
+                })
+            }
+            StagedCommandKind::Command(AdmittedCommand::Fader(record)) => slot
+                .checked_sub(strip_count)
+                .and_then(|track| ready.controls.get_mut(track))
+                .map(|control| {
+                    control.fader.write(stamp, record);
+                }),
+            _ => Some(()),
+        };
+        if written.is_none() {
+            failure = Some(internal(staged.original_wire_index));
+            break;
+        }
+    }
+    ready.plan_gate.publish(revision);
+    failure.map_or(Ok(()), Err)
+}
+
 /// The three passes themselves. Every exit from here is a transaction boundary for its caller.
 fn admit_commands_staged(
     ready: &mut ReadyOwnership,
@@ -5609,6 +5677,10 @@ fn admit_commands_staged(
     for entry in 0..lowered {
         let staged = ready.command_decoded[entry];
         let slot = staged.queue_slot as usize;
+        // The matrix and fader bands are cells (#1312): a write needs no room.
+        if slot < strip_count * 2 {
+            continue;
+        }
         let needed = ready.command_wanted[slot];
         let Some(available) = ready.queue_available(slot) else {
             return Err(refuse(
@@ -5623,10 +5695,19 @@ fn admit_commands_staged(
             ));
         }
     }
+    // The strips' cells, under one stamp (#1312 D7). Every check of the batch has passed, so the
+    // stamp is the last fallible step: a refused batch above stamped and wrote nothing, and used
+    // no revision. The revision is host-local, the next above the gate's last published one, and
+    // is published as soon as the batch's cells are written, whatever the later passes do: the
+    // writes are made, so the revision that reveals them must follow, or a later batch would
+    // reveal them under its own.
+    write_strip_cells(ready, lowered, strip_count)?;
     for entry in 0..lowered {
         let staged = ready.command_decoded[entry];
         let slot = staged.queue_slot as usize;
         match staged.kind {
+            // Cells were written above.
+            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_)) => {}
             StagedCommandKind::Command(record) => {
                 if ready.push(slot, record, applied_at_sample).is_err() {
                     return Err(CommandRejection {
@@ -7211,9 +7292,15 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(decoded_bytes);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
+    let mut host = host;
+    let plan_gate = host
+        .plan
+        .take_revision_gate()
+        .ok_or_else(|| fixed_diagnostic("web.internal.plan_gate"))?;
     let ready = ReadyOwnership {
         commands_enabled,
         controls: handles.strip_controls,
+        plan_gate,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
