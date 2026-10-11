@@ -301,9 +301,10 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
-/// The depth of every strip's fader/mute and matrix/pan lane when the caller names no depth of its
-/// own: 16 records (#1053 D4). The C ABI always uses it; the browser uses it for a session that
-/// did not opt in to live commands (#1326 D2), so both hosts read one number.
+/// The depth of every strip's input queue and every effect's queue when the caller names no depth
+/// of its own: 16 records (#1053 D4). The C ABI always uses it; the browser uses it for a session
+/// that did not opt in to live commands (#1326 D2), so both hosts read one number. The strip's
+/// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312).
 pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
 
 /// What live controls ask preparation to attach (issue #137 D1/D2).
@@ -1649,13 +1650,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut graph_resources = artifact.graph_resource_estimate().clone();
     // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1)
     // and, when this preparation made its own `live_values_superseded` count rather than taking the
-    // session's, that count (#1312 D2; a session's count is the host's to charge once). Charged
-    // here so every host, the C ABI and the browser, counts them in the one row.
+    // session's, and strips hold a clone of it in their cell readers, that count (#1312 D2; a
+    // session's count is the host's to charge once). A preparation with no strip controls keeps no
+    // reader of the count, so the plan retains none and charges none. Charged here so every host,
+    // the C ABI and the browser, counts them in the one row.
     graph_resources.session_plus_plan_bytes = graph_resources
         .session_plus_plan_bytes
         .checked_add(engine::realtime::plan_revision_gate_retained_bytes())
         .and_then(|bytes| {
-            bytes.checked_add(if superseded.is_none() {
+            bytes.checked_add(if superseded.is_none() && !control_requests.is_empty() {
                 LiveValuesSuperseded::retained_bytes()
             } else {
                 0

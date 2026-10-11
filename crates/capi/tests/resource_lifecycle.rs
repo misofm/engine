@@ -1958,12 +1958,6 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             + successor.carry_program_retained_bytes,
         "the swapped-in plan's graph row counts its carry program"
     );
-    assert_eq!(
-        successor.graph_session_plus_plan_bytes - successor.graph_incremental_plan_bytes,
-        engine::realtime::plan_revision_gate_retained_bytes(),
-        "the host-core row it adds to counts the plan's revision gate, and no count of its own \
-         because capi passes the session's"
-    );
     println!(
         "carried ring {} bytes ({} overhead); carry program {} bytes; inventory {} bytes",
         successor.carried_source_total_bytes,

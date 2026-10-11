@@ -11,7 +11,8 @@ use host_core::{
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, LiveValuesSuperseded,
     PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission,
     compile_host_session, control_table_bytes, default_source_ring_frames, diagnostic_lines,
-    prepare_host_runtime, prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime, prepare_host_runtime_with_live_controls,
+    prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
     source_id_arena_bytes,
 };
@@ -808,40 +809,59 @@ fn dense_refusal_diagnostics_finish_under_one_second_in_release() {
 }
 
 /// The graph row counts the allocations the plan makes for itself, for every host: its revision gate
-/// (#1502 D1) always, and its `live_values_superseded` count when the preparation made the count
-/// (#1312 D2) -- the browser's per-plan count -- but not when the host passed the session's, which
-/// the host charges once. The browser copies this row unchanged into its exact retained total.
+/// (#1502 D1) always, and its `live_values_superseded` count only where the count is both the
+/// preparation's own and held by the plan (#1312 D2). A host that passes the session's count
+/// charges it once itself (the C ABI), and a preparation with no strip controls has no cell reader
+/// holding a count, so the plan retains none. The browser's per-plan count has readers and copies
+/// this row unchanged into its exact retained total.
 ///
 /// The graph compiler's row is `session_bytes + incremental_plan_bytes`, and the facade passes it
 /// no session bytes, so the report's incremental row is the independent term the plan's own
 /// allocations are measured against.
 #[test]
-fn the_graph_row_counts_the_plans_gate_and_a_count_it_made() {
+fn the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
-    let own = prepare_host_runtime(&compiled, &caps())
-        .unwrap_or_else(|_| panic!("prepare with the preparation's own count"))
+    let with_lanes = HostLiveControlRequest {
+        control_queue_depth: core::num::NonZeroUsize::new(4),
+        ..HostLiveControlRequest::default()
+    };
+    let gate = engine::realtime::plan_revision_gate_retained_bytes();
+    let row = |report: &HostPrepareReport| {
+        report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes
+    };
+
+    let lane_free = prepare_host_runtime(&compiled, &caps())
+        .unwrap_or_else(|_| panic!("prepare with no strip controls"))
         .report;
-    let session_count = LiveValuesSuperseded::default();
+    assert_eq!(
+        row(&lane_free),
+        gate,
+        "no strip controls: no cell reader holds the preparation's count, so the row charges the \
+         gate and not the count"
+    );
+    let own = prepare_host_runtime_with_live_controls(&compiled, &caps(), &with_lanes)
+        .unwrap_or_else(|_| panic!("prepare with the preparation's own count"))
+        .0
+        .report;
+    assert_eq!(
+        row(&own),
+        gate + LiveValuesSuperseded::retained_bytes(),
+        "strip controls with the preparation's own count: the readers hold it, the row charges it"
+    );
     let shared = prepare_host_runtime_with_live_lanes(
         &compiled,
         &caps(),
-        &HostLiveControlRequest::default(),
+        &with_lanes,
         HostLiveLanes::ALL,
         None,
-        &session_count,
+        &LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("prepare with the session's count"))
     .0
     .report;
-    let gate = engine::realtime::plan_revision_gate_retained_bytes();
     assert_eq!(
-        shared.graph_session_plus_plan_bytes,
-        shared.graph_incremental_plan_bytes + gate,
-        "a host that passes the session's count: the row is the graph's plus the plan's gate"
-    );
-    assert_eq!(
-        own.graph_session_plus_plan_bytes,
-        own.graph_incremental_plan_bytes + gate + LiveValuesSuperseded::retained_bytes(),
-        "a preparation that makes its own count charges it in the row as well"
+        row(&shared),
+        gate,
+        "strip controls with the session's count: the host charges it once, not the row"
     );
 }
