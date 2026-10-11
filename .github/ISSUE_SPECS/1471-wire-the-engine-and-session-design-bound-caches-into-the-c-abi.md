@@ -410,3 +410,97 @@ run under the same mutant):
 
 **Open.** Gate 6's journal-left-open sub-defect is not caught within the ceiling's headroom (above).
 The ceiling test takes about 37 s in debug. Stream B's overlapping hunks are listed above.
+
+### Attempt 3 (implementer, 2026-10-11) -- the attempt-2 findings
+
+Fixes exactly the attempt-2 verdict (`1471-attempt2.md`); the product code is unchanged except n1.
+It supersedes attempt 2's gate 6 "Limit" paragraph and its "sharper check needs an engine-internal
+test" sentence: both checks fit the engine-ceiling test's exception (C ABI only).
+
+**M1 (gate 6), `resource_lifecycle.rs`.**
+- New `a_compile_leaves_nothing_open_on_the_engine_cache`: engine A compiles a 200-design
+  document; engine B compiles it and then a document with no input filter; the bytes engine destroy
+  frees must be equal (84,208 = 84,208, an allocator-observed equality, not a pinned count).
+- `the_engine_cache_stays_within_its_stated_ceiling` now first measures the leaf node (a
+  one-design compile on a fresh engine frees exactly one: 2,608 B), derives the worst case with the
+  header's formula (1,639 x leaf + 273 x 12 pointers = 4,300,720 B, from the cap constant) and
+  asserts it is at most the stated figure; the 16,384-design fill stays. Shared helpers
+  (`roomy_limits`, `create_engine`, `compile_on`) replace the closures.
+- Mutation runs (each applied, red, reverted green):
+  1. Journal left open (`take_journal` clones): the new test red (168,048 vs 84,208); the ceiling
+     test also red (it measures a doubled node, 5,216 B, derived worst case 8,575,232). The old
+     fill-only check was green here (attempt-2 verdict M6b).
+  2. +8 bytes of value (`ChargedInputBound` gains a `u64`): the ceiling test red at once (leaf
+     2,696 B, worst case 4,444,952 B above 4,300,720); the new test green. The old fill-only check
+     was green (verdict M1).
+  3. Cap constant 16,384: ceiling test red (derived worst case 8,598,832).
+  4. Cap not applied (the map's cap `INPUT_BOUND_CACHE_ENTRIES * 2`, constant unchanged): ceiling
+     test red by the fill (7,143,856 B freed); the new test green.
+- Test-value sentences. The new test: a journal that stays open on the engine's cache after a
+  compile (named; the ceiling test turns red under it too, by the doubled node it measures, with a
+  node message). The ceiling test: an entry whose key or value grew by even 8 bytes, and a cap that
+  no longer applies.
+
+**m1, m2 (header comment and `C_ABI_V1_QUALIFICATION.md`).** The ceiling is stated as 4,300,720
+bytes of requested heap between calls; the allocator's per-block rounding comes on top, differs by
+platform (glibc, libmalloc, scudo) and has no stated figure. During a compile the cache also holds
+the open journal: at most 1,805 designs (`INPUT_BOUND_BUDGET_FRAMES / 837` + 1), so 1 + 1,804 / 5 =
+361 nodes, 60 internal: 361 x 2,608 + 60 x 96 = 947,248 B requested; the call frees it before it
+returns. Comment-only header change (`check-capi-abi.sh` ok).
+
+**m3 (gate 4, re-run on the final code).** Same frozen driver and workload as attempt 1 (scratch,
+not committed, deleted); release, `taskset -c 7`, one invocation per document and trim setting
+with the process's first compile, one warmup round and two measured rounds; no tuning or retry.
+Raw: `bench-1471-a3.log` (scratchpad).
+
+| document | cold compile (ms, M1/M2) | rebuild (ms) | warm compile (ms) | designs, cold / rebuild, warm |
+|---|---|---|---|---|
+| 9 strips | 1.63 / 1.66 | 1.31 / 1.30 | 1.47 / 1.46 | 1 / 0 |
+| 64 strips | 26.79 / 26.96 | 12.38 / 12.24 | 14.22 / 13.94 | 64 / 0 |
+
+The rows match attempt 1's (9 strips 1.63 / 1.65, 1.29 / 1.28, 1.44 / 1.43; 64 strips 26.90 /
+26.84, 12.33 / 12.31, 14.21 / 14.01) within run-to-run noise; trimming off the same (9 strips
+1.67 / 1.63, 1.29 / 1.29, 1.46 / 1.44; 64 strips 27.07 / 26.93, 12.95 / 12.32, 14.68 / 14.67). The
+rebuild now reads the sorted-slice seed and no longer moves a session map, and it is no slower.
+First compile in a fresh process: 9 strips 2.34 ms (trim on) / 2.18 (off); 64 strips 34.93 / 29.26
+(attempt 1: 2.41 / 2.46 and 29.18 / 30.28; the 64-strip first compile varies by a few ms between
+processes). The 65,537-strip row and its first-touch figures stay attempt 1's: the compile
+and rebuild path changes do 752 binary-search lookups and one 752-entry sort against 27 s of other
+work, far below that row's run-to-run spread of seconds, so a re-run cannot resolve them. Engine
+cache freed at destroy over an empty engine (now 368 B; the engine gained the journal slot, +32 B):
+2,608 B for 9 strips, 18,352 B for 64 strips, as before.
+
+**n1.** `capi_resources`' `largest` chain is again the original three-element array with
+`.chain([effect_controls.largest_allocation_bytes(), bound_seed_bytes])`: the `compile.rs` hunk
+against the slice base is one line, with no re-indent.
+
+**n2 (gate 5).** `a_refused_rebuild_leaves_the_seed_as_it_was` now refuses through the gate's
+named route, a capi limit one byte below the rebuild's peak, not pending-plan backpressure. The
+peak is the smallest `maximum_capi_retained_bytes` at which a fresh engine compiles the 64-track
+document and edit A (strip 7's HPF) commits, found by bisection (admission is monotone in the cap).
+At one byte below, the compile is admitted, A is refused after its successor was prepared (it
+computed its 1 design), and B (strips 7 and 8 both given A's design, a 63-design seed, 240 B lower
+peak) commits under the same cap and computes 1 design. The control-plane test fault is not
+reachable from capi's integration tests without a new public hook, and the same session's cap is
+fixed, so a re-submit of A cannot commit; B is the committing edit. Mutation: the rebuild writes its
+record into the newest seed before commit (`self.newest_providers_mut().bound_seed =
+bound_seed.clone()` after `prepare_runtime`): the test red (`committed.designs` 0, not 1), the
+other four `design_bound_cache` tests green. Test value: a rebuild that writes its designs into the
+newest seed before its commit.
+
+**n3. Edits outside the listed paths (each small and necessary).** `crates/builtins/src/lib.rs`
+(re-export of `InputBoundRecord`; `get` became `lookup`, `as_deref_mut` at the call); `crates/
+host-core/src/lib.rs` and `crates/control-plane/src/lib.rs` (re-exports, so capi and control-plane
+need not depend on `builtins`); `crates/capi/src/runtime/mod.rs` (the `compile_children` wrapper's
+parameter). Attempt 1 names most of them.
+
+**Gates (all on this tree).** `cargo fmt --check`; `clippy --workspace --all-targets --all-features
+-D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`; `cargo test` for
+`builtins` (test-support), `builtins-compiler`, `host-core`, `control-plane` (test-support) and
+`capi`, all suites (63 suites ok; `design_bound_cache` 5, `resource_lifecycle` 13, 36 s);
+`check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-cross-targets.sh` (PASS),
+`check-capi-abi.sh` (ok); `target/release/audit capi`: 0 allocations, 0 syscalls, `pcm_digest`
+`cb10fbface44a3a4`. Browser: `host-web` depends on neither `control-plane` nor `capi` and
+`builtins` is unchanged since `e44b8e8b2`, so the shipped module sha256 stays
+`f9e711daba98d87aa81d5a8ebfceafa25a9ea2fd2ff20091bc58e4faf71cda41`; the worklet chain was not
+re-run.

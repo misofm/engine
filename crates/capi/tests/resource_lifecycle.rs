@@ -1381,14 +1381,91 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
 }
 
 /// The engine's design-bound cache ceiling (#1471 Amendment 2 D5), as `miso_engine_v1.h` and
-/// `docs/C_ABI_V1_QUALIFICATION.md` state it: at most 4,300,720 bytes of heap on a 64-bit target,
-/// derived (not measured) from `INPUT_BOUND_CACHE_ENTRIES` = 8,192 entries of 236 bytes (a 124-byte
-/// key and a 112-byte value) in the map's nodes. A node of the standard `BTreeMap` holds 5 to 11
-/// entries, so 8,192 entries need at most 1,639 nodes; a leaf is 2,608 bytes and an internal node
-/// 2,704, and at most 273 of the 1,639 are internal. A literal on purpose: it is the figure the
-/// header gives app developers, so a change to the entry, the cap or the journal must move it
-/// there too.
+/// `docs/C_ABI_V1_QUALIFICATION.md` state it: at most 4,300,720 bytes of requested heap on a
+/// 64-bit target, derived (not measured) from `INPUT_BOUND_CACHE_ENTRIES` = 8,192 entries of 236
+/// bytes (a 124-byte key and a 112-byte value) in the map's nodes. A node of the standard
+/// `BTreeMap` holds 5 to 11 entries, so 8,192 entries need at most 1,639 nodes; a leaf is 2,608
+/// bytes and an internal node 2,704, and at most 273 of the 1,639 are internal. A literal on
+/// purpose: it is the figure the header gives app developers, so a change to the entry, the cap or
+/// the journal must move it there too.
 const ENGINE_CACHE_CEILING_BYTES: u64 = 4_300_720;
+
+/// The nodes a map of `INPUT_BOUND_CACHE_ENTRIES` entries needs at most: every node but the root
+/// holds at least 5 entries.
+const WORST_CASE_NODES: u64 = 1 + (builtins::INPUT_BOUND_CACHE_ENTRIES as u64 - 1) / 5;
+
+/// The internal nodes among `WORST_CASE_NODES`: every internal node but the root has at least 6
+/// children and the root at least 2.
+const WORST_CASE_INTERNAL_NODES: u64 = (WORST_CASE_NODES - 3) / 6 + 1;
+
+/// Limits far above every document the engine-cache tests compile.
+fn roomy_limits() -> CompileLimits {
+    CompileLimits {
+        maximum_document_bytes: 1 << 30,
+        maximum_tracks: 4_096,
+        maximum_sources: 4_096,
+        maximum_routes: 8_192,
+        maximum_effects: 8_192,
+        maximum_graph_session_plus_plan_bytes: 1 << 32,
+        maximum_source_total_bytes: 1 << 30,
+        maximum_source_overhead_bytes: 1 << 30,
+        maximum_effect_state_bytes: 1 << 32,
+        maximum_effect_scratch_bytes: 1 << 32,
+        maximum_builtin_retained_bytes: 1 << 32,
+        maximum_capi_retained_bytes: 1 << 30,
+        maximum_named_allocation_bytes: 1 << 32,
+        ..limits()
+    }
+}
+
+fn create_engine() -> *mut Engine {
+    let config = EngineConfig {
+        struct_size: ENGINE_CONFIG_SIZE,
+        abi_version: ABI_VERSION,
+        reserved: [0; 4],
+    };
+    let mut engine = ptr::null_mut();
+    // SAFETY: A valid config and output pointer.
+    let code = unsafe { miso_engine_v1_engine_create(&config, &mut engine) };
+    assert_eq!(code, RESULT_OK);
+    engine
+}
+
+/// Compiles `document` on `engine` at roomy limits, destroys the session and plan, and returns
+/// how many input designs the compile computed (the engine keeps them in its cache).
+fn compile_on(engine: *mut Engine, document: &str) -> u64 {
+    use builtins::test_support::fixed_input_bounds_computed;
+
+    let computed = fixed_input_bounds_computed();
+    let mut diagnostics = [0_u8; 4_096];
+    let mut out = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: diagnostics.as_mut_ptr(),
+        capacity_bytes: diagnostics.len() as u64,
+        required_bytes: 0,
+    };
+    let (mut session, mut plan) = (ptr::null_mut(), ptr::null_mut());
+    // SAFETY: Every descriptor and output location is live for the call; the children are
+    // destroyed once below.
+    unsafe {
+        assert_eq!(
+            miso_engine_v1_compile_session(
+                engine,
+                document.as_ptr(),
+                document.len() as u64,
+                &roomy_limits(),
+                &mut out,
+                &mut session,
+                &mut plan,
+            ),
+            RESULT_OK
+        );
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
+    fixed_input_bounds_computed() - computed
+}
 
 /// A session of `count` tracks whose enabled input designs all differ from each other and from
 /// every other `offset`'s (each track's cutoffs come from its global index), built from the
@@ -1435,84 +1512,90 @@ unsafe fn engine_destroy_freed(engine: *mut Engine) -> u64 {
     window.deallocated_bytes
 }
 
+/// Amendment 2 D5 (gate 6): an engine's lifetime memory after compiles is its design-bound cache
+/// and nothing a compile leaves open. Engine A compiles a 200-design document; engine B compiles
+/// the same document and then a document with no input filter. B's cache holds the same designs
+/// as A's, so the bytes engine destroy frees are equal. A journal that `take_journal` leaves open
+/// holds a record of the designs a compile used beside the cache's own entries, which the
+/// header's ceiling does not count; B's second compile has no filter to record, so the first
+/// compile's record would stay and B would free more than A.
+///
+/// Defect it turns red: a journal that stays open on the engine's cache after a compile, so the
+/// engine keeps a second copy of the designs the ceiling counts once. (The ceiling test below also
+/// turns red under it, by the doubled node it measures, but with a message about the node. This
+/// one is the exact before-and-after, and holds the 200-design size the second compile must not
+/// restart away.)
+#[test]
+fn a_compile_leaves_nothing_open_on_the_engine_cache() {
+    let designs = distinct_design_session(0, 200);
+    let mut memoryless = session::parse_session_json(SESSION).expect("fixture");
+    for track in &mut memoryless.tracks {
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 0.0;
+        }
+    }
+    let memoryless = session::canonical_session_json(&memoryless).expect("canonical document");
+
+    let once = create_engine();
+    assert_eq!(compile_on(once, &designs), 200, "vacuous: 200 new designs");
+    // SAFETY: The engine is live and destroyed once.
+    let once = unsafe { engine_destroy_freed(once) };
+
+    let twice = create_engine();
+    assert_eq!(compile_on(twice, &designs), 200, "vacuous: 200 new designs");
+    compile_on(twice, &memoryless);
+    // SAFETY: The engine is live and destroyed once.
+    let twice = unsafe { engine_destroy_freed(twice) };
+
+    println!("an engine frees {once} bytes after one compile, {twice} after a second");
+    assert_eq!(
+        once, twice,
+        "the engine keeps more than its cache after a compile"
+    );
+}
+
 /// Amendment 2 D5 (gate 6): one engine's design-bound cache, filled past its cap, frees at engine
-/// destroy no more than the ceiling the header states, over an empty engine's. Twice the cap's
-/// distinct designs are compiled, so the cache fills, clears at the 8,193rd and fills again.
-/// Defects it turns red: an entry that grew past the ceiling's headroom, a cap that no longer
-/// applies (16,384 entries are held), and a journal left open on the engine's cache (it keeps
-/// every design used, uncapped).
+/// destroy no more than the ceiling the header states, over an empty engine's, and the header's
+/// figure follows from the measured node size. Twice the cap's distinct designs are compiled, so
+/// the cache fills, clears at the 8,193rd and fills again.
+///
+/// Defects it turns red: a cap that no longer applies (the fill holds 16,384 entries, and a
+/// raised constant raises the derived worst case); and an entry whose key or value grew, even by
+/// 8 bytes, because the worst case is derived here from the node size a one-design compile
+/// measures (a fresh engine frees exactly one leaf) with the header's own formula, and must still
+/// be at most the figure the header gives. The old fill-only check stayed green for an 8-byte
+/// growth (the fill's 3.6 MB sits 0.7 MB under the ceiling).
 #[test]
 fn the_engine_cache_stays_within_its_stated_ceiling() {
     use builtins::INPUT_BOUND_CACHE_ENTRIES;
-    use builtins::test_support::fixed_input_bounds_computed;
 
-    let roomy = CompileLimits {
-        maximum_document_bytes: 1 << 30,
-        maximum_tracks: 4_096,
-        maximum_sources: 4_096,
-        maximum_routes: 8_192,
-        maximum_effects: 8_192,
-        maximum_graph_session_plus_plan_bytes: 1 << 32,
-        maximum_source_total_bytes: 1 << 30,
-        maximum_source_overhead_bytes: 1 << 30,
-        maximum_effect_state_bytes: 1 << 32,
-        maximum_effect_scratch_bytes: 1 << 32,
-        maximum_builtin_retained_bytes: 1 << 32,
-        maximum_capi_retained_bytes: 1 << 30,
-        maximum_named_allocation_bytes: 1 << 32,
-        ..limits()
-    };
-    let config = EngineConfig {
-        struct_size: ENGINE_CONFIG_SIZE,
-        abi_version: ABI_VERSION,
-        reserved: [0; 4],
-    };
-    let create = || {
-        let mut engine = ptr::null_mut();
-        // SAFETY: A valid config and output pointer.
-        let code = unsafe { miso_engine_v1_engine_create(&config, &mut engine) };
-        assert_eq!(code, RESULT_OK);
-        engine
-    };
+    // SAFETY: The engines are live and destroyed once.
+    let empty = unsafe { engine_destroy_freed(create_engine()) };
+
+    // The node size, measured: a fresh engine's cache holds one design, one leaf node.
+    let one = create_engine();
+    assert_eq!(compile_on(one, SESSION), 1, "vacuous: one design");
     // SAFETY: The engine is live and destroyed once.
-    let empty = unsafe { engine_destroy_freed(create()) };
+    let leaf = unsafe { engine_destroy_freed(one) } - empty;
+    // An internal node adds the 12 child pointers of a node of B = 6 (2 x B edges).
+    let internal_extra = 12 * size_of::<usize>() as u64;
+    let derived = WORST_CASE_NODES * leaf + WORST_CASE_INTERNAL_NODES * internal_extra;
+    println!("a leaf node is {leaf} bytes; the derived worst case is {derived}");
+    assert!(
+        derived <= ENGINE_CACHE_CEILING_BYTES,
+        "the node is {leaf} bytes, so the worst case is {derived}, above the stated \
+         {ENGINE_CACHE_CEILING_BYTES}"
+    );
 
-    let engine = create();
+    let engine = create_engine();
     let designs = 2 * INPUT_BOUND_CACHE_ENTRIES;
     let mut offset = 0;
     while offset < designs {
         let count = (designs - offset).min(800);
         let document = distinct_design_session(offset, count);
-        let computed = fixed_input_bounds_computed();
-        let mut diagnostics = [0_u8; 4_096];
-        let mut out = BytesOut {
-            struct_size: BYTES_OUT_SIZE,
-            reserved0: 0,
-            data: diagnostics.as_mut_ptr(),
-            capacity_bytes: diagnostics.len() as u64,
-            required_bytes: 0,
-        };
-        let (mut session, mut plan) = (ptr::null_mut(), ptr::null_mut());
-        // SAFETY: Every descriptor and output location is live for the call; the children are
-        // destroyed once below.
-        unsafe {
-            assert_eq!(
-                miso_engine_v1_compile_session(
-                    engine,
-                    document.as_ptr(),
-                    document.len() as u64,
-                    &roomy,
-                    &mut out,
-                    &mut session,
-                    &mut plan,
-                ),
-                RESULT_OK
-            );
-            miso_engine_v1_session_destroy(session);
-            miso_engine_v1_plan_destroy(plan);
-        }
         assert_eq!(
-            fixed_input_bounds_computed() - computed,
+            compile_on(engine, &document),
             count as u64,
             "vacuous: the designs at {offset} were not all new to the cache"
         );

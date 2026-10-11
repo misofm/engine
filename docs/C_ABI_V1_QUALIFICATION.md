@@ -562,11 +562,25 @@ here from the cap, the entry layout and the ordered map's worst-case node occupa
   bytes. An internal node adds 12 child pointers of 8 bytes = 2,704 bytes. Each internal node
   but the root has at least 6 children and the root at least 2, so a tree of 1,639 nodes has at
   most 273 internal nodes.
-- So the map holds at most 1,639 x 2,608 + 273 x 96 = **4,300,720 bytes**, plus up to 16 bytes of
-  allocator bookkeeping a node (26,224) and the map's own header inside the engine.
+- So, between calls, the map holds at most 1,639 x 2,608 + 273 x 96 = **4,300,720 bytes of
+  requested heap**, plus the map's own header inside the engine. The figure counts requested
+  bytes. The platform allocator rounds each block up to its own size class and keeps its own
+  bookkeeping (glibc, libmalloc and scudo differ), so the extra is platform-specific and no figure
+  is stated for it.
+- During `miso_engine_v1_compile_session` the cache also holds the open journal: at most one
+  preparation's designs, at most 1,805 (`INPUT_BOUND_BUDGET_FRAMES / 837` + 1), in the same
+  map shape. By the same arithmetic that is at most 1 + 1,804 / 5 = 361 nodes, at most 60
+  internal, so 361 x 2,608 + 60 x 96 = **947,248 bytes of requested heap**. The call takes the
+  journal on every path and frees it before it returns; the record it becomes is the plan
+  epoch's seed, charged to `maximum_capi_retained_bytes`, not the engine's cache.
 
-`resource_lifecycle`'s `the_engine_cache_stays_within_its_stated_ceiling` compiles twice the cap's
-distinct designs on one engine (the cache fills, clears at the 8,193rd and fills again) and asserts
-that engine destroy frees at most that ceiling over an empty engine's. One fill order measured
-3,602,112 bytes; that figure is not the ceiling. The C header states the ceiling in its "Engine
-memory" paragraph.
+`resource_lifecycle`'s `the_engine_cache_stays_within_its_stated_ceiling` measures the leaf node (a
+one-design compile on a fresh engine frees exactly one), derives the worst case with the formula
+above and asserts it is at most the stated figure, so a larger key or value turns it red. It then
+compiles twice the cap's distinct designs on one engine (the cache fills, clears at the 8,193rd
+and fills again) and asserts that engine destroy frees at most that ceiling over an empty
+engine's. One fill order measured 3,602,112 bytes; that figure is not the ceiling.
+`a_compile_leaves_nothing_open_on_the_engine_cache` compiles a 200-design document on two
+engines, a no-filter document on the second as well, and asserts engine destroy frees the same
+bytes for both (84,208 each), so a journal left open turns it red. The C header states the
+ceiling in its "Engine memory" paragraph.

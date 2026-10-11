@@ -87,6 +87,18 @@ impl Engine {
 
     /// One `miso_engine_v1_compile_session`, and the work it did.
     fn compile(&self, document: &str) -> (Compiled, Work) {
+        let (code, compiled, work, diagnostics) = self.compile_at(document, &limits());
+        assert_eq!(code, RESULT_OK, "compile: {diagnostics}");
+        (compiled.expect("a compiled session"), work)
+    }
+
+    /// One `miso_engine_v1_compile_session` at `compile_limits`: its result code, the children
+    /// when it compiled, the work it did and its diagnostics.
+    fn compile_at(
+        &self,
+        document: &str,
+        compile_limits: &CompileLimits,
+    ) -> (u32, Option<Compiled>, Work, String) {
         let mut storage = [0_u8; 4_096];
         let mut diagnostics = BytesOut {
             struct_size: BYTES_OUT_SIZE,
@@ -104,20 +116,17 @@ impl Engine {
                     self.0,
                     document.as_ptr(),
                     document.len() as u64,
-                    &limits(),
+                    compile_limits,
                     &mut diagnostics,
                     &mut session,
                     &mut plan,
                 )
             }
         });
-        assert_eq!(
-            code,
-            RESULT_OK,
-            "compile: {}",
-            String::from_utf8_lossy(&storage[..diagnostics.required_bytes as usize])
-        );
-        (Compiled { session, plan }, work)
+        let text =
+            String::from_utf8_lossy(&storage[..diagnostics.required_bytes as usize]).into_owned();
+        let compiled = (code == RESULT_OK).then_some(Compiled { session, plan });
+        (code, compiled, work, text)
     }
 }
 
@@ -188,7 +197,7 @@ impl Compiled {
             bit_depth: source.bit_depth,
             frames: source.frames,
         };
-        let (code, status, work) = self.submit(&edit, revision, tag);
+        let (code, status, work) = self.submit(&[edit], revision, tag);
         assert_eq!(
             (code, status),
             (RESULT_OK, Some(StatusCode::Ok)),
@@ -197,21 +206,21 @@ impl Compiled {
         work
     }
 
-    /// Submits `edit` as the transaction `request_id` at `revision`, and returns the call's
+    /// Submits `edits` as the transaction `request_id` at `revision`, and returns the call's
     /// result code, the status of its response when it has one, and the work it did.
     fn submit(
         &self,
-        edit: &SessionEdit,
+        edits: &[SessionEdit],
         revision: u64,
         request_id: u8,
     ) -> (u32, Option<StatusCode>, Work) {
-        let mut request = vec![0_u8; 4_096];
+        let mut request = vec![0_u8; 8_192];
         let len = ProtocolCodec::default()
             .encode_command_frame_into(
                 &TypedCommandFrame {
                     request_id: RequestId::new(u64::from(request_id)).expect("nonzero request"),
                     expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
-                    payload: CommandPayload::SessionTransactionApply(core::slice::from_ref(edit)),
+                    payload: CommandPayload::SessionTransactionApply(edits),
                 },
                 &mut request,
             )
@@ -460,7 +469,7 @@ fn a_rebuild_keeps_only_the_designs_its_plan_uses() {
 
     // A strip's HPF changes: its new design is the only one computed.
     let (code, status, changed) = session.submit(
-        &builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0)),
+        &[builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0))],
         revision,
         0x51,
     );
@@ -476,7 +485,7 @@ fn a_rebuild_keeps_only_the_designs_its_plan_uses() {
 
     // The strip goes back: the original design left the seed with the plan that used it.
     let (code, status, reverted) = session.submit(
-        &builtins_edit(SIXTY_FOUR_TRACK, 7, None),
+        &[builtins_edit(SIXTY_FOUR_TRACK, 7, None)],
         revision + 2,
         0x53,
     );
@@ -484,34 +493,89 @@ fn a_rebuild_keeps_only_the_designs_its_plan_uses() {
     assert_eq!(reverted.designs, 1, "the original design is computed again");
 }
 
-/// Amendment 2 D1: a rebuild that is prepared and then refused leaves every seed as it was. The
-/// HPF edit is prepared while the previous rebuild's plan is still pending, computes its one new
-/// design, and is refused with backpressure after admission (one replacement at a time); after the
-/// swap the same edit commits and computes that design again. A rebuild that wrote its designs
-/// into the newest seed before its commit would find the design held and compute none.
+/// The edit that sets track `index`'s builtins to track `from`'s, with both HPF cutoffs at
+/// `hpf_hz`: the two strips then share one input design.
+fn builtins_like(document: &str, index: usize, from: usize, hpf_hz: f32) -> SessionEdit {
+    let model = session::parse_session_json(document).expect("the document");
+    let mut builtins = model.tracks[from].builtins.clone();
+    builtins.left.hpf_hz = hpf_hz;
+    builtins.right.hpf_hz = hpf_hz;
+    SessionEdit::SetTrackBuiltins {
+        track_id: model.tracks[index].id.clone(),
+        builtins,
+    }
+}
+
+/// Amendment 2 D1 (gate 5): a rebuild that is prepared and then refused leaves every seed as it
+/// was. The limit is `maximum_capi_retained_bytes`, set one byte below the replacement peak of the
+/// edit under test (found as the smallest cap at which a fresh engine commits it): the refusal is
+/// the existing resource limit, after the successor was prepared and its peak computed, before
+/// any commit. Edit A changes strip 7's HPF (a new design, the seed stays 64 designs). Refused, it
+/// has computed that design. Edit B then gives strips 7 and 8 that same design (a 63-design seed,
+/// so a peak 240 bytes lower, which the same limit admits): it commits and computes the design
+/// again. A rebuild that wrote its designs into the newest seed before its commit would find the
+/// design held and compute none.
 #[test]
 fn a_refused_rebuild_leaves_the_seed_as_it_was() {
-    let engine = Engine::new();
-    let (session, _cold) = engine.compile(SIXTY_FOUR_TRACK);
     let revision = revision(SIXTY_FOUR_TRACK);
-    let first = session.rebuild(SIXTY_FOUR_TRACK, revision, 0x61);
-    assert_eq!(first, Work::default());
+    let edit_a = [builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0))];
+    let edit_b = [
+        builtins_like(SIXTY_FOUR_TRACK, 7, 7, 55.0),
+        builtins_like(SIXTY_FOUR_TRACK, 8, 7, 55.0),
+    ];
+    let commits = (RESULT_OK, Some(StatusCode::Ok));
+    let capped = |cap: u64| CompileLimits {
+        maximum_capi_retained_bytes: cap,
+        ..limits()
+    };
 
-    let edit = builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0));
-    let (code, _, refused) = session.submit(&edit, revision + 1, 0x62);
-    assert_eq!(code, RESULT_BACKPRESSURE, "the first plan is still pending");
+    // Whether the document compiles at `cap` and edit A then commits, on a fresh engine.
+    let a_commits_at = |cap: u64| {
+        let engine = Engine::new();
+        let (code, compiled, _, _) = engine.compile_at(SIXTY_FOUR_TRACK, &capped(cap));
+        let Some(compiled) = compiled else {
+            assert_ne!(code, RESULT_OK);
+            return false;
+        };
+        let (code, status, _) = compiled.submit(&edit_a, revision, 0x61);
+        (code, status) == commits
+    };
+    // The replacement peak: the smallest cap that admits compile and edit A (admission is
+    // monotone in the cap).
+    let (mut refuses, mut admits) = (0_u64, 1_u64 << 30);
+    assert!(a_commits_at(admits), "vacuous: the roomy cap refuses");
+    assert!(!a_commits_at(refuses), "vacuous: a zero cap admits");
+    while admits - refuses > 1 {
+        let middle = refuses + (admits - refuses) / 2;
+        if a_commits_at(middle) {
+            admits = middle;
+        } else {
+            refuses = middle;
+        }
+    }
+    let peak = admits;
+
+    let engine = Engine::new();
+    let (code, session, _, diagnostics) = engine.compile_at(SIXTY_FOUR_TRACK, &capped(peak - 1));
+    assert_eq!(
+        code, RESULT_OK,
+        "vacuous: the initial compile is itself refused one byte below the peak: {diagnostics}"
+    );
+    let session = session.expect("a compiled session");
+
+    let (code, status, refused) = session.submit(&edit_a, revision, 0x62);
+    assert_ne!(
+        (code, status),
+        commits,
+        "edit A is refused one byte below its peak"
+    );
     assert_eq!(
         refused.designs, 1,
         "vacuous: the refused rebuild did not prepare its design"
     );
 
-    session.settle(0);
-    let (code, status, committed) = session.submit(&edit, revision + 1, 0x63);
-    assert_eq!(
-        (code, status),
-        (RESULT_OK, Some(StatusCode::Ok)),
-        "after the swap"
-    );
+    let (code, status, committed) = session.submit(&edit_b, revision, 0x63);
+    assert_eq!((code, status), commits, "edit B fits the same cap");
     assert_eq!(
         committed.designs, 1,
         "the refused rebuild left its design in the newest seed"

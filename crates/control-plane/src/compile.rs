@@ -294,25 +294,20 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // allocations, so feeding the whole row overstates the largest single allocation when that
     // row is the maximum. The error only ever refuses earlier.
     // The effect row is several allocations; its own largest one stands for it.
-    let largest = [
-        control_table_row,
-        source_id_row,
-        strip_table_bytes,
-        bound_seed_bytes,
-    ]
-    .into_iter()
-    .chain([effect_controls.largest_allocation_bytes()])
-    .chain(fixed_allocation_rows)
-    .chain(adapter_allocation_rows.iter().copied())
-    .chain(prepared_protocol_allocation_rows)
-    .chain([
-        queue.largest_allocation_bytes,
-        replay.largest_allocation_bytes,
-        exchange.largest_allocation_bytes,
-        provider.largest_allocation_bytes,
-    ])
-    .max()
-    .unwrap_or(0);
+    let largest = [control_table_row, source_id_row, strip_table_bytes]
+        .into_iter()
+        .chain([effect_controls.largest_allocation_bytes(), bound_seed_bytes])
+        .chain(fixed_allocation_rows)
+        .chain(adapter_allocation_rows.iter().copied())
+        .chain(prepared_protocol_allocation_rows)
+        .chain([
+            queue.largest_allocation_bytes,
+            replay.largest_allocation_bytes,
+            exchange.largest_allocation_bytes,
+            provider.largest_allocation_bytes,
+        ])
+        .max()
+        .unwrap_or(0);
     Ok(CapiResources {
         active_retained,
         epoch_retained,
