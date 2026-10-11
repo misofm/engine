@@ -42,7 +42,10 @@ bodies and titles, with checks. It reads each spec only from the `refs/remotes/o
 after proving that ref equals `git ls-remote origin refs/heads/main`. `--check` (the default) is
 read-only and prints one class per spec; `--apply --backup-dir DIR` writes only the specs whose GitHub
 body and title are an earlier committed state of the spec, saving each issue's old raw JSON first.
-Its header lists the classes and exit codes, and `test-sync-spec-bodies.sh` is its self-test (a stub
+Every `gh` call carries `--repo OWNER/REPO` derived from `git remote get-url origin` (github.com URLs
+only; the script refuses otherwise, and `GH_REPO` cannot redirect it), and a relative `--backup-dir` or
+`--reconcile-dir` is resolved against the directory you run it from. Its header lists the classes and
+exit codes, and `test-sync-spec-bodies.sh` is its self-test (a stub
 `gh`, a local bare `origin`, no network). Editing this README selects the `dsp-research` suite on the
 run that carries it (`scripts/ci-path-router.py` lists this file as a `dsp-research` input); that is
 harmless.

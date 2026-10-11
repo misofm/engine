@@ -20,7 +20,8 @@
 # .github/ISSUE_SPECS/1445-sync-edited-issue-specs-to-their-github-bodies-with-a-checked-operator-script.md):
 #   closed-skipped  the issue is not OPEN; never edited
 #   no-issue        no issue has that number; never edited
-#   oversize        the source blob is above the byte ceiling or its title above 256 characters
+#   oversize        the source blob is above the byte ceiling, or its title is above 256 characters,
+#                   or its title has a control character or leading or trailing whitespace
 #   in-sync         the body matches the source blob (one trailing newline allowed) and the title
 #                   equals the spec's title (or the spec has no title)
 #   fast-forward    not in-sync, but body and title are the source's or an earlier committed state
@@ -32,6 +33,13 @@
 # Exit status: 0 every selected spec is in-sync or closed-skipped at the end of the run; 3 the run
 # completed but fast-forward (--check), unmatched, oversize or no-issue specs remain; 1 a write,
 # read-back or race check failed; 2 a refusal before any write.
+#
+# Every gh call carries `--repo OWNER/REPO`, derived from `git remote get-url origin` (github.com
+# URLs only; the script exits 2 if it cannot derive one), and GH_REPO is overwritten with the same
+# value, so neither the environment nor `gh repo set-default` can redirect a read or a write.
+# --backup-dir and --reconcile-dir are resolved against the caller's directory before the script
+# changes into the repository root. The oversize class also holds a title that GitHub could
+# normalize (a control character or CR, or leading or trailing whitespace); it is never edited.
 #
 # SYNC_SPEC_BODIES_TEST_CEILING may only lower the byte ceiling, and only the self-test sets it.
 set -euo pipefail
@@ -99,6 +107,16 @@ if [[ $mode == apply ]]; then
 else
     [[ -z $backup_dir ]] || die2 '--backup-dir is only for --apply'
 fi
+# Both directories are resolved against the caller's directory now, before the `cd` below, so the
+# path that is checked is the path that is used.
+abs_path() {
+    case $1 in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$PWD" "$1" ;;
+    esac
+}
+[[ -z $backup_dir ]] || backup_dir=$(abs_path "$backup_dir")
+[[ -z $reconcile_dir ]] || reconcile_dir=$(abs_path "$reconcile_dir")
 if [[ -n $reconcile_dir ]]; then
     [[ ! -e $reconcile_dir && ! -L $reconcile_dir ]] || die2 "--reconcile-dir must not exist: $reconcile_dir"
 fi
@@ -110,21 +128,34 @@ if [[ -n ${SYNC_SPEC_BODIES_TEST_CEILING-} ]]; then
     ceiling=$((10#$SYNC_SPEC_BODIES_TEST_CEILING))
 fi
 
-for tool in awk cmp cp git gh jq mktemp sort wc; do
+for tool in awk cat cmp cp git gh head jq mktemp sort wc; do
     command -v "$tool" >/dev/null 2>&1 || die2 "required tool is unavailable: $tool"
 done
 repo=$(git rev-parse --show-toplevel) || die2 'not inside a git checkout'
 cd "$repo"
 
+# --- the GitHub repository: origin's, for every gh call -------------------------------------------
+origin_url=$(git remote get-url origin 2>/dev/null) || die2 'cannot read the url of remote origin'
+gh_owner=
+gh_name=
+if [[ $origin_url =~ ^(https|ssh|git)://([^/@]+@)?github\.com(:[0-9]+)?/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/?$ ]]; then
+    gh_owner=${BASH_REMATCH[4]}
+    gh_name=${BASH_REMATCH[5]}
+elif [[ $origin_url =~ ^[A-Za-z0-9._-]+@github\.com:([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/?$ ]]; then
+    gh_owner=${BASH_REMATCH[1]}
+    gh_name=${BASH_REMATCH[2]}
+fi
+gh_name=${gh_name%.git}
+[[ -n $gh_owner && -n $gh_name && $gh_owner != *[!A-Za-z0-9_-]* && $gh_name != . && $gh_name != .. ]] ||
+    die2 "cannot derive OWNER/REPO from the url of remote origin: $origin_url"
+gh_repo=$gh_owner/$gh_name
+export GH_REPO=$gh_repo
+
 work=$(mktemp -d "${TMPDIR:-/tmp}/sync-spec-bodies.XXXXXX") || die2 'mktemp failed'
 trap 'rm -rf "$work"' EXIT
 
-# --- source: the origin/main blob, proven current ------------------------------------------------
+# --- source: the origin/main blob, resolved here and proven current below ------------------------
 src=$(git rev-parse --verify -q 'refs/remotes/origin/main^{commit}') || die2 'refs/remotes/origin/main does not exist'
-git ls-remote origin refs/heads/main >"$work/ls-remote" 2>"$work/ls-remote.err" || die2 "git ls-remote origin failed: $(cat "$work/ls-remote.err")"
-remote_hash=$(awk -F'\t' '$2 == "refs/heads/main" { print $1 }' "$work/ls-remote")
-[[ $remote_hash =~ ^[0-9a-f]{40,64}$ ]] || die2 'git ls-remote origin returned no refs/heads/main'
-[[ $remote_hash == "$src" ]] || die2 "refs/remotes/origin/main ($src) is not origin's main now ($remote_hash); fetch first"
 
 # --- selection -----------------------------------------------------------------------------------
 # Emits `number<TAB>path` for each top-level `<digits>-<slug>.md` spec on stdin (NUL-separated
@@ -167,7 +198,7 @@ sort -u -k1,1n -k2,2 "$work/sel.raw" >"$work/sel.tsv"
 dup=$(awk -F'\t' 'seen[$1]++ { print $1 }' "$work/sel.tsv")
 [[ -z $dup ]] || die2 "more than one top-level spec file for issue $dup"
 
-# --- backup directory pre-check (before any GitHub call) -----------------------------------------
+# --- backup directory pre-check (before ls-remote and before any GitHub call) --------------------
 if [[ $mode == apply ]]; then
     if [[ -e $backup_dir || -L $backup_dir ]]; then
         [[ -d $backup_dir && ! -L $backup_dir ]] || die2 "--backup-dir is not a directory: $backup_dir"
@@ -177,10 +208,16 @@ if [[ $mode == apply ]]; then
     done <"$work/sel.tsv"
 fi
 
+# --- the source ref must be origin's main now (nothing is read from GitHub before this) ----------
+git ls-remote origin refs/heads/main >"$work/ls-remote" 2>"$work/ls-remote.err" || die2 "git ls-remote origin failed: $(cat "$work/ls-remote.err")"
+remote_hash=$(awk -F'\t' '$2 == "refs/heads/main" { print $1 }' "$work/ls-remote")
+[[ $remote_hash =~ ^[0-9a-f]{40,64}$ ]] || die2 'git ls-remote origin returned no refs/heads/main'
+[[ $remote_hash == "$src" ]] || die2 "refs/remotes/origin/main ($src) is not origin's main now ($remote_hash); fetch first"
+
 # --- history: every blob each issue number's top-level spec file held, newest commit first -------
 # hist.tsv: number<TAB>blob<TAB>commit<TAB>path, one row per distinct blob per number. Keyed by the
 # issue number, so a renamed spec keeps its history.
-git -c core.quotepath=false log --raw --no-abbrev --no-renames --full-history -m \
+git -c core.quotepath=false log --raw --root --no-abbrev --no-renames --full-history -m \
     --format='commit %H' "$src" -- "$SPEC_DIR/" |
     awk -F'\t' -v dir="$SPEC_DIR" '
         /^commit / { split($0, c, " "); commit = c[2]; next }
@@ -254,7 +291,7 @@ title_in_history() { # number titlefile
 # fetch_issue N OUTFILE: 0 fetched, 1 no such issue, 2 any other failure (message in gh.err).
 fetch_issue() {
     local n=$1 out=$2
-    if gh issue view "$n" --json number,state,title,body >"$out" 2>"$work/gh.err"; then
+    if gh issue view "$n" --repo "$gh_repo" --json number,state,title,body >"$out" 2>"$work/gh.err"; then
         if jq -e --argjson n "$n" \
             'type == "object" and .number == $n and (.state | type == "string") and (.title | type == "string") and (.body | type == "string")' \
             "$out" >/dev/null 2>&1; then
@@ -325,12 +362,21 @@ reconcile() { # number dir: sets near_* and writes the evidence when --reconcile
     fi
 }
 
+# title_unsafe TITLEFILE: the title has a control character (CR included) or leading or trailing
+# whitespace, which GitHub may normalize; such a title is refused before any write.
+title_unsafe() {
+    local LC_ALL=C t
+    t=$(<"$1")
+    [[ $t =~ [[:cntrl:]] || $t =~ ^[[:space:]] || $t =~ [[:space:]]$ ]]
+}
+
 # --- classification ----------------------------------------------------------------------------------
 cnt_in_sync=0 cnt_fast_forward=0 cnt_closed_skipped=0 cnt_no_issue=0 cnt_oversize=0 cnt_unmatched=0
+oversize_why=
 : >"$work/ff.list"
 
 classify() { # number path
-    local n=$1 path=$2 d="$work/$n" class size title_chars body_ok= title_ok= has_title= why
+    local n=$1 path=$2 d="$work/$n" class size title_chars title_bad= body_ok= title_ok= has_title= why
     mkdir -p "$d"
     read_source "$path" >"$d/src.md"
     local rc=0
@@ -352,13 +398,22 @@ classify() { # number path
         fi
         size=$(wc -c <"$d/src.md")
         title_chars=0
+        title_bad=
         if [[ -n $has_title ]]; then
             title_chars=$(jq -R length "$d/title.spec")
+            if title_unsafe "$d/title.spec"; then
+                title_bad=1
+            fi
         fi
         if [[ $state != OPEN ]]; then
             class=closed-skipped
-        elif ((size > ceiling || title_chars > TITLE_MAX)); then
+        elif ((size > ceiling || title_chars > TITLE_MAX)) || [[ -n $title_bad ]]; then
             class=oversize
+            why=
+            ((size <= ceiling)) || why="$why size=above-ceiling"
+            ((title_chars <= TITLE_MAX)) || why="$why title=above-$TITLE_MAX-characters"
+            [[ -z $title_bad ]] || why="$why title=control-character-or-edge-whitespace"
+            oversize_why=$why
         else
             body_ok=
             title_ok=
@@ -406,6 +461,8 @@ classify() { # number path
         else
             printf '%s unmatched%s\n' "$n" "$why"
         fi
+    elif [[ $class == oversize ]]; then
+        printf '%s oversize%s\n' "$n" "$oversize_why"
     else
         printf '%s %s\n' "$n" "$class"
     fi
@@ -418,15 +475,24 @@ done <"$work/sel.tsv"
 # --- the write: serial, one issue at a time, ascending -------------------------------------------
 synced=0
 
-save_backup() { # jsonfile number
+backup_saved=
+save_backup() { # jsonfile number: never overwrites a file (noclobber opens with O_EXCL)
     mkdir -p "$backup_dir"
-    cp "$1" "$backup_dir/$2.json"
-    cmp -s "$1" "$backup_dir/$2.json"
+    (
+        set -o noclobber
+        cat -- "$1" >"$backup_dir/$2.json"
+    ) 2>/dev/null || return 1
+    cmp -s "$1" "$backup_dir/$2.json" || return 1
+    backup_saved=$2
 }
 
 stop_failed() { # number word detail
     printf '%s %s\n' "$1" "$2"
-    printf 'sync-spec-bodies: %s: %s; no further write. Rollback copy: %s/%s.json\n' "$1" "$3" "$backup_dir" "$1" >&2
+    if [[ $backup_saved == "$1" ]]; then
+        printf 'sync-spec-bodies: %s: %s; no further write. Rollback copy: %s/%s.json\n' "$1" "$3" "$backup_dir" "$1" >&2
+    else
+        printf 'sync-spec-bodies: %s: %s; no further write. Nothing was written to issue %s, and no rollback copy exists for it.\n' "$1" "$3" "$1" >&2
+    fi
     exit 1
 }
 
@@ -440,7 +506,7 @@ apply_one() { # number
         stop_failed "$n" refused 'title or body changed since classification'
     fi
     save_backup "$d/pre.json" "$n" || stop_failed "$n" refused 'could not save the rollback copy'
-    local args=(issue edit "$n" --body-file "$d/src.md")
+    local args=(issue edit "$n" --repo "$gh_repo" --body-file "$d/src.md")
     if [[ -f $d/title.spec ]] && ! cmp -s "$d/title.gh" "$d/title.spec"; then
         local title
         title=$(<"$d/title.spec")
@@ -466,6 +532,10 @@ if [[ $mode == apply ]]; then
     while IFS=$'\t' read -r n _; do
         apply_one "$n"
     done <"$work/ff.list"
+    if ((synced != cnt_fast_forward)); then
+        printf 'sync-spec-bodies: internal error: synced %s of %s fast-forward issues\n' "$synced" "$cnt_fast_forward" >&2
+        exit 1
+    fi
 fi
 
 # --- summary and exit status ---------------------------------------------------------------------------

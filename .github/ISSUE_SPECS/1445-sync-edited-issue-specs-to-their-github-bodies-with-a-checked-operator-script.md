@@ -245,6 +245,84 @@ Attempt 1 (2026-10-11). Gate 4 (A9's run) is root's and is not recorded here.
   `title=no-committed-title-matches`) and give the nearest history blob; for example #291 matches a
   committed body and differs in the title. The trailing-newline assumption holds (176 bodies match).
 
+Attempt 1 verdict follow-ups (2026-10-11, on `342ab06a5` PASS; verdict
+`submix-verdicts/1445-attempt1.md`). A1-A9 semantics are unchanged. Implementation notes to
+Amendment 1, each inside the amendment's contract:
+
+- **MINOR 3, repository binding (A4/A5).** Every `gh issue view` and `gh issue edit` now carries
+  `--repo OWNER/REPO`, derived from `git remote get-url origin` (`https://`, `ssh://` and
+  `git@github.com:` forms of github.com; any other URL exits 2 before any `gh` call). The script also
+  sets `GH_REPO` to the same value, so an ambient `GH_REPO` cannot redirect it. `git remote get-url`
+  applies `url.*.insteadOf`, so the derived repository is the one `ls-remote` proves.
+- **MINOR 2, directories (A3/A4).** `--backup-dir` and `--reconcile-dir` are made absolute against
+  the caller's directory before the `cd` to the repository root; the path that is checked is the
+  path that is used, and messages print the absolute path.
+- **NIT 1, title sanity (A6/A7).** A spec title with a control character (CR included) or leading or
+  trailing whitespace is class `oversize` (exit 3, never edited), because GitHub may normalize such a
+  title and the read-back would fail after the body write. The line says why:
+  `<n> oversize title=control-character-or-edge-whitespace` (also `size=above-ceiling`,
+  `title=above-256-characters`). No new class and no new exit code; A7 is unchanged. The 305 specs on
+  `origin/main` `1b55de30a` have no such title (verdict).
+- **NIT 2, 3, 4, 6, 7.** The refusal message names a rollback copy only when this run saved it. The
+  rollback copy is written with `noclobber` (O_EXCL), so a file that appears after the pre-check is
+  never overwritten (`<n> refused`, exit 1). `--apply` exits 1 if synced differs from the
+  fast-forward count (a guard against a later early exit; no fixture can reach it without a code
+  defect, so it has no assertion). The history `git log` has `--root`, so `log.showRoot=false` cannot
+  drop the root commit's blobs. The backup-directory pre-check now runs before `git ls-remote`
+  (selection reads only the local `origin/main` ref; the source is still proven current before any
+  `gh` call). NIT 5 (pull requests) is not changed.
+- **Gate 1.** The self-test now has 122 `ok - NAME` lines (was 74) and prints `all assertions passed`.
+  New fixtures: issues 21-30 (titles with trailing space, CR, leading space, embedded control
+  character, 257 and 256 characters; a body that is another issue's blob; a body that is a
+  `BRIEFS/` blob; a spec with no H1), a git wrapper on `PATH` that answers `remote get-url origin`
+  and logs `ls-remote`, stub switches for a state change between fetch and write and after the
+  edit, a read-back title corruption and a backup file that appears during the run.
+- **Mutations of the new assertions** (each applied alone to `sync-spec-bodies.sh`; self-test exit 1;
+  then restored, byte-identical). Red count and the assertion(s) that go red:
+  - `history_of` returns every issue's rows (not keyed by number): 7 red, `history-is-keyed-by-issue-number`,
+    `summary-counts`, `unmatched-never-edited`;
+  - history path reduced to its basename (so `BRIEFS/029-y.md` counts as issue 29): 7 red,
+    `brief-blob-is-not-history`, `summary-counts`, `unmatched-never-edited`. The verdict's mutation
+    (only the `name ~ /\//` line removed) stays green and is an equivalent mutant: the next line,
+    `name !~ /^[0-9]+-[A-Za-z0-9._-]+\.md$/`, rejects `BRIEFS/...` on its own, so both lines have to go
+    (the basename mutation does that);
+  - read-back title comparison removed: 3 red, `readback-title-differs-fails` and two more;
+  - "title unchanged" read-back comparison removed: 2 red, `title-changed-though-spec-has-none-fails`,
+    `title-changed-though-spec-has-none-says-so`;
+  - write-phase `OPEN` check removed: 2 red, `closed-before-the-write-refused-line`,
+    `closed-before-the-write-no-edit`;
+  - read-back `OPEN` check removed: 2 red, `closed-by-the-edit-fails-the-read-back`,
+    `closed-by-the-edit-mismatch-line`;
+  - 256-character title limit removed: 2 red, `class-title-257-characters-is-oversize`,
+    `summary-counts`; limit off by one (`>=`): 2 red, `class-title-256-characters-is-in-sync`,
+    `summary-counts`;
+  - duplicate-spec refusal removed: 2 red, `duplicate-spec-for-one-issue-refused`,
+    `duplicate-spec-for-one-issue-no-gh-call`;
+  - `--repo` dropped from `gh issue view`: 105 red (the stub refuses the argv); dropped from
+    `gh issue edit`: 29 red; `GH_REPO` export removed: 1 red, `ambient-gh-repo-cannot-redirect`;
+    underivable-URL refusal removed: 6 red, `underivable-origin-url-no-gh-call-*`;
+  - `--backup-dir` not made absolute: 4 red, `relative-backup-dir-lands-in-the-callers-directory`
+    and three more; `--reconcile-dir` not made absolute: 2 red,
+    `relative-reconcile-dir-lands-in-the-callers-directory`,
+    `relative-reconcile-dir-leaves-the-repo-root-copy-alone`;
+  - title unsafe checks removed one at a time: control character 2 red
+    (`class-title-embedded-control-character-is-oversize`), leading whitespace 8 red
+    (`class-title-leading-space-is-oversize`), trailing whitespace 9 red
+    (`class-title-trailing-space-is-oversize`);
+  - refusal message always names the backup: 1 red, `refusal-before-the-backup-names-no-backup-file`;
+  - `save_backup` back to a plain `cp`: 3 red, `backup-never-overwrites-a-file-that-appeared`,
+    `backup-that-appeared-is-left-as-it-was`, `backup-that-appeared-no-edit`;
+  - `--root` removed: 1 red, `root-commit-blobs-are-history-despite-showroot-false`;
+  - an `ls-remote` call before the backup pre-check: 2 red, `existing-backup-file-refuses-before-ls-remote`,
+    `ls-remote-runs-once-in-a-normal-run`;
+  - synced-equals-fast-forward guard removed: 0 red (not reachable by a fixture, see above).
+- **Gate 3** re-run after the follow-ups: `check-workspace-policy.sh` (`workspace policy: ok`),
+  `check-script-reachability.py` (ok), `test-script-reachability.py` (20 cases), `check-ci-path-routing.py` and
+  `test-ci-path-routing.py` exit 0; `bash -n` passes on both scripts.
+- **Smoke test, read-only.** `bash scripts/operator/sync-spec-bodies.sh --check 1438 1445 291` against
+  the real repository and GitHub on `origin/main` `1b55de30a`: `1438 fast-forward`, `1445 in-sync`,
+  `291 unmatched` (title), no `gh` write.
+
 ## Dependencies
 
 - None. It may land in any J batch. A2 and C2 use it when it is on `main`.
