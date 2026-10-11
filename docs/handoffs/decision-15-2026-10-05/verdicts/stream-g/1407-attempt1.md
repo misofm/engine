@@ -130,7 +130,7 @@ never sends consecutive close designs and stays green. Root must decide one of:
 ## NIT
 
 5. The spec's DSP evidence line still says "-5.21e-5 ... which is the slowest design"
-   (`1407-...md:130`), and so does gate 4's doc comment (`filter_liveness.rs:632`). Deviation (3)
+   (`f44cf54bf:.github/ISSUE_SPECS/1407-retarget-a-live-input-filter-only-through-its-designs-and-their-mixtures.md:130`), and so does gate 4's doc comment (`filter_liveness.rs:632`). Deviation (3)
    is right: the extreme is the maximum cutoff (about fs/2 - 0.6 Hz), not 10 Hz (measured in
    `evidence/zz_verifier_gate4.rs`). The text was not corrected.
 6. "For designs it equals the spectral radius" holds only approximately. `||A||_V - rho` is

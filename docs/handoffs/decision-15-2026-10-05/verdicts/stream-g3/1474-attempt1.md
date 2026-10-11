@@ -162,7 +162,7 @@ in one line.
 
 ### NIT-1: 25.7 ms against 25.67 ms
 
-With a 0.23 ms margin, the rounding matters. The record (`1474...md:330,360`), #1470 (`:29,31`)
+With a 0.23 ms margin, the rounding matters. The record (`04fc3cc8f:.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:330,360`), #1470 (`:29,31`)
 and `crates/builtins/src/tail.rs:295` say 25.7 ms; the tool prints 25.67 ms.
 
 ### NIT-2: `TAU` visibility

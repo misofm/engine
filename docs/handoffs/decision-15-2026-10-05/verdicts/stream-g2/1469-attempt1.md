@@ -47,7 +47,7 @@ rebases over `effect_control_resources` (G #1464, B #1315/#1345) is not told tha
 changed.
 
 **n2. The attempt record overstates MA's capi reach.**
-`.github/ISSUE_SPECS/1469-...md:397-398` says "MA also turns three `capi` `resource_lifecycle` tests
+`f49c62bfa:.github/ISSUE_SPECS/1469-build-the-launch-effect-registry-once-per-process-and-share-it.md:397-398` says "MA also turns three `capi` `resource_lifecycle` tests
 red". At f49c62bfa, MA turns two red: `capi_retained_bytes_charge_every_byte_the_compile_retains`
 and `tiny_control_frame_still_accounts_three_provider_counters_exactly`. I checked this both in a
 full test-debug-a run under MA and alone, one test per process. The third test,

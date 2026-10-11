@@ -261,7 +261,7 @@ The test is `crates/builtins/tests/tail_contract.rs:2746-2783`; the function is
 
 ### MINOR 2 (spec text, for root): the false L4 sentence is still in the spec text
 
-The sentence is `.github/ISSUE_SPECS/1466-...md:154-155`:
+The sentence is `5ea3149ec:.github/ISSUE_SPECS/1466-certify-the-live-input-section-s-decay-peak-gain-and-flush-stall.md:154-155`:
 
 > a certificate rate that omits the state rounding falls below the floor (as A2's F1(c) and F1(d))
 

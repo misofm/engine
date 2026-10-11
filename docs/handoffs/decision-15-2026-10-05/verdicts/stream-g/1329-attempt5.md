@@ -38,7 +38,7 @@ boot is the SDK default. It bounds every distinct design on the AudioWorklet thr
 (+81 %) for each 64-track boot.**
 
 - *Where.*
-  - `.github/ISSUE_SPECS/1457-cache-design-bounds-across-preparations-within-a-stated-preparation-budget.md:42-49`
+  - `fadc45df0:.github/ISSUE_SPECS/1457-cache-design-bounds-across-preparations-within-a-stated-preparation-budget.md:42-49`
     says: "The browser prepares every strip with a live input lane (`HostLiveLanes::ALL`), so it
     computes no design bound at all; its boot cost is back to the pre-#1329 figures ... that is the
     platform this issue's budget binds". The amendment also deleted the earlier "after which the

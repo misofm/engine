@@ -47,7 +47,7 @@ keeps its line count.
     for the self-test.
   - The rest name the bare path. The second review counted the mentions by section (then over 84
     specs): Objective gates 77, Standing rules 15, Attempt and Evidence records 6, Context 3 (for
-    example #1312:54 and #1343:28, which name `check-realtime-policy.sh:29` as the unsafe
+    example #1312:54 and `c45f48691:.github/ISSUE_SPECS/1343-let-the-control-thread-withdraw-an-unadopted-candidate-plan.md:28`, which name `check-realtime-policy.sh:29` as the unsafe
     authority), ABI rules to implement literally 2, Findings index 2, and one each in "Gates every
     slice inherits", "Exact ordered gates", "Allowed paths and representative gates", "Decisions
     frozen for this slice", "Authority and baseline", "How to use this issue" and "Product outcome"

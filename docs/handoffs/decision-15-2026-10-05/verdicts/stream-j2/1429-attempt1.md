@@ -17,7 +17,7 @@ None.
 ### MINOR
 
 1. **The attempt record gives the wrong CI shell. The gate-1 evidence ran under a shell that CI
-   does not use.** Spec `.github/ISSUE_SPECS/1429-...md:107` says "Under GitHub's
+   does not use.** Spec `b7da37f15:.github/ISSUE_SPECS/1429-fail-the-web-audioworklet-test-step-when-it-leaves-anything-in-its-temporary-dir.md:107` says "Under GitHub's
    `bash -eo pipefail`", and `:119` ran gate 1 with `bash --noprofile --norc -eo pipefail`. The
    step has no `shell:`, and neither the job nor the workflow has `defaults.run.shell`. I parsed
    the YAML to confirm this. So GitHub uses its default for an unspecified shell, `bash -e {0}`,

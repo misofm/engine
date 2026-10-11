@@ -57,9 +57,9 @@ then `target - step*remaining`, then the hold. Same severity class as attempt 1'
 ## NIT
 
 2. **`P(q)` values.** The spec quotes `P(16) = 3.95e-6` and `P(63) = 1.16e-6`
-   (`1407-...md:196` and `:535`). The closed form, which the test itself computes, gives `3.846e-6`
+   (`6af516317:.github/ISSUE_SPECS/1407-retarget-a-live-input-filter-only-through-its-designs-and-their-mixtures.md:196` and `:535`). The closed form, which the test itself computes, gives `3.846e-6`
    and `1.182e-6`. The headline `P(q <= 4) = 1.419e-5` is right.
-3. **"Undershoots" wording.** `1407-...md:187` says "the stored step undershoots the distance". This
+3. **"Undershoots" wording.** `6af516317:.github/ISSUE_SPECS/1407-retarget-a-live-input-filter-only-through-its-designs-and-their-mixtures.md:187` says "the stored step undershoots the distance". This
    is not generally true: `fl(t - c)` can round up. The conclusion still holds, because no word uses
    more than `4/64` (stepped) or `59/64` (from the target) of `64 s`. So every word lies between its
    start and its target, and `|t - c| <= D` stands.

@@ -12,7 +12,7 @@
 //! The oracle is the scalar `f32` expression itself, evaluated per lane with the same two
 //! roundings (`mul`, then `sub`), so the check is bit for bit at every width this build has.
 //!
-//! Mutation evidence is in `.github/ISSUE_SPECS/1407-*.md` (attempt 2).
+//! Mutation evidence is in `2a589d360:.github/ISSUE_SPECS/1407-retarget-a-live-input-filter-only-through-its-designs-and-their-mixtures.md` (attempt 2).
 
 mod support;
 

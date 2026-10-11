@@ -11,7 +11,7 @@ modification, `tools/bench-support/src/producer.rs`, belongs to the other implem
 No BLOCKER. No MAJOR. No MINOR.
 
 ### NIT 1: the recorded gate-2 plant delays the race's signal, not `onUpdate`
-Location: spec attempt record, "Gate 2", `.github/ISSUE_SPECS/1248-...md:113-121`.
+Location: spec attempt record, "Gate 2", `3854c03bb:.github/ISSUE_SPECS/1248-name-the-failed-predicate-and-bound-the-waits-of-the-browser-continuous-spectrum-gate.md:113-121`.
 
 Plant A only removes `callbackResolve` from `onUpdate` and resolves `callbackSeen` 500 ms after
 `startRendering()` returns. Delivery itself still happens on time. The spec asks for "a 500 ms

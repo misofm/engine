@@ -144,7 +144,7 @@ is m3.
   sample. The A4 CPU bound (`:610-612`) omits cursor advances.
 - **17b's #1345 dependency.** 17b is "written on the lane of" #1345 (`:145-146`, `:201-202`) but
   does not list it as a direct dependency.
-- **Attempt record.** The spec's attempt record (`1058-…:132-136`) mentions only the first internal
+- **Attempt record.** The spec's attempt record (`436cc137d:.github/ISSUE_SPECS/1058-research-render-stored-session-automation-in-the-engine-identically-on-every-pla.md:132-136`) mentions only the first internal
   verdict (FAIL). README `:855-861` also records a PASS-WITH-FIXES review.
 - **Anchor ranges.** Three anchors stop before the end of their function. None of them breaks an
   argument:

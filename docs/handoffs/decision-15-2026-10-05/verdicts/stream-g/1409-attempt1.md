@@ -68,7 +68,7 @@ feedback keeps the whole delay suite green. A one-line test change fixes this (M
      flipping the sign or dropping the slope of `target - remaining * step`.
    - The deletion is correct. After the clamp, the effect's own snapshots never reach that clause,
      so the test's premise cannot happen.
-   - This is acceptable only because #1411 (spec line 99) reduces `ramp_current_valid` to
+   - This is acceptable only because #1411 (`8deee2c5e:.github/ISSUE_SPECS/1411-remove-the-64-ulp-restore-slack-once-every-effect-ramp-is-clamped.md:99`) reduces `ramp_current_valid` to
      `converted_value_valid` in the same PR. #1411's verifier must confirm that the clause is gone.
 
 ### NIT

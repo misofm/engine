@@ -53,7 +53,7 @@ None.
 
 **m1. #1474's certified-flush requirement prescribes a treatment that is sound only for
 non-negative majorants, and it does not state the rounding-model condition that the proof needs.**
-Location: `.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:47-54`
+Location: `0b3957808:.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:47-54`
 (Scope item 2) and gate 5 (`:74-75`).
 
 1. **The prescription does not fit the signed state.** The spec says: "Where a component that the
@@ -108,7 +108,7 @@ open item ("Open items for root"). Root must authorize the edit in the batch fol
 ## NIT
 
 - **n1. Two specs cite scratch evidence in `/tmp`.**
-  - #1474 cites `/tmp/claude-1002/v1457b/evidence/probe-subnormal48.log` (`:28`).
+  - #1474 cites `/tmp/claude-1002/v1457b/evidence/probe-subnormal48.log` (`0b3957808:.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:28`).
   - #1471 cites `probe-order.log` and `probe-order-notrim.log` (`:99`).
 
   `/tmp` does not survive a reboot. Cite the attempt-2 verdict instead
