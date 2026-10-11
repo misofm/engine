@@ -161,15 +161,21 @@ this amendment and D1-D4 differ, this amendment holds. Recorded by root, 2026-10
 
 Root's rulings on the 31 `unmatched` issues of A9's run (owner-approved syncs, 2026-10-11) need two
 additions. Recorded by root, 2026-10-11; the mechanism in A11 is the coordinator's, so that every
-ruling's sync still goes through A5's backup and read-back.
+ruling's sync still goes through A5's backup and read-back. Where this amendment and A1-A9 differ,
+this amendment holds: it relaxes A3's "it never overwrites a body or title that is not an earlier
+committed state of the spec" and A9's "never by the script" only through A10 and A11, and nowhere
+else.
 
-- **A10. One normalization: a body without its H1.** Nineteen bodies (#948-#993, #1470, #1471)
-  hold an earlier committed spec with its title line removed. A blob *with its H1 removed* is the
-  blob minus its first two lines, defined only when the first line is `# <title>` (A2) and the second
-  line is empty. A GitHub body that matches (A3, one trailing newline allowed) the H1-removed form of
-  the source blob or of a history blob counts as a body match for `fast-forward`. It never makes an
-  issue `in-sync`: `in-sync` still needs the full blob, so the sync restores the title line. Nothing
-  else is normalized; any other difference stays `unmatched`.
+- **A10. One normalization: a body without its H1.** Seventeen bodies (#948, #951, #952, #955,
+  #961, #968, #969, #972-#975, #987-#989, #991-#993) hold an earlier committed spec with its title
+  line removed. (#1470 and #1471 are named in the same ruling, but each also lacks the blank line and
+  the `## Attempt record` heading, two lines, so A10 does not match them; root synced them through
+  A11 `--reviewed` after review, and they hold no GitHub-only text.) A blob *with its H1 removed* is
+  the blob minus its first two lines, defined only when the first line is `# <title>` (A2) and the
+  second line is empty. A GitHub body that matches (A3, one trailing newline allowed) the H1-removed
+  form of the source blob or of a history blob counts as a body match for `fast-forward`. It never
+  makes an issue `in-sync`: `in-sync` still needs the full blob, so the sync restores the title line.
+  Nothing else is normalized; any other difference stays `unmatched`.
 - **A11. A reviewed body: `--reviewed DIR`.** Some rulings sync an issue whose body is not an earlier
   committed state (a body from an unmerged branch, a body with extra trailing blank lines, a title
   set on GitHub). Root rules on each after a three-way reconcile. `--reviewed DIR` takes a directory
@@ -381,8 +387,8 @@ Amendment 2 implementation (2026-10-11; A10, A11, A12). A1-A9 semantics are unch
   `DIR/<n>.github-title.txt` with `cmp` (no newline allowance); on a hit the class is `fast-forward`
   and the line is `<n> fast-forward reviewed`. `--reconcile-dir` also writes `<n>.github-title.txt`
   (the `jq -j` title, no trailing newline). The write path is A5's, untouched.
-- **A12, Gate 1.** The self-test now has 163 `ok - NAME` lines (was 122) and prints
-  `all assertions passed`. New fixtures are a third repository (issues 40-54: bodies equal to the
+- **A12, Gate 1.** The self-test had 163 `ok - NAME` lines (was 122; the verdict follow-ups below make
+  it 166) and prints `all assertions passed`. New fixtures are a third repository (issues 40-54: bodies equal to the
   H1-removed form of a history blob with the newline dropped and kept, of the source blob, with one
   byte changed, with the H1 line removed but the blank line kept, of a blob whose second line is not
   empty, of a spec with no H1, of a history blob whose title has trailing whitespace or 257
@@ -410,7 +416,10 @@ Amendment 2 implementation (2026-10-11; A10, A11, A12). A1-A9 semantics are unch
     `reviewed-all-prints-no-reviewed-line`, `reviewed-does-not-override-range`;
   - reviewed body compare skipped: 4 red, `reviewed-body-changed-one-byte-is-unmatched` and three more;
     reviewed title compare skipped: 3 red, `reviewed-title-changed-is-unmatched` and two more; reviewed body
-    compare with the newline allowance: 3 red, `reviewed-body-extra-trailing-newline-is-unmatched` and two more;
+    compare with the newline allowance, in the reversed argument order (`matches_blob reviewed body`):
+    3 red, `reviewed-body-extra-trailing-newline-is-unmatched` and two more. This line first said the
+    allowance was covered; it was covered for one order only, and the verdict showed the natural order
+    (`matches_blob body reviewed`) stayed green (see the verdict follow-ups below);
   - `--reviewed` directory existence unchecked: 3 red, `reviewed-dir-must-exist-exit-2`,
     `reviewed-dir-must-exist-no-gh-call`, `reviewed-dir-must-be-a-directory`; not made absolute: 1 red,
     `reviewed-relative-dir-resolves-against-the-callers-directory`;
@@ -424,8 +433,52 @@ Amendment 2 implementation (2026-10-11; A10, A11, A12). A1-A9 semantics are unch
   on `origin/main` `1b55de30a` (no `gh` write): `948`, `961` and `972` are `fast-forward`; `26`, `1309`,
   `1468` and `1470` are `unmatched` (`summary in-sync=0 fast-forward=3 closed-skipped=0 no-issue=0
   oversize=0 unmatched=4`, exit 3). #1470 stays `unmatched` because its body equals the H1-removed form
-  of its nearest blob `3e8ee9b4` except that the body lacks one line, `## Attempt record` (line 73 of
-  the H1-removed form); A10 allows no other difference. #1468's body is 30 added and 16 removed lines from its nearest blob.
+  of its nearest blob `3e8ee9b4` except that the body lacks two lines, the blank line and
+  `## Attempt record`; #1471 has the same shape. A10 allows no other difference. #1468's body is 30 added and 16 removed lines from its nearest blob.
+
+Amendment 2 verdict follow-ups (2026-10-11, on `8794b3294` PASS; verdict
+`submix-verdicts/1445-amendment2-attempt1.md`). A10-A12 semantics are unchanged.
+
+- **MINOR 2, a lost byte.** Fixture 55 (reviewed body `fifty-five body\n`, current GitHub body
+  `fifty-five body`, no trailing newline) must be `unmatched`: `reviewed-body-lost-its-trailing-newline-is-unmatched`.
+  Mutation, `reviewed_unchanged` comparing with `matches_blob "$d/body.gh" "$reviewed_dir/$n.github.md"`
+  (the natural order, which has the one-newline allowance): self-test exit 1, 3 red,
+  `reviewed-body-lost-its-trailing-newline-is-unmatched`, `reviewed-apply-edits-only-the-reviewed-issue`,
+  `reviewed-apply-backup-holds-the-reviewed-issue-only`; before the fixture the same mutant was green.
+  Restored (byte-identical): exit 0. A12's "a one-byte change to either since the review" now covers
+  additions, substitutions and deletions.
+- **NIT 4, closed and oversize.** Fixtures 56 (CLOSED, reviewed files equal to its current state) and
+  57 (OPEN, spec title with trailing whitespace, so `oversize`; reviewed files equal) named with
+  `--reviewed`: `reviewed-never-overrides-a-closed-issue` (`56 closed-skipped`) and
+  `reviewed-never-overrides-an-oversize-issue` (`57 oversize`); neither is edited. No natural defect in
+  the shipped code (the `reviewed_unchanged` call sits inside the `unmatched` branch of an open,
+  non-oversize issue); the mutation that creates one, a post-classification override of
+  `closed-skipped` and `oversize` through `reviewed_unchanged`, gives exit 1 with 3 red, the two
+  assertions above and `reviewed-apply-exit-3-unmatched-remain`. Restored: exit 0.
+- **Gate 1.** 166 `ok - NAME` lines (was 163), `all assertions passed`.
+- **Gate 3** re-run: `check-workspace-policy.sh`, `check-script-reachability.py`,
+  `test-script-reachability.py` and `check-ci-path-routing.py` exit 0.
+
+Gate 4, second run (root rulings, 2026-10-11), on `origin/main` `1b55de30a`:
+
+- `--apply` on 948 951 952 955 961 968 969 972 973 974 975 987 988 989 991 992 993 exited 0 with 17
+  `synced` (A10).
+- `--apply --reviewed /home/bl/misofm/submix-verdicts/body-sync-reconcile-2026-10-11 291 559 560 1470`
+  exited 0 with 4 `synced`. The titles of 291, 559 and 560 were set from the spec H1: their GitHub
+  titles were the creation titles with no rename event, and the spec H1 last changed later, at
+  `b81d1e1d6` on 2026-10-01. The bodies of 559 and 560 had extra trailing blank lines; 1470 lacked two
+  lines.
+- `--apply --reviewed /home/bl/misofm/submix-verdicts/body-sync-reconcile-2026-10-11-1471 1471` exited 0
+  with 1 `synced`.
+- The backup directory `/home/bl/misofm/submix-verdicts/body-sync-backup-2026-10-11` now holds 39 files.
+- A following `--check --all` on `origin/main` `1b55de30a` gave in-sync=215 and `unmatched` = 26, 124,
+  1309, 1311, 1312, 1314, 1343, 1348 and 1468. 26 and 124 are folded into their specs on this branch
+  (`8794b3294`); they sync after the folds are on `origin/main`. 1309, 1311, 1312, 1314, 1343 and 1348
+  are left until stream B batch 1 merges (root ruling). 1468: its GitHub body is not proven to be an
+  earlier committed state; reported to root.
+- Post-merge step for 26 and 124: first `git merge-base --is-ancestor 8794b3294 origin/main`, then
+  `--apply --backup-dir <new dir> --reviewed /home/bl/misofm/submix-verdicts/body-sync-reconcile-2026-10-11 26 124`.
+  Until the folds are on `origin/main`, `--reviewed` would restore the pre-fold specs (verdict MINOR 1).
 
 ## Dependencies
 

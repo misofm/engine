@@ -584,9 +584,10 @@ printf '# Forty-five\nsecond line\nmore v2\n' >"$S3/45-a.md"
 printf 'no heading\n\nfoo v2\n' >"$S3/46-a.md"
 printf '# Forty-eight\n\nnew body\n' >"$S3/48-a.md"
 printf '# Forty-seven\n\nnew47\n' >"$S3/47-a.md"
-for n in 50 51 52 53 54; do
+for n in 50 51 52 53 54 55 56; do
     printf '# Fifty-%s\n\nsrc%s\n' "$n" "$n" >"$S3/$n-a.md"
 done
+printf '# Fifty-57 \n\nsrc57\n' >"$S3/57-a.md"   # an unsafe title: oversize
 D2=$(commit3 'specs v2, reviewed set')
 git -C "$R3" push -q origin main
 
@@ -608,6 +609,9 @@ printf 'fifty-one from a branch\n' >"$T/b3/51"
 printf 'fifty-two body\n' >"$T/b3/52"
 printf 'fifty-three body' >"$T/b3/53"
 printf 'fifty-four body\n' >"$T/b3/54"
+printf 'fifty-five body\n' >"$T/b3/55"       # the body at review time; GitHub then loses the newline
+printf 'fifty-six body\n' >"$T/b3/56"        # a closed issue
+printf 'fifty-seven body\n' >"$T/b3/57"      # an oversize issue (the spec title has trailing whitespace)
 
 reset3() {
     reset_issues
@@ -627,6 +631,9 @@ reset3() {
     mk_issue 52 OPEN 'Fifty-52' "$T/b3/52"
     mk_issue 53 OPEN 'Fifty-53' "$T/b3/53"
     mk_issue 54 OPEN 'Fifty-54' "$T/b3/54"
+    mk_issue 55 OPEN 'Fifty-55' "$T/b3/55"
+    mk_issue 56 CLOSED 'Fifty-56' "$T/b3/56"
+    mk_issue 57 OPEN 'Fifty-57' "$T/b3/57"
     rm -rf "$T/snap"
     cp -r "$G/issues" "$T/snap"
 }
@@ -658,22 +665,31 @@ assert 'h1-removed-after-apply-is-in-sync' bash -c 'grep -q "^40 in-sync" "$1" &
 # A11: the reconcile run writes the title beside the body; --reviewed accepts exactly that state.
 reset3
 RV=$T/RV
-run --check --reconcile-dir "$RV" 50 51 52 53
+run --check --reconcile-dir "$RV" 50 51 52 53 55
+# 56 is closed and 57 is oversize, so no reconcile run writes them; the reviewer's files are made by hand.
+for n in 56 57; do
+    jq -j .body "$G/issues/$n.json" >"$RV/$n.github.md"
+    jq -j .title "$G/issues/$n.json" >"$RV/$n.github-title.txt"
+done
 printf 'Fifty hand' >"$T/expect-title50"
 assert 'reconcile-writes-the-github-title-without-newline' cmp -s "$RV/50.github-title.txt" "$T/expect-title50"
 mk_issue 51 OPEN 'Fifty-51' <(printf 'fifty-one from a branch\nX')   # one byte changed since the review
 mk_issue 52 OPEN 'Fifty-52X' "$T/b3/52"                              # title changed since the review
 mk_issue 53 OPEN 'Fifty-53' <(printf 'fifty-three body\n')         # one trailing newline added since the review
+mk_issue 55 OPEN 'Fifty-55' <(printf 'fifty-five body')            # one trailing newline lost since the review
 rm -rf "$T/snap"
 cp -r "$G/issues" "$T/snap"
 run --check 50
 assert 'without-reviewed-the-issue-is-unmatched' has_line '50 unmatched'
-run --check --reviewed "$RV" 50 51 52 53 54
+run --check --reviewed "$RV" 50 51 52 53 54 55 56 57
 assert 'reviewed-body-and-title-equal-is-fast-forward-reviewed' has_line '50 fast-forward reviewed'
 assert 'reviewed-body-changed-one-byte-is-unmatched' has_line '51 unmatched'
 assert 'reviewed-title-changed-is-unmatched' has_line '52 unmatched'
 assert 'reviewed-body-extra-trailing-newline-is-unmatched' has_line '53 unmatched'
 assert 'reviewed-files-missing-is-unmatched' has_line '54 unmatched'
+assert 'reviewed-body-lost-its-trailing-newline-is-unmatched' has_line '55 unmatched'
+assert 'reviewed-never-overrides-a-closed-issue' has_line '56 closed-skipped'
+assert 'reviewed-never-overrides-an-oversize-issue' has_line '57 oversize'
 assert 'reviewed-check-exit-3' test "$rc" = 3
 assert 'reviewed-check-makes-no-edit' test -z "$(edited)"
 run --check --reviewed "$RV" --all
@@ -691,7 +707,7 @@ assert 'reviewed-dir-must-exist-exit-2' test "$rc" = 2
 assert 'reviewed-dir-must-exist-no-gh-call' no_gh_call
 run --check --reviewed "$T/b3/50" 50
 assert 'reviewed-dir-must-be-a-directory' test "$rc" = 2
-STUB_BACKUP_DIR=$T/BV run --apply --backup-dir "$T/BV" --reviewed "$RV" 50 51 52 53 54
+STUB_BACKUP_DIR=$T/BV run --apply --backup-dir "$T/BV" --reviewed "$RV" 50 51 52 53 54 55 56 57
 assert 'reviewed-apply-edits-only-the-reviewed-issue' test "$(edited)" = '50 '
 assert 'reviewed-apply-exit-3-unmatched-remain' test "$rc" = 3
 assert 'reviewed-apply-reports-synced' has_line '50 synced'

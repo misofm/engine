@@ -48,9 +48,9 @@ only; the script refuses otherwise, and `GH_REPO` cannot redirect it), and a rel
 spec with its title line and the blank line after it removed counts as a match for `fast-forward`
 (never `in-sync`). `--reviewed DIR` takes the directory of an earlier `--reconcile-dir` run: an
 `unmatched` issue named on the command line becomes `fast-forward reviewed` while its GitHub body and
-title still equal the reviewed files byte for byte (never through `--all` or `--range`). Its header lists the classes and
-exit codes, and `test-sync-spec-bodies.sh` is its self-test (a stub
-`gh`, a local bare `origin`, no network). Editing this README selects the `dsp-research` suite on the
+title still equal the reviewed files byte for byte (never through `--all` or `--range`). Its header
+lists the classes and exit codes, and `test-sync-spec-bodies.sh` is its self-test (a stub `gh`, a
+local bare `origin`, no network). Editing this README selects the `dsp-research` suite on the
 run that carries it (`scripts/ci-path-router.py` lists this file as a `dsp-research` input); that is
 harmless.
 
