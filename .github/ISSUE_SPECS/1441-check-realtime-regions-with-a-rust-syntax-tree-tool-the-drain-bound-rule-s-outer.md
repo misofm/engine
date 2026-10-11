@@ -154,12 +154,23 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - **D10. Macros and attributes that can declare an item** (closes a limit the first verdict found;
   root Amendment 1, SP-3).
   - From the first binding the drain rule reads for a pop (the count, its alias source, or the
-    start of the slice parameter's `fn` body) to the end of the innermost bounding loop, these
-    refuse the drain:
+    start of the slice parameter's `fn` body) to the end of the span below, these refuse the drain
+    (root ratification 2026-10-11, after the attempt-2 verdict, replaces the literal "end of the
+    innermost bounding loop"):
     - every macro invocation in statement position (`name!(..);`, `name![..];`, `name! {..}`) or
       item position;
     - every item that carries an attribute other than `cfg`, `allow`, `expect`, `warn`, `deny`,
       `forbid` or `doc`.
+  - **The span.** Root ratification 2026-10-11: the D10 span is widened to close
+    item-macro-after-the-loop-in-an-inner-block. For a `let` binding the span ends at the end of
+    the statement, in the binding's own block, that holds the pop. Root ruling 2026-10-11, applying
+    the item-2 ruling: for a slice-parameter binding the span is the whole `fn` body, because a
+    parameter's block is the `fn` body (an item anywhere in the body shadows the parameter; this
+    closes the attempt-2 probes b04, a statement macro after the slice loop that expands to a
+    `const` shadowing the parameter, and b05, a derive at the same place).
+  - `debug_assert_eq!` and `debug_assert_ne!` are refused under D10: an accepted over-refusal.
+    Widening the exemption needs a root ruling (B2a-D2's trust scan checks only the name
+    `debug_assert`).
   - A `macro_rules!` item name is not hygienic, and a derive or attribute macro emits items beside
     its item: either can declare a `const`, `static` or unit struct that shadows the binding for
     the whole block.

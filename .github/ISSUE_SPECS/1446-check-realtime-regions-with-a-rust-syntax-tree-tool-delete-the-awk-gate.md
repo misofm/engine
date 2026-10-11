@@ -214,8 +214,7 @@ source file changes the `.llvmbc` section of the `libcapi.a` members and nothing
 
    `.llvmbc` is rustc's embedded bitcode. It carries each source file's checksum, so any byte
    change to a source file changes it, and no linker copies it into a shipped image. Any other
-   difference fails. There is no fallback: if a marker would move a line, D5 is skipped and B2b-1
-   places it. (root Amendment 1, SP-1)
+   difference fails. (root Amendment 1, SP-1)
 6. **CI.** The batch's `qualification` run shows `audit-native` running the tool, and `lint`
    running no awk gate.
 7. **GitHub.** After the batch push, C1's script exits 0 on `<base>..<batch tip>`, and its

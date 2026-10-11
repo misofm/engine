@@ -205,7 +205,10 @@ the self-test's lines from `:440` on are one lower.
   - (root Amendment 2, SP-A) Five cases for D3's trusted-name scan, each refused. Test value, one
     sentence each:
     - `user-map-trait-in-a-nested-module`: F1's reproducer (a user trait with a looping `map`)
-      inside `mod a { mod b { .. } }`. Red if the scan reads only top-level items or one file; this
+      inside `mod a { mod b { .. } }`. F1's source shape is a user trait `Spin` with a `map` method
+      whose `impl` calls its argument in a `while f(self).is_ok() {}` loop, applied as
+      `control.map(Consumer::try_pop)` (or `x.map(Consumer::try_pop)`) in a marked drain; it pops
+      1000 of 1000 records (`/home/bl/misofm/submix-verdicts/1442-attempt1.md` F1 and `evidence/1442-attempt1/m.rs`). Red if the scan reads only top-level items or one file; this
       shape passes today.
     - `try-pop-by-value-on-a-reference-impl`: `impl Pop for &Q { fn try_pop(self) }`. Red if (b)
       checks only for `&self`, which was the draft's wording.
@@ -217,6 +220,10 @@ the self-test's lines from `:440` on are one lower.
       with `mk!(debug_assert!);` in a workspace proc-macro crate. Red if (d) is dropped.
   - (root Amendment 2, F2) The 8 existing shadow rows defend the replacement rule. Keep the F2
     `proc-macro-fn` row: it is red only if both the F2 rule and D3's (d) are dropped.
+    The `proc-macro-fn` row's source shape: a file `crates/shadowing/src/lib.rs` that defines
+    `#[proc_macro] pub fn debug_assert(input: TokenStream) -> TokenStream { input }` (no `macro_rules!`,
+    no `macro`, no `use`), beside a drain that names its count inside `debug_assert!`
+    (`/home/bl/misofm/submix-verdicts/1442-attempt1.md` F2 and `evidence/1442-attempt1/pm.rs`, `zz_verifier.rs.txt`).
   - (root Amendment 2, SP-B) The six D8 cases. Test value, one sentence each:
     - `#[path = "shadow.txt"]`: red if D8 (a) is dropped.
     - `cfg_attr(.., path = "x.txt")`: red if (a) matches only a top-level `#[path = ..]`, which was
