@@ -3993,6 +3993,60 @@ fn console_chains_keep_collapsing_across_a_swap_at_four_lanes() {
     }
 }
 
+/// `model` with every track's right channel read from the source's right channel: a stereo-source
+/// session, whose strips cannot collapse.
+fn stereo_source(mut model: SessionModel) -> SessionModel {
+    for track in &mut model.tracks {
+        track.right_source_channel = 1;
+    }
+    model
+}
+
+/// The AND rule of the agreement flag (#1276 D5, #1279 D3): a chain that could not collapse hands
+/// its carried lanes' state over without a claim that the two channels agree, because they were fed
+/// different PCM. B maps every track mono, so its chains can collapse, and changes every trim to
+/// `-0.0` so that no input section carries and the effect carry alone speaks for the chain. The
+/// successor must stay dual -- and render exactly what a successor forced dual renders -- instead of
+/// collapsing onto a left channel its carried right state no longer matches.
+fn a_chain_that_could_not_collapse_hands_over_no_agreement(backend: Backend) {
+    const SLOTS: [&str; 3] = ["eq", "comp", "limiter"];
+    let base = || unfiltered(console_session(true, &SLOTS));
+    let a = Session::compile(stereo_source(base()));
+    let b = Session::compile(with_negative_zero_trims(base()));
+    let feed = bursty_feed(SOURCE, 9);
+    let free = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    let dual = plain_run(&a, Some((&b, &a.model)), &feed, backend, true);
+    let mono = plain_run(&b, None, &feed, backend, false);
+    assert_eq!(free.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(
+        free.collapses[0][0], 0,
+        "{backend:?}: the predecessor could not collapse"
+    );
+    assert!(
+        mono.collapses[1][0] > 0,
+        "{backend:?}: the successor's chains could"
+    );
+    assert_eq!(
+        first_plain_difference(&free, &dual),
+        None,
+        "{backend:?}: the successor does not collapse onto a left channel it does not match"
+    );
+    assert_eq!(free.collapses[1][0], 0, "{backend:?}: it stays dual");
+    assert_eq!(free.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_eight_lanes() {
+    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_four_lanes() {
+    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd4);
+}
+
 /// [`console_session`] with the input section's filters, trim and polarity off, so nothing
 /// before the console holds state, and every strip's matrix routes it to one output plane: `solo`
 /// to the left plane, every other strip to the right. A plane then depends on those strips only.

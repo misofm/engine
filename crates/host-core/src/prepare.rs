@@ -3033,6 +3033,108 @@ mod tests {
     use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
     use session::{DiagnosticCode, parse_session_json};
 
+    const SLOT: &str = "comp";
+
+    fn layout() -> graph::EffectLaneLayout {
+        graph::EffectLaneLayout {
+            effect_id: effect_contract::EffectId::parse("miso.compressor").expect("effect ID"),
+            state_layout_version: 1,
+            state_sizes: effect_contract::StatePayloadSizes {
+                common_bytes: 8,
+                left_bytes: 64,
+                right_bytes: 64,
+            },
+            bypass: false,
+            latency: effect_contract::LatencySamples(0),
+        }
+    }
+
+    fn lane_row(lane: u16, layout: graph::EffectLaneLayout) -> super::EffectLaneInventoryRow {
+        super::EffectLaneInventoryRow {
+            id: "eq0".into(),
+            rack: graph::RackId::Simd1,
+            effect_id: SLOT.into(),
+            location: graph::GraphLaneLocation {
+                unit: 0,
+                slot: 0,
+                lane,
+            },
+            layout,
+        }
+    }
+
+    fn inventory_with(row: super::EffectLaneInventoryRow) -> super::PlanStateInventory {
+        super::PlanStateInventory {
+            plan_identity: 1,
+            sources: Box::default(),
+            input_sections: Box::default(),
+            strip_stages: Box::default(),
+            effect_lanes: Box::new([row]),
+            restarted: Box::default(),
+        }
+    }
+
+    /// D1: the slot's model values are equal and both plans bank it, but the predecessor's lane has
+    /// another prepared layout (state sizes, state layout version, prepared bypass or latency).
+    /// The lane is not moved and its strip restarts. A join that trusts the existence of two rows
+    /// moves a payload the successor's bank would refuse, or read at another size.
+    #[test]
+    fn a_lane_of_another_prepared_layout_is_not_moved() {
+        let join = |same| super::ChainJoin {
+            id: "eq0",
+            chain_changed: false,
+            owners: vec![super::ConsoleOwnerJoin {
+                rack: graph::RackId::Simd1,
+                slot: SLOT,
+                same,
+            }],
+        };
+        let own = [lane_row(3, layout())];
+        let carry = super::resolve_effect_carry(
+            &inventory_with(lane_row(1, layout())),
+            &[join(true)],
+            &own,
+        );
+        assert_eq!(carry.moves.len(), 1);
+        assert_eq!(carry.moves[0].successor.lane, 3);
+        assert_eq!(carry.moves[0].predecessor.lane, 1);
+        assert_eq!(carry.scratch_bytes, 136);
+        assert!(carry.restarted.is_empty());
+        let other = |edit: fn(&mut graph::EffectLaneLayout)| {
+            let mut other = layout();
+            edit(&mut other);
+            other
+        };
+        let layouts = [
+            other(|layout| layout.state_sizes.left_bytes += 4),
+            other(|layout| layout.state_layout_version += 1),
+            other(|layout| layout.bypass = true),
+            other(|layout| layout.latency = effect_contract::LatencySamples(5)),
+        ];
+        for (index, different) in layouts.into_iter().enumerate() {
+            let carry = super::resolve_effect_carry(
+                &inventory_with(lane_row(1, different)),
+                &[join(true)],
+                &own,
+            );
+            assert!(carry.moves.is_empty(), "layout {index}");
+            assert_eq!(
+                carry.restarted,
+                vec![Box::<str>::from("eq0")],
+                "layout {index}"
+            );
+            assert_eq!(carry.scratch_bytes, 0, "layout {index}");
+        }
+        // A changed model value restarts the strip on equal layouts, too.
+        let carry = super::resolve_effect_carry(
+            &inventory_with(lane_row(1, layout())),
+            &[join(false)],
+            &own,
+        );
+        assert!(carry.moves.is_empty());
+        assert_eq!(carry.restarted, vec![Box::<str>::from("eq0")]);
+    }
+
     #[test]
     fn typed_diagnostic_adapters_preserve_projection_and_bound() {
         let effects = EffectDiagnosticSet(vec![
