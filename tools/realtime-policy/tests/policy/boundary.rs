@@ -257,15 +257,6 @@ fn a_region_that_ends_in_a_deeper_block_is_refused() {
     expect_end_refused("region-ends-in-a-deeper-block", &text);
 }
 
-/// The same hole for a slice parameter of the `fn` that the region begins before.
-#[test]
-fn a_region_that_ends_in_a_deeper_block_after_a_slice_parameter_is_refused() {
-    let text = format!(
-        "// {BEGIN}\nfn probe(q: &mut Consumer, lanes: &[u8]) {{\n    {{\n        for _lane in lanes {{\n            let available = q.available_at_entry();\n            for _ in 0..available {{ let _ = q.try_pop(); }}\n        }}\n    // {END}\n        const lanes: [u8; 1] = [0];\n    }}\n}}\n"
-    );
-    expect_end_refused("region-ends-in-a-deeper-block-slice-parameter", &text);
-}
-
 /// The shape of the real `gate-expander`: a region inside a `macro_rules!` body.
 #[test]
 fn a_region_inside_a_macro_body_is_tokens_and_passes() {

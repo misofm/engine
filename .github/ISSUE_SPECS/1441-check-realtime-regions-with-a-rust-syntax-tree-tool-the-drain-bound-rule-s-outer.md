@@ -491,8 +491,10 @@ the branch (`bfed03af6`), so D10 needs no forward reference.
   `rewind` collect the reads, and `count::bounds` takes back the reads of a loop that does not bound. `count.rs` notes
   the count and its alias source, `outer.rs` a slice parameter.
 - Documentation (MINOR-1, MINOR-2): the module documentation of `drain/mod.rs` and `drain/outer.rs` states D9, D10, the
-  widened D2, the `<bound>` strictness (SP-4), and the known false passes. The SP-2 and SP-3 limits are gone; the
-  ones that remain are the `&mut` iterator in a field or a local (an infinite `0..` held in a local passes), a
+  widened D2, the `<bound>` strictness (SP-4), and the known false passes. (Corrected in attempt 3, the second
+  verdict's MAJOR-1: the SP-2 and SP-3 holes were not all gone. A slice parameter's D10 span ended at the body statement
+  that holds the pop, so a statement macro or a derive after the loop, at the body's level, passed. Attempt 3 closes it.)
+  The ones that remain are the `&mut` iterator in a field or a local (an infinite `0..` held in a local passes), a
   collection root that an item shadows (below), and the registry-crate `debug_assert` macro.
 - Tests: `tests/policy/boundary.rs` (the three D9 cases; `boundary-spans-two-blocks` is now refused and
   `boundary-only-end-splits` expects both findings), `tests/policy/drain/outer.rs` (the item kinds and
@@ -596,3 +598,83 @@ time 1.27 s (B2a: 1.27 s). Not tuned.
   ruling and a re-measure of the real tree. The module documentation lists it as a limit meanwhile.
 - `debug_assert_eq!` and `debug_assert_ne!` are not exempt: a statement of either in a drain span is refused (D10 names
   only `debug_assert!`). No drain span holds one.
+
+## Attempt record (attempt 3, J batch branch `codex/d15-stream-j3`, base `418c9c343`)
+
+Verdict on attempt 2: FAIL (`/home/bl/misofm/submix-verdicts/1441-attempt2.md`): MAJOR-1, MINOR-1, NIT-1, and spec problems
+SP-A to SP-D. This is the last attempt of the three the issue allows.
+
+Commits: `0f8852cba` (spec only: root's rulings, below) and the implementation commit that holds this record.
+Edits: `tools/realtime-policy/**` and the specs. No production code, `Cargo.toml` or `Cargo.lock` change (`git diff
+418c9c343 -- crates hosts scripts Cargo.toml Cargo.lock` is empty), so gate 6 holds as in attempt 2.
+
+**Root's rulings, recorded (2026-10-11).**
+- D10 span, `let`: the span ends at the end of the statement, in the binding's own block, that holds the pop. Root
+  ratification; it closes item-macro-after-the-loop-in-an-inner-block (attempt 2's open item 1, SP-A).
+- D10 span, slice parameter: the whole `fn` body, because a parameter's block is the `fn` body. Root ruling, applying the
+  item-2 ruling; it closes the verdict's b04 and b05.
+- `debug_assert_eq!` and `debug_assert_ne!` are refused under D10: an accepted over-refusal. Widening the exemption needs a
+  root ruling (open item 3).
+- SP-C: #1446 gate 5 drops the copied "There is no fallback" sentence. SP-D: D10's trailing `m!()` sentence stays.
+- #1442 gains a description of the source shape of the F2 `proc-macro-fn` row and of F1's reproducer.
+- The collection-root shadowing hole (attempt 2's open item 2, SP-B) is **not** implemented here: it is #1442 attempt 2.
+  The module documentation still lists it as a known false pass.
+
+**What changed (all in `tools/realtime-policy`).**
+- MAJOR-1: `src/drain/mod.rs` `read_span`: for `BindingKind::Param` the span is `(body.full, body.end)`, the whole `fn`
+  body. The `let` span is unchanged.
+- The three false texts are corrected: the `declares_an_item` doc (now says what each span is and points at `read_span`),
+  the `read_span` doc ("a parameter's block is the body, and an item anywhere in the body shadows it"), and the D10 bullet of
+  the module documentation (an item in a `let`'s own block cannot shadow it; for a parameter the span is the whole body).
+  The attempt-2 record's "The SP-2 and SP-3 limits are gone" carries a correction note (above). The module documentation
+  also records that `debug_assert_eq!` and `debug_assert_ne!` are not exempt.
+- MINOR-1: new test `a_loop_that_does_not_bound_takes_back_only_its_own_reads` (two rows, below).
+- NIT-1: `a_region_that_ends_in_a_deeper_block_after_a_slice_parameter_is_refused` is deleted. D9 never reads the region's
+  contents, so the row defended nothing the count-form row does not.
+- The slice-parameter D10 test is extended and renamed `a_statement_macro_or_a_derive_in_the_body_of_a_function_with_a_slice_loop_is_refused`
+  (three rows: `braced-item-macro-shadows-the-slice-parameter` as before, plus `item-macro-after-the-slice-loop-shadows-the-slice-parameter`
+  (b04) and `derive-after-the-slice-loop-shadows-the-slice-parameter` (b05)). `over_slice` takes `before` and `after`.
+
+**Mutations** (each applied alone, `cargo test --locked -p realtime-policy` and the release tool on the real tree, source
+restored after each; `diff` against the saved source is empty).
+- Slice-parameter span ends at the body statement that holds the pop (attempt 2's code): red are exactly
+  `item-macro-after-the-slice-loop-shadows-the-slice-parameter` and `derive-after-the-slice-loop-shadows-the-slice-parameter`
+  (148 passed, 1 failed: the extended test). Real tree ok.
+- Reads are not rewound (`rewind` does nothing): red is exactly `failed-alias-read-does-not-extend-the-span`
+  (148 passed, 1 failed). Real tree ok.
+- Reads are rewound to zero (`truncate(0)`): red is exactly `per-queue-in-a-slice-loop-with-a-shadowing-macro`
+  (148 passed, 1 failed). Real tree ok.
+- Green on the restored source: 149 passed.
+
+**Test value (one sentence per new or changed test).**
+- `a_statement_macro_or_a_derive_in_the_body_of_a_function_with_a_slice_loop_is_refused`: red if a slice parameter's D10
+  span stops at the body statement that holds the pop, so a statement macro or a derive after the loop at the body's level
+  (which can declare a `const` that shadows the parameter and turns the loop into one that never ends) passes.
+- `a_loop_that_does_not_bound_takes_back_only_its_own_reads`: red if a failed bounding attempt keeps its stale reads (the
+  alias-source `let` of a finite outer loop then extends a span over a harmless macro: over-refusal), or forgets reads that
+  an earlier rule noted (a per-queue form in a slice-parameter loop then loses the parameter, and a macro that redeclares it
+  as `0..` passes: a false pass). The attempt-2 verdict showed that neither mutation turned any test red.
+- Deleted: `a_region_that_ends_in_a_deeper_block_after_a_slice_parameter_is_refused` (defended nothing the count-form row
+  does not).
+
+**Gates (re-measured on this branch).**
+1. Real tree: `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh`: both
+   `realtime policy: ok (94 marked regions in 26 files)`, as before.
+2. `cargo test --locked -p realtime-policy`: 149 passed (149 before: +1 rewind test, -1 deleted D9 row; the slice test is
+   renamed and has two more rows).
+3. Parity (the attempt-2 method: an instrumented copy of `scripts/test-realtime-policy.sh`, outside the commit, runs the
+   release binary on each of the 96 `expect_failure` trees): the tool refuses all 96; 57 rows expect the drain class and 55
+   report it, the other two being B1a-D10's `drain-open-tail-last-file` and `drain-region-ends-in-comment`; no other row
+   reports the drain class. Same as attempt 2.
+4. Mutations: above.
+5. Run time, release binary on the real tree: 2.71 s, 2.58 s, 3.07 s (attempt 2: 1.27-1.37 s). The machine carried other
+   builds during the runs (load average 32.9, 29.0, 17.3); the change adds one span computation per read binding and
+   no loop. Not tuned, not re-run.
+6. No shipped source changed.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `scripts/check-workspace-policy.sh`, `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` exit 0.
+
+**Open items.**
+- `debug_assert_eq!`, `debug_assert_ne!`: an accepted over-refusal (ruling above). No drain span holds one.
+- A collection root that an item shadows (r01, r02, b01, b06): #1442 attempt 2; still a known false pass in the module
+  documentation.

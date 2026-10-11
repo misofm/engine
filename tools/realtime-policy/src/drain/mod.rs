@@ -24,17 +24,21 @@
 //!   `core::array::from_fn` and `std::array::from_fn`, whose closure is a finite outer loop and
 //!   never bounds a pop of its own.
 //! - **Macros and attributes that can declare an item (D10).** An expansion is invisible to the
-//!   item scan, and an item declared in a block shadows a `let` of an enclosing block for the whole
-//!   block it lands in. So from the first binding the rules read (the count, its alias source, or
-//!   the start of a slice parameter's `fn` body) to the end of the statement of that binding's
-//!   block that holds the pop, the drain is refused when it holds a macro invocation in statement
-//!   or item position (`name!(..);`, `name![..];`, `name! {..}`) or an item with an attribute other
-//!   than `cfg`, a lint level or `doc` (a derive and an attribute macro emit items beside their
-//!   item, and `cfg_attr` can expand to a derive). A `debug_assert!` is exempt while it is trusted
-//!   ([`shadow`]); a macro in expression position cannot declare an item and is not read. The span
-//!   runs past the loop: an item declared after the loop in an inner block reaches its header too.
-//!   An item in the binding's own block cannot shadow it: the `let` becomes refutable and does not
-//!   compile for a `const` or a unit struct, and it wins over a `fn`.
+//!   item scan, and an item declared in a block shadows a binding of an enclosing block, or a
+//!   function's parameter, for the whole block it lands in. So the drain is refused when it holds
+//!   a macro invocation in statement or item position (`name!(..);`, `name![..];`, `name! {..}`)
+//!   or an item with an attribute other than `cfg`, a lint level or `doc` (a derive and an
+//!   attribute macro emit items beside their item, and `cfg_attr` can expand to a derive) inside
+//!   the span of a binding the rules read. For a `let` (the count, or its alias source) the span
+//!   runs from the `let` to the end of the statement, in the `let`'s own block, that holds the
+//!   pop: it runs past the loop, so an item declared after the loop in an inner block reaches its
+//!   header too. An item in the `let`'s own block cannot shadow it: the `let` becomes refutable and
+//!   does not compile for a `const` or a unit struct, and it wins over a `fn`. For a slice
+//!   parameter the span is the whole `fn` body, because a parameter's block is the body, and an
+//!   item anywhere in it, after the loop included, shadows the parameter. A `debug_assert!` is
+//!   exempt while it is trusted ([`shadow`]); a macro in expression position cannot declare an
+//!   item and is not read. `debug_assert_eq!` and `debug_assert_ne!` are not exempt: an accepted
+//!   over-refusal (widening the exemption needs a root ruling).
 //! - **Region ends (B1b-D9)** are in [`crate::boundary`]: a region ends in the container of its
 //!   begin marker or in one that encloses it, so no block continues past the end marker with the
 //!   rest of its items unread.
@@ -279,13 +283,9 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
         && !declares_an_item(ctx, &steps)
 }
 
-/// D10: whether a macro or an attribute between the first binding the rules read and the end of
-/// the statement of that binding's block that holds the loop can declare an item. Such an item
-/// shadows the binding for the whole block it lands in, wherever in the block it stands, so the
-/// span runs to the end of the statement of the binding's own block that holds the pop: an item
-/// declared in an inner block after the loop ends reaches the loop too. An item in the binding's
-/// own block cannot shadow it: a `const` or a unit struct there makes the `let` refutable, and a
-/// `let` wins over a `fn`.
+/// D10: whether a macro or an attribute within the span of a binding the rules read can declare
+/// an item. Such an item shadows a binding for the whole block it lands in, wherever in the block
+/// it stands (see [`read_span`] for the span of a `let` and of a parameter).
 fn declares_an_item<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>]) -> bool {
     let reads = ctx.reads.borrow();
     let mut span: Option<(Pos, Pos)> = None;
@@ -299,31 +299,37 @@ fn declares_an_item<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>]) -> bool {
     span.is_some_and(|(from, to)| ctx.facts.declares_items_in(from, to))
 }
 
-/// The span of one read binding (D10): from its start to the end of the statement of its block
-/// on the pop's path. A parameter starts at its `fn`'s body, and its block is that body.
+/// The span of one read binding (D10).
+///
+/// - A `let`: from the `let` to the end of the statement of its block that holds the pop. An item
+///   declared in an inner block after the loop shadows the `let` at the loop's header, so the span
+///   runs to the end of that statement. An item in the `let`'s own block cannot shadow it.
+/// - A parameter: the whole `fn` body. A parameter's block is the body, and an item anywhere in the
+///   body shadows the parameter: a `const` or a macro that declares one, after the loop, at the
+///   body's level included.
 fn read_span<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], binding: &Binding<'f>) -> Option<(Pos, Pos)> {
-    let (from, block) = match binding.kind {
+    match binding.kind {
         BindingKind::Let { stmt, .. } => {
             let at = steps.iter().position(|step| {
                 matches!((step.node, step.via), (Node::Block(block), Some(Via::Stmt(index)))
                     if block.stmts[..index].iter().any(|before| std::ptr::eq(before, stmt)))
             })?;
-            (ctx.tree.extent(Node::Stmt(stmt))?.full, at)
+            let from = ctx.tree.extent(Node::Stmt(stmt))?.full;
+            let to = match (steps[at].node, steps[at].via) {
+                (Node::Block(body), Some(Via::Stmt(index))) => {
+                    ctx.tree.extent(Node::Stmt(&body.stmts[index]))?.end
+                }
+                (node, _) => ctx.tree.extent(node)?.end,
+            };
+            Some((from, to))
         }
         BindingKind::Param { .. } => {
             let function = steps.iter().rposition(|step| step.node.is_function())?;
-            let at = function + 1;
-            (ctx.tree.extent(steps.get(at)?.node)?.full, at)
+            let body = ctx.tree.extent(steps.get(function + 1)?.node)?;
+            Some((body.full, body.end))
         }
-        BindingKind::Pattern => return None,
-    };
-    let to = match (steps[block].node, steps[block].via) {
-        (Node::Block(body), Some(Via::Stmt(index))) => {
-            ctx.tree.extent(Node::Stmt(&body.stmts[index]))?.end
-        }
-        (node, _) => ctx.tree.extent(node)?.end,
-    };
-    Some((from, to))
+        BindingKind::Pattern => None,
+    }
 }
 
 /// Whether a closure other than the closure of `array::from_fn` holds the last node of the path

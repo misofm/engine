@@ -5,7 +5,9 @@
 //! count, its alias source or the slice parameter for the whole block it lands in. D2's item scan
 //! reads the tokens of the region and cannot see an expansion. The cases below put the macro
 //! outside the region, as the production shape would, and a pop in a loop whose bound the rule can
-//! prove from the syntax alone.
+//! prove from the syntax alone. A `let` is shadowed from inside its own block only through a
+//! deeper block, so its span ends with the statement that holds the pop; a parameter's block is
+//! the whole `fn` body, so its span is the body.
 
 use realtime_policy::Finding;
 
@@ -19,6 +21,8 @@ const SHADOWS_COUNT: &str =
     "macro_rules! shadow {\n    () => {\n        const available: usize = usize::MAX;\n    };\n}\n";
 const SHADOWS_SLICE: &str =
     "macro_rules! shadow {\n    () => {\n        const lanes: [u8; 1] = [0];\n    };\n}\n";
+/// A macro that declares an unbounded range named like the slice parameter `rounds`.
+const SHADOWS_ROUNDS: &str = "macro_rules! shadow {\n    () => {\n        const rounds: core::ops::RangeFrom<u64> = 0..;\n    };\n}\n";
 
 /// The base tree plus `outside` (items before the region) and a region around `body`.
 fn appended(outside: &str, body: &str) -> String {
@@ -55,10 +59,11 @@ fn counted(before: &str, after: &str) -> String {
 }
 
 /// A drain whose only bound is a loop over the slice parameter `lanes`, with `before` first in the
-/// function body. The count is `available_at_entry()` written in the header, so no `let` binds it.
-fn over_slice(before: &str) -> String {
+/// function body and `after` last in it, at the body's own level. The count is
+/// `available_at_entry()` written in the header, so no `let` binds it.
+fn over_slice(before: &str, after: &str) -> String {
     format!(
-        "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {{\n{before}    for _ in lanes {{\n        for _ in 0..control.available_at_entry() {{\n            {POP}\n        }}\n    }}\n}}"
+        "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {{\n{before}    for _ in lanes {{\n        for _ in 0..control.available_at_entry() {{\n            {POP}\n        }}\n    }}\n{after}}}"
     )
 }
 
@@ -89,12 +94,33 @@ fn a_statement_macro_between_the_count_and_the_end_of_its_block_is_refused() {
     each_row(rows, |name, text| refused(name, &text));
 }
 
-/// The same hole through a slice parameter: the span runs from the start of the `fn` body, and a
-/// braced macro statement is a macro statement.
+/// The same hole through a slice parameter, whose block is the whole `fn` body (root ruling
+/// 2026-10-11): a statement macro or a derive anywhere in the body, the places after the loop at
+/// the body's level included, declares an item that shadows the parameter. Red if the span of a
+/// parameter ends at the body statement that holds the pop, or does not start at the body, or if
+/// a slice parameter is not noted as a read.
 #[test]
-fn a_statement_macro_in_the_body_of_a_function_with_a_slice_loop_is_refused() {
-    let text = appended(SHADOWS_SLICE, &over_slice("    shadow! {}\n"));
-    refused("braced-item-macro-shadows-the-slice-parameter", &text);
+fn a_statement_macro_or_a_derive_in_the_body_of_a_function_with_a_slice_loop_is_refused() {
+    let rows: Vec<(&'static str, String)> = vec![
+        (
+            "braced-item-macro-shadows-the-slice-parameter",
+            appended(SHADOWS_SLICE, &over_slice("    shadow! {}\n", "")),
+        ),
+        (
+            // The attempt-2 verdict's b04: an unbounded `const lanes` after the loop.
+            "item-macro-after-the-slice-loop-shadows-the-slice-parameter",
+            appended(SHADOWS_SLICE, &over_slice("", "    shadow!();\n")),
+        ),
+        (
+            // The attempt-2 verdict's b05: the derive emits `const lanes` beside its item.
+            "derive-after-the-slice-loop-shadows-the-slice-parameter",
+            appended(
+                "",
+                &over_slice("", "    #[derive(MakeLanes)]\n    struct Unrelated;\n"),
+            ),
+        ),
+    ];
+    each_row(rows, |name, text| refused(name, &text));
 }
 
 /// A derive or an attribute macro emits items beside its item, `cfg_attr` can expand to a derive,
@@ -188,6 +214,36 @@ fn a_macro_that_cannot_declare_an_item_in_the_span_is_not_refused() {
         ),
     ];
     each_row(rows, |name, text| accepted(name, &text));
+}
+
+/// A rule that does not bound a loop takes back the reads it noted, and only those. Two drains,
+/// each separating a rewind that stops at its own mark from "no rewind" and from "rewind to zero":
+///
+/// - A per-queue drain inside `for _ in rounds`, a slice-parameter loop, with a statement macro
+///   first in the body. The slice loop notes `rounds`; the pass-count loop `0..passes` then fails
+///   `count::bounds`, and its rewind must stop at its own mark. Rewound to zero it would forget
+///   `rounds`, and the macro, which declares an unbounded `const rounds`, would pass.
+/// - A drain whose outer loop `0..lanes` first reads `lanes` as the alias of an entry count
+///   (`let lanes = first;` notes `first`), fails because `apply(lanes)` uses the alias, and is
+///   finite by its form anyway. With no rewind the stale read of `first` would extend a span over
+///   a statement macro that cannot shadow anything the drain reads, and refuse it.
+#[test]
+fn a_loop_that_does_not_bound_takes_back_only_its_own_reads() {
+    let per_queue = appended(
+        SHADOWS_ROUNDS,
+        "fn poll(ready: &mut Ready, rounds: &[u8]) -> u32 {\n    shadow!();\n    for _ in rounds {\n        for (lane, left) in ready.lanes.iter().zip(&mut ready.remaining) {\n            *left = lane.consumer.available_at_entry().min(DEPTH);\n        }\n        let mut passes = 1_usize;\n        for left in ready.remaining.iter() {\n            passes = passes.saturating_add(*left as usize);\n        }\n        for _ in 0..passes {\n            for ((lane, slot), left) in ready.lanes.iter_mut().zip(&mut ready.slots).zip(&mut ready.remaining) {\n                if slot.is_some() || *left == 0 {\n                    continue;\n                }\n                *left -= 1;\n                if let Ok(record) = lane.consumer.try_pop() {\n                    *slot = Some(record);\n                }\n            }\n            if ready.slots.iter().any(Option::is_none) {\n                break;\n            }\n            return 0;\n        }\n    }\n    0\n}",
+    );
+    refused(
+        "per-queue-in-a-slice-loop-with-a-shadowing-macro",
+        &per_queue,
+    );
+    let stale = appended(
+        SHADOWS_COUNT,
+        &format!(
+            "fn drain(control: &mut Consumer<Record>) {{\n    let first = control.available_at_entry();\n    let lanes = first;\n    apply(lanes);\n    shadow!();\n    for _ in 0..lanes {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n}}"
+        ),
+    );
+    accepted("failed-alias-read-does-not-extend-the-span", &stale);
 }
 
 /// `debug_assert!` is exempt only while no file under the roots defines or imports a macro of that
