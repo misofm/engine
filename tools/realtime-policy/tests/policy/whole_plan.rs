@@ -135,6 +135,25 @@ fn only_a_cfg_test_module_named_tests_is_skipped() {
     );
 }
 
+/// Another outer attribute beside `#[cfg(test)]`, before or after it, leaves the module test
+/// code. The older awk gate stops only at a `#[cfg(test)]` line that comes directly before
+/// `mod tests {`, so it scans such a module: a deliberate difference.
+#[test]
+fn another_attribute_beside_cfg_test_still_skips_the_module() {
+    let after = Edit::ReplaceLine {
+        path: FFI,
+        old: "#[cfg(test)]",
+        new: "#[cfg(test)]\n#[allow(dead_code)]",
+    };
+    expect_valid("whole-plan-cfg-test-then-allow", &[after]);
+    let before = Edit::ReplaceLine {
+        path: FFI,
+        old: "#[cfg(test)]",
+        new: "#[allow(dead_code)]\n#[cfg(test)]",
+    };
+    expect_valid("whole-plan-allow-then-cfg-test", &[before]);
+}
+
 /// A macro's tokens are not parsed, so the rule reads them as tokens.
 #[test]
 fn a_whole_plan_borrow_inside_a_macro_is_a_finding() {

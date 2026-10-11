@@ -170,11 +170,83 @@ fn a_spelling_the_line_scan_missed_is_a_finding() {
             "forbidden-async-move",
             "fn probe() { let _ = async move { 1 }; }",
         ),
-        ("forbidden-await", "async fn probe() { other().await; }"),
     ];
     for (name, code) in rows {
         let text = region(code);
         expect_failure(name, &append_region(&text), &[FORBIDDEN]);
+    }
+}
+
+/// One row for each forbidden spelling and one for the `async` keyword. Each row is a marked
+/// one-line function that holds that spelling and no other, so a pattern that is deleted or
+/// mistyped turns exactly its own row red. The rows come from this table, not from the tool's
+/// source. `eprintln!` holds `println!` as a substring, so its row also holds that spelling; the
+/// `println!` row is the one that a change to either pattern can turn red.
+#[test]
+fn every_forbidden_spelling_is_a_finding() {
+    let spellings: [(&str, &str); 38] = [
+        ("vec-path", "let _ = Vec::new();"),
+        ("vec-macro", "let _ = vec![1];"),
+        ("box-path", "let _ = Box::new(1);"),
+        ("string-path", "let _ = String::new();"),
+        ("to-vec", "let _ = slice.to_vec();"),
+        ("collect-call", "let _ = items.collect();"),
+        ("collect-turbofish", "let _ = items.collect::<u8>();"),
+        ("arc-clone", "let _ = Arc::clone(&shared);"),
+        ("rc-clone", "let _ = Rc::clone(&shared);"),
+        ("drop-call", "drop(value);"),
+        ("mutex", "let _ = Mutex;"),
+        ("rwlock", "let _ = RwLock;"),
+        ("condvar", "let _ = Condvar;"),
+        ("mpsc", "let _ = mpsc;"),
+        ("sync-channel", "sync_channel(1);"),
+        ("thread-path", "let _ = thread::current();"),
+        ("sleep-call", "sleep(1);"),
+        ("yield-now", "let _ = yield_now;"),
+        ("spin-loop", "let _ = spin_loop;"),
+        ("std-fs", "let _ = std::fs;"),
+        ("std-net", "let _ = std::net;"),
+        ("std-process", "let _ = std::process;"),
+        ("println", "println!();"),
+        ("eprintln", "eprintln!();"),
+        ("format", "let _ = format!();"),
+        ("log-path", "log::debug!();"),
+        ("tracing-path", "tracing::info!();"),
+        ("file-path", "let _ = File::open;"),
+        ("tcp", "let _ = Tcp;"),
+        ("udp", "let _ = Udp;"),
+        ("expect-call", "value.expect(1);"),
+        ("unwrap-call", "value.unwrap();"),
+        ("panic-macro", "panic!();"),
+        ("unreachable-macro", "unreachable!();"),
+        ("todo-macro", "todo!();"),
+        ("unimplemented-macro", "unimplemented!();"),
+        ("async-block", "let _ = async { 1 };"),
+        // The region opens inside an async function, so only `.await` makes it forbidden.
+        ("await-only", "other().await;"),
+    ];
+    for (name, statement) in spellings {
+        let (text, line, source) = if name == "await-only" {
+            (
+                format!("async fn outer() {{\n// {BEGIN}\n{statement}\n// {END}\n}}\n"),
+                6,
+                statement.to_owned(),
+            )
+        } else {
+            let code = format!("fn probe() {{ {statement} }}");
+            (region(&code), 5, code)
+        };
+        let report = expect_failure(
+            &format!("forbidden-spelling-{name}"),
+            &append_region(&text),
+            &[FORBIDDEN],
+        );
+        let [finding] = report.findings.as_slice() else {
+            panic!("{name}: one finding expected: {:#?}", report.findings);
+        };
+        assert_eq!(finding.path.as_deref(), Some(BUFFER), "{name}");
+        assert_eq!(finding.line, Some(line), "{name}");
+        assert_eq!(finding.source.as_deref(), Some(source.as_str()), "{name}");
     }
 }
 

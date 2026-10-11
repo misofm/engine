@@ -296,6 +296,13 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
    - Agree, though the spec listed `cfg(any(test, ..))` as a difference: both gates refuse the `cfg-any-test` and
      `cfg-test-helpers` trees. The awk stops only at a `#[cfg(test)]` line followed by `mod tests {`, so it scans
      those modules too. No tree separates the two gates there.
+   - Difference found by the verifier (MINOR-2), not in the spec's list: a `#[cfg(test)]` module `tests` that has
+     another outer attribute (`#[allow(dead_code)]` between or before the lines). The awk stops only at a
+     `#[cfg(test)]` line directly before `mod tests {`, so it scans that module and fails on the test module's
+     `&*plan`; the tool skips the module (D3: "outer attributes include exactly `#[cfg(test)]`") and passes. Cases:
+     `whole-plan-cfg-test-then-allow` and `whole-plan-allow-then-cfg-test`. The spec's D3 case list does not name
+     this shape, but the case pins the "include" wording of D3 and is cheap, so it is added. The tool is narrower
+     than the awk only for test code, never for production code.
 4. Mutations, each applied alone, then reverted (`cargo test` after each; 77 green on the revert). "red" lists
    the tests that went red; the spec's seven first.
    - Skip macro token trees in D2: 1 red, `a_spelling_the_line_scan_missed_is_a_finding` (the user-macro rows).
@@ -340,9 +347,9 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
      (`borrows_that_are_not_the_whole_plan_pass`); render-entry check off or test module counted
      (`a_missing_file_or_a_render_entry_only_in_tests...`); missing file not reported (same); finding line off by
      one (`layout_does_not_hide_a_whole_plan_borrow`).
-5. Run time, release binary, on a loaded machine (load average 6.5): real tree 1.02-1.04 s (A1: 0.75-0.86 s;
+5. Run time, release binary: real tree 1.02-1.04 s (A1: 0.75-0.86 s;
    with the D1 and D2 calls removed it is 0.75 s here, so the two cost about 0.28 s: 0.12 s is the children's
-   `Spanned` spans, the rest the second and third flattening of the marked files' tokens). Base tree plus one
+   `Spanned` spans, the rest the second and third flattening of the marked files' tokens). Machine load is not the cause: the verifier measured 1.01 s three times at load average 2.0, against 0.59 s for the awk gate, so the extra 0.4 s is the D1 and D2 passes. Base tree plus one
    synthetic marked file of 20,004 lines (3,334 regions): 0.04 s (A1: 0.13 s). The awk gate: 0.58 s. Not tuned.
 6. Shipped artifacts: nothing outside `tools/realtime-policy` and `.github/ISSUE_SPECS` changed against the
    parent `e5fa8319b` (`git diff --stat e5fa8319b..HEAD -- . ':!tools/realtime-policy'` is empty before the spec
@@ -392,3 +399,27 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
   the batch push; the verdict path in #948's Evidence is the expected one.
 - A string in a macro's tokens that names a forbidden spelling is a literal and passes, as in a function body;
   the same holds for text built at run time. The predicate reads spellings, as the regex did.
+
+### Verdict follow-ups (attempt 1 verdict PASS: MINOR-1, MINOR-2, NIT-2)
+
+- **MINOR-1.** New test `forbidden::every_forbidden_spelling_is_a_finding`: 38 rows (37 spellings plus the `async`
+  keyword), each a marked one-line function that holds that spelling only, with the exact finding asserted (path,
+  line, source text). The rows are written in the test; nothing reads `src/forbidden.rs`. The `.await` row
+  ("await-only") opens its region inside an `async fn` body, so only `.await` makes it forbidden. The old
+  `forbidden-await` row of `a_spelling_the_line_scan_missed_is_a_finding` (`async fn probe() { other().await; }`)
+  went red on the `async` keyword and not on `.await`; it is deleted (the new `async-block` and `await-only` rows cover
+  each rule). Test value: red if any single spelling is deleted or mistyped in the pattern table, which no other test
+  catches (M8 `.await` and M9 `Tcp` left all 77 tests green). Mutations, each alone and then reverted:
+  `.await` disabled: 1 red (this test); `Tcp` disabled: 1 red; `Arc::clone` disabled: 1 red; revert: 78 green.
+  Finding: `eprintln!` contains `println!`, so disabling `eprintln!` alone stays green (78 green). The `eprintln!`
+  pattern is redundant while `println!` is in the table; the row exists and passes, but no test can distinguish
+  that pattern. Not removed: A2-D2 fixes the 37-pattern list.
+- **MINOR-2.** Recorded in gate 3's D3 differences above. New test
+  `whole_plan::another_attribute_beside_cfg_test_still_skips_the_module` (two passing trees). Test value: red if
+  the test-module rule demands that `#[cfg(test)]` is the only outer attribute. Mutation: add
+  `module.attrs.len() == 1` to `is_test_module`: 1 red (this test); revert: green.
+- **NIT-2.** Gate 5 note corrected above. Re-measured here: 1.00-1.01 s (three runs; machine load was 7.2).
+- Gates after the follow-ups: `cargo test --locked -p realtime-policy` 79 passed (A2 had 77; +2 tests, one row
+  deleted from an existing test); release binary and `check-realtime-policy.sh` print
+  `realtime policy: ok (93 marked regions in 26 files)`; `cargo fmt --all -- --check`,
+  `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and `check-workspace-policy.sh` exit 0.
