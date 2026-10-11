@@ -149,6 +149,9 @@ then structural edit" (D15-7, carry then retarget).
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`, `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+8. **A refused candidate is never reused (Amendment 2).** A rebuild with a carry retarget is
+   refused at `BeforeProtocolCommit`, then the same rebuild is accepted; no debug assertion fires
+   and the retarget applies exactly once.
 
 ## Test value
 
@@ -161,6 +164,8 @@ then structural edit" (D15-7, carry then retarget).
   keeps the old gain too. Each turns it red.
 - Gate 5: a rule that treats a VCA change as live carries X at the old gain. A restart set that
   lists added or unchanged strips fails the exact list. Either turns it red.
+- Gate 8: a refused candidate (plan, epoch, handle or cells) kept and reused, which would carry an
+  open stamp and a stale retarget into a later transaction.
 
 ## Amendment 1 (root, 2026-10-05): revision-bounded cells
 
@@ -174,6 +179,14 @@ revision gate per plan (#1502).
   block's snapshot.
 
 Nothing else changes.
+
+## Amendment 2 (root, 2026-10-11): a refused candidate is never reused
+
+Root ruling on #1312 D7 (#1312 Amendment 3, triggered by #1432 follow-ups verdict m3): D5's carry
+retargets are stamped with the structural revision `r` inside preparation, before fallible steps.
+That is safe only because a refused candidate (plan, provider epoch, gate handle and cells) is
+dropped by the same call and never kept, cached or reused. New gate 8 defends it. Nothing else
+changes.
 
 ## Dependencies
 

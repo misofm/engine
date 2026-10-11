@@ -120,6 +120,40 @@ drain strip cells alike* (#1399).
       on the same handle stays the commit's last write (#1314 D2's position).
     - `commit_live` debug-asserts that the stamped revision equals the revision it publishes
       (review m2). #1432's `GatePin` checks that a stamp is above the last published revision.
+  - **Where the stamp is taken (root, 2026-10-11; #1432 follow-ups m3).**
+    - *The handle of a published plan* (the current epoch, a pending epoch, or the worklet's plan before
+      #1382). A live or model-only commit, and a browser admission, takes its stamp only after its last
+      fallible check. On the C ABI that is step 5, the protocol commit's predicate, which includes
+      #1503's revision bound; the stamp's revision is taken after that bound. Its first cell write comes
+      after the stamp. Every step from the stamp to the revision publication on that handle cannot
+      fail: the cell writes, the pushes whose room was checked, the protocol commit and the owner
+      commits, each an `expect` on a checked invariant. So every revision stamped on such a handle is
+      published before a higher one is stamped, and a refused transaction stamps nothing and writes
+      nothing.
+    - *The handle of a candidate that is not yet published.* A rebuild's carry retargets (#1277 D5,
+      #1280) are stamped with the structural revision `r` inside preparation, and fallible steps
+      follow: the replacement peak, the pending check, `reserve_replacement`, the report table, the
+      protocol commit, and #1310 D4's checks. Render cannot reach the candidate before its publication.
+      On any refusal, the same call drops the candidate plan and its provider epoch, with the gate
+      handle and the cells. A refused candidate, handle or cell is never kept, cached or reused. On
+      success, `r` is published on that handle before `reservation.commit()` (#1502 D6), and nothing
+      else is stamped on it between.
+    - *Handles that persist.* A handle moves to another thread (#1502 D1), or is withdrawn (#1343,
+      #1310 D1), only with no open stamp. Before #1382, the Worker publishes every revision it stamped
+      on a candidate's handle before it hands that handle to the worklet. A withdrawn candidate, which
+      #1310 D4 may republish, holds no open stamp, because its rebuild published `r`.
+    - *The browser's revision.* The worklet takes its host-local revision after the batch's last check
+      (for example `last_published + 1`), so a refused batch uses no revision.
+    - *What checks the rule.* `GatePin`'s debug assertions check the order only: a higher revision
+      stamped while one is open. They cannot see a cell written before a fallible check. A refused C ABI
+      transaction uses no revision, so the next transaction stamps the same `r` again, which `GatePin`
+      allows, and its publication would make a refused write visible (#1432: an abandoned value's leak
+      is the caller's contract). Gate 2 defends that on the C ABI, and gate 9 defends it in the browser.
+      Release builds keep the debug-only check: a violation never loses an acked value, because the
+      newest published value and the pinned value stay protected (#1432 D1); its effect would be a
+      refused value that is applied, which the structure above and gates 2 and 9 prevent. An always-on
+      assert is not used: it still cannot see the same-revision leak, and on the C ABI `catch_unwind`
+      would turn a mid-commit panic into RESULT_INTERNAL on a half-committed session.
   - **The browser (review M1).** The thread that writes a plan's cells publishes on that plan's
     gate.
     - Until *Admit browser live edits in the Worker through the committed model* (#1382), the
@@ -257,6 +291,17 @@ drain strip cells alike* (#1399).
      watermark reads `(r, that block's first sample)`.
    - Mutation (PR evidence): the drains read with `LiveSnapshot::ALL`. The first block turns red.
    - The race form of this gate is #1505's.
+9. **A refused browser batch leaves no trace (new host-web test, debug build; Amendment 3).**
+   - Run it on the worklet admission before #1382, and through the Worker's committed model after
+     #1382.
+   - Batch 1 carries a fader edit on strip A and an edit refused at the batch's last check (for
+     example an effect record whose queue is full; effect lanes stay queues until #1345).
+   - Batch 2 carries a fader edit on strip B and is accepted.
+   - Render two blocks: B's edit applies, A's edit never applies, and no debug assertion fires.
+   - Mutations (PR evidence): A's cell write moved before the last check: A's edit is heard. The
+     browser stamp taken before the checks: `GatePin`'s open-stamp assert panics at batch 2.
+   - Test value: a browser path that writes or stamps before its last check. Gate 2 sees only the C
+     ABI, and no browser gate covers cell writes.
 
 ## Test value
 
@@ -266,6 +311,8 @@ drain strip cells alike* (#1399).
   relies on.
 - Gate 8: a drain that applies a value above the block's snapshot, so a transaction lands across
   two blocks, or a watermark that names a block before the one that applied the revision.
+- Gate 9: a browser path that writes or stamps before its last check, so a refused batch's edit
+  is heard or the next batch trips `GatePin`'s open-stamp assert.
 
 ## Amendment 1 (root, 2026-10-05)
 
@@ -303,6 +350,21 @@ triple buffer with the revision-bounded cell, and root ruled one revision gate p
 - **Non-goals.** "Per-transaction atomicity across cells" is deleted.
 - **Dependencies.** #1502 (the plan gate and the snapshot), #1503 (the revision
   ceiling) and #1504 (the snapshot reaches every drain).
+
+## Amendment 3 (root, 2026-10-11)
+
+Trigger: #1432 follow-ups verdict m3 (`GatePin` now debug-refuses a higher stamp while a stamped
+revision is unpublished). Root ruling under the owner's delegation of 2026-10-11, adopted after a
+fresh adversarial review (ACCEPT WITH CHANGES):
+
+- D7 gains "Where the stamp is taken": a published plan's handle stamps after the last fallible
+  check, and nothing after the stamp can fail; a candidate's retargets are stamped inside
+  preparation, which is safe only because a refused candidate (plan, epoch, handle, cells) is
+  dropped by the same call and never kept, cached or reused; a handle moves threads or is withdrawn
+  only with no open stamp; the browser takes its host-local revision after its last check; what
+  checks the rule, and why no always-on assert.
+- New gate 9 (a refused browser batch leaves no trace).
+- #1277 gains the matching gate (a refused candidate is never reused).
 
 ## Dependencies
 
