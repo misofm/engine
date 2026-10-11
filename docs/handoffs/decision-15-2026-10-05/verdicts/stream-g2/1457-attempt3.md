@@ -108,7 +108,7 @@ open item ("Open items for root"). Root must authorize the edit in the batch fol
 ## NIT
 
 - **n1. Two specs cite scratch evidence in `/tmp`.**
-  - #1474 cites `/tmp/claude-1002/v1457b/evidence/probe-subnormal48.log` (`:28`).
+  - #1474 cites `/tmp/claude-1002/v1457b/evidence/probe-subnormal48.log` (`0b3957808:.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:28`).
   - #1471 cites `probe-order.log` and `probe-order-notrim.log` (`:99`).
 
   `/tmp` does not survive a reboot. Cite the attempt-2 verdict instead

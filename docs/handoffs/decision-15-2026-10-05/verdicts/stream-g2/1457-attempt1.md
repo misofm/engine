@@ -155,7 +155,7 @@ The code shipped today is correct: I read all three loops, and each one is cappe
 - **m4. Successors are told to re-run "#1457's gates 2 and 4", and that is no longer possible.**
   - Amendment 1 (spec line 197) still says "#1464-#1468 rerun gates 2 and 4". Amendment 2 moved
     gate 4 to #1471 and #1470. Root's ruling is gates 2 and 8.
-  - #1465 (lines 103, 185-191), #1466 (132-136), #1467 (118) and #1468 (148-152) still cite
+  - #1465 (`f5c98fa8d:.github/ISSUE_SPECS/1465-state-a-fixed-input-section-s-decay-gains-and-flush-stall.md` lines 103, 185-191), #1466 (`f5c98fa8d:.github/ISSUE_SPECS/1466-certify-the-live-input-section-s-decay-peak-gain-and-flush-stall.md` 132-136), #1467 (`f5c98fa8d:.github/ISSUE_SPECS/1467-derive-the-live-input-section-s-tail-gain-and-state-its-composition.md` 118) and #1468 (148-152) still cite
     "#1457's gates 2 and 4" and "#1457's gate 2 and gate 4 commands".
   - Gate 2's probe is "not committed" (line 368), so no gate-2 command exists for a successor to
     re-run.

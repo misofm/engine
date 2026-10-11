@@ -115,7 +115,7 @@ is not a new test.
 ## #1232 (new tooling issue)
 
 - The GitHub title equals the H1, and the body is byte-equal to
-  `2a589d360:.github/ISSUE_SPECS/1232-make-the-c-abi-checkers-header-mutation-legs-reach-the-compiler.md`.
+  `0006b77f0:.github/ISSUE_SPECS/1232-make-the-c-abi-checkers-header-mutation-legs-reach-the-compiler.md`.
   It is OPEN, has no labels (like its peers), and is in neither the umbrella nor `ISSUE-MAP.md`.
   It is a standalone issue.
 - **Self-contained and accurate against the script:**

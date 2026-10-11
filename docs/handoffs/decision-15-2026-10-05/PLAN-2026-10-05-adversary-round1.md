@@ -42,7 +42,7 @@ architectural decision that changes the order of half the work.
   is still useful as the browser's rebuild primitive, but B3 and B3b (three-way merge of document
   and live overlays, `2a589d360:.github/ISSUE_SPECS/1291-keep-browser-live-strip-state-across-a-session-replacement.md`) exist only because the browser has no
   committed model. Under one control plane the committed model *is* the merge result, exactly as
-  P1 already argues for the C ABI (`2a589d360:.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md` P1, "Why the committed model"). Doing B3/B3b now and
+  P1 already argues for the C ABI (`6fb211594:.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md:78` P1, "Why the committed model"). Doing B3/B3b now and
   #1057 later is the "fix it later" pattern the owner ruled out.
 - **P10 "meters restart at the swap" on the browser is a shortcut too.** Meter, observation and
   spectrum windows of unchanged strips are state owners like any other; a producer watching a
@@ -515,7 +515,7 @@ Agree to do all, with these notes:
   optimisation reason with a measurement.
 - **#1237** (route bounds) touches session validation and route lanes; independent of the carry
   chain; can run early.
-- **#1300** (soft-clip non-finite history) is code-independent of #1279 (its own spec, line 253),
+- **#1300** (soft-clip non-finite history) is code-independent of #1279 (its own spec, `6fb211594:.github/ISSUE_SPECS/1300-let-soft-clip-restore-its-own-non-finite-history.md:253`),
   but without it #1279 D4's fallback restarts such a soft-clip lane at a swap, which is a
   glitch. Under the owner principle land it before #1279 is declared done.
 - **#1301, #1302, #1251, #1248, #1232, #1234, #1235, #1303, #1304** are tooling and test hygiene;

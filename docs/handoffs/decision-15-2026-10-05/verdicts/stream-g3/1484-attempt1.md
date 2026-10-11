@@ -181,7 +181,7 @@ items. One-sigma text is still in these places:
   - H7, `:588-589`: #1376's restated D4 lists `sigma`.
   - H8, `:622-624`: "B1 certifies `D`, `G_p` and `sigma`".
 - **Sibling specs** (root-owned):
-  - #1467: `:11` "states all four", `:21`, `:36`, `:49-50` (L-D7 "State all four"),
+  - #1467 (`03987d646:.github/ISSUE_SPECS/1467-derive-the-live-input-section-s-tail-gain-and-state-its-composition.md`): `:11` "states all four", `:21`, `:36`, `:49-50` (L-D7 "State all four"),
     `:61`, `:89`, `:108`, `:114` (L-D7 asks for `stall` equal to B1's accessor).
   - #1375: `:28`, `:73`, `:113`.
   - #1376: `:111`.

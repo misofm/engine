@@ -96,7 +96,7 @@ needs no re-gate.
 
 - **n1. Line wrap.** These lines pass the doc's 100-column wrap:
   - Policy doc `:104` (125 columns) and `:118` (105).
-  - #1495 record `:193` (126) and `:228` (121). These are the lines that were corrected in place.
+  - #1495 record (`4d6f18625:.github/ISSUE_SPECS/1495-prove-or-correct-fpenv-s-realtime-cost-and-daw-callback-claims-against-the-shipp.md`) `:193` (126) and `:228` (121). These are the lines that were corrected in place.
 - **n2. FTZ has no cited source.** Bullet 2 cites the `core::arch` doc for masks, rounding and DAZ,
   and then also puts FTZ (bit 15) outside the environment. The doc's UB sentence does not name FTZ.
   The classification is correct (FTZ flushes results that the compiler assumes are IEEE
