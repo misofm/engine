@@ -258,7 +258,8 @@ fn the_default_table_is_the_researched_one_and_keeps_pan_at_twice_mute() {
             pan_ms: 20.0
         }
     );
-    assert!(CONTROL_SMOOTHING_DEFAULT.pan_ms >= 2.0 * CONTROL_SMOOTHING_DEFAULT.mute_ms);
+    let defaults = std::hint::black_box(CONTROL_SMOOTHING_DEFAULT);
+    assert!(defaults.pan_ms >= 2.0 * defaults.mute_ms);
     for (rate, mute, other) in [
         (44_100, 441, 882),
         (48_000, 480, 960),
