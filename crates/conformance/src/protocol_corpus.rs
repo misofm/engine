@@ -191,7 +191,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: track.fader.clone(),
-            ramp_samples: None,
+            ramp_samples: Some(480),
         },
         SessionEdit::SetTrackMatrixOrPan {
             track_id: track_id.clone(),
@@ -748,7 +748,10 @@ pub enum ConformanceDecoder {
 /// opcode `0x0507` (`SetRouteFollowsMute`) appended, 43 edits. The frame count stays 46.
 /// Issue #1241 repinned it from `95c1ceb68e44f6e2`: the VCA message, and opcodes `0x0700`-`0x0702`
 /// (`UpsertVca`, `RemoveVca`, `SetVcaFader`) appended, 46 edits. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xab35_7b6c_432f_9755;
+/// Issue #1394 repinned it from `ab357b6c432f9755`: #1394 appends optional `ramp_samples` to the
+/// live-value edits, and the corpus's `SetTrackFader` sets it (480). Absent bytes are unchanged, so
+/// that one edit is the whole move; the frame count and the edit count stay 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x5429_f052_5921_01ef;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
