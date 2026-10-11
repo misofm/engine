@@ -13,7 +13,7 @@ capi-owned `LiveVcaState` and the per-queue `BACKPRESSURE` gates are superseded 
 
 ## Product outcome
 
-A C ABI host, such as a fan's personal mix on a phone, can make all of these VCA edits on the
+A C ABI host, such as an iOS or Android app, can make all of these VCA edits on the
 running plan, with no rebuild:
 
 - ride a VCA ("drums -3 dB"), or mute it;

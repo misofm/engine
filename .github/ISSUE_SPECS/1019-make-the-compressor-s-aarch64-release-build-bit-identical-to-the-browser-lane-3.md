@@ -4,7 +4,7 @@ Issue key for the footprint cleanup: AArch64 CI = #1017, Darwin memset = #1018, 
 
 ## Problem
 
-On AArch64 release builds, the compressor's `max`/`min` (the D8 rule) fold into `fmaxnm`/`fminnm`, which treat NaN and signed zero differently from the pinned oracle. So a fan's phone renders a compressor mix whose bits differ from the producer's browser mix, and gate G1 is red there (LANE-3, #366, closed as deferred). Registered in `docs/TARGET_MATRIX.md`; evidence in `docs/handoffs/dead-code-2026-09-28/VERIFY-DEAD-CODE.md`, finding F4. Native AArch64 is now an official target (`docs/rulings/engine-footprint-2026-09-28.md`).
+On AArch64 release builds, the compressor's `max`/`min` (the D8 rule) fold into `fmaxnm`/`fminnm`, which treat NaN and signed zero differently from the pinned oracle. So an iOS or Android app renders a compressor mix whose bits differ from the browser's render of the same session, and gate G1 is red there (LANE-3, #366, closed as deferred). Registered in `docs/TARGET_MATRIX.md`; evidence in `docs/handoffs/dead-code-2026-09-28/VERIFY-DEAD-CODE.md`, finding F4. Native AArch64 is now an official target (`docs/rulings/engine-footprint-2026-09-28.md`).
 
 ## Smallest closable slice
 

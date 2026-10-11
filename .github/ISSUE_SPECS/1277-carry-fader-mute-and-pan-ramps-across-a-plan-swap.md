@@ -8,8 +8,8 @@ Slice 8 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors veri
 
 A strip keeps its exact fader, mute and pan or matrix state through a plan swap, including a ramp
 that is in flight at the swap block. The carry moves the state at the swap block (move mode), and
-the predecessor never renders again. A producer who pulls a fader while a track is added hears the
-ramp go on, not jump. A live record admitted before the swap is applied, not lost. A structural
+the predecessor never renders again. A fader move made while a track is added keeps
+ramping; it does not jump. A live record admitted before the swap is applied, not lost. A structural
 transaction that also changes a carried strip's fader, mute or pan sounds exactly like "live edit,
 then structural edit" (D15-7, carry then retarget).
 

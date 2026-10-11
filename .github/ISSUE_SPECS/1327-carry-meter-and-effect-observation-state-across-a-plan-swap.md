@@ -9,7 +9,7 @@ and its shared mode word.
 
 ## Product outcome
 
-A producer watching a strip's level or an effect's gain reduction sees no reset when a track is
+An app that reads a strip's level or an effect's gain reduction sees no reset when a track is
 added or another strip is edited. A meter or observation tap is unchanged when its owner's key and
 configuration are the same in both plans. Such an owner keeps its open
 window, its counters and its sequence through a plan swap. The host's existing reader keeps

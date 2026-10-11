@@ -31,8 +31,8 @@ that differ in bits.
    the desktop app's, outside this repo; the engine documents the exact feature set each library
    requires.
 4. **Class A.** The v3 and v4 builds render bit-identical output for every session. Both have FMA,
-   and banking never changes per-lane arithmetic, so a producer and a listener on different
-   builds hear the same bits. A committed differential proves it.
+   and banking never changes per-lane arithmetic, so two hosts on different
+   builds render the same bits. A committed differential proves it.
 5. **Measurement.** The console benchmark rows on Zen 4 (512-bit work split into two 256-bit
    halves) and Zen 5 (full 512-bit), against the v3 build on the same machine, with padding cost
    reported at small track counts.

@@ -23,7 +23,7 @@ path.
   plan and live alike.
 - VCAs nest and overlap.
 - The grouping, each member's own value and each VCA's value are saved in the canonical session, so
-  a fan's phone, the next agent and the producer's mixer see the same intent.
+  every host and every agent that loads the session sees the same intent.
 
 ## Why it is in scope (DESIGN 2.2a, upheld by VERIFY-1)
 
