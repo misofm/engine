@@ -11,6 +11,7 @@ use super::super::common::{BEGIN, END, Edit, Tree, assert_classes};
 use super::{DRAIN, accepts, each_row, refuses};
 
 const BUILTINS: &str = "crates/builtins/src/lib.rs";
+const ROUTE_TWIN: &str = "crates/graph/src/runtime.rs";
 
 /// D1: a pop in a closure is refused wherever the closure is called, and a closure does not hide
 /// the pop from a loop that calls it.
@@ -130,9 +131,10 @@ fn a_function_value_called_in_place_is_judged_by_its_loops() {
     );
 }
 
-/// A file with no markers that shadows `debug_assert`, and the finding that follows: the base
+/// A file with no markers that shadows `debug_assert`, and the findings that follow: the base
 /// tree's valid drain names its count in a `debug_assert!`, and a `debug_assert!` that is not the
-/// standard macro is read as any other macro, so the drain is refused.
+/// standard macro is read as any other macro, so the drain is refused (and the route twin, whose
+/// loop body holds one, by D10).
 fn shadowed_by_file(name: &str, text: &str) -> Vec<Finding> {
     let tree = Tree::base(name);
     tree.apply(&[Edit::Create {
@@ -142,13 +144,21 @@ fn shadowed_by_file(name: &str, text: &str) -> Vec<Finding> {
     assert_classes(&tree, &[DRAIN]).findings
 }
 
-/// The one finding that a shadowed `debug_assert!` causes in the base tree.
-fn assert_base_drain_refused(name: &str, findings: &[Finding]) {
-    assert_eq!(findings.len(), 1, "case {name}: {findings:#?}");
+/// The two findings that a shadowed `debug_assert!` causes in the base tree: the valid drain that
+/// names its count in one (D2), and the route twin, whose loop body holds one (D10: while it is not
+/// trusted, `debug_assert!` is a macro in statement position like any other).
+fn assert_base_drains_refused(name: &str, findings: &[Finding]) {
+    assert_eq!(findings.len(), 2, "case {name}: {findings:#?}");
     assert_eq!(findings[0].path.as_deref(), Some(BUILTINS), "case {name}");
     assert_eq!(
         findings[0].source.as_deref(),
         Some("let Ok(record) = control.try_pop() else {"),
+        "case {name}"
+    );
+    assert_eq!(findings[1].path.as_deref(), Some(ROUTE_TWIN), "case {name}");
+    assert_eq!(
+        findings[1].source.as_deref(),
+        Some("let Ok(record) = self.control.consumer.try_pop() else {"),
         "case {name}"
     );
 }
@@ -186,7 +196,7 @@ fn a_debug_assert_that_a_file_shadows_is_not_taken_at_its_word() {
         ),
     ];
     each_row(rows, |name, text| {
-        assert_base_drain_refused(name, &shadowed_by_file(name, text));
+        assert_base_drains_refused(name, &shadowed_by_file(name, text));
     });
 }
 
@@ -252,7 +262,7 @@ fn a_debug_assert_shadowed_in_the_parent_module_is_shadowed_in_the_child() {
         .collect();
     assert_eq!(
         paths,
-        [BUILTINS, "crates/shadowing/src/drain.rs"],
+        [BUILTINS, ROUTE_TWIN, "crates/shadowing/src/drain.rs"],
         "{findings:#?}"
     );
 }

@@ -17,10 +17,27 @@
 //!   and [`shapes`]; D8b's per-queue form is [`per_queue`].
 //! - **Outer loops (D1)** are in [`outer`]: every other loop around a pop, inside its region,
 //!   must be finite. **Attributes and items (D2)** are in [`count`] and [`items`]: a count binding
-//!   under a `cfg`-family attribute, and a `static`, `const` or `use` of the region that can name
-//!   the count, are refused. **Constructors (D3)** are in [`items`]: `from_fn`, `repeat_with` and
-//!   `successors` are refused anywhere in a region, except `core::array::from_fn` and
-//!   `std::array::from_fn`, whose closure is a finite outer loop and never bounds a pop of its own.
+//!   under a `cfg`-family attribute, and an item of any kind of the region (`const`, `static`,
+//!   `struct`, `enum`, `union`, `fn`, `type`, `trait`, `mod`, or a `use`) that can name the count,
+//!   its alias source or the slice parameter, are refused. **Constructors (D3)** are in [`items`]:
+//!   `from_fn`, `repeat_with` and `successors` are refused anywhere in a region, except
+//!   `core::array::from_fn` and `std::array::from_fn`, whose closure is a finite outer loop and
+//!   never bounds a pop of its own.
+//! - **Macros and attributes that can declare an item (D10).** An expansion is invisible to the
+//!   item scan, and an item declared in a block shadows a `let` of an enclosing block for the whole
+//!   block it lands in. So from the first binding the rules read (the count, its alias source, or
+//!   the start of a slice parameter's `fn` body) to the end of the statement of that binding's
+//!   block that holds the pop, the drain is refused when it holds a macro invocation in statement
+//!   or item position (`name!(..);`, `name![..];`, `name! {..}`) or an item with an attribute other
+//!   than `cfg`, a lint level or `doc` (a derive and an attribute macro emit items beside their
+//!   item, and `cfg_attr` can expand to a derive). A `debug_assert!` is exempt while it is trusted
+//!   ([`shadow`]); a macro in expression position cannot declare an item and is not read. The span
+//!   runs past the loop: an item declared after the loop in an inner block reaches its header too.
+//!   An item in the binding's own block cannot shadow it: the `let` becomes refutable and does not
+//!   compile for a `const` or a unit struct, and it wins over a `fn`.
+//! - **Region ends (B1b-D9)** are in [`crate::boundary`]: a region ends in the container of its
+//!   begin marker or in one that encloses it, so no block continues past the end marker with the
+//!   rest of its items unread.
 //!
 //! Pops that run where the surrounding loops cannot bound them are refused, wherever they stand
 //! (B2a):
@@ -47,6 +64,18 @@
 //! region inside the same function is refused above, not a limit); and a macro, defined elsewhere,
 //! that expands to a loop.
 //!
+//! Known false passes, because the rule reads syntax and not types:
+//!
+//! - **An iterator that never ends, borrowed from a field or a local.** `for _ in &mut rounds`
+//!   and `rounds.iter_mut()` are finite outer loops by their form (D1), so
+//!   `let mut rounds = 0_u32..; for _ in &mut rounds { <counted drain> }` passes, and runs without
+//!   end. The `main` gate documented the same hole. Restructure so that no unbounded iterator is
+//!   reachable by that name; a ruling is needed to refuse these forms.
+//! - **A collection root that an item shadows.** D2's item scan covers the count, its alias source
+//!   and the slice parameter, not the root of `&<fields>` or `<fields>.iter()`: a unit struct
+//!   named like the root, with an `iter_mut` that repeats, redirects the loop.
+//! - **A registry crate** that exports a `debug_assert` macro (see B2a-D2 above).
+//!
 //! It refuses these bounded drains (D7; restructure the drain to pass): a count used other than as
 //! the left operand of a comparison before its loop (`0 == available`, `apply(available)`,
 //! `available as u32`); a count capped other than by `.min(..)` (`cmp::min`, `.clamp(..)`); an outer
@@ -64,6 +93,7 @@ mod shadow;
 mod shapes;
 mod tree;
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use crate::boundary::{Boundaries, RegionNodes};
@@ -72,7 +102,7 @@ use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
 use facts::{Facts, PopKind, PopSite, Use};
-use scope::{Binding, nearest};
+use scope::{Binding, BindingKind, nearest};
 pub(crate) use shadow::debug_assert_shadowed;
 use tree::{Node, Pos, Step, Tree, Via, is_loop_at};
 
@@ -85,6 +115,9 @@ struct Ctx<'f> {
     /// The leaves between the pop's region's markers.
     leaves: &'f [Leaf],
     pops: &'f [PopSite],
+    /// The bindings that the rules judged so far read to bound the pop: the count, its alias
+    /// source, a slice parameter (D10). A rule that fails takes its entries back ([`Ctx::rewind`]).
+    reads: RefCell<Vec<Binding<'f>>>,
 }
 
 impl<'f> Ctx<'f> {
@@ -101,7 +134,22 @@ impl<'f> Ctx<'f> {
         nearest(&steps, name)
     }
 
-    /// Whether a `static`, `const` or `use` of the pop's region can name `name` (D2).
+    /// Note that a rule read `binding` to bound the pop (D10).
+    fn note_read(&self, binding: Binding<'f>) {
+        self.reads.borrow_mut().push(binding);
+    }
+
+    /// How many reads are noted, to hand to [`Ctx::rewind`].
+    fn mark(&self) -> usize {
+        self.reads.borrow().len()
+    }
+
+    /// Forget the reads noted after `mark`: the rule that noted them did not hold.
+    fn rewind(&self, mark: usize) {
+        self.reads.borrow_mut().truncate(mark);
+    }
+
+    /// Whether an item of the pop's region can name `name` (D2).
     fn names_item(&self, name: &str) -> bool {
         items::names_item(self.leaves, name)
     }
@@ -168,6 +216,7 @@ pub(crate) fn check(
                 region: &nodes[index],
                 leaves: boundaries.leaves_between(from, to),
                 pops: &sites,
+                reads: RefCell::new(Vec::new()),
             };
             if !bounded(&ctx, &site) {
                 refused.insert(site.pos.0);
@@ -226,7 +275,55 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
     if !(top..at).all(|outer| !is_loop_at(&steps, outer) || outer::finite(ctx, &steps, outer)) {
         return false;
     }
-    count::bounds(ctx, &steps, at) || per_queue::bounds(ctx, &steps, at, site)
+    (count::bounds(ctx, &steps, at) || per_queue::bounds(ctx, &steps, at, site))
+        && !declares_an_item(ctx, &steps)
+}
+
+/// D10: whether a macro or an attribute between the first binding the rules read and the end of
+/// the statement of that binding's block that holds the loop can declare an item. Such an item
+/// shadows the binding for the whole block it lands in, wherever in the block it stands, so the
+/// span runs to the end of the statement of the binding's own block that holds the pop: an item
+/// declared in an inner block after the loop ends reaches the loop too. An item in the binding's
+/// own block cannot shadow it: a `const` or a unit struct there makes the `let` refutable, and a
+/// `let` wins over a `fn`.
+fn declares_an_item<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>]) -> bool {
+    let reads = ctx.reads.borrow();
+    let mut span: Option<(Pos, Pos)> = None;
+    for binding in reads.iter() {
+        let Some((from, to)) = read_span(ctx, steps, binding) else {
+            // A binding that cannot be placed is refused: only a fail-closed answer is safe.
+            return true;
+        };
+        span = Some(span.map_or((from, to), |(first, last)| (first.min(from), last.max(to))));
+    }
+    span.is_some_and(|(from, to)| ctx.facts.declares_items_in(from, to))
+}
+
+/// The span of one read binding (D10): from its start to the end of the statement of its block
+/// on the pop's path. A parameter starts at its `fn`'s body, and its block is that body.
+fn read_span<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], binding: &Binding<'f>) -> Option<(Pos, Pos)> {
+    let (from, block) = match binding.kind {
+        BindingKind::Let { stmt, .. } => {
+            let at = steps.iter().position(|step| {
+                matches!((step.node, step.via), (Node::Block(block), Some(Via::Stmt(index)))
+                    if block.stmts[..index].iter().any(|before| std::ptr::eq(before, stmt)))
+            })?;
+            (ctx.tree.extent(Node::Stmt(stmt))?.full, at)
+        }
+        BindingKind::Param { .. } => {
+            let function = steps.iter().rposition(|step| step.node.is_function())?;
+            let at = function + 1;
+            (ctx.tree.extent(steps.get(at)?.node)?.full, at)
+        }
+        BindingKind::Pattern => return None,
+    };
+    let to = match (steps[block].node, steps[block].via) {
+        (Node::Block(body), Some(Via::Stmt(index))) => {
+            ctx.tree.extent(Node::Stmt(&body.stmts[index]))?.end
+        }
+        (node, _) => ctx.tree.extent(node)?.end,
+    };
+    Some((from, to))
 }
 
 /// Whether a closure other than the closure of `array::from_fn` holds the last node of the path

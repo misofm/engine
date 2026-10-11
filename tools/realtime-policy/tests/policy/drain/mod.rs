@@ -1,6 +1,7 @@
 //! The drain-bound rule (B1a): how a pop maps to its region, the scope resolver, the visited
 //! syntax, pops, count bindings, reads before the loop and the innermost bounding loop.
 
+mod declarations;
 mod forms;
 mod indirect;
 mod outer;

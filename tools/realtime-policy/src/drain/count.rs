@@ -15,11 +15,17 @@ use super::tree::{Node, Pos, Step, Via, pos};
 
 /// Whether the loop at `steps[at]` bounds the pops in its body (D8).
 pub(super) fn bounds<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize) -> bool {
-    match steps[at].node {
+    let mark = ctx.mark();
+    let bounded = match steps[at].node {
         Node::Expr(syn::Expr::ForLoop(each)) => for_bounds(ctx, each),
         Node::Expr(syn::Expr::While(cond)) => while_bounds(ctx, cond),
         _ => false,
+    };
+    // A loop that does not bound its pops read nothing (D10).
+    if !bounded {
+        ctx.rewind(mark);
     }
+    bounded
 }
 
 /// Where a loop's header starts: its label, or its keyword.
@@ -116,7 +122,10 @@ fn counted<'f>(ctx: &Ctx<'f>, name: &str, at: Pos, header: (Pos, Pos)) -> Option
     if !ctx.region.holds(bound.core, bound.end) || !entry_binding(ctx, &binding, 0) {
         return None;
     }
-    only_reads(ctx, name, &binding, bound.end, header.0).then_some(binding)
+    only_reads(ctx, name, &binding, bound.end, header.0).then(|| {
+        ctx.note_read(binding);
+        binding
+    })
 }
 
 /// D6: a `let` of the count in one of the entry forms, or (at `depth` 0) one plain alias of one.
@@ -157,13 +166,17 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> bool
     ) else {
         return false;
     };
-    ctx.region.holds(first.core, first.end)
+    let held = ctx.region.holds(first.core, first.end)
         && ctx
             .resolved_uses(&entry_name, alias.core, alias.end, &entry)
             .len()
             == 1
         && only_reads(ctx, &entry_name, &entry, first.end, alias.core)
-        && entry_binding(ctx, &entry, 1)
+        && entry_binding(ctx, &entry, 1);
+    if held {
+        ctx.note_read(entry);
+    }
+    held
 }
 
 /// D2: whether the `let` carries a `cfg`-family attribute (`cfg`, `cfg_attr`, or a path ending in

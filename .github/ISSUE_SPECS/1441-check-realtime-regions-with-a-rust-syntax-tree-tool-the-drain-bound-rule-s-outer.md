@@ -364,8 +364,8 @@ base tree.
 8. **`libcapi.a` digest.** The parent (`1e03edf19`) builds `libcapi.a` `3431f546ec53477d...` and `libcapi.so`
    `0213cd820e2715de...`; with D5's markers the `.so` is identical and the `.a` is `2aa32d808165aef3...`. Three
    objects of the archive differ (`builtins_compiler`, `graph_compiler`, `host_core`); their code and data sections are
-   identical, and only `.debug*` and `.llvmbc` (embedded bitcode) differ, which carry the changed source text of
-   `lib.rs`. A comment in place of a blank line cannot leave that unchanged. The worklet module is byte-identical:
+   identical, and only `.llvmbc` (embedded bitcode, which carries each source file's checksum) differs; every `.debug_*`
+   section is identical (corrected in attempt 2 from "`.debug*` and `.llvmbc`", the first verdict's NIT-1). A comment in place of a blank line cannot leave that unchanged. The worklet module is byte-identical:
    `scripts/build-web-audioworklet.sh --module-only` at the parent and at the change both give `9784d3509dba6bfd...`
    (the CI `artifact-identity` job is not run here). Open item for root: gate 6's "libcapi digests identical" holds
    for the `.so` and for the code of the `.a`, not for the `.a` bytes.
@@ -453,8 +453,131 @@ every one, except where marked *. The spec's named cases are first.
 - STREAMS: the hot-file row to "J tool slice B1b", and the floor message text, are root's edits.
 - B2a: the closure and macro transparency and its two superseded B1a tests, as B1a's record says.
 
-## Attempt record (attempt 2 placement, 2026-10-11)
+## Attempt record (attempt 2, J batch branch `codex/d15-stream-j3`, base `1a33b2f6d`)
 
-Coordinator's choice, recorded with root Amendment 1: D10 (SP-3) is implemented in this issue's
-attempt 2, not in #1442. B2a-D2's trust state (`src/drain/shadow.rs`, `Facts::of(file,
-trust_debug_assert)`) already exists on the branch (`bfed03af6`), so D10 needs no forward reference.
+Commits: `f9a26b706` (root Amendment 1, specs only) and the implementation commit that holds this record.
+Edits: `tools/realtime-policy/**` and the specs. No production code, `Cargo.toml` or `Cargo.lock` change (`git diff
+1a33b2f6d -- crates hosts scripts` is empty), so gate 6 (`.so`, `.a` members and the worklet module) holds trivially.
+
+Placement (coordinator's choice, recorded with root Amendment 1): D10 (SP-3) is implemented in this issue's attempt 2,
+not in #1442. B2a-D2's trust state (`src/drain/shadow.rs`, `Facts::of(file, trust_debug_assert)`) already exists on
+the branch (`bfed03af6`), so D10 needs no forward reference.
+
+**What is where.**
+- D9: `src/boundary.rs` (`Layout::encloses`; `check` adds `Class::RegionEndsInsideAContainer`, on the end marker's
+  line, when neither marker is in a macro token tree and the end's container does not enclose the begin's). The
+  macro-token-tree refusal is first and unchanged. `src/report.rs`: the new class.
+- D2 (NEW-1): `src/drain/items.rs` `names_item` reads `const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`,
+  `trait` and `mod` followed by the name, and `use`.
+- D10: `src/drain/facts.rs` records macro invocations in statement or item position (`item_macros`; a trusted
+  `debug_assert!` is left out) and items whose first non-inert attribute is not `cfg`, `allow`, `expect`, `warn`, `deny`,
+  `forbid` or `doc` (`attributed_items`; `cfg_attr`, a derive, a bare or path attribute count). `src/drain/mod.rs`
+  `declares_an_item`/`read_span` judge the span of every binding a bounding rule read; `Ctx::note_read`, `mark` and
+  `rewind` collect the reads, and `count::bounds` takes back the reads of a loop that does not bound. `count.rs` notes
+  the count and its alias source, `outer.rs` a slice parameter.
+- Documentation (MINOR-1, MINOR-2): the module documentation of `drain/mod.rs` and `drain/outer.rs` states D9, D10, the
+  widened D2, the `<bound>` strictness (SP-4), and the known false passes. The SP-2 and SP-3 limits are gone; the
+  ones that remain are the `&mut` iterator in a field or a local (an infinite `0..` held in a local passes), a
+  collection root that an item shadows (below), and the registry-crate `debug_assert` macro.
+- Tests: `tests/policy/boundary.rs` (the three D9 cases; `boundary-spans-two-blocks` is now refused and
+  `boundary-only-end-splits` expects both findings), `tests/policy/drain/outer.rs` (the item kinds and
+  `unit_struct_shadows_the_alias_source`), `tests/policy/drain/declarations.rs` (D10), `indirect.rs` (the two B2a tests
+  that count the base tree's findings under a shadowed `debug_assert` now expect the route twin as well: D10).
+  No committed #1442 probe verdict changed (118 probes, all green).
+
+**Deviation from the ruling's text (for root).** D10 says the span ends at "the end of the innermost bounding loop".
+That leaves a false pass: items of a block are visible in the whole block, so a macro invoked after the loop, in an
+inner block between the binding and the loop, shadows the count. rustc 1.97.1:
+`let available = 1usize; { for _ in 0..available { n += 1; } shadow!(); }` runs the loop 3 times (the macro declares
+`const available: usize = 3;`). So the span ends at the end of the statement of the binding's own block that holds the
+pop (for a slice parameter: the statement of the `fn` body). An item in the binding's own block cannot shadow the `let`
+(E0005 for a `const`, a type error for a unit struct, and a `let` wins over a `fn`), so nothing further is needed. It
+is a superset of the ruled span (a macro after the loop and before the end of the enclosing statement is refused too);
+`item-macro-after-the-loop-in-an-inner-block` pins it, and the mutation "span ends at the innermost loop" turns it red.
+The real tree passes under both spans. Root: ratify, or order the literal span (a one-line change in `read_span`).
+
+**Real tree (re-measured).** `cargo run --locked --release -q -p realtime-policy` and
+`bash scripts/check-realtime-policy.sh`: `ok (94 marked regions in 26 files)`, as before. `live.rs:231` (END `:537`) and
+`transient-shaper/src/lib.rs:613` (END `:726`) stay accepted under D9; the only statement macro in a drain span is
+`debug_assert!` at `crates/graph/src/runtime.rs:903`, exempt while trusted; no drain span holds an item. Release run
+time 1.27 s (B2a: 1.27 s). Not tuned.
+
+**Gates.**
+1. Real tree: above.
+2. `cargo test --locked -p realtime-policy`: 149 passed (140 before; +3 D9, +1 D2, +5 D10).
+3. Parity (the B1a method: an instrumented copy of `scripts/test-realtime-policy.sh` outside the repository runs the
+   release binary on each of the 96 `expect_failure` trees): the awk fails all 96, the tool fails all 96; 55 of the 57
+   ported drain cases report the drain class, the other two are B1a-D10's class changes (`drain-open-tail-last-file`,
+   `drain-region-ends-in-comment`), and no other case reports the drain class. The verdicts agree on all 57.
+4. Mutations: below.
+5. Run time: above.
+6. No shipped source changed (above).
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-workspace-policy.sh`, `check-realtime-policy.sh` and `test-realtime-policy.sh` exit 0.
+
+**Mutations** (each applied alone, `cargo test` and the real tree after each, source restored). Red lists tests and rows.
+- D9, accept END in any container (`else if false`): `a_region_that_ends_in_another_block_is_refused`
+  (`boundary-spans-two-blocks`), `a_region_that_ends_in_a_deeper_block_is_refused` (`region-ends-in-a-deeper-block`),
+  `..._after_a_slice_parameter_is_refused`, `either_marker_alone_can_split_a_node` (`boundary-only-end-splits`). Real tree ok.
+- D9, require the same container (`end != begin`): `a_region_may_span_the_end_of_an_impl` (`boundary-spans-impl-end`),
+  `a_boundary_finding_names_the_marker_line`, `either_marker_alone_can_split_a_node` (`boundary-only-begin-splits`),
+  `forms::a_region_spanning_the_end_of_an_impl_reads_its_nodes` and the ported `region-spanning-an-impl` and
+  `count-from-closed-region-function`. The real tree fails at `live.rs:537` and `transient-shaper/src/lib.rs:726`.
+- D2, scan restricted to `const`, `static` and `use`: `unit_struct_shadows_the_alias_source`
+  (`unit-struct-shadows-the-alias-source`) and the rows `count-shadowed-by-block-{struct,enum,union,fn,type,trait,mod}`
+  and `slice-shadowed-by-block-struct`. Real tree ok.
+- D2, `names_item` always false: all 16 shadow rows (count and slice), `unit-struct-shadows-the-alias-source`, the ported
+  `outer-over-slice-parameter-shadowed-by-block-const` and `count-shadowed-by-block-static`, and probes
+  `s10_block_static_shadow` and `e12_slice_param_shadowed_by_use`. Real tree ok. Before this attempt the three
+  `slice-shadowed-*` rows stayed green under this mutation: their loop `for _ in rounds` pops once per pass with no count and
+  was refused anyway. They are rebuilt as a counted drain inside the slice loop (`slice_shadowed_by`), so they now defend
+  the scan on the slice parameter.
+- D10, allow statement macros: `item-macro-shadows-the-count`, `bracketed-...`, `braced-...`,
+  `item-macro-after-the-loop-in-an-inner-block`, `braced-item-macro-shadows-the-slice-parameter`,
+  `untrusted-debug-assert-in-the-loop`, and the 8 `a_debug_assert_that_a_file_shadows..` rows with the parent-module case.
+  Real tree ok.
+- D10, always exempt `debug_assert!`: `untrusted-debug-assert-in-the-loop` and the same 9 B2a rows (they now count the
+  route twin). Real tree ok.
+- D10, refuse `debug_assert!` too: every test that builds the base tree (the base route twin refuses); the real tree
+  fails at `crates/graph/src/runtime.rs:900`, the pop of the drain that holds `:903`'s `debug_assert!`.
+- D10, attributes never emit items (extra, for the derive case): the five refused attribute rows
+  (`derive-on-an-item-in-the-drain`, `cfg-attr-...`, `plain-attribute-...`, `path-attribute-...`,
+  `derive-after-an-allowed-attribute`). Every attribute emits items: the eight accepted rows (`cfg`, the five lint
+  levels, `doc`, a doc comment). Real tree ok under both.
+- D10, every macro counts (extra): `expression-macro-in-the-drain`, `trailing-macro-expression-in-the-drain`,
+  `trusted-debug-assert-in-the-loop`; the real tree fails at `live.rs:366` and `runtime.rs:900`.
+- D10, span ends at the innermost loop (the ruling's literal text): `item-macro-after-the-loop-in-an-inner-block` alone.
+  Real tree ok.
+- D10, span starts at the file: `item-macro-before-the-count` and `item-macro-in-another-function`. Real tree fails
+  at several drains (`lib.rs:1128`, `live.rs:366`, `runtime.rs:900`, ...).
+- D10, a slice parameter is not noted as a read: `braced-item-macro-shadows-the-slice-parameter` alone. Real tree ok.
+
+**Test value (the one-sentence answer, per new test).**
+- `a_region_that_ends_in_another_block_is_refused`, `..._in_a_deeper_block_is_refused` and `..._after_a_slice_parameter_is_refused`:
+  red if a region may end inside a block it does not wholly hold, which lets an item after END shadow the count or the
+  slice parameter; nothing else reads those items.
+- `a_region_may_span_the_end_of_an_impl` (rewritten): red if D9 is read as "same container" and refuses `live.rs:231` and
+  `transient-shaper/src/lib.rs:613`.
+- `either_marker_alone_can_split_a_node` (rewritten): red if END's container is not judged for where the region ends.
+- `an_item_that_can_name_the_count_refuses_the_drain` (extended and repaired) and `unit_struct_shadows_the_alias_source`:
+  red if the item scan reads only `static`, `const` and `use`, or if the slice-parameter rows hold a drain that the scan
+  alone separates from the finite outer loop.
+- `a_statement_macro_between_the_count_and_the_end_of_its_block_is_refused`: red if a statement macro (any delimiter) in
+  the span, or one after the loop in an inner block, is not refused.
+- `a_statement_macro_in_the_body_of_a_function_with_a_slice_loop_is_refused`: red if a braced macro, or the span from a
+  slice parameter's `fn` body, is missed.
+- `an_attribute_that_can_emit_an_item_refuses_the_drain`: red if a derive, an attribute macro, a bare attribute or
+  `cfg_attr` on an item is not refused, or if `cfg`, a lint level or `doc` is.
+- `a_macro_that_cannot_declare_an_item_in_the_span_is_not_refused`: red if an expression macro, a trailing macro with no `;`,
+  a macro before the count, a macro in another function or a trusted `debug_assert!` is refused.
+- `an_untrusted_debug_assert_in_the_loop_refuses_the_drain`: red if the `debug_assert!` exemption ignores B2a-D2's trust.
+
+**Open items.**
+- Root: the span deviation above (ratify or order the literal span).
+- Root: **a collection root that an item shadows** is a false pass. `struct controls; impl controls { fn iter_mut(&self) ->
+  core::iter::Repeat<u8> { core::iter::repeat(0) } } for _ in controls.iter_mut() { <counted drain> }` passes the tool
+  (verified: 95 regions; the awk gate passes it too, so it is not a regression) and runs without end. D2 names the count, its alias source and the slice parameter, not the root of
+  `&<fields>` or `<fields>.iter()`. Closing it is `!ctx.names_item(root)` in `outer::collection` plus a spec line; it needs a
+  ruling and a re-measure of the real tree. The module documentation lists it as a limit meanwhile.
+- `debug_assert_eq!` and `debug_assert_ne!` are not exempt: a statement of either in a drain span is refused (D10 names
+  only `debug_assert!`). No drain span holds one.

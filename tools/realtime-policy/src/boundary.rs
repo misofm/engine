@@ -10,6 +10,10 @@
 //! a doc comment and its item is at a child boundary. An attribute is itself whole: a marker
 //! inside one splits it. A region whose two markers sit in different containers, one of them a
 //! macro token tree, is refused: it would hold some of the macro's tokens and some syntax.
+//!
+//! The end marker's container must be the begin marker's or one that encloses it (B1b-D9). A
+//! region that ends inside a block that continues past the end marker would let an item after the
+//! marker name a binding of the region for the whole block, unseen by the drain rule.
 
 use proc_macro2::LineColumn;
 use syn::spanned::Spanned;
@@ -173,14 +177,22 @@ pub(crate) fn check(
                 ));
             }
         }
-        if begin != end
-            && (layout.containers[begin].macro_tree || layout.containers[end].macro_tree)
-        {
+        if begin == end {
+            continue;
+        }
+        if layout.containers[begin].macro_tree || layout.containers[end].macro_tree {
             findings.push(Finding::at_line(
                 Class::RegionSplitsMacroTree,
                 &source.path,
                 region.begin,
                 source.line_text(region.begin),
+            ));
+        } else if !layout.encloses(end, begin) {
+            findings.push(Finding::at_line(
+                Class::RegionEndsInsideAContainer,
+                &source.path,
+                region.end,
+                source.line_text(region.end),
             ));
         }
     }
@@ -335,6 +347,12 @@ impl Layout {
                     .expect("the file container holds every marker line")
             })
             .collect()
+    }
+
+    /// Whether container `outer` is container `inner` or encloses it. Containers nest properly, so
+    /// `outer` encloses `inner` exactly when it holds `inner`'s opening brace.
+    fn encloses(&self, outer: usize, inner: usize) -> bool {
+        outer == inner || self.containers[outer].holds(self.containers[inner].open)
     }
 
     /// What the marker on `line`, whose innermost container is `container`, splits, if anything.

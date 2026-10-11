@@ -2,7 +2,8 @@
 //! name (D2) and the constructors that loop without a loop keyword (D3).
 //!
 //! Both read leaves, so a macro's token tree and a `macro_rules!` body are read too: tokens in
-//! them can declare an item or call a constructor as well.
+//! them can declare an item or call a constructor as well. An item that a macro *expands to* is not
+//! a token of the region; D10 refuses the macro itself (see [`super`]).
 
 use crate::leaf::{Kind, Leaf};
 
@@ -22,17 +23,25 @@ fn is_keyword(leaf: &Leaf, keyword: &str) -> bool {
     matches!(&leaf.kind, Kind::Word(found) if found == keyword)
 }
 
-/// D2: whether a `static` or `const` item, or a `use` declaration, among `leaves` can name
-/// `name`: `static [mut] name`, `const name`, or a `use` whose tokens up to its `;` hold `name` or
-/// a glob `*`. A block item shadows a `let` of an enclosing block for its whole block, wherever it
-/// is declared, so the position of the item does not matter.
+/// The keywords that declare an item whose name follows them. `static` may take a `mut` first.
+const NAMING_ITEMS: [&str; 9] = [
+    "const", "static", "struct", "enum", "union", "fn", "type", "trait", "mod",
+];
+
+/// D2: whether an item among `leaves` can name `name`: an item of any kind that declares it as
+/// its own name (`const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`, `trait`,
+/// `mod`), or a `use` whose tokens up to its `;` hold `name` or a glob `*`. A block item shadows a
+/// `let` of an enclosing block for its whole block, wherever it is declared, so the position of
+/// the item does not matter. A unit struct with comparison and `SubAssign` impls redirects an alias
+/// as a `const` does, so every kind counts.
 pub(super) fn names_item(leaves: &[Leaf], name: &str) -> bool {
     for (index, leaf) in leaves.iter().enumerate() {
-        if is_keyword(leaf, "static") || is_keyword(leaf, "const") {
+        if NAMING_ITEMS.iter().any(|keyword| is_keyword(leaf, keyword)) {
             let mut next = index + 1;
-            if leaves
-                .get(next)
-                .is_some_and(|after| is_keyword(after, "mut"))
+            if is_keyword(leaf, "static")
+                && leaves
+                    .get(next)
+                    .is_some_and(|after| is_keyword(after, "mut"))
             {
                 next += 1;
             }

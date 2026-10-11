@@ -119,6 +119,14 @@ pub(super) struct Facts {
     macros: Vec<Pos>,
     /// Where each attribute, outer or inner, starts, sorted by position.
     attributes: Vec<Pos>,
+    /// Where each macro invocation in statement or item position starts (D10), sorted by
+    /// position. A macro there can expand to an item, which shadows a binding for its whole block.
+    /// A `debug_assert!` is left out while it is trusted: it expands to an `if` expression.
+    item_macros: Vec<Pos>,
+    /// Where each item that carries an attribute other than `cfg`, a lint level or `doc` starts
+    /// its first such attribute (D10), sorted by position. A derive or an attribute macro emits
+    /// items beside its item.
+    attributed_items: Vec<Pos>,
 }
 
 impl Facts {
@@ -133,7 +141,19 @@ impl Facts {
         }
         facts.macros.sort_unstable();
         facts.attributes.sort_unstable();
+        facts.item_macros.sort_unstable();
+        facts.attributed_items.sort_unstable();
         facts
+    }
+
+    /// D10: whether a macro in statement or item position, or an item with an attribute that can
+    /// emit items, starts in `from..to`.
+    pub(super) fn declares_items_in(&self, from: Pos, to: Pos) -> bool {
+        let any = |list: &[Pos]| {
+            let first = list.partition_point(|at| *at < from);
+            list.get(first).is_some_and(|at| *at < to)
+        };
+        any(&self.item_macros) || any(&self.attributed_items)
     }
 
     /// Whether a macro invocation or an attribute starts in `from..to`.
@@ -160,6 +180,13 @@ impl Facts {
             .entry(name)
             .or_default()
             .push(Use { pos: at, kind });
+    }
+
+    /// D10: note a macro in statement or item position, unless it is a trusted `debug_assert!`.
+    fn note_item_macro(&mut self, call: &syn::Macro) {
+        if !(self.trust_debug_assert && is_debug_assert(call)) {
+            self.item_macros.push(pos(call.path.span().start()));
+        }
     }
 
     fn tokens(&mut self, tokens: &proc_macro2::TokenStream) {
@@ -197,6 +224,27 @@ impl<'ast> Visit<'ast> for Facts {
         visit::visit_attribute(self, node);
     }
 
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.note_item_macro(&node.mac);
+        visit::visit_stmt_macro(self, node);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        self.note_item_macro(&node.mac);
+        visit::visit_item_macro(self, node);
+    }
+
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        if let Some(attribute) = item_attributes(node)
+            .iter()
+            .find(|attribute| !cannot_emit_items(attribute))
+        {
+            self.attributed_items
+                .push(pos(attribute.pound_token.span.start()));
+        }
+        visit::visit_item(self, node);
+    }
+
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         self.macros.push(pos(node.path.span().start()));
         let parsed = (self.trust_debug_assert && is_debug_assert(node))
@@ -224,6 +272,43 @@ impl<'ast> Visit<'ast> for Facts {
         self.debug_args.extend(inner.debug_args);
         self.macros.extend(inner.macros);
         self.attributes.extend(inner.attributes);
+        self.item_macros.extend(inner.item_macros);
+        self.attributed_items.extend(inner.attributed_items);
         self.debug_args.insert(macro_key(node), args);
+    }
+}
+
+/// D10: whether the attribute cannot emit an item: `cfg`, a lint level (`allow`, `expect`, `warn`,
+/// `deny`, `forbid`) or `doc`, spelled as one bare name. A derive, an attribute macro and
+/// `cfg_attr` (which can expand to a derive) can.
+fn cannot_emit_items(attribute: &syn::Attribute) -> bool {
+    attribute.path().get_ident().is_some_and(|name| {
+        matches!(
+            bare(name).as_str(),
+            "cfg" | "allow" | "expect" | "warn" | "deny" | "forbid" | "doc"
+        )
+    })
+}
+
+/// The outer attributes of an item of any kind. A node `syn` keeps as raw tokens has none to read;
+/// the parser's verbatim finding refuses it.
+fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(node) => &node.attrs,
+        syn::Item::Enum(node) => &node.attrs,
+        syn::Item::ExternCrate(node) => &node.attrs,
+        syn::Item::Fn(node) => &node.attrs,
+        syn::Item::ForeignMod(node) => &node.attrs,
+        syn::Item::Impl(node) => &node.attrs,
+        syn::Item::Macro(node) => &node.attrs,
+        syn::Item::Mod(node) => &node.attrs,
+        syn::Item::Static(node) => &node.attrs,
+        syn::Item::Struct(node) => &node.attrs,
+        syn::Item::Trait(node) => &node.attrs,
+        syn::Item::TraitAlias(node) => &node.attrs,
+        syn::Item::Type(node) => &node.attrs,
+        syn::Item::Union(node) => &node.attrs,
+        syn::Item::Use(node) => &node.attrs,
+        _ => &[],
     }
 }

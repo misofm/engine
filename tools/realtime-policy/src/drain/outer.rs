@@ -14,7 +14,15 @@
 //! - the closure of `core::array::from_fn` or `std::array::from_fn`.
 //!
 //! `while` and `loop` are refused. So is every other `for` header (`1..n`, `0..=n`, `(0..)`,
-//! `.rev()`, `.take(n)`, a bare local), the over-refusals that D7 keeps.
+//! `.rev()`, `.take(n)`, a bare local), the over-refusals that D7 keeps. The `<bound>` of
+//! `0..<bound>` is stricter than the `main` gate's `path`, which also took a zero-argument method
+//! call and a bracket index (`0..self.controls.len()`, `0..a[i]`): both run code this rule cannot
+//! see, so both are refused, and widening that needs a ruling (B1b-D1).
+//!
+//! Not checked: a collection whose type never ends. `&mut <fields>` and `<fields>.iter_mut()` are
+//! finite by their form, so a field or a local that holds an unbounded iterator (`0..`) passes;
+//! and the root of `<fields>` is not asked whether an item shadows it. See the module
+//! documentation of [`super`].
 
 use super::Ctx;
 use super::count;
@@ -147,10 +155,14 @@ fn slice_parameter<'f>(
     ) else {
         return false;
     };
-    finite
+    let held = finite
         && ctx.region.holds(signature.core, this.end)
         && ctx.boundaries.words_in(name, body, this.full) == 0
-        && !ctx.names_item(name)
+        && !ctx.names_item(name);
+    if held {
+        ctx.note_read(binding);
+    }
+    held
 }
 
 /// Where the body of a function node opens.

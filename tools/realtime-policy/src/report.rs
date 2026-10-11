@@ -40,6 +40,9 @@ pub enum Class {
     RegionSplits(&'static str),
     /// A region's markers sit in different containers and one of them is a macro token tree.
     RegionSplitsMacroTree,
+    /// A region's end marker sits in a container that does not enclose its begin marker's: the
+    /// region ends inside a block that continues past it (B1b-D9).
+    RegionEndsInsideAContainer,
     /// A marked region holds a forbidden spelling.
     ForbiddenBody,
     /// A `try_pop` in a marked region that the drain rule cannot prove bounded.
@@ -77,6 +80,9 @@ impl fmt::Display for Class {
             Self::MisorderedMarkers => out.write_str("misordered realtime policy markers"),
             Self::RegionSplits(node) => write!(out, "region boundary splits {node}"),
             Self::RegionSplitsMacroTree => out.write_str("region boundary splits a macro token tree"),
+            Self::RegionEndsInsideAContainer => out.write_str(
+                "region ends inside a container that does not enclose its begin marker",
+            ),
             Self::ForbiddenBody => out.write_str("marked realtime forbidden-body predicate"),
             Self::UnboundedTryPop => out.write_str(
                 "marked realtime unbounded try_pop drain (bound it with available_at_entry)",

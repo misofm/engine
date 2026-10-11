@@ -108,10 +108,21 @@ fn either_marker_alone_can_split_a_node() {
     let end_splits = format!(
         "// {BEGIN}\nfn inside() {{}}\nfn holder() {{\n    call(1,\n    // {END}\n    2);\n}}\n"
     );
-    let report = expect_failure("boundary-only-end-splits", &append(&end_splits), &[call]);
-    // The finding is on the end marker's line, the base file's three lines and four more below.
-    assert_eq!(report.findings.len(), 1);
-    assert_eq!(report.findings[0].line, Some(8));
+    let report = expect_failure(
+        "boundary-only-end-splits",
+        &append(&end_splits),
+        &[call, Class::RegionEndsInsideAContainer],
+    );
+    // B1b-D9: the end marker is inside `holder`, a block that does not enclose the begin marker's
+    // file, so the same marker is also refused for where it ends. Both findings are on its line,
+    // the base file's three lines and four more below.
+    assert_eq!(report.findings.len(), 2);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.line == Some(8))
+    );
     let begin_splits = format!(
         "fn holder() {{\n    call(1,\n    // {BEGIN}\n    2);\n}}\nfn inside() {{}}\n// {END}\n"
     );
@@ -193,17 +204,66 @@ fn a_marker_between_the_children_of_a_container_is_a_boundary() {
     }
 }
 
-/// A region may start in one container and end in another when no macro is involved.
+/// A region may start in one container and end in another when the end's container is the
+/// begin's or encloses it (B1b-D9). The first shape is the real `live.rs` and `transient-shaper`.
 #[test]
 fn a_region_may_span_the_end_of_an_impl() {
     let text = format!(
         "impl Spanning {{\n    // {BEGIN}\n    fn first(&self) {{}}\n}}\nfn second() {{}}\n// {END}\n"
     );
     expect_one_more_region("boundary-spans-impl-end", &text);
-    let blocks = format!(
+    let enclosing = format!(
+        "fn one() {{\n    {{\n    // {BEGIN}\n    work();\n    }}\n    work();\n    // {END}\n}}\n"
+    );
+    expect_one_more_region("boundary-ends-in-the-enclosing-block", &enclosing);
+}
+
+/// Assert that the base tree plus `text` is refused for where its region ends, and for nothing
+/// else (B1b-D9), with one finding on the end marker's line.
+fn expect_end_refused(name: &str, text: &str) {
+    let report = expect_failure(name, &append(text), &[Class::RegionEndsInsideAContainer]);
+    // The base file's three lines come first.
+    let end_line = 3
+        + text
+            .lines()
+            .position(|line| line.contains(END))
+            .expect("the case holds an end marker")
+        + 1;
+    let [finding] = report.findings.as_slice() else {
+        panic!("case {name}: one finding expected: {:#?}", report.findings);
+    };
+    assert_eq!(finding.line, Some(end_line), "case {name}");
+}
+
+/// A region whose end marker sits in a container that does not enclose the begin marker's is
+/// refused whatever it holds (B1b-D9). Red if it passes: the region ends inside a block that
+/// continues past the marker, so the item scan, which reads the region only, could not see an item
+/// after it.
+#[test]
+fn a_region_that_ends_in_another_block_is_refused() {
+    let text = format!(
         "fn one() {{\n    // {BEGIN}\n    work();\n}}\nfn two() {{\n    work();\n    // {END}\n}}\n"
     );
-    expect_one_more_region("boundary-spans-two-blocks", &blocks);
+    expect_end_refused("boundary-spans-two-blocks", &text);
+}
+
+/// The first verdict's probe: a `const` after the end marker, in the block that holds the loop,
+/// shadows the count for the whole block. Nothing but the boundary rule can see it.
+#[test]
+fn a_region_that_ends_in_a_deeper_block_is_refused() {
+    let text = format!(
+        "fn probe(q: &mut Consumer) {{\n    // {BEGIN}\n    let available = q.available_at_entry();\n    {{\n        for _ in 0..available {{ let _ = q.try_pop(); }}\n    // {END}\n        const available: usize = usize::MAX;\n    }}\n}}\n"
+    );
+    expect_end_refused("region-ends-in-a-deeper-block", &text);
+}
+
+/// The same hole for a slice parameter of the `fn` that the region begins before.
+#[test]
+fn a_region_that_ends_in_a_deeper_block_after_a_slice_parameter_is_refused() {
+    let text = format!(
+        "// {BEGIN}\nfn probe(q: &mut Consumer, lanes: &[u8]) {{\n    {{\n        for _lane in lanes {{\n            let available = q.available_at_entry();\n            for _ in 0..available {{ let _ = q.try_pop(); }}\n        }}\n    // {END}\n        const lanes: [u8; 1] = [0];\n    }}\n}}\n"
+    );
+    expect_end_refused("region-ends-in-a-deeper-block-slice-parameter", &text);
 }
 
 /// The shape of the real `gate-expander`: a region inside a `macro_rules!` body.

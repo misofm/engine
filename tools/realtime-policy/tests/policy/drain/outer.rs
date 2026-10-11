@@ -34,6 +34,16 @@ fn shadowed_by(params: &str, header: &str, item: &str) -> String {
     )
 }
 
+/// A counted drain in each pass of a loop over the slice parameter `rounds`, with a block item
+/// after the loop. Only the item scan tells it from the finite outer loop of D1, so only a row
+/// built this way defends the scan on the slice parameter.
+fn slice_shadowed_by(item: &str) -> String {
+    format!(
+        "fn drain(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    for _ in rounds {{\n{}    }}\n    {item}\n}}",
+        counted_drain("")
+    )
+}
+
 const CONFIG: &str = ", cfg: &Config";
 
 /// D1: a loop around a counted drain that runs a finite number of passes by its form.
@@ -272,13 +282,12 @@ fn a_slice_parameter_of_a_function_outside_the_region_is_not_read() {
     );
 }
 
-/// D2: a `static`, `const` or `use` of the region that can name the count or the slice parameter
-/// shadows it for its whole block, wherever it is declared; an item that names something else
-/// does not.
+/// D2: an item of the region that can name the count or the slice parameter (a `const`, `static`,
+/// `struct`, `enum`, `union`, `fn`, `type`, `trait` or `mod` of that name, or a `use`) shadows it
+/// for its whole block, wherever it is declared; an item that names something else does not.
 #[test]
 fn an_item_that_can_name_the_count_refuses_the_drain() {
     let count = "for _ in 0..available";
-    let slice = "for _ in rounds";
     let rows: Vec<(&'static str, String)> = vec![
         (
             "count-shadowed-by-block-const",
@@ -301,16 +310,48 @@ fn an_item_that_can_name_the_count_refuses_the_drain() {
             shadowed_by("", count, "use other::{first, available as third};"),
         ),
         (
+            "count-shadowed-by-block-struct",
+            shadowed_by("", count, "struct available;"),
+        ),
+        (
+            "count-shadowed-by-block-enum",
+            shadowed_by("", count, "enum available { One }"),
+        ),
+        (
+            "count-shadowed-by-block-union",
+            shadowed_by("", count, "union available { one: u8 }"),
+        ),
+        (
+            "count-shadowed-by-block-fn",
+            shadowed_by("", count, "fn available() {}"),
+        ),
+        (
+            "count-shadowed-by-block-type",
+            shadowed_by("", count, "type available = usize;"),
+        ),
+        (
+            "count-shadowed-by-block-trait",
+            shadowed_by("", count, "trait available {}"),
+        ),
+        (
+            "count-shadowed-by-block-mod",
+            shadowed_by("", count, "mod available {}"),
+        ),
+        (
+            "slice-shadowed-by-block-struct",
+            slice_shadowed_by("struct rounds;"),
+        ),
+        (
             "slice-shadowed-by-block-static",
-            shadowed_by(", rounds: &[u8]", slice, "static rounds: [u8; 1] = [0];"),
+            slice_shadowed_by("static rounds: [u8; 1] = [0];"),
         ),
         (
             "slice-shadowed-by-use",
-            shadowed_by(", rounds: &[u8]", slice, "use other::rounds;"),
+            slice_shadowed_by("use other::rounds;"),
         ),
         (
             "slice-shadowed-by-glob-use",
-            shadowed_by(", rounds: &[u8]", slice, "use other::*;"),
+            slice_shadowed_by("use other::*;"),
         ),
     ];
     each_row(rows, |name, text| refuses(name, &text));
@@ -320,18 +361,35 @@ fn an_item_that_can_name_the_count_refuses_the_drain() {
             shadowed_by("", count, "const LIMIT: usize = 4;"),
         ),
         (
+            "unrelated-struct-after-the-loop",
+            shadowed_by("", count, "struct Lane;"),
+        ),
+        (
+            "unrelated-fn-after-the-loop",
+            shadowed_by("", count, "fn note() {}"),
+        ),
+        (
             "unrelated-use-after-the-loop",
             shadowed_by("", count, "use core::cmp::max;"),
         ),
         (
             "unrelated-static-after-a-slice-loop",
-            format!(
-                "fn drain(control: &mut Consumer<Record>, rounds: &[u8]) {{\n    for _ in rounds {{\n{}    }}\n    static LIMIT: usize = 4;\n}}",
-                counted_drain("")
-            ),
+            slice_shadowed_by("static LIMIT: usize = 4;"),
         ),
     ];
     each_row(unrelated, |name, text| accepts(name, &text));
+}
+
+/// D2 (root Amendment 1, NEW-1): a unit struct that compares with `i32` and takes `-=` stands in
+/// for an alias source as a `const` does. The loop below pops without bound, because the struct's
+/// `!=` never says the count is zero and its `-=` does nothing. Red if the item scan reads only
+/// `static`, `const` and `use`.
+#[test]
+fn unit_struct_shadows_the_alias_source() {
+    let text = format!(
+        "fn drain(control: &mut Consumer<Record>) {{\n    let available = control.available_at_entry();\n    {{\n        struct available;\n        impl PartialEq<i32> for available {{\n            fn eq(&self, _: &i32) -> bool {{\n                false\n            }}\n        }}\n        impl core::ops::SubAssign<i32> for available {{\n            fn sub_assign(&mut self, _: i32) {{}}\n        }}\n        let mut remaining = available;\n        while remaining != 0 {{\n            remaining -= 1;\n            {POP}\n        }}\n    }}\n}}"
+    );
+    refuses("unit-struct-shadows-the-alias-source", &text);
 }
 
 /// D2: a count binding under a `cfg`-family attribute, on the entry binding or on the one alias
