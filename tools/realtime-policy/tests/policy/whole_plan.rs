@@ -6,8 +6,14 @@ use super::common::{Edit, UNSAFE, expect_failure, expect_valid};
 
 const FFI: &str = "crates/capi/src/ffi.rs";
 const WHOLE_PLAN: Class = Class::WholePlanReference;
-const RENDER_ENTRY: &str =
-    "pub unsafe extern \"C\" fn miso_engine_v1_render_f32_planar(plan: *mut Plan) -> u32 {";
+
+/// The render entry point's signature line in the base file.
+fn render_entry() -> String {
+    format!(
+        "pub {UNSAFE} extern \"C\" fn miso_engine_v1_render_f32_planar(plan: *mut Plan) -> u32 {{"
+    )
+}
+
 /// The last line of the render entry point in the base file.
 const RETURN: &str = "    0";
 
@@ -81,17 +87,19 @@ fn a_missing_file_or_a_render_entry_only_in_tests_is_a_finding() {
         &[Edit::Delete { path: FFI }],
         &[Class::MissingCapiFfi],
     );
+    let entry = render_entry();
+    let fixture = format!("    fn fixture(plan: *mut Plan) {{ let _ = {UNSAFE} {{ &*plan }}; }}");
     expect_failure(
         "capi-render-entry-only-in-tests",
         &[
             Edit::ReplaceLine {
                 path: FFI,
-                old: RENDER_ENTRY,
+                old: &entry,
                 new: "fn moved_render(plan: *mut Plan) -> u32 {",
             },
             Edit::ReplaceLine {
                 path: FFI,
-                old: "    fn fixture(plan: *mut Plan) { let _ = unsafe { &*plan }; }",
+                old: &fixture,
                 new: "    fn miso_engine_v1_render_f32_planar() {}",
             },
         ],

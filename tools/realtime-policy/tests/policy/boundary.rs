@@ -108,7 +108,10 @@ fn either_marker_alone_can_split_a_node() {
     let end_splits = format!(
         "// {BEGIN}\nfn inside() {{}}\nfn holder() {{\n    call(1,\n    // {END}\n    2);\n}}\n"
     );
-    expect_failure("boundary-only-end-splits", &append(&end_splits), &[call]);
+    let report = expect_failure("boundary-only-end-splits", &append(&end_splits), &[call]);
+    // The finding is on the end marker's line, the base file's three lines and four more below.
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].line, Some(8));
     let begin_splits = format!(
         "fn holder() {{\n    call(1,\n    // {BEGIN}\n    2);\n}}\nfn inside() {{}}\n// {END}\n"
     );
@@ -231,43 +234,52 @@ fn a_region_that_crosses_a_macro_token_tree_is_refused() {
     let rows = [
         (
             "boundary-begin-in-macro-end-after",
+            6,
             format!(
                 "macro_rules! crossing {{\n    () => {{\n        // {BEGIN}\n        fn inside() {{}}\n    }};\n}}\n// {END}\n"
             ),
         ),
         (
             "boundary-begin-before-macro-end-inside",
+            4,
             format!(
                 "// {BEGIN}\nmacro_rules! crossing {{\n    () => {{\n        fn inside() {{}}\n        // {END}\n    }};\n}}\n"
             ),
         ),
         (
             "boundary-begin-in-outer-group-end-in-inner",
+            6,
             format!(
                 "fn probe() {{\n    emit!(a,\n    // {BEGIN}\n    b, {{ c,\n    // {END}\n    d }});\n}}\n"
             ),
         ),
         (
             "boundary-begin-in-group-end-two-groups-deeper",
+            6,
             format!(
                 "fn probe() {{\n    emit!(a, {{ b,\n    // {BEGIN}\n    c, [ d, ( e,\n    // {END}\n    f ) ] }});\n}}\n"
             ),
         ),
         (
             "boundary-between-two-macro-calls",
+            6,
             format!(
                 "fn probe() {{\n    first!(\n    // {BEGIN}\n    a);\n    second!(\n    b,\n    // {END}\n    c);\n}}\n"
             ),
         ),
         (
             "boundary-block-to-macro-group",
+            5,
             format!(
                 "fn probe() {{\n    // {BEGIN}\n    work();\n    emit!(\n    a,\n    // {END}\n    b);\n}}\n"
             ),
         ),
     ];
-    for (name, text) in rows {
-        expect_failure(name, &append(&text), &[MACRO_TREE]);
+    for (name, begin_line, text) in rows {
+        let report = expect_failure(name, &append(&text), &[MACRO_TREE]);
+        // One finding, on the begin marker's line.
+        assert_eq!(report.findings.len(), 1, "case {name}");
+        assert_eq!(report.findings[0].line, Some(begin_line), "case {name}");
     }
 }
 
