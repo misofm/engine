@@ -52,6 +52,7 @@ three floor messages are `:1408`, `:1410` and `:1414`.
   - any of these, optionally followed by `.enumerate()` and by one or more
     `.zip(<literal | fields | &fields | &mut fields>)` steps (the D8b pass loop has two);
   - the closure of `core::array::from_fn` or `std::array::from_fn`.
+    *Withdrawn by root, 2026-10-11 (#1442 Amendment 3): the array::from_fn outer-loop exception no longer exists. A pop inside any closure is refused.*
 
   `while` and `loop` around a bounded drain are refused. The loop and the slice parameter's `fn`
   signature must lie in the pop's region (B1a-D1). This row is `main`'s rule as it stands. The
@@ -77,6 +78,7 @@ three floor messages are `:1408`, `:1410` and `:1414`.
     region. `core::array::from_fn` and `std::array::from_fn` are the exceptions; `array::from_fn`
     after `use core::array` is refused, as today.
   - A pop directly in an `array::from_fn` closure is refused.
+    *Withdrawn by root, 2026-10-11 (#1442 Amendment 3): the array::from_fn outer-loop exception no longer exists. A pop inside any closure is refused.*
 - **D4. Limits that stay** (stated in the drain rule's module documentation, which replaces
   `:79-141`):
   - recursion;
