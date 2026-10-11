@@ -733,3 +733,133 @@ Implemented on `394a85c6d` (A2 with its verdict follow-ups). No production code 
 - B2a replaces "closures and macros are transparent": `form-pop-token-in-a-macro-in-a-counted-loop` and
   `a_pop_in_a_macro_or_a_closure_is_judged_by_the_loops_around_it` are superseded then and are deleted in that
   change.
+
+### Attempt 2 (on root Amendment 1; same branch, base `e33614d95`)
+
+Commits: `cfca7f991` (the amendment, spec only), `82a67bc09` (code and tests), the small follow-up that
+drops a redundant guard (below), and this record. Edits: `tools/realtime-policy/**` and this spec; no
+`Cargo.toml` or `Cargo.lock` change, no production code change (`git diff --stat 394a85c6d..HEAD` outside
+`tools/realtime-policy` and `.github/ISSUE_SPECS` is empty).
+
+**What changed.**
+- `src/drain/facts.rs`: `Facts` also records where every macro invocation (`syn::Macro`, by any path and in
+  any position) and every attribute (outer or inner, doc comments included) starts;
+  `has_macro_or_attribute_in(from, to)`.
+- `src/drain/per_queue/window.rs`: `holds` refuses the form when a macro or an attribute starts between the
+  start of the set loop (its first outer attribute counts, `Extent::full`) and the end of the form's outermost
+  loop, before it reads the mentions (a.1). The terminal call is the allow-list of item 5 (a.2):
+  `reaches_a_block` (every step from the function body to the block B is a block, an expression statement, an
+  `if` or `else` branch but not its condition, a `match` arm body but not its scrutinee or guard, a loop body
+  but not its header, or an unlabelled block), `simple_statement` and `simple_expr` (the tail's statements and
+  expressions), and a last statement `return;`, `return <e>;` or `break [<'label>] [<e>];` with its semicolon,
+  whose `break` leaves the outermost loop. The old `Banned` visitor is gone.
+- `src/drain/per_queue/mod.rs`: `Located::set_start`.
+- MINOR-2: `ctx.region.is_tokens()` removed from `drain/mod.rs`, and with it `RegionNodes::is_tokens` and the
+  `tokens_only` field (`src/boundary.rs`). A tokens-only region has no nodes, so the missing top refuses its pop.
+- MINOR-1: `per_queue_second_pop_in_counted_inner_drain` committed.
+- NIT-1 (state D7's "mention = a use that D2 resolves to the count" in the decisions): not changed. Root's
+  ruling and the review do not include it, so it stays with the batch follow-ups; deviation 4 of attempt 1 still
+  records the reading.
+- Tests 113 to 121: `per_queue_counters_written_by_macro` deleted (probe-a replaces it, as the ruling says);
+  added `per_queue_counters_written_by_macro_defined_before`, `per_queue_debug_assert_shadowed`,
+  `per_queue_continue_in_terminal_tail`, `per_queue_continue_in_terminal_return`, `per_queue_set_loop_under_cfg`,
+  `per_queue_terminal_return_under_cfg`, `per_queue_second_pop_in_counted_inner_drain`, and two the ruling does
+  not name, `per_queue_terminal_break` (accepted) and `per_queue_terminal_break_leaves_an_inner_loop` (refused),
+  because the rewrite of item 5 touched the `break` branch that no case pinned. The meter-poll twin's reset
+  branch gained `R.lost = 1;` so that an assignment in the tail (the real poll's `ready.meter_loss_count = 1;`)
+  is pinned.
+
+**Notes on the text.**
+- `Expr::Repeat` (`[x; n]`) is read as an array literal (syn's own description). `Expr::Group`, a range, `?`,
+  `.await`, a block, `if`, `match`, a loop, a closure and a macro are refused. A tail `return`/`break` without
+  its semicolon is refused (the ruling's text has the semicolon); no case pins it, since it only over-refuses.
+- The labelled-block arm of `breaks_out_of_outer` is removed: the ancestors admit no labelled block, so a label
+  can only name a loop.
+- Dropped in a follow-up commit: the `Some(_)` guard on the tail's inner statements. An expression statement
+  without `;` that is not last is block-like, and `simple_expr` already refuses it, so no case could pin the
+  guard.
+- The ancestor allow-list and the closure case overlap (a `let` initializer is not an allowed ancestor, and the
+  closure node is not one either): each arm alone leaves `per_queue_counters_refilled_in_closure` refused. The
+  mutation that opens the whole list turns it red (M9 below).
+
+**Gates.**
+1. Real tree: `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh`:
+   `realtime policy: ok (93 marked regions in 26 files)`. Release run time 1.04 s, 1.03 s, 1.03 s (attempt 1:
+   1.00-1.06 s).
+2. `cargo test --locked -p realtime-policy`: 121 passed.
+3. Parity (the attempt-1 verifier's method: an instrumented copy of `scripts/test-realtime-policy.sh` outside the
+   repository runs the awk gate, gawk 5.2.1, and the release binary on every `expect_failure` tree, 96 trees):
+   the verdict table is identical to attempt 1's verifier table (`diff` empty). 41 trees: awk fails, tool fails
+   with the drain class (the committed ported cases); 41: both fail without the drain class (A1 and A2 cases,
+   `open-tail-last-file`, `region-ends-in-comment`); 14: awk fails, tool passes. The 14 are D10's deferred list
+   (`from_fn`, `bare_from_fn`, `repeat_with`, `array_from_fn_pop`, `bounded_drain_inside_outer_loop`,
+   `wrapped_outer_while`, `paren_open_range_outer`, `outer_repeat`, `outer_over_iterator_parameter`,
+   `outer_over_rebound_slice_parameter`, `outer_zip_then_cycle`, `outer_over_slice_parameter_shadowed_by_block_const`,
+   `count_under_cfg`, `count_shadowed_by_block_static`), unchanged from attempt 1.
+4. Gate 7: `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-realtime-policy.sh`, `test-realtime-policy.sh`, `check-workspace-policy.sh`, `check-bench-policy.sh`
+   all exit 0. Gate 6: shipped artifacts unchanged (no file outside the two authorized paths changed).
+5. `poll_meters` (`hosts/host-web/src/lib.rs:3446-3788` on this branch, not marked here): a faithful copy (the
+   function text read from the file at test time, wrapped in `impl Host { .. }`, in the second region of the base
+   tree) passes the whole tool, as a temporary test, not committed. Its set loop to the end of the `passes` loop
+   holds no macro and no attribute; its terminal call is `ready.reset_meter_delivery(false);`,
+   `ready.meter_loss_count = 1;`, `self.meter_activation_sample = ..;`, `return 0;`.
+
+**Mutations** (each applied alone to the code, `cargo test` and the real tree after each, then reverted by
+`git checkout`; 121 green and the real tree ok after every revert; the real tree passes under every mutation).
+Red cases per mutation:
+- Macros not read at all (a macro judged only by the root mentions in its own tokens): 
+  `per_queue_counters_written_by_macro_defined_before` and `per_queue_debug_assert_shadowed`.
+- `debug_assert!` exempt from the macro rule: `per_queue_debug_assert_shadowed` (alone).
+- Tail judged by a deny-list that does not refuse `if` or `continue` (`simple_expr` falls through to true except
+  closures, loops and macros): `per_queue_continue_in_terminal_tail` and `per_queue_continue_in_terminal_return`.
+- Operands of the last statement not held to the allow-list (a `return` accepted whatever it holds):
+  `per_queue_continue_in_terminal_return` (alone).
+- Attribute span starts at the window (`set_end`), not at the set loop: `per_queue_set_loop_under_cfg` (alone).
+- Attributes on a `return` not read: `per_queue_terminal_return_under_cfg` (alone).
+- M14, the pass body's only-pop check dropped: `per_queue_second_pop_in_counted_inner_drain` (alone; in attempt
+  1 this mutation turned nothing red).
+- Tail unchecked (terminal call accepted after its ancestors): `per_queue_counter_written_by_call`, with
+  `per_queue_continue_in_terminal_tail`, `per_queue_continue_in_terminal_return` and
+  `per_queue_terminal_break_leaves_an_inner_loop`.
+- M9, the ancestor list opened (`reaches_a_block` true): `per_queue_counters_refilled_in_closure` (alone).
+- A terminal `break` refused: `per_queue_terminal_break` (alone). Any `break` accepted as the end of the form:
+  `per_queue_terminal_break_leaves_an_inner_loop` (alone).
+- Assignments not allowed in the tail: `per_queue_meter_poll` and `per_queue_param_root` (the twin's tail).
+- MINOR-2: with the guard removed from the code no test is red by construction, and the missing top is now the
+  only guard of a tokens-only region.
+
+**PR evidence, not committed (temporary tests, removed).** Each refused as the amendment says; under "attributes
+not read" R8b, R9 and the inner-attribute case go red, and under "macros not read" the path-macro,
+the pass-body-macro and R2 cases go red:
+- R8b: `#[cfg(any())]` on the guard `if slot.is_some() || *left == 0 { continue; }`: refused.
+- R9: `if .. { #[cfg(any())] continue; }`: refused.
+- R2: `debug_assert!({ refill!(); true });` with a local `refill!`: refused.
+- R7: the terminal call inside an `async` block: refused (ForbiddenBody and UnboundedTryPop, as the review says).
+- R4: `#[cfg(any())] { *left -= 1; }`: refused. `crate::refill!();` in the window, a macro in the pass body, an
+  inner attribute `#![allow(unused)]` in the window: each refused.
+
+**Test value (one sentence each, new tests).**
+- `per_queue_counters_written_by_macro_defined_before`: red if a macro call in the window is judged only by the
+  roots named in its own tokens (a macro defined before the set loop writes the counters).
+- `per_queue_debug_assert_shadowed`: red if `debug_assert!` is exempt from the macro rule (a local
+  `macro_rules!` can shadow the name).
+- `per_queue_continue_in_terminal_tail`: red if the terminal tail admits an `if` around a `continue`, which
+  carries refilled counters into the next pass.
+- `per_queue_continue_in_terminal_return`: red if the operands of the tail's last statement are not held to the
+  allow-list.
+- `per_queue_set_loop_under_cfg`: red if the attribute span starts at the end of the set loop, so `cfg` can
+  remove the set loop and leave stale counters.
+- `per_queue_terminal_return_under_cfg`: red if attributes on nested statements are not read, so `cfg` can
+  remove the terminal `return`.
+- `per_queue_second_pop_in_counted_inner_drain`: red if the pass body's one-pop check is dropped (the second pop
+  names no `<r'>`, so no other check refuses it).
+- `per_queue_terminal_break`: red if a tail ending in a `break` out of the outermost loop is refused.
+- `per_queue_terminal_break_leaves_an_inner_loop`: red if any `break` ends the tail, so a `break` out of an
+  inner loop carries refilled counters into the next pass.
+
+**Open items.**
+- The tool reads no types: a user `Deref`/`DerefMut` on a root's type is outside condition 6 (Hazards, a.3).
+- NIT-1 (D7's reading of "mention") is left to the batch follow-ups, as above.
+- `Expr::Verbatim` and other nodes that syn leaves unparsed are not macro invocations and are not read by this
+  rule (none occurs in stable Rust the tree uses); recorded, not ruled.
