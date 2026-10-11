@@ -2851,6 +2851,12 @@ struct GraphExecutor {
     /// The strip section of the hand-over (issue #1277 D8), sorted by predecessor location and
     /// owner; empty (and never allocated) when no strip stage carries.
     carry_strips: Box<[GraphStripMove]>,
+    /// The console-effect section of the hand-over (issue #1279 D3), sorted by predecessor
+    /// location; empty (and never allocated) when no effect lane carries.
+    carry_effects: Box<[GraphEffectMove]>,
+    /// The one payload scratch the effect section moves every lane through (issue #1279 D3):
+    /// preallocated at the largest carried payload, and empty when no effect lane carries.
+    carry_scratch: Box<[u8]>,
     /// The live snapshot `S` of the block about to render (#1504 D1): stored by
     /// [`PreparedPlanExecutor::begin_live_block`] and taken by `render`, so a block that renders
     /// without its own snapshot is refused and never reads the previous block's.
@@ -2915,6 +2921,12 @@ pub enum GraphCarryInstallError {
     StripLaneOutOfRange,
     /// A successor or predecessor strip lane appears twice for one owner.
     DuplicateStripLane,
+    /// An effect carry was installed before the plan's [`GraphCarryProgram`].
+    NoEffectCarryProgram,
+    /// A successor location is not a populated lane of an effect bank whose lanes carry.
+    EffectLaneOutOfRange,
+    /// A successor or predecessor effect lane appears twice.
+    DuplicateEffectLane,
 }
 
 /// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
@@ -3056,6 +3068,109 @@ pub fn install_builtin_strip_carry(
     Ok(())
 }
 
+pub use rack::EffectLaneLayout;
+
+/// One console effect lane a successor takes from its predecessor at the swap block: the whole
+/// state of the lane at `predecessor` in the displaced plan is moved into `successor` (issue
+/// #1279 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphEffectMove {
+    /// The lane in the successor, the plan the move is installed in.
+    pub successor: GraphLaneLocation,
+    /// The lane in the plan the successor displaces.
+    pub predecessor: GraphLaneLocation,
+}
+
+/// One banked effect lane of a bound graph plan that a swap can move (issue #1279 D1): a populated
+/// lane of a bank stage with no live control lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphEffectLane {
+    /// The rack the effect sits in: `Simd1` for a `pre_insert` console slot, `Simd2` for a
+    /// `post_insert` one, `Dynamic` for an insert.
+    pub rack: RackId,
+    /// The effect ID: a console slot's slot ID.
+    pub effect_id: Box<str>,
+    /// Where the lane sits.
+    pub location: GraphLaneLocation,
+    /// What the lane must share with the lane it is moved to or from.
+    pub layout: EffectLaneLayout,
+}
+
+/// Every banked effect lane of a bound graph plan whose stage has no live control lane, as
+/// `(strip ID, lane)` pairs in program order (issue #1279 D1); `None` for any other plan. A lane
+/// whose bank has a live control lane or a lowered bypass is a `LiveControlEffectBankStage` lane
+/// and is not listed (#1280). Read off the render thread, before publication: a successor's
+/// preparation joins its own lanes with its predecessor's (recorded when that plan was prepared)
+/// by owner key, never by location.
+pub fn bank_effect_lanes(
+    plan: &mut PreparedRenderPlan,
+) -> Option<Vec<(Box<str>, GraphEffectLane)>> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(executor.runtime.bank_effect_lanes())
+}
+
+/// Install the console-effect section of the hand-over this graph plan runs when it displaces its
+/// predecessor (issue #1279 D3), after its [`GraphCarryProgram`], which names that predecessor,
+/// and preallocate the payload scratch at the largest carried payload.
+///
+/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
+/// program, a successor location is not a populated lane of an effect bank without a live control
+/// lane, or a successor or predecessor location repeats. Predecessor locations and layouts are
+/// checked against the predecessor at the swap block, where one that does not resolve refuses the
+/// whole hand-over. The moves are kept sorted by predecessor location, so the swap block
+/// disengages each predecessor chain once.
+pub fn install_effect_carry(
+    plan: &mut PreparedRenderPlan,
+    mut moves: Vec<GraphEffectMove>,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    if executor.carry.is_none() {
+        return Err(GraphCarryInstallError::NoEffectCarryProgram);
+    }
+    let mut scratch = 0_u64;
+    for (index, step) in moves.iter().enumerate() {
+        let Some(layout) = executor.runtime.effect_lane_layout(step.successor) else {
+            return Err(GraphCarryInstallError::EffectLaneOutOfRange);
+        };
+        scratch = scratch.max(layout.payload_bytes());
+        if moves[..index].iter().any(|earlier| {
+            earlier.successor == step.successor || earlier.predecessor == step.predecessor
+        }) {
+            return Err(GraphCarryInstallError::DuplicateEffectLane);
+        }
+    }
+    moves.sort_unstable_by_key(|step| step.predecessor);
+    executor.carry_scratch =
+        vec![0_u8; usize::try_from(scratch).unwrap_or(usize::MAX)].into_boxed_slice();
+    executor.carry_effects = moves.into_boxed_slice();
+    Ok(())
+}
+
+/// The effect-section bytes a carry of `moves` lanes with a largest payload of `scratch_bytes`
+/// retains in its plan: the move table and the payload scratch ([`install_effect_carry`]).
+/// Checked arithmetic: `None` on overflow. The one place the charge is spelled, so preparation's
+/// admission and [`carry_program_retained_bytes`] cannot disagree.
+#[must_use]
+pub fn effect_carry_retained_bytes(moves: usize, scratch_bytes: u64) -> Option<u64> {
+    u64::try_from(moves.checked_mul(core::mem::size_of::<GraphEffectMove>())?)
+        .ok()?
+        .checked_add(scratch_bytes)
+}
+
+/// Restores the console-effect carry refused in this plan's banks, summed over every effect bank
+/// stage (issue #1279 D6): each left its lane as prepared, at rest. Saturating. `None` for any
+/// other plan.
+///
+/// Read after render, by whoever holds the plan: an own payload is never refused (#1278), so a
+/// nonzero count is a defect. Named like `RealtimePlanOwner::carry_mismatch_count`.
+pub fn carry_refusal_count(plan: &mut PreparedRenderPlan) -> Option<u64> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(executor.runtime.carry_refusal_count())
+}
+
 /// The process-unique identity of a graph plan, taken at bind; `None` for any other plan.
 pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
     plan.executor_any_mut()?
@@ -3122,7 +3237,15 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
                 &executor.carry_strips,
             ))
             .unwrap_or(u64::MAX);
-            sources.saturating_add(inputs).saturating_add(strips)
+            let effects = effect_carry_retained_bytes(
+                executor.carry_effects.len(),
+                u64::try_from(executor.carry_scratch.len()).unwrap_or(u64::MAX),
+            )
+            .unwrap_or(u64::MAX);
+            sources
+                .saturating_add(inputs)
+                .saturating_add(strips)
+                .saturating_add(effects)
         })
 }
 
@@ -3208,6 +3331,8 @@ struct GraphExecutorWithoutSplitPairTable {
     carry: Option<GraphCarryProgram>,
     carry_inputs: Box<[GraphLaneMove]>,
     carry_strips: Box<[GraphStripMove]>,
+    carry_effects: Box<[GraphEffectMove]>,
+    carry_scratch: Box<[u8]>,
     live_snapshot: Option<LiveSnapshot>,
 }
 
@@ -3320,6 +3445,8 @@ impl GraphExecutor {
             carry: None,
             carry_inputs: Box::default(),
             carry_strips: Box::default(),
+            carry_effects: Box::default(),
+            carry_scratch: Box::default(),
             live_snapshot: None,
         }
     }
@@ -3332,10 +3459,10 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     // REALTIME_POLICY_BEGIN
     /// Move the sources the installed [`GraphCarryProgram`] names out of the predecessor graph
-    /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276)
-    /// and the fader, mute and matrix stages [`install_builtin_strip_carry`] names (issue #1277),
-    /// at the swap block: a bounded series of swaps and fixed-size lane copies, nothing allocated
-    /// or freed.
+    /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276),
+    /// the fader, mute and matrix stages [`install_builtin_strip_carry`] names (issue #1277) and
+    /// the console effect lanes [`install_effect_carry`] names (issue #1279), at the swap block: a
+    /// bounded series of swaps and fixed-size lane copies, nothing allocated or freed.
     ///
     /// No program, or a predecessor that is not a graph plan, takes nothing (`NotRequested`). A
     /// predecessor of another identity, an input lane that does not resolve on either side, a
@@ -3370,6 +3497,14 @@ impl PreparedPlanExecutor for GraphExecutor {
         {
             return CarryOutcome::PredecessorMismatch;
         }
+        // Issue #1279: likewise every console-effect move, and the scratch holds every payload.
+        if !self.runtime.can_carry_effect_lanes(
+            &mut predecessor.runtime,
+            &self.carry_effects,
+            self.carry_scratch.len(),
+        ) {
+            return CarryOutcome::PredecessorMismatch;
+        }
         if !program.sources.is_empty() {
             let (Some(successor_set), Some(predecessor_set)) =
                 (self.source_set.as_mut(), predecessor.source_set.as_mut())
@@ -3387,6 +3522,11 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
         self.runtime
             .carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips);
+        self.runtime.carry_effect_lanes(
+            &mut predecessor.runtime,
+            &self.carry_effects,
+            &mut self.carry_scratch,
+        );
         CarryOutcome::Carried
     }
     // REALTIME_POLICY_END
@@ -3467,6 +3607,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             carry: _,
             carry_inputs: _,
             carry_strips: _,
+            carry_effects: _,
+            carry_scratch: _,
             live_snapshot,
         } = self;
         // One block's snapshot: taken here, so the next block cannot reuse it.

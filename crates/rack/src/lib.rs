@@ -11,9 +11,9 @@
 
 use effect_contract::{
     BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
-    EffectProgramKey, ObservationLane, ObservationSample, PreparedAutomationSpan,
-    PreparedEffectBank, PreparedNativeEffectBank, PreparedSidechainPort, SeamSide,
-    transpose_tile_4,
+    EffectId, EffectProgramKey, LatencySamples, ObservationLane, ObservationSample,
+    PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffectBank, PreparedSidechainPort,
+    SeamSide, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, transpose_tile_4,
 };
 use engine::realtime::{LiveSnapshot, RenderError};
 
@@ -772,12 +772,53 @@ pub trait BankStage: Send {
     }
 }
 
+/// What two bank lanes must share before a plan swap moves the state of one into the other
+/// (#1279 D1): the effect, the layout of its state payload, its prepared bypass and its latency.
+///
+/// Read off the control side when a stage is built, so the successor's preparation can compare it
+/// with the predecessor's without touching a bank, and the swap block can check it again before it
+/// restores anything.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectLaneLayout {
+    /// The native effect the lane runs.
+    pub effect_id: EffectId,
+    /// The descriptor's state payload layout version.
+    pub state_layout_version: u32,
+    /// The prepared sizes of the three payload sections.
+    pub state_sizes: StatePayloadSizes,
+    /// The bank's prepared bypass.
+    pub bypass: bool,
+    /// The bank's prepared latency.
+    pub latency: LatencySamples,
+}
+
+impl EffectLaneLayout {
+    /// The layout a bank bound with `key` has.
+    #[must_use]
+    pub const fn of(key: &EffectProgramKey) -> Self {
+        Self {
+            effect_id: key.effect_id,
+            state_layout_version: key.state_layout_version,
+            state_sizes: key.state_sizes,
+            bypass: key.bypass,
+            latency: key.latency,
+        }
+    }
+
+    /// The bytes one lane's payload takes: the three sections together.
+    #[must_use]
+    pub fn payload_bytes(&self) -> u64 {
+        self.state_sizes.total().unwrap_or(u64::MAX)
+    }
+}
+
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
 ///
 /// Width, quantum and the automation offsets are fixed here once (#96 F8): the render path reads
 /// no metadata and performs no `checked_add`. The bank's [`effect_contract::PreparedBankMetadata`]
-/// is read at bind, on the control thread, and only the one value a stage method reads -- the
-/// prepared bypass -- is kept, as a plain field (issue #1461).
+/// is read at bind, on the control thread, and only the values a stage method reads -- the
+/// prepared bypass, and the lane layout a plan swap checks -- are kept, as plain fields (issue
+/// #1461, #1279).
 pub struct EffectBankStage {
     processor: Box<dyn PreparedNativeEffectBank>,
     /// The bank's prepared `bypass`, which the response snapshot reports.
@@ -785,7 +826,8 @@ pub struct EffectBankStage {
     width: BankWidth,
     quantum: u32,
     offsets: Box<[u32]>,
-    /// One flag per lane: the effect's own designed-word comparison, taken once at bind.
+    /// One witness per lane: the terms this stage decides itself, taken at bind and refreshed
+    /// after a plan swap restores a lane.
     ///
     /// # Why this is cached and why the cache cannot go stale
     ///
@@ -794,14 +836,23 @@ pub struct EffectBankStage {
     /// twenty-six words for the input chain. Pulling it once per lane per slot per block, which is
     /// what the collapse's dispatch needs, would cost more than the collapse saves.
     ///
-    /// The cache is sound because the designed words of a **bound** bank cannot move: a
-    /// live-control-free slot hands the bank an empty automation slice on every block
-    /// (`EffectBankStage::process`), and `reset`/`restore_track_state_payload` -- the two calls
-    /// that do move them -- are preparation-side and unreachable once a processor has been moved
-    /// into a chain. `LiveControlEffectBankStage` is the slot that *does* drain writes, and it
-    /// caches the same half for the same reason: a one-channel write clears the `LIVE` term, which
-    /// that slot pulls live, and a `Both` write leaves the two channels bit-equal.
-    designed: Box<[bool]>,
+    /// The cache is sound because the designed words of a **bound** bank move at exactly one
+    /// boundary, and it refreshes the cache. A live-control-free slot hands the bank an empty
+    /// automation slice on every block (`EffectBankStage::process`), so a block moves none, and
+    /// `reset` is preparation-side and unreachable once a processor has been moved into a chain.
+    /// `restore_track_state_payload` runs on a bound bank in one place: the plan-swap carry's swap
+    /// block ([`EffectBankStage::carry_lane_from`], #1279). It overwrites a lane's designed words
+    /// with the predecessor's, and it recomputes both terms this stage holds for the lane: the
+    /// `DESIGNED` term from the bank and the `RESTORED` term from the payload it restored.
+    /// `LiveControlEffectBankStage` is the slot that *does* drain writes, and it caches the same
+    /// half for the same reason: a one-channel write clears the `LIVE` term, which that slot pulls
+    /// live, and a `Both` write leaves the two channels bit-equal.
+    witness: Box<[ChannelSymmetryWitness]>,
+    /// The layout a plan swap checks before it moves a lane in or out.
+    layout: EffectLaneLayout,
+    /// Restores a plan swap's carry refused on this stage: each left its lane as prepared, at rest
+    /// (#1279 D6). Saturating; read after render.
+    carry_refused: u64,
 }
 
 impl EffectBankStage {
@@ -821,8 +872,8 @@ impl EffectBankStage {
         if quantum == 0 {
             return Err(RackError::ZeroQuantum);
         }
-        let designed = (0..width.lanes() as usize)
-            .map(|lane| processor.lane_channel_symmetry(lane))
+        let witness = (0..width.lanes() as usize)
+            .map(|lane| lane_witness(processor.lane_channel_symmetry(lane), true))
             .collect();
         Ok(Self {
             processor,
@@ -830,9 +881,109 @@ impl EffectBankStage {
             width,
             quantum,
             offsets: vec![0_u32; width.lanes() as usize + 1].into_boxed_slice(),
-            designed,
+            witness,
+            layout: EffectLaneLayout::of(&metadata.program_key),
+            carry_refused: 0,
         })
     }
+
+    /// The layout a plan swap checks before it moves a lane in or out (#1279 D1).
+    #[must_use]
+    pub const fn layout(&self) -> EffectLaneLayout {
+        self.layout
+    }
+
+    /// The bank's lanes, populated or padded.
+    #[must_use]
+    pub const fn lanes(&self) -> usize {
+        self.width.lanes() as usize
+    }
+
+    /// Restores a plan swap's carry refused on this stage (#1279 D6). Saturating.
+    #[must_use]
+    pub const fn carry_refused(&self) -> u64 {
+        self.carry_refused
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Whether [`Self::carry_lane_from`] would take `predecessor`'s lane `predecessor_lane` into
+    /// this stage's lane `lane` with a scratch of `scratch_bytes`: both lanes exist, both banks
+    /// run one layout, and the scratch holds the payload. Allocation-free and bounded.
+    #[must_use]
+    pub fn can_carry_lane_from(
+        &self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch_bytes: usize,
+    ) -> bool {
+        lane < self.lanes()
+            && predecessor_lane < predecessor.lanes()
+            && self.layout == predecessor.layout
+            && usize::try_from(self.layout.payload_bytes())
+                .is_ok_and(|payload| payload <= scratch_bytes)
+    }
+
+    /// Move `predecessor`'s lane `predecessor_lane` -- its whole state payload, a ramp in flight
+    /// included -- into this stage's lane `lane`, through `scratch`, at the swap block (#1279 D3):
+    /// snapshot the predecessor lane, restore it here, then recompute the witness this stage holds
+    /// for the lane (D5). Returns whether the lane was taken.
+    ///
+    /// The caller has checked [`Self::can_carry_lane_from`], and has disengaged `predecessor`'s
+    /// chain ([`BankChain::disengage_for_carry`]) so a collapsed bank's right channel holds the
+    /// state a dual run would (D4): the payload is then the one a dual run writes, and the restore
+    /// continues it bit for bit.
+    ///
+    /// A snapshot or a restore that refuses leaves this lane as prepared, at rest -- a restore
+    /// validates the whole payload before it commits, so a refused one changes nothing -- and
+    /// counts in [`Self::carry_refused`] (D6). An own payload is never refused, so a count above
+    /// zero is a defect, and it never panics here. Allocation-free and bounded by the prepared
+    /// state size.
+    pub fn carry_lane_from(
+        &mut self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        scratch: &mut [u8],
+    ) -> bool {
+        let sizes = self.layout.state_sizes;
+        let taken = (|| {
+            if !self.can_carry_lane_from(lane, predecessor, predecessor_lane, scratch.len()) {
+                return None;
+            }
+            let (common, rest) = scratch.split_at_mut_checked(sizes.common_bytes as usize)?;
+            let (left, rest) = rest.split_at_mut_checked(sizes.left_bytes as usize)?;
+            let right = rest.get_mut(..sizes.right_bytes as usize)?;
+            predecessor
+                .processor
+                .snapshot_track_state_payload(
+                    u32::try_from(predecessor_lane).ok()?,
+                    StatePayloadOutput::new(common, left, right, sizes).ok()?,
+                )
+                .ok()?;
+            let (common, left, right): (&[u8], &[u8], &[u8]) = (common, left, right);
+            self.processor
+                .restore_track_state_payload(
+                    u32::try_from(lane).ok()?,
+                    self.layout.state_layout_version,
+                    StatePayloadInput::new(common, left, right, sizes).ok()?,
+                )
+                .ok()?;
+            Some(left == right)
+        })();
+        match taken {
+            Some(restored) => {
+                self.witness[lane] =
+                    lane_witness(self.processor.lane_channel_symmetry(lane), restored);
+                true
+            }
+            None => {
+                self.carry_refused = self.carry_refused.saturating_add(1);
+                false
+            }
+        }
+    }
+    // REALTIME_POLICY_END
 }
 
 impl BankStage for EffectBankStage {
@@ -861,7 +1012,10 @@ impl BankStage for EffectBankStage {
     /// A live-control-free bank has no live channel at all, so the two live terms cannot be false
     /// and the whole witness is the effect's own designed-word comparison.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
-        witness_of_designed(self.designed.get(lane).copied().unwrap_or(false))
+        self.witness
+            .get(lane)
+            .copied()
+            .unwrap_or(ChannelSymmetryWitness::DECLINED)
     }
 
     /// Every prepared effect sits in `simd1`, `dynamic` or `simd2`, all three upstream of the
@@ -880,6 +1034,10 @@ impl BankStage for EffectBankStage {
 
     fn channels_agree(&self) -> bool {
         self.processor.channels_agree()
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
     }
 
     // REALTIME_POLICY_BEGIN
@@ -933,6 +1091,21 @@ pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
         ChannelSymmetryWitness::SYMMETRIC
     } else {
         ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
+    }
+}
+
+/// The witness of a live-control-free bank lane: the designed-word comparison, and whether the
+/// lane's last restored payload had equal left and right sections (`true` for a lane never
+/// restored). The two terms an [`EffectBankStage`] decides for itself; the rest hold, or are
+/// decided elsewhere.
+const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness {
+    let witness = witness_of_designed(designed);
+    if restored {
+        witness
+    } else {
+        witness.and(ChannelSymmetryWitness::symmetric_except(
+            ChannelSymmetryWitness::RESTORED,
+        ))
     }
 }
 
@@ -7366,5 +7539,301 @@ mod tests {
                 assert!(names[2..].iter().all(|name| name.is_empty()), "{what}");
             }
         }
+    }
+}
+
+/// The plan-swap carry of an [`EffectBankStage`] lane (#1279 D3, D5, D6), against a bank whose
+/// payload holds exactly what the stage's witness reads.
+#[cfg(test)]
+mod effect_lane_carry_tests {
+    use super::*;
+    use effect_contract::{
+        BankProcessReport, EffectQuality, LinkMode, PreparedBankMetadata, PreparedPorts, ResetKind,
+        StatePayloadError, TailSamples,
+    };
+
+    const LANES: usize = 4;
+    /// Per channel: one running word and one designed word, four bytes each.
+    const SIZES: StatePayloadSizes = StatePayloadSizes {
+        common_bytes: 0,
+        left_bytes: 8,
+        right_bytes: 8,
+    };
+
+    /// One channel of one lane: the running word a block advances and the designed word the
+    /// witness compares between the channels.
+    type Channel = [u32; 2];
+
+    /// A bank whose lanes hold `[left, right]` channels, whose payload is those channels' bytes,
+    /// whose `lane_channel_symmetry` is the designed words' equality, and whose block writes each
+    /// lane's running words into the planes, so a test reads a lane's state off the output.
+    struct WordBank {
+        lanes: [[Channel; 2]; LANES],
+        refuse_restore: bool,
+    }
+
+    impl WordBank {
+        fn new(lanes: [[Channel; 2]; LANES]) -> Self {
+            Self {
+                lanes,
+                refuse_restore: false,
+            }
+        }
+
+        fn bound(self, layout_version: u32) -> PreparedEffectBank {
+            PreparedEffectBank {
+                processor: Box::new(self),
+                metadata: PreparedBankMetadata {
+                    width: BankWidth::Four,
+                    program_key: EffectProgramKey {
+                        effect_id: EffectId::parse("mock.words").expect("id"),
+                        contract_major: 1,
+                        state_layout_version: layout_version,
+                        sample_rate: 48_000,
+                        quantum: 8,
+                        quality: EffectQuality::Normal,
+                        bypass: false,
+                        link_mode: LinkMode::DualMono,
+                        ports: PreparedPorts {
+                            sidechain: effect_contract::PreparedSidechainPort::None,
+                        },
+                        latency: LatencySamples(0),
+                        tail: TailSamples::Finite(0),
+                        tail_every_peak: TailSamples::Infinite,
+                        rest: effect_contract::RestBound::Unstated,
+                        composition: effect_contract::CompositionBound::Unstated,
+                        state_sizes: SIZES,
+                        scratch_bytes: 0,
+                        automation_capacity: 0,
+                    },
+                },
+            }
+        }
+    }
+
+    fn bytes(channel: Channel) -> [u8; 8] {
+        let mut out = [0_u8; 8];
+        out[..4].copy_from_slice(&channel[0].to_le_bytes());
+        out[4..].copy_from_slice(&channel[1].to_le_bytes());
+        out
+    }
+
+    fn word(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes(bytes.try_into().expect("four bytes"))
+    }
+
+    impl PreparedNativeEffectBank for WordBank {
+        fn reset(&mut self, _kind: ResetKind) {}
+
+        fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+            for lane in 0..LANES {
+                block.left[lane] = f32::from_bits(self.lanes[lane][0][0]);
+                block.right[lane] = f32::from_bits(self.lanes[lane][1][0]);
+            }
+            BankProcessReport::empty(BankWidth::Four)
+        }
+
+        fn snapshot_track_state_payload(
+            &self,
+            track_index: u32,
+            output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            let lane = self
+                .lanes
+                .get(track_index as usize)
+                .ok_or(StatePayloadError {
+                    code: "effect.state.lane",
+                })?;
+            output.left.copy_from_slice(&bytes(lane[0]));
+            output.right.copy_from_slice(&bytes(lane[1]));
+            Ok(())
+        }
+
+        fn restore_track_state_payload(
+            &mut self,
+            track_index: u32,
+            _state_layout_version: u32,
+            input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            if self.refuse_restore {
+                return Err(StatePayloadError {
+                    code: "effect.state.refused",
+                });
+            }
+            let lane = self
+                .lanes
+                .get_mut(track_index as usize)
+                .ok_or(StatePayloadError {
+                    code: "effect.state.lane",
+                })?;
+            *lane = [
+                [word(&input.left[..4]), word(&input.left[4..])],
+                [word(&input.right[..4]), word(&input.right[4..])],
+            ];
+            Ok(())
+        }
+
+        fn lane_channel_symmetry(&self, lane: usize) -> bool {
+            self.lanes[lane][0][1] == self.lanes[lane][1][1]
+        }
+    }
+
+    fn stage(lanes: [[Channel; 2]; LANES], layout_version: u32) -> EffectBankStage {
+        EffectBankStage::new(
+            WordBank::new(lanes).bound(layout_version),
+            BankWidth::Four,
+            8,
+        )
+        .expect("stage")
+    }
+
+    /// Lane `n` at rest: running word `n`, designed word `100 + n`, equal on both channels.
+    fn at_rest() -> [[Channel; 2]; LANES] {
+        core::array::from_fn(|lane| {
+            let channel = [lane as u32 + 1, 100 + lane as u32];
+            [channel, channel]
+        })
+    }
+
+    /// The running word of `lane`'s left channel, read off one block.
+    fn running(stage: &mut EffectBankStage) -> [u32; LANES] {
+        let (mut left, mut right) = ([0.0_f32; LANES], [0.0_f32; LANES]);
+        stage
+            .process(BankBlock {
+                left: &mut left,
+                right: &mut right,
+                frames: 1,
+                first_sample: 0,
+                lanes: LANES,
+            })
+            .expect("block");
+        core::array::from_fn(|lane| left[lane].to_bits())
+    }
+
+    /// The lane moves to the lane index it is given, not the one it came from: successor lane 2
+    /// takes predecessor lane 1's state, and no other lane changes.
+    #[test]
+    fn a_carried_lane_lands_on_the_lane_it_was_given() {
+        let mut predecessor_lanes = at_rest();
+        predecessor_lanes[1] = [[41, 100 + 1], [42, 100 + 1]];
+        let predecessor = stage(predecessor_lanes, 1);
+        let mut successor = stage(at_rest(), 1);
+        let mut scratch = [0_u8; 16];
+        assert!(successor.carry_lane_from(2, &predecessor, 1, &mut scratch));
+        assert_eq!(running(&mut successor), [1, 2, 41, 4]);
+        assert_eq!(successor.carry_refused(), 0);
+    }
+
+    /// D5, the `DESIGNED` term: the restored payload's designed words differ between the channels,
+    /// so the stage's cached answer for the lane (symmetric at bind) is stale and the witness must
+    /// say so. A stage that restores without recomputing keeps the bind-time answer and collapses
+    /// a lane whose channels run on different words.
+    #[test]
+    fn a_restored_lane_recomputes_the_designed_term() {
+        let mut predecessor_lanes = at_rest();
+        predecessor_lanes[1] = [[7, 300], [7, 301]];
+        let predecessor = stage(predecessor_lanes, 1);
+        let mut successor = stage(at_rest(), 1);
+        assert!(successor.lane_symmetry(2).eligible());
+        let mut scratch = [0_u8; 16];
+        assert!(successor.carry_lane_from(2, &predecessor, 1, &mut scratch));
+        assert_eq!(
+            successor.lane_symmetry(2).declined(),
+            ChannelSymmetryWitness::DESIGNED | ChannelSymmetryWitness::RESTORED
+        );
+        // The lanes this stage did not restore keep their witness.
+        for lane in [0, 1, 3] {
+            assert!(successor.lane_symmetry(lane).eligible(), "lane {lane}");
+        }
+    }
+
+    /// D5, the `RESTORED` term, alone: the designed words agree but the running words of the two
+    /// channels do not, so only the payload's sections tell the stage the channels diverged. A
+    /// restore that skips the section comparison collapses a lane whose state disagrees.
+    #[test]
+    fn a_restored_lane_with_divergent_sections_clears_the_restored_term() {
+        let mut predecessor_lanes = at_rest();
+        predecessor_lanes[0] = [[5, 100], [6, 100]];
+        let predecessor = stage(predecessor_lanes, 1);
+        let mut successor = stage(at_rest(), 1);
+        let mut scratch = [0_u8; 16];
+        assert!(successor.carry_lane_from(3, &predecessor, 0, &mut scratch));
+        assert_eq!(
+            successor.lane_symmetry(3).declined(),
+            ChannelSymmetryWitness::RESTORED
+        );
+    }
+
+    /// A lane restored from equal sections stays eligible: the carry never costs a lane its
+    /// collapse (gate 2 of #1279 rests on it).
+    #[test]
+    fn a_restored_lane_with_equal_sections_stays_eligible() {
+        let predecessor = stage(at_rest(), 1);
+        let mut successor = stage(at_rest(), 1);
+        let mut scratch = [0_u8; 16];
+        assert!(successor.carry_lane_from(0, &predecessor, 3, &mut scratch));
+        assert!(successor.lane_symmetry(0).eligible());
+    }
+
+    /// D6: a restore that refuses leaves the lane as prepared and counts, saturating, and never
+    /// panics.
+    #[test]
+    fn a_refused_restore_leaves_the_lane_at_rest_and_counts() {
+        let mut predecessor_lanes = at_rest();
+        predecessor_lanes[1] = [[41, 101], [42, 101]];
+        let predecessor = stage(predecessor_lanes, 1);
+        let mut refusing = WordBank::new(at_rest());
+        refusing.refuse_restore = true;
+        let mut successor =
+            EffectBankStage::new(refusing.bound(1), BankWidth::Four, 8).expect("stage");
+        let mut scratch = [0_u8; 16];
+        assert!(!successor.carry_lane_from(2, &predecessor, 1, &mut scratch));
+        assert_eq!(successor.carry_refused(), 1);
+        assert_eq!(
+            running(&mut successor),
+            [1, 2, 3, 4],
+            "the lane is as prepared"
+        );
+        assert!(
+            successor.lane_symmetry(2).eligible(),
+            "its witness is unchanged"
+        );
+        assert!(!successor.carry_lane_from(2, &predecessor, 1, &mut scratch));
+        assert_eq!(successor.carry_refused(), 2);
+        successor.carry_refused = u64::MAX;
+        assert!(!successor.carry_lane_from(2, &predecessor, 1, &mut scratch));
+        assert_eq!(successor.carry_refused(), u64::MAX, "saturating");
+    }
+
+    /// D1: two lanes of different payload layouts, a lane past the bank and a scratch too small
+    /// for the payload are not carried, and a carry that is asked for anyway counts and moves
+    /// nothing.
+    #[test]
+    fn lanes_that_do_not_fit_are_not_carried() {
+        let predecessor = stage(at_rest(), 1);
+        let other_layout = stage(at_rest(), 2);
+        let mut successor = stage(at_rest(), 1);
+        assert!(successor.can_carry_lane_from(0, &predecessor, 3, 16));
+        assert!(
+            !successor.can_carry_lane_from(0, &other_layout, 3, 16),
+            "layout version"
+        );
+        assert!(
+            !successor.can_carry_lane_from(LANES, &predecessor, 0, 16),
+            "successor lane"
+        );
+        assert!(
+            !successor.can_carry_lane_from(0, &predecessor, LANES, 16),
+            "predecessor lane"
+        );
+        assert!(
+            !successor.can_carry_lane_from(0, &predecessor, 3, 15),
+            "scratch"
+        );
+        let mut short = [0_u8; 15];
+        assert!(!successor.carry_lane_from(0, &predecessor, 3, &mut short));
+        assert!(!successor.carry_lane_from(0, &other_layout, 3, &mut [0_u8; 16]));
+        assert_eq!(successor.carry_refused(), 2);
+        assert_eq!(running(&mut successor), [1, 2, 3, 4]);
     }
 }

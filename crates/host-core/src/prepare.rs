@@ -565,10 +565,13 @@ pub struct PreparedHost {
 
 impl PreparedHost {
     /// The strip IDs present in both this plan and the plan it was prepared to displace for which
-    /// at least one fader, mute or matrix stage does not carry, so it starts at rest (#1277 D4,
-    /// D6): a prepared value differs, the two plans bank the stage in different forms or attach
-    /// different control kinds. Sorted. Added strips are not listed, and neither is any strip of a
-    /// plan prepared without a predecessor. *Duck-swap a strip whose state cannot continue across
+    /// at least one fader, mute or matrix stage or console effect slot does not carry, so it
+    /// starts at rest (#1277 D4, D6; #1279 D1): a prepared value differs, the two plans bank the
+    /// stage in different forms or attach different control kinds, or a console slot has no
+    /// effect bank lane without live control in both plans. A strip whose effect chain changed (an
+    /// insert added, removed or reordered, or a session console slot added, removed or moved) is
+    /// listed too, even when its remaining owners carry (D15-9). Sorted. Added strips are not
+    /// listed, and neither is any strip of a plan prepared without a predecessor. *Duck-swap a strip whose state cannot continue across
     /// a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
@@ -602,6 +605,8 @@ pub struct PlanStateInventory {
     input_sections: Box<[InputSectionInventoryRow]>,
     /// Sorted by strip ID, then owner.
     strip_stages: Box<[StripStageInventoryRow]>,
+    /// Sorted by strip ID, rack, then effect ID.
+    effect_lanes: Box<[EffectLaneInventoryRow]>,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -625,6 +630,25 @@ pub(crate) struct StripStageInventoryRow {
     /// Whether this plan attached latest-target cells to the strip's fader, mute and matrix
     /// stages (the control kind of #1277 D4).
     pub(crate) live: bool,
+}
+
+/// One banked effect lane of a prepared plan, owner key `(strip ID, rack, effect ID)` (issue
+/// #1279 D1): a lane of a bank stage with no live control lane. A console slot's effect ID is its
+/// slot ID, and its rack is `Simd1` in `pre_insert` and `Simd2` in `post_insert`. A lane of a
+/// bank with a live control lane, a lowered bypass or no bank at all has no row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EffectLaneInventoryRow {
+    /// The strip ID: a track's or a submix's.
+    pub(crate) id: Box<str>,
+    /// The rack the effect sits in.
+    pub(crate) rack: graph::RackId,
+    /// The effect ID: a console slot's slot ID.
+    pub(crate) effect_id: Box<str>,
+    /// Where the lane sits in this plan. Meaningful only to this plan's successor's carry
+    /// program, which names it as the lane to copy from.
+    pub(crate) location: graph::GraphLaneLocation,
+    /// What the successor's lane must share with this one for the state to move.
+    pub(crate) layout: graph::EffectLaneLayout,
 }
 
 /// One banked strip input section of a prepared plan, owner key `(strip ID,
@@ -681,6 +705,24 @@ impl PlanStateInventory {
         self.strip_stages.len()
     }
 
+    /// Banked effect lane rows, one per lane of an effect bank stage with no live control lane
+    /// (issue #1279).
+    #[must_use]
+    pub fn effect_lane_count(&self) -> usize {
+        self.effect_lanes.len()
+    }
+
+    /// The row of effect `effect_id` in `rack` of strip `id`, if the plan banks one.
+    #[must_use]
+    pub(crate) fn effect_lane(
+        &self,
+        id: &str,
+        rack: graph::RackId,
+        effect_id: &str,
+    ) -> Option<&EffectLaneInventoryRow> {
+        effect_lane_row(&self.effect_lanes, id, rack, effect_id)
+    }
+
     /// The row of `owner`'s stage of strip `id`, if the plan banks one.
     #[must_use]
     pub(crate) fn strip_stage(
@@ -705,11 +747,17 @@ impl PlanStateInventory {
                 .iter()
                 .map(|row| row.id.len())
                 .sum::<usize>()
+            + self
+                .effect_lanes
+                .iter()
+                .map(|row| row.id.len() + row.effect_id.len())
+                .sum::<usize>()
             + self.restarted.iter().map(|id| id.len()).sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
                 + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
                 + core::mem::size_of_val::<[StripStageInventoryRow]>(&self.strip_stages)
+                + core::mem::size_of_val::<[EffectLaneInventoryRow]>(&self.effect_lanes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + ids,
         )
@@ -727,7 +775,10 @@ impl PlanStateInventory {
 /// values is written to the successor's cells as a retarget stamped with `revision`, so the
 /// stage sounds as "live edit, then structural edit" (D15-7). A source carries when its ID is in
 /// both models, its declaration (content, channels, bit depth, frames) is equal, and its ring
-/// configuration is the inventory row's; which tracks read it does not matter.
+/// configuration is the inventory row's; which tracks read it does not matter. A console effect
+/// slot (#1279) carries when no prepared value of it differs, its two plans bank it in an effect
+/// stage with no live control lane, and the prepared layouts of the two lanes are equal; a
+/// strip whose effect chain changed restarts even if its remaining slots carry.
 #[derive(Clone, Copy, Debug)]
 pub struct SuccessorBase<'a> {
     /// The predecessor's [`PreparedHost::inventory`].
@@ -1475,13 +1526,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         None => Vec::new(),
         Some(base) => join_strips(base.committed, model, live_strips),
     };
+    // Issue #1279 D1: how each strip's console slots and effect chain differ between the
+    // predecessor's base and this model, resolved against the plans' lanes once this plan is
+    // bound.
+    let chain_joins: Vec<ChainJoin<'_>> = match successor {
+        None => Vec::new(),
+        Some(base) => join_chains(base.committed, model),
+    };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
     let carry_program = match successor {
         Some(base)
             if !carried_sources.is_empty()
                 || !carried_inputs.is_empty()
-                || strip_joins.iter().any(StripJoin::may_carry) =>
+                || strip_joins.iter().any(StripJoin::may_carry)
+                || chain_joins.iter().any(ChainJoin::may_carry) =>
         {
             Some(graph::GraphCarryProgram {
                 predecessor: base.inventory.plan_identity(),
@@ -2067,24 +2126,70 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(resource("host.graph.resource.limit"));
     }
+    // Issue #1279 D1: this plan's own effect bank lanes, sorted by owner key: the inventory its
+    // successor joins with, and the table the join below looks this plan's lanes up in.
+    let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?
+        .into_iter()
+        .map(|(id, lane)| EffectLaneInventoryRow {
+            id,
+            rack: lane.rack,
+            effect_id: lane.effect_id,
+            location: lane.location,
+            layout: lane.layout,
+        })
+        .collect();
+    effect_lanes.sort_unstable_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.rack.cmp(&right.rack))
+            .then_with(|| left.effect_id.cmp(&right.effect_id))
+    });
+    let effect_carry = match successor {
+        Some(base) => resolve_effect_carry(base.inventory, &chain_joins, &effect_lanes),
+        None => EffectCarry::default(),
+    };
+    // The effect moves' table and payload scratch are charged at their exact size, against the
+    // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
+    let effect_carry_bytes =
+        graph::effect_carry_retained_bytes(effect_carry.moves.len(), effect_carry.scratch_bytes)
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    if effect_carry.scratch_bytes > caps.maximum_named_allocation_bytes {
+        return Err(resource("host.resource.limit"));
+    }
+    if admitted_graph_and_model
+        .checked_add(strip_carry_bytes)
+        .and_then(|bytes| bytes.checked_add(effect_carry_bytes))
+        .ok_or_else(|| resource("host.resource.arithmetic"))?
+        > caps.maximum_graph_session_plus_plan_bytes
+    {
+        return Err(resource("host.graph.resource.limit"));
+    }
     if !strip_carry.moves.is_empty() {
         graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
+    if !effect_carry.moves.is_empty() {
+        graph::install_effect_carry(&mut plan, effect_carry.moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     debug_assert_eq!(
         carry_program_retained_bytes,
-        carry_program_bytes + strip_carry_bytes
+        carry_program_bytes + strip_carry_bytes + effect_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let mut restarted = strip_carry.restarted;
+    restarted.extend(effect_carry.restarted);
     restarted.sort_unstable();
+    restarted.dedup();
     let inventory = PlanStateInventory {
         plan_identity: graph::plan_identity(&mut plan)
             .ok_or_else(|| graph_failure("host.inventory.identity"))?,
         sources: inventory_sources.into_boxed_slice(),
         input_sections: input_sections.into_boxed_slice(),
         strip_stages: strip_stages.into_boxed_slice(),
+        effect_lanes: effect_lanes.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
     };
     let report = HostPrepareReport {
@@ -2650,6 +2755,226 @@ fn resolve_strip_carry<'a>(
                 fader,
                 matrix,
             });
+        }
+    }
+    carry
+}
+
+/// Effect `effect_id` in `rack` of strip `id` in `rows`, which are sorted by strip ID, rack, then
+/// effect ID.
+fn effect_lane_row<'a>(
+    rows: &'a [EffectLaneInventoryRow],
+    id: &str,
+    rack: graph::RackId,
+    effect_id: &str,
+) -> Option<&'a EffectLaneInventoryRow> {
+    rows.binary_search_by(|row| {
+        (*row.id)
+            .cmp(id)
+            .then(row.rack.cmp(&rack))
+            .then_with(|| (*row.effect_id).cmp(effect_id))
+    })
+    .ok()
+    .map(|index| &rows[index])
+}
+
+/// One console slot of a strip present in both models, and whether the successor's model leaves
+/// every prepared value of it as the predecessor's base holds it (#1279 D1).
+struct ConsoleOwnerJoin<'a> {
+    /// `Simd1` for a `pre_insert` slot, `Simd2` for a `post_insert` one.
+    rack: graph::RackId,
+    /// The slot ID, which is the effect ID of the owner key.
+    slot: &'a str,
+    /// The slot's identity, quality and link mode (session-level), and this strip's bypass and
+    /// parameter values for it, are bit-equal in both models, and the slot sits in the same
+    /// section. An effect bank stage without a live control lane has no live value, so every
+    /// difference is prepared (D2).
+    same: bool,
+}
+
+/// One strip present in both models, with how its console slots and effect chain differ.
+struct ChainJoin<'a> {
+    id: &'a str,
+    /// An insert was added, removed or reordered, or a session console slot was added, removed or
+    /// moved: the chain's processing changed, so the strip restarts even when every remaining
+    /// owner carries (D15-9).
+    chain_changed: bool,
+    /// The strip's console slots in the successor's model.
+    owners: Vec<ConsoleOwnerJoin<'a>>,
+}
+
+impl ChainJoin<'_> {
+    /// Whether any console slot of the strip could carry.
+    fn may_carry(&self) -> bool {
+        self.owners.iter().any(|owner| owner.same)
+    }
+}
+
+/// The session console slots in chain order, each with its rack.
+fn console_slots(model: &SessionModel) -> Vec<(graph::RackId, &session::ConsoleSlot)> {
+    model
+        .console
+        .pre_insert
+        .iter()
+        .map(|slot| (graph::RackId::Simd1, slot))
+        .chain(
+            model
+                .console
+                .post_insert
+                .iter()
+                .map(|slot| (graph::RackId::Simd2, slot)),
+        )
+        .collect()
+}
+
+/// Whether two strips' knobs for one console slot are bit-equal: bypass and every parameter.
+fn same_console_entry(left: &session::ConsoleEntry, right: &session::ConsoleEntry) -> bool {
+    left.bypass == right.bypass
+        && left.params.len() == right.params.len()
+        && left.params.iter().zip(&right.params).all(|(left, right)| {
+            left.parameter_id == right.parameter_id
+                && left.channel == right.channel
+                && left.unit == right.unit
+                && left.value.to_bits() == right.value.to_bits()
+        })
+}
+
+/// The console entries and inserts `strip` had in `committed`, among strips of its own kind
+/// (#1279 D1). A strip whose kind changed is not found.
+fn committed_chain<'a>(
+    committed: &'a SessionModel,
+    strip: &StripRef<'_>,
+) -> Option<(&'a [session::ConsoleEntry], &'a [session::Effect])> {
+    let id = strip.id.as_str();
+    match strip.kind {
+        StripKind::Track(_) => committed
+            .tracks
+            .binary_search_by(|track| track.id.as_str().cmp(id))
+            .ok()
+            .map(|index| {
+                let track = &committed.tracks[index];
+                (&*track.console, &*track.inserts.effects)
+            }),
+        StripKind::Submix(_) => committed
+            .submixes
+            .binary_search_by(|submix| submix.id.as_str().cmp(id))
+            .ok()
+            .map(|index| {
+                let submix = &committed.submixes[index];
+                (&*submix.console, &*submix.inserts.effects)
+            }),
+    }
+}
+
+/// The model half of the console-effect join (#1279 D1): for every strip of `model` that
+/// `committed` also has, whether its effect chain changed and which console slots keep every
+/// prepared value.
+///
+/// An insert is not an owner of this slice (its lane carries with #1281 and #1282), but an insert
+/// added, removed or reordered changes the chain. A strip whose kind changed has no counterpart:
+/// its chain is changed and no slot carries.
+fn join_chains<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<ChainJoin<'a>> {
+    let committed_slots = console_slots(committed);
+    let slots = console_slots(model);
+    let console_changed = committed_slots.len() != slots.len()
+        || committed_slots
+            .iter()
+            .zip(&slots)
+            .any(|((before_rack, before), (rack, slot))| {
+                before_rack != rack || before.slot != slot.slot
+            });
+    let mut joins = Vec::new();
+    for strip in model.strips() {
+        let id = strip.id.as_str();
+        let Some((before_console, before_inserts)) = committed_chain(committed, &strip) else {
+            if committed_has_strip(committed, id) {
+                joins.push(ChainJoin {
+                    id,
+                    chain_changed: true,
+                    owners: Vec::new(),
+                });
+            }
+            continue;
+        };
+        let inserts = &strip.inserts.effects;
+        let inserts_changed = before_inserts.len() != inserts.len()
+            || before_inserts.iter().zip(inserts).any(|(before, insert)| {
+                before.id != insert.id || before.identity != insert.identity
+            });
+        let owners = slots
+            .iter()
+            .zip(strip.console)
+            .map(|((rack, slot), entry)| {
+                let same = committed_slots
+                    .iter()
+                    .position(|(_, before)| before.slot == slot.slot)
+                    .and_then(|index| {
+                        let (before_rack, before_slot) = committed_slots[index];
+                        let before_entry = before_console.get(index)?;
+                        Some(
+                            before_rack == *rack
+                                && before_slot == *slot
+                                && same_console_entry(before_entry, entry),
+                        )
+                    })
+                    .unwrap_or(false);
+                ConsoleOwnerJoin {
+                    rack: *rack,
+                    slot: slot.slot.as_str(),
+                    same,
+                }
+            })
+            .collect();
+        joins.push(ChainJoin {
+            id,
+            chain_changed: console_changed || inserts_changed,
+            owners,
+        });
+    }
+    joins
+}
+
+/// What the console-effect join resolved against both plans' lanes.
+#[derive(Default)]
+struct EffectCarry {
+    moves: Vec<graph::GraphEffectMove>,
+    restarted: Vec<Box<str>>,
+    /// The largest payload of a carried lane: the scratch every move goes through.
+    scratch_bytes: u64,
+}
+
+/// The lane half of the console-effect join (#1279 D1, D2): which console slot of which strip
+/// moves, and which strips restart.
+///
+/// A slot carries when no prepared value of it differs and both plans hold it as a lane of an
+/// effect bank stage with no live control lane, with equal layouts (prepared bypass, latency, state
+/// sizes and state layout version). A lane of a stage with a live control lane or a lowered bypass
+/// has no row: it does not carry here (#1280) and its strip restarts. A strip with a slot that does
+/// not carry, or whose chain changed, is listed in `restarted`.
+fn resolve_effect_carry(
+    predecessor: &PlanStateInventory,
+    joins: &[ChainJoin<'_>],
+    own: &[EffectLaneInventoryRow],
+) -> EffectCarry {
+    let mut carry = EffectCarry::default();
+    for join in joins {
+        let mut restart = join.chain_changed;
+        for owner in &join.owners {
+            let rows = effect_lane_row(own, join.id, owner.rack, owner.slot)
+                .zip(predecessor.effect_lane(join.id, owner.rack, owner.slot));
+            match rows {
+                Some((own, before)) if owner.same && own.layout == before.layout => {
+                    carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
+                    carry.moves.push(graph::GraphEffectMove {
+                        successor: own.location,
+                        predecessor: before.location,
+                    });
+                }
+                _ => restart = true,
+            }
+        }
+        if restart {
+            carry.restarted.push(join.id.into());
         }
     }
     carry

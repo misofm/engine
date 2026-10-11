@@ -3465,3 +3465,822 @@ fn a_preparation_without_a_retarget_stamps_nothing() {
     gate.stamp(successor::SUCCESSOR_REVISION + 5)
         .expect("a different revision stamps on a handle with no open stamp");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1279: a console effect lane keeps its state through a plan swap.
+//
+// A console slot with no live control lane is an `EffectBankStage`; the carry moves each lane
+// through the payload calls (D3), recomputes the witness the stage caches for it (D5) and counts a
+// refusal (D6). These cases prepare their plans with no live controls, the form that stage has.
+// A slot with live controls is #1280's.
+
+use session::{
+    ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode,
+    ParameterChannel, ParameterUnit, SidechainDeclaration,
+};
+
+/// One slot of the console the cases build.
+struct ConsoleEffect {
+    slot: &'static str,
+    effect: &'static str,
+    /// In `post_insert`; else in `pre_insert`.
+    post: bool,
+    link_mode: LinkMode,
+}
+
+/// All six console-eligible effects: the EQ, compressor, gate/expander and transient shaper
+/// before the inserts, the soft-clip and the true-peak limiter after them.
+const CONSOLE_EFFECTS: [ConsoleEffect; 6] = [
+    ConsoleEffect {
+        slot: "eq",
+        effect: "miso.parametric-eq",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "comp",
+        effect: "miso.compressor",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "gate",
+        effect: "miso.gate-expander",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "transient",
+        effect: "miso.transient-shaper",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "clip",
+        effect: "miso.soft-clip",
+        post: true,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "limiter",
+        effect: "miso.true-peak-limiter",
+        post: true,
+        link_mode: LinkMode::Maximum,
+    },
+];
+
+fn param(parameter_id: u32, unit: ParameterUnit, value: f32) -> EffectParam {
+    EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    }
+}
+
+fn param_on(
+    parameter_id: u32,
+    channel: ParameterChannel,
+    unit: ParameterUnit,
+    value: f32,
+) -> EffectParam {
+    EffectParam {
+        channel,
+        ..param(parameter_id, unit, value)
+    }
+}
+
+/// Strip `index`'s knobs for console slot `slot`: every strip differs, so a lane carried to the
+/// wrong strip is heard. `mono` makes the two channels' values equal, so the chain can collapse.
+fn console_params(slot: &str, index: usize, mono: bool) -> Vec<EffectParam> {
+    use ParameterChannel::{Left, Right};
+    use ParameterUnit::{Db, Hz, Linear, Milliseconds, Ratio};
+    let step = index as f32;
+    match slot {
+        "eq" => vec![
+            param(1, Linear, 1.0),
+            param(2, Linear, 1.0),
+            param_on(3, Left, Hz, 90.0 + 10.0 * step),
+            param_on(
+                3,
+                Right,
+                Hz,
+                if mono { 90.0 + 10.0 * step } else { 2_400.0 },
+            ),
+            param_on(4, Left, Db, 5.0 - 0.5 * step),
+            param_on(4, Right, Db, if mono { 5.0 - 0.5 * step } else { -4.0 }),
+            param(5, Ratio, 0.7),
+            param(6, Ratio, 1.0),
+        ],
+        "comp" => vec![
+            param(1, Db, -14.0 - 0.5 * step),
+            param(2, Ratio, 4.0),
+            param(3, Db, 3.0),
+            param(4, Milliseconds, 2.0),
+            param(5, Milliseconds, 40.0),
+            param(6, Db, 0.0),
+            param(7, Linear, 1.0),
+        ],
+        "gate" => vec![
+            param(1, Db, -14.0 - 0.25 * step),
+            param(2, Ratio, 4.0),
+            param(3, Db, 30.0),
+            param(4, Db, 3.0),
+            param(5, Milliseconds, 1.0),
+            param(6, Milliseconds, 5.0),
+            param(7, Milliseconds, 20.0),
+        ],
+        "transient" => vec![
+            param(1, Linear, 0.6 - 0.05 * step),
+            param(2, Linear, -0.4),
+            param(3, Linear, 1.0),
+        ],
+        "clip" => vec![
+            param(1, Db, 9.0 + 0.5 * step),
+            param(2, Db, -3.0),
+            param(3, Linear, 1.0),
+        ],
+        "limiter" => vec![
+            param(1, Db, -8.0 - 0.25 * step),
+            param(2, Milliseconds, 60.0),
+            param(3, Milliseconds, 5.0),
+        ],
+        other => panic!("no parameters for slot {other}"),
+    }
+}
+
+fn console_slot_declaration(effect: &ConsoleEffect) -> ConsoleSlot {
+    ConsoleSlot {
+        slot: id(effect.slot),
+        identity: EffectIdentity::Native {
+            effect_id: id(effect.effect),
+        },
+        quality: EffectQuality::Normal,
+        link_mode: effect.link_mode,
+    }
+}
+
+/// [`filtered_session`] with the console slots named in `slots` (in [`CONSOLE_EFFECTS`] order)
+/// declared and every track configured for them.
+fn console_session(mono: bool, slots: &[&str]) -> SessionModel {
+    let mut model = filtered_session(mono);
+    let chosen: Vec<&ConsoleEffect> = CONSOLE_EFFECTS
+        .iter()
+        .filter(|effect| slots.contains(&effect.slot))
+        .collect();
+    assert_eq!(chosen.len(), slots.len(), "every named slot exists");
+    model.console.pre_insert = chosen
+        .iter()
+        .filter(|effect| !effect.post)
+        .map(|effect| console_slot_declaration(effect))
+        .collect();
+    model.console.post_insert = chosen
+        .iter()
+        .filter(|effect| effect.post)
+        .map(|effect| console_slot_declaration(effect))
+        .collect();
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.console = chosen
+            .iter()
+            .map(|effect| ConsoleEntry {
+                slot: id(effect.slot),
+                bypass: false,
+                params: console_params(effect.slot, index, mono),
+            })
+            .collect();
+    }
+    model
+}
+
+/// [`Feed::new`] with an envelope: loud over frames 0..300 and 500..1000, quiet (a fiftieth of the
+/// level) between and after, so a gate opens and closes and a dynamics effect has an envelope in
+/// flight when the swap block renders (frame 768).
+fn bursty_feed(id: &'static str, seed: u32) -> Feed {
+    let mut feed = Feed::new(id, seed);
+    for plane in &mut feed.planes {
+        for (frame, sample) in plane.iter_mut().enumerate() {
+            if !(frame < 300 || (500..1000).contains(&frame)) {
+                *sample *= 0.02;
+            }
+        }
+    }
+    feed
+}
+
+const ALL_SLOTS: [&str; 6] = ["eq", "comp", "gate", "transient", "clip", "limiter"];
+
+/// What a plain run (plans prepared with no live controls, the successor adopting its predecessor
+/// itself) hands back.
+struct PlainRun {
+    blocks: Vec<Vec<u32>>,
+    carry: CarryOutcome,
+    restarted: Vec<Box<str>>,
+    /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
+    /// deallocations)` over the hand-over plus the successor's first block.
+    swap_allocator: ((u64, u64, u64), (u64, u64)),
+    /// `bank_collapse_counters()` of the predecessor at the swap and of the last plan at the end.
+    collapses: [[u64; 2]; 2],
+    /// `bank_collapse_transitions()` of the last plan at the end.
+    transitions: [u64; 3],
+    /// The successor's `carry_refusal_count()` after the last block (D6).
+    refusals: u64,
+    /// The successor's `carry_program_retained_bytes`.
+    carry_bytes: u64,
+    /// Effect lanes the predecessor's inventory records.
+    effect_lanes: usize,
+}
+
+fn plain_render(prepared: &mut host_core::PreparedHost, output: &mut [f32]) {
+    let sample = prepared.plan.next_absolute_sample();
+    prepared
+        .plan
+        .render_contiguous(
+            engine::realtime::RenderIo {
+                output: engine::realtime::PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM)
+                    .expect("output"),
+            },
+            sample,
+        )
+        .unwrap_or_else(|error| panic!("render: {error:?}"));
+}
+
+/// Render `a` for [`SWAP_BLOCK`] blocks fed `feed`, then -- when `b` is given -- prepare it as
+/// `a`'s successor from `committed`, hand over, and render to [`BLOCKS`]. `successor_dual` forces
+/// the successor's mono collapse off. Without `b` this is the reference: `a` rendered from frame 0.
+fn plain_run(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    feed: &Feed,
+    backend: Backend,
+    successor_dual: bool,
+) -> PlainRun {
+    use bench_support::alloc as bench_alloc;
+    let mut plan = a.prepare(backend);
+    let effect_lanes = plan.inventory.effect_lane_count();
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut carry = CarryOutcome::NotRequested;
+    let mut restarted = Vec::new();
+    let mut swap_allocator = ((0, 0, 0), (0, 0));
+    let mut collapses = [[0; 2]; 2];
+    let mut carry_bytes = 0;
+    feed.submit(&mut plan.sources, 48_000, 0);
+    for block in 0..BLOCKS {
+        if let (SWAP_BLOCK, Some((session, committed))) = (block, b) {
+            collapses[0] = plan.plan.bank_collapse_counters();
+            let mut successor = session
+                .prepare_successor(&plan.inventory, committed, &caps(), backend)
+                .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+            successor.plan.force_mono_collapse_off(successor_dual);
+            restarted = successor.restarted_strips().to_vec();
+            carry_bytes = successor.report.carry_program_retained_bytes;
+            assert_eq!(successor.sources.adopt_persisting(&mut plan.sources), 1);
+            if block + 1 < BLOCKS {
+                feed.submit(&mut successor.sources, 48_000, block + 1);
+            }
+            let mut output = vec![f32::NAN; QUANTUM * 2];
+            engine::realtime::audit::reset();
+            let mark = bench_alloc::current_thread_counters();
+            carry = successor.plan.adopt_predecessor_plan(&mut plan.plan);
+            plain_render(&mut successor, &mut output);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            let audit = engine::realtime::audit::snapshot();
+            swap_allocator = (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            );
+            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            plan = successor;
+            continue;
+        }
+        if block + 1 < BLOCKS {
+            feed.submit(&mut plan.sources, 48_000, block + 1);
+        }
+        let mut output = vec![f32::NAN; QUANTUM * 2];
+        plain_render(&mut plan, &mut output);
+        blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+    }
+    collapses[1] = plan.plan.bank_collapse_counters();
+    PlainRun {
+        blocks,
+        carry,
+        restarted,
+        swap_allocator,
+        collapses,
+        transitions: plan.plan.bank_collapse_transitions(),
+        refusals: graph::carry_refusal_count(&mut plan.plan).expect("a graph plan"),
+        carry_bytes,
+        effect_lanes,
+    }
+}
+
+fn first_plain_difference(left: &PlainRun, right: &PlainRun) -> Option<usize> {
+    assert_eq!(left.blocks.len(), right.blocks.len());
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
+}
+
+/// Gate 1: nine tracks with all six console effects, each doing work on the test signal and each
+/// track configured differently; B adds a muted track whose ID sorts first, so every lane shifts
+/// and two cross into the next bank. Every block of the swapped run equals a fresh B fed from
+/// frame 0, nothing restarts, and no restore is refused.
+fn console_effect_state_survives_a_swap(backend: Backend) {
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let b = Session::compile(with_muted_track(console_session(false, &ALL_SLOTS)));
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(
+        run.carry,
+        CarryOutcome::Carried,
+        "{backend:?}: the swap block"
+    );
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session rendered from frame 0"
+    );
+    assert!(reference.blocks[SWAP_BLOCK].iter().any(|bits| *bits != 0));
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(run.refusals, 0, "{backend:?}: no restore was refused");
+    // Not vacuous: six console effects on nine strips are 54 recorded lanes.
+    assert_eq!(run.effect_lanes, 54, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn console_effect_state_survives_a_swap_at_eight_lanes() {
+    console_effect_state_survives_a_swap(Backend::Simd8);
+}
+
+/// Four lanes: the NEON and simd128 width. A console effect bank binds only at the width its
+/// build executes (decision D4), so on a build with eight lanes this case cannot prepare.
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn console_effect_state_survives_a_swap_at_four_lanes() {
+    console_effect_state_survives_a_swap(Backend::Simd4);
+}
+
+/// Each of the six effects changes the test signal, so a lane it fails to carry is heard: a
+/// session with only that slot differs from a session with no console, after the swap block.
+fn every_console_effect_does_work(backend: Backend) {
+    let feed = bursty_feed(SOURCE, 5);
+    let bare = plain_run(
+        &Session::compile(console_session(false, &[])),
+        None,
+        &feed,
+        backend,
+        false,
+    );
+    for slot in ALL_SLOTS {
+        let with = plain_run(
+            &Session::compile(console_session(false, &[slot])),
+            None,
+            &feed,
+            backend,
+            false,
+        );
+        assert!(
+            with.blocks[SWAP_BLOCK..] != bare.blocks[SWAP_BLOCK..],
+            "{backend:?}: {slot} leaves the signal as it found it"
+        );
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn every_console_effect_does_work_at_eight_lanes() {
+    every_console_effect_does_work(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn every_console_effect_does_work_at_four_lanes() {
+    every_console_effect_does_work(Backend::Simd4);
+}
+
+/// Gate 4: the swap block of gate 1, with every console effect carried, allocates and frees
+/// nothing: not on the allocator and not in the engine's render audit.
+fn the_effect_carry_allocates_and_frees_nothing(backend: Backend) {
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let b = Session::compile(with_muted_track(console_session(false, &ALL_SLOTS)));
+    let feed = bursty_feed(SOURCE, 5);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(run.effect_lanes, 54, "{backend:?}: every lane is carried");
+    assert_eq!(
+        run.swap_allocator,
+        ((0, 0, 0), (0, 0)),
+        "{backend:?}: allocator and render audit over the swap block"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn the_effect_carry_allocates_and_frees_nothing_at_eight_lanes() {
+    the_effect_carry_allocates_and_frees_nothing(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn the_effect_carry_allocates_and_frees_nothing_at_four_lanes() {
+    the_effect_carry_allocates_and_frees_nothing(Backend::Simd4);
+}
+
+/// Gate 2: a mono-source session whose console is the collapse-capable subset (EQ, compressor,
+/// limiter; the gate/expander, soft-clip and transient shaper declare no channel symmetry, so a
+/// chain that holds one never collapses). Its chains collapse before the swap and, because the
+/// carry disengages them and the successor inherits their agreement, on every block after it, with
+/// no agreement proof; with the successor's collapse forced off the carried lanes' right channels
+/// must hold the state the collapsed predecessor never wrote there. Output is bit-identical to a
+/// fresh B either way.
+fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool) {
+    const SLOTS: [&str; 3] = ["eq", "comp", "limiter"];
+    let a = Session::compile(console_session(true, &SLOTS));
+    let b = Session::compile(with_muted_track(console_session(true, &SLOTS)));
+    let feed = bursty_feed(SOURCE, 9);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, successor_dual);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert!(
+        run.collapses[0][0] > 0,
+        "{backend:?}: the predecessor rendered collapsed before the swap"
+    );
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}, successor dual {successor_dual}"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+    assert!(reference.collapses[1][0] > 0);
+    if successor_dual {
+        assert_eq!(run.collapses[1][0], 0, "{backend:?}: forced dual");
+    } else {
+        // Every chain that collapses in the reference collapses on every block after the swap,
+        // and none needed an agreement proof to engage.
+        assert_eq!(
+            run.collapses[1][0] * BLOCKS as u64,
+            reference.collapses[1][0] * (BLOCKS - SWAP_BLOCK) as u64,
+            "{backend:?}: successor collapsed blocks"
+        );
+        assert_eq!(run.transitions[2], 0, "{backend:?}: agreement proofs");
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn console_chains_keep_collapsing_across_a_swap_at_eight_lanes() {
+    console_chains_keep_collapsing(Backend::Simd8, false);
+    console_chains_keep_collapsing(Backend::Simd8, true);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn console_chains_keep_collapsing_across_a_swap_at_four_lanes() {
+    console_chains_keep_collapsing(Backend::Simd4, false);
+    console_chains_keep_collapsing(Backend::Simd4, true);
+}
+
+/// [`console_session`] with the input section's filters, trim and polarity off, so nothing
+/// before the console holds state, and every strip's matrix routes it to one output plane: `solo`
+/// to the left plane, every other strip to the right. A plane then depends on those strips only.
+fn isolated_session(slots: &[&str], solo: &str) -> SessionModel {
+    let mut model = console_session(false, slots);
+    for track in &mut model.tracks {
+        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+            channel.hpf_hz = 0.0;
+            channel.lpf_hz = 0.0;
+            channel.trim_db = 0.0;
+            channel.polarity_invert = false;
+        }
+        track.matrix_or_pan = if track.id.as_str() == solo {
+            MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 0.0,
+                smoothing_samples: 16,
+            }
+        } else {
+            MatrixOrPan::Matrix {
+                ll: 0.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: 16,
+            }
+        };
+    }
+    model
+}
+
+/// `model` with `track`'s `value` of parameter `parameter_id` of console slot `slot` replaced.
+fn with_console_param(
+    mut model: SessionModel,
+    track: &str,
+    slot: &str,
+    parameter_id: u32,
+    value: f32,
+) -> SessionModel {
+    let entry = track_mut(&mut model, track)
+        .console
+        .iter_mut()
+        .find(|entry| entry.slot.as_str() == slot)
+        .expect("console slot");
+    entry
+        .params
+        .iter_mut()
+        .find(|param| param.parameter_id == parameter_id)
+        .expect("parameter")
+        .value = value;
+    model
+}
+
+/// One plane (`0` left, `1` right) of every block of a run.
+fn plane_of(run: &PlainRun, plane: usize) -> Vec<&[u32]> {
+    run.blocks
+        .iter()
+        .map(|block| &block[plane * QUANTUM..(plane + 1) * QUANTUM])
+        .collect()
+}
+
+/// Gate 3, first case. B changes the compressor threshold of strip `eq3` -- a prepared value, since
+/// an effect bank stage has no live lane -- and adds a muted track. That slot does not carry, every
+/// other lane does, and `restarted_strips()` is exactly `eq3`:
+///
+/// * the right plane, which the other strips alone feed, equals a fresh B on every block: their
+///   lanes carried;
+/// * the carry program holds exactly one move fewer than the same swap without the threshold
+///   change: `eq3`'s other slots carried (with a single slot that is none left to count);
+/// * the left plane, which `eq3` alone feeds, differs from the swap that carries the old
+///   threshold: the slot restarted at the new one.
+fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots: &[&str]) {
+    let a_model = isolated_session(slots, "eq3");
+    let changed = with_console_param(with_muted_track(a_model.clone()), "eq3", "comp", 1, -30.0);
+    let a = Session::compile(a_model.clone());
+    let b = Session::compile(changed);
+    let unchanged = Session::compile(with_muted_track(a_model));
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    let carried_all = plain_run(&a, Some((&unchanged, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
+    assert_eq!(carried_all.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(
+        carried_all.carry_bytes - run.carry_bytes,
+        core::mem::size_of::<graph::GraphEffectMove>() as u64,
+        "{backend:?}: one move fewer"
+    );
+    assert_eq!(
+        plane_of(&run, 1),
+        plane_of(&reference, 1),
+        "{backend:?}: the other strips are unmoved"
+    );
+    assert_ne!(
+        plane_of(&run, 0)[SWAP_BLOCK..],
+        plane_of(&carried_all, 0)[SWAP_BLOCK..],
+        "{backend:?}: eq3 restarted at the new threshold"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+/// The first case with a lone compressor slot, where the restarted slot has an exact oracle: the
+/// left plane after the swap is what a fresh B renders from rest on the same PCM, the compressor at
+/// the new threshold with no history. A rule that carries the slot despite its changed threshold
+/// restores the old threshold's designed words and envelope, and differs.
+fn a_restarted_slot_starts_at_rest_at_its_new_value(backend: Backend) {
+    let a_model = isolated_session(&["comp"], "eq3");
+    let changed = with_console_param(with_muted_track(a_model.clone()), "eq3", "comp", 1, -30.0);
+    let a = Session::compile(a_model);
+    let b = Session::compile(changed);
+    let feed = bursty_feed(SOURCE, 5);
+    let from_swap = spliced(SOURCE, &feed, |block| {
+        (block + SWAP_BLOCK < BLOCKS).then_some(block + SWAP_BLOCK)
+    });
+    let at_rest = plain_run(&b, None, &from_swap, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
+    assert_eq!(
+        plane_of(&run, 0)[SWAP_BLOCK..],
+        plane_of(&at_rest, 0)[..BLOCKS - SWAP_BLOCK],
+        "{backend:?}: eq3's compressor starts at rest"
+    );
+    // Not vacuous: the new threshold is heard.
+    let carried_old = plain_run(
+        &a,
+        Some((
+            &Session::compile(with_muted_track(isolated_session(&["comp"], "eq3"))),
+            &a.model,
+        )),
+        &feed,
+        backend,
+        false,
+    );
+    assert_ne!(
+        plane_of(&run, 0)[SWAP_BLOCK..],
+        plane_of(&carried_old, 0)[SWAP_BLOCK..],
+        "{backend:?}"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_eight_lanes() {
+    a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd8, &ALL_SLOTS);
+    a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_four_lanes() {
+    a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd4, &ALL_SLOTS);
+    a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd4);
+}
+
+/// A compressor insert that changes no sample: threshold at 0 dB and ratio 1.
+fn transparent_insert() -> Effect {
+    Effect {
+        id: id("tc"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        params: vec![
+            param(1, ParameterUnit::Db, 0.0),
+            param(2, ParameterUnit::Ratio, 1.0),
+            param(3, ParameterUnit::Db, 0.0),
+            param(4, ParameterUnit::Milliseconds, 2.0),
+            param(5, ParameterUnit::Milliseconds, 40.0),
+            param(6, ParameterUnit::Db, 0.0),
+            param(7, ParameterUnit::Linear, 1.0),
+        ],
+        sidechain: SidechainDeclaration::None,
+    }
+}
+
+/// Gate 3, second case. B adds a compressor insert to strip `eq3` and a muted track. The insert
+/// changes `eq3`'s chain, so `eq3` -- and only `eq3` -- is in the restart set, but every console
+/// slot of every strip, `eq3`'s included, carries: the insert changes no sample, so the swapped run
+/// equals a fresh B on every block only if `eq3`'s console state continued.
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry(backend: Backend) {
+    let mut with_insert = with_muted_track(console_session(false, &ALL_SLOTS));
+    track_mut(&mut with_insert, "eq3")
+        .inserts
+        .effects
+        .push(transparent_insert());
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let b = Session::compile(with_insert);
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let bare = plain_run(
+        &Session::compile(with_muted_track(console_session(false, &ALL_SLOTS))),
+        None,
+        &feed,
+        backend,
+        false,
+    );
+    assert_eq!(
+        first_plain_difference(&reference, &bare),
+        None,
+        "{backend:?}: the insert is transparent, so the oracle is exact"
+    );
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}: every console slot carried"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_eight_lanes() {
+    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_four_lanes() {
+    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd4);
+}
+
+/// `model` without console slot `slot`: its declaration and every strip's entry.
+fn without_console_slot(mut model: SessionModel, slot: &str) -> SessionModel {
+    model
+        .console
+        .pre_insert
+        .retain(|declared| declared.slot.as_str() != slot);
+    model
+        .console
+        .post_insert
+        .retain(|declared| declared.slot.as_str() != slot);
+    for track in &mut model.tracks {
+        track.console.retain(|entry| entry.slot.as_str() != slot);
+    }
+    model
+}
+
+/// A session console slot removed changes every strip's chain: every strip restarts (D15-9), and
+/// the five slots that remain still carry, on every strip.
+fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let removed = Session::compile(without_console_slot(
+        console_session(false, &ALL_SLOTS),
+        "gate",
+    ));
+    let feed = bursty_feed(SOURCE, 5);
+    let run = plain_run(&a, Some((&removed, &a.model)), &feed, backend, false);
+    let kept = Session::compile(console_session(false, &ALL_SLOTS));
+    let unchanged = plain_run(&a, Some((&kept, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
+    assert_eq!(run.restarted, every_strip, "{backend:?}");
+    assert_eq!(unchanged.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(
+        unchanged.carry_bytes - run.carry_bytes,
+        9 * core::mem::size_of::<graph::GraphEffectMove>() as u64,
+        "{backend:?}: the removed slot's nine lanes do not move, the other forty-five do"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_removed_console_slot_restarts_every_strip_at_eight_lanes() {
+    a_removed_console_slot_restarts_every_strip(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn a_removed_console_slot_restarts_every_strip_at_four_lanes() {
+    a_removed_console_slot_restarts_every_strip(Backend::Simd4);
+}
+
+/// A console slot with live controls is an effect stage with a control lane, which this slice does
+/// not carry (#1280): the plan records no effect lane, the swap prepares and carries what it does
+/// carry, and every strip that has the slot is in the restart set.
+fn a_console_slot_with_live_controls_restarts_its_strip(backend: Backend) {
+    let slots = ["eq", "comp"];
+    let a = Session::compile(console_session(false, &slots));
+    let b = Session::compile(with_muted_track(console_session(false, &slots)));
+    let mut plan = LivePlan::fresh(&a, backend);
+    assert_eq!(
+        plan.prepared.inventory.effect_lane_count(),
+        0,
+        "{backend:?}"
+    );
+    let feed = Feed::new(SOURCE, 3);
+    plan.submit(&feed, QUANTUM, 0);
+    for block in 0..SWAP_BLOCK {
+        plan.submit(&feed, QUANTUM, block + 1);
+        plan.render(QUANTUM);
+    }
+    let mut successor = LivePlan::successor(&b, &plan.prepared.inventory, &a.model, backend);
+    let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
+    assert_eq!(
+        successor.prepared.restarted_strips(),
+        &every_strip[..],
+        "{backend:?}"
+    );
+    assert_eq!(
+        successor
+            .prepared
+            .sources
+            .adopt_persisting(&mut plan.prepared.sources),
+        1
+    );
+    successor.submit(&feed, QUANTUM, SWAP_BLOCK + 1);
+    assert_eq!(
+        successor
+            .prepared
+            .plan
+            .adopt_predecessor_plan(&mut plan.prepared.plan),
+        CarryOutcome::Carried,
+        "{backend:?}"
+    );
+    successor.render(QUANTUM);
+    assert_eq!(
+        graph::carry_refusal_count(&mut successor.prepared.plan),
+        Some(0),
+        "{backend:?}"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_console_slot_with_live_controls_restarts_its_strip_at_eight_lanes() {
+    a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd8);
+}
+
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+#[test]
+fn a_console_slot_with_live_controls_restarts_its_strip_at_four_lanes() {
+    a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd4);
+}
