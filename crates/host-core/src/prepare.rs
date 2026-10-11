@@ -2154,7 +2154,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let effect_carry_bytes =
         graph::effect_carry_retained_bytes(effect_carry.moves.len(), effect_carry.scratch_bytes)
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    if effect_carry.scratch_bytes > caps.maximum_named_allocation_bytes {
+    let effect_carry_scratch_bytes = effect_carry.scratch_bytes;
+    if effect_carry_scratch_bytes > caps.maximum_named_allocation_bytes {
         return Err(resource("host.resource.limit"));
     }
     if admitted_graph_and_model
@@ -2232,7 +2233,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         observation_retained_bytes,
         spectrum_capture_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,
-        largest_engine_allocation_bytes,
+        largest_engine_allocation_bytes: largest_engine_allocation_bytes
+            .max(effect_carry_scratch_bytes),
     };
 
     // The mono collapse's structural join (mono-collapse M2). This is the one place a host has
