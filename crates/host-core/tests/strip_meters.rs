@@ -382,6 +382,7 @@ fn prepare_selected(
         &meter_controls(),
         meters,
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())))
 }
@@ -615,6 +616,7 @@ fn selected_strip_meters_keep_the_callers_order_and_an_unknown_strip_is_refused(
             meter("nowhere", MeterTap::PostSimd2PreFader),
         ],
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     ) else {
         panic!("a meter on an unknown strip must be refused");
     };

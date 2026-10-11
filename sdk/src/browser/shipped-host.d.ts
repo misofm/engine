@@ -860,6 +860,9 @@ export interface MisoStatus {
   readonly quantumFrames: number;
   readonly nextAbsoluteSample: bigint;
   readonly renderedQuanta: bigint;
+  /// The session's count of live values that a later committed value replaced before a block
+  /// applied them (decision 15, D15-2). The same count the C ABI reports through `COUNTERS_GET`.
+  readonly liveValuesSuperseded: bigint;
   readonly memoryBytes: number;
 }
 

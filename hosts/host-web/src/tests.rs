@@ -410,7 +410,8 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebCommandReport, reserved), 32);
     assert_eq!(offset_of!(WebStatus, state), 8);
     assert_eq!(offset_of!(WebStatus, next_absolute_sample), 32);
-    assert_eq!(offset_of!(WebStatus, reserved), 48);
+    assert_eq!(offset_of!(WebStatus, live_values_superseded), 48);
+    assert_eq!(offset_of!(WebStatus, reserved), 56);
     assert_eq!(offset_of!(WebResourceReport, options_bytes), 32);
     assert_eq!(offset_of!(WebResourceReport, id_staging_bytes), 64);
     assert_eq!(
@@ -954,6 +955,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             &live_controls,
             &[],
             live_lanes(options),
+            &host_core::LiveValuesSuperseded::default(),
         )
         .expect("independent engine preparation");
         assert_eq!(
@@ -1010,6 +1012,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .checked_add(source_control_bytes)
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(inventory_bytes))
+            .and_then(|bytes| bytes.checked_add(host_core::LiveValuesSuperseded::retained_bytes()))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge metadata arithmetic");
@@ -1019,6 +1022,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .checked_add(source_control_bytes)
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(inventory_bytes))
+            .and_then(|bytes| bytes.checked_add(host_core::LiveValuesSuperseded::retained_bytes()))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge retained arithmetic");
@@ -3297,6 +3301,61 @@ fn paired_fader_and_matrix_commands_share_the_acknowledged_application_sample() 
     );
 }
 
+/// #1399 gate 1: the status reports the session's `live_values_superseded` count.
+///
+/// 40 `channel = both` fader edits on one track, each its own admitted transaction, then one
+/// render: the 39 writes each of the two channel cells that a later write replaced before the
+/// block read them are 78. The status word equals the session count it is loaded from, is still
+/// zero before the block, and the three words after it stay zero.
+///
+/// Test value: red if the word is at the wrong offset, never written, written before the block
+/// that counts rather than after it, or counts a `Both` edit once instead of per cell.
+///
+/// Red mutation: skip the load in `render_next` -> the word stays 0. Load it before
+/// `plan.render` -> 0 after the first block. Fold a `Both` record into one count -> 39, not 78.
+#[test]
+fn the_status_reports_the_sessions_superseded_count() {
+    const QUANTUM: u32 = 128;
+    const EDITS: usize = 40;
+    let mut host = live_control_host(QUANTUM, 0);
+    for edit in 0..EDITS {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-1.0 - edit as f32 * 0.25, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(host.submit_commands(1), RESULT_OK, "fader edit {edit}");
+    }
+    assert_eq!(
+        host.status().live_values_superseded,
+        0,
+        "nothing has been read yet"
+    );
+    feed_and_render(&mut host, 1, 0, 0.5);
+    let session_count = host
+        .ready
+        .as_ref()
+        .expect("ready ownership")
+        .live_values_superseded
+        .get();
+    assert_eq!(session_count, 78, "39 replaced writes in each channel cell");
+    assert_eq!(host.status().live_values_superseded, session_count);
+    assert_eq!(host.status().reserved, [0; 3]);
+    feed_and_render(&mut host, 1, 1, 0.5);
+    assert_eq!(
+        host.status().live_values_superseded,
+        78,
+        "a block that replaces nothing adds nothing"
+    );
+}
+
 /// #459: the acknowledgement and the actual serialized composite belong to one render call.
 #[cfg(feature = "test-support")]
 #[test]
@@ -3489,6 +3548,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             &live_controls,
             &[],
             live_lanes(options),
+            &host_core::LiveValuesSuperseded::default(),
         )
         .expect("independent effect preparation");
         let dense_table = shape
@@ -3561,8 +3621,12 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         let effect_payload = string_payload + owner_payload;
         let effect_largest = string_largest.max(owner_largest);
         let effect_retained = dense_table + effect_payload;
-        let ready_metadata =
-            source_control_bytes + session_model_bytes + engine.inventory.retained_bytes();
+        // The session's `live_values_superseded` count: one allocation the browser makes and
+        // charges once as a bridge row (#1399), which the plan's graph row leaves out.
+        let ready_metadata = source_control_bytes
+            + session_model_bytes
+            + engine.inventory.retained_bytes()
+            + host_core::LiveValuesSuperseded::retained_bytes();
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes
@@ -8571,23 +8635,11 @@ fn many_input_edits_before_one_render_apply_the_last_and_are_counted() {
         "the render applied the last value of each cell"
     );
     assert_eq!(
-        many.ready
-            .as_ref()
-            .expect("ready ownership")
-            .live_values_superseded
-            .get(),
+        many.status().live_values_superseded,
         116,
         "2 x 29 replaced writes for each of the two kinds"
     );
-    assert_eq!(
-        last_only
-            .ready
-            .as_ref()
-            .expect("ready ownership")
-            .live_values_superseded
-            .get(),
-        0
-    );
+    assert_eq!(last_only.status().live_values_superseded, 0);
 }
 
 /// A submission is all-or-nothing across the new band too: a batch whose last record is refused
@@ -9782,6 +9834,7 @@ fn lane_free_render(document: &str, blocks: u64) -> Vec<u32> {
         &HostLiveControlRequest::default(),
         &[],
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("lane-free preparation");
     assert!(handles.strip_controls.is_empty(), "no lane at all");
@@ -11648,16 +11701,9 @@ fn many_send_edits_before_one_render_apply_the_last_and_are_counted() {
         many_bits, last_bits,
         "the render applied the last value of the cell"
     );
-    let superseded = |host: &AudioWorkletEngineHost| {
-        host.ready
-            .as_ref()
-            .expect("ready ownership")
-            .live_values_superseded
-            .get()
-    };
-    assert_eq!(superseded(&many), (EDITS - 1) as u64);
-    assert_eq!(superseded(&last_only), 0);
-    assert_eq!(superseded(&untouched), 0);
+    assert_eq!(many.status().live_values_superseded, (EDITS - 1) as u64);
+    assert_eq!(last_only.status().live_values_superseded, 0);
+    assert_eq!(untouched.status().live_values_superseded, 0);
 }
 
 /// Issue #1222 gate 2: a send batch is all or nothing.
@@ -12160,6 +12206,7 @@ fn send_prepare_report(document: &str, queue_records: u64) -> host_core::HostPre
         &live_controls,
         &[],
         live_lanes(options),
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("independent send preparation");
     engine.report

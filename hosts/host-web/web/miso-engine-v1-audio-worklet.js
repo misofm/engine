@@ -945,7 +945,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const view = this.statusView;
     if (view.getUint32(0, true) !== 80 || view.getUint32(4, true) !== ABI_VERSION
         || view.getUint32(28, true) !== 0
-        || [48, 56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
+        || [56, 64, 72].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
       throw new RangeError("Invalid status report");
     }
     return Object.freeze({
@@ -956,6 +956,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       quantumFrames: view.getUint32(24, true),
       nextAbsoluteSample: view.getBigUint64(32, true),
       renderedQuanta: view.getBigUint64(40, true),
+      liveValuesSuperseded: view.getBigUint64(48, true),
     });
   }
 

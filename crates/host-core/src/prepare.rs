@@ -948,9 +948,10 @@ pub fn prepare_host_runtime_with_live_controls(
 /// preparations (#1457): a design it holds is not computed again, and every prepared value is the
 /// same with and without it. `None` computes every design, as before.
 ///
-/// `superseded` is the session's `live_values_superseded` count (#1312 D2): the fader and matrix
-/// cell readers of this plan, and of every plan the session prepares, add to it. Every other entry
-/// makes a fresh count for its plan and returns it in
+/// `superseded` is the session's `live_values_superseded` count (#1312 D2): every strip and route
+/// cell reader of this plan, and of every plan the session prepares, adds to it. The plan does not
+/// charge it, because the host makes it once and charges it once. The entries that take no count
+/// make a fresh one for their plan, charge it to that plan's graph row, and return it in
 /// [`HostLiveControlHandles::live_values_superseded`].
 pub fn prepare_host_runtime_with_live_lanes(
     compiled: &CompiledSession,
@@ -1010,12 +1011,16 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
 ///
 /// Meter configuration remains part of [`HostLiveControlRequest`], so this entry keeps the
 /// live-control, meter and spectrum resources in one transactional preparation boundary.
+///
+/// `superseded` is the session's `live_values_superseded` count, as in
+/// [`prepare_host_runtime_with_live_lanes`].
 pub fn prepare_host_runtime_with_live_controls_and_spectrum(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     spectrum: &SpectrumCaptureRequest,
     lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
 ) -> Result<(PreparedHost, HostLiveControlHandles, SpectrumCapture), PrepareDiagnostics> {
     let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -1028,7 +1033,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         None,
         lanes,
         None,
-        None,
+        Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Single(capture) => capture,
@@ -1040,12 +1045,16 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
 }
 
 /// Prepare a host with live-control handles and several atomically selectable spectrum observers.
+///
+/// `superseded` is the session's `live_values_superseded` count, as in
+/// [`prepare_host_runtime_with_live_lanes`].
 pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     spectrum: &SpectrumCaptureCollectionRequest,
     lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
 ) -> Result<
     (
         PreparedHost,
@@ -1065,7 +1074,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         None,
         lanes,
         None,
-        None,
+        Some(superseded),
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Collection(capture) => capture,
@@ -1260,6 +1269,9 @@ pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
 }
 
 /// Prepare a serialized host with exactly the caller-selected meter observers.
+///
+/// `superseded` is the session's `live_values_superseded` count, as in
+/// [`prepare_host_runtime_with_live_lanes`].
 #[allow(clippy::too_many_lines)]
 pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
     compiled: &CompiledSession,
@@ -1267,6 +1279,7 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
     live_controls: &HostLiveControlRequest,
     meters: &[HostMeterRequest],
     lanes: HostLiveLanes,
+    superseded: &LiveValuesSuperseded,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -1279,7 +1292,7 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
         None,
         lanes,
         None,
-        None,
+        Some(superseded),
     )?;
     Ok((prepared, handles))
 }
@@ -1345,13 +1358,23 @@ pub fn prepare_host_runtime_with_spectrum_collection(
     request: &SpectrumCaptureCollectionRequest,
 ) -> Result<(PreparedHost, SpectrumCaptureCollection), PrepareDiagnostics> {
     let (prepared, _handles, capture) =
-        prepare_host_runtime_with_live_controls_and_spectrum_collection(
+        prepare_host_runtime_with_live_controls_policy_and_spectrum(
             compiled,
             caps,
             &HostLiveControlRequest::default(),
-            request,
+            None,
+            false,
+            Backend::current(),
+            Some(SpectrumPreparationRequest::Collection(request)),
+            None,
             HostLiveLanes::ALL,
+            None,
+            None,
         )?;
+    let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
+        PreparedSpectrumCapture::Collection(capture) => capture,
+        PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
+    };
     Ok((prepared, capture))
 }
 

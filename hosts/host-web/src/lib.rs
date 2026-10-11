@@ -1306,8 +1306,14 @@ pub struct WebStatus {
     pub next_absolute_sample: u64,
     /// Number of successful rendered quanta.
     pub rendered_quanta: u64,
+    /// The session's `live_values_superseded` count (decision 15, D15-2): the writes to live
+    /// values that a later committed value replaced before the block that would have applied them,
+    /// summed over every cell the session holds (a `Both` record counts in each channel cell).
+    /// Loaded after every rendered block, so it is never behind the last one, and equal to what the
+    /// C ABI's `COUNTERS_GET` reports for the same script.
+    pub live_values_superseded: u64,
     /// Required-zero expansion words.
-    pub reserved: [u64; 4],
+    pub reserved: [u64; 3],
 }
 
 /// Exact retained-resource projection for the browser bridge and production artifacts.
@@ -1525,10 +1531,9 @@ struct ReadyOwnership {
     /// declared first so they are released before the plan that owns their consumer endpoints.
     /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
     controls: Vec<TrackControlProducer>,
-    /// The session's `live_values_superseded` count (#1312 D2), which every strip cell reader adds
-    /// to. Tests read it to prove the cells' replaced writes are counted (#1346 gate 1); the
-    /// status field that reports it is #1399's.
-    #[cfg(test)]
+    /// The session's `live_values_superseded` count (#1312 D2): one count, made once by
+    /// [`compile_ready`], which every cell reader of every plan the session prepares adds to, and
+    /// which the status reports (#1399). A successor plan is prepared with this same count.
     live_values_superseded: host_core::LiveValuesSuperseded,
     /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
     /// stamps those writes from this handle and publishes their revision on it, as the control
@@ -2198,7 +2203,8 @@ impl AudioWorkletEngineHost {
                 reserved0: 0,
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
-                reserved: [0; 4],
+                live_values_superseded: 0,
+                reserved: [0; 3],
             },
             resources,
             command_report: empty_command_report(),
@@ -3254,6 +3260,9 @@ impl AudioWorkletEngineHost {
             Ok(report) => {
                 self.status.next_absolute_sample = report.next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
+                // #1399: the session's count, loaded after the block that added to it, so the
+                // status is never behind the last rendered block.
+                self.status.live_values_superseded = ready.live_values_superseded.get();
                 // Issue #137 D1: the matrix stage drained every control queue at the top of this
                 // block, so the exact free-slot count is the whole capacity again. Command-free
                 // blocks have no counters to clear and skip the dense write pass entirely.
@@ -6748,6 +6757,10 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.live_controls.config"))?;
     let lanes = live_lanes(options);
     let commands_enabled = options_enable_commands(options);
+    // #1312 D2, #1399: the session's `live_values_superseded` count, made here once, before any
+    // plan is prepared. Every plan the session prepares takes this count, so host-core charges
+    // none for it and the report below charges it once, as a bridge allocation.
+    let live_values_superseded = host_core::LiveValuesSuperseded::new();
     // Issue #1209 D3: one meter per strip, the tracks then the submixes, in the strip order
     // host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair.
     let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
@@ -6774,6 +6787,7 @@ fn compile_ready(
                 &live_controls,
                 request,
                 lanes,
+                &live_values_superseded,
             )
             .map_err(BootFailure::preparation)?;
             (
@@ -6790,6 +6804,7 @@ fn compile_ready(
                     &live_controls,
                     request,
                     lanes,
+                    &live_values_superseded,
                 )
                 .map_err(BootFailure::preparation)?;
             (
@@ -6805,6 +6820,7 @@ fn compile_ready(
                 &live_controls,
                 &meters,
                 lanes,
+                &live_values_superseded,
             )
             .map_err(BootFailure::preparation)?;
             (host, handles, None)
@@ -6818,11 +6834,14 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     // Charged because the browser bridge retains them: the facade's control table and ID arena
     // (`control_retained_bytes` is exactly those two), the compiled session model, and the
-    // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor.
+    // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor,
+    // and the session's `live_values_superseded` count (#1399), the one allocation every plan of
+    // the session shares and host-core's graph row therefore leaves out.
     let ready_metadata = checked_sum_prepare([
         engine.control_retained_bytes,
         engine.session_model_bytes,
         engine.inventory_retained_bytes,
+        host_core::LiveValuesSuperseded::retained_bytes(),
     ])?;
     let mut bridge_metadata = report
         .bridge_metadata_bytes
@@ -7297,8 +7316,7 @@ fn compile_ready(
     let ready = ReadyOwnership {
         commands_enabled,
         controls: handles.strip_controls,
-        #[cfg(test)]
-        live_values_superseded: handles.live_values_superseded.clone(),
+        live_values_superseded,
         plan_gate,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),

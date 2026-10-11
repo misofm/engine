@@ -222,22 +222,24 @@ fn browser_identity_fixture_retained_rows_stay_within_their_budgets() {
     assert_eq!(refused.result(), RESULT_REFUSED_BUDGET);
 }
 
-/// The browser's exact retained total counts the allocations the plan makes for itself (#1502 m1,
-/// #1312 m3). The browser copies host-core's graph row unchanged, and the graph compiler's row is
-/// its incremental row plus the session bytes the facade does not pass it, so the row less the
-/// incremental row is the plan's own: its revision gate and, because the browser prepares each plan
-/// with its own `live_values_superseded` count, that count. A row that leaves either out would let
-/// the exact aggregate under-report two real allocations, and no ceiling above would notice.
+/// The browser's graph row charges the allocation the plan makes for itself and not the session's
+/// (#1502 m1, #1312 m3, #1399). The browser copies host-core's graph row unchanged, and the graph
+/// compiler's row is its incremental row plus the session bytes the facade does not pass it, so the
+/// row less the incremental row is the plan's own: its revision gate. The session's
+/// `live_values_superseded` count is one allocation every plan of the session shares, so the
+/// browser charges it once, in its bridge rows (the exact-decomposition tests in `src/tests.rs`
+/// add it there), and the plan's row must not charge it again. A row that leaves the gate out would
+/// let the exact aggregate under-report a real allocation, and one that charges the count per plan
+/// would charge it twice; no ceiling above would notice either.
 #[test]
-fn the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count() {
+fn the_graph_row_charges_the_plans_gate_and_not_the_sessions_superseded_count() {
     let host = AudioWorkletEngineHost::boot(SESSION_DOCUMENT.as_bytes(), options()).unwrap_or_else(
         |failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())),
     );
     let report = *host.resources();
     assert_eq!(
         report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes,
-        engine::realtime::plan_revision_gate_retained_bytes()
-            + builtins_compiler::LiveValuesSuperseded::retained_bytes(),
-        "the browser's graph row: the graph's own bytes, the plan's revision gate and its count"
+        engine::realtime::plan_revision_gate_retained_bytes(),
+        "the browser's graph row: the graph's own bytes and the plan's revision gate"
     );
 }

@@ -158,7 +158,8 @@
         { "name": "reserved0", "offset": 28, "type": "u32" },
         { "name": "nextAbsoluteSample", "offset": 32, "type": "u64" },
         { "name": "renderedQuanta", "offset": 40, "type": "u64" },
-        { "name": "reserved", "offset": 48, "type": "u64[4]" }
+        { "name": "liveValuesSuperseded", "offset": 48, "type": "u64" },
+        { "name": "reserved", "offset": 56, "type": "u64[3]" }
       ]
     },
     "resourceReport": {

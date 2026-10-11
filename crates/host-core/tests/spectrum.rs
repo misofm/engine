@@ -427,6 +427,7 @@ fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
             maximum_capture_bytes: resources.retained_bytes,
         },
         HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .expect("live controls, meters and spectrum prepare together");
     assert_eq!(handles.strip_controls.len(), 9);
