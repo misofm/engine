@@ -591,6 +591,85 @@ fn a_full_bound_cache_is_cleared_and_reports_the_same_values() {
     }
 }
 
+/// #1471 Amendment 1: a journal records the designs a preparation used at the time it used them,
+/// so a clear of the cache in the middle of the preparation loses none. A cache of two designs
+/// given three clears once; the journal still holds all three, and a preparation seeded from it
+/// computes none and walks no frame. (A copy of the cache after the preparation holds one or two.)
+#[cfg(feature = "test-support")]
+#[test]
+fn a_journal_holds_every_design_a_preparation_used_through_a_clear() {
+    use builtins::test_support::{fixed_input_bounds_computed, fixed_input_frames_walked};
+    let rate = 48_000;
+    let designs = [
+        parameters(0.0, 1_000.0, 0.0, false),
+        parameters(1_000.0, 0.0, 6.0, false),
+        parameters(1_000.0, 2_000.0, 0.0, false),
+    ];
+    let expected = input_section_bounds(rate, designs, None).expect("bounds");
+    let mut cache = InputBoundCache::with_capacity(core::num::NonZeroUsize::new(2).expect("two"));
+    cache.begin_journal();
+    let bounds = input_section_bounds(rate, designs, Some(&mut cache)).expect("bounds");
+    assert_eq!(bounds, expected);
+    assert!(cache.len() < designs.len(), "the cache cleared");
+    let mut seed = cache.take_journal();
+    assert_eq!(seed.len(), designs.len(), "the journal lost a design");
+    assert_eq!(seed.capacity(), cache.capacity());
+    let (computed, walked) = (fixed_input_bounds_computed(), fixed_input_frames_walked());
+    let rebuilt = input_section_bounds(rate, designs, Some(&mut seed)).expect("bounds");
+    assert_eq!(rebuilt, expected);
+    assert_eq!(fixed_input_bounds_computed(), computed, "computed a design");
+    assert_eq!(fixed_input_frames_walked(), walked, "walked a frame");
+    // A closed journal records nothing more, and none open returns an empty cache.
+    input_section_bounds(rate, designs, Some(&mut cache)).expect("bounds");
+    assert!(cache.take_journal().is_empty());
+}
+
+/// #1471 Amendment 1: a design served from the cache (a hit inserts nothing) and a design whose
+/// stopped walk the cache holds as a horizon are both used, so both are journaled; a preparation
+/// seeded from the journal under the same budget walks no frame and reports the same bounds. The
+/// budget stops the second design after it walks part of its cascade (asserted below, so the
+/// stopped entry is not vacuous).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used() {
+    use builtins::test_support::{fixed_input_frames_walked, input_section_bounds_within};
+    let rate = 48_000;
+    let designs = [
+        parameters(0.0, 1_000.0, 0.0, false),
+        parameters(1_000.0, 0.0, 6.0, false),
+    ];
+    let first = input_section_bound_charged(rate, designs[0]).expect("bound");
+    let second = input_section_bound_charged(rate, designs[1]).expect("bound");
+    // The second design gets half its walk after its section's reservation, so it stops mid-walk.
+    assert!(second.frames > 2, "the second design walks");
+    let budget = first.charge + 580 + second.frames / 2;
+    let expected = input_section_bounds_within(rate, designs, budget, None).expect("bounds");
+    // Warm a cache with a Bound entry and a stopped horizon, with no journal open.
+    let mut warm = InputBoundCache::new();
+    input_section_bounds_within(rate, designs, budget, Some(&mut warm)).expect("bounds");
+    assert_eq!(warm.len(), 2);
+    // A preparation of only hits: nothing inserted, everything used.
+    warm.begin_journal();
+    let hits = input_section_bounds_within(rate, designs, budget, Some(&mut warm)).expect("bounds");
+    assert_eq!(hits, expected);
+    let mut seed = warm.take_journal();
+    assert_eq!(seed.len(), 2, "the journal lost a hit or a stopped walk");
+    let before = fixed_input_frames_walked();
+    let rebuilt =
+        input_section_bounds_within(rate, designs, budget, Some(&mut seed)).expect("bounds");
+    assert_eq!(rebuilt, expected);
+    assert_eq!(fixed_input_frames_walked(), before, "walked a frame");
+    // Without the stopped entry the same preparation does walk (the entry earns its place).
+    let mut missing = InputBoundCache::new();
+    input_section_bounds_within(rate, [designs[0]], budget, Some(&mut missing)).expect("bounds");
+    let before = fixed_input_frames_walked();
+    input_section_bounds_within(rate, designs, budget, Some(&mut missing)).expect("bounds");
+    assert!(
+        fixed_input_frames_walked() > before,
+        "the stopped walk walks"
+    );
+}
+
 /// #1457 gate 6 (D2): the live-bound table preparation reads is the computed live bound at every
 /// launch rate, bit for bit, and states nothing off them.
 #[test]

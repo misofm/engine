@@ -422,6 +422,9 @@ pub const INPUT_BOUND_CACHE_ENTRIES: usize = 8192;
 pub struct InputBoundCache {
     entries: std::collections::BTreeMap<InputBoundKey, CachedDesign>,
     capacity: core::num::NonZeroUsize,
+    /// The designs preparations used since [`begin_journal`](Self::begin_journal), while open. It
+    /// has no entry cap of its own, so it never clears (see `begin_journal`).
+    journal: Option<Box<InputBoundCache>>,
 }
 
 /// One cached design (#1457 D2).
@@ -441,6 +444,7 @@ impl InputBoundCache {
         Self {
             entries: std::collections::BTreeMap::new(),
             capacity,
+            journal: None,
         }
     }
 
@@ -470,8 +474,45 @@ impl InputBoundCache {
         self.capacity
     }
 
-    pub(crate) fn get(&self, key: &InputBoundKey) -> Option<CachedDesign> {
-        self.entries.get(key).copied()
+    /// Starts recording every design a preparation uses through this cache, hit or computed, a
+    /// stopped walk's horizon ([`CachedDesign::ChargeAbove`]) included, at the time it is used
+    /// (#1471 Amendment 1). The record is a cache of its own with this cache's entry cap, so a
+    /// clear of this cache loses none of it. It holds one preparation's designs (the cap holds a
+    /// whole preparation, [`INPUT_BOUND_CACHE_ENTRIES`]). A journal already open is discarded and
+    /// restarted empty.
+    ///
+    /// The record never clears, so it holds every distinct design used while it is open: a
+    /// preparation uses at most `INPUT_BOUND_BUDGET_FRAMES / 837` + 1 of them with an enabled
+    /// section (the budget charges every design a cache holds at least 837, and the first design
+    /// past it stops). A caller that keeps a journal open across several preparations holds the
+    /// union of their designs, and takes it when it has what it needs.
+    pub fn begin_journal(&mut self) {
+        self.journal = Some(Box::new(Self::with_capacity(core::num::NonZeroUsize::MAX)));
+    }
+
+    /// Closes the journal and returns exactly the designs recorded since
+    /// [`begin_journal`](Self::begin_journal), each with the value it held when last used (its
+    /// stored charge, or its stopped walk's horizon), as a cache with this cache's entry cap (a
+    /// record of one preparation is within it; a longer one is cleared by the cache's next
+    /// insertion like any full cache). An empty cache when no journal is open. A preparation served from the returned cache reports
+    /// what it reports from this one at the time of use (#1457's stored-charge rule).
+    #[must_use]
+    pub fn take_journal(&mut self) -> InputBoundCache {
+        let mut journal = self
+            .journal
+            .take()
+            .map_or_else(|| Self::with_capacity(self.capacity), |journal| *journal);
+        journal.capacity = self.capacity;
+        journal
+    }
+
+    /// The cached design under `key`, recorded in the open journal as used.
+    pub(crate) fn lookup(&mut self, key: &InputBoundKey) -> Option<CachedDesign> {
+        let hit = self.entries.get(key).copied()?;
+        if let Some(journal) = self.journal.as_deref_mut() {
+            journal.insert(*key, hit);
+        }
+        Some(hit)
     }
 
     pub(crate) fn insert(&mut self, key: InputBoundKey, value: CachedDesign) {
@@ -479,6 +520,9 @@ impl InputBoundCache {
             self.entries.clear();
         }
         self.entries.insert(key, value);
+        if let Some(journal) = self.journal.as_deref_mut() {
+            journal.insert(key, value);
+        }
     }
 }
 

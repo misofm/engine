@@ -3573,7 +3573,7 @@ fn input_section_bounds_within(
             let cached = if remaining == 0 {
                 Some(CachedDesign::ChargeAbove(0))
             } else {
-                cache.as_deref().and_then(|cache| cache.get(&key))
+                cache.as_deref_mut().and_then(|cache| cache.lookup(&key))
             };
             let charged = match cached {
                 Some(CachedDesign::Bound(hit)) => (hit.charge <= remaining).then_some(hit),
