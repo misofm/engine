@@ -10,6 +10,7 @@
 use core::num::NonZeroUsize;
 
 use builtins::{BuiltinLaneSelector, Matrix2x2};
+use builtins_compiler::TestOnlyWriteGate;
 use builtins_compiler::{
     TrackControlRecord, TrackFaderRecord, test_only_fader_matrix_witness,
     test_only_reset_fader_matrix_witness,
@@ -19,8 +20,9 @@ use effect_contract::TailSamples;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostPrepareCaps,
-    HostShapePolicy, PreparedHost, SourceSubmission, compile_host_session, prepare_host_runtime,
-    prepare_host_runtime_between_render_calls, prepare_host_runtime_with_live_lanes,
+    HostShapePolicy, LiveValuesSuperseded, PreparedHost, SourceSubmission, compile_host_session,
+    prepare_host_runtime, prepare_host_runtime_between_render_calls,
+    prepare_host_runtime_with_live_lanes,
 };
 use session::{
     Console, MatrixOrPan, RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix,
@@ -146,10 +148,15 @@ fn with_lanes(
     model: &SessionModel,
     lanes: HostLiveLanes,
 ) -> (PreparedHost, HostLiveControlHandles) {
-    prepare_host_runtime_with_live_lanes(&compile(model), &caps(), &request(), lanes, None)
-        .unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        })
+    prepare_host_runtime_with_live_lanes(
+        &compile(model),
+        &caps(),
+        &request(),
+        lanes,
+        None,
+        &LiveValuesSuperseded::default(),
+    )
+    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())))
 }
 
 fn feed(frames: usize) -> [Vec<f32>; 2] {
@@ -282,21 +289,27 @@ fn fader_and_matrix_lanes_render_as_the_session_with_their_values_baked() {
         let mut reference = lanes_free(&baked(model.clone()));
         let mut untouched = lanes_free(&model);
         let (mut live, mut handles) = with_lanes(&model, HostLiveLanes::FADER_AND_MATRIX);
-        handles.strip_controls[MUTED]
-            .fader
-            .try_push(TrackFaderRecord::Mute {
-                lanes: BuiltinLaneSelector::Both,
-                muted: true,
-                smoothing_samples: 0,
-            })
-            .expect("fader queue room");
-        handles.strip_controls[PANNED]
-            .producer
-            .try_push(TrackControlRecord {
-                matrix: MATRIX,
-                smoothing_samples: 0,
-            })
-            .expect("matrix queue room");
+        let mut gate = live
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
+        gate.write_published(|stamp| {
+            handles.strip_controls[MUTED].fader.write(
+                stamp,
+                TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: true,
+                    smoothing_samples: 0,
+                },
+            );
+            handles.strip_controls[PANNED].producer.write(
+                stamp,
+                TrackControlRecord {
+                    matrix: MATRIX,
+                    smoothing_samples: 0,
+                },
+            );
+        });
         let expected = render(&mut reference, &planes);
         assert_ne!(
             expected,
@@ -319,17 +332,29 @@ fn observation_without_effect_lanes_is_refused() {
         effects: false,
         ..HostLiveLanes::ALL
     };
-    let failure = prepare_host_runtime_with_live_lanes(&compiled, &caps(), &request, lanes, None)
-        .err()
-        .expect("observation without effect lanes is refused");
+    let failure = prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps(),
+        &request,
+        lanes,
+        None,
+        &LiveValuesSuperseded::default(),
+    )
+    .err()
+    .expect("observation without effect lanes is refused");
     assert!(
         String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.live_controls"),
         "{}",
         String::from_utf8_lossy(failure.as_bytes())
     );
     // The same request with effect lanes prepares, so the refusal is the selection's.
-    prepare_host_runtime_with_live_lanes(&compiled, &caps(), &request, HostLiveLanes::ALL, None)
-        .unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
+    prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps(),
+        &request,
+        HostLiveLanes::ALL,
+        None,
+        &LiveValuesSuperseded::default(),
+    )
+    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
 }

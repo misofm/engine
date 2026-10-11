@@ -239,8 +239,9 @@ therefore uses the exact prepared values; automation domain
 checks therefore address real revision-scoped handles. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. The three provider-owned counters retain an independent
-three-slot minimum even when the frame-derived telemetry configuration capacity is smaller.
+provider's counter and diagnostic pages. The four provider-owned counters (the two telemetry counters, canceled automation, and
+`live_values_superseded`, #1312 D8) retain an independent four-slot minimum even when the
+frame-derived telemetry configuration capacity is smaller.
 Candidate catalogs allocate before structural commit and are included in double-live resource
 admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
 `control-provider` edge.

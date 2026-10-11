@@ -29,14 +29,16 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterTap};
-use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
+use builtins_compiler::{
+    TestOnlyWriteGate, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
+};
 use dsp_reference::randomized::{Draw, first_difference, run_seeds};
 use effect_compiler::{CONSOLE_ELIGIBLE_EFFECTS, launch_native_effect_registry};
 use effect_contract::{
     AutomationRate, EffectControlRecord, EffectDescriptor, NativeEffectRegistry,
     ParameterChannelPolicy, ParameterDomain,
 };
-use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{PlanRevisionGate, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
@@ -568,6 +570,9 @@ struct Arm {
     label: &'static str,
     host: PreparedHost,
     handles: HostLiveControlHandles,
+    /// The plan's gate handle: every fader and matrix write is a transaction stamped from it and
+    /// published on it, so the plan's next block reads the write (#1312 D7).
+    gate: PlanRevisionGate,
 }
 
 /// One block's live-control records, applied to every arm.
@@ -702,9 +707,11 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
     records
 }
 
-/// Pushes one record and says whether the queue took it; a full queue answers the same on every
-/// arm, because every arm has seen the same records.
-fn push(handles: &mut HostLiveControlHandles, record: Live) -> bool {
+/// Pushes one record and says whether the lane took it. A fader or matrix write is a cell write
+/// and always lands; a queue lane (input, effect) answers the same on every arm, because every arm
+/// has seen the same records.
+fn push(arm: &mut Arm, record: Live) -> bool {
+    let Arm { handles, gate, .. } = arm;
     match record {
         Live::Input(track, record) => handles.strip_controls[track]
             .input
@@ -712,11 +719,16 @@ fn push(handles: &mut HostLiveControlHandles, record: Live) -> bool {
             .expect("input lane")
             .try_push(record)
             .is_ok(),
-        Live::Fader(track, record) => handles.strip_controls[track].fader.try_push(record).is_ok(),
-        Live::Matrix(track, record) => handles.strip_controls[track]
-            .producer
-            .try_push(record)
-            .is_ok(),
+        Live::Fader(track, record) => {
+            gate.write_published(|stamp| handles.strip_controls[track].fader.write(stamp, record));
+            true
+        }
+        Live::Matrix(track, record) => {
+            gate.write_published(|stamp| {
+                handles.strip_controls[track].producer.write(stamp, record);
+            });
+            true
+        }
         Live::Effect(index, record) => handles.effect_controls[index].try_push(record).is_ok(),
     }
 }
@@ -792,10 +804,15 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
     .map(|(label, serialized, forced)| {
         let (mut host, handles) = prepared(serialized);
         host.plan.force_mono_collapse_off(forced);
+        let gate = host
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
         Arm {
             label,
             host,
             handles,
+            gate,
         }
     })
     .collect();
@@ -817,13 +834,10 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
         let context = format!("seed {seed} block {block}");
         let records = live_records(&mut draw, &arms[0].handles);
         for record in &records {
-            let taken: Vec<bool> = arms
-                .iter_mut()
-                .map(|arm| push(&mut arm.handles, *record))
-                .collect();
+            let taken: Vec<bool> = arms.iter_mut().map(|arm| push(arm, *record)).collect();
             assert!(
                 taken.iter().all(|took| *took == taken[0]),
-                "{context}: the arms' queues disagree on {record:?}"
+                "{context}: the arms' lanes disagree on {record:?}"
             );
             reach.live_records += u64::from(taken[0]);
             if let Live::Input(strip, _) | Live::Fader(strip, _) | Live::Matrix(strip, _) = record

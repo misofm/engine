@@ -9,8 +9,9 @@ use std::collections::BTreeSet;
 
 use builtins::{InputBoundCache, MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
 use builtins_compiler::{
-    BuiltinCompileCaps, MeterConsumer, MeterRequest, SelectedMeterRequest, TrackControlProducer,
-    TrackControlRequest, prepare_selected_session_builtins_between_render_calls,
+    BuiltinCompileCaps, LiveValuesSuperseded, MeterConsumer, MeterRequest, SelectedMeterRequest,
+    TrackControlProducer, TrackControlRequest,
+    prepare_selected_session_builtins_between_render_calls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
 };
@@ -314,10 +315,11 @@ pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("s
 pub struct HostLiveControlRequest {
     /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
-    /// Issue #140 turns this into the depth of *every* live channel a strip owns (a submix too,
-    /// issue #1211 D1): the matrix/pan queue #137 shipped, the fader/mute queue, and one queue
-    /// per prepared effect instance. Which of them are attached is the caller's [`HostLiveLanes`]
-    /// (issue #1254 D2): the matrix/pan and fader/mute queues always; the input queue when
+    /// Issue #140 turns this into the depth of every live *queue* a strip owns (a submix too,
+    /// issue #1211 D1): the input queue and one queue per prepared effect instance. The
+    /// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312); they are
+    /// attached whenever this is `Some`. Which of the others are attached is the caller's
+    /// [`HostLiveLanes`] (issue #1254 D2): the input queue when
     /// [`HostLiveLanes::strip_input`] is set, the effect queues when [`HostLiveLanes::effects`] is
     /// set, and the route queues when [`HostLiveLanes::routes`] is set. Every entry takes the
     /// selection from its caller, except the ones with no `lanes` argument, which attach
@@ -475,6 +477,11 @@ pub struct HostLiveControlHandles {
     /// The designated master strip index, echoed back after validation against `strips.len()`
     /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
     pub master_track: Option<u32>,
+    /// The `live_values_superseded` count this plan's fader and matrix cell readers add to
+    /// (#1312 D2): the session's own count when the host passed one to
+    /// [`prepare_host_runtime_with_live_lanes`], else a fresh count this preparation made. Read
+    /// it with [`LiveValuesSuperseded::get`].
+    pub live_values_superseded: LiveValuesSuperseded,
 }
 
 impl HostLiveControlHandles {
@@ -806,12 +813,18 @@ pub fn prepare_host_runtime_with_live_controls(
 /// `bound_cache` (#1471) is a design-bound cache the host keeps on its control thread across
 /// preparations (#1457): a design it holds is not computed again, and every prepared value is the
 /// same with and without it. `None` computes every design, as before.
+///
+/// `superseded` is the session's `live_values_superseded` count (#1312 D2): the fader and matrix
+/// cell readers of this plan, and of every plan the session prepares, add to it. Every other entry
+/// makes a fresh count for its plan and returns it in
+/// [`HostLiveControlHandles::live_values_superseded`].
 pub fn prepare_host_runtime_with_live_lanes(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     lanes: HostLiveLanes,
     bound_cache: Option<&mut InputBoundCache>,
+    superseded: &LiveValuesSuperseded,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -824,6 +837,7 @@ pub fn prepare_host_runtime_with_live_lanes(
         None,
         lanes,
         bound_cache,
+        Some(superseded),
     )?;
     Ok((prepared, handles))
 }
@@ -840,6 +854,7 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
     lanes: HostLiveLanes,
     base: SuccessorBase<'_>,
     bound_cache: Option<&mut InputBoundCache>,
+    superseded: &LiveValuesSuperseded,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -852,6 +867,7 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
         Some(base),
         lanes,
         bound_cache,
+        Some(superseded),
     )?;
     Ok((prepared, handles))
 }
@@ -877,6 +893,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         Some(SpectrumPreparationRequest::Single(spectrum)),
         None,
         lanes,
+        None,
         None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -913,6 +930,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         Some(SpectrumPreparationRequest::Collection(spectrum)),
         None,
         lanes,
+        None,
         None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -1109,6 +1127,7 @@ fn prepare_host_runtime_with_live_controls_policy(
         successor,
         HostLiveLanes::ALL,
         None,
+        None,
     )?;
     Ok((prepared, handles))
 }
@@ -1129,6 +1148,7 @@ pub fn prepare_host_runtime_with_spectrum(
         Some(SpectrumPreparationRequest::Single(request)),
         None,
         HostLiveLanes::ALL,
+        None,
         None,
     )?;
     debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
@@ -1170,6 +1190,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     successor: Option<SuccessorBase<'_>>,
     lanes: HostLiveLanes,
     bound_cache: Option<&mut InputBoundCache>,
+    superseded: Option<&LiveValuesSuperseded>,
 ) -> Result<
     (
         PreparedHost,
@@ -1178,6 +1199,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    // #1312 D2: the session's count when the host passed one, else this preparation's own, which
+    // the handles hand back. Made before any observed allocation of the preparation.
+    let live_superseded = superseded.cloned().unwrap_or_default();
     let model = compiled.normalized_model();
     // Source semantics: tracks only.
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
@@ -1465,6 +1489,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map(|strip| TrackControlRequest {
                 track_id: strip.to_string(),
                 queue_capacity: depth,
+                superseded: live_superseded.clone(),
                 input_lane: lanes.strip_input,
             })
             .collect(),
@@ -1940,6 +1965,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .map(RouteControlProducer::new)
                 .collect(),
             master_track,
+            live_values_superseded: live_superseded,
         },
         spectrum_capture,
     ))
@@ -2236,6 +2262,7 @@ mod tests {
                 None,
                 HostLiveLanes::ALL,
                 cache,
+                None,
             )
             .expect("prepare")
             .0

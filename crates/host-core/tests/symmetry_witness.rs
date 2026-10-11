@@ -106,6 +106,8 @@ fn live_controls() -> HostLiveControlRequest {
 struct Console {
     prepared: PreparedHost,
     handles: HostLiveControlHandles,
+    /// The plan's gate handle, for stamping and publishing cell writes.
+    gate: engine::realtime::PlanRevisionGate,
     block: usize,
 }
 
@@ -127,17 +129,22 @@ fn prepare(document: &str) -> (CompiledSession, Console) {
 /// of an eight-track fixture reaches an eight-lane bank width. That arm is asserted per track
 /// rather than on the census, so the precondition is not one it owes.
 fn prepare_unbanked(document: &str) -> (CompiledSession, Console) {
-    let (session, prepared, handles) =
+    let (session, mut prepared, handles) =
         prepare_host_session_with_live_controls(document, &caps(), &live_controls())
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
     assert_eq!(handles.strips.len(), TRACKS);
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     (
         session,
         Console {
             prepared,
             handles,
+            gate,
             block: 0,
         },
     )
@@ -884,7 +891,7 @@ fn an_observe_record_never_moves_the_witness() {
 fn seam_side_live_control_traffic_leaves_every_lane_eligible() {
     use builtins::BuiltinLaneSelector;
     use builtins::Matrix2x2;
-    use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
+    use builtins_compiler::{TestOnlyWriteGate, TrackControlRecord, TrackFaderRecord};
 
     let (_session, mut console) = prepare(&mono_session());
     let [before, lanes] = census(&console);
@@ -896,27 +903,29 @@ fn seam_side_live_control_traffic_leaves_every_lane_eligible() {
         .iter_mut()
         .find(|producer| producer.track_id.as_ref() == "eq3")
         .expect("a control channel for the addressed track");
-    control
-        .fader
-        .try_push(TrackFaderRecord::FaderDb {
-            // One lane only: the most asymmetric fader move the ABI can express.
-            lanes: BuiltinLaneSelector::Left,
-            db: -18.0,
-            smoothing_samples: 64,
-        })
-        .expect("room in the bounded queue");
-    control
-        .producer
-        .try_push(TrackControlRecord {
-            matrix: Matrix2x2 {
-                ll: 0.25,
-                lr: 0.75,
-                rl: 0.5,
-                rr: 0.5,
+    console.gate.write_published(|stamp| {
+        control.fader.write(
+            stamp,
+            TrackFaderRecord::FaderDb {
+                // One lane only: the most asymmetric fader move the ABI can express.
+                lanes: BuiltinLaneSelector::Left,
+                db: -18.0,
+                smoothing_samples: 64,
             },
-            smoothing_samples: 64,
-        })
-        .expect("room in the bounded queue");
+        );
+        control.producer.write(
+            stamp,
+            TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.25,
+                    lr: 0.75,
+                    rl: 0.5,
+                    rr: 0.5,
+                },
+                smoothing_samples: 64,
+            },
+        );
+    });
 
     render(&mut console, 4);
     assert_eq!(

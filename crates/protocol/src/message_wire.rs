@@ -639,6 +639,7 @@ pub enum CounterId {
     AutomationTimePast = 13,
     AutomationOrderReject = 14,
     ValidationFailures = 15,
+    LiveValuesSuperseded = 16,
 }
 
 /// Complete endpoint-local telemetry configuration. It does not create meter production.
@@ -2046,6 +2047,7 @@ fn parse_counter_id(value: u32) -> Result<CounterId, DecodeError> {
         13 => Ok(CounterId::AutomationTimePast),
         14 => Ok(CounterId::AutomationOrderReject),
         15 => Ok(CounterId::ValidationFailures),
+        16 => Ok(CounterId::LiveValuesSuperseded),
         _ => Err(DecodeError::InvalidTlv),
     }
 }

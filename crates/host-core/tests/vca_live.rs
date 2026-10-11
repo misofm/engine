@@ -19,7 +19,7 @@ use core::num::NonZeroUsize;
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use builtins::BuiltinLaneSelector;
-use builtins_compiler::TrackFaderRecord;
+use builtins_compiler::{TestOnlyWriteGate, TrackFaderRecord};
 use dsp_reference::randomized::{Draw, first_difference, replaying, run_seeds};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
@@ -1123,6 +1123,8 @@ fn the_command_path_allocates_nothing_and_the_retained_bytes_are_measured() {
 struct Live {
     host: PreparedHost,
     handles: HostLiveControlHandles,
+    /// The plan's gate handle: every strip write is stamped from it and published on it.
+    gate: engine::realtime::PlanRevisionGate,
     block: usize,
 }
 
@@ -1139,9 +1141,15 @@ impl Live {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
+        let mut host = host;
+        let gate = host
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
         Self {
             host,
             handles,
+            gate,
             block: 0,
         }
     }
@@ -1311,26 +1319,30 @@ fn batch(
     }
     for strip in 0..strips {
         for (lanes, db) in mirrors.vca.fader_delta(strip).into_iter().flatten() {
-            live.handles.strip_controls[strip]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes,
-                    db,
-                    smoothing_samples: 0,
-                })
-                .expect("fader queue room");
+            live.gate.write_published(|stamp| {
+                live.handles.strip_controls[strip].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes,
+                        db,
+                        smoothing_samples: 0,
+                    },
+                );
+            });
             mirrors.vca.record_emitted_db(strip, lanes, db);
             reach.fader_records += 1;
         }
         for (lanes, muted) in mirrors.solo.strip_delta(strip).into_iter().flatten() {
-            live.handles.strip_controls[strip]
-                .fader
-                .try_push(TrackFaderRecord::Mute {
-                    lanes,
-                    muted,
-                    smoothing_samples: 0,
-                })
-                .expect("fader queue room");
+            live.gate.write_published(|stamp| {
+                live.handles.strip_controls[strip].fader.write(
+                    stamp,
+                    TrackFaderRecord::Mute {
+                        lanes,
+                        muted,
+                        smoothing_samples: 0,
+                    },
+                );
+            });
             mirrors.solo.record_emitted(strip, lanes, muted);
             reach.mute_records += 1;
         }

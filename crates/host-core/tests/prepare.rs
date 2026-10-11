@@ -701,7 +701,7 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
         ..HostLiveControlRequest::default()
     };
-    let (compiled, prepared, mut handles) =
+    let (compiled, prepared, handles) =
         prepare_host_session_with_live_controls(SESSION, &live_control_caps, &live_controls)
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -727,27 +727,6 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         assert_eq!(&*handles.meters[index].track_id, track.as_str());
     }
     assert!(prepared.report.builtin_meter_payload_bytes > 0);
-
-    // The control queue is bounded and a full queue hands the record back rather than dropping it.
-    let record = builtins_compiler::TrackControlRecord {
-        matrix: builtins::Matrix2x2 {
-            ll: 1.0,
-            lr: 0.0,
-            rl: 0.0,
-            rr: 1.0,
-        },
-        smoothing_samples: 0,
-    };
-    let producer = &mut handles.strip_controls[0].producer;
-    for _ in 0..4 {
-        producer
-            .try_push(record)
-            .expect("bounded depth admits four");
-    }
-    let full = producer
-        .try_push(record)
-        .expect_err("fifth is backpressure");
-    assert_eq!(full.value, record, "a full queue returns the record");
 }
 
 /// Issue #137: a host that asks for no live controls gets none, and pays for none.
