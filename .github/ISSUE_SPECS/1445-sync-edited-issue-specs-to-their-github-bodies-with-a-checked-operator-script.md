@@ -322,6 +322,17 @@ Amendment 1, each inside the amendment's contract:
 - **Smoke test, read-only.** `bash scripts/operator/sync-spec-bodies.sh --check 1438 1445 291` against
   the real repository and GitHub on `origin/main` `1b55de30a`: `1438 fast-forward`, `1445 in-sync`,
   `291 unmatched` (title), no `gh` write.
+- **Gate 4: A9's run (root, 2026-10-11)**, on `origin/main` `1b55de30a`:
+  - `--check --all` exited 3 with `summary in-sync=176 fast-forward=17 closed-skipped=81 no-issue=0
+    oversize=0 unmatched=31 synced=0`.
+  - `--apply --backup-dir /home/bl/misofm/submix-verdicts/body-sync-backup-2026-10-11 763 881 887 888 889
+    1008 1010 1019 1373 1374 1375 1376 1378 1379 1422 1438 1487` exited 0 with 17 `synced`.
+  - A following `--check` of those 17 issues exited 0 with `in-sync=17`.
+  - The backup directory holds 17 files, `<n>.json`, one per synced issue.
+  - The 31 `unmatched` issues were not written: 26, 124, 291, 559, 560, 948, 951, 952, 955, 961, 968, 969,
+    972, 973, 974, 975, 987, 988, 989, 991, 992, 993, 1309, 1311, 1312, 1314, 1343, 1348, 1468, 1470, 1471.
+    They are reconciled by hand, with a recommendation each, in
+    `/home/bl/misofm/submix-verdicts/body-sync-unmatched.md`.
 
 ## Dependencies
 
