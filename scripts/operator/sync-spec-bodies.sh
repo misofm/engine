@@ -13,8 +13,11 @@
 #
 # The source of every spec is the blob on refs/remotes/origin/main, read with `git cat-file`,
 # never the working tree or the index. The script refuses (exit 2, before any `gh` call) unless
-# that ref equals what `git ls-remote origin refs/heads/main` returns now. Run it from inside the
-# repository checkout.
+# that ref equals what `git ls-remote origin refs/heads/main` returns now. The script's own
+# location selects the repository: it must sit at scripts/operator/ of a git checkout, and it acts on
+# that checkout, whatever the current directory is. Running one clone's copy therefore acts on that
+# clone, never on the clone you happen to stand in. The current directory only resolves a relative
+# DIR argument (--backup-dir, --reconcile-dir, --reviewed).
 #
 # Classes (per selected spec, see the "Amendment 1" section of
 # .github/ISSUE_SPECS/1445-sync-edited-issue-specs-to-their-github-bodies-with-a-checked-operator-script.md):
@@ -148,7 +151,7 @@ for tool in awk cat cmp cp git gh head jq mktemp sort tail wc; do
     command -v "$tool" >/dev/null 2>&1 || die2 "required tool is unavailable: $tool"
 done
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-repo_top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die2 'not inside a git checkout'
+repo_top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die2 "the script's location is not inside a git checkout"
 [[ $repo_top -ef $repo ]] || die2 'the script is not at scripts/operator/ of a git checkout'
 cd "$repo"
 

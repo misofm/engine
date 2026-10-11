@@ -275,6 +275,7 @@ rc=0
 CEILING=
 STUB_BACKUP_DIR=
 RUNCWD=
+RUNTOOL=
 STUB_ORIGIN_URL=
 run() { # args...: runs the tool inside RUNCWD (default: the repository) against the stub
     : >"$G/log"
@@ -282,11 +283,19 @@ run() { # args...: runs the tool inside RUNCWD (default: the repository) against
     rc=0
     (
         cd "${RUNCWD:-$R}"
-        case ${RUNCWD:-$R} in # the copy inside the repository the run happens in
-        "$R3" | "$R3"/*) tool=$R3/scripts/operator/sync-spec-bodies.sh ;;
-        "$R2" | "$R2"/*) tool=$R2/scripts/operator/sync-spec-bodies.sh ;;
-        *) tool=$R/scripts/operator/sync-spec-bodies.sh ;;
-        esac
+        if [[ -n $RUNTOOL ]]; then # an explicit copy, whatever the directory the run happens in
+            tool=$RUNTOOL
+        else
+            case ${RUNCWD:-$R} in # the copy inside the repository the run happens in
+            "$R3" | "$R3"/*) tool=$R3/scripts/operator/sync-spec-bodies.sh ;;
+            "$R2" | "$R2"/*) tool=$R2/scripts/operator/sync-spec-bodies.sh ;;
+            "$R" | "$R"/*) tool=$R/scripts/operator/sync-spec-bodies.sh ;;
+            *)
+                printf 'run: RUNCWD is in no test repository and RUNTOOL is unset: %s\n' "$RUNCWD" >&2
+                exit 99
+                ;;
+            esac
+        fi
         PATH="$T/bin:$PATH" GH_STUB_DIR=$G STUB_BACKUP_DIR=$STUB_BACKUP_DIR STUB_ORIGIN_URL=$STUB_ORIGIN_URL \
             SYNC_SPEC_BODIES_TEST_CEILING=$CEILING bash "$tool" "$@"
     ) >"$T/out" 2>"$T/err" || rc=$?
@@ -462,7 +471,12 @@ assert 'reconcile-source-blob-file' cmp -s "$RD/15.source.md" "$T/src15"
 git -C "$R" show "$C2:.github/ISSUE_SPECS/15-unmatched.md" >"$T/near15"
 assert 'reconcile-nearest-blob-file' cmp -s "$RD/15.nearest.md" "$T/near15"
 assert 'reconcile-header-names-nearest-commit' grep -q "commit $C2 path .github/ISSUE_SPECS/15-unmatched.md" "$RD/15.header.txt"
-assert 'reconcile-dir-must-not-exist' bash -c '! (cd "$1" && PATH="$2:$PATH" GH_STUB_DIR="$3" bash "$4" --check --reconcile-dir "$5" 15) >/dev/null 2>&1' _ "$R" "$T/bin" "$G" "$R/scripts/operator/sync-spec-bodies.sh" "$RD"
+# An existing DIR is refused with exit 2 before any gh call. (A bare "the run failed" check would stay
+# green without the guard: this run ends with exit 3, unmatched work remaining, which is also nonzero.)
+run --check --reconcile-dir "$RD" 15
+assert 'reconcile-dir-must-not-exist-exit-2' test "$rc" = 2
+assert 'reconcile-dir-must-not-exist-message' grep -q -- '--reconcile-dir must not exist' "$T/err"
+assert 'reconcile-dir-must-not-exist-no-gh-call' no_gh_call
 
 # --- L: every gh call is bound to origin's repository --------------------------------------------
 # (the stub refuses any argv whose --repo is not test-owner/test-repo, so every run above proves the flag)
@@ -497,6 +511,24 @@ RUNCWD=$R/.github run --apply --backup-dir relb2 10
 assert 'relative-backup-dir-existing-file-refused' test "$rc" = 2
 assert 'relative-backup-dir-existing-file-no-gh-call' no_gh_call
 rm -rf "$R/rdexist" "$R/.github/rdexist" "$R/.github/rdexist2" "$R/.github/relb" "$R/.github/relb2"
+
+# --- M2: the script's own location selects the repository ---------------------------------------
+# (a) a copy at sub/scripts/operator/ of a checkout is not at the checkout's scripts/operator/.
+reset_issues
+mkdir -p "$R/sub/scripts/operator"
+cp "$SCRIPT" "$R/sub/scripts/operator/sync-spec-bodies.sh"
+RUNTOOL=$R/sub/scripts/operator/sync-spec-bodies.sh run --check 11
+assert 'nested-install-refused-exit-2' test "$rc" = 2
+assert 'nested-install-refused-message' grep -q 'the script is not at scripts/operator/ of a git checkout' "$T/err"
+assert 'nested-install-no-gh-call' no_gh_call
+rm -rf "$R/sub"
+# (b) the working directory does not choose the repository: from a directory outside every checkout,
+# and from inside another checkout, one clone's copy acts on its own clone.
+mkdir -p "$T/outside"
+RUNCWD=$T/outside RUNTOOL=$R/scripts/operator/sync-spec-bodies.sh run --check 11
+assert 'cwd-outside-every-checkout-acts-on-the-scripts-repository' has_line '11 fast-forward'
+assert 'cwd-outside-every-checkout-views-the-issue' test "$(viewed)" = '11 '
+RUNTOOL=
 
 # --- N: the write phase checks state, title and the backup file itself ---------------------------
 reset_issues
@@ -559,6 +591,12 @@ git -C "$R2" push -q origin main
 RUNCWD=$R2 run --check --all
 assert 'duplicate-spec-for-one-issue-refused' test "$rc" = 2
 assert 'duplicate-spec-for-one-issue-no-gh-call' no_gh_call
+
+# --- P2: standing inside another checkout does not choose the repository (see M2) -----------------
+reset_issues
+RUNCWD=$R2 RUNTOOL=$R/scripts/operator/sync-spec-bodies.sh run --check 11
+assert 'cwd-in-another-checkout-acts-on-the-scripts-repository' has_line '11 fast-forward'
+RUNTOOL=
 
 # --- Q: the history does not depend on the user's log.showRoot -------------------------------------
 reset_issues
