@@ -10,9 +10,9 @@
 //! outcome flags)` here, with saturating per-outcome counters, and any thread reads it.
 //!
 //! The revision is the highest one that is in effect together with every revision before it.
-//! Revisions travel with their plans (the mailbox cell words of `spsc.rs`), and render reads only
-//! the cell of the plan it runs, so the watermark never reports a revision before the plan that
-//! carries it renders.
+//! Revisions travel with their plans (each plan's own revision gate, #1502), and render takes its
+//! block snapshot only from the gate of the plan it runs, so the watermark never reports a
+//! revision before the plan that carries it renders.
 //!
 //! # Why this is a level, not a queue
 //!

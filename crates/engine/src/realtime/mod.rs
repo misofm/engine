@@ -989,6 +989,9 @@ mod tests {
             let probe = SnapshotProbe::default();
             let (plan, gate) = probed(1, &probe);
             let (_first_gate, mut publisher, mut realtime, _retirer) = exchange_with(plan, gate, 1);
+            // Plan one's own refused block takes no snapshot: its executor is never called.
+            refused_block(&mut realtime, 0, false);
+            assert_eq!(probe.calls(), 0);
             let mut b_gate = publish_at(&mut publisher, 2, 7);
 
             // `render`: the refused block claims B but renders nothing.
