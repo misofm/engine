@@ -5355,7 +5355,11 @@ mod tests {
             // 1088 -> 1136: its control consumers hold the input cell reader, 88 bytes, in place
             // of the 40-byte input ring consumer). The allocation counts do not move. No PCM,
             // meter, response or benchmark fixture moved.
-            "28f109c918b027b20d5b4cce6a6b0a7ec7c3b8be5eb7bd6f8a1daae82b93e9d0",
+            //
+            // Re-pinned by issue #1054 (D1a): the two `prepare_256_tracks` rows move, by the
+            // `session_template_sha256` of `canonical.json` and its new `control_smoothing` key.
+            // No PCM, meter, response or resource fixture moved.
+            "3e151a3c0744742330d44d4a6d22ea0f11886b1892ad3266325ec23d93b9e108",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);
