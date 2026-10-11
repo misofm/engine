@@ -25,7 +25,9 @@
 //! A gate and its [`GatePin`] are born together ([`RevisionGate::pair`]), so a pin cannot start
 //! below, or apart from, its gate's initial revision. Control keeps one rule: it publishes each
 //! revision it stamped before it stamps a higher one. `stamp` and `publish` debug-assert it; the
-//! choice of `A` makes a violation harmless to a reader even in a release build.
+//! choice of `A` makes a violation harmless to a reader even in a release build. A
+//! [`LiveStamp`] borrows its pin, so a stamp cannot outlive its own publication: the compiler,
+//! not a check, refuses a write with a stamp made stale by a later `publish`.
 //!
 //! **Every write to a gate word is a read-modify-write**, and every read of it masks
 //! `ANNOUNCED`. A plain store would end the release sequences the visibility argument uses. The
@@ -50,6 +52,7 @@
 //! word loads. On AArch64 without LSE (ARMv8.0) a read-modify-write is a load-linked or
 //! store-conditional loop, which `docs/REALTIME_DEPENDENCY_POLICY.md` states.
 
+use core::marker::PhantomData;
 #[cfg(not(loom))]
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(loom)]
@@ -88,16 +91,52 @@ impl LiveSnapshot {
 
 /// The revision a transaction commits as, and the snapshot render may still hold, as of the time
 /// control stamps it. Only [`GatePin::stamp`] makes one.
+///
+/// A stamp borrows the pin that made it (`'p`), so [`GatePin::publish`] cannot run while a stamp
+/// is alive: a stamp cannot outlive its own publication, and a write cannot use a stamp whose
+/// facts (`pinned`, `published`) a later publication has made stale. The borrow is a type-level
+/// fact with no runtime cost. One stamp serves every cell write of one transaction:
+///
+/// ```
+/// use engine::realtime::{CellWriter, DirtyWord, LatestCell, RevisionGate};
+///
+/// let (gate, mut pin) = RevisionGate::pair(0);
+/// let (cells, dirty) = ([LatestCell::<1>::new(), LatestCell::<1>::new()], DirtyWord::new());
+/// let mut writers = [CellWriter::<1>::new(), CellWriter::<1>::new()];
+/// let stamp = pin.stamp(1);
+/// for (bit, (writer, cell)) in writers.iter_mut().zip(&cells).enumerate() {
+///     writer.write(cell, &dirty, bit as u32, stamp, [7]);
+/// }
+/// let revision = stamp.revision();
+/// pin.publish(&gate, revision);
+/// ```
+///
+/// A stamp used after its publication does not compile, because the publication needs the pin
+/// the stamp still borrows:
+///
+/// ```compile_fail,E0499
+/// use engine::realtime::{CellWriter, DirtyWord, LatestCell, RevisionGate};
+///
+/// let (gate, mut pin) = RevisionGate::pair(0);
+/// let (cell, dirty, mut writer) = (LatestCell::<1>::new(), DirtyWord::new(), CellWriter::<1>::new());
+/// let stamp = pin.stamp(1);
+/// writer.write(&cell, &dirty, 0, stamp, [7]);
+/// pin.publish(&gate, 1);
+/// // The stamp's `published` and `pinned` are now stale; this write would target a published slot.
+/// writer.write(&cell, &dirty, 0, stamp, [8]);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LiveStamp {
+pub struct LiveStamp<'p> {
     revision: u64,
     pinned: Option<u64>,
     /// The gate's published revision when the stamp was made: `A` is the newest value at or below
     /// it.
     published: u64,
+    /// The borrow of the pin that made the stamp.
+    pin: PhantomData<&'p mut GatePin>,
 }
 
-impl LiveStamp {
+impl LiveStamp<'_> {
     /// The revision of the transaction that writes with this stamp.
     #[must_use]
     pub const fn revision(self) -> u64 {
@@ -230,6 +269,9 @@ impl GatePin {
 
     /// The stamp for a transaction that commits as `revision`.
     ///
+    /// The stamp borrows the pin, so `publish` cannot run while the stamp is alive: take the
+    /// stamp, write every cell of the transaction with it, then publish.
+    ///
     /// **Rule:** control publishes every revision it stamped before it stamps a higher one. A
     /// transaction that stamps `revision` writes all its cells and then calls `publish(revision)`;
     /// no other revision is stamped between. Cell writes choose their slot on this rule.
@@ -238,7 +280,7 @@ impl GatePin {
     /// [`GATE_REVISION_MAX`] (the in-place rule would rewrite a slot render may be reading); and a
     /// second revision while one is stamped and not yet published (the rule above).
     #[must_use]
-    pub fn stamp(&mut self, revision: u64) -> LiveStamp {
+    pub fn stamp(&mut self, revision: u64) -> LiveStamp<'_> {
         debug_assert!(
             revision <= GATE_REVISION_MAX,
             "stamped revision {revision} is above the ceiling {GATE_REVISION_MAX}"
@@ -258,6 +300,7 @@ impl GatePin {
             revision,
             pinned: self.pinned,
             published: self.last_published,
+            pin: PhantomData,
         }
     }
 }
@@ -395,7 +438,7 @@ impl<const N: usize> CellWriter<N> {
     }
 
     /// The slot a write stamped `stamp` stores into.
-    fn target(&self, stamp: LiveStamp) -> usize {
+    fn target(&self, stamp: LiveStamp<'_>) -> usize {
         // One revision occupies at most one slot, so a second write of it rewrites that slot.
         // Render reads only revisions at or below its snapshot, and this one is not published.
         if let Some(index) = self.revisions.iter().position(|&r| r == stamp.revision) {
@@ -427,13 +470,14 @@ impl<const N: usize> CellWriter<N> {
     /// the caller's contract, and the slot of a published value is never taken.
     ///
     /// In debug builds, a stamp whose revision is below the cell's newest written revision
-    /// panics, and so does a `bit` of 64 or more.
+    /// panics (a stamp of this pin cannot be stale, because it borrows the pin; the check guards a
+    /// stamp from another pin), and so does a `bit` of 64 or more.
     pub fn write(
         &mut self,
         cell: &LatestCell<N>,
         dirty: &DirtyWord,
         bit: u32,
-        stamp: LiveStamp,
+        stamp: LiveStamp<'_>,
         words: [u32; N],
     ) {
         debug_assert!(bit < u64::BITS, "dirty bit {bit} is outside the word");
@@ -889,6 +933,7 @@ mod tests {
             revision: 4,
             pinned: f.pin.pinned,
             published: f.pin.last_published(),
+            pin: PhantomData,
         };
         f.writer
             .write(&f.cell, &f.dirty, 0, stamp, value_words(4, 0));
@@ -908,10 +953,18 @@ mod tests {
     #[test]
     #[should_panic(expected = "is below a revision already written")]
     fn a_write_below_a_written_revision_panics() {
+        // A stamp of this pin cannot be kept across a publication (it borrows the pin), so the
+        // stale stamp is forged, as a stamp of another pin would be.
         let mut f = Fixture::new();
-        let old = f.pin.stamp(3);
+        f.write(3, 0);
         f.publish(3);
         f.write(4, 0);
+        let old = LiveStamp {
+            revision: 3,
+            pinned: None,
+            published: 0,
+            pin: PhantomData,
+        };
         f.writer.write(&f.cell, &f.dirty, 0, old, value_words(3, 0));
     }
 }

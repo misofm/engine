@@ -72,16 +72,23 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
     - `GatePin::publish(&mut self, gate, revision)`: `swap(revision, AcqRel)`. If the old word had
       `ANNOUNCED`, `pinned` becomes `Some(old revision)`; otherwise `pinned` is unchanged. Then
       `last_published := revision`.
-    - `GatePin::stamp(&mut self, revision) -> LiveStamp { revision, pinned, published }`, where
+    - `GatePin::stamp(&mut self, revision) -> LiveStamp<'_> { revision, pinned, published }`, where
       `published` is `last_published` at the stamp (follow-ups, m2). `A` is the newest value at or
       below `published`.
+    - **A stamp borrows its pin** (`LiveStamp<'p>` holds a `PhantomData<&'p mut GatePin>`), so
+      `publish` cannot run while a stamp is alive. A stamp kept past its own publication, whose
+      `pinned` and `published` a later publication made stale, does not compile. One stamp serves
+      every cell write of one transaction: take it, write the cells, read `stamp.revision()` into
+      a local, then publish. The cost is zero at run time (follow-ups after the follow-ups, m2).
     - `publish` and `stamp` debug-assert that `revision` is above `last_published` and at most
       `GATE_REVISION_MAX`. A stamp at or below a revision already published would make the
       in-place rule below rewrite a slot render may be reading. They also debug-assert the rule
       "publish every stamped revision before a higher one is stamped": `stamp` refuses a second
       revision while `open` is set, and `publish` refuses a revision below `open`. `publish` also
-      debug-asserts that the gate's old revision is `last_published`, which catches a pin used with
-      another gate.
+      debug-asserts that the gate's old revision is `last_published`. That catches a pin used with
+      another gate only when the two gates hold different revisions; it cannot see a wrong gate at
+      the same revision (two fresh gates at 0). The real protection is that the plan's handle owns
+      the gate and its pin together (#1502 D1, D5).
   - **`LiveSnapshot`** wraps the revision a block reads. `LiveSnapshot::ALL` is
     `GATE_REVISION_MAX`. Its only user is a drain of a quiescent predecessor plan (#1312 D6); no
     production render path takes it.
@@ -97,8 +104,8 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
     1. Choose the target slot.
        - If a slot's mirrored revision equals `stamp.revision`, rewrite that slot in place, so
          one revision occupies at most one slot.
-       - Otherwise let `A` be the slot with the greatest mirrored revision `< stamp.revision`
-         (the newest published value). Let `B` be the slot with the greatest mirrored revision
+       - Otherwise let `A` be the slot with the greatest mirrored revision at or below
+         `stamp.published` (the newest published value). Let `B` be the slot with the greatest mirrored revision
          `<= stamp.pinned`, if `pinned` is `Some`. Choose a slot that is neither `A` nor `B`;
          three slots guarantee one.
     2. Store the words, the next sequence and `stamp.revision` into it (`Relaxed`, any order).
@@ -290,7 +297,7 @@ Dependents: #1502, then #1503, *Hand each block's live snapshot to every live dr
 - Three render-side regions carry `REALTIME_POLICY` markers (the gate snapshot, the dirty take with
   `DirtyReader`, and `CellReader`). `scripts/check-realtime-policy.sh` floors rose to 27 files and
   96 regions. `docs/REALTIME_DEPENDENCY_POLICY.md` gained D4's one sentence.
-- 12 unit tests (`latest_cell::tests`) and 5 loom models (`spsc_loom_cells_*`: L1, L2, L3, R2, L4).
+- 17 unit tests (`latest_cell::tests`; the first record said 12 in error) and 5 loom models (`spsc_loom_cells_*`: L1, L2, L3, R2, L4).
 
 **API choices the spec left open (for review).**
 
@@ -415,7 +422,7 @@ One commit on `codex/d15-stream-b2`. Every change is in `latest_cell.rs` and thi
 claimed first.
 
 **Mutation evidence for the new and changed tests.** Each row applies one defect to the committed
-file and reverts it (revert: all 17 unit tests and the 13 loom tests green, run last).
+file and reverts it (revert: all 22 unit tests and the 13 loom tests green, run last. The count was 17 at attempt 1 and is 22 after this commit: 5 added, 2 rewritten, none deleted).
 
 | Mutation | Red |
 |---|---|
@@ -446,3 +453,59 @@ engine --features realtime-audit`, `check-realtime-policy.sh` (96 regions in 27 
 `test-realtime-policy.sh`, `cargo fmt --check`, workspace clippy `-D warnings`, `cargo doc` with
 `-D warnings`, `check-workspace-policy.sh` and `check-cross-targets.sh` (PASS). The worklet chain was
 not re-run: the module is not referenced from the browser host.
+
+### Follow-ups after the follow-ups verdict
+
+Verdict: PASS with MINORs m1, m2, m3 and NITs n1, n2 (`/home/bl/misofm/submix-verdicts/1432-followups.md`).
+One commit on `codex/d15-stream-b2`. Every change is in `latest_cell.rs` and this spec. m3 (#1312 D7
+must say that control takes the stamp only after every fallible check, or that a refused transaction
+stamps no higher revision before it publishes) is root's sync and is not changed here.
+
+- **m1.** D1's Write step 1 now reads "`A` = the slot with the greatest mirrored revision at or
+  below `stamp.published`", the one definition the `stamp` bullet and the code use.
+- **m2: a stamp cannot outlive its publication.** `LiveStamp` is now `LiveStamp<'p>` and carries a
+  `PhantomData<&'p mut GatePin>`, and `GatePin::stamp(&mut self, ..) -> LiveStamp<'_>`.
+  - `publish(&mut self, ..)` needs the pin the stamp borrows, so a write with a stamp made stale
+    by a later `publish` fails to compile (E0499). The verdict's probe
+    (`probe_stale_stamp_targets_the_slot_render_reads`: stamp 3, write, publish 3, write again
+    with the same stamp) is unrepresentable. The stamp is still `Copy`, so one stamp writes every
+    cell of one transaction.
+  - Why this shape: the defect needs a stamp that survives its own publication, and the only
+    thing that changes at a publication is the pin. Tying the stamp's lifetime to the pin removes
+    exactly that state at compile time and adds no field, check or branch to `stamp`, `write` or
+    `publish`. A runtime check (a stamp generation compared at `write`) would cost a compare per
+    write and would still allow the defect in a release build.
+  - Fit with the users, read before the change. Every user stamps, writes, then publishes, and no
+    one keeps a stamp across a publish: the five loom models and the unit fixture needed no
+    change. #1502 D1 and D6 and #1312 D7 take the stamp from the handle (`&mut` access to the
+    gate's `GatePin`) and publish through the same handle as the commit's last write, which the
+    borrow allows. The cell writers do not live in the handle, so the stamp's borrow of the pin
+    does not conflict with a write. Cost for those users: a debug check such as "the stamped
+    revision equals the published one" reads `stamp.revision()` into a local before `publish`,
+    because `publish(&gate, stamp.revision())` borrows the pin twice. The doctest shows it.
+  - The doc tests on `LiveStamp` are the proof: one passing example (one stamp, two cells, then
+    publish) and one `compile_fail,E0499` example (a write with the stamp after `publish`).
+  - Tests: the two sites that built a `LiveStamp` by hand gained `pin: PhantomData`.
+    `a_write_below_a_written_revision_panics` can no longer hold a real stamp across a
+    publication, so it forges the stale stamp (it defends `write`'s own assert, which still guards
+    a stamp from another pin). No unit test was added or deleted.
+- **n1.** The text claiming the gate-identity check "catches a pin used with another gate" now
+  says it does so only when the two gates hold different revisions.
+- **n2.** The earlier records said 12 unit tests at attempt 1 and 17 after the first follow-ups.
+  The real counts are 17 before and 22 after the first follow-ups (5 added, 2 rewritten, none
+  deleted); no record of a deleted test stands, and the table above now says so.
+
+**Mutation evidence.**
+
+| Mutation | Red | Revert |
+|---|---|---|
+| `stamp` returns `LiveStamp<'static>` (the stamp no longer borrows the pin) | the `compile_fail,E0499` doctest ("compiled successfully, but it's marked `compile_fail`") | all doctests green |
+
+The passing doctest is the control for the compile-fail one: the same calls compile when the stamp
+is dead before `publish`, so the failure is the borrow and not a typo.
+
+**Gates.** CI loom command: 13 passed; again with `-C debug-assertions=on`: 13 passed (the loom
+models needed no edit). `cargo test --locked -p engine --features realtime-audit`: 75, 4 and 1
+passed, plus the doc tests (the `LiveStamp` pass example and compile-fail example, and the existing
+`PreparedRenderPlan` compile-fail). Policy, fmt, clippy, doc, workspace-policy and cross-target
+results are in the commit message.
