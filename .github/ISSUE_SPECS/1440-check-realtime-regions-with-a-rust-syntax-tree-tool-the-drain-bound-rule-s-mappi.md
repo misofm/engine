@@ -861,5 +861,38 @@ the pass-body-macro and R2 cases go red:
 **Open items.**
 - The tool reads no types: a user `Deref`/`DerefMut` on a root's type is outside condition 6 (Hazards, a.3).
 - NIT-1 (D7's reading of "mention") is left to the batch follow-ups, as above.
-- `Expr::Verbatim` and other nodes that syn leaves unparsed are not macro invocations and are not read by this
-  rule (none occurs in stable Rust the tree uses); recorded, not ruled.
+- `Expr::Verbatim` and other nodes that syn leaves unparsed: closed by the A1 parser check (`src/syntax.rs`
+  refuses any non-empty `Verbatim` node in a marked file; the drain runs only on marked files).
+
+#### Verdict follow-ups (attempt 2)
+
+Source: `/home/bl/misofm/submix-verdicts/1440-attempt2.md` (PASS). Edits: `tools/realtime-policy/tests/policy/drain/per_queue.rs`
+and this spec; no change under `src/`.
+
+- **MINOR-1 (closed).** `per_queue_terminal_break_leaves_a_labelled_block` is committed. The outermost loop is
+  `'l: for _ in 0..passes`; the tail is `'l: { if ready.lost > 9 { ready.refill_counters(); break 'l; } }`, so
+  `break 'l` leaves the labelled block (rustc-proven in the verdict's `probe/shadow.rs`: warnings only) and the next
+  pass starts with refilled counters. Test value: red if a labelled block is admitted as an ancestor of the
+  terminal call (`block.label.is_none()` at `window.rs`, `reaches_a_block`), which no other case defends.
+  Mutation: `syn::Expr::Block(block) => block.label.is_none() && via == Via::Body` changed to
+  `syn::Expr::Block(_block) => via == Via::Body`: only the new case is red (131 passed, 1 failed; findings `[]`),
+  the real tree stays ok; reverted by `git checkout`, 132 green.
+- **NIT-3 (closed).** The open item on `Expr::Verbatim` now reads "closed by the A1 parser check".
+- **NIT-4 (closed, tests changed to match D11).** `per_queue_second_pop_in_counted_inner_drain` now binds
+  `let n` and loops `for _ in 0..n`, as D11 spells it; the claim is unchanged (the second pop of a disjoint queue
+  names no `<r'>`; only the pass body's one-pop check refuses it). The `ready.` in D11's probe-a and R1 texts against
+  `R.` in the tests is not a difference: the tests' `R.` renders as `ready.` for the `ready` root those cases use,
+  and as `self.` for the `self` root. D11's text is unchanged.
+- **NIT-1 (accepted over-refusal, no change).** `breaks_out_of_outer` refuses a `break 'e` to a labelled loop that
+  encloses the set loop (`return index == self.outer`). Such a `break` also leaves the form, and the set loop would
+  run again on re-entry; the tool refuses it all the same. It only over-refuses, and no production form uses it.
+- **NIT-2 (harmless, no change).** The terminal call's own arguments are not held to the allow-list, so
+  `ready.refill_counters(if flag { continue } else { 0 }); return 0;` is accepted. It is not a false pass: the
+  arguments run before the call, so a `continue` there skips the refill.
+
+Gates on this tree (head `31bfd0271`, which carries #1441's commits, plus this change): `cargo test --locked -p
+realtime-policy`: 132 passed (131 before the new case; the verdict's 121 at `1e03edf19` plus #1441's tests);
+release binary on the real tree: `realtime policy: ok (94 marked regions in 26 files)` (the verdict measured 93 on
+`1e03edf19`; `993b85745` marks `drain_controls` and raises the floor to 94). The fmt, clippy `-D warnings`,
+`check-workspace-policy.sh` and `check-realtime-policy.sh` results are below.
+Results: fmt, clippy `-D warnings` (crate, all targets), `check-workspace-policy.sh` ("workspace policy: ok") and `check-realtime-policy.sh` ("ok (94 marked regions in 26 files)") all exit 0.

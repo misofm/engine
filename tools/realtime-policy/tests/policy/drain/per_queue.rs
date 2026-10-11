@@ -364,7 +364,7 @@ fn per_queue_terminal_return_under_cfg() {
 #[test]
 fn per_queue_second_pop_in_counted_inner_drain() {
     let mut poll = Poll::passing("self");
-    poll.pass_body.push_str("\nlet extra = R.other.available_at_entry();\nfor _ in 0..extra {\n    if let Ok(record) = R.other.try_pop() {\n        apply(record);\n    }\n}");
+    poll.pass_body.push_str("\nlet n = R.other.available_at_entry();\nfor _ in 0..n {\n    if let Ok(record) = R.other.try_pop() {\n        apply(record);\n    }\n}");
     refuses("per-queue-second-pop-in-counted-inner-drain", &poll);
 }
 
@@ -384,6 +384,25 @@ fn per_queue_terminal_break_leaves_an_inner_loop() {
     let mut poll = Poll::passing("self");
     poll.after = "for _ in 0..2 {\n    if R.lost > 9 {\n        R.refill_counters();\n        break;\n    }\n}".to_owned();
     refuses("per-queue-terminal-break-leaves-an-inner-loop", &poll);
+}
+
+/// Condition 6: the tail's `break 'l` names a labelled block that shadows the outermost loop's own
+/// label, so it leaves that block and the next pass starts with the refilled counters (it compiles
+/// with a warning). Defect: a labelled block admitted as an ancestor of the terminal call.
+#[test]
+fn per_queue_terminal_break_leaves_a_labelled_block() {
+    let mut poll = Poll::passing("ready");
+    poll.after =
+        "'l: {\n    if R.lost > 9 {\n        R.refill_counters();\n        break 'l;\n    }\n}"
+            .to_owned();
+    let text = poll
+        .render()
+        .replace("for _ in 0..passes {", "'l: for _ in 0..passes {");
+    expect_failure(
+        "per-queue-terminal-break-leaves-a-labelled-block",
+        &edit(&text),
+        &[DRAIN],
+    );
 }
 
 /// D1, condition 3: the loops that enclose the set loop are the drain's outer loops, judged like
