@@ -3269,9 +3269,10 @@ impl PreparedPlanExecutor for GraphExecutor {
     ///
     /// * **`Ok`:** each plane's `frames` words are this block's master. Nothing past `frames` is
     ///   written, so a `plane_stride` wider than the block keeps its padding.
-    /// * **No live snapshot: untouched.** A block whose [`PreparedPlanExecutor::begin_live_block`] did not run is refused
-    ///   with `InvalidEnvelope` before any drain, because no drain falls back to a default
-    ///   snapshot (#1504 D2). `PreparedRenderPlan` calls it before every block.
+    /// * **No live snapshot: untouched.** A block whose
+    ///   [`PreparedPlanExecutor::begin_live_block`] did not run is refused with `InvalidEnvelope`
+    ///   before any drain, because no drain falls back to a default snapshot (#1504 D2).
+    ///   `PreparedRenderPlan` calls it before every block.
     /// * **Envelope rejection: untouched.** A non-stereo `output` is refused with
     ///   `Buffer(InvalidPlane)`. A plane that is not exactly `arena.frames()` words is refused with
     ///   `InvalidEnvelope`. Both refusals come before any observer boundary, source work or unit.

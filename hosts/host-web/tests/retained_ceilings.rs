@@ -219,3 +219,23 @@ fn browser_identity_fixture_retained_rows_stay_within_their_budgets() {
     .expect("one byte below the fixture's exact retained aggregate must refuse");
     assert_eq!(refused.result(), RESULT_REFUSED_BUDGET);
 }
+
+/// The browser's exact retained total counts the allocations the plan makes for itself (#1502 m1,
+/// #1312 m3). The browser copies host-core's graph row unchanged, and the graph compiler's row is
+/// its incremental row plus the session bytes the facade does not pass it, so the row less the
+/// incremental row is the plan's own: its revision gate and, because the browser prepares each plan
+/// with its own `live_values_superseded` count, that count. A row that leaves either out would let
+/// the exact aggregate under-report two real allocations, and no ceiling above would notice.
+#[test]
+fn the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count() {
+    let host = AudioWorkletEngineHost::boot(SESSION_DOCUMENT.as_bytes(), options()).unwrap_or_else(
+        |failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())),
+    );
+    let report = *host.resources();
+    assert_eq!(
+        report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes,
+        engine::realtime::plan_revision_gate_retained_bytes()
+            + builtins_compiler::LiveValuesSuperseded::retained_bytes(),
+        "the browser's graph row: the graph's own bytes, the plan's revision gate and its count"
+    );
+}

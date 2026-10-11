@@ -36,7 +36,6 @@ pub(crate) use engine::realtime::{
     PlanReplacementReservationError, PlanRetirer, PlanRevisionGate, PlanWatermark,
     PlanWatermarkReader, PlanarBufferMut, PreparedRenderPlan, RealtimePlanOwner, RenderError,
     RenderIo, WatermarkBusy, plan_exchange_at_revision, plan_exchange_resource_report,
-    plan_revision_gate_retained_bytes,
 };
 pub(crate) use host_core::{
     HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, PlanStateInventory,

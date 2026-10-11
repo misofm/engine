@@ -5341,8 +5341,9 @@ mod tests {
             // Re-pinned by issue #1312: `resources.jsonl` alone moves, by +8 bytes per track in
             // every processor payload count (`StripPreparation` 1080 -> 1088: its control
             // consumers hold the fader and matrix cell readers in place of two ring consumers).
-            // The largest allocation and the allocation counts do not move. No PCM, meter,
-            // response or benchmark fixture moved.
+            // The allocation counts do not move; `maximum_single_allocation_bytes` does, by the
+            // same +8 bytes per track, because the strip vector is the largest allocation. No PCM,
+            // meter, response or benchmark fixture moved.
             "0834666e8f2ea44131efd5906d3017c511cc7e4f88923b0588d01c051410580e",
             "accepted joined-corpus manifest identity"
         );

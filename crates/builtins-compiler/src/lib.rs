@@ -265,11 +265,28 @@ pub struct TrackControlRequest {
 #[derive(Clone, Debug, Default)]
 pub struct LiveValuesSuperseded(Arc<AtomicU64>);
 
+/// The shared-owner allocation behind one [`LiveValuesSuperseded`]: `Arc`'s header and the word.
+#[repr(C)]
+struct SupersededAllocation {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    count: AtomicU64,
+}
+
 impl LiveValuesSuperseded {
     /// A count at zero.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Exact bytes of the one allocation a count retains: the word with the shared-owner header.
+    /// A host that makes a count per plan charges it to that plan's row; a host that makes one per
+    /// session charges it once (#1312 D2).
+    #[must_use]
+    pub fn retained_bytes() -> u64 {
+        u64::try_from(core::alloc::Layout::new::<SupersededAllocation>().size())
+            .expect("a count allocation's size fits u64")
     }
 
     /// Control: the writes counted so far.
@@ -4364,7 +4381,7 @@ fn resource_plan(
         // sections now live *inline* in the strip vector charged above rather than behind a `Box`,
         // so they are charged by that vector's layout and not per track. `controlled` therefore
         // changes no byte of the *section* storage, and the only live-control-dependent rows left
-        // are the two or three bounded rings charged below.
+        // are the input ring (until #1346) and the fader and matrix cells' `Arc`s charged below.
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
     add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
@@ -11139,6 +11156,60 @@ mod tests {
         assert_eq!(
             builtins::test_support::fader_bank_lane_words(&processor.bank, 0),
             settled
+        );
+    }
+
+    /// The matrix counterpart of the fader drain test above (#1312 D2): the matrix/pan cell counts
+    /// the writes a later write replaced, in the same session counter, and applies only what its
+    /// block's snapshot covers. Thirty writes of the one matrix cell count `29` replaced writes.
+    #[test]
+    fn a_matrix_drain_counts_the_replaced_writes_and_applies_only_what_its_snapshot_covers() {
+        let counter = LiveValuesSuperseded::default();
+        let (mut cells, reader) = matrix_lane(&counter);
+        let width = BankWidth::Four;
+        let mut processor = MatrixBankProcessor {
+            bank: BuiltinMatrixBank::new(
+                Backend::Simd4,
+                width,
+                vec![(Matrix2x2::IDENTITY, 0); width.lanes() as usize],
+            )
+            .expect("bank"),
+            controls: core::iter::once(Some(reader))
+                .chain((1..width.lanes()).map(|_| None))
+                .collect(),
+            process_calls: 0,
+            frames_processed: 0,
+            control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+        };
+        let record = |index: u32| TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 1.0 - index as f32 * 0.01,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+            smoothing_samples: 0,
+        };
+        let mut gate = TestOnlyGate::new();
+        let initial = builtins::test_support::matrix_bank_lane_words(&processor.bank, 0);
+        for index in 0..30_u32 {
+            gate.write_published(|stamp| cells.write(stamp, record(index)));
+        }
+        // The block's snapshot covers the 30th write; the 29 before it were replaced.
+        let covers_thirty = gate.snapshot();
+        // A 31st write is published after the snapshot: this block must not apply it.
+        gate.write_published(|stamp| cells.write(stamp, record(30)));
+        processor.begin_block(0, covers_thirty).unwrap();
+        assert_eq!(counter.get(), 29, "29 replaced writes in the matrix cell");
+        let after_thirty = builtins::test_support::matrix_bank_lane_words(&processor.bank, 0);
+        assert_ne!(after_thirty, initial);
+        // The next block's snapshot reaches the 31st write, which replaced nothing.
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(counter.get(), 29);
+        assert_ne!(
+            builtins::test_support::matrix_bank_lane_words(&processor.bank, 0),
+            after_thirty,
+            "the later write applied in the block whose snapshot covers it"
         );
     }
 

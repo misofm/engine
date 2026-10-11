@@ -1645,7 +1645,22 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let route_control_resources = graph::route_control_resources(&graph_route_controls);
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
-    let graph_resources = artifact.graph_resource_estimate().clone();
+    let mut graph_resources = artifact.graph_resource_estimate().clone();
+    // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1)
+    // and, when this preparation made its own `live_values_superseded` count rather than taking the
+    // session's, that count (#1312 D2; a session's count is the host's to charge once). Charged
+    // here so every host, the C ABI and the browser, counts them in the one row.
+    graph_resources.session_plus_plan_bytes = graph_resources
+        .session_plus_plan_bytes
+        .checked_add(engine::realtime::plan_revision_gate_retained_bytes())
+        .and_then(|bytes| {
+            bytes.checked_add(if superseded.is_none() {
+                LiveValuesSuperseded::retained_bytes()
+            } else {
+                0
+            })
+        })
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let session_resources = compiled.resource_estimate();
     let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
         None => None,

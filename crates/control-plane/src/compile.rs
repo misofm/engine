@@ -701,14 +701,12 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             track_count: host.track_count,
             latency_samples: host.latency_samples,
             output_tail: host.output_tail,
-            // The carry program's bytes and the plan's revision gate (#1502 D1) are the plan's own
-            // allocations that the host-core row does not count.
+            // The carry program's bytes are the plan's own allocation that the host-core row does
+            // not count. The plan's revision gate is in the host-core row (#1502 D1), shared with
+            // the browser.
             graph_session_plus_plan_bytes: with_carried(
-                with_carried(
-                    host.graph_session_plus_plan_bytes,
-                    host.carry_program_retained_bytes,
-                )?,
-                plan_revision_gate_retained_bytes(),
+                host.graph_session_plus_plan_bytes,
+                host.carry_program_retained_bytes,
             )?,
             graph_incremental_plan_bytes: host.graph_incremental_plan_bytes,
             graph_metadata_bytes: host.graph_metadata_bytes,

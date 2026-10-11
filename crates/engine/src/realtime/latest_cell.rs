@@ -486,8 +486,9 @@ impl<const N: usize> CellWriter<N> {
     /// the caller's contract, and the slot of a published value is never taken.
     ///
     /// In debug builds, a stamp whose revision is below the cell's newest written revision
-    /// panics (a stamp of this pin cannot be stale, because it borrows the pin; the check guards a
-    /// stamp from another pin), and so does a `bit` of 64 or more.
+    /// panics (a stamp of this pin cannot be stale, because it borrows the pin; the check catches
+    /// a stamp from another pin only when its revision is below one already written), and so does
+    /// a `bit` of 64 or more.
     pub fn write(
         &mut self,
         cell: &LatestCell<N>,

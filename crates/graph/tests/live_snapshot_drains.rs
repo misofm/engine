@@ -3,9 +3,9 @@
 //!
 //! The plan is rendered through the exchange (`RealtimePlanOwner`) so that `S` is what render
 //! read from the plan's own revision gate. Revisions are published on that gate between blocks.
-//! Four drain kinds are probed: the builtin bank (the bank stage forwards to it), the per-node
+//! Three drain kinds are probed: the builtin bank (the bank stage forwards to it), the per-node
 //! processors, and the live route (through the graph's route-drain test hooks). The rack crate's
-//! own tests probe the bank chain's hand-over to a bare `BankStage`.
+//! own tests probe the bank chain's hand-over to a bare `BankStage`, the fourth.
 #![cfg(feature = "test-support")]
 
 use core::num::NonZeroUsize;

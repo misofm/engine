@@ -392,8 +392,9 @@ impl From<SpscError> for PlanExchangeError {
 ///
 /// # Panics
 ///
-/// If `gate` is not `initial`'s handle (checked by pointer identity), or `initial_revision` is not
-/// above the gate's published revision when it is above 0.
+/// If `gate` is not `initial`'s handle (checked by pointer identity). In a debug build it also
+/// panics when `initial_revision` is not above the gate's published revision and is above 0 (the
+/// check is `GatePin::publish`'s debug assertion).
 ///
 /// # Errors
 ///
