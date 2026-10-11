@@ -59,21 +59,29 @@ primitives. #1345, #1346, #1347, #1371 and #1390 reuse them.
   `crates/engine/src/realtime/latest_cell.rs`, safe Rust (atomics only, no `unsafe`).
   - **The gate.** `RevisionGate` is one `AtomicU64`, embeddable (no `Arc` of its own).
     - Bit 63 is `ANNOUNCED`. Bits 0-62 are the revision. `GATE_REVISION_MAX = 2^63 - 1`.
-    - `RevisionGate::new(initial)` requires `initial <= GATE_REVISION_MAX`. A gate belongs to one
-      plan for the plan's life (#1502), so it has no re-arm operation.
+    - `RevisionGate::pair(initial) -> (RevisionGate, GatePin)` requires `initial <= GATE_REVISION_MAX`
+      and builds the gate and its one pin together (follow-ups after attempt 1, m1). A gate belongs to
+      one plan for the plan's life (#1502), so it has no re-arm operation.
     - `snapshot(&self) -> LiveSnapshot` (render, once per block): `fetch_or(ANNOUNCED, AcqRel)`.
       It returns the revision bits of the old word.
     - **Every write to the gate word is a read-modify-write**, and every read of it masks
       `ANNOUNCED`. A plain store would end the release sequences the proof uses.
-  - **The control pin.** `GatePin` is control-private, one per gate. It holds `pinned:
-    Option<u64>` and `last_published: u64` (at first the gate's initial revision).
+  - **The control pin.** `GatePin` is control-private, one per gate, and has no public
+    constructor. It holds `pinned: Option<u64>`, `last_published: u64` (at first the gate's initial
+    revision) and `open: Option<u64>` (the revision stamped and not yet published).
     - `GatePin::publish(&mut self, gate, revision)`: `swap(revision, AcqRel)`. If the old word had
       `ANNOUNCED`, `pinned` becomes `Some(old revision)`; otherwise `pinned` is unchanged. Then
       `last_published := revision`.
-    - `GatePin::stamp(&self, revision) -> LiveStamp { revision, pinned }`.
+    - `GatePin::stamp(&mut self, revision) -> LiveStamp { revision, pinned, published }`, where
+      `published` is `last_published` at the stamp (follow-ups, m2). `A` is the newest value at or
+      below `published`.
     - `publish` and `stamp` debug-assert that `revision` is above `last_published` and at most
       `GATE_REVISION_MAX`. A stamp at or below a revision already published would make the
-      in-place rule below rewrite a slot render may be reading.
+      in-place rule below rewrite a slot render may be reading. They also debug-assert the rule
+      "publish every stamped revision before a higher one is stamped": `stamp` refuses a second
+      revision while `open` is set, and `publish` refuses a revision below `open`. `publish` also
+      debug-asserts that the gate's old revision is `last_published`, which catches a pin used with
+      another gate.
   - **`LiveSnapshot`** wraps the revision a block reads. `LiveSnapshot::ALL` is
     `GATE_REVISION_MAX`. Its only user is a drain of a quiescent predecessor plan (#1312 D6); no
     production render path takes it.
@@ -343,8 +351,8 @@ fails) and reverts it. "Unit" is `latest_cell::tests`; the loom column is `spsc_
 | dirty `swap(0)` is `Relaxed` | L1, L2, L3, R2, L4 | none |
 | reader never defers | L1, L2, L3, R2, L4 | `a_read_applies_only_what_the_snapshot_covers_and_defers_the_rest` |
 | gate `fetch_or` and `swap` are `Relaxed` | L1, L3, R2, L4 | none |
-| model takes the dirty bits before the snapshot | L1, L3, R2 | none |
-| two writes of one revision go to two slots (no in-place rule) | R2 only | `two_writes_in_one_revision_apply_the_second` |
+| model takes the dirty bits before the snapshot | L1, L3, R2, L4 (corrected in the follow-ups: L4 was missed) | none |
+| two writes of one revision are forced into two slots (no in-place rule; dropping the lookup alone is a benign variant, because slot choice is deterministic and every test stays green) | R2 only | `two_writes_in_one_revision_apply_the_second` |
 | `peek_unread` consumes (sets the last applied sequence) | none | `peek_changes_nothing_and_a_read_counts_the_replaced_writes` |
 | superseded count off by one | L1, L2, L3, R2, L4 | five tests |
 | snapshot does not mask `ANNOUNCED` | (the run aborts) | `the_announcement_never_leaks_into_a_revision` and one more |
@@ -370,3 +378,71 @@ above.
 
 **Open items.** None blocking. Not done by design: the type does not force `pending` after
 `snapshot` (a documented rule; model mutation "take before the snapshot" shows the loom catch).
+
+### Follow-ups after attempt 1 verdict
+
+Verdict: PASS with MINORs m1, m2 and NITs n2, n4 (`/home/bl/misofm/submix-verdicts/1432-attempt1.md`).
+One commit on `codex/d15-stream-b2`. Every change is in `latest_cell.rs` and this spec.
+
+**m1: a pin cannot be built apart from its gate.**
+
+- `RevisionGate::new` and `GatePin::new` are gone. `RevisionGate::pair(initial) -> (RevisionGate,
+  GatePin)` builds both; the pin starts at the gate's own revision, and nothing else makes a pin.
+  A pin below its gate's initial revision is now unrepresentable.
+- A pin used with a different gate stays representable (a pair can be split), so `publish`
+  debug-asserts that the gate's old revision is `last_published`. It reads the `swap`'s result, so
+  it costs no atomic operation. A gate has exactly one publisher, so the check holds for every
+  correct caller.
+- The loom models take the pin from `Shared::new` (L1, L2, L3, R2) and from the plan builder (L4).
+- Note for #1502 and #1277: a gate built at revision `r` cannot take a stamp of `r`. A candidate
+  whose retargets are stamped at `r` needs a gate built below `r` (L4 builds gate 0, then writes
+  and publishes 2).
+
+**m2: the publish-before-a-higher-stamp rule.**
+
+- The rule is on `GatePin::stamp` and `CellWriter::write`, and in the module docs.
+- `GatePin` tracks `open`, the revision stamped and not yet published. In a debug build `stamp`
+  refuses a second revision while `open` is set (the same revision may stamp again), and `publish`
+  refuses a revision below `open`.
+- The type carries `published` in `LiveStamp`, and `A` is now the newest value at or below it
+  (before: below the stamp's revision, "hence published"). Under the rule the two are equal. When
+  a caller breaks the rule, even in a release build, `A` never follows an unpublished value, so an
+  abandoned revision cannot shield a slot render holds. The probe in the verdict now reads the
+  held value. An abandoned value's leak stays the caller's contract, as the verdict says.
+- #1312's brief must carry the rule (the verdict's note).
+
+**n2: L4 counts P.** It asserts that P's resolved writes equal 1 if P ran a block and 0 if C was
+claimed first.
+
+**Mutation evidence for the new and changed tests.** Each row applies one defect to the committed
+file and reverts it (revert: all 17 unit tests and the 13 loom tests green, run last).
+
+| Mutation | Red |
+|---|---|
+| `pair` starts the pin at 0 | `a_pair_starts_the_pin_at_the_gates_revision` |
+| `publish`'s gate-identity assert removed | `a_pin_publishes_only_to_its_own_gate` |
+| `stamp`'s open-revision assert removed | `a_second_revision_is_not_stamped_before_the_first_is_published` |
+| `publish`'s open-revision assert removed | `a_publication_below_the_stamped_revision_panics` |
+| `stamp` does not record `open` | the two tests above |
+| `A` back to "below the stamp's revision" | `an_abandoned_revision_never_shields_the_slot_render_holds` (no loom model reaches it: the models obey the rule) |
+| P's resolved count over by one (model only) | L4, on the new P assertion (line 1299) |
+| the dirty take before the snapshot (L4 model) | L4 (the missed row of the attempt 1 table) |
+| two writes of one revision forced into two slots | R2 and `two_writes_in_one_revision_apply_the_second` |
+| control protects only `A`, rerun on the new `A` | L2, R2, L4 |
+| control drops the pin on an unannounced swap, rerun | L2, L4 |
+
+Test value, one line each. `a_pair_starts_the_pin_at_the_gates_revision`: a pair whose pin disagrees
+with its gate (the verdict's m1 probe). `a_pin_publishes_only_to_its_own_gate`: a pin used with
+another gate, which corrupts `pinned`. `a_second_revision_is_not_stamped_before_the_first_is_published`
+and `a_publication_below_the_stamped_revision_panics`: an abandoned or reordered revision, the
+verdict's m2. `an_abandoned_revision_never_shields_the_slot_render_holds`: the m2 probe in a release
+build, where the asserts are off. `a_write_below_a_written_revision_panics` was rewritten: its old
+body now trips `stamp`'s assert first, so it holds an older stamp across a later publication, the
+only way left to reach `write`'s own assert. `the_all_snapshot_applies_the_newest_write` now
+publishes revision 1 before it writes 5, as the rule requires.
+
+**Gates (follow-ups commit).** All green: the CI loom command (13 passed), `cargo test --locked -p
+engine --features realtime-audit`, `check-realtime-policy.sh` (96 regions in 27 files),
+`test-realtime-policy.sh`, `cargo fmt --check`, workspace clippy `-D warnings`, `cargo doc` with
+`-D warnings`, `check-workspace-policy.sh` and `check-cross-targets.sh` (PASS). The worklet chain was
+not re-run: the module is not referenced from the browser host.
