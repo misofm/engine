@@ -18,15 +18,15 @@ use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     BuiltinLaneSelector, EQ_TARGET_CAPACITY, EqTargetEdit, EqTargetPreparer,
     HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveDelta, LiveEffectAddress,
-    LiveRamps, LiveRebuild, LiveStripRecords, PreparedHost, SourceSubmission, TrackControlRecord,
+    LiveRampRow, LiveRamps, LiveRebuild, PreparedHost, SourceSubmission, TrackControlRecord,
     TrackFaderRecord, classify_live_delta, compile_host_session, prepare_host_runtime,
     prepare_host_runtime_with_live_controls,
 };
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
-    ConsoleSlot, DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel,
-    ParameterUnit, RackName, RouteDestination, RouteSource, SendTap, SessionModel, StableId,
-    Submix, Vca, canonical_session_json, parse_session_json,
+    ConsoleSlot, ControlSmoothing, DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan,
+    ParameterChannel, ParameterUnit, RackName, RouteDestination, RouteSource, SendTap,
+    SessionModel, StableId, Submix, Vca, canonical_session_json, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -39,6 +39,8 @@ type Edit = fn(&mut SessionModel);
 const STEP: LiveRamps = LiveRamps {
     fader_samples: 0,
     mute_samples: 0,
+    pan_samples: 0,
+    link_samples: 0,
 };
 
 fn caps() -> HostPrepareCaps {
@@ -600,12 +602,25 @@ fn an_output_profile_channel_change_is_structural() {
     );
 }
 
-/// Gate 1(l). Red if the ramp seam is ignored: fader and mute records carry `LiveRamps`, the
-/// matrix record the model's smoothing.
-#[test]
-fn records_carry_the_ramps_and_the_model_smoothing() {
+/// `model` with the session's `control_smoothing` set (#1054).
+fn with_smoothing(
+    model: &SessionModel,
+    control_smoothing: Option<ControlSmoothing>,
+) -> SessionModel {
+    let mut model = model.clone();
+    model.control_smoothing = control_smoothing;
+    model
+}
+
+/// The records of one strip whose fader, mute and pan all change, under `control_smoothing`, at
+/// the fixture's 48 kHz: `[FaderDb, Mute, matrix]` ramps, the matrix one for a pan that carries
+/// `pan_smoothing_samples` of its own.
+fn ramps_of_a_move(
+    control_smoothing: Option<ControlSmoothing>,
+    pan_smoothing_samples: u32,
+) -> [u32; 3] {
     use BuiltinLaneSelector::Both;
-    let current = two_tracks();
+    let current = with_smoothing(&two_tracks(), control_smoothing);
     let next = edited(&current, |next| {
         let track = &mut next.tracks[0];
         track.fader.left_db = -6.0;
@@ -615,31 +630,165 @@ fn records_carry_the_ramps_and_the_model_smoothing() {
         track.matrix_or_pan = MatrixOrPan::Pan {
             left: 0.5,
             right: 0.5,
-            smoothing_samples: 96,
+            smoothing_samples: pan_smoothing_samples,
         };
     });
-    let ramps = LiveRamps {
-        fader_samples: 480,
-        mute_samples: 240,
-    };
+    let ramps = LiveRamps::for_session(&next);
     let delta = classify_live_delta(&current, &next, ramps).expect("live");
-    assert_eq!(
-        delta.strips,
-        vec![LiveStripRecords {
-            strip_id: next.tracks[0].id.as_str(),
-            fader: [
-                Some(fader_db(Both, -6.0, 480)),
-                Some(mute(Both, true, 240)),
-                None,
-                None
-            ],
-            matrix: Some(TrackControlRecord {
-                matrix: pan_matrix(0.5, 0.5).expect("pan"),
-                smoothing_samples: 96,
-            }),
-        }]
+    let [Some(db), Some(muted), None, None] = delta.strips[0].fader else {
+        panic!(
+            "one FaderDb and one Mute record: {:?}",
+            delta.strips[0].fader
+        );
+    };
+    let matrix = delta.strips[0].matrix.expect("a matrix record");
+    assert_eq!(matrix.matrix, pan_matrix(0.5, 0.5).expect("pan"));
+    assert_eq!(db, fader_db(Both, -6.0, ramps.fader_samples));
+    assert_eq!(muted, mute(Both, true, ramps.mute_samples));
+    let TrackFaderRecord::FaderDb {
+        smoothing_samples: fader,
+        ..
+    } = db
+    else {
+        unreachable!()
+    };
+    let TrackFaderRecord::Mute {
+        smoothing_samples: muted,
+        ..
+    } = muted
+    else {
+        unreachable!()
+    };
+    [fader, muted, matrix.smoothing_samples]
+}
+
+/// Gate 3. Red if the classifier keeps a pan window of 0, ignores the session for one row, or maps
+/// a row to the wrong key: the session's `control_smoothing` (or the default table) is what the
+/// fader, mute and matrix records carry at 48 kHz, and a pan's own non-zero window still wins.
+#[test]
+fn records_carry_the_session_ramps_and_the_models_own_pan_window() {
+    // The default table: fader 20 ms, mute 10 ms, pan 20 ms.
+    assert_eq!(ramps_of_a_move(None, 0), [960, 480, 960]);
+    assert_eq!(ramps_of_a_move(None, 96), [960, 480, 96]);
+    // Three different keys, so that a row cannot read its neighbour's.
+    let explicit = Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    assert_eq!(ramps_of_a_move(explicit, 0), [720, 240, 1200]);
+    assert_eq!(ramps_of_a_move(explicit, 96), [720, 240, 96]);
+    // An explicit 0 is the hard switch, never "use the default".
+    let steps = Some(ControlSmoothing {
+        mute_ms: 0.0,
+        fader_ms: 0.0,
+        pan_ms: 0.0,
+    });
+    assert_eq!(ramps_of_a_move(steps, 0), [0, 0, 0]);
+    // A session-wide hard switch does not override a pan that asks for its own window.
+    assert_eq!(ramps_of_a_move(steps, 96), [0, 0, 96]);
+}
+
+/// Gate 3, the raw matrix. Red if a raw matrix with no window of its own is given 0 instead of the
+/// session's `pan_ms` (D5 covers a pan and a matrix alike).
+#[test]
+fn a_raw_matrix_without_a_window_takes_the_session_pan_ramp() {
+    let explicit = Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    let current = with_smoothing(&two_tracks(), explicit);
+    let moved = |smoothing_samples| {
+        let mut current = current.clone();
+        current.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+            smoothing_samples,
+        };
+        let next = edited(&current, |next| {
+            next.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
+                ll: 0.25,
+                lr: -0.5,
+                rl: 0.5,
+                rr: 1.0,
+                smoothing_samples,
+            };
+        });
+        let delta = classify_live_delta(&current, &next, LiveRamps::for_session(&next))
+            .expect("a matrix move is live");
+        delta.strips[0]
+            .matrix
+            .expect("a matrix record")
+            .smoothing_samples
+    };
+    assert_eq!(moved(0), 1200);
+    assert_eq!(moved(64), 64);
+}
+
+/// Gate 3, the row table. Red if a row reads another row's key, or the polarity row gets the plain
+/// mute length instead of twice it. The expected values are written from `docs/SESSION_SCHEMA_V1.md`'s
+/// table, one per row, and the exhaustive `match` fails to compile when a row is added without one.
+#[test]
+fn for_row_returns_the_key_field_of_every_row() {
+    use LiveRampRow::*;
+    // At 48 kHz, 5 ms is 240 samples (mute), 15 ms is 720 (fader), 25 ms is 1200 (pan).
+    const MUTE: u32 = 240;
+    const FADER: u32 = 720;
+    const PAN: u32 = 1200;
+    fn expected(row: LiveRampRow) -> u32 {
+        match row {
+            Fader | InputTrim | SendGain | VcaOffset | LinkGlide => FADER,
+            Mute | Solo | SendMute | SendFollowsMute | VcaMute | BypassCrossfade => MUTE,
+            PolarityInvert => 2 * MUTE,
+            Pan | Matrix | SendMatrix => PAN,
+        }
+    }
+    let rows = [
+        Fader,
+        InputTrim,
+        SendGain,
+        VcaOffset,
+        LinkGlide,
+        Mute,
+        Solo,
+        PolarityInvert,
+        SendMute,
+        SendFollowsMute,
+        VcaMute,
+        BypassCrossfade,
+        Pan,
+        Matrix,
+        SendMatrix,
+    ];
+    let explicit = with_smoothing(
+        &two_tracks(),
+        Some(ControlSmoothing {
+            mute_ms: 5.0,
+            fader_ms: 15.0,
+            pan_ms: 25.0,
+        }),
     );
-    assert_eq!(LiveRamps::for_session(&next), STEP);
+    let ramps = LiveRamps::for_session(&explicit);
+    assert_eq!(
+        (
+            ramps.mute_samples,
+            ramps.fader_samples,
+            ramps.pan_samples,
+            ramps.link_samples
+        ),
+        (MUTE, FADER, PAN, FADER)
+    );
+    for row in rows {
+        assert_eq!(ramps.for_row(row), expected(row), "{row:?}");
+    }
+    // The default table: polarity is 20 ms, twice the mute's 10 ms.
+    let defaults = LiveRamps::for_session(&two_tracks());
+    assert_eq!(defaults.for_row(PolarityInvert), 960);
+    assert_eq!(defaults.for_row(Mute), 480);
+    assert_eq!(defaults.for_row(LinkGlide), 960);
 }
 
 /// Gate 2. Red if the classifier admits a fader dB or a matrix coefficient the render-side setter

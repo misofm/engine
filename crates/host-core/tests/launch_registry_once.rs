@@ -32,6 +32,8 @@ const THREADS: usize = 4;
 const STEP: LiveRamps = LiveRamps {
     fader_samples: 0,
     mute_samples: 0,
+    pan_samples: 0,
+    link_samples: 0,
 };
 
 fn caps() -> HostPrepareCaps {

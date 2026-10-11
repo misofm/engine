@@ -30,7 +30,7 @@ use session::{Effect, EffectIdentity, EffectParam, SessionModel, Track, canonica
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
-pub use crate::prepare::LiveRamps;
+use crate::prepare::LiveRamps;
 use crate::prepare::{fader_records, followed_mute_changes, matrix_record};
 
 /// The records of one strip whose live values change.
@@ -264,7 +264,7 @@ pub fn classify_live_delta<'a>(
     for (before, after) in current.tracks.iter().zip(&next.tracks) {
         let fader =
             fader_records(&before.fader, &after.fader, ramps).map_err(|_| LiveRebuild::Domain)?;
-        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan)
+        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan, ramps)
             .map_err(|_| LiveRebuild::Domain)?;
         if followed_mute_changes(&before.fader, &after.fader, next, after.id.as_str()) {
             return Err(LiveRebuild::FollowedMute);

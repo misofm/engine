@@ -27,7 +27,10 @@ mod successor;
 use builtins_compiler::TestOnlyWriteGate;
 use engine::realtime::{CarryOutcome, SwapOutcome};
 use graph_compiler::Backend;
-use host_core::{PrepareRejection, SourceControlError, SourceControlSet, SourceSubmission};
+use host_core::{
+    LiveRampRow, LiveRamps, PrepareRejection, SourceControlError, SourceControlSet,
+    SourceSubmission,
+};
 use session::{RouteSource, SessionModel, Source, StableId, parse_session_json};
 use successor::{
     BLOCKS, Feed, QUANTUM, SWAP_BLOCK, Session, Successor, caps, first_difference, reference_run,
@@ -3011,16 +3014,20 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
     let before = strip_state_session();
     let moved = after(strip_state_session());
     let feed = feed_for_strips();
+    // A retarget carries the ramp the classifier would give the same edit: the session's own
+    // fader length (#1054 D4); the pan carries the model's own 300-sample window (#1054 D5).
+    let fader_samples = LiveRamps::for_session(&moved).for_row(LiveRampRow::Fader);
+    assert_ne!(fader_samples, 0, "the default table ramps a fader");
     let records = [
         CellRecord::Fader(TrackFaderRecord::FaderDb {
             lanes: BuiltinLaneSelector::Left,
             db: -4.0,
-            smoothing_samples: 0,
+            smoothing_samples: fader_samples,
         }),
         CellRecord::Fader(TrackFaderRecord::FaderDb {
             lanes: BuiltinLaneSelector::Right,
             db: -6.0,
-            smoothing_samples: 0,
+            smoothing_samples: fader_samples,
         }),
         CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
     ];
@@ -3318,8 +3325,7 @@ fn with_send_through_submix(
 /// carry, starts at rest at the new mute, and the strip is exactly the restart set. The same
 /// change with no route that follows it is live and carries. Red if the join treats the followed
 /// mute as live: X would carry, be written a mute retarget and drop out of the restart set (then
-/// the carried stage ramps the mute while the following route, prepared fresh, steps, once #1054
-/// gives mutes a ramp).
+/// the carried stage ramps the mute (#1054) while the following route, prepared fresh, steps).
 fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
     let a_model =
         |follows_mute| with_send_through_submix(strip_state_session(), MOVED, follows_mute);
@@ -3358,17 +3364,48 @@ fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
         reference.blocks[SWAP_BLOCK..],
         "{backend:?} {form:?}: the followed strip starts at rest at its new mute"
     );
-    // The control: with no route following the mute, the same change is live and carries.
+    // The control: with no route following the mute, the same change is live and carries. The
+    // retarget ramps over the session's mute length (#1054 D4), so it sounds like the live mute
+    // record written to the predecessor, and unlike a mute prepared at rest.
     let (run, reference) = run_for(false);
     assert!(
         run.restarted.is_empty(),
         "{backend:?} {form:?}: {:?}",
         run.restarted
     );
+    let (a, b) = (
+        Session::compile(a_model(false)),
+        Session::compile(b_model(false)),
+    );
+    let moved = with_mute(a_model(false), MOVED, true);
+    let mute_samples = LiveRamps::for_session(&moved).for_row(LiveRampRow::Mute);
+    assert_ne!(mute_samples, 0, "the default table ramps a mute");
+    let written = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &moved,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[CellWrite {
+            block: SWAP_BLOCK,
+            strip: MOVED,
+            record: CellRecord::Fader(mute_both(true, mute_samples)),
+        }],
+        backend,
+    );
     assert_eq!(
         run.blocks[SWAP_BLOCK..],
+        written.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: a live mute carries and retargets over the session's mute ramp"
+    );
+    assert_ne!(
+        run.blocks[SWAP_BLOCK..],
         reference.blocks[SWAP_BLOCK..],
-        "{backend:?} {form:?}: a live mute carries and retargets"
+        "{backend:?} {form:?}: the mute ramp is audible, not a step"
     );
 }
 
