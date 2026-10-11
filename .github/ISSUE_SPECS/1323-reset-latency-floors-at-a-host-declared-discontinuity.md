@@ -79,9 +79,11 @@ with nothing to reset changes nothing.
   read position, so no frame is repeated or skipped, and the source-read clock steps back to the
   render clock at the adoption block. The inventory records
   natural arrivals beside floored ones, so D2's test is a comparison of two numbers.
-  - **The constructor.** This is the first slice that adds a field to `SuccessorBase`, so it also
-    adds `SuccessorBase::new(inventory, committed)`. `new` sets every other field to its neutral
-    value: `discontinuity: false` here. Each later slice that adds a field extends `new` with that
+  - **The constructor.** `SuccessorBase::new(inventory, committed, revision)` exists from
+    *Carry fader, mute and pan ramps across a plan swap* (#1277 D10), which added `revision`
+    first; `revision` has no neutral value, so `new` takes it as an argument. This slice adds
+    `discontinuity` to `new`'s output: `new` sets every other field to its neutral value,
+    `discontinuity: false` here. Each later slice that adds a field extends `new` with that
     field's neutral value (*Prepare a warm successor whose carried nodes lead the predecessor by
     P*, #1354 D4: `warm: None`; *Duck-swap the strips a latency growth restarts, and fall back to
     the transition when a warm successor cannot adopt*, #1397 D2: `forced_restart` empty).
@@ -98,7 +100,7 @@ with nothing to reset changes nothing.
 
     A site added by a slice that is not ordered against this one is in the list if that slice
     lands first. The discontinuity successor is
-    `SuccessorBase { discontinuity: true, ..SuccessorBase::new(inventory, committed) }`. Every
+    `SuccessorBase { discontinuity: true, ..SuccessorBase::new(inventory, committed, revision) }`. Every
     later site is built through `new`, and a later field changes `new` and no construction site.
 - **D4. Acked-batch rule.** Preparation can fail (budgets, ceilings). On failure the call returns
   the preparation error and nothing changes. On success the plan is published with its retirement
@@ -211,3 +213,17 @@ with nothing to reset changes nothing.
   publishes.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314): gate 5's
   outcome flags.
+
+## Amendment (root, 2026-10-11): `SuccessorBase::new` takes `revision`
+
+Root amended this spec per the *Carry fader, mute and pan ramps across a plan swap* (#1277) ruling.
+#1277 D10 adds `SuccessorBase::revision`, which has no neutral value. So D3's constructor is
+`SuccessorBase::new(inventory, committed, revision)`, and the sentence "the first slice that adds a
+field" is removed. Nothing else changes.
+
+### Open question for root (from the #1277 ruling review, 2026-10-11)
+
+The discontinuity successor publishes the *committed* revision on a fresh gate, and a session at
+revision 0 would be refused by `stamp(0)` (and by host-core's entry check, `host.successor.revision`,
+which requires `1 <= revision`). Root decides how this slice handles a session at revision 0 when
+#1323 is next.

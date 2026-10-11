@@ -113,14 +113,24 @@ then structural edit" (D15-7, carry then retarget).
 - `crates/host-core/src/live_delta.rs`: only the extraction of D5's per-strip function. This is
   stream B's file, and root orders the merge with *Hold live values in latest-target cells on both
   hosts* (#1312).
+- Added by Amendment 3:
+  - `crates/engine/src/realtime/plan.rs`: D11's method and the handle docs only (B's file).
+  - `crates/control-plane/src/control.rs`: the structural arm's `SuccessorBase` literal
+    (`revision`), the one read of `r` with its range check before `prepare_runtime`, and the
+    existing stamp's use of that value. Nothing else. `compile.rs` is not touched.
+  - `crates/capi/tests/resource_lifecycle.rs`: the one `SuccessorBase` literal, `revision: 1`.
+  - `crates/capi/src/runtime/live_tests.rs`: gate 8 only.
+  - Host-core test support: it must publish `r` on the successor's handle before
+    `reserve_replacement`. Otherwise the stamped retarget is never covered and is never heard.
 
 ## Non-goals
 
 - No solo or VCA host state, and no VCA retarget. VCA changes stay prepared until #1247.
 - No effects and no delay lines.
 - No transition for a restarted strip (#1324).
-- No change to the C ABI or the browser call sites. The successor entry points write the records
-  into the cells themselves.
+- No change to the C ABI surface or header, or to the browser call sites. The successor entry
+  points write the records into the cells themselves. The control plane changes only where it reads
+  `r` and builds `SuccessorBase` (D10).
 
 ## Objective gates
 
@@ -148,12 +158,20 @@ then structural edit" (D15-7, carry then retarget).
    - `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core --features builtins-compiler/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `cargo test --locked -p console-workload`
+   - `cargo test --locked -p capi` (added by Amendment 3)
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`, `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
-8. **A refused candidate is never reused (Amendment 2).** A rebuild with a carry retarget is
-   refused at `BeforeProtocolCommit`, then the same rebuild is accepted; no debug assertion fires
-   and the retarget applies exactly once.
+8. **A refused candidate is never reused (Amendment 2; strengthened by Amendment 3).** In
+   `crates/capi/src/runtime/live_tests.rs`, beside
+   `a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone`, with the `Rig` and twin
+   pattern, a debug build and `test_set_structural_faults(.., [Some(BeforeProtocolCommit), None])`:
+   a rebuild that adds a track and changes strip X's fader to g1 (a carry retarget) is refused at
+   `BeforeProtocolCommit`. Then the same structural change is committed *without* X's fader change.
+   The twin takes only that change, and every block is bit-identical. No debug assertion fires. A
+   refused attempt uses no revision, so the next one stamps the same `r`; if the accepted rebuild
+   were the same edit, a kept candidate, cell or stamp would be inaudible and the gate could not go
+   red.
 
 ## Test value
 
@@ -195,3 +213,58 @@ changes.
 - *Hold live values in latest-target cells on both hosts* (#1312): the cells D5 writes and the
   `apply_pending` D8 calls.
 - #1253 and #1276 are on `main`.
+
+## Amendment 3 (root, 2026-10-11): where preparation takes the retarget stamp
+
+Trigger: the stream A coordinator reported a spec gap. In the authorized paths, preparation has
+neither `r` nor the handle: `SuccessorBase` has no revision, and the control plane takes the handle
+after preparation (`compile.rs:673-676`). Gate 8's fault is in the control plane, and its fault
+tests are in capi. Root ruled option (b): an engine method that stamps on the plan's own pin.
+
+- **D5, Amendment 1's stamp sentence becomes:** Each retarget write is stamped with the structural
+  revision `r` on the successor plan's own gate pin, through
+  `PreparedRenderPlan::stamp_held_gate`, while the plan still holds its handle. The open stamp
+  moves with the pin into the handle that the control plane takes after preparation returns (#1502
+  D1, unchanged). The control plane stamps `r` again on that handle as its last fallible step
+  (`GatePin` allows a stamp at the open revision). It publishes `r` before `reservation.commit()`.
+  A preparation that writes no retarget does not stamp.
+- **D10. The revision.** `SuccessorBase` gains `revision: u64`. This is `r`, the revision the
+  successor commits as. Precondition: `1 <= revision <= GATE_REVISION_MAX`.
+  - The control plane reads `r` once from the prepared token, before `prepare_runtime`, and uses
+    that one value for the base and for its stamp.
+  - If `r` is out of range, the control plane returns `CommandError::Internal` before preparation,
+    with nothing built. #1503 D1 makes this unreachable.
+  - Host-core checks the same precondition at entry, before it allocates. It refuses with the
+    whole-session line `host.successor.revision` (`PrepareRejection::Session`).
+  - A `None` or `Err` from `stamp_held_gate` returns the same line. This cannot happen after the
+    entry check, because a pin that was not handed out has published nothing.
+  - `revision` has no neutral value. So #1323 D3's constructor is
+    `SuccessorBase::new(inventory, committed, revision)`, and #1323's sentence "the first slice that
+    adds a field" no longer holds. Root amends #1323. #1310 D2's base and #1344's literals carry `r`
+    too.
+- **D11. Engine method.**
+  `PreparedRenderPlan::stamp_held_gate(&mut self, revision: u64) -> Option<Result<LiveStamp<'_>, StampRefused>>`.
+  It returns `None` after `take_revision_gate`; otherwise it is `GatePin::stamp` on the plan's own
+  pin. The `PlanRevisionGate` doc changes from "only the holder stamps" to "the plan's owner before
+  hand-out, then the holder". No other engine change.
+- **Gate 8** goes in `crates/capi/src/runtime/live_tests.rs`, beside
+  `a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone`. It uses the `Rig` and twin
+  pattern, a debug build and `test_set_structural_faults(.., [Some(BeforeProtocolCommit), None])`.
+  - Change to the gate: after the refused rebuild (add a track, and strip X's fader to g1), commit
+    the same structural change *without* X's fader change. The twin takes only that change, and
+    every block must be bit-identical.
+  - Reason: a refused attempt uses no revision, so the next one stamps the same `r`. If the
+    accepted rebuild is the same edit, a kept candidate, cell or stamp is inaudible and the gate
+    cannot go red. The existing capi test uses this same reasoning.
+  - Gate 8 in "Objective gates" is updated to this shape, and `cargo test --locked -p capi` is added
+    to gate 7.
+- The "Authorized paths" section gains the Amendment 3 bullets, and the last "Non-goals" bullet is
+  replaced, as in the sections above.
+
+## Attempt record
+
+### Attempt 1
+
+Stopped before any edit, on a spec gap: preparation had neither `r` nor the gate handle in the
+authorized paths (see Amendment 3's trigger). No code was written. Root ruled option (b) and issued
+Amendment 3.
