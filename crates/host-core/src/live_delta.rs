@@ -26,14 +26,12 @@ use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
 };
-use session::{
-    Effect, EffectIdentity, EffectParam, RouteSource, SessionModel, Track, canonical_session_json,
-};
+use session::{Effect, EffectIdentity, EffectParam, SessionModel, Track, canonical_session_json};
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 pub use crate::prepare::LiveRamps;
-use crate::prepare::{fader_records, matrix_record};
+use crate::prepare::{fader_records, followed_mute_changes, matrix_record};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,7 +143,7 @@ pub enum LiveRebuild {
 ///    (decision 15 E1, #1335 D4). An unchanged automation table is never re-checked: it was
 ///    prepared. An accepted change stays live with no records, as #1260 D2 made it.
 /// 5. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
-///    [`checked_fader_gain`] or a pan/matrix does not lower through [`lower_matrix_or_pan`] (the
+///    [`builtins::checked_fader_gain`] or a pan/matrix does not lower through [`builtins_compiler::lower_matrix_or_pan`] (the
 ///    single authorities the render-side setters use); [`LiveRebuild::FollowedMute`] if a lane's
 ///    mute changes and a `follows_mute` route in `next` sends from the track; otherwise the
 ///    track's records. Then, for each of the track's effect instances in chain order whose
@@ -266,9 +264,7 @@ pub fn classify_live_delta<'a>(
             fader_records(&before.fader, &after.fader, ramps).map_err(|_| LiveRebuild::Domain)?;
         let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan)
             .map_err(|_| LiveRebuild::Domain)?;
-        let mutes_before = [before.fader.left_mute, before.fader.right_mute];
-        let mutes_after = [after.fader.left_mute, after.fader.right_mute];
-        if mutes_before != mutes_after && follows_mute_from(next, after.id.as_str()) {
+        if followed_mute_changes(&before.fader, &after.fader, next, after.id.as_str()) {
             return Err(LiveRebuild::FollowedMute);
         }
         if fader[0].is_some() || matrix.is_some() {
@@ -458,13 +454,4 @@ fn same_params(before: &[EffectParam], after: &[EffectParam]) -> bool {
                 && left.unit == right.unit
                 && left.value.to_bits() == right.value.to_bits()
         })
-}
-
-/// Whether `next` has a `follows_mute` route whose source is the track `track_id` (#1053 G2).
-fn follows_mute_from(next: &SessionModel, track_id: &str) -> bool {
-    next.routes.iter().any(|route| {
-        route.follows_mute
-            && matches!(&route.source, RouteSource::Track { track_id: source, .. }
-                if source.as_str() == track_id)
-    })
 }

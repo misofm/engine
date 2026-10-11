@@ -2344,6 +2344,27 @@ pub(crate) fn fader_records(
     Ok(fader)
 }
 
+/// Whether `track_id`'s mute changes from `before` to `after` while a `follows_mute` route in
+/// `model` sends from the track (#1053 G2).
+///
+/// The classifier refuses such a delta (`LiveRebuild::FollowedMute`): the route's own mute must
+/// step with the source's, and a live mute record would ramp only the source's stage once #1054
+/// gives mutes a ramp. A successor's join asks the same predicate (#1277 D3), so a strip whose
+/// followed mute changes is prepared, not carried. `model` is the post-change model.
+pub(crate) fn followed_mute_changes(
+    before: &session::DualMonoFader,
+    after: &session::DualMonoFader,
+    model: &SessionModel,
+    track_id: &str,
+) -> bool {
+    [before.left_mute, before.right_mute] != [after.left_mute, after.right_mute]
+        && model.routes.iter().any(|route| {
+            route.follows_mute
+                && matches!(&route.source, session::RouteSource::Track { track_id: source, .. }
+                    if source.as_str() == track_id)
+        })
+}
+
 /// The matrix record that brings a strip's matrix/pan stage from `before`'s value to `after`'s,
 /// when a lowered coefficient's bits change (the per-owner function of #1277 D5). A change of the
 /// smoothing window alone is no record.
@@ -2487,8 +2508,14 @@ fn effective_fader(
 ///
 /// A family's difference is live when the classifier would emit a record for it on a plan that
 /// attaches the control kind (`live`): the strip is a track, no VCA is in either model (until
-/// #1247 `LiveRebuild::Vca` keeps them prepared) and the values are in domain. Every other
-/// difference is prepared. A strip whose kind changed has no counterpart and both families are
+/// #1247 `LiveRebuild::Vca` keeps them prepared), the strip's values are in domain and its mute
+/// does not change under a `follows_mute` route (`LiveRebuild::FollowedMute`, one predicate with
+/// the classifier). The classifier refuses a strip as a whole, so a refused strip's matrix
+/// difference is prepared too. Every other difference is prepared.
+///
+/// A change of the matrix's smoothing window alone is `Same` (as on the live path, whose
+/// classifier emits no record for it): a carried matrix stage keeps the predecessor's window,
+/// and every retarget passes its own. A strip whose kind changed has no counterpart and both families are
 /// prepared.
 fn join_strips<'a>(
     committed: &SessionModel,
@@ -2524,13 +2551,21 @@ fn join_strips<'a>(
             strip.fader,
             next_effective.as_ref().map(|effective| &effective[index]),
         );
-        let fader = match fader_records(&before, &after, ramps) {
+        // The classifier refuses a strip as a whole (`Domain`, `FollowedMute`) and then emits no
+        // record for either family, so a refused strip's differences are all prepared.
+        let fader_records = fader_records(&before, &after, ramps);
+        let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan);
+        let live_family = live_family
+            && fader_records.is_ok()
+            && matrix_record.is_ok()
+            && !followed_mute_changes(before_fader, strip.fader, model, id);
+        let fader = match fader_records {
             Err(_) => FamilyJoin::Prepared,
             Ok(records) if records[0].is_none() => FamilyJoin::Same,
             Ok(_) if !live_family => FamilyJoin::Prepared,
             Ok(records) => FamilyJoin::Live(records),
         };
-        let matrix = match matrix_record(before_matrix, strip.matrix_or_pan) {
+        let matrix = match matrix_record {
             Err(_) => FamilyJoin::Prepared,
             Ok(None) => FamilyJoin::Same,
             Ok(Some(_)) if !live_family => FamilyJoin::Prepared,

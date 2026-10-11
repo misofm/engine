@@ -3021,6 +3021,113 @@ fn a_prepared_change_restarts_the_stage_at_eight_lanes() {
     }
 }
 
+/// `model` with `track`'s main route sent through a new submix, `follows_mute` set as given.
+fn with_send_through_submix(
+    mut model: SessionModel,
+    track: &str,
+    follows_mute: bool,
+) -> SessionModel {
+    let main = format!("{track}-main");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == main)
+        .expect("the track's main route");
+    let mut onward = route.clone();
+    route.destination = session::RouteDestination::SubmixInput {
+        submix_id: id("bus"),
+    };
+    route.follows_mute = follows_mute;
+    let RouteSource::Track { tap, .. } = onward.source.clone() else {
+        panic!("a track route");
+    };
+    onward.id = id("bus-main");
+    onward.source = RouteSource::Submix {
+        submix_id: id("bus"),
+        tap,
+    };
+    onward.follows_mute = false;
+    model.routes.push(onward);
+    model
+        .submixes
+        .push(session::Submix::unity(id("bus"), &model.console));
+    model
+}
+
+/// A mute change on a track that a `follows_mute` route follows is refused by the classifier
+/// (`LiveRebuild::FollowedMute`), so by D3 it is a prepared difference: the strip's stage does not
+/// carry, starts at rest at the new mute, and the strip is exactly the restart set. The same
+/// change with no route that follows it is live and carries. Red if the join treats the followed
+/// mute as live: X would carry, be written a mute retarget and drop out of the restart set (then
+/// the carried stage ramps the mute while the following route, prepared fresh, steps, once #1054
+/// gives mutes a ramp).
+fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
+    let a_model =
+        |follows_mute| with_send_through_submix(strip_state_session(), MOVED, follows_mute);
+    let b_model = |follows_mute| with_mute(with_muted_track(a_model(follows_mute)), MOVED, true);
+    let feed = feed_for_strips();
+    let run_for = |follows_mute| {
+        let (a, b) = (
+            Session::compile(a_model(follows_mute)),
+            Session::compile(b_model(follows_mute)),
+        );
+        let reference = cell_run(&b, form, None, &feed, &[], backend);
+        let run = cell_run(
+            &a,
+            form,
+            Some(Swap {
+                to: &b,
+                committed: &a.model,
+                form,
+                successor_writes: &[],
+            }),
+            &feed,
+            &[],
+            backend,
+        );
+        (run, reference)
+    };
+    let (run, reference) = run_for(true);
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?} {form:?}: exactly the followed strip restarts"
+    );
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: the followed strip starts at rest at its new mute"
+    );
+    // The control: with no route following the mute, the same change is live and carries.
+    let (run, reference) = run_for(false);
+    assert!(
+        run.restarted.is_empty(),
+        "{backend:?} {form:?}: {:?}",
+        run.restarted
+    );
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: a live mute carries and retargets"
+    );
+}
+
+#[test]
+fn a_followed_mute_change_restarts_the_stage_at_four_lanes() {
+    for form in forms() {
+        a_followed_mute_change_restarts_the_stage(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_followed_mute_change_restarts_the_stage_at_eight_lanes() {
+    for form in forms() {
+        a_followed_mute_change_restarts_the_stage(Backend::Simd8, form);
+    }
+}
+
 /// Gate 6: with a ramp in flight, a pending cell value in the predecessor and a retarget in the
 /// successor, the swap block makes no allocator call and no audited allocation.
 #[test]
