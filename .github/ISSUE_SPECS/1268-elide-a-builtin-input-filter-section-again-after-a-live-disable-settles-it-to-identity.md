@@ -18,9 +18,12 @@ this; what follows depends only on that measurement.
 
 - **The elision rule.** A section is skipped only when its six coefficient words are the identity
   **and** both integrators are exactly `+0.0`, in every bank lane (`section_is_identity`,
-  `crates/lane/src/kernels/builtins.rs:1146-1163`). The state words are compared bitwise because
-  identity coefficients over a `-0.0` integrator would emit `-0.0` where the elided form gives
-  `+0.0`.
+  `crates/lane/src/kernels/builtins.rs:1146-1163`). The state words are compared bitwise, so a
+  section whose integrators hold any other bits, `-0.0` included, is never elided. (Corrected
+  2026-10-11, root direction, after attempt 1: the filed reason, that identity coefficients over a
+  `-0.0` integrator would emit `-0.0` where the elided form gives `+0.0`, does not hold at the
+  output. The next stage ends in `v + 0.0`, which sends `-0.0` to `+0.0`, so a stale integrator
+  never changes an output bit and only costs work; see "What no test checks".)
 - **The original premise.** The filed body (on `54b0a1bf8`) said that after a live disable the
   integrators keep their last values, because `svf_step` does not drive them to zero with identity
   coefficients (`crates/lane/src/kernels.rs:643-652`), so the section is never elided again.
@@ -31,10 +34,21 @@ this; what follows depends only on that measurement.
   so only settled lanes are cleared. `refresh_filter_plan` (`crates/builtins/src/lib.rs:1266-1279`)
   runs right after the ramp prefix (`:1659`) and recomputes the plan. The decision-15 review found
   the premise likely stale (agreed plan, D15-4 context; round-1 review, B4 item 4).
-- **What no test checks.** `filter_ramp_endpoint_is_partition_invariant_and_reset_honors_kind`
+- **What the older tests check, and what they do not.** (Corrected 2026-10-11, root direction,
+  after attempt 1.) `filter_ramp_endpoint_is_partition_invariant_and_reset_honors_kind`
   (`crates/builtins/tests/filter_liveness.rs:223`) checks a disabled section's coefficient words,
-  and `input_tail_is_infinite_while_a_filter_target_is_ramping` (`:314`) its tail. Neither reads the
-  integrators, the elision plan, or signed-zero output after a disable.
+  and `input_tail_is_infinite_while_a_filter_target_is_ramping` (`:314`) its tail. Two older tests
+  also read the integrators and the elision plan after a disable:
+  `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time` (`filter_liveness.rs`) reads
+  `state_words`, `current_words` and the elision plan on the scalar chain and on one bank lane
+  (dual body only), and `filter_prefix_ends_at_countdown_for_dual_and_mono_paths`
+  (`crates/builtins/src/tests.rs`) reads the plan of a one-lane stage on both bodies. No older
+  test reads a bank lane's integrators and the plan next to the lane-isolation output of its
+  neighbours on the one-plane body. No output leg can prove the clear: with identity coefficients
+  and a stale integrator pair, the settled section's output is `fma(0, ic2, fma(0, ic1, 1 * x))`
+  and the next stage, elided or running over `+0.0` integrators, ends in `v + 0.0`, so a stale
+  state never changes an output bit and only costs work, because the section is never elided
+  again. The state and plan legs prove the clear; the output legs guard lane isolation.
 - **Readback.** `builtins::test_support::bank_lane_state_words` and `bank_elision_plan`
   (`crates/builtins/src/lib.rs:5471-5479`, feature `test-support`). The bank renders through
   `BuiltinInputBank::process` (`:3615`, dual body) and `process_mono` (`:3631`, mono body).
@@ -107,10 +121,15 @@ Run every command from the repository root.
 
 ## Test value
 
-- Gate 1's test: red if a disabled section keeps stale integrators (no re-elision, a signed-zero
-  difference on `-0.0` input), if the plan refresh misses a settled section, or if the clear
-  touches a lane that never ramped. No existing test reads the integrators or the plan after a
-  disable (see Context). Gate 2 is the evidence that it turns red on that defect.
+- Gate 1's test: red if a disabled section keeps stale integrators (no re-elision), if the plan
+  refresh misses a settled section, or if the clear touches a lane that never ramped. (Corrected
+  2026-10-11, root direction, after attempt 1.) The state and plan legs that catch the first two
+  defects are also read by older tests (see Context), so they are not unique catches. The unique
+  catch is the third: a one-plane (`process_mono`) ramp completion that clears the integrators of
+  every lane when any lane settles wipes a neighbouring lane's live HPF state, and only this
+  test's neighbour-lane output leg turns red on it. The test makes no signed-zero claim: no output
+  bit depends on a stale integrator. Gate 2 is the evidence that the state legs turn red when a
+  clear is removed.
 
 ## Dependencies
 
