@@ -74,7 +74,13 @@ fn a_line_comment_opening_a_block_comment_text_does_not_open_one() {
 #[test]
 fn a_marker_after_code_is_malformed() {
     let text = format!("fn after() {{}} // {END}\n");
-    expect_failure("marker-after-code", &append(&text), &[MALFORMED]);
+    let report = expect_failure("marker-after-code", &append(&text), &[MALFORMED]);
+    let [finding] = report.findings.as_slice() else {
+        panic!("one finding expected: {:#?}", report.findings);
+    };
+    assert_eq!(finding.path.as_deref(), Some(BUFFER));
+    assert_eq!(finding.line, Some(4));
+    assert_eq!(finding.source.as_deref(), Some(text.trim()));
 }
 
 #[test]
@@ -103,11 +109,19 @@ fn an_end_before_its_begin_is_misordered() {
     let swapped = format!("// {END}\nfn render() {{}}\n// {BEGIN}\n");
     let edits = rewrite(BUFFER, &swapped);
     // The file leaves both counts: a misordered file has no regions.
-    expect_failure(
+    let report = expect_failure(
         "markers-end-before-begin",
         &edits,
         &[Class::MisorderedMarkers, FILE_FLOOR, REGION_FLOOR],
     );
+    // The finding names the first marker that breaks the alternation.
+    let misordered = report
+        .findings
+        .iter()
+        .find(|finding| finding.class == Class::MisorderedMarkers)
+        .expect("a misordered finding");
+    assert_eq!(misordered.path.as_deref(), Some(BUFFER));
+    assert_eq!(misordered.line, Some(1));
 }
 
 #[test]
@@ -218,4 +232,34 @@ fn the_region_floor_fires_when_a_region_is_dropped_and_the_markers_still_pair() 
         + 1;
     tree.apply(&rewrite(path, &text[after..]));
     super::common::assert_classes(&tree, &[REGION_FLOOR]);
+}
+
+/// Columns are counted in characters: multi-byte text before a marker must not shift where the
+/// block-comment scan starts, or the `/*` inside the literal would open a comment.
+#[test]
+fn a_marker_after_multibyte_text_is_still_a_marker() {
+    let text = format!(
+        "const S: &str = \"\u{20ac}\u{20ac}\u{20ac}\u{20ac}/*\";\n// {BEGIN}\nfn inside() {{}}\n// {END}\n"
+    );
+    let report = expect_valid("marker-after-multibyte-text", &append(&text));
+    assert_eq!(
+        (report.regions, report.files),
+        (BASE_REGIONS + 1, BASE_FILES)
+    );
+}
+
+/// A checkout with CRLF line endings still has markers.
+#[test]
+fn markers_with_crlf_line_endings_are_regions() {
+    let text = format!("// {BEGIN}\r\nfn render() {{}}\r\n// {END}\r\n");
+    let report = expect_valid("marker-crlf", &rewrite(BUFFER, &text));
+    assert_eq!((report.regions, report.files), (BASE_REGIONS, BASE_FILES));
+}
+
+/// The last marker of a file needs no newline after it.
+#[test]
+fn a_final_marker_without_a_newline_is_a_marker() {
+    let text = format!("// {BEGIN}\nfn render() {{}}\n// {END}");
+    let report = expect_valid("marker-no-final-newline", &rewrite(BUFFER, &text));
+    assert_eq!((report.regions, report.files), (BASE_REGIONS, BASE_FILES));
 }
