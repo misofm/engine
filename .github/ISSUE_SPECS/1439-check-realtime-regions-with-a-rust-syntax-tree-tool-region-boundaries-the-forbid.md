@@ -264,9 +264,10 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
 - The spec's "region nodes" (maximal nodes between the markers) are not built as a type: no A2 rule reads them.
   The container/children layout in `boundary.rs` is what B1a extends (a region's nodes are the children of its
   innermost container that lie between the markers).
-- Case counts: D4's nine whole-plan cases are 8 tests rows: the five forms are one test (`every_form_of_...`),
-  the other four are `layout_does_not_hide_...` (2) and `a_missing_file_or_a_render_entry_only_in_tests_...` (2).
-  The nine forbidden-body cases are one table test. 53 tests became 77.
+- Case counts: D4's nine whole-plan cases are three tests (the five forms in `every_form_of_a_whole_plan_borrow_is_a_finding`;
+  at-line-end and after-a-comment-line in `layout_does_not_hide_a_whole_plan_borrow`; the missing file and the
+  entry point only in tests in `a_missing_file_or_a_render_entry_only_in_tests_is_a_finding`). The nine
+  forbidden-body cases are one table test. 53 tests became 77.
 
 **Gates.**
 1. `cargo run --locked --release -q -p realtime-policy` prints `realtime policy: ok (93 marked regions in 26
@@ -292,10 +293,9 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
    - D3 (awk pass, tool fail, 2): `whole-plan-after-tests`, `whole-plan-in-macro-rules`; (awk fail, tool pass,
      4): `whole-plan-macro-call` (`&*plan(1)`), `-macro-index` (`&*plan[0]`), `-macro-path` (`&*plan::DEFAULT`),
      `whole-plan-tree-lookalikes` (the tree forms of the same call, index and path).
-   - Agree, though the spec expected a difference: the `cfg(any(test, ..))` and `#[cfg(test)] mod helpers`
-     trees. The awk stops only at a `#[cfg(test)]` line followed by `mod tests {`, so it too scans those modules.
-     The tool differs from the awk there only in the other direction (an exact attribute is required), which no
-     tree separates.
+   - Agree, though the spec listed `cfg(any(test, ..))` as a difference: both gates refuse the `cfg-any-test` and
+     `cfg-test-helpers` trees. The awk stops only at a `#[cfg(test)]` line followed by `mod tests {`, so it scans
+     those modules too. No tree separates the two gates there.
 4. Mutations, each applied alone, then reverted (`cargo test` after each; 77 green on the revert). "red" lists
    the tests that went red; the spec's seven first.
    - Skip macro token trees in D2: 1 red, `a_spelling_the_line_scan_missed_is_a_finding` (the user-macro rows).
@@ -348,7 +348,7 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
    parent `e5fa8319b` (`git diff --stat e5fa8319b..HEAD -- . ':!tools/realtime-policy'` is empty before the spec
    commit), `cargo tree -e normal,features -p capi` names no `realtime-policy`, and two clean builds of
    `cargo build --locked --release -p capi` give identical digests: `libcapi.a` `3431f546...a3394`, `libcapi.so`
-   `0213cd82...8ca6d`. (The A1 digests differ because #1422 changed `crates/engine/src/realtime/plan.rs` since.)
+   `0213cd82...8ca6d`. (A1's digests were taken at `2a589d360`; `crates/engine/src/realtime/plan.rs` has changed since, in #1422.)
    The `artifact-identity` job is CI-only.
 7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
    `check-workspace-policy.sh`, `check-bench-policy.sh`, `check-realtime-policy.sh`, `test-realtime-policy.sh`,
