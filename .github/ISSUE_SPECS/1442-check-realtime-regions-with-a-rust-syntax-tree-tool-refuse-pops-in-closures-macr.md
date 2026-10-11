@@ -554,4 +554,153 @@ the real tree ok after every revert). Red = tests and rows.
 - Root: u19 (deviation 1c) and the 4 accepted fuzz regions (gate 4) are awk over-refusals the tool does not repeat.
 - A `.map(Consumer::try_pop)` on an iterator of `&mut Consumer` is allowed by D3 as written. Such an iterator
   yields each consumer once, so it is finite; no infinite form is reachable without `from_fn`, `repeat_with` or
-  `successors`, which stay refused.
+  `successors`, which stay refused. (Attempt 2: this sentence is false, as the attempt-1 verdict F1 showed. A user
+  `map` or a `try_pop(&self)` type with `repeat` pops without end. Root Amendment 1 (iv) and Amendment 2 (SP-A)
+  replace the rule.)
+
+## Attempt record (attempt 2, J batch branch `codex/d15-stream-j3`, base `c8d971814`)
+
+Commits: the code commit and the evidence commit that holds this record. Edits: `tools/realtime-policy/**` and this
+spec only. No production code, `Cargo.toml` or `Cargo.lock` change (gate 6 holds as in attempt 1).
+
+**Deviation for root (D3 (a), read first).** The text of (a) refuses every identifier `map` or `as_mut` that does not
+directly follow `.` or `::`. On the real tree that refuses 17 local variables named `map`
+(`tools/console-workload/tests/paired_spans.rs:2061,2070,2071,2074,2075,2123,2124,2125,2129,2402,2403,2413` and
+`tools/session-validator/src/lib.rs:793,794,807,808,821`), so the gate fails with the text as worded. The spec's
+measurement counted `.map(` and `.as_mut(` occurrences, not every `map` identifier. I did not edit those two files
+(outside the authorized paths). I implemented (a) for the forms that define or import a name: after `fn`, `const`,
+`static`, `struct`, `enum`, `union`, `type`, `trait`, `mod`, `macro`, `as` or `macro_rules!`, and anywhere in a `use`
+item, in each case when no `.` or `::` directly precedes it (`trusted.rs`, `defines_a_name` and `imported_names`).
+A local variable cannot change what `.map(..)` resolves to. Root may (1) accept this, or (2) rule the literal text and
+have the 17 locals renamed in a production-adjacent change, which flips one accepted row
+(`the_trusted_names_in_their_allowed_forms_pass`, the `let map` line) and deletes `defines_a_name`. Rules (b), (c),
+(d) and F2 are implemented as worded and refuse nothing on the real tree.
+
+**What changed.**
+- D1 (Option A). `in_closure` refuses a pop below any closure. The `array::from_fn` closure exception is deleted
+  from `mod.rs`, `outer.rs` and `tree.rs` (`array_from_fn_call`, `is_loop_at`); `constructor_lines` keeps the token
+  allowance for the two paths. The base tree's `drain_lane_pairs` is a plain `for lane in 0..2` loop (same count
+  comment between the binding and the loop). The probe `a2-n/n06_array_from_fn_bounded` is a counted drain in a
+  `from_fn` closure: it is committed as refused now (`.drain`), which the spec's counts did not foresee.
+- D2 F2 and D3 SP-A. `src/drain/shadow.rs` and its enumeration are deleted. `src/drain/trusted.rs` is one token
+  walk over every `.rs` file: a `debug_assert` that no `!` follows is a shadow; (a), (b), (d) are findings of the
+  drain class at the identifier's line; (c) records every invocation `name!(..)` whose tree holds `map`, `as_mut`,
+  `try_pop` or `debug_assert`, and `finish` reports those whose macro is name-emitting (a body with `fn $`, closed
+  over the macros it invokes and over `use .. as n` renames). A hit is a standalone finding of the drain class (the
+  threat model says the scan refuses the definition), not a trust withdrawal; F2 stays a trust withdrawal, so the
+  existing shadow rows keep their two-finding assertion.
+- D3 (iv). `called_in_place` allows `.map(<path>)` only when the receiver is `<fields>.as_mut()`, where `<fields>` is
+  an identifier or `self` followed by zero or more `.field` steps (`Place::of`), and the call has no turbofish.
+- D9. `Ctx::note_read` stores the name with the binding. `shadowed_by_an_item` (renamed from `declares_an_item`)
+  asks `names_item(name)` for every read, then D10's macro span. New reads: the root of an outer `for`'s collection
+  (`outer::read_root`; it must resolve to a binding, `self` is skipped), and `<Q>` and `<K>` of a per-queue form
+  (`per_queue::Pass::holds`, with a rewind per failed form). `BindingKind::Pattern` carries its owner node so that a
+  pattern-bound root has a span (the binding node). The scattered `names_item` calls in `count.rs` and `outer.rs`
+  are deleted: the one check covers them.
+- Module documentation of `drain/mod.rs`, `outer.rs`, `items.rs`, `scope.rs`, `trusted.rs`: the closure exception,
+  the collection-root hole and the `.map(..)` on any receiver are gone; the list of known false passes keeps only the
+  threat-model limits (never-ending iterator in a field or local, registry crates, auto-deref and impl resolution).
+- Tests: 149 before, 163 now (+15 tests, -1). Deleted as superseded: the three `outer-*-array-from-fn` accepted
+  rows, the two `outer-array-from-fn-*` refused rows, `a_pop_directly_in_an_array_from_fn_closure_is_refused`.
+
+**Real tree (re-measured).** `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh`:
+`realtime policy: ok (94 marked regions in 26 files)`, as before. Release run 1.31 s (attempt 1: 1.27 s), 214 MB.
+
+**Gates.**
+1. Real tree: above. 2. `cargo test --locked -p realtime-policy`: 163 passed.
+3. Parity (throwaway script outside the repository, base tree + each of the 120 committed probes, awk under gawk and the
+   release tool). The tool equals the expected class set of every file name. Awk and tool differ on 10, all named:
+   a06, a07, b02, n09, e11 (D1), e07 (D2), v14 and v14b (SP-4: awk passes, tool refuses), n06 (D1 Option A: awk
+   passes, tool refuses), u19 (awk refuses, tool accepts). u03's repaired form is refused by both.
+   **Corpus: 120 files = 89 refused + 31 accepted**, not 88 + 32: n06 moves from accepted to refused (D1).
+4. Fuzz (throwaway, as in attempt 1): fz_1-4 and fz_11-14: 3767 regions, 3762 refused with the drain class, 1 parse
+   failure (`fz_2` s125), 4 accepted (`fz_1` s249, `fz_3` s63, `fz_11` s170, `fz_14` s229: the pop is in a bare block
+   after the loop; attempt 1 explained them). fz_21 and fz_22: 800 regions, **106 refused with the drain class** (58 +
+   48), 694 accepted, and 125 also refused as unsafe code. The spec says 800 accepted. All 106 hold a statement macro
+   `m! { x }` or an attribute in the span, so they are refused by #1441's D10. I ran the same script on the release
+   tool built from `299cdafbd` (this slice's base): the numbers are identical (58 and 48), so this slice moves none.
+5. Mutations, below. 6. Shipped artifacts: unchanged. 7. `cargo fmt --all -- --check`,
+   `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`, `scripts/check-workspace-policy.sh`,
+   `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` exit 0.
+
+**Mutations** (each alone; after each the suite is green again on revert; real tree `ok` unless stated).
+- Closures transparent again: the five closure rows (F3's row among them), the five `from_fn` rows, `array-from-fn-pop`,
+  a06, a07, b02, n09, e11, n06.
+- Restore the exception (a `core`/`std::array::from_fn` closure is a finite outer loop again): the four `from_fn`
+  drain rows and n06. Restore it as "any `from_fn` closure on the path exempts every closure": those and F3's
+  `closure-in-a-nested-closure-in-array-from-fn`, which is red only here (the old mutation of F3 is gone with the
+  exception; this is its Option A form).
+- Macro token trees allowed: `macro-call-with-no-loop`, `debug-assert-argument`, u09.
+- `debug_assert` always trusted: the 8 shadow rows, the parent-module case, `untrusted-debug-assert-in-the-loop`, e07.
+  Shadow check limited to the drain's file: the same, e07 excepted.
+- F2 dropped: the same 8 rows, parent-module case, untrusted case, e07. F2 dropped alone, and (d) dropped alone:
+  `a_proc_macro_named_debug_assert_is_refused` stays green; both dropped: it is red.
+- Any `try_pop` path value allowed: the 12 function-value rows.
+- `.map(<path>)` refused: 113 tests red (the base tree holds `live.rs:366`'s form) and the real tree refuses
+  `live.rs:366` (exempt, root Amendment 1 iii). Any `.map` receiver: the iterator, `repeat`, `cycle`, `as_ref` and
+  call-result rows. Receiver method `as_ref` accepted besides `as_mut`: the `as_ref` row.
+- (a) dropped: `user-map-trait-in-a-nested-module`, `fn-as-mut`, `fn-map-in-an-impl`, `const-named-as-mut`,
+  `macro-named-map`. (a) after `fn` only: `const-named-as-mut`, `macro-named-map`. `use` items not read:
+  `use-of-map-in-a-group`.
+- (b) dropped, and (b) as "refuse only `&self`": `try-pop-by-value-on-a-reference-impl`. (The test panics at that
+  first assertion, so the three rows after it were not run under these two mutations.)
+- (c) dropped, and (c) as the text `fn map` only: `macro-made-map-name`, the inner-macro case, the rename case. Not
+  transitive: the inner-macro case. Renames not followed: the rename case.
+- (d) dropped: `macro-made-proc-macro`. (d) for `proc_macro` only: `proc-macro-attribute`, `proc-macro-derive`.
+- D9, collection roots not noted: `unit-struct-shadows-the-collection-root` (r01), `slice-parameter-collection-root-...`
+  (b06), the `&controls`, `&cfg.controls` and pattern rows, and the macro rows r02 and b01. Only the `.iter_mut()`
+  arm not noted: r01, b06, r02, b01. Only the `&` arm not noted: the const, `cfg` and pattern rows. `<Q>` and `<K>`
+  not noted: the per-queue item test and both per-queue macro rows. Pattern binding has no span: the accepted
+  `collection-root-of-a-pattern` row. The item check dropped: 6 tests including the count rows.
+- u19-swapped: red only when both "the loop body opens with the decrement" and the binding-aware use resolution are
+  dropped (`while-first-stmt-any-position` alone leaves it green: the resolver still refuses the decrement of the
+  inner `remaining`). One defect alone does not turn it red.
+
+**Deviations from the spec's numbers and cases.**
+1. D3 (a): above.
+2. Corpus 89 refused + 31 accepted (n06).
+3. `user-map-trait-in-a-nested-module` applies the trait beside the accepted form `self.control.as_mut().map(..)`, not
+   F1's `control.map(..)` (which D3 (iv) refuses on its own). `macro-made-proc-macro` invokes `mk!(emit !)`, not
+   `mk!(debug_assert !)`: with `debug_assert` in the invocation, (c) refuses it as well and the (d) mutation would stay
+   green. F3's row is the spec's second form (a counted drain in a nested closure in the `from_fn` closure), under the
+   same name.
+4. Gate 4 bounded fuzz: 694 accepted, not 800 (#1441's D10; identical on `299cdafbd`).
+5. A trusted-name hit is a standalone drain-class finding at the identifier; the spec says "refuses" and names no
+   class. The message text is the drain class's.
+6. The unit-struct-shadows-the-collection-root row is the r01 shape (the spec calls them the same shape); rows that
+   no single mutation turns red (`use`, `fn`, after-the-loop, glob-use collection-root rows; `free-fn-map`,
+   `use-renamed-to-map`) were deleted.
+
+**Test value (one sentence per new test).**
+- `a_drain_in_the_closure_of_array_from_fn_is_refused`: red if the `array::from_fn` outer-loop exception returns, in any
+  path spelling (restore-the-exception mutation).
+- `a_pop_in_a_closure_is_refused` (F3 row): red if a closure inside the `from_fn` closure is exempted with it.
+- `a_function_value_that_pops_is_refused_unless_it_is_called_in_place` (new rows): red if `.map(<path>)` is allowed on a
+  receiver other than `<fields>.as_mut()`, or on `as_ref`, or on a call result.
+- `a_proc_macro_named_debug_assert_is_refused`: red only if F2 and (d) are both dropped.
+- `a_user_trait_with_a_map_in_a_nested_module_is_refused`: red if the scan reads one file or only top-level items, or drops (a).
+- `a_definition_import_or_rename_of_map_or_as_mut_is_refused`: red if (a) names only `map`, looks after `fn` only, or skips `use` items.
+- `a_try_pop_taken_by_value_on_a_reference_impl_is_refused`: red if (b) allows a receiver other than `&mut self`.
+- `a_map_name_that_a_macro_makes_is_refused`, `a_name_passed_to_an_inner_name_emitting_macro_is_refused`,
+  `a_name_emitting_macro_invoked_through_a_rename_is_refused`: red if (c) is dropped, matches only `fn map`, is not
+  transitive, or does not follow renames.
+- `a_proc_macro_that_a_macro_makes_is_refused`: red if (d) is dropped or names only `proc_macro`.
+- `the_trusted_names_in_their_allowed_forms_pass`: red if the scan refuses `.map`, `.as_mut`, the `Consumer::try_pop`
+  definition, a macro that emits no name, or (deviation 1) a local variable named `map`.
+- `an_item_that_declares_the_collection_root_refuses_the_drain`: red if the item rule reads the count, its alias source
+  and the slice parameter but not the collection root of an outer `for` (either arm, any binding kind).
+- `a_collection_root_that_no_item_names_passes`: red if the root rule over-refuses an unshadowed root, a pattern root or `self`.
+- `a_statement_macro_that_can_declare_a_collection_root_refuses_the_drain`: red if a root, or `<Q>` or `<K>`, is not a
+  read for D10's span (r02, b01 and the per-queue macro forms).
+- `an_item_that_declares_a_per_queue_root_refuses_the_form`: red if the item rule skips `<Q>` and `<K>`.
+- `a_decrement_that_a_body_let_has_rebound_is_refused`: red if a body `let` that rebinds the count is not read as a
+  rebinding by the use resolution (only together with a relaxed first-statement rule; see the mutation note).
+- `the_refused_probes_are_refused`, `the_bounded_probes_pass` (v14, v14b, n06 moved to refused): red if the outer
+  bound accepts a method call or an index without a ruling, or the `from_fn` closure exception returns.
+
+**Open items.**
+- Root: D3 (a) as worded (deviation 1).
+- Root: spec counts 88/32 and gate 4's "800 accepted" are stale (deviations 2 and 4).
+- The scripts/test-realtime-policy.sh base tree still holds the awk-era `drain_lane_pairs` closure (outside this
+  slice's paths; the awk accepts it until C2 deletes the script).
+
