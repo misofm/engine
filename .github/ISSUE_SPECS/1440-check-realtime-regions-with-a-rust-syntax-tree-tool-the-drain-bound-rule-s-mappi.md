@@ -466,3 +466,198 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`)
+
+Implemented on `394a85c6d` (A2 with its verdict follow-ups). No production code changed; no `Cargo.toml` or
+`Cargo.lock` change. Edits: `tools/realtime-policy/**` and this spec.
+
+**What is where.**
+- `src/boundary.rs`: `Boundaries` (the file's leaves, container layout and the innermost container of every
+  marker, built once and shared by the boundary check and the drain rule), `RegionNodes` (the region nodes, see
+  the first deviation) and `words_in` (identifier tokens in a range).
+- `src/drain/tree.rs` (D4, D3): the allow-list as a tree. `Node` is a reference into the parsed file;
+  `Tree::children` lists the children of a node that D4 admits and the slot (`Via`) each one fills;
+  `Tree::descend(pos)` follows them to a source position. A node outside the list has no entry, so a pop below it
+  is never reached. Extents are cached.
+- `src/drain/scope.rs` (D2): the one resolver, `nearest(steps, name)`. It reads a path of steps upward: the
+  statements of a block before the one the path goes through, a `for` or closure pattern for its body, the `let`
+  chain of an `if` or `while` for its condition and body, an arm's pattern, and a function's parameters, where the
+  search ends.
+- `src/drain/facts.rs` (D5): the pops of a file (method call, path expression, identifier in a macro's tokens;
+  `r#` stripped), the uses of every single-segment name (a path expression, or an identifier in a macro's tokens),
+  and the `debug_assert!` arguments parsed as expressions (D7).
+- `src/drain/shapes.rs` (D6): the entry-count grammar, `<cap>`, `<recv>`, places (`self.lanes`).
+- `src/drain/count.rs` (D6, D7, D8): `for P in 0..<count>`, `for P in 0..<recv>.available_at_entry()`,
+  `while <count> != 0 | > 0`, the entry binding and its one alias, the reads between binding and loop.
+- `src/drain/per_queue/mod.rs`, `window.rs` (D8b): the set loop, the pass loop, pairing and conditions 1, 2, 4, 5;
+  condition 6's closed list of five.
+- `src/drain/mod.rs` (D1): the judgment of one pop, and the module documentation of D9's gap.
+- New class `UnboundedTryPop`, "marked realtime unbounded try_pop drain (bound it with available_at_entry)", the
+  awk's message; one finding per refused line.
+- Tests: `tests/policy/drain/` (`ported.rs` the 43 refused ported cases as data, `mod.rs` their test and the row
+  helper, `forms.rs`, `per_queue.rs`). 79 tests became 113.
+
+**Deviations from the spec's text and numbers.**
+1. **Region nodes (coordinator note).** A2 built no node set, so B1a builds it: `Boundaries::region_nodes` takes,
+   from the container layout, the children of every non-macro container whose extent (first token after outer
+   attributes to the end) lies wholly between the markers, and keeps the maximal ones. A region with a marker in a
+   macro token tree has none. The "top" of a pop's path is the first step whose extent is one of them.
+2. **The allow-list is applied from the file down.** D4 constrains the path from the pop to its top. The tree is
+   walked from the file, so every node above the top must be admitted too: a region inside an `async` block, a
+   `const` block or an item `const` is refused. Stricter, fail closed.
+3. **The innermost loop is the innermost loop whose body holds the pop**, and a pop in the header of any loop on
+   its path is refused separately (D8). With one choice for both, the header rule would never decide anything.
+4. **Mentions are uses, not tokens.** D7's "every mention of `<count>`" is read as a use that D2 resolves to the
+   count's binding: a path expression, or an identifier in a macro's tokens. A binder in a pattern or a field
+   or method name is no use. So a mention in a closed inner block that shadows the count passes
+   (`form-shadow-in-a-closed-block`; the awk refuses it), while the loop header's "names `<count>` exactly once"
+   stays a token count (so `for available in 0..available` is refused, as in the awk).
+5. **A pop in a `macro_rules!` body, or in any item the list omits (`const`, `static`, an `impl` constant), is
+   refused**; a region whose markers sit in a macro token tree has no region node and is refused. Three guards
+   overlap there (`is_tokens`, the missing top, the unreached pop); each alone leaves the cases red-free, so the
+   macro-region cases turn red only under the combined mutation below.
+6. **D10's expected deferred list was a guess; the measured one is 14.** `second_loop_in_bounded_region` and
+   `loop_inside_bounded_for` are refused here (their pops sit in an unbounded `loop`), so they are committed.
+   `count_from_another_function` is ported with a changed place for the earlier binding (a new function
+   `drain_fader_prepare` before the parameter-taking `drain_fader_tail`, both in the fader region), because the
+   edit kinds cannot insert after a function; the claim (a binding in another function, same region) is the same.
+7. **Real tree.** The spec's line numbers are `main`'s; on this tree the marked pops are
+   `crates/builtins-compiler/src/lib.rs:1084` and `:1128`, `crates/effect-contract/src/live.rs:366` (the path
+   value `Consumer::try_pop` under the alias `remaining`), `crates/graph/src/runtime.rs:900`; `spsc.rs:441` is the
+   `fn try_pop` definition (not a pop); `plan_exchange.rs:377` is gone (#1343). All four pops pass. The cell
+   slices (#1312, #1346, #1347, #1345) have not landed on this branch. Floors unchanged: 93 regions, 26 files.
+8. Added beyond the spec: `per_queue_param_root` (the roots are a typed parameter, not `self`), which pins that
+   parameters resolve as bindings; D8b's `two_pops_one_decrement` puts both pops in the third statement (a pop
+   in a later statement is refused by "the third statement holds the pop" and would not test the pop count).
+9. A set loop is form A only (`<r><path>.available_at_entry()`, no `map_or`), as D8b condition 2 spells it.
+
+**Gates.**
+1. `cargo run --locked --release -q -p realtime-policy` prints `realtime policy: ok (93 marked regions in 26
+   files)`; `bash scripts/check-realtime-policy.sh` prints the same.
+2. `cargo test --locked -p realtime-policy`: 113 passed.
+3. Parity (gawk 5.2.1; the tool's release binary; every tree the harness builds, 327, kept by a throwaway patch
+   of `Tree::drop`, reverted): 259 agree, 68 differ. 21 are A1's and 37 are A2's (unchanged lists). The 10 of
+   this slice are all deliberate:
+   - awk pass, tool fail: `allow-list-const-block`, `allow-list-const-item`, `allow-list-macro-item` (D4:
+     nodes off the list, and `macro_rules!` bodies), `loop-around-the-region` (D1: a loop that encloses the
+     region), `pop-in-a-macro-body-region`, `pop-in-a-macro-call-region` (D1: a region in a macro token tree).
+   - awk fail, tool pass: `per-queue-meter-poll`, `per-queue-param-root`, `per-queue-single-pass` (D8b: the awk
+     has no per-queue form), `form-shadow-in-a-closed-block` (deviation 4).
+   All 57 ported cases (a separate run, each built from the script's own text): both gates refuse the 43
+   committed cases, including the two class changes (`open-tail-last-file`: misordered markers and both floors;
+   `region-ends-in-comment`: malformed marker). The other 14 pass the tool and fail the awk: they depend on B1b.
+   **D10's deferred list, for B1b:** outer-loop rule (finite outer loops; the outer `loop`, `while`, `(0..)`,
+   `iter::repeat`, an iterator parameter, a rebound slice parameter, a zip then `cycle`):
+   `bounded_drain_inside_outer_loop`, `wrapped_outer_while`, `paren_open_range_outer`, `outer_repeat`,
+   `outer_over_iterator_parameter`, `outer_over_rebound_slice_parameter`, `outer_zip_then_cycle`; outer loop
+   and item rule (a block `const` shadows a slice parameter): `outer_over_slice_parameter_shadowed_by_block_const`;
+   attribute rule (a `cfg` on the binding): `count_under_cfg`; item rule (a block `static` shadows the
+   count): `count_shadowed_by_block_static`; constructor rule (`from_fn`, `repeat_with`, a pop in an
+   `array::from_fn` closure): `from_fn`, `bare_from_fn`, `repeat_with`, `array_from_fn_pop`.
+4. Mutations, each applied alone to the code, then reverted (`cargo test` after each; 113 green on the revert;
+   the real tree passes under every mutation named here, but under the ones marked *). "red" lists the cases
+   that went red; the spec's named case first.
+   - Accept any mention of the count (the reads rule off): `count_in_user_macro` red, with `count-in-arithmetic`,
+     `count-passed-to-a-function`, `reassigned_count`, `count-in-raw-identifier-macro` and three more. The
+     other half of the spec's pair, `inflated_count`, is a D6 form, not a mention: accept any entry initializer:
+     `inflated_count` red, with `shadowed_count`, `entry_name_in_binding`, `count_raised_by_max`,
+     `bound_not_at_entry`.
+   - Pops in headers ignored: `wrapped_while_let`, `path_pop`, `header_past_closed_body` and
+     `marked-unbounded-try-pop-drain` red.
+   - Resolve only `let` bindings: patterns of `let` only: `pattern_rebound_count` red (with `binder-tuple-let`,
+     `-if-let`, `-match-arm`, `-while-let`, `count_rebound_by_for_pattern`, and the two accepted per-queue twins);
+     binders other than `let` ignored: `count_rebound_by_for_pattern` red (with `binder-closure-parameter`,
+     `-if-let`, `-while-let` and the twins).
+   - Read nodes outside the region: `binding-above-begin` red (alone).
+   - No `r#` strip on a method name: `raw-identifier-pop` red (alone).
+   - Accept `Expr::Async`: `drain-in-async-block` red (alone). Skip the unreached-pop refusal: `drain-in-async-block`
+     and `allow-list-const-block` red.
+   - Nested `fn` as a new scope: `pop-in-a-nested-function-in-an-unbounded-loop` red (alone). Closure as a new
+     scope: `pop-in-a-closure-in-an-unbounded-loop` red (alone).
+   - D8b condition 1, roots by spelling: `per_queue_root_rebound` (alone). Condition 2, any set-loop initializer:
+     `per_queue_count_not_from_entry` (with the twins, whose `.min(DEPTH)` the mutation breaks); first statement
+     only: `per_queue_set_loop_adjusts_count` (alone). Condition 4, adapters in the zip headers ignored:
+     `per_queue_counters_misaligned` (alone); any pass binding as the queue: `per_queue_pop_from_wrong_zip_position`
+     (alone). Condition 5: receiver path not compared: `per_queue_pop_other_queue`; decrement not required:
+     `per_queue_no_decrement`; more than one pop accepted (the pop count and the queue-mention clause both
+     dropped, since either alone leaves it refused): `per_queue_two_pops_one_decrement`, with
+     `per_queue_element_swapped_with_spare` and `per_queue_receiver_rebound`; receivers by spelling:
+     `per_queue_receiver_rebound` (alone); the queue's other mentions unchecked: `per_queue_element_swapped_with_spare`
+     (with `per_queue_receiver_rebound`). Condition 6: window ends at the pass loop: `per_queue_count_reread_in_pass`
+     (with the closure, reborrow and macro cases, which stand after the pass loop); item 1 on `<K>` only:
+     `per_queue_collection_swapped`; terminal call without its tail: `per_queue_counter_written_by_call`;
+     terminal call in a closure: `per_queue_counters_refilled_in_closure`; a bare root not a mention:
+     `per_queue_root_reborrowed`; macro tokens not read: `per_queue_counters_written_by_macro`; items 1 and 3
+     refused inside a closure: `per_queue_meter_poll` (and `per_queue_param_root`, which has the same closure).
+     D8b removed: `per_queue_meter_poll`, `per_queue_single_pass`, `per_queue_param_root`.
+   - The macro-region cases (D11) turn red only when the three overlapping guards of deviation 5 are dropped
+     together: `pop-in-a-macro-body-region`, `pop-in-a-macro-call-region`, `allow-list-*`, `drain-in-async-block`;
+     each guard alone: no case red.
+   - Mutations for the new rows (one red case each unless noted): header form refused
+     (`form-header-entry-count`); `> 0` refused (`form-while-greater-than-zero`); a typed binding refused
+     (`form-typed-count`, `form-alias-with-a-type`); `.min(<field>)` and `.min(<literal>)` refused (their rows);
+     the function's outer attributes in the region node (`form-function-with-attributes`; the real tree fails
+     too*); `!=`, `<`, `>`, `>=` dropped from the reads (`form-count-compared-before-the-loop`); macro pops
+     refused outright (`form-pop-token-in-a-macro-in-a-counted-loop`); uses matched by name, not binding
+     (`form-shadow-in-a-closed-block`); each refusal row of `a_count_that_the_rule_cannot_prove_is_refused` is red
+     under the mutation that admits it (right operand, any binary operator, a call argument, `debug_assert!`
+     arguments exempt, every `*assert` macro parsed, a method cap, the header token count, an inclusive range,
+     `+= 1`, `-= 2`); collection loop counted bounded (`collection-loop-without-a-count`); each binder kind
+     ignored in turn (`binder-match-arm`, `-if-let`, `-while-let`, `-closure-parameter`, `-tuple-let`); a
+     typed parameter not a binding (`per_queue_param_root`); an `Expr::Const`, an item `const` and a `macro_rules!`
+     item admitted (their `allow-list-*` rows); the loop that encloses the region ignored
+     (`loop-around-the-region`); region nodes from the end container only (`region-spanning-an-impl`; the
+     real tree fails too*); macro tokens not found as pops (`pop-token-in-a-macro-in-an-unbounded-loop` and the
+     macro-region cases). Rows that the base tree already pins were removed after the sweep showed it (`.min(<path>)`,
+     `map_or`, `==`, `<=`, `debug_assert!`): dropping those forms turns the base tree red.
+5. Run time, release binary: real tree 1.00 s, 1.00 s, 1.01 s (A2: 1.02-1.04 s; the awk gate 0.53 s). The base
+   tree plus one synthetic marked file (a `for lane in 0..4` loop of 3,007 lines holding 300 counted drains, the
+   same count name 300 times, and again with 300 distinct names): 0.04 s each time (the awk: 0.43 s and 1.05 s).
+   A stress run with every one of 566 source files of the workspace wrapped in markers: 2.9 s, exit 1 with 35
+   drain findings in test files, no panic. Not tuned.
+6. Shipped artifacts: `git diff --stat 394a85c6d..HEAD` outside `tools/realtime-policy` and `.github/ISSUE_SPECS`
+   is empty; `cargo tree -e normal,features -p capi` names no `realtime-policy`; `cargo build --locked --release
+   -p capi` built twice at the parent and twice at the change gives the same digests each time: `libcapi.a`
+   `3431f546ec53477d...`, `libcapi.so` `0213cd820e2715de...` (A2's digests, taken at `394a85c6d`'s parent: the
+   same). The `artifact-identity` job is CI-only.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-workspace-policy.sh`, `check-bench-policy.sh`, `check-realtime-policy.sh`,
+   `test-realtime-policy.sh`: all exit 0.
+
+**Test value (the one-sentence answer, per new test).**
+- `the_ported_drain_cases_are_refused`: red if the visitor misses the pop, binding, read or innermost loop in the
+  position a ported case holds (the named mutations above, and the lexer-era cases as a regression corpus by
+  root's ruling of 2026-10-05).
+- `the_forms_that_d6_and_d8_state_pass`: red if a counted drain in a form D6 or D8 states (header entry count,
+  `> 0`, typed, literal- or field-capped, an attributed function, `!=`/`<`/`>`/`>=` reads, a macro pop in a
+  counted loop, a shadow in a closed block) is refused, which neither the base tree nor the real tree pins.
+- `a_count_that_the_rule_cannot_prove_is_refused`: red if a count mention that is not a left comparison, an
+  assertion other than `debug_assert!`, a method cap, an inclusive range or a `while` body not opening with
+  `<count> -= 1;` is accepted.
+- `a_loop_with_no_count_does_not_bound_a_pop`: red if a collection loop with no count bounds a pop.
+- `every_kind_of_binder_takes_the_count`: red if a `match` arm, `if let`, `while let`, closure parameter or tuple
+  `let` between the entry binding and the loop is not the count's nearest binding.
+- `a_pop_below_a_node_outside_the_allow_list_is_refused`: red if the allow-list admits `Expr::Const`, an item
+  `const` or a `macro_rules!` item.
+- `a_counted_drain_in_an_async_block_is_refused_twice`: red if `Expr::Async` is walked or an unreached pop passes.
+- `a_raw_identifier_pop_is_a_pop`: red if `r#try_pop` is compared without stripping `r#`.
+- `a_pop_in_a_macro_or_a_closure_is_judged_by_the_loops_around_it`: red if macro-token pops are ignored or a
+  closure hides the loop around it.
+- `a_pop_in_a_nested_function_is_judged_by_the_loops_outside_it`: red if a nested `fn` starts a new loop scope.
+- `a_count_binding_above_the_region_is_not_read`: red if the rule reads a node outside the pop's region.
+- `a_loop_that_encloses_the_region_is_refused`: red if the loop around a region is ignored.
+- `a_pop_in_a_region_inside_a_macro_body_is_refused`, `..._macro_call_is_refused`: red if a pop in tokens of a
+  macro is judged by the loops inside those tokens (all three guards of deviation 5 together).
+- `a_region_spanning_the_end_of_an_impl_reads_its_nodes`: red if the region nodes come from one container.
+- `per_queue_*`: each refusal is red on the defect named with it in D11 (the mutation list above); the three
+  acceptances are red if the meter poll's shape (its closure reads included), the single pass or a typed-parameter
+  root is refused.
+
+**Open items.**
+- B1b: the 14 deferred cases (list above), the outer-loop, attribute, item and constructor rules, `drain_controls`.
+  B1b's "region opened inside a loop's body" case already exists here (`loop-around-the-region`).
+- D9's gap stands in the module documentation until B1b; the awk gate covers it.
+- B2a replaces "closures and macros are transparent": `form-pop-token-in-a-macro-in-a-counted-loop` and
+  `a_pop_in_a_macro_or_a_closure_is_judged_by_the_loops_around_it` are superseded then and are deleted in that
+  change.
