@@ -102,8 +102,9 @@ pub struct SelectedMeterRequest {
 /// matrix stage and nothing else, because a bounded SPSC queue has exactly one consumer and the
 /// matrix stage is a different graph node from the fader and the input chain.
 ///
-/// The record is `Copy` and fixed-size, so the queue is a plain `bounded_spsc` and the render-side
-/// drain allocates nothing.
+/// The record is `Copy` and fixed-size. Since #1312 it is the value written to the strip's
+/// latest-target matrix cell ([`MatrixCells::write`]), not an element of a queue: the cell holds
+/// the newest value, the render-side drain allocates nothing, and a write has no room to want.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackControlRecord {
     /// New 2x2 target, already domain-checked by the producer.
@@ -114,12 +115,13 @@ pub struct TrackControlRecord {
 
 /// One live-control fader or mute record for a track's fader/mute stage (issue #140 B).
 ///
-/// # Why this is a second record type and a second queue
+/// # Why this is a second record type and a second set of cells
 ///
-/// The matrix stage and the fader stage are two different graph nodes, so one SPSC queue cannot
-/// serve both -- a queue has exactly one consumer, and that consumer is the processor bound to the
-/// node. `TrackControlRecord` therefore stays exactly the 20-byte matrix record #137 froze, and
-/// this rides its own bounded queue to `TrackStage::PostFader`.
+/// The matrix stage and the fader stage are two different graph nodes, so one lane cannot serve
+/// both -- a lane has exactly one reader, and that reader is the processor bound to the node.
+/// `TrackControlRecord` therefore stays exactly the 20-byte matrix record #137 froze, and this
+/// is written to its own four latest-target cells (fader left and right, mute left and right,
+/// [`FaderCells::write`]) read by `TrackStage::PostFader` (#1312: it was a bounded queue before).
 ///
 /// `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget` in
 /// `BUILTIN_PARAMETER_DESCRIPTORS`. (This paragraph read "still declare `PreparedOnly`" until
@@ -10950,11 +10952,113 @@ mod tests {
                 },
                 smoothing_samples: 6,
             });
+            let fader_before =
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
+            let matrix_before =
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
             fixture.paired.apply_pending().unwrap();
-            // The paired side has applied everything; the separate side's block drain does it
-            // inside `assert_pair_call`, which then compares PCM bits and every bank word.
+            // `apply_pending` alone has moved the paired side to where the separate stages' block
+            // drain moves theirs, in every bank word.
+            let snapshot = fixture.snapshot();
+            fixture.separate_fader.begin_block(0, snapshot).unwrap();
+            fixture.separate_matrix.begin_block(0, snapshot).unwrap();
+            let fader_after =
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
+            let matrix_after =
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
+            assert_ne!(fader_after, fader_before, "the fader writes were applied");
+            assert_ne!(matrix_after, matrix_before, "the matrix write was applied");
+            assert_eq!(
+                fader_after,
+                builtins::test_support::fader_bank_lane_words(&fixture.separate_fader.bank, 0)
+            );
+            assert_eq!(
+                matrix_after,
+                builtins::test_support::matrix_bank_lane_words(&fixture.separate_matrix.bank, 0)
+            );
+            // The empty-drain blocks that follow render the bits the block drain renders.
             assert_pair_call(&mut fixture, 4, 9, false);
             assert_pair_call(&mut fixture, 4, 10, false);
+        }
+    }
+
+    /// The drain applies a strip's fader cells before its mute cells (#1312 D4), whatever order the
+    /// writes came in: they share one gain ramp, and a fader move after a mute would cut the
+    /// mute's ramp short. The oracle applies the same two values directly in D4's order; the
+    /// reverse order is shown to differ, so the comparison can tell them apart.
+    #[test]
+    fn the_drain_applies_the_fader_before_the_mute_whatever_the_write_order() {
+        let new_bank = || {
+            BuiltinFaderBank::new(
+                Backend::Simd4,
+                BankWidth::Four,
+                vec![BuiltinParameters::default(); 4],
+            )
+            .expect("bank")
+        };
+        let words =
+            |bank: &BuiltinFaderBank| builtins::test_support::fader_bank_lane_words(bank, 0);
+        let (fader_db, mute_ramp, fader_ramp) = (-6.0_f32, 5_u32, 9_u32);
+
+        let mut canonical = new_bank();
+        canonical
+            .set_fader_db(0, BuiltinLaneSelector::Left, fader_db, fader_ramp)
+            .unwrap();
+        canonical
+            .set_mute(0, BuiltinLaneSelector::Left, true, mute_ramp)
+            .unwrap();
+        let mut reversed = new_bank();
+        reversed
+            .set_mute(0, BuiltinLaneSelector::Left, true, mute_ramp)
+            .unwrap();
+        reversed
+            .set_fader_db(0, BuiltinLaneSelector::Left, fader_db, fader_ramp)
+            .unwrap();
+        assert_ne!(
+            words(&canonical),
+            words(&reversed),
+            "the order is observable in the ramp state"
+        );
+
+        for mute_first in [true, false] {
+            let counter = LiveValuesSuperseded::default();
+            let (mut cells, reader) = fader_lane(&counter);
+            let mut processor = FaderBankProcessor {
+                bank: new_bank(),
+                controls: core::iter::once(Some(reader))
+                    .chain((1..4).map(|_| None))
+                    .collect(),
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            };
+            let mut gate = TestOnlyGate::new();
+            let mute = TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Left,
+                muted: true,
+                smoothing_samples: mute_ramp,
+            };
+            let fader = TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: fader_db,
+                smoothing_samples: fader_ramp,
+            };
+            let order = if mute_first {
+                [mute, fader]
+            } else {
+                [fader, mute]
+            };
+            gate.write_published(|stamp| {
+                for record in order {
+                    cells.write(stamp, record);
+                }
+            });
+            processor.begin_block(0, gate.snapshot()).unwrap();
+            assert_eq!(
+                words(&processor.bank),
+                words(&canonical),
+                "mute written first: {mute_first}"
+            );
         }
     }
 

@@ -365,7 +365,9 @@ const INPUT_PROCESSOR_BYTES: u64 = 696;
 // #808 retains the same additional 416-byte input state inline.
 // #1328 amendment A9: +24 with the input section (1072 before).
 // #1451: -16 with the input section (1096 before).
-const STRIP_PREPARATION_BYTES: u64 = 1080;
+// #1312: +8 (1080 before): `StripControlConsumers` holds the fader and matrix cell readers
+// (`FaderReader` 56 bytes, `MatrixReader` 32) in place of two 40-byte ring consumers.
+const STRIP_PREPARATION_BYTES: u64 = 1088;
 const FADER_PROCESSOR_BYTES: u64 = 16;
 const MATRIX_PROCESSOR_BYTES: u64 = 136;
 // #1080 removed the controlled-activation flag #816 added, so the binding is 80 bytes again.
@@ -5336,7 +5338,12 @@ mod tests {
             // seal's tail vectors, +16 per track in both processor payload counts). The largest
             // allocation and the allocation counts do not move. No PCM, meter, response or
             // benchmark fixture moved.
-            "d0bf619820c5c474c6f7475556cfbd5ea20ca9d69bab6fd41cf08d27962deff9",
+            // Re-pinned by issue #1312: `resources.jsonl` alone moves, by +8 bytes per track in
+            // every processor payload count (`StripPreparation` 1080 -> 1088: its control
+            // consumers hold the fader and matrix cell readers in place of two ring consumers).
+            // The largest allocation and the allocation counts do not move. No PCM, meter,
+            // response or benchmark fixture moved.
+            "0834666e8f2ea44131efd5906d3017c511cc7e4f88923b0588d01c051410580e",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);
