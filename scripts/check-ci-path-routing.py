@@ -1077,6 +1077,20 @@ def check_nightly_self_tests(root: pathlib.Path) -> None:
     require(needs is not None and NIGHTLY_SELF_TEST_JOB in
             [name.strip() for name in needs.group(1).replace("\n", " ").split(",")],
             f"nightly: failure-notice must report {NIGHTLY_SELF_TEST_JOB}")
+    # Issue #1513: a job the notice reports must not be able to hide its own failure. #1481 removed
+    # a mask that had hidden a broken step for weeks; `UNMASKABLE` sees job-level keys only.
+    reported = [name.strip() for name in needs.group(1).replace("\n", " ").split(",")]
+    for name in reported:
+        reported_job = job(text, name)
+        # The key may be quoted; any value, even a literal `false`, is refused: the key has no use
+        # on a job the notice reports.
+        require(re.search(r"^    ['\"]?continue-on-error['\"]?\s*:", reported_job, re.MULTILINE) is None,
+                f"nightly: {name} is reported by failure-notice and must not carry the job-level "
+                "continue-on-error key")
+        for step in job_steps(reported_job):
+            require(re.search(r"['\"]?continue-on-error['\"]?\s*:", step) is None,
+                    f"nightly: {name} is reported by failure-notice and must not carry the "
+                    "continue-on-error key on any step")
 
 
 def check_qualification_workflow(root: pathlib.Path) -> None:
