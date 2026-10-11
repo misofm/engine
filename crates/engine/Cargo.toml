@@ -16,6 +16,8 @@ realtime-audit = []
 [dev-dependencies]
 # MIT licensed; test/model-checking only. It is not reachable from production, Wasm, or render.
 loom = "=0.7.2"
+# Test only: the thread-scoped allocation counters of `tests/plan_exchange_ceiling.rs`.
+bench-support.workspace = true
 
 [lints]
 workspace = true

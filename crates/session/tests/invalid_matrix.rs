@@ -55,9 +55,10 @@ fn model_case(
 
 #[test]
 fn u64_model_fields_accept_the_full_unsigned_domain() {
+    // `revision` is not a full-domain leaf: it is bounded at `MAX_SESSION_REVISION` (#1503) and
+    // its refusal is pinned in `diagnostic_parity.rs`.
     type Mutation = fn(&mut SessionModel);
     let cases: &[(Mutation, &str)] = &[
-        (|session| session.revision = u64::MAX, "$.revision"),
         (
             |session| session.sources[0].frames = u64::MAX,
             "$.sources[0].frames",

@@ -37,7 +37,7 @@ use super::watermark::{
     CandidateOutcome, PlanWatermarkReader, WatermarkWriter, plan_watermark,
     watermark_retained_bytes,
 };
-use super::{Consumer, Producer, QueueEmpty, QueueGeneration, SpscError};
+use super::{Consumer, GATE_REVISION_MAX, Producer, QueueEmpty, QueueGeneration, SpscError};
 
 /// Epoch assigned to a successfully published render plan.
 ///
@@ -364,6 +364,26 @@ pub fn plan_exchange(
     plan_exchange_inner(initial, 0, config)
 }
 
+/// Why [`plan_exchange_at_revision`] refused to prepare an exchange. Nothing was allocated for the
+/// exchange or published, and `initial` is dropped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanExchangeError {
+    /// The mailbox or the retirement queue could not be sized.
+    Resources(SpscError),
+    /// The initial revision is above [`GATE_REVISION_MAX`], the largest revision a plan's gate can
+    /// hold (#1432 D1: bit 63 is render's announcement).
+    RevisionAboveCeiling {
+        /// The refused revision.
+        revision: u64,
+    },
+}
+
+impl From<SpscError> for PlanExchangeError {
+    fn from(error: SpscError) -> Self {
+        Self::Resources(error)
+    }
+}
+
 /// Prepare the exchange with `initial` at committed revision `initial_revision` (#1314 D1, #1502
 /// D5): `gate` is the initial plan's handle ([`PreparedRenderPlan::take_revision_gate`]), the
 /// revision is published on it when it is above 0, and the watermark starts at
@@ -374,16 +394,27 @@ pub fn plan_exchange(
 ///
 /// If `gate` is not `initial`'s handle (checked by pointer identity), or `initial_revision` is not
 /// above the gate's published revision when it is above 0.
+///
+/// # Errors
+///
+/// [`PlanExchangeError::RevisionAboveCeiling`] when `initial_revision` is above
+/// [`GATE_REVISION_MAX`], checked before the exchange allocates anything (#1503 D3);
+/// [`PlanExchangeError::Resources`] when the queue cannot be sized.
 pub fn plan_exchange_at_revision(
     initial: PreparedRenderPlan,
     gate: &mut PlanRevisionGate,
     initial_revision: u64,
     config: PlanExchangeConfig,
-) -> Result<(PlanPublisher, RealtimePlanOwner, PlanRetirer), SpscError> {
+) -> Result<(PlanPublisher, RealtimePlanOwner, PlanRetirer), PlanExchangeError> {
     assert!(
         initial.owns_revision_gate(gate),
         "the initial revision is published on the initial plan's own gate"
     );
+    if initial_revision > GATE_REVISION_MAX {
+        return Err(PlanExchangeError::RevisionAboveCeiling {
+            revision: initial_revision,
+        });
+    }
     let exchange = plan_exchange_inner(initial, initial_revision, config)?;
     // Render has not run, so the first snapshot of the gate reads the revision.
     if initial_revision > 0 {

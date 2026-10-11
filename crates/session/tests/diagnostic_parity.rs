@@ -801,3 +801,57 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
     let span = target(&errors, &wrong).span.expect("wrong type span");
     assert_eq!(&wrong_type[span.byte_start..span.byte_end], "7");
 }
+
+/// The revision domain is `0..=MAX_SESSION_REVISION` through every entry point (#1503): text
+/// parse, typed canonicalization and typed compilation each refuse exactly one
+/// `NumericOutOfSchemaRange` at `$.revision`, and the ceiling itself is accepted and round-trips.
+#[test]
+fn revision_above_the_plan_gate_ceiling_is_refused_by_every_entry_point() {
+    let at_ceiling = CANONICAL.replacen(
+        "\"revision\": \"7\"",
+        &format!("\"revision\": \"{}\"", session::MAX_SESSION_REVISION),
+        1,
+    );
+    let model = parse_session_json(&at_ceiling).expect("the ceiling parses");
+    assert_eq!(model.revision, session::MAX_SESSION_REVISION);
+    assert_eq!(
+        canonical_session_json(&model).expect("the ceiling writes"),
+        at_ceiling
+    );
+    compile_session(&model, caps()).expect("the ceiling compiles");
+
+    for revision in [session::MAX_SESSION_REVISION + 1, u64::MAX] {
+        let source = CANONICAL.replacen(
+            "\"revision\": \"7\"",
+            &format!("\"revision\": \"{revision}\""),
+            1,
+        );
+        let mut model = parse_session_json(CANONICAL).expect("fixture parses");
+        model.revision = revision;
+        let sets = [
+            parse_session_json(&source).expect_err("text parse"),
+            canonical_session_json(&model).expect_err("typed canonical"),
+            compile_session(&model, caps()).expect_err("typed compile"),
+        ];
+        for set in &sets {
+            let found: Vec<_> = set
+                .diagnostics()
+                .iter()
+                .map(|d| (d.code, d.path.to_string()))
+                .collect();
+            assert_eq!(
+                found,
+                vec![(
+                    DiagnosticCode::NumericOutOfSchemaRange,
+                    "$.revision".to_owned()
+                )],
+                "revision {revision}"
+            );
+        }
+        let span = sets[0].diagnostics()[0].span.expect("parse span");
+        assert_eq!(
+            &source[span.byte_start..span.byte_end],
+            format!("\"{revision}\"")
+        );
+    }
+}

@@ -34,7 +34,7 @@ pub use plan::{
     ResponseSnapshotSink, plan_revision_gate_retained_bytes,
 };
 pub use plan_exchange::{
-    PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
+    PlanEpoch, PlanExchangeConfig, PlanExchangeError, PlanExchangeResourceReport, PlanPublisher,
     PlanReplacementReservation, PlanReplacementReservationError, PlanRetirer, PublishError,
     RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome,
     UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_at_revision,

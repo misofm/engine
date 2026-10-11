@@ -238,9 +238,19 @@ fn mapped_source_shape_and_map_errors_are_transactional() {
     let float_input = canonical_model(&model);
     assert!(fold_mono_session_document(&float_input, &pairs()).is_err());
     model.sources[0].bit_depth = SourceBitDepth::Pcm24;
-    model.revision = u64::MAX;
+    // A document at the revision ceiling has no successor: the fold's own typed refusal, not the
+    // later "transformed session is invalid" one.
+    model.revision = session::MAX_SESSION_REVISION;
     let overflow_input = canonical_model(&model);
-    assert!(fold_mono_session_document(&overflow_input, &pairs()).is_err());
+    let error = fold_mono_session_document(&overflow_input, &pairs()).expect_err("no successor");
+    assert_eq!(error.to_string(), "session revision exhausted");
+    model.revision = session::MAX_SESSION_REVISION - 1;
+    let last_input = canonical_model(&model);
+    let folded = fold_mono_session_document(&last_input, &pairs()).expect("last fold");
+    assert_eq!(
+        parse_session_json(&folded).unwrap().revision,
+        session::MAX_SESSION_REVISION
+    );
 }
 
 fn render_two_blocks(document: &str, mono: bool) -> Vec<f32> {
