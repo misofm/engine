@@ -250,6 +250,9 @@ Dependents: #1503, #1504, #1312, #1310.
 
 ## Attempt record
 
+Commit hashes cited in this record that name pre-rebase commits map to the rebased commits in
+#1432's "Commit mapping after the rebase onto 7f8ecb8a1".
+
 ### Attempt 1 (implementer, on `codex/d15-stream-b2`, commits d1e0a69dd and 07d5c60ae)
 
 **What landed.**
@@ -361,10 +364,11 @@ foreign-handle tests: a second writer on a gate and a revision published on anot
   `graph_session_plus_plan_bytes` (and in its admission check), the control plane's separate
   addition is removed, and both hosts count the gate. The same row now charges the browser's
   per-plan `live_values_superseded` count (see #1312 m3). `host-core`'s
-  `the_graph_row_counts_the_plans_gate_and_a_count_it_made` and `host-web`'s
+  `the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds` and `host-web`'s
   `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count` defend the row on both
-  paths; capi's identity in `resource_lifecycle.rs` now checks that the host row carries the gate
-  and the carry program is the only term capi adds. `expected.json` did not move.
+  paths; capi's identity in `resource_lifecycle.rs` checks that the carry program is the only term
+  capi adds (its second assertion, that the host row carries the gate, was removed by the blocker
+  follow-ups: host-core's test is its unique catch). `expected.json` did not move.
 - **`plan_exchange_at_revision`'s `# Panics` doc (n2).** It now says that only the foreign-handle
   check is an always-on `assert!`; "a revision not above the gate's published one" is
   `GatePin::publish`'s debug assertion and does not panic in a release build.
@@ -374,9 +378,9 @@ reverted (green).
 
 | Defect | Red |
 |---|---|
-| the gate's bytes not added to the graph row | `the_graph_row_counts_the_plans_gate_and_a_count_it_made` (host-core: `left: 263942, right: 263966`); `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count` (host-web); `double_live_oracle_drives_exact_and_one_below_c_caps` (capi) |
+| the gate's bytes not added to the graph row | `the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds` (host-core, renamed by the blocker follow-ups; `left: 263942, right: 263966` when first written); `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count` (host-web); `double_live_oracle_drives_exact_and_one_below_c_caps` (capi) |
 | the preparation's own count not added | the same host-core and host-web tests (`left: 24, right: 48` on the browser's row, native widths) |
-| the count added although the host passed the session's | the host-core test |
+| the count added although the host passed the session's | the host-core test, and capi's second identity (`resource_lifecycle.rs`), which the blocker follow-ups removed so that the host-core test is the one catch (see #1312's blocker follow-ups) |
 
 Test value: a host path (the browser's exact retained total above all) that leaves the gate or the
 count out of the row while its ceilings stay green, because the row less the graph's incremental row
@@ -393,5 +397,8 @@ scripts; `check-cross-targets.sh` PASS; the worklet chain (`build-web-audioworkl
 --artifacts` with `expected.json` unchanged, `check-scalar-oracle-absent.py --wasm`,
 `strip-wasm-names.py check`, `test-web-audioworklet.sh` with a private TMPDIR left empty). No exact
 resource number was re-pinned: the audit fixtures and the C ABI and browser fixtures did not move.
-The V8 spill gate needs Node 22.23.2 and was not run. The engine loom leg does not build on this
-branch; see #1503's batch follow-ups.
+The V8 spill gate needs Node 22.23.2 and was not run. The engine loom leg did not build at that point; #1503's Root Amendment 2 (`6ae468ceb`) closed it.
+- **Executor-failure path counter (batch NIT 3, recorded).** On the #1502 D7 path a value that a setter
+  refused (a structural defect only) has already been passed by `CellReader`. The counter that counts
+  it, `live_block_errors`, is visible only through `PlanQueries`; neither host exposes it. See #1312's
+  blocker follow-ups for the owner.

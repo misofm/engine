@@ -573,3 +573,50 @@ same commit. Gates: `cargo test --locked --release -p engine --lib latest_cell` 
   (the section above) made `stamp` refuse a revision at or below `last_published` in every build, so
   the sequence now returns `StampRefused` instead of reaching the slot. The open-stamp rule (a higher
   revision stamped while one is open) stays debug-only. No always-on assert is used for it.
+
+### Commit mapping after the rebase onto 7f8ecb8a1
+
+The batch branch `codex/d15-stream-b2` was rebased from `c4ca6f2dd` onto `origin/main` `7f8ecb8a1`.
+The pre-rebase tip is `89627e18d` on the local branch `codex/d15-stream-b2-prerebase`; after the
+merge those commits are not ancestors of `main`. The slice specs and the verdict copies under
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-b2/` cite pre-rebase hashes (the verdict copies
+stay byte-identical to the originals); read each cited hash through this list. Derived with
+`git range-diff c4ca6f2dd..codex/d15-stream-b2-prerebase 7f8ecb8a1..6ae468ceb`. "=" patches are
+unchanged; five were adapted to main's #1471/#1326 (#1502 `d1e0a69dd`, #1312 host-core `7247f8281`,
+#1312 control plane and C ABI `b99f24407`, #1312 browser `d5834d1f4`, and the follow-ups
+`e939efd29`), with the same intent.
+
+- `194fe80d8` -> `164b99b8a` Add the revision gate and the revision-bounded latest-target cell (#1432)
+- `203ec4194` -> `a5dff0ab2` Pair the gate with its pin and carry the publish-before-a-higher-stamp rule (#1432 attempt 1 follow-ups)
+- `030478400` -> `44937553a` Fold root's stamp-order ruling into #1312 D7 and #1277 gates (#1432 follow-ups m3)
+- `48a13bbc1` -> `14a72cd88` A stamp borrows its pin so it cannot outlive its publication (#1432 follow-ups after the follow-ups)
+- `d1e0a69dd` -> `ad5a1b213` Give each plan its own revision gate and take each block's live snapshot from it (#1502)
+- `07d5c60ae` -> `60907a9f6` Pin the executor's live-block call, refuse-before-snapshot probe, watermark docs (#1502)
+- `fec3af7e4` -> `f663ae777` Record #1502 attempt 1 evidence
+- `35b15eb2c` -> `2b3b9e43a` Refuse a stale or over-ceiling stamp in every build (#1432 root ruling n3)
+- `2340d7d8d` -> `9a80f552e` Record the #1432 n3 follow-up evidence
+- `ed62ed794` -> `a9fd770cb` Fold root's #1503 ruling: the revision ceiling is the session schema's domain
+- `70017bf09` -> `2cdeec225` Hand each block's live snapshot to every live drain (#1504)
+- `5df1ce8b9` -> `ae613fef6` Bound committed revisions at the plan gate's ceiling: schema domain, store bound, exchange refusal (#1503)
+- `9fddf7560` -> `55caa50dd` Bound the SDK builder, C ABI test and docs at the revision ceiling; record #1503 attempt 1
+- `b472a7421` -> `4757ba44a` Move the strip fader, mute and matrix lanes onto latest-target cells in builtins-compiler (#1312, checkpoint 1)
+- `8a2229113` -> `673f3e884` Write the allocation tracker's strip cells through the plan's own gate (#1312)
+- `c4ffd7e15` -> `a477bf49d` Drop unused imports in the allocation tracker (#1312)
+- `7247f8281` -> `21c92d60b` Host-core: cell producers, the session count and counter 16 (#1312, checkpoint 2)
+- `9be6d2318` -> `e4e2b8e0f` Graph-compiler: write the console fader script through the plan's gate; re-pin the direct-route resource fixture (#1312)
+- `b99f24407` -> `b8cae7548` Control plane and C ABI: cell writes behind the stamp, counter 16, header and docs (#1312, checkpoint 3)
+- `d5834d1f4` -> `19704ea65` Browser: write the strips' cells under the batch's stamp (#1312, checkpoint 4)
+- `f2b939a92` -> `33be41913` Gate 8: one live transaction lands whole in the block its revision is published for (#1312)
+- `771cf3d16` -> `173c3415d` Drop an unused import in the gate 8 test (#1312)
+- `0976694b4` -> `452e6eead` Re-pin the builtin resource grid for the cell readers; gate 4 compares apply_pending alone; add the drain-order test (#1312)
+- `3120682d5` -> `845580636` Record #1312 attempt 1 evidence
+- `6170fadaa` -> `03a11a89d` Move the #1504 snapshot-handoff test out of rack's render source (rack policy)
+- `e939efd29` -> `b2084f616` Batch 2 code follow-ups: charge the plan's gate and count once, browser post-stamp expects, matrix count test
+- `170b6cfe3` -> `e511cbede` Record the batch 2 follow-ups in the five slice specs
+- `89627e18d` -> `4ddba84bc` Copy the stream B batch 2 verdicts into the handoff directory
+- (new in the rebase) `fab5743f6` Fix the call sites where main's #1471/#1326 meet batch 2's #1312 signatures
+- (new in the rebase) `6ae468ceb` Move #1503's exchange-ceiling test to bench-support so the loom leg builds (root Amendment 2)
+
+Commits `ad5a1b213` to `b2084f616` do not compile until `fab5743f6` (E0061: the call sites where
+main's #1471/#1326 meet #1312's signatures; its message says so). That affects only a bisect between
+them. Commits after `6ae468ceb` are the batch qualification blocker fixes.

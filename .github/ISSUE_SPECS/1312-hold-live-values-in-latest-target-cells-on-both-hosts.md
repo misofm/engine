@@ -395,6 +395,9 @@ Dependents: #1277 (which writes into these cells), #1280 (which peeks them), #13
 
 ## Attempt record
 
+Commit hashes cited in this record that name pre-rebase commits map to the rebased commits in
+#1432's "Commit mapping after the rebase onto 7f8ecb8a1".
+
 ### Attempt 1 (implementer, on `codex/d15-stream-b2`, commits `b472a7421` to `0976694b4`)
 
 **What landed.**
@@ -521,7 +524,8 @@ other stage's acked value.
 
 **Open items.**
 
-1. `scripts/check-rack-policy.sh` fails on `crates/rack/src/lib.rs:6191` (`use std::sync::{Arc,
+1. **Closed by `03a11a89d`** (the #1504 test moved out of rack's render source; the policy script passes).
+   `scripts/check-rack-policy.sh` failed on `crates/rack/src/lib.rs:6191` (`use std::sync::{Arc,
    Mutex}` in a #1504 test module). `crates/rack` is untouched by this tranche; the failure is not
    caused by it.
 2. #1504's verifier note: `BuiltinStage` should report live lanes so `BankChain::new`'s assertion
@@ -553,7 +557,7 @@ other stage's acked value.
   were published, which refused a batch whose values were already visible. The stamp itself stays
   the one fallible step (a revision past the ceiling is a refusal). No new test: the invariants are
   not reachable through the ABI, and a seam would exist only to be tested. Evidence that the
-  `expect`s are live: with the free-room check bypassed, 10 refusal tests that used to see
+  `expect`s are live: with the free-room check bypassed, 14 refusal tests that used to see
   `RESULT_BACKPRESSURE` now panic at "the free-room pass checked this record's room", including gate
   9's `a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone`; reverted, green.
 - **The browser's count is per plan and its allocation is charged (m3).** The browser prepares each
@@ -596,3 +600,117 @@ other stage's acked value.
   and `crates/capi/tests/resource_lifecycle.rs` (the row tests), and comment or doc corrections in
   `crates/engine/src/realtime/{latest_cell,plan_exchange}.rs`, `crates/graph/{src/lib.rs,tests}`,
   `tools/audit/src/fixture_builtins.rs` and two docs.
+
+### Blocker follow-ups (stream B batch 2, after the batch qualification verdict)
+
+Verdict `stream-b2-batch-verdict` (blockers B1, B2; MINOR 1 to 7; NIT 1 to 10). Commits are listed
+in #1432's commit mapping as "the batch qualification blocker fixes".
+
+- **B1: the test-support forwarding mutation case.** `b8cae7548` made `control-plane/test-support`
+  forward `host-core/test-support`, so removing only `host-web`'s forward no longer uncovers
+  host-core. `scripts/test-test-support-ci.py` now has four cases on the forwarding graph: both
+  forwards present (passes), host-web's removed with control-plane's present (passes), control-plane's
+  removed with host-web's present (passes), and both removed (refused, naming `effect-compiler`,
+  `effect-contract` and `host-core`). The gate `check-test-support-ci.py` is unchanged. Mutations
+  of the gate (applied to `forwarded()`, then reverted): no forward closure at all turns the suite
+  red at the unmutated baseline; ignoring `control-plane`'s forwards turns it red at "host-web stops
+  forwarding host-core/test-support; control-plane still does". Reverted, `test-test-support-ci.py`
+  and `check-test-support-ci.py` pass (12 packages).
+- **B2: the audit's builtins manifest digest.** `452e6eead` moved `resources.jsonl` and its
+  `MANIFEST.tsv` row (+8 bytes per track) and left `ACCEPTED_MANIFEST_SHA256` at `d0bf6198`. It is
+  re-pinned to the measured `sha256sum fixtures/builtins/v1/MANIFEST.tsv`,
+  `0834666e8f2ea44131efd5906d3017c511cc7e4f88923b0588d01c051410580e`, with the reason in the
+  constant's comment. The digest is the corpus's single owner (an on-disk fixture digest).
+  `scripts/test-builtins-fixtures.sh` ("builtins fixture mutations: ok") and
+  `scripts/check-builtins-fixtures.sh . target/release/audit` ("builtins fixtures: ok (50 files)")
+  pass.
+- **MINOR 1, the header's counter prose.** `miso_engine_v1.h` now says what D2 guarantees: the counter
+  is per cell, a `Both` record counts in each, a write to a withdrawn candidate and a value on a lane a
+  swap restarts are not counted, and no value is lost either way. It also says that a transaction with
+  fader and effect values can see its effect values land one block before its fader values (NIT 5).
+  The watermark bound text is untouched.
+- **MINOR 2, the SDK host prose.** `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and its
+  SDK mirror say that fader, mute and pan or matrix values are cells that never return backpressure,
+  and that effect, input and live-send queues keep room and the whole-batch refusal. The
+  `Backpressure` reason says which lanes can return it.
+- **MINOR 3, #1326's ring-era text and ceilings.** `builtin_retained_bytes` is 2,887 (native x86-64)
+  and 2,723 (simd128). By the file's rule (value x 1.1, rounded up to 64 bytes), each re-pinned on
+  its own: `hosts/host-web/tests/retained_ceilings.rs` 3,776 to 3,200 (3,175.7) and
+  `expected.json` `builtinRetainedBytes` 3,584 to 3,008 (2,995.3). No other ceiling moves. The
+  `STRIP_LIVE_QUEUE_DEPTH` doc, the `WebBootOptions` doc, the `effect_slot` table, the
+  `submit_commands` docs, `control-plane`'s `LIVE_QUEUE_DEPTH` and resource comments and
+  `docs/BUILTINS_AND_METERING_V1.md` (a VCA two-lane lowering is no longer refused for fader-queue
+  room) say what the code does; #1326's spec carries a "superseded by #1312" note.
+  `check-browser-expected-resources.py` (and `--artifacts` on the rebuilt module) reports
+  `builtinRetainedBytes 2723 of 3008`.
+- **MINOR 4, citations of pre-rebase commits.** #1432's "Commit mapping after the rebase onto
+  7f8ecb8a1" lists every old and new hash; this spec and the other slice specs point to it. The
+  verdict copies are not rewritten.
+- **MINOR 5 and 6, the host-core row test and the overcharge.** `host-core` charged the count's 24
+  bytes whenever the preparation made it, including a preparation with no strip controls
+  (`prepare_host_runtime`), where no cell reader keeps the count. The charge now needs the
+  preparation's own count and a nonempty control set. The test is
+  `the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds` with three cases: no strip
+  controls (the gate only), strip controls with the preparation's own count (gate and count), strip
+  controls with the session's count (the gate only). Capi's second identity assertion is deleted: it
+  caught the same defects as the host-core test, which leaves the host-core test the one catch for
+  "the count charged although the host passed one". `live_routes.rs`'s idle-versus-lanes identity
+  now names the count as the term besides the route lanes. Mutations in `host-core/src/prepare.rs`
+  (each red, then reverted green): reverting the fix (charge whenever the count is the
+  preparation's own) turns the host-core test red at the no-strip-controls case (`left: 48, right:
+  24`) and `live_send_lanes_are_charged_against_the_graph_cap` red (`left: 117864, right: 117840`);
+  the gate not charged turns it red at the first case (`left: 0, right: 24`); the count charged
+  although the host passed one turns it red at the third case (`left: 48, right: 24`) and only that
+  test (capi's assertion is gone); the count never charged turns it red at the second case (`left:
+  24, right: 48`), and host-web's `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count`
+  too. Test value: a preparation that charges an allocation no plan retains, or a host-passed count
+  charged twice, which no other test sees now that capi's second assertion is gone.
+- **MINOR 7, deferrals recorded only in closed specs.** #1399, #1346 and #1345 each carry a
+  dependency note that names the deferred item and where it is recorded.
+- **NITs fixed.** NIT 5 (header, above); NIT 6 (`plan.rs` comment: host-core charges the gate); NIT 7
+  (this spec's "10 refusal tests" is 14, open item 1 is marked closed by `03a11a89d`; #1502's
+  records name the capi red and the loom fix); NIT 8 (`C_ABI_V1_QUALIFICATION.md:149` rewrapped);
+  NIT 9 (`LiveValuesSuperseded::retained_bytes` uses `SharedAllocation<AtomicU64>`, same layout; the
+  shipped `libcapi.so` still passes `check-scalar-oracle-absent.py --native` after the CI order:
+  the four-package build, then `check-capi-abi.sh`, then the check); NIT 1's doc half
+  (`crates/control-plane/src/compile.rs`, `hosts/host-web/src/lib.rs` queue wording).
+- **NITs recorded, not changed.**
+  - NIT 1, code half: the saturating adds to `command_wanted` for the cell bands in `hosts/host-web/src/lib.rs`
+    (matrix and fader staging, the VCA fader pass and the solo pass) are dead, because the room pass
+    skips cell slots. They also serve as the slot bounds check (`get_mut(slot)` refuses an
+    out-of-range slot), so removing them needs a bounds check of their own and a browser mutation
+    run; the dead add costs one saturating add per staged record on the control path. A tidy-up for
+    the slice that next edits these passes (#1346 moves the input band).
+  - NIT 3: on the executor-failure path (#1502 D7) a value that a setter refused (a structural defect
+    only) has already been passed by `CellReader`; the `live_block_errors` counter that counts it is
+    visible only through `PlanQueries` and neither host exposes it. Exposing it is a new status field
+    on each host, outside this batch; no issue owns it yet.
+  - NIT 4: the browser stamp refusal (a revision past the ceiling) returns `RESULT_INTERNAL` with
+    `COMMAND_REASON_BACKPRESSURE` (`write_strip_cells`). No command reason names the ceiling, and a new
+    reason widens the three-spelling vocabulary that `check-command-reason-vocabulary.py` pins across
+    Rust, JS and the `.d.ts`; the stamp refusal needs the plan's revision to reach `GATE_REVISION_MAX` (2^63 - 1, #1503's
+    ceiling), which no host reaches in practice. Recorded for the slice that next edits that
+    vocabulary.
+  - NIT 10: the rebased commits `ad5a1b213` to `b2084f616` do not compile until `fab5743f6`; recorded
+    in #1432's commit mapping. It affects only bisecting.
+  - NIT 2: see #1504's batch follow-ups (n3) and #1346's dependency note.
+
+**Gates (x86-64, this box, rustc 1.97.1, node v22.23.2).** `cargo test --locked --workspace
+--all-targets` with CI's explicit exclusions and `--features
+builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,control-plane/test-support,engine/realtime-audit`
+`--no-fail-fast`: 1,548 passed, 0 failed, 10 ignored; the doctest step rc 0; the engine loom leg
+`spsc_loom` 13 passed; `cargo fmt --all -- --check`; clippy `--workspace --all-targets
+--all-features -D warnings`; `cargo doc` with `-D warnings`; 45 lint-job steps (every policy and
+mutation script of the lint job, `check-test-support-ci.py` and `test-test-support-ci.py`,
+`test-builtins-fixtures.sh`); `check-capi-abi.sh` and `--self-test`; `audit capi` 100,000 calls, 0
+allocations, 0 deallocations, 0 locks, 0 syscalls, 0 violations, `pcm_digest` `cb10fbface44a3a4`;
+the builtins, builtins-graph and graph realtime traces; `check-builtins-fixtures.sh . target/release/audit`;
+`check-scalar-oracle-absent.py --native` (after `check-capi-abi.sh`, CI's order) and `--wasm`;
+`check-cross-targets.sh` PASS; the worklet chain (`build-web-audioworklet.sh --named-twin`,
+`strip-wasm-names.py`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh` with a private
+TMPDIR left empty, the V8 spill gate); the SDK job's generated-surface, deletion, type, headless and
+package checks in source-bundle mode with no `sdk/dist`; `npm run qualify -- --check-matrix
+--self-test-mutations` in chromium 151.0.7922.34, firefox 153.0 and webkit 26.5, all gates passed, 0
+render allocations in every scenario. The shipped module moved to `99c743a6...` (host-core's
+charge) with the named twin `171a0f44...`.

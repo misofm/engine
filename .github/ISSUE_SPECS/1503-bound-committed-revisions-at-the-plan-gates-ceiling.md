@@ -174,6 +174,9 @@ Dependents: #1312 (stream order).
 
 ## Attempt record
 
+Commit hashes cited in this record that name pre-rebase commits map to the rebased commits in
+#1432's "Commit mapping after the rebase onto 7f8ecb8a1".
+
 ### Attempt 1 (implementer, on `codex/d15-stream-b2`)
 
 **What landed (Amendment 1 as written; no spec change needed).**

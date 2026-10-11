@@ -202,6 +202,15 @@ The bridge, graph and source rows are equal before and after. Shipped simd128 mo
 no other row moves (bridge metadata and retained, graph, source rows identical). The lanes are two
 16-record rings per strip. No other row was re-pinned.
 
+**Superseded by #1312 (stream B batch 2).** The text above records #1326 as it merged. #1312 holds
+the strip's fader, mute and matrix/pan values in latest-target cells, which have no depth or room,
+so `STRIP_LIVE_QUEUE_DEPTH` is now the depth of the input and effect queues only and the "two
+16-record rings per strip" are gone. `builtin_retained_bytes` fell to 2,887 (x86-64, native) and
+2,723 (shipped simd128 module). The ceilings follow the file's rule (measured value x 1.1, rounded up
+to 64 bytes), each re-pinned on its own: `retained_ceilings.rs` 3,776 to 3,200 (2,887 x 1.1 =
+3,175.7) and `expected.json` `resourceCeilings.builtinRetainedBytes` 3,584 to 3,008 (2,723 x 1.1 =
+2,995.3). A ceiling left at the ring-era value passed 889 and 861 bytes of regression unseen.
+
 **Gate 5 results (x86_64, this box).**
 
 - `cargo test --locked -p host-core -p host-web -p capi --features host-core/test-support,host-web/test-support`:

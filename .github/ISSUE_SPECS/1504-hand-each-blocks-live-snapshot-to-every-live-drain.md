@@ -140,6 +140,9 @@ Dependents: #1312, #1345, #1346, #1347.
 
 ## Attempt record
 
+Commit hashes cited in this record that name pre-rebase commits map to the rebased commits in
+#1432's "Commit mapping after the rebase onto 7f8ecb8a1".
+
 ### Attempt 1 (implementer, on `codex/d15-stream-b2`)
 
 **What landed.**
@@ -294,3 +297,7 @@ and clippy `--workspace --all-targets --all-features -D warnings`: all pass.
 - **Nits (n5, n6).** `live_snapshot_drains.rs`'s header now says "Three drain kinds are probed" and
   names the rack crate's test as the fourth; the 122-column doc line at `crates/graph/src/lib.rs:3272`
   is rewrapped.
+- **D3 guard and the cell lanes (batch NIT 2, recorded for #1346).** The D3 guard
+  (`crates/rack/src/lib.rs`, `BankChain::new`) cannot see the fader and matrix cell lanes, because
+  `BuiltinStage` (`crates/graph/src/runtime.rs`) does not forward `live_lanes`. It cannot fire wrongly
+  today: builtin slots are always active. #1346's dependency note carries the work.
