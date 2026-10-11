@@ -530,15 +530,13 @@ fn three_design_session() -> String {
         }
     }
     let document = session::canonical_session_json(&model).expect("three-design canonical fixture");
-    // One entry is the same size whatever its design, so the seed's bytes count the designs.
-    let one = host_half(SESSION, &limits()).bound_seed_bytes(&limits());
-    assert!(
-        one > 0,
-        "vacuous: the nine-track fixture enables no input section"
-    );
+    // The bounds a preparation computes, counted by the builtins' own counter: three distinct
+    // designs, not read back from the seed whose charge the document tests.
+    let computed = builtins::test_support::fixed_input_bounds_computed();
+    drop(host_half(&document, &limits()));
     assert_eq!(
-        host_half(&document, &limits()).bound_seed_bytes(&limits()),
-        3 * one,
+        builtins::test_support::fixed_input_bounds_computed() - computed,
+        3,
         "vacuous: the document does not use three designs"
     );
     document
