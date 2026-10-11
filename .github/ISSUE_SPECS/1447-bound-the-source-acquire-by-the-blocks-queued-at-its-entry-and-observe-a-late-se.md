@@ -238,3 +238,47 @@ This issue lands on the stream B batch-1 tree (#1309, #1343, #1314, #1311, #1348
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Attempt record
+
+### Attempt 1 (Sonnet 5.5, on `codex/d15-stream-b3` at `8c0deee2c`)
+
+Changed: `acquire_current_block` is the D1 shape (count at entry, phase 1, one re-observe outside
+both loops, phase 2 bounded by the blocks left from the first count); `settle_block` and a
+`note_sanitized_samples` helper follow it, with no blank line between them and the blank line
+before `is_unobserved_generation`; the D2 comment is the one-slot argument; D5 is
+`the_acquire_does_not_pop_a_block_published_after_its_count`; `bench-support.workspace = true` in
+`crates/source/Cargo.toml` and its one `Cargo.lock` line. The D5 producer submits when its view of
+the data queue is empty (`available_capacity() == capacity()`, private fields, in-crate test).
+
+- **Gate 1.** `cargo test --locked -p source`: 38 lib tests (every existing one plus D5) and the two
+  integration tests pass. D5 takes about 0.04 s for 20,000 blocks (41.7 ms in the recorded run).
+- **Gate 2 (red on the parent).** D5 and the dev-dependency applied to `8c0deee2c`'s `lib.rs`,
+  32 CPUs: first run failed, then ten more runs: 7 of 10 failed
+  (`the acquire popped 2 blocks, one was queued at its entry`, at blocks 467 to 18,740). Not tuned.
+- **Gate 3.** Export of this change with markers in place of the blank lines around
+  `acquire_current_block` (before its doc comment, and before `is_unobserved_generation`'s doc
+  comment): `realtime policy: ok (101 marked regions in 27 files)`; the same around
+  `observe_seek_at_block_boundary`: ok. Control: the same markers on the parent's acquire report
+  `marked realtime unbounded try_pop drain (bound it with available_at_entry)` at its `try_pop`.
+- **Gate 4 (mutations, each alone, then reverted).**
+  - phase 2 removed (`return` after the re-observe's `settle_block`):
+    `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm` fails (only test red).
+  - re-observe removed: the same test fails (only test red).
+  - bound reverted to `self.transfer_block_count`: D5 fails in 9 of 10 runs.
+- **Gate 5.** `target/release/audit capi`: `allocations 0`, `deallocations 0`, `syscalls 0`,
+  `pcm_digest cb10fbface44a3a4`, identical to the parent's. Browser module built twice
+  (`build-web-audioworklet.sh --named-twin`): base shipped module `99c743a6...`, head `8e2bb4ab...`
+  (ARTIFACT CHANGED as the spec expects). Function-level comparison of the two named twins by
+  function name (`wasm-objdump -d`, call indices normalized): 2,800 base functions, 2,801 head
+  functions; the one added is `PcmSourceConsumer::settle_block`, and the one changed is
+  `PcmSourceConsumer::acquire_current_block`; no other function body differs. On the head,
+  `check-web-audioworklet.sh --without-metadata-regeneration` (including its call-graph gate),
+  `check-browser-expected-resources.py --artifacts`, `strip-wasm-names.py check` and
+  `test-web-audioworklet.sh` pass with the base's pins; `cargo test --locked --release -p
+  wasm-gates --features math/lane` (G5, G6) passes; no pin, fixture or digest changed. The
+  `artifact-identity` job, `check-scalar-oracle-absent` and the three browser legs run in CI only.
+- **Gate 6.** `cargo fmt --all -- --check`, `cargo clippy --locked -p source --all-targets -- -D
+  warnings`, `scripts/check-realtime-policy.sh`, `scripts/check-workspace-policy.sh` exit 0
+  (clippy prints the two existing `clippy.toml` `fast_db` warnings, on the parent too).
+  `scripts/check-cross-targets.sh`: PASS. `cargo test --locked -p host-core -p capi -p graph`: pass.

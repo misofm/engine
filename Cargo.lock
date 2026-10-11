@@ -1978,6 +1978,7 @@ dependencies = [
 name = "source"
 version = "0.1.0"
 dependencies = [
+ "bench-support",
  "dsp-reference",
  "effect-contract",
  "engine",
