@@ -257,3 +257,40 @@ copy is deleted in the same commit.
 `live_control_bank`, 4 `mono_reengage`) ok; `cargo test --locked -p graph --features test-support`,
 `check-realtime-policy.sh` (100 regions in 27 files), `check-workspace-policy.sh`, `cargo fmt --all -- --check`
 and clippy `--workspace --all-targets --all-features -D warnings`: all pass.
+
+### Batch follow-ups (stream B batch 2, after the five slices passed)
+
+- **Gate 2 realised with a partial bank (verdict `1504-attempt1`, m1).** The gate says one lane of
+  the probe bank is bypassed. `live_snapshot_drains.rs` uses a partial bank (3 populated lanes, the
+  rest structurally inactive), which exercises the slot guard's mask, not a live bypass. The
+  bypassed-lane drain skip is covered by the existing rack test
+  `un_bypassing_returns_the_current_wet_signal`: the verifier ran the mutation "the effect bank stage
+  skips the drain of a bypassed lane" (`crates/rack/src/lib.rs`, `LiveControlEffectBankStage::drain`)
+  and that test goes red. No probe seam exists for a live-bypassed lane in the graph test
+  without #1345's lanes reading cells; #1345 adds the case when its lanes do.
+- **Caller list (n1).** `BankChain::run` also has callers in
+  `crates/builtins-compiler/tests/allocation_tracker.rs` and
+  `crates/graph-compiler/tests/bypass_shunt_identity.rs`; the new argument reaches both, with
+  `LiveSnapshot::ALL` in a quiescent direct call as the `GraphBindingBlock` doc allows. Both paths
+  are authorized by this note.
+- **D4 wording (n2).** "No resource row moves" is true, but the executor body grows by 16 bytes on
+  x86-64 (D1 stores `S` in it; `GraphExecutor` 392 to 408). It feeds only
+  `largest_allocation_bytes` as a `max` on native and moved no row. D4 does not forbid the field.
+- **The "no snapshot" refusal keeps `InvalidEnvelope` (n4).** `RenderError`'s variants are
+  `UnsupportedRate`, `InvalidEnvelope`, `OutputShape`, `TimeOverflow`, `TimeDiscontinuity` and
+  `Buffer`; none names a missing snapshot, and a new variant would widen a public `engine` enum that
+  the C ABI and the browser host map (outside this slice's paths). The refusal cannot fire in
+  production (`PreparedRenderPlan::render_block` calls `begin_live_block` before every `render`),
+  and when it does fire it is a counted block error. A dedicated variant waits for a slice that
+  already edits `RenderError`.
+- **`BuiltinStage` live lanes (n3), recorded for #1346.** `BuiltinStage` reports `live_lanes() == 0`,
+  so the preparation assertion is vacuous for builtin banks. Reporting them needs a
+  `live_lanes` method on `GraphPreparedBuiltinBankProcessor` (`crates/graph`) and an implementation
+  on each builtin bank processor in `crates/builtins-compiler` (fader, matrix, input and the fused
+  pair), which is outside this slice's paths and #1312's. It is safe today: every graph slot carries
+  the chain's own lane mask and a padded group always has lane 0 active, so no builtin slot is
+  wholly inactive. #1346 moves the last builtin lane (input) to cells; it adds the method and the
+  four implementations then.
+- **Nits (n5, n6).** `live_snapshot_drains.rs`'s header now says "Three drain kinds are probed" and
+  names the rack crate's test as the fourth; the 122-column doc line at `crates/graph/src/lib.rs:3272`
+  is rewrapped.

@@ -136,11 +136,11 @@ drain strip cells alike* (#1399).
     - *The handle of a candidate that is not yet published.* A rebuild's carry retargets (#1277 D5,
       #1280) are stamped with the structural revision `r` inside preparation, and fallible steps
       follow: the replacement peak, the pending check, `reserve_replacement`, the report table, the
-      protocol commit, and #1310 D4's checks. Render cannot reach the candidate before its publication. A rebuild stamps `r`
-      on the candidate's handle before its protocol commit, inside preparation when it writes
-      retargets. A refused stamp refuses the rebuild like any other refusal of this list. On a fresh
-      gate with `1 <= r <= GATE_REVISION_MAX` (#1503 D1, checked when the transaction is prepared),
-      it cannot be refused.
+      protocol commit, and #1310 D4's checks. Render cannot reach the candidate before its
+      publication. A rebuild stamps `r` on the candidate's handle before its protocol commit,
+      inside preparation when it writes retargets. A refused stamp refuses the rebuild like any
+      other refusal of this list. On a fresh gate with `1 <= r <= GATE_REVISION_MAX` (#1503 D1,
+      checked when the transaction is prepared), it cannot be refused.
       On any refusal, the same call drops the candidate plan and its provider epoch, with the gate
       handle and the cells. A refused candidate, handle or cell is never kept, cached or reused. On
       success, `r` is published on that handle before `reservation.commit()` (#1502 D6), and nothing
@@ -154,8 +154,9 @@ drain strip cells alike* (#1399).
       browser's host-local counter is not bounded by #1503's store, so the ceiling compare in `stamp`
       is its only always-on guard; keep the ceiling in the check.
     - *What checks the rule.* The stamp's revision bound is always on and returns a refusal, not a
-      panic (#1432 D1). Only the open-stamp rule stays debug-only. `GatePin`'s debug assertions check the order only: a higher revision
-      stamped while one is open. They cannot see a cell written before a fallible check. A refused C ABI
+      panic (#1432 D1). Only the open-stamp rule stays debug-only. `GatePin`'s debug assertions
+      check the order only: a higher revision stamped while one is open. They cannot see a cell
+      written before a fallible check. A refused C ABI
       transaction uses no revision, so the next transaction stamps the same `r` again, which `GatePin`
       allows, and its publication would make a refused write visible (#1432: an abandoned value's leak
       is the caller's contract). Gate 2 defends that on the C ABI, and gate 9 defends it in the browser.
@@ -532,3 +533,66 @@ other stage's acked value.
 4. `apply_pending` has no production caller until #1277; it is `allow(dead_code)` with that reason.
 5. The browser oracle legs under Playwright (`npm run qualify`) were not run here (no browsers);
    the Node legs (`direct-oracle.mjs` through `check-browser-expected-resources.py`) were.
+
+### Batch follow-ups (stream B batch 2, after the five slices passed)
+
+- **Matrix/pan supersession is counted and tested (verdict `1312-attempt1`, m1).** The new unit test
+  `a_matrix_drain_counts_the_replaced_writes_and_applies_only_what_its_snapshot_covers`
+  (`builtins-compiler`) writes 30 matrix targets, reads under a snapshot that covers the 30th, and
+  expects 29 replaced writes in the session counter, the 31st write (published after the snapshot)
+  pending, and applied by the next block. Test value: a matrix reader that stops counting the
+  replaced writes, or reads past its snapshot, which gate 1 and the fader drain test (both fader
+  cells) cannot see. Mutation: `MatrixReader::drain` without `self.superseded.add(superseded)`: the
+  test is red (`left: 0, right: 29`); reverted, green.
+- **Browser steps after the stamp are `expect`s (m2; root's D7 ruling, "each an `expect` on a checked
+  invariant").** In `write_strip_cells`, the cell writes after the stamp, and in the browser's
+  admission pass, the pushes whose room the free-room pass checked, the companion decode and the
+  builtin target conversion, the owner-target publication, `commit_owner` and the input shadow's
+  `commit`, and the pushed-target count, are now `expect`s (an `assert_eq!` for the count) on the
+  invariants the staging passes establish. Before, each returned `RESULT_INTERNAL` after the cells
+  were published, which refused a batch whose values were already visible. The stamp itself stays
+  the one fallible step (a revision past the ceiling is a refusal). No new test: the invariants are
+  not reachable through the ABI, and a seam would exist only to be tested. Evidence that the
+  `expect`s are live: with the free-room check bypassed, 10 refusal tests that used to see
+  `RESULT_BACKPRESSURE` now panic at "the free-room pass checked this record's room", including gate
+  9's `a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone`; reverted, green.
+- **The browser's count is per plan and its allocation is charged (m3).** The browser prepares each
+  plan with its own `live_values_superseded` count (one `Arc<AtomicU64>` per plan); the C ABI passes
+  a session's. Host-core's graph row now charges the count (`LiveValuesSuperseded::retained_bytes()`)
+  when the preparation made it, in the same row as the plan's revision gate (see #1502's batch
+  follow-ups), so the browser's exact retained total counts it; a count the host passes is the
+  host's to charge once (the C ABI does, in `capi_resources`). The per-session semantics of the
+  browser's count are still #1399's: it must pass one count from `host-web` to every plan the
+  session prepares, and charge it once, in place of the per-plan charge. The browser test
+  `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count` goes red when either
+  allocation is left out of the row (mutations in #1502's follow-ups record: gate uncharged, count
+  uncharged, count charged for a session-supplied count).
+- **Audit re-pin comment (n1).** The re-pin comment in `tools/audit/src/fixture_builtins.rs` said
+  "the largest allocation and the allocation counts do not move". The largest allocation
+  (`maximum_single_allocation_bytes`) moves by the same +8 bytes per track (the strip vector is the
+  largest allocation); the allocation counts do not move. The comment now says so.
+- **Stale `resource_plan` comment (n3).** It named "the two or three bounded rings" as the
+  live-control-dependent rows; only the input ring (until #1346) and the cells' `Arc`s are left.
+  Corrected in place.
+- **Recorded, not changed (n2, n4, n5).**
+  - The rebuild path's candidate `stamp(revision)` is unobservable today: deleting it (verdict
+    mutation M11) survives the control-plane and C ABI suites. It has no effect until #1277 writes
+    retargets on the candidate's cells; #1277's added gate (a refused candidate is never reused) is
+    where it becomes defended.
+  - `apply_pending` is inherent to each stage type and `allow(dead_code)`; #1277 will need it
+    through the bank trait object (a trait method, or a downcast through `as_any`).
+  - Gate 9's stamp-before-check mutation is blunt: the process-global counter makes 80 host-web lib
+    tests and `render_locked_source` trip the same `GatePin` assert, so that mutation shows the
+    assert fires, not that gate 9 alone catches it. The discriminating mutation is the cell write
+    moved before the room pass (red in gate 9 and seven older refusal tests).
+- **Open item 2 above** (`BuiltinStage` reporting live lanes) is recorded for #1346 in #1504's batch
+  follow-ups: it needs a method on `GraphPreparedBuiltinBankProcessor` and four implementations in
+  `builtins-compiler`.
+- **Paths touched by these follow-ups beyond the list above.** `crates/host-core/src/prepare.rs` (the
+  graph row's two charges; the root's batch decision), `crates/control-plane/src/{compile,lib}.rs`
+  (the separate gate addition and its re-export removed), `hosts/host-web/tests/retained_ceilings.rs`
+  (the new browser row test), `hosts/host-web/src/lib.rs` beyond the bands' admission (the
+  post-stamp pushes and owner commits that D7 names as `expect`s), `crates/host-core/tests/prepare.rs`
+  and `crates/capi/tests/resource_lifecycle.rs` (the row tests), and comment or doc corrections in
+  `crates/engine/src/realtime/{latest_cell,plan_exchange}.rs`, `crates/graph/{src/lib.rs,tests}`,
+  `tools/audit/src/fixture_builtins.rs` and two docs.

@@ -310,7 +310,7 @@ Dependents: #1502, then #1503, *Hand each block's live snapshot to every live dr
 - Three render-side regions carry `REALTIME_POLICY` markers (the gate snapshot, the dirty take with
   `DirtyReader`, and `CellReader`). `scripts/check-realtime-policy.sh` floors rose to 27 files and
   96 regions. `docs/REALTIME_DEPENDENCY_POLICY.md` gained D4's one sentence.
-- 17 unit tests (`latest_cell::tests`; the first record said 12 in error) and 5 loom models (`spsc_loom_cells_*`: L1, L2, L3, R2, L4).
+- 12 unit tests (`latest_cell::tests`) and 5 loom models (`spsc_loom_cells_*`: L1, L2, L3, R2, L4).
 
 **API choices the spec left open (for review).**
 
@@ -435,7 +435,7 @@ One commit on `codex/d15-stream-b2`. Every change is in `latest_cell.rs` and thi
 claimed first.
 
 **Mutation evidence for the new and changed tests.** Each row applies one defect to the committed
-file and reverts it (revert: all 22 unit tests and the 13 loom tests green, run last. The count was 17 at attempt 1 and is 22 after this commit: 5 added, 2 rewritten, none deleted).
+file and reverts it (revert: all 17 unit tests and the 13 loom tests green, run last. The unit-test count was 12 at attempt 1 and is 17 after this commit: 5 added, 2 rewritten, none deleted).
 
 | Mutation | Red |
 |---|---|
@@ -501,12 +501,15 @@ stamps no higher revision before it publishes) is root's sync and is not changed
   - Tests: the two sites that built a `LiveStamp` by hand gained `pin: PhantomData`.
     `a_write_below_a_written_revision_panics` can no longer hold a real stamp across a
     publication, so it forges the stale stamp (it defends `write`'s own assert, which still guards
-    a stamp from another pin). No unit test was added or deleted.
+    a stamp from another pin only when its revision is below one already written). No unit test was
+    added or deleted.
 - **n1.** The text claiming the gate-identity check "catches a pin used with another gate" now
   says it does so only when the two gates hold different revisions.
-- **n2.** The earlier records said 12 unit tests at attempt 1 and 17 after the first follow-ups.
-  The real counts are 17 before and 22 after the first follow-ups (5 added, 2 rewritten, none
-  deleted); no record of a deleted test stands, and the table above now says so.
+- **n2.** The first record said 12 unit tests at attempt 1, which was right. This "correction"
+  replaced it with 17 before and 22 after, which counted the 5 loom models with the unit tests. The
+  true counts are 12 unit tests before and 17 after the first follow-ups (5 added, 2 rewritten,
+  none deleted); with the 5 loom models they are 17 and 22 tests. No record of a deleted test
+  stands. (Corrected in the batch follow-ups below.)
 
 **Mutation evidence.**
 
@@ -546,3 +549,27 @@ same commit. Gates: `cargo test --locked --release -p engine --lib latest_cell` 
 | the bound made a `debug_assert!` (release run) | the new test, at the first refused stamp |
 | the ceiling kept, the published-revision bound dropped (release run) | the new test |
 | a refusal sets `open` (debug run) | the new test, at the legal `stamp(7)` |
+
+### Batch follow-ups (stream B batch 2, after the five slices passed)
+
+- **Unit-test counts (verdict `1432-followups-2`, m1).** The three places that gave the counts now
+  say: 12 unit tests at attempt 1, 17 after the first follow-ups (5 added, 2 rewritten, none
+  deleted), and 17 and 22 tests with the 5 loom models. The commit message of the first follow-ups
+  keeps its wrong counts; commit messages are not rewritten.
+- **The `compile_fail` doctest's code is not checked on stable (n1).** Rustdoc checks the error code
+  of a `compile_fail,E0499` example only on nightly; the doctests run on the stable pin, so they
+  prove only that the example does not compile. The control is the example minus its last line (the
+  stale `write`): without it the example compiles, and the doctest goes red (the verdict's m3
+  mutation). A later API change that made the example fail to compile for another reason would not
+  be seen on stable.
+- **`write`'s assert claim (n2).** The comment on `CellWriter::write` said the below-written assert
+  "guards a stamp from another pin". It now says the assert catches a stamp from another pin only
+  when its revision is below one already written. The real protection is #1502 D1: only the
+  handle's holder stamps writes to a plan's cells.
+- **Re-stamping a published revision (root decision, verdict `1432-followups-2`, n3).** At the time of
+  that verdict, `stamp(1)`, write, `publish(1)`, `stamp(1)`, write compiled and only `stamp`'s debug
+  assert refused it; in release the in-place rule rewrote the slot render reads (a torn read). The
+  verdict accepted this, and root's ruling kept the order rule debug-only. Root's later n3 ruling
+  (the section above) made `stamp` refuse a revision at or below `last_published` in every build, so
+  the sequence now returns `StampRefused` instead of reaching the slot. The open-stamp rule (a higher
+  revision stamped while one is open) stays debug-only. No always-on assert is used for it.

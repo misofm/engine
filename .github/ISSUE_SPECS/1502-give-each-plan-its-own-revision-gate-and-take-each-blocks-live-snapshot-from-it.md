@@ -208,7 +208,8 @@ This slice changes no rendered bit. It provides the snapshot.
      by a model in which control publishes on a candidate's plan gate while render claims and
      snapshots. Render's `S` is the claimed plan's: 1 while the withdrawal wins, the candidate's
      revision while the claim wins.
-   - #1314's mutation L3 (render's cached `Active` index moved by a lost claim) stays red.
+   - #1314's mutation L3 (render's cached `Active` index moved by a lost claim) has no object any
+     more: the reader holds no index (see the Attempt record, choice 3).
    - Command: `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo
      test --locked --release -p engine --lib spsc_loom`.
 5. **A block that errors after the snapshot (engine unit test).** A probe executor returns an
@@ -290,9 +291,14 @@ Dependents: #1503, #1504, #1312, #1310.
 
 1. `PlanRevisionGate` lives in `plan.rs`, not `latest_cell.rs` (which this attempt does not edit).
 2. A foreign handle given to `plan_exchange_at_revision` panics (documented), as `republish` does.
-3. L3 (the reader's cached `Active` index) has no object any more: the reader holds no index. Its
-   defect class (render reads the wrong plan after a lost claim) is held by the new loom model's
-   `snapshot == 1` assertion and by the capi race tests.
+3. L3 (the reader's cached `Active` index) has no object any more: the reader holds no index. The
+   earlier text here said the new loom model's `snapshot == 1` assertion holds its defect class.
+   That was wrong: the model picks the gate in its own code, so the assertion can go red only when
+   the model itself changes, and no production mutation reaches it. The argument that holds is
+   structural: (a) the reader no longer has a cached index to move; (b) `RealtimePlanOwner` changes
+   its active plan only when `claim` returns `Some`; (c) the mailbox models keep their "adopted and
+   withdrawn both" assertions. The loom model still defends the publication order of D6 (mutation
+   L1).
 4. The new loom model builds the candidate's gate at 0 and publishes the rebuild's 7 before the commit
    and the live commit's 8 after it, which is D6's order, and checks a withdrawn candidate's gate reads 8.
 
@@ -339,3 +345,53 @@ The control-plane mirror test: a count that never leaves the render thread. The 
 foreign-handle tests: a second writer on a gate and a revision published on another plan's gate.
 
 **Open items.** None blocking. #1503's ceiling, #1504's drains and #1312's stamps are untouched.
+
+### Batch follow-ups (stream B batch 2, after the five slices passed)
+
+- **Authorized paths (verdict `1502-attempt1`, n1).** Three paths outside the list were edited, each
+  justified, and are now authorized by this note: `scripts/check-web-audioworklet-callgraph.py`
+  (two entries: D2 makes `begin_live_block` a trait method on the boxed executor, which adds a second
+  `call_indirect` in `render_inner`, and the impl index in a mangled name moved from `Ms2` to `Ms4`;
+  each entry gives its reason inline); `docs/C_ABI_V1_QUALIFICATION.md` (one sentence named the
+  deleted revision words); `crates/capi/tests/resource_lifecycle.rs` (one accounting identity).
+- **The gate's bytes are charged once, in host-core's graph row (m1).** The attempt charged each
+  plan's gate (`plan_revision_gate_retained_bytes()`, 16 bytes on wasm32) only in the control
+  plane, so the browser's exact retained total, which copies host-core's `graph_session_plus_plan_bytes`,
+  left out one real allocation per plan. The charge now sits in `prepare_host_runtime...`'s
+  `graph_session_plus_plan_bytes` (and in its admission check), the control plane's separate
+  addition is removed, and both hosts count the gate. The same row now charges the browser's
+  per-plan `live_values_superseded` count (see #1312 m3). `host-core`'s
+  `the_graph_row_counts_the_plans_gate_and_a_count_it_made` and `host-web`'s
+  `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count` defend the row on both
+  paths; capi's identity in `resource_lifecycle.rs` now checks that the host row carries the gate
+  and the carry program is the only term capi adds. `expected.json` did not move.
+- **`plan_exchange_at_revision`'s `# Panics` doc (n2).** It now says that only the foreign-handle
+  check is an always-on `assert!`; "a revision not above the gate's published one" is
+  `GatePin::publish`'s debug assertion and does not panic in a release build.
+
+**Mutation evidence for the row change.** Each defect applied to `host-core/src/prepare.rs`, then
+reverted (green).
+
+| Defect | Red |
+|---|---|
+| the gate's bytes not added to the graph row | `the_graph_row_counts_the_plans_gate_and_a_count_it_made` (host-core: `left: 263942, right: 263966`); `the_exact_retained_total_counts_the_plans_gate_and_its_superseded_count` (host-web); `double_live_oracle_drives_exact_and_one_below_c_caps` (capi) |
+| the preparation's own count not added | the same host-core and host-web tests (`left: 24, right: 48` on the browser's row, native widths) |
+| the count added although the host passed the session's | the host-core test |
+
+Test value: a host path (the browser's exact retained total above all) that leaves the gate or the
+count out of the row while its ceilings stay green, because the row less the graph's incremental row
+is the independent term the plan's own allocations are measured against.
+
+**Gates for the batch follow-ups (all #1432, #1502, #1503, #1504, #1312 items together).**
+`cargo test --locked --workspace --no-fail-fast` exit 0 (343 `test result: ok` lines, none failed);
+`cargo test --locked --release -p engine --lib latest_cell` 12 passed; `cargo fmt --all -- --check`;
+clippy `--workspace --all-targets --all-features -D warnings`; `check-capi-abi.sh` and `--self-test`;
+`audit capi` (0 allocations, deallocations, locks, syscalls; `total_violations` 0); the workspace,
+realtime (100 regions in 27 files), rack, builtins, host-core, protocol-control and graph policy
+scripts; `check-cross-targets.sh` PASS; the worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts` with `expected.json` unchanged, `check-scalar-oracle-absent.py --wasm`,
+`strip-wasm-names.py check`, `test-web-audioworklet.sh` with a private TMPDIR left empty). No exact
+resource number was re-pinned: the audit fixtures and the C ABI and browser fixtures did not move.
+The V8 spill gate needs Node 22.23.2 and was not run. The engine loom leg does not build on this
+branch; see #1503's batch follow-ups.

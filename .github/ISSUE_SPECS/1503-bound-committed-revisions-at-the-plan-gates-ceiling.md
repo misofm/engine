@@ -215,3 +215,35 @@ allocations, 0 deallocations, 0 syscalls, `total_violations: 0`), `check-capi-ab
 **Notes.** `sdk/dist` was deleted after the SDK gates; `sdk/node_modules` (ignored) was installed with `npm ci` and is
 not committed.
 `crates/capi/src/runtime/live_tests.rs` is not authorized, so the capi test lives in `tests.rs` with its own helpers.
+
+### Batch follow-ups (stream B batch 2, after the five slices passed)
+
+- **The `invalid_matrix.rs` row was deleted, not changed (verdict `1503-attempt1`, n1).** Deliverable
+  2 named a row change. The row sat in `u64_model_fields_accept_the_full_unsigned_domain`, whose
+  name says the u64 model fields accept the whole domain; `revision` no longer does, so a refusal
+  row does not belong in it, and a ceiling-acceptance row would duplicate `diagnostic_parity.rs`,
+  which pins the typed-canonical refusal and the ceiling's round trip.
+- **`json_grammar.rs` lexical vehicle (n5).** The lexical test's vehicle moved from `revision` to
+  `frames`, so its literal `"0"` became `"1"` (frames `0` is semantically invalid). The lexical
+  `"0"` stays covered by `canonical-minimal.json`'s revision `"0"`.
+- **Docs (n2, n3).** `docs/C_ABI_V1_QUALIFICATION.md` rewrapped the 140-column line the added
+  sentence left; `docs/CONTROL_PROTOCOL_SEMANTICS.md:7` now says "owns its revision, and the
+  revision lies in `0..=...`" (the subject of "lies in" was the model).
+- **builder-evals guard kept (n4).** The new test's `if (asset !== undefined)` guard stays. It is the
+  guard the neighbouring route test (`builder-evals.mjs`, the accepted/rejected routes) uses for the
+  same reason: `MISO_ENGINE_SDK_SKIP_ASSET=1` runs the builder checks without the engine asset, and
+  without the guard this test's engine half would fail there. The verdict's "neighbours use asset
+  without a guard" holds only for the tests that do not support that mode.
+- **OPEN, found by the batch gates: the CI loom leg does not build since this slice.**
+  `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked
+  --release -p engine --lib spsc_loom` fails to compile `engine` (12 errors, `loom` unresolved in
+  `latest_cell.rs` and `spsc.rs`) at `5df1ce8b9` and every commit after it; at `70017bf09` (the
+  commit before) it passes with 13 tests. Cause: this slice's dev-dependency `bench-support`
+  (`crates/engine/Cargo.toml`) depends on `engine`, so under `--cfg loom` cargo builds `engine` as a
+  normal library, where `loom` (a dev-dependency) is not linked. With the dev-dependency and
+  `tests/plan_exchange_ceiling.rs` removed temporarily, the leg passes (13 tests, also with
+  `-C debug-assertions=on`) on the branch tip, so nothing else in the batch breaks it. Not fixed
+  here: both fixes change this slice's authorized paths. Either move gate 4's test to a crate that
+  already depends on both `engine` and `bench-support` (and drop the dev-dependency), or declare
+  `loom` under `[target.'cfg(loom)'.dependencies]` in `crates/engine/Cargo.toml` (the standard
+  pattern, subject to the workspace policy on engine's dependencies). The coordinator decides.
