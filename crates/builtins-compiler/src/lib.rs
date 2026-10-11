@@ -415,8 +415,8 @@ impl FaderReader {
     /// read `Unchanged` is not paired.
     ///
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
-    /// returned after the last. The count of writes the reads replaced is added to the session
-    /// counter once. It allocates nothing and takes no lock.
+    /// returned after the last. Each applied read adds the writes it replaced to the session
+    /// counter (`read_counted`). It allocates nothing and takes no lock.
     fn drain(
         &mut self,
         snapshot: LiveSnapshot,
@@ -431,26 +431,20 @@ impl FaderReader {
             return Ok(());
         }
         let mut applied = [None; FADER_CELLS];
-        let mut superseded = 0_u64;
         for (index, slot) in applied.iter_mut().enumerate() {
             if pending & (1 << index) == 0 {
                 continue;
             }
-            if let CellRead::Applied {
-                words,
-                superseded: replaced,
-                ..
-            } = self.cells[index].read(
+            if let CellRead::Applied { words, .. } = self.cells[index].read_counted(
                 &self.lane.cells[index],
                 snapshot,
                 &mut self.dirty,
                 index as u32,
+                &self.superseded,
             ) {
-                superseded = superseded.saturating_add(replaced);
                 *slot = Some(words);
             }
         }
-        self.superseded.add(superseded);
         let mut first_error = Ok(());
         for (kind, base) in [(FaderKind::Fader, FADER_LEFT), (FaderKind::Mute, MUTE_LEFT)] {
             let mut run = |selector, words| {
@@ -487,7 +481,7 @@ struct MatrixReader {
 // REALTIME_POLICY_BEGIN
 impl MatrixReader {
     /// Read the stage's pending cell under `snapshot` and apply its newest value in range, if
-    /// any. The first refusal is returned; the replaced count is added to the session counter.
+    /// any. The first refusal is returned; the applied read adds the writes it replaced to the session counter.
     fn drain(
         &mut self,
         snapshot: LiveSnapshot,
@@ -497,15 +491,15 @@ impl MatrixReader {
         if pending == 0 {
             return Ok(());
         }
-        let CellRead::Applied {
-            words, superseded, ..
-        } = self
-            .cell
-            .read(&self.lane.cell, snapshot, &mut self.dirty, 0)
-        else {
+        let CellRead::Applied { words, .. } = self.cell.read_counted(
+            &self.lane.cell,
+            snapshot,
+            &mut self.dirty,
+            0,
+            &self.superseded,
+        ) else {
             return Ok(());
         };
-        self.superseded.add(superseded);
         apply(
             Matrix2x2 {
                 ll: f32::from_bits(words[0]),
@@ -750,20 +744,13 @@ fn read_input_cell<const N: usize>(
     reader: &mut CellReader,
     snapshot: LiveSnapshot,
     dirty: &mut DirtyReader,
-    superseded: &mut u64,
+    superseded: &LiveValuesSuperseded,
 ) -> Option<[u32; N]> {
     if pending & (1 << bit) == 0 {
         return None;
     }
-    match reader.read(cell, snapshot, dirty, bit as u32) {
-        CellRead::Applied {
-            words,
-            superseded: replaced,
-            ..
-        } => {
-            *superseded = superseded.saturating_add(replaced);
-            Some(words)
-        }
+    match reader.read_counted(cell, snapshot, dirty, bit as u32, superseded) {
+        CellRead::Applied { words, .. } => Some(words),
         CellRead::Unchanged => None,
     }
 }
@@ -780,8 +767,8 @@ impl InputReader {
     /// cannot reach render state without declaring its witness effect.
     ///
     /// Every applied value is applied even if an earlier one is refused; the first refusal is
-    /// returned after the last. The count of writes the reads replaced is added to the session
-    /// counter once. It allocates nothing and takes no lock.
+    /// returned after the last. Each applied read adds the writes it replaced to the session
+    /// counter (`read_counted`). It allocates nothing and takes no lock.
     fn drain(
         &mut self,
         snapshot: LiveSnapshot,
@@ -800,7 +787,6 @@ impl InputReader {
             dirty,
             superseded,
         } = self;
-        let mut replaced = 0_u64;
         let trim_words: [Option<[u32; TRIM_CELL_WORDS]>; 2] = core::array::from_fn(|channel| {
             read_input_cell(
                 pending,
@@ -809,7 +795,7 @@ impl InputReader {
                 &mut trim[channel],
                 snapshot,
                 dirty,
-                &mut replaced,
+                superseded,
             )
         });
         let polarity_words: [Option<[u32; POLARITY_CELL_WORDS]>; 2] =
@@ -821,7 +807,7 @@ impl InputReader {
                     &mut polarity[channel],
                     snapshot,
                     dirty,
-                    &mut replaced,
+                    superseded,
                 )
             });
         let filter_words: [Option<[u32; FILTER_CELL_WORDS]>; 2 * FILTER_SECTIONS] =
@@ -833,10 +819,9 @@ impl InputReader {
                     &mut filter[index],
                     snapshot,
                     dirty,
-                    &mut replaced,
+                    superseded,
                 )
             });
-        superseded.add(replaced);
         let mut first_error = Ok(());
         let mut run = |record: TrackInputRecord| {
             // The one hook. `admit` takes the record by trait, not by kind, so a record type

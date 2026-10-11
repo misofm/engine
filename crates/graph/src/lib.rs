@@ -956,6 +956,7 @@ pub struct RouteControlRecord {
 }
 
 impl RouteControlRecord {
+    // REALTIME_POLICY_BEGIN
     /// `None` when `length > ROUTE_RAMP_LENGTH_MAXIMUM`, or when `mute` is true and any target
     /// coefficient is not `+0.0` (bitwise): a muted route's coefficients are the four `+0.0` its
     /// gate gives ([`gated_route_coefficients`]).
@@ -987,6 +988,7 @@ impl RouteControlRecord {
     pub const fn length(&self) -> u32 {
         self.length
     }
+    // REALTIME_POLICY_END
 }
 
 /// Words of one route cell: the four target coefficients' bits, the mute flag and the ramp length
@@ -1007,6 +1009,7 @@ impl RouteControlRecord {
         ]
     }
 
+    // REALTIME_POLICY_BEGIN
     /// The record a cell's words hold: `None` for words no record wrote, which render skips. The
     /// words come from [`Self::to_words`], so the check is the constructor's own.
     pub(crate) fn from_words(words: [u32; ROUTE_CELL_WORDS]) -> Option<Self> {
@@ -1025,6 +1028,7 @@ impl RouteControlRecord {
             length,
         )
     }
+    // REALTIME_POLICY_END
 }
 
 /// What one live route shares between its writer (control) and its reader (render): one

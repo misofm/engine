@@ -78,12 +78,14 @@ fi
 # lane carry in rack; the same exception) to one hundred and twelve, the file count unchanged. The
 # strip cell slices re-measure them as they land: #1346 (the input cells' drain and the
 # paired-channel read, two regions) brought the tree's count to one hundred and fourteen regions
-# in the same twenty-seven files. Deleting a marker to silence the gate fails here -- the file
+# in the same twenty-seven files, and #1347's route-cell record decode (`RouteControlRecord`'s
+# constructor, accessors and `from_words`, which the render-side route drain calls) to one hundred
+# and sixteen. Deleting a marker to silence the gate fails here -- the file
 # leaves the discovered set or a region leaves the marked set -- instead of passing with less
 # coverage.
 # Raising a floor is part of the change that adds a marker.
 [[ "$marked_file_count" -ge 27 ]] || fail "expected at least twenty-seven marked realtime files"
-[[ "$marker_count" -ge 114 ]] || fail "expected at least one hundred and fourteen marked realtime regions"
+[[ "$marker_count" -ge 116 ]] || fail "expected at least one hundred and sixteen marked realtime regions"
 
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?

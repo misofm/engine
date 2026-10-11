@@ -58,12 +58,13 @@
 // The worklet validates a whole submission -- shape, addressing, domain, and free queue room on the
 // lanes that keep a queue -- before it pushes or writes a single record. A refused batch admits
 // nothing, so a half-applied fader move cannot exist. A strip's fader, mute and pan or matrix
-// values are held in latest-target cells, not queues (issue 1312): a flood of those edits is never
-// refused for room, and a later value for the same cell replaces the earlier one. Effect, input
-// trim/polarity and live-send records keep bounded per-destination queues, and a flood of those is
-// refused before it reaches a queue. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host
-// locally when its own in-flight bound is reached, and by the engine when one of those queues has
-// no room.
+// values, an input's trim, polarity and filter values and a live send's gain, matrix and mute are
+// held in latest-target cells, not queues (issues 1312, 1346, 1347): a flood of those edits is never
+// refused for room, and a later value for the same cell replaces the earlier one. Only effect
+// records (bypass, parameters and observation requests) keep bounded per-destination queues, and a
+// flood of those is refused before it reaches a queue. `RESULT_BACKPRESSURE` (6) is returned by the
+// main-realm host locally when its own in-flight bound is reached, and by the engine when an
+// effect's queue has no room.
 //
 // ## Application timing is exact
 //
@@ -339,8 +340,8 @@ export const enum MisoCommandReason {
   Domain = 6,
   /// Well formed and correctly addressed; this ABI version cannot apply that kind.
   UnsupportedKind = 7,
-  /// A bounded control queue (an effect, input trim/polarity or live-send lane) had no room;
-  /// nothing was admitted. Fader, mute and pan or matrix values are cells and never return it.
+  /// An effect's bounded control queue had no room; nothing was admitted. Fader, mute, pan or
+  /// matrix, input trim, polarity and filter, and live-send values are cells and never return it.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,

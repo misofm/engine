@@ -903,13 +903,14 @@ impl LiveRoute {
         let control = &mut *self.control;
         let mut applied = 0;
         if control.dirty.pending(&control.lane.dirty) & 1 != 0
-            && let CellRead::Applied {
-                words, superseded, ..
-            } = control
-                .reader
-                .read(&control.lane.cell, snapshot, &mut control.dirty, 0)
+            && let CellRead::Applied { words, .. } = control.reader.read_counted(
+                &control.lane.cell,
+                snapshot,
+                &mut control.dirty,
+                0,
+                &control.superseded,
+            )
         {
-            control.superseded.add(superseded);
             // Only `write` fills the cell, from a validated record, so the words decode; words no
             // record wrote retarget nothing.
             let record = crate::RouteControlRecord::from_words(words);

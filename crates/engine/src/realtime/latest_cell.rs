@@ -618,6 +618,28 @@ impl CellReader {
         }
     }
 
+    /// [`Self::read`], and when it applies a write, the writes it replaced join `superseded`
+    /// (#1312 D2). This is the only way to write a [`LiveValuesSuperseded`], so the count's
+    /// single-writer rule is the reader's own: render, the cell's one reader.
+    pub fn read_counted<const N: usize>(
+        &mut self,
+        cell: &LatestCell<N>,
+        snapshot: LiveSnapshot,
+        stage: &mut DirtyReader,
+        bit: u32,
+        superseded: &LiveValuesSuperseded,
+    ) -> CellRead<N> {
+        let read = self.read(cell, snapshot, stage, bit);
+        if let CellRead::Applied {
+            superseded: replaced,
+            ..
+        } = read
+        {
+            superseded.add(replaced);
+        }
+        read
+    }
+
     /// The plan-swap carry only: the written slot with the greatest sequence, if that sequence is
     /// above the last applied one. It changes nothing: no read-modify-write, and the last applied
     /// sequence stays as it was, as do the dirty word and the deferred mask.
@@ -696,9 +718,11 @@ impl LiveValuesSuperseded {
 
 // REALTIME_POLICY_BEGIN
 impl LiveValuesSuperseded {
-    /// Render: add `count` replaced writes. Saturating. Render is the only writer, so a cell
-    /// reader calls this with what its [`CellRead::Applied`] reported and nothing else does.
-    pub fn add(&self, count: u64) {
+    /// Render: add `count` replaced writes. Saturating. A load and a store, not a read-modify-write,
+    /// because render is the count's only writer. The method is private to this module, so the only
+    /// caller is [`CellReader::read_counted`], which render's drains call; no other crate or
+    /// control path can write the count (#1347 attempt 2, m2).
+    fn add(&self, count: u64) {
         if count != 0 {
             let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
             self.0.store(

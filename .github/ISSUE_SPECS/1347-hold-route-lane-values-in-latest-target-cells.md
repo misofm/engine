@@ -183,9 +183,8 @@ half (graph-compiler; its last-wins, reversed-order and unmute-while-inactive ha
 (host-web; its overlong-window half survives as
 `a_follow_ramp_past_the_send_bound_refuses_the_strip_mute_whole`), the overfilled-send-queue arm of
 `a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (now `..._writes_nothing_...`, whose
-effect-queue arm stays), `a_vca_batch_that_overfills_a_queue_is_refused_whole` (now
-`a_vca_batch_with_a_late_refusal_is_refused_whole`, a domain refusal after the VCA mute's follow
-write was staged). Send queue-room assertions in host-web became cell write counts
+effect-queue arm stays), `a_vca_batch_that_overfills_a_queue_is_refused_whole` (rewritten in attempt 1 as
+`a_vca_batch_with_a_late_refusal_is_refused_whole`; **deleted in attempt 2**, see M1 there). Send queue-room assertions in host-web became cell write counts
 (`send_write_counts`), and `the_exact_retained_budget_charges_the_send_lanes` now asserts that
 the route lanes' charge and the bridge rows do not move with the queue depth.
 
@@ -235,7 +234,7 @@ Gate 3 (the mute rule) is `RouteControlRecord::new`'s and its tests, unchanged a
 | the mute word decodes inverted | the render aborts in `drain`'s debug assertion (SIGABRT) in graph-compiler and host-core `live_routes` |
 | browser admission does not write the send cell | 16 host-web tests, among them gate 1, `a_live_send_edit_lands_on_a_fresh_plans_bits` and `a_refused_send_batch_writes_nothing_...` |
 | the send band is back in the room pass | 31 host-web tests (every send edit is refused `UNSUPPORTED_KIND`) |
-| the batch's cells are written before the room pass | 16 host-web tests, among them `a_refused_send_batch_writes_nothing_and_keeps_the_mirror`, `a_vca_batch_with_a_late_refusal_...` |
+| the batch's cells are written before the room pass | (attempt 1 claimed 16 tests, among them `a_vca_batch_with_a_late_refusal_...`; the attempt-1 verdict measured six and not that one; re-run in attempt 2 below) |
 
 **Open items.** (a) The C ABI's send edits (#1225, #1226, #1247) write
 `RouteControlProducer::write` behind the stamp, as #1312's fader edits do. (b) The browser send band's
@@ -243,3 +242,83 @@ queue slots stay as unaddressable slot numbers beside the other cell bands; a re
 queue-slot layout is a separate change. (c) `hosts/host-web/MUTATIONS.md` rows that name deleted
 tests are history and were not rewritten. (d) The call-graph script's self-test data still names
 `GraphRouteControlProducer::free`.
+
+### Attempt 2 (implementer, on `codex/d15-stream-b3`; findings of the attempt-1 verdict: M1, m1, m2, n1 to n3)
+
+**M1. `a_vca_batch_with_a_late_refusal_is_refused_whole` is deleted.** Gate 4 says the full-queue
+predecessor is deleted with the queue, and I found no defect only the rewrite catches. The rewrite
+stages a VCA mute and then an out-of-domain `routeMatrix`; the send is refused inside the staging
+loop, before the follow pass and the room pass, so the VCA mute's member-mute and follow records
+were never staged, and its doc comment and the attempt-1 sentence "a domain refusal after the VCA
+mute's follow write was staged" were wrong. Its send-domain half is the "domain" arm of
+`a_refused_send_batch_writes_nothing_and_keeps_the_mirror`; its VCA-rollback half is held by
+`a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index` and
+`vca_records_are_addressed_and_shape_checked`. I did not write a room-pass replacement: a VCA mute
+plus a bypass on a full insert queue would be re-written when #1345 turns bypass into a cell (the
+same reason as #1346 follow-up m1), and the rollback it would defend is already held by two tests.
+Mutation rows, re-run on the attempt-2 tree (one defect at a time, then reverted):
+
+| Defect (applied to `hosts/host-web/src/lib.rs`) | Red (host-web `--features test-support --lib`, 191 tests green before) |
+|---|---|
+| `write_strip_cells(..)` moved before the room pass (attempt 1's M5) | six: `a_mixed_batch_is_one_transaction_across_every_queue`, `a_refused_solo_submission_leaves_the_live_controls_untouched`, `a_refused_send_batch_writes_nothing_and_keeps_the_mirror`, `a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone`, `overfilling_a_bus_queue_is_typed_backpressure_with_no_push`, `prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches` |
+| `ready.vcas.rollback()` removed from the refusal arm | two: `a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index`, `vca_records_are_addressed_and_shape_checked` |
+
+The attempt-1 record's "16 host-web tests, among them `a_vca_batch_with_a_late_refusal_...`" for the
+first row was wrong; the count is six. (Attempt 1's "browser admission does not write the send
+cell: 16 host-web tests" row is a different mutation and the verdict reproduced it.)
+
+**m1. Browser typings.** `sdk/src/browser/shipped-host.d.ts` and
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` (still identical): the "one batch is one
+transaction" paragraph now says that fader, mute, pan and matrix values, an input's trim, polarity
+and filter values and a live send's gain, matrix and mute are latest-target cells (issues 1312,
+1346, 1347) and never refused for room, and that only effect records keep bounded queues and return
+`RESULT_BACKPRESSURE`. `MisoCommandReason.Backpressure` is documented as an effect queue with no
+room. #1399's `live_values_superseded` edits in both files are untouched.
+
+**m2. `LiveValuesSuperseded::add` is private to `engine::realtime::latest_cell`.** The only way to
+write the count is the new `CellReader::read_counted(cell, snapshot, stage, bit, superseded)`,
+which is `read` plus the add of an `Applied` read's replaced writes. The four render drains
+(`FaderReader`, `MatrixReader`, `InputReader` through `read_input_cell`, and `LiveRoute::drain`)
+call it; their local sums and `.add` calls are gone (the saturating sum of the fader and input
+drains became one saturating add per applied read, the same result). Control cannot reach the
+count's write, and no `CellReader` exists on the control side, so the single-writer rule is
+enforced by the type system and the reader's own one-reader rule, not by prose. Mutation: the
+`add` in `read_counted` removed turns red builtins-compiler
+`a_matrix_drain_counts_the_replaced_writes_and_applies_only_what_its_snapshot_covers`,
+`a_drain_applies_the_newest_value_its_snapshot_covers_and_counts_the_rest` and
+`many_input_edits_before_one_block_apply_the_last_and_count_each_replaced_value`, and host-web
+`many_input_edits_before_one_render_...`, `many_send_edits_before_one_render_...` and
+`the_status_reports_the_sessions_superseded_count`.
+
+**Nits.** n1: the two stale doc comments in host-web `tests.rs` now say each record writes once
+into its own send's cell. n2: the comment above the send kinds in `hosts/host-web/src/lib.rs`
+says the send's cell holds the last record and render applies only that one and counts the others
+as superseded. n3: `RouteControlRecord`'s constructor and accessors (a region) and `from_words`
+(a region) are inside `REALTIME_POLICY` regions, and the floors rose from 102 to 104 regions in
+27 files (`check-realtime-policy.sh`, with its self-test fixture pad from 59 to 61 regions).
+
+**SDK.** `scripts/check-sdk-headless.sh` failed since #1346 on one eval, which #1346's follow-ups
+now record (Part B of this attempt). No SDK eval asserts a send queue or a send `Backpressure`.
+
+**Gates (this tree).** `cargo fmt --all -- --check` and clippy `--workspace --all-targets
+--all-features -D warnings`: ok. `cargo test --locked` for engine, graph (`--features
+test-support`), graph-compiler, builtins-compiler and host-core (`--features
+control-provider,test-support`), all test binaries: pass; host-web `--features test-support`: lib
+191 passed, 2 ignored (one fewer: the deleted test), integration binaries pass.
+`check-workspace-policy.sh`, `check-host-core-policy.sh`, `check-builtins-policy.sh`,
+`check-graph-policy.sh`, `check-rack-policy.sh`, `check-realtime-policy.sh` (104 regions in 27
+files) and `test-realtime-policy.sh`: ok. `check-cross-targets.sh`: PASS. `cargo build --locked
+--release -p audit -p capi && target/release/audit capi`: allocations, deallocations, locks and
+syscalls 0, `total_violations` 0; `check-capi-abi.sh`: ok. Worklet chain: `build-web-audioworklet.sh
+--named-twin` (shipped module `2502cd4bec95...`; it moved from `0ce76dd0...` because the readers now
+call `read_counted`), `check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+`check-web-audioworklet-v8-spill.py` and `test-web-audioworklet.sh` (private TMPDIR left empty):
+pass. SDK job (source-bundle mode, `sdk/dist` removed afterwards): `check-sdk-generated.sh`,
+`check-sdk-deletions.py`, `check-sdk-types.sh` (the mirror pin holds for both `.d.ts` copies),
+`check-sdk-headless.sh` (362 passed) and `sdk-package.sh check`: pass. Not run: the Playwright
+`browser` legs (no browsers on this box).
+
+**Open items.** STREAMS hot-file rows for `crates/builtins-compiler/src/lib.rs`,
+`crates/host-core/src/prepare.rs` and now `crates/engine/src/realtime/latest_cell.rs` do not name
+#1347 (n4, root's). The spec's D2 still reads `write(record)` (n5, root's).

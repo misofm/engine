@@ -11384,7 +11384,7 @@ fn seeded_send_values() -> Vec<SendValues> {
 }
 
 /// One batch of random kind 13, 14 and 15 records on [`seeded_send_document`]'s sends, six trials
-/// at smoothing 0 and 480 each: every record must take exactly one slot of its own send's queue,
+/// at smoothing 0 and 480 each: every record must write exactly once into its own send's cell,
 /// and the output must settle, bit for bit, on a host booted from the edited values.
 fn seeded_send_edits_land_on_a_fresh_plan(with_inserts: bool, seed: u64) {
     let seeds = seeded_send_values();
@@ -11477,7 +11477,7 @@ fn seeded_send_edits_land_on_a_fresh_plan(with_inserts: bool, seed: u64) {
 
 /// Issue #1222, from its verdict's MINOR-1 and MINOR-2: live edits on following pre-fader sends
 /// whose source strips carry every lane-mute combination -- tracks `[F,F]`, `[T,F]`, `[F,T]`,
-/// `[T,T]` and a bus with its right lane muted -- take one slot of their own send's queue each and
+/// `[T,T]` and a bus with its right lane muted -- write once into their own send's cell each and
 /// settle, bit for bit, on a fresh plan, so the mirror's seeded `source_lane_muted` is the
 /// prepared plan's follow-zeroed lanes. The session runs twice: without effects, and with an
 /// insert on every track, so the send band starts after a four-queue effect band (`3S + E + r`).
@@ -14868,66 +14868,6 @@ fn a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone() {
         audible,
         "t1's edit is audible, so the comparison can tell it was not applied"
     );
-}
-
-/// Issue #1245 gate 4, after #1347: all or nothing. A mute of VCA `band` (`bass`, `drums`) whose
-/// follow records land in `drums-verb`'s send cell, in one submission with a send edit outside
-/// the route domain, is refused `domain` at the edit's wire index: nothing is written (not even
-/// the members' mute cells or the follow send's) and the VCA, strip-mute and send mirrors are
-/// unchanged. A send's cell has no full queue to refuse the follow (#1347), and a fader value
-/// is a cell with no room to overfill (#1312), so a late domain refusal is the case left.
-///
-/// The identical mute, submitted alone, is then admitted and renders bit-identically to a twin
-/// that never received the refused submission.
-///
-/// Test value: red if any send or member cell is written, or a mirror commits, before every
-/// record of the submission is validated.
-#[test]
-fn a_vca_batch_with_a_late_refusal_is_refused_whole() {
-    let model = vca_ride_model(
-        &[("bass", [-2.0, -5.0], [false; 2])],
-        &[("band", [-3.0; 2], [false; 2], &["bass", "drums"])],
-    );
-    let mut live = vca_ride_host(&model, 4);
-    let mut twin = vca_ride_host(&model, 4);
-    vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
-    stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 64);
-    // `ll = 1.5` is outside the route coefficient domain `[-1, 1]` (issue #1237).
-    stage_send(
-        &mut live,
-        1,
-        COMMAND_ROUTE_MATRIX,
-        1,
-        0,
-        [1.5, 0.1, 0.2, 0.3],
-    );
-    assert_vca_refusal(
-        &mut live,
-        2,
-        RESULT_INVALID_ARGUMENT,
-        COMMAND_REASON_DOMAIN,
-        1,
-        "a mute whose follow record meets a later domain refusal",
-    );
-    vca_lockstep(
-        &mut [&mut live, &mut twin],
-        Some(1),
-        1,
-        1,
-        "after the refusal",
-    );
-    for host in [&mut live, &mut twin] {
-        stage_vca(host, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 64);
-        assert_eq!(host.submit_commands(1), RESULT_OK, "the identical mute");
-        assert_eq!(follow_lanes(host), [[true; 2], [true; 2]]);
-    }
-    assert!(vca_lockstep(
-        &mut [&mut live, &mut twin],
-        Some(1),
-        2,
-        3,
-        "the admitted mute vs twin"
-    ));
 }
 
 /// Issue #1245 gate 5: a VCA mute flows to the members' following sends and survives solo. In

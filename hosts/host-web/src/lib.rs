@@ -5113,8 +5113,9 @@ fn admit_commands_staged(
             // Issue #1222 D4: a send kind moves one field of its mirror and stages one record
             // built from the whole mirror, through the prepared route's own coefficient function.
             // The mirror is touched only once the record is built, and every later record in the
-            // batch reads it, so several edits of one send stage one record each, in wire order,
-            // and the render plane, applying them in order, settles on the last.
+            // batch reads it, so several edits of one send stage one record each, in wire order;
+            // the send's cell holds the last, and render applies only that one and counts the
+            // others as superseded.
             COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX => {
                 // No live commands: the app did not opt in, so the session has no write path for
                 // any send.
