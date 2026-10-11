@@ -1,7 +1,7 @@
 //! Native graph-to-window spectrum capture gates for issue #781.
 
 use host_core::{
-    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
+    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
     SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumAnalysisError, SpectrumAnalyzer,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
@@ -426,6 +426,7 @@ fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
             channels: SpectrumChannels::Left,
             maximum_capture_bytes: resources.retained_bytes,
         },
+        HostLiveLanes::ALL,
     )
     .expect("live controls, meters and spectrum prepare together");
     assert_eq!(handles.strip_controls.len(), 9);

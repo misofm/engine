@@ -17,9 +17,9 @@ use builtins::{MeterLaneSnapshot, MeterMetricSet, MeterSnapshot, MeterTap};
 use dsp_reference::randomized::{Draw, run_seeds};
 use engine::realtime::audit;
 use host_core::{
-    HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
-    HostShapePolicy, PrepareRejection, PreparedHost, SourceSubmission, compile_host_session,
-    prepare_host_runtime_with_selected_meters_between_render_calls,
+    HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
+    HostPrepareCaps, HostShapePolicy, PrepareRejection, PreparedHost, SourceSubmission,
+    compile_host_session, prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_session_with_live_controls,
 };
 use session::{
@@ -381,6 +381,7 @@ fn prepare_selected(
         &caps(),
         &meter_controls(),
         meters,
+        HostLiveLanes::ALL,
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())))
 }
@@ -613,6 +614,7 @@ fn selected_strip_meters_keep_the_callers_order_and_an_unknown_strip_is_refused(
             meter("bus", MeterTap::PostMatrix),
             meter("nowhere", MeterTap::PostSimd2PreFader),
         ],
+        HostLiveLanes::ALL,
     ) else {
         panic!("a meter on an unknown strip must be refused");
     };

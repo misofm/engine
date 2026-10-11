@@ -65,6 +65,13 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// x86-64 / AArch64 (AArch64 under qemu-user): bridge metadata 1,150,215 and bridge retained
 /// 1,170,724 at both; source total 3,442 and overhead 2,418 at both; builtin retained 1,957 at both;
 /// graph session+plan and incremental 48,034 / 35,230; graph metadata 6,711 / 6,675.
+///
+/// **Re-pinned: `builtin_retained_bytes` (#1326).** Every browser plan now carries each strip's
+/// fader/mute and matrix/pan lanes, whatever the app's live-control options say (the engine ramps a
+/// strip's mute for its own transitions). The lanes are two 16-record rings per strip, 1,234 bytes
+/// retained for this one-strip fixture (2,149 to 3,383) and 1,228 to 1,234 per strip across the
+/// one-, three- and nine-strip sessions measured, and no other row moves. The ceiling is the new
+/// value plus 10 %, rounded up to 64 bytes: 3,383 * 1.1 = 3,721.3, so 3,776.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
@@ -93,8 +100,8 @@ const BUDGETS: [Budget; 12] = [
     Budget {
         row: "builtin_retained_bytes",
         value: |report| report.builtin_retained_bytes,
-        eight_lanes: 2_176,
-        four_lanes: 2_176,
+        eight_lanes: 3_776,
+        four_lanes: 3_776,
     },
     Budget {
         row: "graph_session_plus_plan_bytes",

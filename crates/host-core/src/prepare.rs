@@ -300,6 +300,11 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
+/// The depth of every strip's fader/mute and matrix/pan lane when the caller names no depth of its
+/// own: 16 records (#1053 D4). The C ABI always uses it; the browser uses it for a session that
+/// did not opt in to live commands (#1326 D2), so both hosts read one number.
+pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
+
 /// What live controls ask preparation to attach (issue #137 D1/D2).
 ///
 /// Both halves are optional and independent, and the default attaches neither, so
@@ -314,8 +319,9 @@ pub struct HostLiveControlRequest {
     /// per prepared effect instance. Which of them are attached is the caller's [`HostLiveLanes`]
     /// (issue #1254 D2): the matrix/pan and fader/mute queues always; the input queue when
     /// [`HostLiveLanes::strip_input`] is set, the effect queues when [`HostLiveLanes::effects`] is
-    /// set, and the route queues when [`HostLiveLanes::routes`] is set. Every entry except
-    /// [`prepare_host_runtime_with_live_lanes`] passes [`HostLiveLanes::ALL`]. Each
+    /// set, and the route queues when [`HostLiveLanes::routes`] is set. Every entry takes the
+    /// selection from its caller, except the ones with no `lanes` argument, which attach
+    /// [`HostLiveLanes::ALL`]. Each
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
     /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
@@ -381,7 +387,7 @@ pub struct HostLiveLanes {
 }
 
 impl HostLiveLanes {
-    /// Every lane: what every entry other than [`prepare_host_runtime_with_live_lanes`] attaches.
+    /// Every lane: what an entry with no `lanes` argument attaches.
     pub const ALL: Self = Self {
         strip_input: true,
         effects: true,
@@ -429,8 +435,8 @@ pub struct HostLiveControlHandles {
     ///
     /// Each carries a strip's builtin channels: always the matrix/pan queue (#137 D1) and the
     /// fader/mute queue (#140 B), and the input trim/polarity queue (#210 phase 3) only when
-    /// [`HostLiveLanes::strip_input`] was set -- under [`HostLiveLanes::ALL`], every entry but
-    /// [`prepare_host_runtime_with_live_lanes`]. With [`HostLiveLanes::FADER_AND_MATRIX`] its
+    /// [`HostLiveLanes::strip_input`] was set -- under [`HostLiveLanes::ALL`], which an entry with
+    /// no `lanes` argument attaches. With [`HostLiveLanes::FADER_AND_MATRIX`] its
     /// `input` is `None`. A submix's producer carries the submix ID in `track_id`.
     pub strip_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared strip effect instance (#140 A); empty when no channel was
@@ -457,9 +463,10 @@ pub struct HostLiveControlHandles {
     /// requested or [`HostLiveLanes::routes`] was not set (issue #1254), and routes into the
     /// output have none: they keep their prepared constants and their fold.
     ///
-    /// The browser prepares with [`HostLiveLanes::ALL`] and gets these. C ABI plans prepare with
-    /// the fader, matrix and effect lanes and no route lane (#1053 D5, #1256, #1263) and get
-    /// none; their route lanes arrive with the slice that pushes to them (#1225). A settled
+    /// A browser session that opted in to live commands prepares with [`HostLiveLanes::ALL`] and
+    /// gets these; one that did not prepares with [`HostLiveLanes::FADER_AND_MATRIX`] (#1326 D3)
+    /// and gets none. C ABI plans prepare with the fader, matrix and effect lanes and no route
+    /// lane (#1053 D5, #1256, #1263) and get none; their route lanes arrive with the slice that pushes to them (#1225). A settled
     /// record's bits are a static route's by construction, because
     /// [`RouteControlProducer::record`] takes its target
     /// from `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
@@ -778,7 +785,6 @@ pub fn prepare_host_runtime_with_live_controls(
         compiled,
         caps,
         live_controls,
-        None,
         false,
         Backend::current(),
         None,
@@ -852,6 +858,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     spectrum: &SpectrumCaptureRequest,
+    lanes: HostLiveLanes,
 ) -> Result<(PreparedHost, HostLiveControlHandles, SpectrumCapture), PrepareDiagnostics> {
     let (prepared, handles, capture) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -862,7 +869,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(spectrum)),
         None,
-        HostLiveLanes::ALL,
+        lanes,
         None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -880,6 +887,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     spectrum: &SpectrumCaptureCollectionRequest,
+    lanes: HostLiveLanes,
 ) -> Result<
     (
         PreparedHost,
@@ -897,7 +905,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         Backend::current(),
         Some(SpectrumPreparationRequest::Collection(spectrum)),
         None,
-        HostLiveLanes::ALL,
+        lanes,
         None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -942,7 +950,6 @@ pub fn prepare_host_runtime_with_live_controls_successor(
         compiled,
         caps,
         live_controls,
-        None,
         false,
         Backend::current(),
         Some(base),
@@ -964,7 +971,6 @@ pub fn test_only_prepare_host_runtime_with_live_controls_on(
         compiled,
         caps,
         live_controls,
-        None,
         false,
         backend,
         None,
@@ -986,7 +992,6 @@ pub fn test_only_prepare_host_runtime_with_live_controls_successor_on(
         compiled,
         caps,
         live_controls,
-        None,
         false,
         backend,
         Some(base),
@@ -1006,7 +1011,6 @@ pub(crate) fn prepare_host_runtime_with_live_controls_backend(
         compiled,
         caps,
         live_controls,
-        None,
         false,
         backend,
         None,
@@ -1048,7 +1052,6 @@ pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
         compiled,
         caps,
         live_controls,
-        None,
         true,
         backend,
         None,
@@ -1062,8 +1065,9 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     meters: &[HostMeterRequest],
+    lanes: HostLiveLanes,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_live_controls_policy(
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
         caps,
         live_controls,
@@ -1071,7 +1075,11 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
         true,
         Backend::current(),
         None,
-    )
+        None,
+        lanes,
+        None,
+    )?;
+    Ok((prepared, handles))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1079,7 +1087,6 @@ fn prepare_host_runtime_with_live_controls_policy(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
-    selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
     backend: Backend,
     successor: Option<SuccessorBase<'_>>,
@@ -1088,7 +1095,7 @@ fn prepare_host_runtime_with_live_controls_policy(
         compiled,
         caps,
         live_controls,
-        selected_meters,
+        None,
         between_render_calls,
         backend,
         None,
@@ -1139,6 +1146,7 @@ pub fn prepare_host_runtime_with_spectrum_collection(
             caps,
             &HostLiveControlRequest::default(),
             request,
+            HostLiveLanes::ALL,
         )?;
     Ok((prepared, capture))
 }

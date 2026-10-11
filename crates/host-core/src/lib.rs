@@ -137,9 +137,9 @@ pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveR
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, PlanStateInventory, PreparedHost,
-    SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, compile_host_model,
-    compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
-    prepare_host_runtime, prepare_host_runtime_between_render_calls,
+    SOURCE_STALL_TOLERANCE_MS, STRIP_LIVE_QUEUE_DEPTH, SourceInventoryRow, SuccessorBase,
+    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
+    parse_host_session, prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,

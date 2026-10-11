@@ -11,10 +11,11 @@ pub struct CompiledChildren<A: ControlAdapter> {
 }
 
 /// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
+/// One number for both hosts: [`host_core::STRIP_LIVE_QUEUE_DEPTH`] (#1326 D2).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
-pub const LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
+pub const LIVE_QUEUE_DEPTH: NonZeroUsize = host_core::STRIP_LIVE_QUEUE_DEPTH;
 
 /// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
 /// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
