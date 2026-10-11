@@ -3888,6 +3888,31 @@ fn the_effect_carry_allocates_and_frees_nothing_at_four_lanes() {
     the_effect_carry_allocates_and_frees_nothing(Backend::Simd4);
 }
 
+/// `model` with every track's input section flat: no filters, no trim, no polarity inversion.
+fn unfiltered(mut model: SessionModel) -> SessionModel {
+    for track in &mut model.tracks {
+        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+            channel.hpf_hz = 0.0;
+            channel.lpf_hz = 0.0;
+            channel.trim_db = 0.0;
+            channel.polarity_invert = false;
+        }
+    }
+    model
+}
+
+/// `model` with every track's trim set to `-0.0` on both channels: a bit pattern that differs from
+/// the `+0.0` of an [`unfiltered`] session, and so an input section that does not carry (#1276
+/// D1), with the same gain.
+fn with_negative_zero_trims(mut model: SessionModel) -> SessionModel {
+    for track in &mut model.tracks {
+        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+            channel.trim_db = -0.0;
+        }
+    }
+    model
+}
+
 /// Gate 2: a mono-source session whose console is the collapse-capable subset (EQ, compressor,
 /// limiter; the gate/expander, soft-clip and transient shaper declare no channel symmetry, so a
 /// chain that holds one never collapses). Its chains collapse before the swap and, because the
@@ -3895,10 +3920,22 @@ fn the_effect_carry_allocates_and_frees_nothing_at_four_lanes() {
 /// no agreement proof; with the successor's collapse forced off the carried lanes' right channels
 /// must hold the state the collapsed predecessor never wrote there. Output is bit-identical to a
 /// fresh B either way.
-fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool) {
+///
+/// With `inputs_restart`, B also changes every track's trim to `-0.0` -- the same gain, a different
+/// bit pattern -- so no input section carries and the effect carry alone disengages the
+/// predecessor's collapsed chains.
+fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool, inputs_restart: bool) {
     const SLOTS: [&str; 3] = ["eq", "comp", "limiter"];
-    let a = Session::compile(console_session(true, &SLOTS));
-    let b = Session::compile(with_muted_track(console_session(true, &SLOTS)));
+    let after = |model: SessionModel| {
+        if inputs_restart {
+            with_negative_zero_trims(model)
+        } else {
+            model
+        }
+    };
+    let base = || unfiltered(console_session(true, &SLOTS));
+    let a = Session::compile(base());
+    let b = Session::compile(after(with_muted_track(base())));
     let feed = bursty_feed(SOURCE, 9);
     let reference = plain_run(&b, None, &feed, backend, false);
     let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, successor_dual);
@@ -3907,10 +3944,20 @@ fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool) {
         run.collapses[0][0] > 0,
         "{backend:?}: the predecessor rendered collapsed before the swap"
     );
+    if inputs_restart {
+        // Not vacuous: the nine input sections did not carry.
+        let kept = Session::compile(with_muted_track(base()));
+        let carried = plain_run(&a, Some((&kept, &a.model)), &feed, backend, false);
+        assert_eq!(
+            carried.carry_bytes - run.carry_bytes,
+            9 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
+            "{backend:?}"
+        );
+    }
     assert_eq!(
         first_plain_difference(&run, &reference),
         None,
-        "{backend:?}, successor dual {successor_dual}"
+        "{backend:?}, successor dual {successor_dual}, inputs restart {inputs_restart}"
     );
     assert_eq!(run.refusals, 0, "{backend:?}");
     assert!(reference.collapses[1][0] > 0);
@@ -3931,29 +3978,27 @@ fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool) {
 #[cfg(target_feature = "avx2")]
 #[test]
 fn console_chains_keep_collapsing_across_a_swap_at_eight_lanes() {
-    console_chains_keep_collapsing(Backend::Simd8, false);
-    console_chains_keep_collapsing(Backend::Simd8, true);
+    for inputs_restart in [false, true] {
+        console_chains_keep_collapsing(Backend::Simd8, false, inputs_restart);
+        console_chains_keep_collapsing(Backend::Simd8, true, inputs_restart);
+    }
 }
 
 #[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
 fn console_chains_keep_collapsing_across_a_swap_at_four_lanes() {
-    console_chains_keep_collapsing(Backend::Simd4, false);
-    console_chains_keep_collapsing(Backend::Simd4, true);
+    for inputs_restart in [false, true] {
+        console_chains_keep_collapsing(Backend::Simd4, false, inputs_restart);
+        console_chains_keep_collapsing(Backend::Simd4, true, inputs_restart);
+    }
 }
 
 /// [`console_session`] with the input section's filters, trim and polarity off, so nothing
 /// before the console holds state, and every strip's matrix routes it to one output plane: `solo`
 /// to the left plane, every other strip to the right. A plane then depends on those strips only.
 fn isolated_session(slots: &[&str], solo: &str) -> SessionModel {
-    let mut model = console_session(false, slots);
+    let mut model = unfiltered(console_session(false, slots));
     for track in &mut model.tracks {
-        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
-            channel.hpf_hz = 0.0;
-            channel.lpf_hz = 0.0;
-            channel.trim_db = 0.0;
-            channel.polarity_invert = false;
-        }
         track.matrix_or_pan = if track.id.as_str() == solo {
             MatrixOrPan::Matrix {
                 ll: 1.0,

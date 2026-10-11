@@ -2414,10 +2414,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// A bank whose chain is currently collapsed holds a right channel frozen at the moment the
     /// collapse engaged, so a payload taken from it would carry a right section no dual run ever
     /// produced. [`desymmetrize_channels`](Self::desymmetrize_channels) documents the obligation.
-    /// No engine path snapshots a bound bank yet -- #1037 removed the persisted state envelope,
-    /// whose only entry point snapshotted unpublished banks -- but the plan-swap carry will, so
-    /// the note is repeated from here because this is the method a caller reaches for: a caller
-    /// that snapshots a bound bank must call `desymmetrize_channels` first.
+    /// One engine path snapshots a bound bank: the plan-swap carry (#1279), which disengages the
+    /// displaced chain, and so desymmetrizes every collapsed bank in it, once before it snapshots
+    /// any lane. The note is repeated from here because this is the method a caller reaches for: a
+    /// caller that snapshots a bound bank must call `desymmetrize_channels` first.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -2427,6 +2427,12 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// Render-safe and exact against the continued lane, like
     /// [`PreparedNativeEffect::restore_state_payload`]; a refused restore changes nothing.
+    ///
+    /// On a bound bank it runs in one place: the swap block of the plan-swap carry (#1279), which
+    /// restores the successor's lane from the displaced plan's. The stage that owns the bank then
+    /// recomputes every witness term it caches for the lane, the `DESIGNED` term from
+    /// [`lane_channel_symmetry`](Self::lane_channel_symmetry) and the `RESTORED` term from the
+    /// payload's own sections (`rack::EffectBankStage::carry_lane_from`).
     fn restore_track_state_payload(
         &mut self,
         track_index: u32,
@@ -2526,10 +2532,11 @@ pub trait PreparedNativeEffectBank: Send {
     /// A state payload taken while a bank is collapsed would carry a right section that is whatever
     /// the right channel held when the collapse engaged. Calling this first makes the payload the
     /// one a dual run would have written, and calling it is always sound -- it is the counterfactual
-    /// state, not an approximation of it. No engine path snapshots a bound bank yet: #1037 removed
-    /// the persisted state envelope, whose snapshot took only unpublished banks. The plan-swap
-    /// carry (#1269) will be the first caller that does, and the obligation is written here so it
-    /// finds it stated rather than has to derive it.
+    /// state, not an approximation of it, so a collapsed bank's published output is the same after the
+    /// call as before.
+    /// The plan-swap carry (#1279) is the caller that does: it disengages a collapsed predecessor
+    /// chain, which calls this on every collapsed bank in it, and then snapshots the lanes it moves.
+    /// Every later carry slice that snapshots a bank lane relies on the same rule.
     fn desymmetrize_channels(&mut self) {}
 
     /// Whether this bank can **prove**, right now, that its two channels' state is bit-equal.
@@ -2579,8 +2586,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// A **reset** boundary would re-establish agreement too, and it is not offered as a way back
     /// because it cannot be reached and would not be sound if it were.
     /// [`reset`](Self::reset) is preparation-side: no session, host, protocol or graph path
-    /// invokes it on a bound bank, exactly as `restore_track_state_payload` cannot reach one. And
-    /// [`ResetKind`] is not a symmetrising operation in any of the shipped effects -- both kinds
+    /// invokes it on a bound bank. The one restore a bound bank takes, the plan-swap carry's
+    /// (#1279), is no way back either: it overwrites a lane with the displaced plan's state, whose
+    /// channels agree only if that plan's chain agreed, and the successor's chain inherits exactly
+    /// that agreement. And [`ResetKind`] is not a symmetrising operation in any of the shipped effects -- both kinds
     /// clear the *running* state to constants but re-seed the *designed* words from each channel's
     /// own defaults or its own ramp targets, so a reset preserves whatever parameter asymmetry the
     /// two channels already carried. It is the witness, not the reset, that would have to speak to

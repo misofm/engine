@@ -3465,9 +3465,12 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// bounded series of swaps and fixed-size lane copies, nothing allocated or freed.
     ///
     /// No program, or a predecessor that is not a graph plan, takes nothing (`NotRequested`). A
-    /// predecessor of another identity, an input lane that does not resolve on either side, a
-    /// source set missing on either side, or a driver that refuses the moves takes nothing and
-    /// reports `PredecessorMismatch`.
+    /// predecessor of another identity, an input, strip or effect lane that does not resolve on
+    /// either side (an effect lane also when the two lanes' layouts differ or the payload scratch
+    /// is short), a source set missing on either side, or a driver that refuses the moves takes
+    /// nothing and reports `PredecessorMismatch`. A console effect restore that refuses after the
+    /// moves resolved leaves its lane as prepared and counts in [`carry_refusal_count`] (#1279
+    /// D6); the hand-over still reports `Carried`.
     fn adopt_predecessor(&mut self, predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
         let Some(program) = self.carry.as_ref() else {
             return CarryOutcome::NotRequested;
