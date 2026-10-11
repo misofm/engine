@@ -140,6 +140,10 @@ fn a_marker_between_attributes_and_their_item_is_a_boundary() {
     expect_one_more_region("boundary-after-doc-comment", &documented);
     let between = format!("#[inline]\n// {BEGIN}\n#[must_use]\nfn between() {{}}\n// {END}\n");
     expect_one_more_region("boundary-between-attributes", &between);
+    let several = format!(
+        "/// A doc comment.\n///\n/// Its second paragraph.\n#[inline]\n#[must_use]\n// {BEGIN}\nfn several() {{}}\n// {END}\n"
+    );
+    expect_one_more_region("boundary-after-several-attributes", &several);
     let in_impl = format!(
         "impl Marked {{\n    /// Documented.\n    // {BEGIN}\n    fn documented(&self) {{}}\n    // {END}\n}}\n"
     );
@@ -214,6 +218,10 @@ fn a_region_inside_a_macro_body_is_tokens_and_passes() {
         "fn probe() {{\n    emit!(a, {{ b,\n    // {BEGIN}\n    c,\n    // {END}\n    d }});\n}}\n"
     );
     expect_one_more_region("boundary-in-nested-macro-group", &nested);
+    let deeper = format!(
+        "fn probe() {{\n    emit!(a, {{ b, [ c, ( d,\n    // {BEGIN}\n    e,\n    // {END}\n    f ) ] }});\n}}\n"
+    );
+    expect_one_more_region("boundary-in-deeply-nested-macro-group", &deeper);
 }
 
 /// A region whose markers sit in different containers, one a macro token tree, mixes tokens and
@@ -237,6 +245,12 @@ fn a_region_that_crosses_a_macro_token_tree_is_refused() {
             "boundary-begin-in-outer-group-end-in-inner",
             format!(
                 "fn probe() {{\n    emit!(a,\n    // {BEGIN}\n    b, {{ c,\n    // {END}\n    d }});\n}}\n"
+            ),
+        ),
+        (
+            "boundary-begin-in-group-end-two-groups-deeper",
+            format!(
+                "fn probe() {{\n    emit!(a, {{ b,\n    // {BEGIN}\n    c, [ d, ( e,\n    // {END}\n    f ) ] }});\n}}\n"
             ),
         ),
         (

@@ -216,6 +216,13 @@ fn a_forbidden_word_in_a_comment_or_a_literal_passes() {
     );
 }
 
+/// Two words stay two words: the rendering never joins them into a spelling.
+#[test]
+fn adjacent_words_do_not_join_into_a_spelling() {
+    let text = region("fn probe() { emit!(Mu tex, Rw Lock, Con dvar, to do ! ()); }");
+    expect_valid("forbidden-adjacent-words", &append_region(&text));
+}
+
 /// Only the region's own tokens are read: a spelling just outside it passes, and every region of
 /// a file is read.
 #[test]

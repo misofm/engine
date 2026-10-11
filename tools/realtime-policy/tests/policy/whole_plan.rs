@@ -131,33 +131,24 @@ fn only_a_cfg_test_module_named_tests_is_skipped() {
 #[test]
 fn a_whole_plan_borrow_inside_a_macro_is_a_finding() {
     let rows = [
-        (
-            "whole-plan-in-macro-call",
-            "    check!(&*plan);\n    0",
-            "check",
-        ),
-        (
-            "whole-plan-in-macro-mut",
-            "    check!(&mut *plan);\n    0",
-            "check",
-        ),
-        (
-            "whole-plan-in-macro-parens",
-            "    check!(&(*plan));\n    0",
-            "check",
-        ),
+        ("whole-plan-in-macro-call", "    check!(&*plan);\n    0"),
+        ("whole-plan-in-macro-mut", "    check!(&mut *plan);\n    0"),
+        ("whole-plan-in-macro-parens", "    check!(&(*plan));\n    0"),
         (
             "whole-plan-in-macro-braces",
             "    check! { first, &*plan }\n    0",
-            "check",
         ),
         (
             "whole-plan-in-nested-group",
             "    check!([first, (&*plan)]);\n    0",
-            "check",
+        ),
+        // A single colon does not continue the operand as a path would.
+        (
+            "whole-plan-before-a-colon",
+            "    check!(&*plan : Plan);\n    0",
         ),
     ];
-    for (name, text, _) in rows {
+    for (name, text) in rows {
         expect_failure(name, &[in_render_entry(text)], &[WHOLE_PLAN]);
     }
     let definition =
