@@ -526,3 +526,121 @@ carried it). Root's ruling (3), verbatim:
   awk gate report it.
 - The doc's "Unsafe-code ownership" section is #1489's; it lists the allowlist as `main` holds it.
 
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`)
+
+Implemented on `2a589d360` (main with stream B batch 1 and #1445 merged). Production code changes:
+none. Edits outside `tools/realtime-policy/`: `Cargo.toml` (one member), `Cargo.lock` (the new package's
+entry only), `scripts/check-realtime-policy.sh` (the exclusion line: the Amendment's five removals only),
+`.github/workflows/qualification.yml` (`audit-native`: `-p realtime-policy` on the release build, the step
+renamed, one new step running `./target/release/realtime_policy`).
+
+**Measured differences from the spec's numbers.**
+- **The allowlist is 19 paths, not 14.** The spec's list of 18 predates #1489/#1494, which added five
+  lane/host-core/capi/wasm-gates test files to the awk exclusion line:
+  `crates/lane/tests/fp_env.rs`, `crates/lane/tests/g6_ftz_inert.rs`, `crates/capi/src/runtime/tests.rs`,
+  `crates/host-core/tests/fp_environment.rs`, `tools/wasm-gates/tests/g6_full_corpus_ftz.rs`. Each holds
+  `unsafe` code by the awk regex, and `rg -l` over the tree finds exactly
+  19 files matching the regex, which are exactly the 24 awk entries minus the five Amendment removals.
+  `Policy::workspace()` carries those 19 (D5 says to copy `:29` as `main` holds it).
+- Floors 26 files and 93 regions (batch 1 is on `main`); the real tree has 562 tracked `.rs` files under
+  `crates hosts tools`. All lex and parse where required.
+- `Lit::Verbatim` cannot come from source text (syn builds it only from a macro-fragment placeholder
+  `(/*ERROR*/)`), so no `visit_lit` arm exists; every other node kind that carries `Verbatim` has an arm
+  and a row in the Verbatim case (item, trait item, impl item, foreign item, expression, pattern, type,
+  type-parameter bound).
+
+**Case port decisions.**
+- D10's 17 `unsafe-*` cases are 16 distinct rows: `unsafe-outside-exact-allowlist` and
+  `unsafe-outside-rack-benchmark-main` are the same file and text (`tools/bench/src/other.rs`), so the
+  duplicate is dropped (a copy would answer no defect). The 16 rows plus the dropped-allowlist-entry row
+  (Amendment gate), the macro case, the finding-place case and the mention/other-spelling case are in
+  `tests/policy/unsafe_ownership.rs`.
+- `open-tail-valid` is ported as `an_open_tail_is_misordered` ({misordered, file floor, region floor}).
+  The prepended unmarked `oracle_drain` of the script's case is not ported: no rule in this slice judges it,
+  so it would add no claim. B2b-1 adds it with its class.
+- The base tree is `create_fixture`'s output at `2a589d360`, 36 files as `*.rs.txt` under
+  `tests/fixtures/base`; it counts 93 regions in 26 files (pad_1 holds 14).
+- Retired, as D10 says: the 22 tool-failure injections and the 5 counter-mutants.
+- New cases beyond the spec's list: a scan root that is a file; an unreadable `.rs` file (fails, rather than
+  passes untested, when the tests run as root); `[const]`-bound and the other Verbatim rows; a lookalike
+  `targets` directory is scanned; links to files with another name are ignored; nested files under every
+  root; marker cases for multi-line raw strings, nested block comments, a line comment that mentions `/*`,
+  a bare `:`, multi-byte text before a marker, CRLF and a final marker without a newline; sort order of the
+  findings. Each is in the mutation table below.
+
+**Gates.**
+1. `cargo run --locked --release -q -p realtime-policy` prints `realtime policy: ok (93 marked regions in
+   26 files)`; `bash scripts/check-realtime-policy.sh` prints the same counts.
+2. `cargo test --locked -p realtime-policy`: 50 passed (the `policy` test binary; one binary, so a failing
+   case names itself). `target/tmp` holds no leftover tree afterwards.
+3. Parity, 82 case trees materialized by a throwaway patch of `Tree::drop` (reverted, not committed) and run
+   through gawk 5.2.1 `check-realtime-policy.sh` and the release binary: 63 agree (18 both pass, 45 both
+   fail), 19 differ, every one a listed deliberate difference:
+   - D6 (class change): `markers-end-before-begin`, `markers-nested`, `open-tail` (awk pass, tool fail);
+   - D5: `unsafe-mentions` (awk fail on text in comments/strings, tool pass);
+   - D3, new findings (awk pass, tool fail): `walk-dir-named-rs`, `walk-rs-link`, `walk-not-utf8`,
+     `walk-lex-error`, `walk-parse-error`, `walk-ffi-parse-error`, and the eight
+     `walk-verbatim-{item,trait-item,impl-item,foreign-item,expression-in-a-function,pattern,type,bound}`;
+   - D3, skip rule (awk fail on `unsafe`/markers in `target` and `node_modules`, tool pass):
+     `walk-skipped-directories`.
+   - Both fail by different classes: the missing-root cases (`walk-missing-tools`, `walk-root-is-file`,
+     `binary-missing-tools`) and `walk-no-realtime-module` (both fail). The unlistable-directory and
+     unreadable-file trees lose their condition when copied, so I rebuilt them by hand: awk exits 2 (an `rg`
+     error), the tool exits 1; the directory-symlink tree: awk passes, tool fails (deliberate, D3).
+4. Mutations (each applied alone to the committed code; `git checkout` reverted it). "red" is the tests that
+   failed; the spec's list first.
+   - spsc.rs out of the allowlist: 39 red incl. the base tree and `unsafe_code_outside_the_allowlist`...; gate 1
+     reports `spsc.rs:50: unsafe { cursor.unsync_load() }` and exits 1.
+   - D6 block-comment test dropped (`starts_inside_block_comment` returns false): `a_marker_line_inside_a_block_comment_is_malformed`.
+   - A group's span as a leaf: 42 red; gate 1 reports the real markers of `crates/builtins-compiler/src/lib.rs` as malformed.
+   - Missing root skipped: `a_missing_scan_root_is_a_finding`, `a_scan_root_that_is_a_file_is_a_finding`,
+     `binary::a_root_with_a_missing_scan_root_exits_one`. Unlistable directory skipped:
+     `a_directory_that_cannot_be_listed_is_a_finding`.
+   - Misordered markers accepted: `an_end_before_its_begin_is_misordered`, `two_begins_in_a_row_are_misordered`,
+     `an_open_tail_is_misordered`.
+   - File floor lowered by one (`files + 1 < floor`): `the_file_floor_fires_when_a_marked_file_loses_its_markers` and six more.
+     Region floor lowered by one: `the_region_floor_fires_when_a_region_is_dropped_and_the_markers_still_pair` and four more.
+   - `run` returns 0 after findings: `findings_exit_one_and_print_one_line_each_on_stderr`,
+     `findings_without_a_place_print_without_one`, `findings_are_sorted_by_class_then_path`,
+     `binary::a_root_with_a_missing_scan_root_exits_one`.
+   - `main` ignores `run`'s code: `binary::a_root_with_a_missing_scan_root_exits_one`,
+     `binary::two_arguments_exit_two`.
+   - Amendment: `crates/soft-clip/tests/allocation.rs` given an unsafe block in the real tree: the awk gate
+     and the tool both report it. Re-adding that entry, or the `wasm-gate-guest` entry, to
+     `Policy::workspace()`: `the_dropped_allowlist_entries_are_findings` (the case covers all five paths).
+   - Defects of the new tests, one red each unless noted: `:`-without-space accepted
+     (`a_longer_word_or_a_bare_colon_is_malformed`); prefix allowlist match
+     (`unsafe_code_outside_the_allowlist_is_a_finding`); macro bodies not scanned
+     (`unsafe_code_inside_a_macro_body_is_a_finding`); `unsafe trait`/attribute flagged
+     (`mentions_and_the_other_spellings_are_not_unsafe_code`); only-brace-group rule (6 red); line-spanning
+     leaf test dropped (`a_marker_written_in_a_string_literal...`, `...doc_comment...`); non-matching
+     mentions ignored (5 red); `/*` inside a line comment opens a comment
+     (`a_line_comment_opening_a_block_comment_text_does_not_open_one`); non-nesting block comments;
+     `.rs` symlink / directory symlink / other-link refusal, `x.rs` directory, lossy UTF-8, unreadable file
+     skipped, `target` or `node_modules` not skipped, prefix skip, lex error ignored, `crates/capi/src/ffi.rs`
+     not always parsed, marked files not parsed, parse error ignored, each of the eight Verbatim arms and
+     the two visitor descents dropped (`syntax_the_parser_keeps_verbatim_is_a_finding`), relative root not
+     joined, no-argument root, two-argument code, swapped success line, misorder parity, unmatched check
+     removed, realtime-module check removed, regions not summed, no sort (`findings_are_sorted_by_class_then_path`),
+     column counted as bytes (`a_marker_after_multibyte_text_is_still_a_marker`), CR not stripped
+     (`markers_with_crlf_line_endings_are_regions`), marker/misordered line off by one (the two finding-place
+     assertions). Two mutants first showed untested behavior (finding line of a malformed and of a misordered
+     marker); both got an assertion and then went red.
+5. Run time, release binary: real tree 0.75-0.86 s (3 runs); the base tree plus one synthetic marked file of
+   20,004 lines (3,334 regions): 0.13-0.14 s; the awk gate on the real tree: 0.58 s. `audit-native` step
+   time is CI-only. Local release build of the crate: 9.5 s with `syn` compiled, 13.9 s with `syn`,
+   `proc-macro2` and `quote` rebuilt.
+6. `libcapi.a` sha256 `4f3df3d5...c682`, `libcapi.so` `ade7f6d0...4fb`: identical at the parent `2a589d360`
+   (two clean builds) and at the change. The `artifact-identity` job is CI-only.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-workspace-policy.sh`, `check-bench-policy.sh`, `check-realtime-policy.sh` (and the awk self-test
+   `test-realtime-policy.sh`), `check-ci-path-routing.py`, `test-ci-path-routing.py`,
+   `check-script-reachability.py`: all exit 0.
+
+**Open items.**
+- A file with thousands of marker lines inside one huge block comment makes the block-comment scan
+  quadratic in the comment's size; not reachable by a real tree and fails only in time. Not chased.
+- `Policy::workspace()`'s floors have no test of their own: the case policy replaces them, and gate 1 is the
+  only check of the real values (the awk gate checks them too until C2).
+- The unlistable-directory and unreadable-file cases fail when the tests run as root, by design (D9).
