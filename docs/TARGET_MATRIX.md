@@ -97,8 +97,8 @@ AArch64 as below.
 ### Native AArch64 (#1017)
 
 Owner ruling 2026-09-28 (`docs/rulings/engine-footprint-2026-09-28.md`): "Yes ARM64 will be an
-official target." Fans open and play sessions in iOS and Android apps, which embed the engine
-through the C ABI. This reverses #378. What qualifies the target:
+official target." iOS and Android apps embed the engine through the C ABI. This reverses #378.
+What qualifies the target:
 
 * **Compile and lint rows** (`scripts/check-cross-targets.sh`, `qualification.yml` `cross-target`).
   For `aarch64-apple-ios` and `aarch64-linux-android`, the product crates are checked with

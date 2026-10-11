@@ -2,7 +2,7 @@
 
 ## Mission
 
-`misofm/engine` is a greenfield, headless Rust music-production engine for agents that work between musicians and the engine.  Agents require a deliberately broad, granular semantic API; the runtime ABI remains narrow, stable, and efficient.  Build for browser WebAssembly and for iOS and Android apps, which embed the engine through the C ABI; native desktop and cloud embedding are expected later and are not live scope (owner ruling R2, `docs/rulings/engine-footprint-2026-09-28.md`).  PCM is the engine output; delivery codecs live outside this repository.
+`misofm/engine` is a greenfield, headless Rust music-production engine for agents that work between musicians and the engine.  Agents require a deliberately broad, granular semantic API; the runtime ABI remains narrow, stable, and efficient.  Build for browser WebAssembly and for iOS and Android apps, which embed the engine through the C ABI; native desktop and cloud embedding are expected later and are not live scope (owner ruling R2, `docs/rulings/engine-footprint-2026-09-28.md`).  PCM is the engine output; delivery codecs live outside this repository.  The engine has no notion of person roles such as producer, fan or listener; apps own them.
 
 Never inspect, copy, benchmark against, or inherit an architecture from a legacy engine source.  A useful idea may be independently re-derived and justified, but this engine is not a port.
 

@@ -11,7 +11,7 @@ decision-15 fix round. The send half is *Deliver value-only send edits to the ru
 
 ## Product outcome
 
-A C ABI host, such as a fan's phone, can change a bus's (submix strip's) fader dB, lane mute, or
+A C ABI host, such as an iOS or Android app, can change a bus's (submix strip's) fader dB, lane mute, or
 pan/matrix on the running plan. The change never rebuilds the plan, leaves a silent block, resets
 a source ring or steps hard. It lands on the same plan, ramped, exactly as the same edit on a track
 does today (#1257), and it is never lost, also when the same transaction makes a structural edit

@@ -26,7 +26,7 @@ one bit.
   (`hosts/host-web/src/lib.rs:7221`) maps `live_control_command_queue_records == 0` to
   `control_queue_depth: None` (`:7225-7228`), and host-core then attaches no lane at all
   (`HostLiveControlRequest`, `crates/host-core/src/prepare.rs:309-321`). The SDK's default policy
-  is 0 (`sdk/test/browser-defaults-evals.mjs:422-456`), so fan playback has no live mute.
+  is 0 (`sdk/test/browser-defaults-evals.mjs:422-456`), so a plan booted without live controls has no live mute.
 - `compile_ready` (`hosts/host-web/src/lib.rs:6617`) prepares through one of three host-core
   entries: `prepare_host_runtime_with_live_controls_and_spectrum` (`:6646`),
   `prepare_host_runtime_with_live_controls_and_spectrum_collection` (`:6661`) and

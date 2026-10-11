@@ -20,6 +20,13 @@ aim, in the owner's words, is "minimizing the engine footprint".
 * **Removals:** "The removals look good if they're not actively used." Code that nothing actively
   uses is removed even if a later product might want it; git history keeps it.
 
+> **Note, 2026-10-11 (owner direction).** "It's crazy to have 'producer' and 'fan' concepts in a
+> generic audio engine. That makes no sense. This should be something we do on the application layer."
+> The engine has no producer, fan or listener role. Read the first bullet above as: the engine is
+> cross-platform, a browser app and iOS and Android apps all embed it, and each app decides what its
+> users do. Read "A producer's automation" in decision 2 as "a session's stored automation". Roles
+> belong to the app layer.
+
 ## Decisions on the audit's rulings
 
 | ruling | decision |
@@ -57,6 +64,16 @@ aim, in the owner's words, is "minimizing the engine footprint".
   personal mix is represented and what happens when the producer updates the session).
 * #140 closes as descoped: its stored-automation outcome moves to #1058; sample-timed
   `AutomationEnqueue` delivery has no product consumer.
+
+> **Note, 2026-10-11 (owner direction).** "It's crazy to have 'producer' and 'fan' concepts in a
+> generic audio engine. That makes no sense. This should be something we do on the application layer."
+> The bullet "A fan's edits are saved as a personal mix; the producer's original is untouched" is
+> withdrawn as engine scope. The personal-mix question (#1057, section 7) is not an engine question and
+> is closed: an app keeps its users' edits itself, with canonical JSON snapshots and transactions. The
+> bullet "A producer's automation is rendered by the core engine from the session file" stands as
+> "a session's stored automation is rendered by the core engine from the session file". Decision 16
+> (fan level offsets, send automation and personal mixes) was not adopted; this note decides none of
+> its role-free parts.
 
 ## Test rulings (2026-09-28)
 

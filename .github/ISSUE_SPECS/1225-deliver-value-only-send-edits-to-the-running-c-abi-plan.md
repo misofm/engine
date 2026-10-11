@@ -11,7 +11,7 @@ design record cited as `DESIGN` is `docs/handoffs/submix-sends-2026-10-02/DESIGN
 
 ## Product outcome
 
-A C ABI host, such as a fan's phone, can change a send's `gain_db`, `mute` or `channel_matrix` (a
+A C ABI host, such as an iOS or Android app, can change a send's `gain_db`, `mute` or `channel_matrix` (a
 route whose destination is a submix) on the running plan. The change never rebuilds the plan,
 leaves a silent block, resets a source ring or steps hard. Track faders, mutes and pans are already
 live (#1257). After this slice a send edit lands on the same plan, ramped, and is never lost, also
