@@ -276,3 +276,75 @@ queue; the refused batch writes no input cell and no fader cell). Adapted for th
 the matrix and fader bands; a renumbering of the queue-slot layout is a separate change. (b) The
 C ABI's input edits (#1261, #1262) write `TrackControlProducer::input` with `InputCells::write`
 behind the stamp, as #1312's fader edits do. (c) Filter section order is unobservable (item 9).
+
+### Follow-ups (verdict of attempt 1: m1, m2, m3, n1 to n5; m5 is root's)
+
+**m1. The four browser backpressure tests now fill an insert queue with observation records.**
+Gate 5 said observation records, and effect bypass becomes a cell in #1345 (D1), so a rewrite on
+bypass records would be rewritten again. `COMMAND_OBSERVE_SUBSCRIBE` records stay a FIFO (#1345 D2),
+so these four tests keep their queue. The parametric EQ declares no tap, so the hosts they use now
+carry the observation fixture's compressor as the insert (`observed_compressor_insert`, tap 1) with
+`live_control_observation_taps: 4`; `stage_effect_bypass` is deleted and `stage_observe_subscribe`
+replaces it. #1345 D2 sizes the observation queue by tap count, not by `live_control_command_queue_records`,
+so #1345 must re-size these four fills (depth and the `in_flight` numbers), but no longer has to change the
+record kind.
+
+| Test (hosts/host-web/src/tests.rs) | Defect it turns red | Mutation (applied to `hosts/host-web/src/lib.rs`, then reverted) |
+|---|---|---|
+| `idle_render_skips_admission_counter_clear_without_losing_queue_credit` | an insert-queue record that takes no `in_flight` credit, or an idle block that clears the dense counters | drop `ready.in_flight[slot] += 1` for a queue record: red; `if ready.has_in_flight_commands` made `if true`: red |
+| `prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches` | the browser writing a cell (the prepared input targets, the fader value) before the room pass that refuses the batch | `write_strip_cells(..)` called before the room pass: red (16 tests in all); room check off by one (`needed > available + 1`): red |
+| `prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues` | a batch refused for an unrelated full queue (track 1's compressor insert) that still admits or publishes the EQ owner's targets | room check off by one: red |
+| `a_refused_solo_submission_leaves_the_live_controls_untouched` | a refused batch that leaves the solo transaction applied | delete `ready.solo.rollback()`: red (with 4 other tests); room check off by one: red |
+
+**m2. A test pins the four `live_lanes` implementations.** `every_builtin_bank_reports_exactly_the_lanes_that_hold_a_reader`
+(builtins-compiler) builds the input, fader and matrix banks with readers on lanes 0 and 2 and the
+fused pair with fader readers on lanes 0 and 2 and matrix readers on lanes 1 and 2, and asserts
+`0b101`, `0b101`, `0b101` and the union `0b111`; banks without a reader report 0. Defect it turns
+red that nothing else does: a builtin bank reporting 0 for a lane it drains, which makes
+`BankChain::new`'s slot guard (`live_lanes() == 0 || ..`) vacuous for that bank. Mutations, one
+each, all red at the named assertion and green when reverted: the input bank returns 0; the fader
+bank returns 0; the matrix bank returns 0; the fused pair returns 0; the fused pair reports only
+its fader stage (`5` instead of `7`); the input bank reports `0xff` (255 instead of 5).
+
+**m3. `equal_words_written_per_channel_in_one_block_keep_the_collapse` is deleted.** I looked for a
+defect only it catches. The one candidate was pairing any two applied channel words into a `Both`
+record, whatever their values (`paired_channels` without `left == right`): it turns that test red
+and no other host-core test, but it also turns `the_input_witness_folds_from_the_final_cell_contents`
+red at crate level (builtins-compiler), so the defect is caught. Every other defect I tried (a fixed
+`Desymmetrize`, a fixed `Preserve`, never pairing) is already caught by five or more host-core tests
+and the builtins-compiler gate-3 test. The end-to-end collapse dispatch is held by
+`a_both_lane_record_drained_while_collapsed_keeps_the_collapse` and
+`a_symmetric_ride_renders_the_same_bits_collapsed_or_not`.
+
+**Nits.**
+
+- n1: the dead `let prepared = ..; let _ = prepared;` is removed from
+  `many_input_edits_before_one_block_apply_the_last_and_count_each_replaced_value`.
+- n2: the doc of `the_input_drains_apply_every_value_past_a_refused_one` names the mutation that turns it red
+  (the reader's `drain` applies only while `first_error` is `Ok`: red in the block arm; the
+  carry applies nothing: red in the carry arm) and says that the carry arm's count-and-continue
+  replaced by a return stays green (re-run: green), since `drain_for_carry` reports a returned
+  error as one refusal.
+- n3: the `command_wanted` accumulation and its `u32` overflow `BACKPRESSURE` refusal now run only
+  for an EQ owner marker; a builtin input owner's targets are cells and want no room.
+- n4: `TrackControlProducer` is named in the `Arc` prose in place of "the producer".
+- n5: `BuiltinBankProcessor::drain_controls` has a `debug_assert!(lane < MAXIMUM_BANK_LANES, ..)`
+  before the `live.get_mut(lane)` lookup. The `get_mut` stays in the render path (a slice index puts a
+  panic edge into the worklet call graph, which the shipped-module gate refuses); a debug build
+  now refuses a lane that holds a reader and has no symmetry term, instead of skipping its drain.
+
+**Follow-up gates (this tree).** `cargo fmt --all -- --check` and clippy `--workspace --all-targets
+--all-features -D warnings`: ok. builtins-compiler `--features test-support` 66 passed (the new
+`live_lanes` test included); host-core `--features control-provider,test-support` all binaries
+green (`input_liveness_live_controls` 11 passed, one test fewer); host-web `--features test-support`
+lib 191 passed, 2 ignored. `check-workspace-policy.sh`, `check-host-core-policy.sh`,
+`check-builtins-policy.sh`, `check-graph-policy.sh`, `check-rack-policy.sh`,
+`check-realtime-policy.sh` (102 regions in 27 files) and `test-realtime-policy.sh`: ok.
+`check-cross-targets.sh`: PASS. Worklet chain on this tree: `build-web-audioworklet.sh
+--named-twin` (shipped module `13e78585e4a5...`; it moved from `ffec707c...` because `host-web`'s admission
+code changed, n3), `check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts` (sourceTotalBytes 3358 of 3648),
+`check-scalar-oracle-absent.py --wasm`, `check-web-audioworklet-v8-spill.py` and
+`test-web-audioworklet.sh` (private TMPDIR left empty): pass. Not run: the Playwright `browser` legs
+(no browsers on this box). Open: #1345 re-sizes the four observation fills (m1); STREAMS hot-file rows
+(m5) are root's.

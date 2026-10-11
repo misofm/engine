@@ -600,59 +600,6 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
     );
 }
 
-/// Equal words written to the two channels in one block are one `Both` record (#1346 D3): the
-/// collapse census does not move however the writes were split, and the bits are the `Both` ride's.
-/// Unequal words are two per-lane records and decline every lane.
-///
-/// This is the end-to-end half of the witness fold: the lane-level fold is gated in
-/// `builtins-compiler`, and what only a real banked plan shows is that the collapse dispatch reads
-/// the folded term, so a mono track keeps collapsing through a per-channel ride that ended equal.
-///
-/// Red mutation: admit a fixed `Desymmetrize` for every drained value in `InputReader::drain` ->
-/// the `Both` arm and the separate-but-equal arm decline all eight lanes.
-#[test]
-fn equal_words_written_per_channel_in_one_block_keep_the_collapse() {
-    let session = mono_session();
-    let ride = |lanes, db| TrackInputRecord::TrimDb {
-        lanes,
-        db,
-        smoothing_samples: 256,
-    };
-    let mut both = prepare_with_live_controls(&session);
-    let mut separate = prepare_with_live_controls(&session);
-    let mut unequal = prepare_with_live_controls(&session);
-    let before = census(&both);
-    for track in 0..TRACKS {
-        push(&mut both, track, ride(BuiltinLaneSelector::Both, -12.0));
-        push(&mut separate, track, ride(BuiltinLaneSelector::Left, -12.0));
-        push(
-            &mut separate,
-            track,
-            ride(BuiltinLaneSelector::Right, -12.0),
-        );
-        push(&mut unequal, track, ride(BuiltinLaneSelector::Left, -12.0));
-        push(&mut unequal, track, ride(BuiltinLaneSelector::Right, -6.0));
-    }
-    let both_bits = render(&mut both, 6);
-    let separate_bits = render(&mut separate, 6);
-    let _ = render(&mut unequal, 6);
-    assert_eq!(census(&both), before, "a `Both` ride declines nothing");
-    assert_eq!(
-        census(&separate),
-        before,
-        "the same words written to each channel in one block are one `Both` record"
-    );
-    assert_eq!(
-        census(&unequal),
-        [before[0] - TRACKS as u64, before[1]],
-        "unequal words decline every lane"
-    );
-    assert_eq!(
-        separate_bits, both_bits,
-        "and they render the `Both` ride's bits"
-    );
-}
-
 // ---------------------------------------------------------------------------------------------
 // 4. The disengage-under-drain window.
 // ---------------------------------------------------------------------------------------------

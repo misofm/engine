@@ -5687,15 +5687,19 @@ fn admit_commands_staged(
                 .map_err(|_| refuse(COMMAND_REASON_MALFORMED, marker.first_wire_index as usize))?;
         }
         marker.target_count = target_count as u32;
-        ready.command_wanted[marker.queue_slot as usize] = ready.command_wanted
-            [marker.queue_slot as usize]
-            .checked_add(marker.target_count)
-            .ok_or_else(|| {
-                refuse(
-                    COMMAND_REASON_BACKPRESSURE,
-                    marker.first_wire_index as usize,
-                )
-            })?;
+        // Only an EQ owner's targets are queue records. A builtin input owner's targets are cells
+        // (#1346): they want no room, and the room pass skips the input band.
+        if marker.kind == PreparedOwnerKind::Eq {
+            ready.command_wanted[marker.queue_slot as usize] = ready.command_wanted
+                [marker.queue_slot as usize]
+                .checked_add(marker.target_count)
+                .ok_or_else(|| {
+                    refuse(
+                        COMMAND_REASON_BACKPRESSURE,
+                        marker.first_wire_index as usize,
+                    )
+                })?;
+        }
         if let Some(staged) = ready.command_decoded.get_mut(entry) {
             staged.kind = StagedCommandKind::PreparedOwner(marker);
         }

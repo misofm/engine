@@ -2470,10 +2470,30 @@ fn input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkle
 }
 
 fn effect_input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
+    mixed_input_filter_live_control_host(quantum, queue_depth, false)
+}
+
+/// [`effect_input_filter_live_control_host`] with the EQ insert swapped for the observed
+/// compressor and observation lanes bound, so track 0's insert queue takes observation records.
+fn observed_input_filter_live_control_host(
+    quantum: u32,
+    queue_depth: u64,
+) -> AudioWorkletEngineHost {
+    mixed_input_filter_live_control_host(quantum, queue_depth, true)
+}
+
+fn mixed_input_filter_live_control_host(
+    quantum: u32,
+    queue_depth: u64,
+    observed: bool,
+) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
         .expect("accepted command fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = u64::from(quantum) * 4;
+    if observed {
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+    }
     let builtins = &mut model.tracks[0].builtins;
     builtins.left.hpf_hz = 100.0;
     builtins.left.lpf_hz = 1_000.0;
@@ -2485,6 +2505,7 @@ fn effect_input_filter_live_control_host(quantum: u32, queue_depth: u64) -> Audi
         WebBootOptions {
             source_ring_frames: quantum,
             live_control_command_queue_records: queue_depth,
+            live_control_observation_taps: if observed { 4 } else { 0 },
             ..boot_options(quantum)
         },
     )
@@ -2739,22 +2760,63 @@ fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u6
     assert_eq!(host.render_next(), RESULT_OK);
 }
 
-/// Stage one `effectBypass` record for the first insert of track 0: a record that rides an effect
-/// queue, which stays a queue (a fader, matrix or input value is a latest-target cell with no room
-/// to fill, #1312, #1346).
-fn stage_effect_bypass(host: &mut AudioWorkletEngineHost, index: usize) {
+/// The observation fixture's compressor: the one launch effect with a resident tap (gain
+/// reduction, tap 1) that a session in this file can bind, so an insert queue can be filled with
+/// observation subscriptions, which stay a FIFO (D15-2 condition 1; #1345 D2), where a fader,
+/// matrix or input value is a latest-target cell with no room to fill (#1312, #1346).
+fn observed_compressor_insert() -> session::Effect {
+    parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("accepted observation fixture")
+    .tracks[0]
+        .inserts
+        .effects[0]
+        .clone()
+}
+
+/// Stage one observation subscription (tap 1, a two-block window) for insert `effect` of `track`.
+fn stage_observe_subscribe_at(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    track: u32,
+    effect: u32,
+) {
     stage_command(
         host,
         index,
-        COMMAND_EFFECT_BYPASS,
-        1,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        RACK_INSERTS,
         255,
-        0,
-        0,
-        0,
-        0,
-        [1.0, 0.0, 0.0, 0.0],
+        track,
+        effect,
+        1,
+        2,
+        [0.0; 4],
     );
+}
+
+/// Stage one subscription for the first insert of track 0, the record the queue-credit tests fill
+/// that insert's queue with. A repeated subscription is idempotent in effect and costs one record.
+fn stage_observe_subscribe(host: &mut AudioWorkletEngineHost, index: usize) {
+    stage_observe_subscribe_at(host, index, 0, 0);
+}
+
+/// The command fixture with its parametric EQ insert swapped for the observed compressor and
+/// observation lanes bound: track 0 keeps one insert queue that observation records can fill.
+fn observed_effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+        .expect("accepted command fixture");
+    model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+    let document = canonical_session_json(&model).expect("canonical observed command fixture");
+    let options = WebBootOptions {
+        source_ring_frames: quantum,
+        live_control_command_queue_records: depth,
+        live_control_observation_taps: 4,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options)
+        .expect("observed effect live-control boot")
 }
 
 /// #514 IO7: command-free blocks skip the dense admission-counter reset while command ownership
@@ -2764,7 +2826,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     const QUANTUM: u32 = 128;
     const QUEUE_DEPTH: usize = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
 
-    let mut host = effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    let mut host = observed_effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
     reset_admission_counter_clear();
     for block in 0..3_u64 {
         feed_and_render(&mut host, 1, block, 0.25);
@@ -2780,12 +2842,13 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
 
-    // Repeated records on the effect queue preserve the exact per-queue count until the successful
-    // render drains it. A fader, matrix or input record is a latest-target cell (#1312, #1346): it
+    // Repeated observation subscriptions on the insert queue (the one queue kind that stays a FIFO,
+    // #1345 D2) preserve the exact per-queue count until the successful render drains it. A fader,
+    // matrix or input record is a latest-target cell (#1312, #1346): it
     // takes no queue credit and counts nowhere, so the fader record below leaves the counters as
     // they were.
-    stage_effect_bypass(&mut host, 0);
-    stage_effect_bypass(&mut host, 1);
+    stage_observe_subscribe(&mut host, 0);
+    stage_observe_subscribe(&mut host, 1);
     assert_eq!(host.submit_commands(2), RESULT_OK);
     let application_sample = 3 * u64::from(QUANTUM);
     assert_eq!(
@@ -2865,7 +2928,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // A healthy drained host can refill a queue to its exact old capacity; one more record is the
     // existing typed refusal and leaves the accepted prefix's ownership untouched.
     for index in 0..QUEUE_DEPTH {
-        stage_effect_bypass(&mut host, index);
+        stage_observe_subscribe(&mut host, index);
     }
     assert_eq!(
         host.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS),
@@ -2876,7 +2939,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         DEFAULT_COMMAND_QUEUE_RECORDS
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-    stage_effect_bypass(&mut host, 0);
+    stage_observe_subscribe(&mut host, 0);
     assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE);
     assert_eq!(
         *host.command_report(),
@@ -2946,7 +3009,8 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(admission_counter_clear_stats(), (0, 0));
 
     // Malformed and backpressured submissions on an idle host cannot create pending ownership.
-    let mut refused = effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    let mut refused =
+        observed_effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
     stage_command(
         &mut refused,
         0,
@@ -2977,7 +3041,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
     for index in 0..=QUEUE_DEPTH {
-        stage_effect_bypass(&mut refused, index);
+        stage_observe_subscribe(&mut refused, index);
     }
     assert_eq!(
         refused.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS + 1),
@@ -3001,7 +3065,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
 
     // A refusal after accepted records preserves those records and the dirty flag.
-    stage_effect_bypass(&mut refused, 0);
+    stage_observe_subscribe(&mut refused, 0);
     assert_eq!(refused.submit_commands(1), RESULT_OK);
     stage_command(
         &mut refused,
@@ -3041,8 +3105,9 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
 
     // A render failure is sticky: pending ownership and the untouched clear counters survive the
     // failed block and the subsequent WRONG_STATE re-entry.
-    let mut failed = effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
-    stage_effect_bypass(&mut failed, 0);
+    let mut failed =
+        observed_effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    stage_observe_subscribe(&mut failed, 0);
     assert_eq!(failed.submit_commands(1), RESULT_OK);
     let before = failed.ready.as_ref().expect("ready").in_flight.to_vec();
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
@@ -3339,6 +3404,28 @@ fn bank_effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngine
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("bank EQ live-control boot")
+}
+
+/// [`bank_effect_live_control_host`] with the observed compressor as track 1's only insert, next
+/// to the console EQs the prepared EQ edits address, and observation lanes bound.
+fn bank_observed_insert_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-bank-console.json"
+    ))
+    .expect("accepted bank EQ fixture");
+    model.tracks[1]
+        .inserts
+        .effects
+        .push(observed_compressor_insert());
+    let document = canonical_session_json(&model).expect("canonical bank fixture with an insert");
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 2,
+        live_control_command_queue_records: depth,
+        live_control_observation_taps: 4,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options)
+        .expect("bank observed-insert live-control boot")
 }
 
 #[test]
@@ -3911,13 +3998,14 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
     assert_eq!(ready.input_filter_shadows[0].revision, 0);
     assert!(ready.in_flight.iter().all(|count| *count == 0));
 
-    // A full effect queue (a matrix, fader or input value is a cell with no room to fill, #1312,
-    // #1346) refuses the mixed transaction at the effect record behind the prepared owner's, and
+    // A full insert queue, filled with observation subscriptions (a matrix, fader or input value
+    // is a cell with no room to fill, #1312, #1346), refuses the mixed transaction at the
+    // subscription behind the prepared owner's record, and
     // the builtin shadow stays at its committed seed with no cell written: the cells are written
     // only after every check of the batch has passed.
-    let mut full = effect_input_filter_live_control_host(QUANTUM, 2);
+    let mut full = observed_input_filter_live_control_host(QUANTUM, 2);
     for index in 0..2 {
-        stage_effect_bypass(&mut full, index);
+        stage_observe_subscribe(&mut full, index);
     }
     assert_eq!(full.submit_commands(2), RESULT_OK);
     let companion_bytes = stage_prepared_input_filter(&mut full, 0, 0, 300.0, 2_000.0);
@@ -3933,7 +4021,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
         0,
         [-3.0, 0.0, 0.0, 0.0],
     );
-    stage_effect_bypass(&mut full, 2);
+    stage_observe_subscribe(&mut full, 2);
     assert_eq!(
         full.submit_prepared_commands(3, companion_bytes),
         RESULT_BACKPRESSURE
@@ -4197,23 +4285,12 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
         assert_eq!(success, 0, "stale {label} changed queue");
     }
 
-    // Fill an unrelated effect queue (track 1's console EQ; a matrix, fader or input value is a
-    // cell with no room to fill, #1312, #1346), then submit a valid prepared EQ edit plus a later
-    // record for the full queue. The unrelated full queue refuses the whole batch; after one
-    // render, the EQ edit recovers.
-    let bypass_track_1 = |host: &mut AudioWorkletEngineHost, index: usize| {
-        stage_command(
-            host,
-            index,
-            COMMAND_EFFECT_BYPASS,
-            RACK_CONSOLE,
-            255,
-            1,
-            0,
-            0,
-            0,
-            [1.0, 0.0, 0.0, 0.0],
-        );
+    // Fill an unrelated insert queue (track 1's compressor, with observation subscriptions; a
+    // matrix, fader or input value is a cell with no room to fill, #1312, #1346), then submit a
+    // valid prepared EQ edit plus a later subscription for the full queue. The unrelated full
+    // queue refuses the whole batch; after one render, the EQ edit recovers.
+    let subscribe_track_1 = |host: &mut AudioWorkletEngineHost, index: usize| {
+        stage_observe_subscribe_at(host, index, 1, 0);
     };
     let owner_snapshot = |host: &mut AudioWorkletEngineHost| {
         assert_eq!(
@@ -4234,11 +4311,11 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
             .success_count();
         (revision, success)
     };
-    let mut full = bank_effect_live_control_host(QUANTUM, 1);
-    bypass_track_1(&mut full, 0);
+    let mut full = bank_observed_insert_live_control_host(QUANTUM, 1);
+    subscribe_track_1(&mut full, 0);
     assert_eq!(full.submit_commands(1), RESULT_OK);
     stage_prepared_eq_parameter(&mut full, 0, 0, RACK_CONSOLE, 0, 4, -12.0);
-    bypass_track_1(&mut full, 1);
+    subscribe_track_1(&mut full, 1);
     assert_eq!(full.submit_prepared_commands(2, 104), RESULT_BACKPRESSURE);
     assert_eq!(full.command_report().reason, COMMAND_REASON_BACKPRESSURE);
     assert_eq!(full.command_report().rejected_index, 1);
@@ -4248,7 +4325,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
     assert_eq!(
         full.submit_prepared_commands(2, 104),
         RESULT_OK,
-        "the same mixed EQ/bypass batch recovers after the unrelated queue drains"
+        "the same mixed EQ/subscription batch recovers after the unrelated queue drains"
     );
     assert_eq!(full.command_report().admitted, 2);
     assert_eq!(owner_snapshot(&mut full).0, 1);
@@ -7356,23 +7433,22 @@ fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEn
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot")
 }
 
-/// A live-control host over [`solo_session`] whose track 0 also carries the command fixture's
-/// parametric EQ insert, so the session has an effect queue to fill: a fader, mute, matrix or
-/// input value is a latest-target cell with no room to overfill (#1312, #1346).
+/// A live-control host over [`solo_session`] whose track 0 also carries the observed compressor
+/// insert, with observation lanes bound, so the session has an insert queue to fill with
+/// observation subscriptions: a fader, mute, matrix or input value is a latest-target cell with no
+/// room to overfill (#1312, #1346).
 fn solo_host_with_insert(quantum: u32, tracks: usize) -> AudioWorkletEngineHost {
     let mut model =
         parse_session_json(&solo_session(quantum, tracks, &[])).expect("accepted solo session");
-    let effect = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
-        .expect("accepted command fixture")
-        .tracks[0]
+    model.tracks[0]
         .inserts
-        .effects[0]
-        .clone();
-    model.tracks[0].inserts.effects.push(effect);
+        .effects
+        .push(observed_compressor_insert());
     let document = canonical_session_json(&model).expect("canonical solo session with an insert");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_observation_taps: 4,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot with an insert")
@@ -7744,12 +7820,12 @@ fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
     );
 
     // One batch: soloing track 1 (which pass one applies to the host's solo state, and which owes
-    // track 0 a gate value) behind one more bypass record than track 0's insert queue can hold.
-    // The queue is a real one: a fader, mute or trim value is a cell with no room to overfill
-    // (#1312, #1346).
+    // track 0 a gate value) behind one more observation subscription than track 0's insert queue
+    // can hold. The queue is a real one: a fader, mute or trim value is a cell with no room to
+    // overfill (#1312, #1346).
     stage_solo(&mut refused, 0, 1, true, QUANTUM);
     for index in 0..=DEPTH as usize {
-        stage_effect_bypass(&mut refused, 1 + index);
+        stage_observe_subscribe(&mut refused, 1 + index);
     }
     assert_eq!(refused.submit_commands(DEPTH + 2), RESULT_BACKPRESSURE);
     assert_eq!(refused.command_report().reason, COMMAND_REASON_BACKPRESSURE,);

@@ -918,8 +918,8 @@ fn input_lane_cells(superseded: &LiveValuesSuperseded) -> (InputCells, InputRead
 /// The control-side producer half of one prepared live-control channel.
 ///
 /// Every half is a latest-target cell set (#1312, #1346): a write cannot fail, and render applies
-/// the last committed value of each cell. Each is an `Arc` shared by the producer and the reader,
-/// so either may drop first: the last owner frees the storage, on the control thread, since the
+/// the last committed value of each cell. Each is an `Arc` shared by the [`TrackControlProducer`] and the reader
+/// half, so either may drop first: the last owner frees the storage, on the control thread, since the
 /// render thread never drops a plan.
 pub struct TrackControlProducer {
     /// Session-stable track identity this channel addresses.
@@ -1163,6 +1163,14 @@ impl BuiltinBankProcessor {
             let Some(control) = control.as_mut() else {
                 continue;
             };
+            // `live` holds `MAXIMUM_BANK_LANES` terms and a bank never has more lanes, so every
+            // lane that holds a reader has its term. The `get_mut` only keeps a slice index (a
+            // panic edge) out of the render call graph; a lane without a term would skip its whole
+            // drain, acknowledged values and all, so a debug build refuses it outright.
+            debug_assert!(
+                lane < MAXIMUM_BANK_LANES,
+                "a bank lane with a reader has a symmetry term"
+            );
             let Some(witness) = live.get_mut(lane) else {
                 continue;
             };
@@ -14331,9 +14339,12 @@ mod tests {
     /// applies after it; lane 1 holds a trim. Admission would refuse a NaN trim; it stands in for
     /// any apply that fails.
     ///
-    /// Red mutation: let the drain stop at the first refused apply (the carry arm's `Err(_) if
-    /// carry` count-and-continue replaced by a return) -> lane 0's inversion and lane 1's trim stay
-    /// unapplied and the trims never move.
+    /// Red mutation: let the reader's `drain` stop applying after the first refused apply (apply
+    /// only while `first_error` is still `Ok`) -> the block arm leaves lane 0's inversion and
+    /// lane 1's trim unapplied. `drain_for_carry` applying nothing turns the carry arm red. The
+    /// carry arm's `Err(_) if carry` count-and-continue is not what this test defends: replacing
+    /// it with a return stays green, because the drain applies every value either way and
+    /// `drain_for_carry` reports a returned error as one refusal, which is the count here.
     #[test]
     fn the_input_drains_apply_every_value_past_a_refused_one() {
         // A `Vec`, so a target without AVX2 iterates one width without a single-element loop.
@@ -14630,7 +14641,6 @@ mod tests {
     /// the oldest value instead of the newest -> the bits differ from the twin's.
     #[test]
     fn many_input_edits_before_one_block_apply_the_last_and_count_each_replaced_value() {
-        let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");
         let hpf = |index: usize| {
             let pair =
                 builtins::prepare_input_filter_pair(48_000, 100.0 + 10.0 * index as f32, 8_000.0)
@@ -14644,7 +14654,6 @@ mod tests {
             db: -1.0 - index as f32,
             smoothing_samples: 16,
         };
-        let _ = prepared;
         for backend in input_test_backends() {
             let many = LiveValuesSuperseded::new();
             let (mut processor, mut cells, mut gate) = live_input_processor(backend, &many);
@@ -14727,6 +14736,133 @@ mod tests {
                 "{backend:?}: the second block applied revision 2"
             );
             assert_eq!(superseded.get(), 0, "no value was replaced unread");
+        }
+    }
+
+    /// Each builtin bank reports exactly the lanes that hold a reader (#1346; the lane mask
+    /// `rack`'s `BankChain::new` slot guard reads, #1504 D3). The guard's first disjunct is
+    /// `live_lanes() == 0`, so a bank that reports 0 for a lane that does drain makes it vacuous for
+    /// that bank, and nothing else in the tree notices: no reachable builtin configuration can
+    /// make the guard fire.
+    ///
+    /// Four shapes: the input bank, the fader bank and the matrix bank, each with readers on lanes
+    /// 0 and 2, and the fused pair (fader readers on lanes 0 and 2, matrix readers on lanes 1 and
+    /// 2), whose mask is the union of its two stages. A bank with no reader reports 0 (an
+    /// `input_lane: false` strip).
+    ///
+    /// Red mutation: make any one of the four `live_lanes` return 0 -> that shape's assertion
+    /// fails; report every lane instead of the readers' lanes -> the exact masks fail; report one
+    /// stage of the fused pair instead of the union -> `0b111` fails.
+    #[test]
+    fn every_builtin_bank_reports_exactly_the_lanes_that_hold_a_reader() {
+        fn sparse<T>(lanes: usize, readers: Vec<(usize, T)>) -> Box<[Option<T>]> {
+            let mut controls: Vec<Option<T>> = (0..lanes).map(|_| None).collect();
+            for (lane, reader) in readers {
+                controls[lane] = Some(reader);
+            }
+            controls.into_boxed_slice()
+        }
+        for backend in input_test_backends() {
+            let width = BankWidth::for_backend(backend).expect("a banking backend");
+            let lanes = width.lanes() as usize;
+            let superseded = LiveValuesSuperseded::new();
+            let parameters = vec![BuiltinParameters::default(); 4];
+            let input = |controls: Box<[Option<InputReader>]>| BuiltinBankProcessor {
+                bank: BuiltinInputBank::new(
+                    backend,
+                    width,
+                    (0..4)
+                        .map(|_| {
+                            BuiltinChain::new(48_000, BuiltinParameters::default())
+                                .expect("chain")
+                                .into_input_builtins()
+                        })
+                        .collect(),
+                )
+                .expect("input bank"),
+                controls,
+                live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+                process_calls: 0,
+                frames_processed: 0,
+            };
+            let fader = |controls: Box<[Option<FaderReader>]>| FaderBankProcessor {
+                bank: BuiltinFaderBank::new(backend, width, parameters.clone())
+                    .expect("fader bank"),
+                controls,
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            };
+            let matrix = |controls: Box<[Option<MatrixReader>]>| MatrixBankProcessor {
+                bank: BuiltinMatrixBank::new(
+                    backend,
+                    width,
+                    parameters.iter().map(|p| (p.matrix, 0)).collect(),
+                )
+                .expect("matrix bank"),
+                controls,
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            };
+
+            let input_reader = || input_lane_cells(&superseded).1;
+            let fader_reader = || fader_lane(&superseded).1;
+            let matrix_reader = || matrix_lane(&superseded).1;
+
+            assert_eq!(
+                input(sparse(
+                    lanes,
+                    vec![(0, input_reader()), (2, input_reader())]
+                ))
+                .live_lanes(),
+                0b101,
+                "{backend:?}: the input bank"
+            );
+            assert_eq!(
+                fader(sparse(
+                    lanes,
+                    vec![(0, fader_reader()), (2, fader_reader())]
+                ))
+                .live_lanes(),
+                0b101,
+                "{backend:?}: the fader bank"
+            );
+            assert_eq!(
+                matrix(sparse(
+                    lanes,
+                    vec![(0, matrix_reader()), (2, matrix_reader())]
+                ))
+                .live_lanes(),
+                0b101,
+                "{backend:?}: the matrix bank"
+            );
+            let pair = make_fader_matrix(
+                Box::new(fader(sparse(
+                    lanes,
+                    vec![(0, fader_reader()), (2, fader_reader())],
+                ))),
+                Box::new(matrix(sparse(
+                    lanes,
+                    vec![(1, matrix_reader()), (2, matrix_reader())],
+                ))),
+            );
+            let Ok(pair) = pair else {
+                panic!("{backend:?}: an eligible pair");
+            };
+            assert_eq!(
+                pair.live_lanes(),
+                0b111,
+                "{backend:?}: the fused pair is the union of its two stages"
+            );
+
+            // A strip prepared without its live lane holds no reader: nothing to drain.
+            assert_eq!(input(sparse::<InputReader>(lanes, vec![])).live_lanes(), 0);
+            assert_eq!(fader(sparse::<FaderReader>(lanes, vec![])).live_lanes(), 0);
+            assert_eq!(
+                matrix(sparse::<MatrixReader>(lanes, vec![])).live_lanes(),
+                0
+            );
         }
     }
 
