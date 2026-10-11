@@ -3332,7 +3332,8 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     // REALTIME_POLICY_BEGIN
     /// Move the sources the installed [`GraphCarryProgram`] names out of the predecessor graph
-    /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276),
+    /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276)
+    /// and the fader, mute and matrix stages [`install_builtin_strip_carry`] names (issue #1277),
     /// at the swap block: a bounded series of swaps and fixed-size lane copies, nothing allocated
     /// or freed.
     ///

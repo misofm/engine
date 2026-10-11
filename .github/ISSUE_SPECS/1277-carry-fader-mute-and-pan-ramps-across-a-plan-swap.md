@@ -268,3 +268,73 @@ tests are in capi. Root ruled option (b): an engine method that stamps on the pl
 Stopped before any edit, on a spec gap: preparation had neither `r` nor the gate handle in the
 authorized paths (see Amendment 3's trigger). No code was written. Root ruled option (b) and issued
 Amendment 3.
+
+### Attempt 2
+
+Implemented D1-D11, Amendments 1-3, gates 1-8. Commits on `codex/d15-stream-a2`: spec amendment
+`3e0449ae5`, `stamp_held_gate` `7cfcb20dc`, carry and join `8e557130f`, gates 1-6 tests
+`b7e86e41b`, gate 8 `4c5b1307d`, chain-walk fix `78eed509b`, plus the closing record commit.
+
+Design notes:
+
+- Lane state: `FaderLaneState` and `MatrixLaneState` in `crates/builtins` (`export_lane`,
+  `import_lane` on `BuiltinFaderBank` and `BuiltinMatrixBank`). The fused stage is the two inner
+  banks, so it carries both halves from a fused predecessor only (D9).
+- Graph: `BuiltinStripOwner`, `BuiltinStripStage`, `GraphStripMove`, `builtin_strip_lanes`,
+  `install_builtin_strip_carry`; the swap block checks every strip move before anything moves,
+  applies each predecessor bank's pending cells once with `LiveSnapshot::ALL`
+  (`drain_for_carry`), then imports.
+- Host-core: the per-owner record functions and `LiveRamps` moved from `live_delta.rs` (gated by
+  `control-provider`) to `prepare.rs`, which needs them on every build; `live_delta.rs`
+  re-exports `LiveRamps` and calls them. `PlanStateInventory` gained `strip_stages` rows and the
+  restart set (`restarted_strips()` reads it, because `PreparedHost` has exhaustive destructures
+  in `crates/capi/tests`). The restart set lists every strip present in both plans with a stage that
+  does not carry: a prepared difference, a different bank form or a different control kind.
+- The strip moves' table is checked against the graph cap after bind, at its exact length, because
+  which strips carry is known only when both plans' lanes are.
+- Test seams `test_only_prepare_host_runtime_between_render_calls_on` and
+  `..._successor_on` (reachable as `host_core::prepare::..`; no `lib.rs` edit).
+- Existing tests re-pinned individually, each for one reason: six exact `carry_program_retained_bytes`
+  expectations in `successor_swap.rs` (a carried strip adds a fader and a matrix move of
+  `size_of::<GraphStripMove>()` bytes each).
+- Not done: the realtime-policy floors (`check-realtime-policy.sh`, 96 regions) were not raised;
+  the tree now has 111 marked regions in 27 files. This spec does not name the standing floor
+  exception.
+
+Gates run (all green): `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core
+--features builtins-compiler/test-support,graph/test-support,host-core/test-support`;
+`cargo test --locked -p capi`; `cargo test --locked -p console-workload`; release `audit`
+builds, `trace-builtins-audit.sh`, `trace-builtins-graph-audit.sh`, `audit capi` (0 allocations,
+0 syscalls); `check-realtime-policy.sh`, `check-workspace-policy.sh`, `check-cross-targets.sh`,
+`check-capi-abi.sh`; `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; the worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`).
+
+Mutation evidence (defect applied: red; reverted: green):
+
+| Defect | Turned red |
+| --- | --- |
+| `stamp_held_gate` stamps `revision + 1` | engine `a_held_gate_stamps_on_the_pin_the_handle_inherits`, `the_handle_inherits_the_open_stamp_of_a_held_gate` |
+| Fader import drops `remaining` | `a_ramp_in_flight_finishes_after_the_swap_*`, builtins `a_fader_lane_imported_mid_fade_*` |
+| Fader import drops `muted` / `fader_gain` | builtins `a_fader_lane_imported_mid_fade_*` only; host-level stays green because a successor prepared from the base already holds the same flag |
+| Matrix import drops `remaining`, `ramp.target`, or skips `sync_settled` | `a_ramp_in_flight_*` (remaining), builtins `a_matrix_lane_imported_mid_ramp_*` (all three) |
+| `drain_for_carry` applies nothing | `a_ramp_in_flight_*` |
+| Export before `apply_pending` | `a_ramp_in_flight_*` (the first draft with `eq3` stayed green; the moved strip is now the first lane of the first bank) |
+| Successor cells applied before the import | `a_live_difference_retargets_the_carried_stage_*` |
+| Live difference treated as prepared; retargets not written | `a_live_difference_retargets_the_carried_stage_*` |
+| VCA treated as live | `a_prepared_change_restarts_the_stage_*` (the first draft ran on a plan without cells and stayed green) |
+| Restart set lists added strips | `strip_state_survives_a_swap_*` |
+| Fused stage does not carry | `a_ramp_in_flight_*` (fused form) |
+| Cross-form pair paired; control kind ignored | `a_cross_form_pair_does_not_carry`; `a_changed_control_kind_carries_no_strip_stage` |
+| Entry revision check removed | `a_successor_revision_its_gate_cannot_stamp_is_refused` |
+| Allocation in `carry_strip_lanes` | `the_strip_carry_allocates_and_frees_nothing` |
+| Stamp taken with no retarget | `a_preparation_without_a_retarget_stamps_nothing` |
+| Predecessor lane taken from the successor's location | `strip_state_survives_a_swap_*` |
+| Chain walk stops at the first non-builtin slot | `a_strip_behind_an_effect_still_carries_at_eight_lanes`, and capi `double_live_oracle_drives_exact_and_one_below_c_caps` |
+| Last retargets kept and re-written into the next successor of the same revision | capi `a_refused_rebuild_with_a_carry_retarget_is_never_reused` |
+
+Test value: `a_strip_behind_an_effect_still_carries_at_eight_lanes` catches a chain walk that
+stops at an effect slot, which no effect-free session shows (found first by capi's double-live
+oracle). The `a_retarget_leaves_its_revision_open_*` draft was deleted: the engine test already
+catches the only defect that could turn it red.
