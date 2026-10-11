@@ -63,7 +63,7 @@ at `:2630,2632,2636,2640` (`32`, `24`, `+ 8`).
 ## MINOR
 
 **m1. D3 has a test value, but the attempt does not record it. It catches caller drift, not worklet
-behavior.** `.github/ISSUE_SPECS/1491-...md:163` says only that D3 "holds that the five callers
+behavior.** `2a589d360:.github/ISSUE_SPECS/1491-make-the-boot-contract-red-when-the-worklet-skips-spectrum-collection-staging.md:163` says only that D3 "holds that the five callers
 without a collection stage nothing". I could not find a plausible worklet defect that turns D3 red.
 The worklet calls `..._collection_request_ptr` only when options carry a collection. A mutated
 `hasSpectrumCollection` that also accepts `undefined` returns early from

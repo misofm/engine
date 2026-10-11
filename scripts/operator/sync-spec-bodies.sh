@@ -20,7 +20,7 @@
 # DIR argument (--backup-dir, --reconcile-dir, --reviewed).
 #
 # Classes (per selected spec, see the "Amendment 1" section of
-# .github/ISSUE_SPECS/1445-sync-edited-issue-specs-to-their-github-bodies-with-a-checked-operator-script.md):
+# 2a589d360:.github/ISSUE_SPECS/1445-sync-edited-issue-specs-to-their-github-bodies-with-a-checked-operator-script.md):
 #   closed-skipped  the issue is not OPEN; never edited
 #   no-issue        no issue has that number; never edited
 #   oversize        the source blob is above the byte ceiling, or its title is above 256 characters,

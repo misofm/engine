@@ -777,9 +777,9 @@ and replaces "(c) #1261 and #1262 then report the bounded tail, never `Infinite`
 
 | slice | issue | title | spec |
 |---|---|---|---|
-| A1 | #1464 | Carry every node's tail bound in one node-neutral struct | `.github/ISSUE_SPECS/1464-carry-every-node-s-tail-bound-in-one-node-neutral-struct.md` |
-| A2 | #1465 | State a fixed input section's decay, gains and flush stall | `.github/ISSUE_SPECS/1465-state-a-fixed-input-section-s-decay-gains-and-flush-stall.md` |
-| B1 | #1466 | Certify the live input section's decay, peak gain and flush stall | `.github/ISSUE_SPECS/1466-certify-the-live-input-section-s-decay-peak-gain-and-flush-stall.md` |
-| B2 | #1467 | Derive the live input section's tail gain and state its composition | `.github/ISSUE_SPECS/1467-derive-the-live-input-section-s-tail-gain-and-state-its-composition.md` |
+| A1 | #1464 | Carry every node's tail bound in one node-neutral struct | `2a589d360:.github/ISSUE_SPECS/1464-carry-every-node-s-tail-bound-in-one-node-neutral-struct.md` |
+| A2 | #1465 | State a fixed input section's decay, gains and flush stall | `2a589d360:.github/ISSUE_SPECS/1465-state-a-fixed-input-section-s-decay-gains-and-flush-stall.md` |
+| B1 | #1466 | Certify the live input section's decay, peak gain and flush stall | `2a589d360:.github/ISSUE_SPECS/1466-certify-the-live-input-section-s-decay-peak-gain-and-flush-stall.md` |
+| B2 | #1467 | Derive the live input section's tail gain and state its composition | `2a589d360:.github/ISSUE_SPECS/1467-derive-the-live-input-section-s-tail-gain-and-state-its-composition.md` |
 | C | #1379 | Define how node tails compose through gain in the graph extent | this spec |
 | G_p | #1468 | Tighten the fixed input section's peak gain past the cascade triangle inequality | `.github/ISSUE_SPECS/1468-tighten-the-fixed-input-section-s-peak-gain-past-the-cascade-triangle-inequality.md` |

@@ -1,7 +1,7 @@
 # Seamless plan swap, phase 1: verdicts
 
 Phase 1 of *Swap a rebuilt plan without an audio gap* (#1269,
-`.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md`), built on the batch branch
+`2a589d360:.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md`), built on the batch branch
 `codex/seamless-swap` from `41517fc35`. This folder keeps each slice's adversarial verdicts as the
 verifier wrote them; the verifiers' scratch logs and exports are not kept. Each slice's evidence
 and decision record is its spec's Attempt record; the slices closed with PR #1299, so their specs

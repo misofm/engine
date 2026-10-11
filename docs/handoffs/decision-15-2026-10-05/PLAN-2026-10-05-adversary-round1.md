@@ -40,7 +40,7 @@ architectural decision that changes the order of half the work.
   answers the draft now changes (see C2, C3, C5).
 - **#1290-#1297 must be re-planned after the C4/C6 decision** (see C6). B2's Rust replace method
   is still useful as the browser's rebuild primitive, but B3 and B3b (three-way merge of document
-  and live overlays, `.github/ISSUE_SPECS/1291-…md`) exist only because the browser has no
+  and live overlays, `2a589d360:.github/ISSUE_SPECS/1291-keep-browser-live-strip-state-across-a-session-replacement.md`) exist only because the browser has no
   committed model. Under one control plane the committed model *is* the merge result, exactly as
   P1 already argues for the C ABI (`1269-…md` P1, "Why the committed model"). Doing B3/B3b now and
   #1057 later is the "fix it later" pattern the owner ruled out.

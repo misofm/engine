@@ -77,7 +77,7 @@ No BLOCKER, MAJOR or MINOR finding.
   that `rm -rf` cannot remove, so this cannot happen in practice, and the code that was there before
   had the same behaviour.
 - **NIT 2 (outside this issue's paths)**,
-  `.github/ISSUE_SPECS/1417-refuse-a-c-allocator-name-anywhere-in-an-unmangled-worklet-symbol.md:42,79`.
+  `2a589d360:.github/ISSUE_SPECS/1417-refuse-a-c-allocator-name-anywhere-in-an-unmangled-worklet-symbol.md:42,79`.
   These lines cite `scripts/test-web-audioworklet.sh:41` for the call-graph self-test. After this commit
   that line is `:47`. The spec records the state at its own commit, so this is a note for whoever
   edits #1417 next.

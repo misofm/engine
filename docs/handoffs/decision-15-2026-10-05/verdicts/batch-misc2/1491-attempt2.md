@@ -51,7 +51,7 @@ None.
 
 ## NIT
 
-- **n1.** `.github/ISSUE_SPECS/1491-...md:42-55`: the decision text still says "each 24-byte
+- **n1.** `2a589d360:.github/ISSUE_SPECS/1491-make-the-boot-contract-red-when-the-worklet-skips-spectrum-collection-staging.md:42-55`: the decision text still says "each 24-byte
   entry" (D1) and "the worklet's constants" (D2). The attempt-2 record correctly says that the
   values come from the generated layout. If the spec is edited again, change D1 and D2 to name the
   generated layout as the source. This does not change behavior.

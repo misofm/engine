@@ -8,7 +8,7 @@ that touches `crates/source`.
   parent `1338b063c`, from the worktree `/home/bl/misofm/wt-swap`. I exported it with `git archive`
   to `/tmp/claude-1002/v1274/attempt1/` and built and tested it there.
 - **Spec:** `.github/ISSUE_SPECS/1274-hold-an-anchored-source-seek-until-its-render-sample.md`.
-- **Umbrella:** P4 of `1269-swap-a-rebuilt-plan-without-an-audio-gap.md`.
+- **Umbrella:** P4 of #1269 (`git show 2a589d360:.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md`).
 - **Files changed:** six. The slice spec, `crates/source/src/lib.rs`, `crates/host-core/src/source.rs`,
   `crates/host-core/tests/successor_swap.rs`, and the two out-of-path files covered in MINOR-2.
 - **Commit hygiene:** the commit uses exact paths, ends with the attribution line, and contains no

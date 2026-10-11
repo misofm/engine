@@ -52,7 +52,7 @@ met. The merge does not conflict with #1300.
 ### MINOR
 
 1. **The soundness wording is not exact** (`crates/soft-clip/src/lib.rs:723-728`; the spec
-   carries the same text at `.github/ISSUE_SPECS/1300-...md:66-71` and `:114-116`). I confirm the
+   carries the same text at `2a589d360:.github/ISSUE_SPECS/1300-let-soft-clip-restore-its-own-non-finite-history.md:66-71` and `:114-116`). I confirm the
    earlier verifier's note (a). The comment says every non-finite word "either reaches the output
    ... or ages out unread within 31 samples", and that "a crafted payload gains nothing beyond
    what the effect's own input can cause". A scratch probe (`logs/zz_probe.rs`, not committed)

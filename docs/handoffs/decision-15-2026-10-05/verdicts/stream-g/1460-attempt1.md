@@ -44,7 +44,7 @@ None.
 
 **m1. Gate 4's evidence sentence is broader than the review behind it.**
 
-- *Where.* `.github/ISSUE_SPECS/1460-...md:166-167`: "No render-owned struct holds
+- *Where.* `2a589d360:.github/ISSUE_SPECS/1460-keep-only-render-read-effect-fields-in-the-render-node-table.md:166-167`: "No render-owned struct holds
   `PreparedEffectMetadata`: `NodeKind` and `LiveControlEffect` hold `EffectNode`".
 - *Why it is false.* Render-owned structs outside `runtime.rs` hold a `PreparedEffectMetadata` by
   value, for example:

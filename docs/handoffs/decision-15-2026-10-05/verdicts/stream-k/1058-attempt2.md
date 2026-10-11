@@ -264,7 +264,7 @@ No tests were added or changed. This is a docs-only research note with draft spe
 
 - **Gate 4.** `git diff --name-only 45c5a1819 50fb23b5f` lists only
   `docs/handoffs/stored-automation-1058/` (the README and drafts) and
-  `.github/ISSUE_SPECS/1058-research-render-stored-session-automation-in-the-engine-identically-on-every-pla.md`.
+  `2a589d360:.github/ISSUE_SPECS/1058-research-render-stored-session-automation-in-the-engine-identically-on-every-pla.md`.
   PASS.
 - **Policy scripts.** I ran them in a `git archive` export of `50fb23b5f` at
   `/tmp/claude-1002/v1058/tree`, made into a git repository, and deleted it afterwards:
