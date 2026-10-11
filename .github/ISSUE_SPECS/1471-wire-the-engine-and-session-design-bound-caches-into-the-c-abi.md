@@ -114,4 +114,26 @@ bound. The prepared plans, the reports and every rendered bit are the same as wi
 
 - #1457 (stream G), #1309 (stream B, batch 1, on `main`).
 
+## Amendment 1 (root, 2026-10-11): seed each session from the compile's journal
+
+The dfg coordinator brought gate 1's seeding question before implementation: `InputBoundCache::insert`
+clears the whole cache when full and a hit inserts nothing, so a copy of the engine's cache taken
+after a compile that cleared it mid-way lacks the designs hit or inserted before the clear, and the
+session's first rebuild computes them again. Root chose option (1), the journal:
+
+- **D1 (amended).** Each session's cache is seeded with "the designs that compile used, journaled at
+  the time of use, each with its stored charge" (so a session rebuild's results stay a pure function
+  of the session under #1457's stored-charge rule), in place of a copy of the engine's cache after
+  that compile. D2 does not change: the parameter stays `Option<&mut InputBoundCache>`.
+- **Named exception.** A `begin_journal`/`take_journal` pair on `InputBoundCache` in
+  `crates/builtins/src/tail.rs` (with its unit tests): while a journal is open, every design a
+  preparation uses, hit or computed (a `ChargeAbove` entry included), is also recorded at the time of
+  use, so no clear loses it; `take_journal` returns exactly those designs as an `InputBoundCache`.
+  The C ABI compile opens the journal on the engine's cache, prepares, and seeds the session from
+  `take_journal`.
+- **Gates.** Gate 1 passes with an engine cache that clears mid-compile: a test fills the engine's
+  cache to just below its cap, compiles, then rebuilds and asserts zero recomputed designs and zero
+  walked frames; a mutant that seeds from the post-compile copy turns it red. The per-session seed's
+  memory is measured and recorded beside gate 4.
+
 ## Attempt record
