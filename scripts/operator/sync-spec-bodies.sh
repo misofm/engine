@@ -7,8 +7,8 @@
 # to a backup directory and edits that issue's body (and title, when it differs).
 #
 # Usage:
-#   sync-spec-bodies.sh [--check] SELECTION [--reconcile-dir DIR]
-#   sync-spec-bodies.sh --apply --backup-dir DIR SELECTION [--reconcile-dir DIR]
+#   sync-spec-bodies.sh [--check] SELECTION [--reconcile-dir DIR] [--reviewed DIR]
+#   sync-spec-bodies.sh --apply --backup-dir DIR SELECTION [--reconcile-dir DIR] [--reviewed DIR]
 # SELECTION is exactly one of: --all | --range A..B | ISSUE_NUMBER...
 #
 # The source of every spec is the blob on refs/remotes/origin/main, read with `git cat-file`,
@@ -24,8 +24,14 @@
 #                   or its title has a control character or leading or trailing whitespace
 #   in-sync         the body matches the source blob (one trailing newline allowed) and the title
 #                   equals the spec's title (or the spec has no title)
-#   fast-forward    not in-sync, but body and title are the source's or an earlier committed state
+#   fast-forward    not in-sync, but body and title are the source's or an earlier committed state;
+#                   a body that is such a blob with its H1 and the blank line after it removed
+#                   counts as a body match too (Amendment 2, A10), for fast-forward only, never in-sync
 #   unmatched       anything else; never edited (--reconcile-dir writes the evidence for it)
+# --reviewed DIR (Amendment 2, A11) takes a directory that an earlier --reconcile-dir run wrote. An
+# unmatched issue named explicitly on the command line (never through --all or --range) becomes
+# `fast-forward reviewed` when its current GitHub body is byte-equal to DIR/<n>.github.md and its
+# current title is byte-equal to DIR/<n>.github-title.txt. The write is unchanged.
 # --apply writes the fast-forward set only. It never closes, reopens or comments, and it handles
 # every body through files, never through an argument, an environment variable or a command
 # substitution, so bytes and trailing newlines are exact.
@@ -37,7 +43,7 @@
 # Every gh call carries `--repo OWNER/REPO`, derived from `git remote get-url origin` (github.com
 # URLs only; the script exits 2 if it cannot derive one), and GH_REPO is overwritten with the same
 # value, so neither the environment nor `gh repo set-default` can redirect a read or a write.
-# --backup-dir and --reconcile-dir are resolved against the caller's directory before the script
+# --backup-dir, --reconcile-dir and --reviewed are resolved against the caller's directory before the script
 # changes into the repository root. The oversize class also holds a title that GitHub could
 # normalize (a control character or CR, or leading or trailing whitespace); it is never edited.
 #
@@ -54,7 +60,7 @@ die2() {
 }
 
 usage() {
-    printf 'usage: %s [--check | --apply --backup-dir DIR] [--reconcile-dir DIR] (--all | --range A..B | N...)\n' "$0" >&2
+    printf 'usage: %s [--check | --apply --backup-dir DIR] [--reconcile-dir DIR] [--reviewed DIR] (--all | --range A..B | N...)\n' "$0" >&2
     exit 2
 }
 
@@ -65,6 +71,7 @@ select_all=
 range=
 backup_dir=
 reconcile_dir=
+reviewed_dir=
 numbers=()
 while (($#)); do
     case $1 in
@@ -81,6 +88,11 @@ while (($#)); do
     --reconcile-dir)
         (($# >= 2)) || usage
         reconcile_dir=$2
+        shift
+        ;;
+    --reviewed)
+        (($# >= 2)) || usage
+        reviewed_dir=$2
         shift
         ;;
     --all) select_all=1 ;;
@@ -117,6 +129,10 @@ abs_path() {
 }
 [[ -z $backup_dir ]] || backup_dir=$(abs_path "$backup_dir")
 [[ -z $reconcile_dir ]] || reconcile_dir=$(abs_path "$reconcile_dir")
+[[ -z $reviewed_dir ]] || reviewed_dir=$(abs_path "$reviewed_dir")
+if [[ -n $reviewed_dir ]]; then
+    [[ -d $reviewed_dir ]] || die2 "--reviewed must be an existing directory: $reviewed_dir"
+fi
 if [[ -n $reconcile_dir ]]; then
     [[ ! -e $reconcile_dir && ! -L $reconcile_dir ]] || die2 "--reconcile-dir must not exist: $reconcile_dir"
 fi
@@ -128,7 +144,7 @@ if [[ -n ${SYNC_SPEC_BODIES_TEST_CEILING-} ]]; then
     ceiling=$((10#$SYNC_SPEC_BODIES_TEST_CEILING))
 fi
 
-for tool in awk cat cmp cp git gh head jq mktemp sort wc; do
+for tool in awk cat cmp cp git gh head jq mktemp sort tail wc; do
     command -v "$tool" >/dev/null 2>&1 || die2 "required tool is unavailable: $tool"
 done
 repo=$(git rev-parse --show-toplevel) || die2 'not inside a git checkout'
@@ -272,6 +288,40 @@ body_in_history() { # number bodyfile
     return 1
 }
 
+# h1_removed_matches BODY BLOB: A10. The blob minus its first two lines, defined only when line 1 is
+# `# <title>` (A2, with the same title sanity as the classification: at most TITLE_MAX characters, no
+# control character, no leading or trailing whitespace) and line 2 is empty. The GitHub body matches
+# it with the one-trailing-newline allowance of matches_blob. Used for fast-forward only.
+h1_removed_matches() {
+    local first second nl chars
+    first=$(head -n1 "$2")
+    [[ $first =~ ^'# '(.+)$ ]] || return 1
+    printf '%s' "${BASH_REMATCH[1]}" >"$work/h1-title"
+    nl=$(wc -l <"$2")
+    ((nl >= 2)) || return 1
+    second=$(head -n2 "$2" | tail -n1)
+    [[ -z $second ]] || return 1
+    tail -n +3 "$2" >"$work/h1-removed"
+    matches_blob "$1" "$work/h1-removed" || return 1
+    chars=$(jq -R length "$work/h1-title")
+    ((chars <= TITLE_MAX)) || return 1
+    ! title_unsafe "$work/h1-title"
+}
+
+# body_in_history_h1_removed NUMBER BODYFILE SRCFILE: the body is the H1-removed form of the source
+# blob or of any blob in the issue's history.
+body_in_history_h1_removed() {
+    local blob
+    h1_removed_matches "$2" "$3" && return 0
+    while IFS=$'\t' read -r _ blob _ _; do
+        git cat-file blob "$blob" >"$work/hist-candidate"
+        if h1_removed_matches "$2" "$work/hist-candidate"; then
+            return 0
+        fi
+    done < <(history_of "$1")
+    return 1
+}
+
 title_in_history() { # number titlefile
     local blob line
     while IFS=$'\t' read -r _ blob _ _; do
@@ -355,6 +405,7 @@ reconcile() { # number dir: sets near_* and writes the evidence when --reconcile
     if [[ -n $reconcile_dir ]]; then
         mkdir -p "$reconcile_dir"
         cp "$d/body.gh" "$reconcile_dir/$n.github.md"
+        cp "$d/title.gh" "$reconcile_dir/$n.github-title.txt"
         cp "$d/src.md" "$reconcile_dir/$n.source.md"
         cp "$d/h/$near_blob" "$reconcile_dir/$n.nearest.md"
         printf 'nearest blob %s commit %s path %s; github-vs-nearest %s, nearest-vs-source %s\n' \
@@ -370,13 +421,23 @@ title_unsafe() {
     [[ $t =~ [[:cntrl:]] || $t =~ ^[[:space:]] || $t =~ [[:space:]]$ ]]
 }
 
+# reviewed_unchanged NUMBER: A11. Only for an issue named explicitly on the command line, and only
+# while the GitHub body and title are still byte-equal to what the reviewer saw (files that an
+# earlier --reconcile-dir run wrote).
+reviewed_unchanged() {
+    local n=$1 d="$work/$1"
+    [[ -n $reviewed_dir ]] && ((${#numbers[@]} > 0)) || return 1
+    [[ -f $reviewed_dir/$n.github.md && -f $reviewed_dir/$n.github-title.txt ]] || return 1
+    cmp -s "$d/body.gh" "$reviewed_dir/$n.github.md" && cmp -s "$d/title.gh" "$reviewed_dir/$n.github-title.txt"
+}
+
 # --- classification ----------------------------------------------------------------------------------
 cnt_in_sync=0 cnt_fast_forward=0 cnt_closed_skipped=0 cnt_no_issue=0 cnt_oversize=0 cnt_unmatched=0
 oversize_why=
 : >"$work/ff.list"
 
 classify() { # number path
-    local n=$1 path=$2 d="$work/$n" class size title_chars title_bad= body_ok= title_ok= has_title= why
+    local n=$1 path=$2 d="$work/$n" class size title_chars title_bad= body_ok= title_ok= has_title= why tag=
     mkdir -p "$d"
     read_source "$path" >"$d/src.md"
     local rc=0
@@ -427,6 +488,9 @@ classify() { # number path
                 if [[ -z $body_ok ]] && body_in_history "$n" "$d/body.gh"; then
                     body_ok=1
                 fi
+                if [[ -z $body_ok ]] && body_in_history_h1_removed "$n" "$d/body.gh" "$d/src.md"; then
+                    body_ok=1
+                fi
                 if [[ -z $title_ok ]] && title_in_history "$n" "$d/title.gh"; then
                     title_ok=1
                 fi
@@ -434,6 +498,10 @@ classify() { # number path
                     class=fast-forward
                 else
                     class=unmatched
+                    if reviewed_unchanged "$n"; then
+                        class=fast-forward
+                        tag=' reviewed'
+                    fi
                 fi
             fi
         fi
@@ -464,7 +532,7 @@ classify() { # number path
     elif [[ $class == oversize ]]; then
         printf '%s oversize%s\n' "$n" "$oversize_why"
     else
-        printf '%s %s\n' "$n" "$class"
+        printf '%s %s%s\n' "$n" "$class" "$tag"
     fi
 }
 

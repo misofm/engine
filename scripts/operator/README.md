@@ -44,7 +44,11 @@ read-only and prints one class per spec; `--apply --backup-dir DIR` writes only 
 body and title are an earlier committed state of the spec, saving each issue's old raw JSON first.
 Every `gh` call carries `--repo OWNER/REPO` derived from `git remote get-url origin` (github.com URLs
 only; the script refuses otherwise, and `GH_REPO` cannot redirect it), and a relative `--backup-dir` or
-`--reconcile-dir` is resolved against the directory you run it from. Its header lists the classes and
+`--reconcile-dir` is resolved against the directory you run it from. A body that is an earlier committed
+spec with its title line and the blank line after it removed counts as a match for `fast-forward`
+(never `in-sync`). `--reviewed DIR` takes the directory of an earlier `--reconcile-dir` run: an
+`unmatched` issue named on the command line becomes `fast-forward reviewed` while its GitHub body and
+title still equal the reviewed files byte for byte (never through `--all` or `--range`). Its header lists the classes and
 exit codes, and `test-sync-spec-bodies.sh` is its self-test (a stub
 `gh`, a local bare `origin`, no network). Editing this README selects the `dsp-research` suite on the
 run that carries it (`scripts/ci-path-router.py` lists this file as a `dsp-research` input); that is

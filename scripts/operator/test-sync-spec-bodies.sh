@@ -548,6 +548,163 @@ reset_issues
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=log.showRoot GIT_CONFIG_VALUE_0=false run --check 10
 assert 'root-commit-blobs-are-history-despite-showroot-false' has_line '10 fast-forward'
 
+# --- R: a body without its H1 (A10), and a reviewed body (A11) -----------------------------------------
+# A third repository, so the counts above stay as they are. Issues are served from the stub; only the
+# numbers named here are selected, except where --all or --range is the point.
+O3=$T/origin3.git
+R3=$T/repo3
+S3=$R3/.github/ISSUE_SPECS
+git init -q --bare -b main "$O3"
+git init -q -b main "$R3"
+git -C "$R3" remote add origin "$O3"
+mkdir -p "$S3"
+printf '# Forty\n\nforty v1\nbody\n' >"$S3/40-a.md"
+printf '# Forty-one\n\nforty-one v1\nx\n' >"$S3/41-a.md"
+printf '# Forty-two\n\nforty-two only\n' >"$S3/42-a.md"
+printf '# Forty-three\n\nforty-three v1\nline\n' >"$S3/43-a.md"
+printf '# Forty-four\n\nforty-four v1\n' >"$S3/44-a.md"
+printf '# Forty-five\nsecond line\nmore\n' >"$S3/45-a.md"
+printf 'no heading\n\nfoo\n' >"$S3/46-a.md"
+printf '# Forty-eight \n\nold body\n' >"$S3/48-a.md"
+printf '# %s\n\nold47\n' "$T257" >"$S3/47-a.md"
+printf '# Forty-nine\n\nother\n' >"$S3/49-a.md"
+commit3() { # message
+    tick=$((tick + 1))
+    export GIT_AUTHOR_DATE="2026-02-01T00:00:0$tick +0000" GIT_COMMITTER_DATE="2026-02-01T00:00:0$tick +0000"
+    git -C "$R3" add -A .github
+    git -C "$R3" commit -q -m "$1"
+    git -C "$R3" rev-parse HEAD
+}
+D1=$(commit3 'specs v1')
+printf '# Forty\n\nforty v2\n' >"$S3/40-a.md"
+printf '# Forty-one\n\nforty-one v2\n' >"$S3/41-a.md"
+printf '# Forty-three\n\nforty-three v2\n' >"$S3/43-a.md"
+printf '# Forty-four\n\nforty-four v2\n' >"$S3/44-a.md"
+printf '# Forty-five\nsecond line\nmore v2\n' >"$S3/45-a.md"
+printf 'no heading\n\nfoo v2\n' >"$S3/46-a.md"
+printf '# Forty-eight\n\nnew body\n' >"$S3/48-a.md"
+printf '# Forty-seven\n\nnew47\n' >"$S3/47-a.md"
+for n in 50 51 52 53 54; do
+    printf '# Fifty-%s\n\nsrc%s\n' "$n" "$n" >"$S3/$n-a.md"
+done
+D2=$(commit3 'specs v2, reviewed set')
+git -C "$R3" push -q origin main
+
+blob3() { git -C "$R3" show "$1:.github/ISSUE_SPECS/$2"; }
+h1strip() { tail -n +3; } # a blob minus its first two lines
+mkdir -p "$T/b3"
+blob3 "$D1" 40-a.md | h1strip | strip_nl >"$T/b3/40"      # H1-removed form of a history blob, newline dropped
+blob3 "$D1" 41-a.md | h1strip >"$T/b3/41"                  # the same, newline kept
+blob3 "$D2" 42-a.md | h1strip | strip_nl >"$T/b3/42"      # H1-removed form of the source blob
+blob3 "$D1" 43-a.md | h1strip | strip_nl | sed 's/line/lime/' >"$T/b3/43" # one byte changed
+blob3 "$D1" 44-a.md | tail -n +2 | strip_nl >"$T/b3/44"    # H1 line removed, blank line kept
+blob3 "$D1" 45-a.md | h1strip | strip_nl >"$T/b3/45"      # second line of the blob is not empty
+blob3 "$D1" 46-a.md | h1strip | strip_nl >"$T/b3/46"      # the spec has no H1
+blob3 "$D1" 47-a.md | h1strip | strip_nl >"$T/b3/47"      # the old blob's title has 257 characters
+blob3 "$D1" 48-a.md | h1strip | strip_nl >"$T/b3/48"      # the old blob's title has trailing whitespace
+cp "$T/b3/40" "$T/b3/49"                                   # another issue's H1-removed history blob
+printf 'fifty edited on github\n\n\n' >"$T/b3/50"
+printf 'fifty-one from a branch\n' >"$T/b3/51"
+printf 'fifty-two body\n' >"$T/b3/52"
+printf 'fifty-three body' >"$T/b3/53"
+printf 'fifty-four body\n' >"$T/b3/54"
+
+reset3() {
+    reset_issues
+    rm -f "$G"/issues/*.json
+    mk_issue 40 OPEN 'Forty' "$T/b3/40"
+    mk_issue 41 OPEN 'Forty-one' "$T/b3/41"
+    mk_issue 42 OPEN 'Forty-two' "$T/b3/42"
+    mk_issue 43 OPEN 'Forty-three' "$T/b3/43"
+    mk_issue 44 OPEN 'Forty-four' "$T/b3/44"
+    mk_issue 45 OPEN 'Forty-five' "$T/b3/45"
+    mk_issue 46 OPEN 'Forty-six, hand titled' "$T/b3/46"
+    mk_issue 47 OPEN 'Forty-seven' "$T/b3/47"
+    mk_issue 48 OPEN 'Forty-eight' "$T/b3/48"
+    mk_issue 49 OPEN 'Forty-nine' "$T/b3/49"
+    mk_issue 50 OPEN 'Fifty hand' "$T/b3/50"
+    mk_issue 51 OPEN 'Fifty-51' "$T/b3/51"
+    mk_issue 52 OPEN 'Fifty-52' "$T/b3/52"
+    mk_issue 53 OPEN 'Fifty-53' "$T/b3/53"
+    mk_issue 54 OPEN 'Fifty-54' "$T/b3/54"
+    rm -rf "$T/snap"
+    cp -r "$G/issues" "$T/snap"
+}
+RUNCWD=$R3
+reset3
+run --check 40 41 42 43 44 45 46 47 48 49
+assert 'h1-removed-history-blob-is-fast-forward' has_line '40 fast-forward'
+assert 'h1-removed-history-blob-newline-kept-is-fast-forward' has_line '41 fast-forward'
+assert 'h1-removed-source-blob-is-fast-forward-never-in-sync' has_line '42 fast-forward'
+assert 'h1-removed-with-one-byte-changed-is-unmatched' has_line '43 unmatched'
+assert 'h1-line-removed-but-blank-line-kept-is-unmatched' has_line '44 unmatched'
+assert 'blob-with-nonempty-second-line-has-no-h1-removed-form' has_line '45 unmatched'
+assert 'spec-without-h1-has-no-h1-removed-form' has_line '46 unmatched'
+assert 'blob-with-257-character-title-has-no-h1-removed-form' has_line '47 unmatched'
+assert 'blob-with-unsafe-title-has-no-h1-removed-form' has_line '48 unmatched'
+assert 'h1-removed-form-is-keyed-by-issue-number' has_line '49 unmatched'
+assert 'h1-removed-check-exit-3' test "$rc" = 3
+assert 'h1-removed-check-makes-no-edit' test -z "$(edited)"
+STUB_BACKUP_DIR=$T/BH run --apply --backup-dir "$T/BH" 40 41 42
+assert 'h1-removed-apply-exit-0' test "$rc" = 0
+assert 'h1-removed-apply-edits-the-set' test "$(edited)" = '40 41 42 '
+blob3 "$D2" 40-a.md | strip_nl >"$T/expect40"
+jq -j .body "$G/issues/40.json" >"$T/stored40"
+assert 'h1-removed-readback-has-the-full-blob' cmp -s "$T/expect40" "$T/stored40"
+assert 'h1-removed-backup-equals-served-raw-json' cmp -s "$T/BH/40.json" "$T/snap/40.json"
+run --check 40 41 42
+assert 'h1-removed-after-apply-is-in-sync' bash -c 'grep -q "^40 in-sync" "$1" && grep -q "^41 in-sync" "$1" && grep -q "^42 in-sync" "$1"' _ "$T/out"
+
+# A11: the reconcile run writes the title beside the body; --reviewed accepts exactly that state.
+reset3
+RV=$T/RV
+run --check --reconcile-dir "$RV" 50 51 52 53
+printf 'Fifty hand' >"$T/expect-title50"
+assert 'reconcile-writes-the-github-title-without-newline' cmp -s "$RV/50.github-title.txt" "$T/expect-title50"
+mk_issue 51 OPEN 'Fifty-51' <(printf 'fifty-one from a branch\nX')   # one byte changed since the review
+mk_issue 52 OPEN 'Fifty-52X' "$T/b3/52"                              # title changed since the review
+mk_issue 53 OPEN 'Fifty-53' <(printf 'fifty-three body\n')         # one trailing newline added since the review
+rm -rf "$T/snap"
+cp -r "$G/issues" "$T/snap"
+run --check 50
+assert 'without-reviewed-the-issue-is-unmatched' has_line '50 unmatched'
+run --check --reviewed "$RV" 50 51 52 53 54
+assert 'reviewed-body-and-title-equal-is-fast-forward-reviewed' has_line '50 fast-forward reviewed'
+assert 'reviewed-body-changed-one-byte-is-unmatched' has_line '51 unmatched'
+assert 'reviewed-title-changed-is-unmatched' has_line '52 unmatched'
+assert 'reviewed-body-extra-trailing-newline-is-unmatched' has_line '53 unmatched'
+assert 'reviewed-files-missing-is-unmatched' has_line '54 unmatched'
+assert 'reviewed-check-exit-3' test "$rc" = 3
+assert 'reviewed-check-makes-no-edit' test -z "$(edited)"
+run --check --reviewed "$RV" --all
+assert 'reviewed-does-not-override-all' has_line '50 unmatched'
+assert 'reviewed-all-prints-no-reviewed-line' bash -c '! grep -q reviewed "$1"' _ "$T/out"
+run --check --reviewed "$RV" --range "$D1..origin/main"
+assert 'reviewed-does-not-override-range' has_line '50 unmatched'
+cp -r "$RV" "$R3/.github/RVrel"
+RUNCWD=$R3/.github run --check --reviewed RVrel 50
+rm -rf "$R3/.github/RVrel"
+assert 'reviewed-relative-dir-resolves-against-the-callers-directory' has_line '50 fast-forward reviewed'
+RUNCWD=$R3
+run --check --reviewed "$T/no-such-reviewed-dir" 50
+assert 'reviewed-dir-must-exist-exit-2' test "$rc" = 2
+assert 'reviewed-dir-must-exist-no-gh-call' no_gh_call
+run --check --reviewed "$T/b3/50" 50
+assert 'reviewed-dir-must-be-a-directory' test "$rc" = 2
+STUB_BACKUP_DIR=$T/BV run --apply --backup-dir "$T/BV" --reviewed "$RV" 50 51 52 53 54
+assert 'reviewed-apply-edits-only-the-reviewed-issue' test "$(edited)" = '50 '
+assert 'reviewed-apply-exit-3-unmatched-remain' test "$rc" = 3
+assert 'reviewed-apply-reports-synced' has_line '50 synced'
+assert 'reviewed-apply-edit-sets-the-spec-title' grep -Eq '^issue edit 50 --repo test-owner/test-repo --body-file /[^ ]+ --title Fifty-50$' "$G/log"
+assert 'reviewed-apply-backup-equals-served-raw-json' cmp -s "$T/BV/50.json" "$T/snap/50.json"
+assert 'reviewed-apply-backup-holds-the-reviewed-issue-only' test "$(ls "$T/BV")" = '50.json'
+blob3 "$D2" 50-a.md | strip_nl >"$T/expect50"
+jq -j .body "$G/issues/50.json" >"$T/stored50"
+assert 'reviewed-apply-body-is-the-origin-main-blob' cmp -s "$T/expect50" "$T/stored50"
+run --check 50
+assert 'reviewed-apply-leaves-the-issue-in-sync' has_line '50 in-sync'
+RUNCWD=
+
 if ((failures > 0)); then
     printf '%s assertion(s) failed\n' "$failures" >&2
     exit 1

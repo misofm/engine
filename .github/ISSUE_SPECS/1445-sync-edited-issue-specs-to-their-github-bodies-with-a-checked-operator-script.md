@@ -365,6 +365,68 @@ Amendment 1, each inside the amendment's contract:
     They are reconciled by hand, with a recommendation each, in
     `/home/bl/misofm/submix-verdicts/body-sync-unmatched.md`.
 
+Amendment 2 implementation (2026-10-11; A10, A11, A12). A1-A9 semantics are unchanged.
+
+- **A10.** `h1_removed_matches` takes the first two lines off a blob only when line 1 is `# <title>`
+  with A2's title sanity (at most 256 characters, no control character, no leading or trailing
+  whitespace) and line 2 is empty; the GitHub body then matches that form with the one-trailing-newline
+  allowance (`matches_blob`). It is tried against the source blob and each blob of the issue's history
+  (keyed by number), only after the full-blob test failed, and only sets the body half of
+  `fast-forward`, so it can never give `in-sync`. The history always holds the source blob, so no
+  fixture separates the explicit source check from the history loop. The sanity check runs after the
+  body compare, so the `jq` call is paid only on a match.
+- **A11.** `--reviewed DIR` is made absolute before the `cd`, must be an existing directory (exit 2
+  otherwise, before any `gh` call), and applies only when issue numbers are on the command line.
+  `reviewed_unchanged` compares the current body with `DIR/<n>.github.md` and the current title with
+  `DIR/<n>.github-title.txt` with `cmp` (no newline allowance); on a hit the class is `fast-forward`
+  and the line is `<n> fast-forward reviewed`. `--reconcile-dir` also writes `<n>.github-title.txt`
+  (the `jq -j` title, no trailing newline). The write path is A5's, untouched.
+- **A12, Gate 1.** The self-test now has 163 `ok - NAME` lines (was 122) and prints
+  `all assertions passed`. New fixtures are a third repository (issues 40-54: bodies equal to the
+  H1-removed form of a history blob with the newline dropped and kept, of the source blob, with one
+  byte changed, with the H1 line removed but the blank line kept, of a blob whose second line is not
+  empty, of a spec with no H1, of a history blob whose title has trailing whitespace or 257
+  characters, and of another issue's history blob; and a reviewed set with a body changed by one byte,
+  a changed title, one added trailing newline and no reviewed files).
+- **A12, mutations** (each applied alone to `sync-spec-bodies.sh`; self-test exit 1; then restored,
+  byte-identical). Red count and the assertions that go red:
+  - no H1-removed match at all: 8 red, `h1-removed-history-blob-is-fast-forward` and seven more;
+  - line 1 not required to be an H1: 1 red, `spec-without-h1-has-no-h1-removed-form`;
+  - blank second line not required: 1 red, `blob-with-nonempty-second-line-has-no-h1-removed-form`;
+  - only the first line removed (`tail -n +2`): 9 red, including `h1-line-removed-but-blank-line-kept-is-unmatched`
+    and `h1-removed-history-blob-is-fast-forward`;
+  - strict compare, no newline allowance: 7 red, including `h1-removed-history-blob-is-fast-forward`;
+    only the added-newline form: 4 red, including `h1-removed-history-blob-newline-kept-is-fast-forward`;
+  - body compare always true: 27 red, including the unmatched fixtures `h1-removed-with-one-byte-changed-is-unmatched`;
+  - no title sanity: 1 red, `blob-with-unsafe-title-has-no-h1-removed-form`; no 256-character limit:
+    1 red, `blob-with-257-character-title-has-no-h1-removed-form`;
+  - history not keyed by issue number: 1 red, `h1-removed-form-is-keyed-by-issue-number`;
+  - an H1-removed match also counts for `in-sync`: 6 red, `h1-removed-history-blob-is-fast-forward`,
+    `h1-removed-history-blob-newline-kept-is-fast-forward`, `h1-removed-source-blob-is-fast-forward-never-in-sync`
+    and three more;
+  - `--reviewed` never accepted: 9 red, including `reviewed-body-and-title-equal-is-fast-forward-reviewed`
+    and `reviewed-apply-edits-only-the-reviewed-issue`;
+  - `--reviewed` also honoured for `--all` and `--range`: 3 red, `reviewed-does-not-override-all`,
+    `reviewed-all-prints-no-reviewed-line`, `reviewed-does-not-override-range`;
+  - reviewed body compare skipped: 4 red, `reviewed-body-changed-one-byte-is-unmatched` and three more;
+    reviewed title compare skipped: 3 red, `reviewed-title-changed-is-unmatched` and two more; reviewed body
+    compare with the newline allowance: 3 red, `reviewed-body-extra-trailing-newline-is-unmatched` and two more;
+  - `--reviewed` directory existence unchecked: 3 red, `reviewed-dir-must-exist-exit-2`,
+    `reviewed-dir-must-exist-no-gh-call`, `reviewed-dir-must-be-a-directory`; not made absolute: 1 red,
+    `reviewed-relative-dir-resolves-against-the-callers-directory`;
+  - the `reviewed` word not printed: 2 red, `reviewed-body-and-title-equal-is-fast-forward-reviewed` and
+    `reviewed-relative-dir-resolves-against-the-callers-directory`;
+  - `<n>.github-title.txt` not written: 10 red, `reconcile-writes-the-github-title-without-newline` and nine more.
+- **Gate 3** re-run: `bash -n` on both scripts, `check-workspace-policy.sh` (`workspace policy: ok`),
+  `check-script-reachability.py` (ok), `test-script-reachability.py` (20 cases), `check-ci-path-routing.py` and
+  `test-ci-path-routing.py` exit 0.
+- **Smoke test, read-only.** `bash scripts/operator/sync-spec-bodies.sh --check 948 961 972 1468 1470 1309 26`
+  on `origin/main` `1b55de30a` (no `gh` write): `948`, `961` and `972` are `fast-forward`; `26`, `1309`,
+  `1468` and `1470` are `unmatched` (`summary in-sync=0 fast-forward=3 closed-skipped=0 no-issue=0
+  oversize=0 unmatched=4`, exit 3). #1470 stays `unmatched` because its body equals the H1-removed form
+  of its nearest blob `3e8ee9b4` except that the body lacks one line, `## Attempt record` (line 73 of
+  the H1-removed form); A10 allows no other difference. #1468's body is 30 added and 16 removed lines from its nearest blob.
+
 ## Dependencies
 
 - None. It may land in any J batch. A2 and C2 use it when it is on `main`.
