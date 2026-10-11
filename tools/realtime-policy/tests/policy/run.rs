@@ -59,7 +59,7 @@ fn findings_without_a_place_print_without_one() {
     assert_eq!(
         err,
         "realtime policy failure: expected at least 26 marked realtime files\n\
-         realtime policy failure: expected at least 93 marked realtime regions\n"
+         realtime policy failure: expected at least 94 marked realtime regions\n"
     );
 }
 

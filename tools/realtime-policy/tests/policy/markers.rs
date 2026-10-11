@@ -156,7 +156,7 @@ fn an_open_tail_is_misordered() {
         super::common::assert_classes(&tree, &[Class::MisorderedMarkers, FILE_FLOOR, REGION_FLOOR]);
     assert_eq!(
         (report.regions, report.files),
-        (BASE_REGIONS - 14, BASE_FILES - 1)
+        (BASE_REGIONS - 15, BASE_FILES - 1)
     );
 }
 

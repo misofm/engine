@@ -40,3 +40,6 @@ fn floor_1_13() {}
 // REALTIME_POLICY_BEGIN
 fn floor_1_14() {}
 // REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn floor_1_15() {}
+// REALTIME_POLICY_END

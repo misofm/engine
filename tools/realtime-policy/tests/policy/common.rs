@@ -15,7 +15,7 @@ pub(crate) const END: &str = concat!("REALTIME_POLICY", "_END");
 
 /// The base tree's marked files and regions. The case policy's floors are these counts.
 pub(crate) const BASE_FILES: usize = 26;
-pub(crate) const BASE_REGIONS: usize = 93;
+pub(crate) const BASE_REGIONS: usize = 94;
 
 /// The floor findings that a tree one file and one region short reports.
 pub(crate) const FILE_FLOOR: Class = Class::MarkedFileFloor(BASE_FILES);
