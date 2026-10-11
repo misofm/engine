@@ -4,7 +4,7 @@ Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
 Root rescoped *Require every loop around a realtime drain to drain a different queue on each pass*
 (#1418) after its two verdicts. Root's ruling: replace the awk gate with a tool that reads Rust's
-syntax tree. Do not add a fourth layer of patterns. The work has nine slices:
+syntax tree. Do not add a fourth layer of patterns. The work has ten slices:
 
 - **C1 (#1445):** an operator script that syncs edited specs to their GitHub bodies, with a self-test. It
   has no dependency and may land first.
@@ -16,6 +16,8 @@ syntax tree. Do not add a fourth layer of patterns. The work has nine slices:
 - **B1b (#1441):** the drain-bound rule's outer loops, attributes and constructors, the remaining ported
   cases, the synthetic twins and the marker on `drain_controls`.
 - **B2a (#1442):** refuse pops in closures, macros and function values; commit the probe corpus.
+- **#1519:** refuse every source that rustc reads and the walk does not (`#[path]` forms, `include!`); split out of B2a by
+  a root ruling of 2026-10-11 (rj3-c R2).
 - **C2 (#1446):** delete the awk gate and its self-test. CI then runs only the tool.
 - **The #1448 guard commit** ("H #1448's guard, landed by J after C2"; root ruling 2 on the fourth
   review, option (C)): the two region markers around `poll_meters`, whose code stream H's #1448
@@ -26,7 +28,7 @@ syntax tree. Do not add a fourth layer of patterns. The work has nine slices:
 - **B2b-2 (#1444):** the call rule (a call to a popping function in a marked loop or closure). It waits for
   #1345 (Amendment 1) in stream B.
 
-The order is A1 → A2 → B1a → B1b → B2a → C2 → the #1448 guard commit → B2b-1 → B2b-2, with C1
+The order is A1 → A2 → B1a → B1b → B2a → #1519 → C2 → the #1448 guard commit → B2b-1 → B2b-2, with C1
 before C2. #1418 (Amendment 1) and #1426 (Amendment 1) come after the whole batch is on `main`, in
 the tool. No production code changes in this slice.
 

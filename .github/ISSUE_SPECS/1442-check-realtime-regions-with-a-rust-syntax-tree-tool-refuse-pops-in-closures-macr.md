@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice B2a of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a, C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what
+This is slice B2a of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a, #1519, C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what
 each holds).
 - B1a and B1b ported `main`'s drain rule as it stands.
 - **B2a (this issue)** closes three of that rule's documented limits, which a syntax tree makes
@@ -96,8 +96,13 @@ the self-test's lines from `:440` on are one lower.
 ## Decisions
 
 - **D1. Closures.**
-  - A pop inside a closure body is refused, except in an `array::from_fn` closure, where B1b-D1
-    and B1b-D3 apply.
+  - (root Amendment 3, MAJOR-1; replaces the former first bullet, "A pop inside a closure body is
+    refused, except in an `array::from_fn` closure, where B1b-D1 and B1b-D3 apply") "A pop inside a
+    closure body is refused, the closure of `core::array::from_fn` and `std::array::from_fn` included.
+    The B1b-D1/D3 outer-loop exception for that closure is withdrawn (root, 2026-10-11, #1441 attempt-3
+    MAJOR-1: it trusted the path roots `core`/`std`, which a workspace `mod`, a `use .. as`, a
+    macro-made module or a Cargo dependency key can redirect). B1b-D3's token allowance for the two
+    paths stays. No marked region in `crates/` or `hosts/` pops in such a closure."
   - This refuses a06, a07, b02, n09 and e11.
   - No marked region on `main` pops inside a closure. On `6b9067ede` there were 143 closures in
     marked regions, and none holds `try_pop` (the second review measured it with `syn`).
@@ -224,48 +229,38 @@ the self-test's lines from `:440` on are one lower.
     `#[proc_macro] pub fn debug_assert(input: TokenStream) -> TokenStream { input }` (no `macro_rules!`,
     no `macro`, no `use`), beside a drain that names its count inside `debug_assert!`
     (`/home/bl/misofm/submix-verdicts/1442-attempt1.md` F2 and `evidence/1442-attempt1/pm.rs`, `zz_verifier.rs.txt`).
-  - (root Amendment 2, SP-B) The six D8 cases. Test value, one sentence each:
-    - `#[path = "shadow.txt"]`: red if D8 (a) is dropped.
-    - `cfg_attr(.., path = "x.txt")`: red if (a) matches only a top-level `#[path = ..]`, which was
-      the draft's wording.
-    - `#[path = "../../../scripts/x.rs"]`: red if (a) checks only the `.rs` suffix, which was the
-      draft's wording.
-    - `#[path = $p]`: red if (a) accepts a value that is not a literal.
-    - `include!("x.in")` holding a looping `map` trait: red if (b) is dropped.
-    - `use std::include as inc`: red if (c) is dropped.
+  - (root Amendment 2, SP-B; removed by root Amendment 3) The six D8 cases moved to #1519.
+  - (root Amendment 3, MAJOR-1) `from-fn-closure-drain-is-refused` (f02's drain: a counted drain in a
+    `core::array::from_fn` closure, no shadow; refused). Test value: red if the `array::from_fn`
+    outer-loop exception for a closure returns.
+  - (root Amendment 3, SP-2) `unit-struct-shadows-the-collection-root` (`struct controls;` before a
+    repeating `controls.iter_mut()` outer loop around a counted drain, as the attempt-2 verdict's r01;
+    refused). Test value: red if the item rule reads only the count, its alias source and the slice
+    parameter, and not the collection root of an outer `for`.
+  - (root Amendment 3, SP-2) The cases r01, r02, b01 and b06 (see D9), each refused, and the same
+    shadow of a `<Q>` or `<K>` root of a per-queue form.
+  - (root Amendment 3, F3) The row `closure-in-a-nested-closure-in-array-from-fn` never turns red
+    (`tests/policy/drain/indirect.rs`). Mutation: `in_closure` exempts every closure when any
+    `array::from_fn` closure is on the path; all 140 tests stay green under it. The row's pop is under
+    no counted loop, so the "no count" rule refuses it either way. A row that turns red under that
+    mutation is a nested closure that pops in a `while` inside a counted `for` inside the `from_fn`
+    closure. Replace the row with that one, or delete it.
 - **D7. Documentation.** The drain rule's module documentation drops the closure,
   function-value and macro limits from B1b-D4, states D1 to D3, and states D2's limit.
-- **D8. Source that rustc reads and the walk does not (root Amendment 2, SP-B).** Adopted from an
-  adversarial review; #1443 D1 rule 3 resolves only the `#[path]` forms this decision accepts. Text:
-  "The walk refuses every way rustc reads source that the walk does not read. Over the tokens of every `.rs` file under the roots, at any depth, refuse:
-  (a) an identifier `path` in an attribute (`#[..]` or `#![..]`, `cfg_attr` arguments included), unless it is directly followed by `=` and a plain string literal whose value ends in `.rs`, is relative, and has no `..`, `target` or `node_modules` component;
-  (b) an `include!` invocation (any path prefix), unless its one argument is a string literal naming a file, relative to the invoking file's directory, whose `proc_macro2` tokens (comments dropped) are literals and punctuation only;
-  (c) an identifier `include` in a `use` item.
-  `include_str!` and `include_bytes!` produce a literal and stay allowed."
-  - **Why the draft was too narrow.** `include!` is not refused today: the tool has no `include!`
-    handling at all. These bypass a rule of "`#[path]` not ending in `.rs`":
-    `#[cfg_attr(all(), path = "x.txt")]` (rustc accepts it); `#[path = "../../scripts/x.rs"]`, a `.rs`
-    file outside the roots or under `target/`; `#[path = $p]` from a `$p:literal` metavariable (rustc
-    accepts it); `use std::include as inc; inc!("z.txt")` (rustc accepts it). `#[path = concat!(..)]`
-    is not an escape: rustc refuses it as a malformed `path` attribute.
-  - **Measured** on `main` and on the branch head `1a33b2f6d` (zero refusals on the real tree).
-    (a) The one `path` attribute, `crates/host-core/tests/successor_swap.rs:24`
-    (`#[path = "support/successor.rs"]`), is accepted. (b) The real tree has 4 `include!` sites, each
-    of a non-`.rs` file whose identifiers are only in `//` comments (a digest array), and all four are
-    accepted: `crates/gate-expander/src/corpus.rs:294`, `crates/multiband-compressor/src/corpus.rs:600`,
-    `crates/soft-clip/src/corpus.rs:212`, `tools/wasm-gate-corpus/src/lib.rs:1865`. A rule that refused
-    `include!` of a non-`.rs` file would refuse the real tree 4 times. (c) There are none. Gate 1 (the
-    real tree) defends the accepted forms.
-  - **Cases (six, D6 style).** The case format may need a non-`.rs` side file.
-    - `#[path = "shadow.txt"]`
-    - `#[cfg_attr(.., path = "x.txt")]`
-    - `#[path = "../../../scripts/x.rs"]`
-    - `#[path = $p]` from a `$p:literal` metavariable
-    - `include!("x.in")` whose file holds a looping `map` trait
-    - `use std::include as inc;` (with `inc!("z.txt")`)
-  - **If attempt 2 fails on D8 alone,** split D8 into its own slice ahead of C2 rather than spending
-    attempt 3 on it. Placement here is otherwise acceptable: same crate, cost 0 on the real tree, and
-    D2's and D3's trust depends on it.
+- **D8.** Moved to #1519 (root Amendment 3, rj3-c R2). #1443 D1 rule 3 and Amendment 2 name "#1442 D8"; that is #1519's D1.
+- **D9. Collection-root shadowing (root Amendment 3, SP-2).** Root's text: "Collection-root shadowing
+  (`struct controls;` with a repeating iter_mut): a false pass, not a listed limit. Fix it in #1442
+  attempt 2, not as a #1441 attempt 3. Generalize the item rule: an item, of any kind or `use`, that
+  declares the name of ANY binding a drain rule reads is refused, wherever it sits in the block. That
+  covers the count, its alias source, the slice parameter and the collection root of an outer `for`.
+  Add the spec line, a refused case (`unit-struct-shadows-the-collection-root`, with its test-value
+  sentence and a mutation), and a real-tree re-measure. It must land before #1446 removes the awk."
+  Root's extension: "Keep collection-root shadowing in #1442 attempt 2, with the verifier's extension to
+  the per-queue <Q>/<K> roots and the macro forms (r01, r02, b01, b06)." Probe shapes (the #1441 attempt-2
+  verdict, `/home/bl/misofm/submix-verdicts/1441-attempt2.md`, open item 2): `r01` `struct controls;` with a
+  repeating `iter_mut`, in an inner block; `r02` the same struct emitted by a macro before the loop; `b06` a
+  written `struct lanes;` after a `lanes.iter()` loop over a slice parameter; `b01` the macro form of `b06`.
+  The implementer re-measures the rule on the real tree (gate 1).
 
 ### Root Amendment 1 (2026-10-11): the attempt-1 open items
 
@@ -293,11 +288,35 @@ rejected. Each is placed where it belongs and marked "(root Amendment 2)":
 - **SP-A** D3's trusted-name scan (a) to (d), with five D6 cases and four gate 5 mutations.
 - **F2** One rule replaces D2's enumeration: any `debug_assert` identifier not directly followed by
   `!` is a shadow. The enumeration code is deleted; the `proc-macro-fn` row stays.
-- **SP-B** New D8: path attributes (`cfg_attr` included), `include!` and `use .. include`, with six
-  D6 cases. If attempt 2 fails on D8 alone, D8 becomes its own slice ahead of C2.
+- **SP-B** Moved to #1519 (root Amendment 3).
 - **Threat model** The text is in #1438 Hazards; this spec's Hazards refer to it.
 
 All three rules were measured at zero refusals on the real tree (`main` and `1a33b2f6d`).
+
+### Root Amendment 3 (2026-10-11): MAJOR-1 (Option A), the collection-root item rule, F3 and the D8 split
+
+Authority: root (ruling rj3-c, under the owner's delegation), after the #1441 attempt-3 verdict
+(`/home/bl/misofm/submix-verdicts/1441-attempt3.md`) and the #1442 attempt-1 verdict
+(`/home/bl/misofm/submix-verdicts/1442-attempt1.md`). Root adopted the fresh review's texts verbatim and chose
+its Option A for MAJOR-1. This spec-only commit comes before attempt 2; the implementer does not write rule
+text. Each item is placed where it belongs and marked "(root Amendment 3)":
+
+- **MAJOR-1 (Option A)** D1's first bullet (text above), with these items: the D6 case
+  `from-fn-closure-drain-is-refused`; the gate 5 mutation "restore the exception"; B1b-D1's
+  `array::from_fn` outer-loop entry (the "bounding-loop entry" of the review's D10 wording) is removed; the
+  base tree's `drain_lane_pairs` (`tests/fixtures/base/crates/builtins/src/lib.rs.txt`) is rewritten or its row
+  flipped to refused. Option B (shadow scans of `core`/`std`) is refused by root: it cannot see a Cargo
+  dependency key (`core = { package = "spin", .. }`, built and confirmed) and has an open splice gap.
+- **SP-2** New D9: the collection-root item rule, the D6 case `unit-struct-shadows-the-collection-root`, the
+  cases r01, r02, b01, b06 and the `<Q>`/`<K>` roots, and a gate 5 mutation.
+- **F3** The D6 row of the nested closure (text in D6).
+- **SP-B split** D8, its six D6 cases, its gate 5 mutation bullet and Amendment 2's SP-B line moved to #1519
+  (a new issue, filed by root; three attempts). #1442 keeps (iv), SP-A, F2, D9, u19-swapped, F3, the counts and
+  MAJOR-1.
+- **#1418** is amended in the same commit: a drain inside any closure, `from_fn` included, is refused.
+- **Module documentation.** The list of known false passes in the realtime-policy tool's module documentation
+  (`tools/realtime-policy`, drain rule) is updated in attempt 2 so that it does not overclaim: the
+  collection-root hole is a known false pass until D9 lands (rj3-c R1).
 
 ## Authorized paths
 
@@ -317,7 +336,7 @@ All three rules were measured at zero refusals on the real tree (`main` and `1a3
 - **Over-refusal is acceptable, a false pass is not.**
 - **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
   limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. D3's trusted-name
-  scan, D2's replacement rule and D8 are how this slice meets it; a registry trait or type method
+  scan and D2's replacement rule are how this slice meets it (D8 moved to #1519); a registry trait or type method
   named `map` or `as_mut` is a stated limit (limit 1). A finding inside a listed limit is recorded,
   not a FAIL, and only a root ruling adds or widens a limit.
 - A type with its own `as_mut` that returns an iterator would let `.map` pop once per item; the
@@ -328,7 +347,7 @@ All three rules were measured at zero refusals on the real tree (`main` and `1a3
 
 1. **The real tree.** `cargo run --locked --release -q -p realtime-policy` prints the same counts
    as before this slice. `bash scripts/check-realtime-policy.sh` passes on the same tree.
-   (root Amendment 2) D2's replacement rule, D3's trusted-name scan and D8 refuse nothing on the real
+   (root Amendment 2) D2's replacement rule and D3's trusted-name scan refuse nothing on the real
    tree (measured on `main` and on `1a33b2f6d`); the implementer re-measures with the tool and the
    full suite.
 2. **The cases.** `cargo test --locked -p realtime-policy` passes, with every earlier case and
@@ -359,8 +378,13 @@ All three rules were measured at zero refusals on the real tree (`main` and `1a3
      - (d) dropped: turns `macro-made-proc-macro` red.
    - (root Amendment 2, F2) The replacement rule removed: turns the 8 shadow rows red; the real tree
      passes.
-   - (root Amendment 2, SP-B) One mutation for each of D8's (a) to (c), each alone, the real tree still
-     passing: each turns red the D8 cases named for it in D6.
+   - (root Amendment 2, SP-B; removed by root Amendment 3) D8's mutations moved to #1519.
+   - (root Amendment 3, MAJOR-1) Restore the exception (a closure of `core::array::from_fn` or
+     `std::array::from_fn` is again a finite outer loop around a pop): turns `from-fn-closure-drain-is-refused`
+     red; the real tree passes (no marked region pops in such a closure).
+   - (root Amendment 3, SP-2; the mutation is the placement of the rule's own words) The item rule limited to the
+     count, its alias source and the slice parameter, not the collection root or the `<Q>`/`<K>` roots: turns
+     `unit-struct-shadows-the-collection-root` and r01, r02, b01, b06 red; the real tree passes.
 6. **Shipped artifacts unchanged.** As A1's gate 6.
 7. `cargo fmt --all -- --check`,
    `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and

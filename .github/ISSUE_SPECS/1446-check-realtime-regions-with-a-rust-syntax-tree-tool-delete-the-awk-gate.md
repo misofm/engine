@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice C2 of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2, B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
+This is slice C2 of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2, B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
 holds).
 - A1 to B2a moved every check of `scripts/check-realtime-policy.sh` into `tools/realtime-policy`.
   The fourth review measured that A1 to B2a cover the awk gate (its BLOCKER-1, option B), so C2
@@ -236,7 +236,7 @@ source file changes the `.llvmbc` section of the `libcapi.a` members and nothing
 
 ## Dependencies
 
-- After (same stream): B2a and C1.
+- After (same stream): B2a (#1442), #1519 and C1. If any of them spends its budget without PASS, C2 does not land in this batch.
 - Before (same stream, in the same batch): the commit "H #1448's guard, landed by J after C2"
   (B2b-1's first commit, spec in its "#1448 guard" section), then the rest of B2b-1, then B2b-2. #1418 (Amendment 1) and #1426 (Amendment 1) come after the
   whole batch is on `main`.

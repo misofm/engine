@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice A2 of nine (C1 (#1445), A1 (#1438), A2, B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
+This is slice A2 of ten (C1 (#1445), A1 (#1438), A2, B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
 holds).
 - A1 built `tools/realtime-policy`: the crate, the binary, the walk, unsafe ownership, markers,
   floors and the case harness.

@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice B2b-2 of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), C2 (#1446), B2b-1 (#1443), B2b-2; A1's spec lists what
+This is slice B2b-2 of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b (#1441), B2a (#1442), #1519, C2 (#1446), B2b-1 (#1443), B2b-2; A1's spec lists what
 each holds).
 - B2b-1 put every non-test pop in a marked region or on the control-side allowlist, and made the
   one restructure this slice needs.

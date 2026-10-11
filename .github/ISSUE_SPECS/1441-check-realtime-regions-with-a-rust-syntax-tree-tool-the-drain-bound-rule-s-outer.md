@@ -2,7 +2,7 @@
 
 Stream J follow-up of decision 15
 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0, D15-2).
-This is slice B1b of nine (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b, B2a (#1442), C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
+This is slice B1b of ten (C1 (#1445), A1 (#1438), A2 (#1439), B1a (#1440), B1b, B2a (#1442), #1519, C2 (#1446), B2b-1 (#1443), B2b-2 (#1444); A1's spec lists what each
 holds):
 
 - B1a ported the drain rule's mapping, scope resolver, pops, counts, reads and innermost bound,
@@ -678,3 +678,17 @@ restored after each; `diff` against the saved source is empty).
 - `debug_assert_eq!`, `debug_assert_ne!`: an accepted over-refusal (ruling above). No drain span holds one.
 - A collection root that an item shadows (r01, r02, b01, b06): #1442 attempt 2; still a known false pass in the module
   documentation.
+
+### Attempt 3 verdict (root rescope, 2026-10-11)
+
+Verdict: FAIL (`/home/bl/misofm/submix-verdicts/1441-attempt3.md`): one MAJOR (MAJOR-1: an item named `core` or
+`std` redirects the `array::from_fn` outer loop; probes f02 to f05; a false pass in both gates, in the code since
+attempt 1). Every attempt-2 finding is closed. Root's ruling (rj3-c, 2026-10-11) adopts the review's R1 text verbatim.
+The record and the close comment read exactly:
+
+"Attempt 3 FAIL (MAJOR-1). Budget spent; no attempt 4. Root rescope (2026-10-11): MAJOR-1 (the core/std
+path trust of the array::from_fn exception) and the collection-root hole (r01, r02, b01, b06) move to
+#1442. The remaining scope has no BLOCKER or MAJOR (attempt-3 verdict)."
+
+#1441 closes after the batch push with that record (not "at merge", not kept open). MAJOR-1's rule text is
+#1442 D1 (Option A, root Amendment 3), not D3. #1442 Amendment 3 carries the rule text for both items.
