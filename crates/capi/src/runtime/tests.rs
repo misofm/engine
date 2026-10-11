@@ -3088,7 +3088,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
 
 /// Issue #146 at the C ABI: the render entry pins the environment and hands the caller's back.
 ///
-/// Every DAW audio callback arrives with FTZ and DAZ already set, so this is the shape of the real
+/// A native host's audio thread may run with FTZ and DAZ set, so this is the shape of the real
 /// exposure. Three arms render the same subnormal fade tail through the same compiled session:
 ///
 /// * the C entry with the caller's FTZ/DAZ clear -- the reference bytes;

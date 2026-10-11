@@ -5,8 +5,8 @@
 //! [`PreparedHost`] is prepared on a control thread and moved once. Nothing in its type says
 //! *which* thread it landed on, and nothing made the engine look at that thread's floating-point
 //! environment before the first block. Issue #144 showed why that matters: under a caller's
-//! hardware FTZ+DAZ, 69-70 of 331 corpus rows render off-pin, and every DAW audio callback arrives
-//! with FTZ+DAZ set.
+//! hardware FTZ+DAZ, 69-70 of 331 corpus rows render off-pin, and a native host's audio thread may
+//! run with FTZ+DAZ set (see `crates/lane/src/fpenv.rs`).
 //!
 //! Legacy engine-the earlier engine solved the same problem with `MountedSession::start`: the mount is one
 //! thing, *starting* it on the render thread is another, and the started object is the only thing

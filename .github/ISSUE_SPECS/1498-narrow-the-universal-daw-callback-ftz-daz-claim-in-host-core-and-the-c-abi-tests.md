@@ -103,3 +103,42 @@ gate 1's verifier read is the check, so there is no mutation run.
 - Work only from this body. Read the cited lines and #1495's spec and verdict first.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: one hour.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-11, head `7d5362dc2`+`b3ddc8d86` base, branch `codex/d15-batch-dfg`)
+
+Anchors re-read on the branch. `render_session.rs:8-9` and `lib.rs:78` were where the spec says. The
+test's doc comment had moved to `crates/capi/src/runtime/tests.rs:3091-3092` (the spec's `:3080-3081`
+is stale; same text). `ffi.rs` moved the conditional sentence to `:843`; still conditional, untouched.
+A repository search for other "every DAW"/"DAW audio callback" claims found no further copy.
+
+Before and after (each passage keeps its line count; every line is at most 99 columns):
+
+- `render_session.rs:8-9`: "... and every DAW audio callback arrives / with FTZ+DAZ set." became
+  "... and a native host's audio thread may / run with FTZ+DAZ set (see `crates/lane/src/fpenv.rs`)."
+- `lib.rs:78`: "Every DAW audio callback arrives with hardware FTZ and DAZ set, and issue #144" became
+  "A native audio thread may run with hardware FTZ and DAZ set, and issue #144" (`lib.rs:79` and #1446's
+  wording untouched).
+- `runtime/tests.rs:3091`: "Every DAW audio callback arrives with FTZ and DAZ already set, so this is
+  the shape of the real" became "A native host's audio thread may run with FTZ and DAZ set, so this is the
+  shape of the real" (line 3092 and the test's sense unchanged, D3).
+
+Truth check: each new sentence is the `fpenv.rs:16-17` claim ("native hosts, whose audio thread may run
+with FTZ and DAZ set"); no universal claim remains.
+
+Gates (all at the edited tree):
+
+- `cargo fmt --all -- --check`: ok.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps` (the CI form): ok. The spec's
+  `-p host-core` form fails identically on the base without my edit, at `lib.rs:19`: the intra-doc
+  link `SessionControlProvider` is behind the `control-provider` feature, which only a workspace build
+  enables. Pre-existing; the workspace form is the gate CI runs (`qualification.yml:475`).
+- `cargo test --locked -p capi`: all suites pass (81, 3, 11).
+- `cargo clippy --locked -p host-core -p capi --all-targets -- -D warnings`: clean.
+- `scripts/check-workspace-policy.sh`: ok. `scripts/check-realtime-policy.sh`: ok (93 marked regions).
+- No codegen change: `./target/release/audit capi` gives `pcm_digest` `cb10fbface44a3a4`, 0 allocations,
+  0 deallocations, 0 syscalls, 0 violations. Browser: `build-web-audioworklet.sh --module-only` before
+  and after the edit gives the same shipped module `429788e6...3be3` (3129218 B) and the same named
+  twin `e44d96c7...50b8`.
+- No test added or changed in logic, so no mutation run (spec test-value note).

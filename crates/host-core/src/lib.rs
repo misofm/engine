@@ -75,7 +75,7 @@
 //!   `scripts/check-realtime-policy.sh` enforces the source-level half of that;
 //!   `tools/audit` and the browser call-graph gate enforce the binary half.
 //! * **A native render entry borrows the caller's floating-point environment; it never adopts it**
-//!   (issue #146). Every DAW audio callback arrives with hardware FTZ and DAZ set, and issue #144
+//!   (issue #146). A native audio thread may run with hardware FTZ and DAZ set, and issue #144
 //!   measured what that does: 69-70 of the 331 cross-target corpus comparisons render off-pin,
 //!   because a transient intra-block denormal is not a recursive state word the master-plan D7
 //!   flush law can reach. So the entry saves the caller's control word, installs the canonical one,
