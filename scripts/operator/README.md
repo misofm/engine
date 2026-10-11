@@ -13,6 +13,10 @@ browser, or run a timed workload. Their output is the sealed records under
 `artifacts/` (see "Where records live" below), and the procedures that invoke
 them are documented in `docs/`.
 
+One tool here is not a benchmark or a browser workload: `sync-spec-bodies.sh` is a GitHub operator
+script that edits issue bodies and titles (it needs a token with issue write access, which CI does not
+hold), and a person runs it by hand after the specs it reads are on `origin/main`.
+
 They live here, separately from `scripts/`, because of a rule that now holds
 for everything above this directory:
 
@@ -30,6 +34,18 @@ invisible for days. Every one of those rows now runs from CI instead.
 Keeping operator tools inside `scripts/` would make that rule unenforceable,
 because every future audit would have to re-derive which unreachable scripts
 are fine and which are dead. Here, the answer is the directory.
+
+## Syncing issue specs to GitHub (#1445)
+
+`sync-spec-bodies.sh` copies the committed specs under `.github/ISSUE_SPECS/` to their GitHub issue
+bodies and titles, with checks. It reads each spec only from the `refs/remotes/origin/main` blob,
+after proving that ref equals `git ls-remote origin refs/heads/main`. `--check` (the default) is
+read-only and prints one class per spec; `--apply --backup-dir DIR` writes only the specs whose GitHub
+body and title are an earlier committed state of the spec, saving each issue's old raw JSON first.
+Its header lists the classes and exit codes, and `test-sync-spec-bodies.sh` is its self-test (a stub
+`gh`, a local bare `origin`, no network). Editing this README selects the `dsp-research` suite on the
+run that carries it (`scripts/ci-path-router.py` lists this file as a `dsp-research` input); that is
+harmless.
 
 ## Which benchmarks exist (#1039)
 

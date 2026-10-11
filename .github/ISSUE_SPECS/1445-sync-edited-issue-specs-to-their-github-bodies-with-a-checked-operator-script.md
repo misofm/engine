@@ -200,7 +200,50 @@ edits a closed issue, or maps a brief under `BRIEFS/` to an issue number. No oth
 
 ## Evidence
 
-- Gates 1-4 output.
+Attempt 1 (2026-10-11). Gate 4 (A9's run) is root's and is not recorded here.
+
+- **Gate 1.** `bash scripts/operator/test-sync-spec-bodies.sh` exits 0: 74 `ok - NAME` lines and
+  `all assertions passed` (about 5 s; temporary directory removed by trap).
+- **Gate 2, mutations.** Each applied alone to `sync-spec-bodies.sh`, the self-test run, then the
+  file restored (byte-identical to the unmutated copy). Every run exited 1. Count of red
+  assertions, and the assertion(s) the spec names:
+  - comparison always succeeds (`matches_blob` returns 0): 30 red, including `readback-one-byte-fails`;
+  - no trailing-newline allowance (`matches_blob` ends `return 1`): 29 red, including
+    `readback-trailing-newline-dropped-passes`;
+  - drop the closed-issue check (classify `state != OPEN`): 13 red, including `class-closed-skipped`.
+    `closed-never-edited` stays green because the write phase's own re-fetch (A5 step 1) refuses a
+    non-OPEN issue (`12 refused`, exit 1) before any edit; the two checks back each other;
+  - drop the top-level filter (`[[ $base != */* ]] || continue`): 3 red, `range-selects-changed-top-level-specs`,
+    `range-reads-brief-as-nothing`, `range-apply-never-reads-issue-36`;
+  - skip the `ls-remote` comparison: 5 red, `stale-origin-ref-refused`, `stale-origin-ref-no-gh-call`,
+    `stale-origin-ref-no-backup-dir-written`, `locally-moved-origin-ref-refused`,
+    `locally-moved-origin-ref-no-gh-call`;
+  - read the spec from the working tree (`read_source` uses `cat`): 1 red,
+    `source-is-origin-main-blob-not-working-tree`;
+  - no `unmatched` class (the fallback class is `fast-forward`): 16 red, including
+    `class-unmatched-branch-only-blob`, `unmatched-never-edited` and the four `reconcile-*` file assertions;
+  - history keyed by path instead of issue number: 33 red, including `renamed-spec-body-is-fast-forward`;
+  - skip the backup write (`save_backup` returns 0): 5 red, `backup-saved-before-each-edit`,
+    `backup-equals-served-raw-json-10`, `backup-equals-served-raw-json-16`,
+    `backup-holds-fast-forward-set-only`, `readback-failure-keeps-the-backup`;
+  - remove the ceiling check (`size > ceiling`): 3 red, `oversize-class`, `oversize-never-edited`,
+    `oversize-other-fast-forwards-still-written`;
+  - skip the pre-write re-fetch comparison: 4 red, `race-refused-exit-1`, `race-refused-line`,
+    `race-no-edit`, `race-no-backup-written`;
+  - skip the read-back body comparison: 4 red, `readback-one-byte-fails`, `readback-mismatch-line`,
+    `readback-stops-later-writes`, `readback-names-the-backup-file`.
+- **Gate 3.** `bash scripts/check-workspace-policy.sh` (`workspace policy: ok`),
+  `python3 -B scripts/check-script-reachability.py` (`script reachability: ok`, 8 files under
+  `scripts/operator/` exempt) and `python3 -B scripts/test-script-reachability.py` (20 cases) exit 0.
+  `README.md` is a `dsp-research` input of the path router, so `python3 -B scripts/check-ci-path-routing.py`
+  and `python3 -B scripts/test-ci-path-routing.py` were run and exit 0. `shellcheck` is not installed
+  on the build host; `bash -n` passes.
+- **Smoke test, read-only.** `bash scripts/operator/sync-spec-bodies.sh --check --all` against the real
+  repository and GitHub on `origin/main` `1b55de30a` (about 3 minutes, no `gh` write): exit 3, 305 top-level
+  specs, `summary in-sync=176 fast-forward=17 closed-skipped=81 no-issue=0 oversize=0 unmatched=31`.
+  The `unmatched` lines say which half failed (`body=no-committed-state-matches` or
+  `title=no-committed-title-matches`) and give the nearest history blob; for example #291 matches a
+  committed body and differs in the title. The trailing-newline assumption holds (176 bodies match).
 
 ## Dependencies
 
