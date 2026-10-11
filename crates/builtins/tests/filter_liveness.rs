@@ -1332,7 +1332,13 @@ fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) 
     for block in 0..6 {
         let got = render_bank_block(&mut bank, body, FRAMES, |_, _| -0.0);
         let reference = render_bank_block(&mut twin, body, FRAMES, |_, _| -0.0);
-        let context = format!("block {block}");
+        let context = format!(
+            "{} body, neighbour {neighbour}, {history_blocks} history blocks, block {block}",
+            match body {
+                Body::Dual => "dual",
+                Body::Mono => "mono",
+            }
+        );
         assert_lanes_equal(&got, &reference, unaffected, &context);
         if block >= 3 {
             assert_lanes_equal(&got, &reference, &[1], &context);
@@ -1345,7 +1351,17 @@ fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) 
             );
             let plan = builtins::test_support::bank_elision_plan(&bank);
             if neighbour {
-                assert!(!plan[0][0], "the neighbour keeps the left HPF live");
+                assert!(
+                    !plan[0][0],
+                    "the neighbour keeps the left HPF live, {context}"
+                );
+                // Lane 3 holds a left-addressed HPF under the dual body and a both-channel one
+                // under the one-plane body, so only the dual body leaves the right HPF elided.
+                assert_eq!(
+                    plan[1][0],
+                    matches!(body, Body::Dual),
+                    "the right HPF is elided only when no lane holds one, {context}"
+                );
             } else {
                 assert!(
                     plan[0][0] && plan[1][0],

@@ -188,10 +188,10 @@ committed; "builtins suite" is `cargo test --locked --no-fail-fast --all-targets
 
 | Mutation | New test | Other builtins tests red |
 |---|---|---|
-| M1: dual body, the two `ic` clear lines (`:1166-1167`) replaced by no-ops | RED (`filter_liveness.rs:1341`, lane 1 state) | `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths`, `a_disable_in_the_enables_drain_still_completes_and_elides`, `a_disable_freezes_the_recursion_words_and_moves_only_the_mix`, `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time`, `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs` |
-| M2: mono body, the two `ic` clear lines (`:1410-1411`) replaced by no-ops | RED (`:1341`) | `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths` only |
-| M4a: both bodies, `identity = done` (drops `current_target_identity`; clears every settled lane) | RED (`:1265` output leg, when run before the history change) | `symmetric_bank_target_keeps_mono_and_dual_paths_equal`, and in the dual run `live_peak_gain_bounds_the_real_kernel_on_its_worst_histories` |
-| M4b dual: any settled lane makes the mask all lanes | RED (`:1265` output leg) | `bank_filter_target_updates_one_member_and_leaves_padding_identity` |
+| M1: dual body, the two `ic` clear lines (`:1166-1167`) replaced by no-ops | RED (`filter_liveness.rs:1341`, lane 1 state; `:1347` after the follow-ups) | `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths`, `a_disable_in_the_enables_drain_still_completes_and_elides`, `a_disable_freezes_the_recursion_words_and_moves_only_the_mix`, `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time`, `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs` |
+| M2: mono body, the two `ic` clear lines (`:1410-1411`) replaced by no-ops | RED (`:1341`; `:1347` after the follow-ups) | `tests::filter_prefix_ends_at_countdown_for_dual_and_mono_paths` only |
+| M4a: both bodies, `identity = done` (drops `current_target_identity`; clears every settled lane) | RED (`:1266` output leg; run on an earlier revision, where the line was `:1265`) | `symmetric_bank_target_keeps_mono_and_dual_paths_equal`, and in the dual run `live_peak_gain_bounds_the_real_kernel_on_its_worst_histories` |
+| M4b dual: any settled lane makes the mask all lanes | RED (`:1266` output leg; earlier revision, where the line was `:1265`) | `bank_filter_target_updates_one_member_and_leaves_padding_identity` |
 | **M4b mono: any settled lane makes the mask all lanes** | **RED** (`:1266`, output leg) | **none** |
 | M4b mono with the state and plan assertions removed from the test | RED (`:1266`, output leg alone) | n/a |
 | none (restored) | green | none |
@@ -200,6 +200,24 @@ M1 and M2 each turn the matching leg red (spec gate 2), but older tests already 
 is evidence for the regression guard, not a unique catch. M4a and M4b were run with the first
 revision of the history (a sine, replaced by an integer sawtooth because `f32::sin` is a
 disallowed method); M1, M2, M4b mono and the restored run were repeated on the final test.
+
+**Deviation: the history's sign (verdict MINOR).** Gate 1 asks for "several blocks of negative
+samples" before the disable. The test drives a signed sawtooth (`history_input`, about [-0.4, 0.4))
+instead, because it must differ per lane and move the integrators' phase at the disable. It does no
+harm: the clear is checked as exact `+0.0` integrator bits, whatever sign the history left, and
+the verifier's output-only runs showed the history's sign cannot reach the output (a stale
+identity HPF's signed zero is normalised by the following LPF stage in the bank and the twin
+alike). Only the `neighbour` scenario and this history shape deviate from the body's letter.
+
+**Follow-ups (after the verdict, PASS).** The assertion context now names the body, the scenario
+and the history length (M1 and M2 failed with the same text before); in the `neighbour` scenario
+the right HPF's plan entry is checked too (elided under the dual body, where lane 3 holds only a
+left HPF; live under the one-plane body, where lane 3's `Both` target holds both). Re-run after
+the edit: `filter_liveness` 15 passed; M4b mono (`if L::mask_any(identity) { all lanes }` on the
+mono body's `identity`): RED at `filter_liveness.rs:1266`, "left, lane 3, frame 1, mono body,
+neighbour true, 6 history blocks, block 0"; M1 (dual clear lines no-oped): RED at
+`filter_liveness.rs:1347`, "lane 1 integrators are +0.0 after dual body, neighbour false, 6 history
+blocks, block 2"; restored: green (`crates/lane/src/kernels/builtins.rs` byte-equal to base).
 
 **Gates.** Final test, no production change:
 
