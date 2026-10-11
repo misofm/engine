@@ -384,8 +384,9 @@ mod tests {
     };
     use builtins_compiler::{
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
-        PreparedBuiltinsCorruptionCase, SelectedMeterRequest, TrackControlRequest,
-        TrackFaderRecord, prepare_selected_session_builtins_between_render_calls,
+        PreparedBuiltinsCorruptionCase, SelectedMeterRequest, TestOnlyWriteGate,
+        TrackControlRequest, TrackFaderRecord,
+        prepare_selected_session_builtins_between_render_calls,
         prepare_selected_session_builtins_with_live_controls, prepare_session_builtins,
         prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
         test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness,
@@ -2930,6 +2931,7 @@ mod tests {
             let controls = [TrackControlRequest {
                 track_id: model.tracks[0].id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             }];
             let builtins = if controlled {
@@ -11022,10 +11024,10 @@ mod tests {
     ///
     /// # The contract, and why banking is where it could have been lost
     ///
-    /// `TrackFaderRecord` rides a bounded SPSC queue with exactly one consumer, and the consumer
-    /// drains it *at the top of the block*, before any audio is touched -- so a record admitted
-    /// while block `N` is being prepared takes effect on the first sample of block `N` and not on
-    /// block `N + 1`. That is what the control side is acknowledged with, and it is the property
+    /// A fader or mute record is a write to the strip's latest-target cells (#1312), and the
+    /// bank reads them *at the top of the block* (`begin_block`), before any audio is touched, under
+    /// the block's snapshot -- so a record published while block `N` is being prepared takes
+    /// effect on the first sample of block `N` and not on block `N + 1`. That is what the control side is acknowledged with, and it is the property
     /// #210 Phase 1's solo depends on.
     ///
     /// Banking moves the consumer from a per-track node to a bank lane, which is exactly the kind
@@ -11050,7 +11052,7 @@ mod tests {
     ///   limiter's lookahead put the first non-silent output at block 11, so a command admitted
     ///   before then has settled long before anything it did could reach the session output.
     ///
-    /// Red-mutation proven: draining `FaderBankProcessor`'s queues *after* `bank.process` instead
+    /// Red-mutation proven: draining `FaderBankProcessor`'s cells *after* `bank.process` instead
     /// of before it -- one block of latency, and nothing else -- fails at block 14, the block the
     /// first record was admitted in.
     #[test]
@@ -11391,6 +11393,7 @@ mod tests {
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect();
@@ -11447,6 +11450,9 @@ mod tests {
             .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
         let mut plan = bound.plan;
         let mut controls = bound.track_controls;
+        let mut gate = plan
+            .take_revision_gate()
+            .expect("the bound plan's gate handle");
         let pcm = (0..blocks)
             .map(|block| {
                 // Admitted *before* the block renders, which is the contract under test: every
@@ -11455,23 +11461,27 @@ mod tests {
                     if *at != block {
                         continue;
                     }
-                    for (index, channel) in controls.iter_mut().enumerate().take(tracks) {
-                        // Each lane gets its own gain, so a record applied to the wrong lane
-                        // changes the output rather than being masked by a uniform move.
-                        let record = match *record {
-                            TrackFaderRecord::FaderDb {
-                                lanes,
-                                db,
-                                smoothing_samples,
-                            } => TrackFaderRecord::FaderDb {
-                                lanes,
-                                db: db + index as f32 * 0.125,
-                                smoothing_samples: smoothing_samples + index as u32,
-                            },
-                            other => other,
-                        };
-                        channel.fader.try_push(record).expect("queue has room");
-                    }
+                    // One transaction: every lane's write is stamped with one revision and
+                    // published on the plan's gate, so the block that renders next reads them all.
+                    gate.write_published(|stamp| {
+                        for (index, channel) in controls.iter_mut().enumerate().take(tracks) {
+                            // Each lane gets its own gain, so a record applied to the wrong lane
+                            // changes the output rather than being masked by a uniform move.
+                            let record = match *record {
+                                TrackFaderRecord::FaderDb {
+                                    lanes,
+                                    db,
+                                    smoothing_samples,
+                                } => TrackFaderRecord::FaderDb {
+                                    lanes,
+                                    db: db + index as f32 * 0.125,
+                                    smoothing_samples: smoothing_samples + index as u32,
+                                },
+                                other => other,
+                            };
+                            channel.fader.write(stamp, record);
+                        }
+                    });
                 }
                 let mut pcm = vec![0.0_f32; frames * 2];
                 plan.render(
@@ -11677,6 +11687,7 @@ mod tests {
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect();
@@ -11835,6 +11846,7 @@ mod tests {
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect();
