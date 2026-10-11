@@ -9,13 +9,15 @@
 # on exit, and exits 1 if any assertion failed.
 set -euo pipefail
 
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SCRIPT=$here/sync-spec-bodies.sh
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+SCRIPT=$root/scripts/operator/sync-spec-bodies.sh
 [[ -f $SCRIPT ]] || { printf 'missing %s\n' "$SCRIPT" >&2; exit 2; }
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-sync-spec-bodies.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 R=$T/repo
+R2=$T/repo2
+R3=$T/repo3
 O=$T/origin.git
 G=$T/gh
 mkdir -p "$T/bin" "$G/issues" "$T/bodies"
@@ -30,6 +32,14 @@ assert() { # name command...
     local name=$1
     shift
     if "$@"; then ok "$name"; else bad "$name"; fi
+}
+
+# The tool finds its repository from its own location (#1022), so each fake repository gets its
+# own copy at scripts/operator/, kept out of `git status` through .git/info/exclude.
+install_tool() { # repository
+    mkdir -p "$1/scripts/operator"
+    cp "$SCRIPT" "$1/scripts/operator/sync-spec-bodies.sh"
+    printf '/scripts/\n' >>"$1/.git/info/exclude"
 }
 
 # --- the stub gh ------------------------------------------------------------------------------------
@@ -148,6 +158,7 @@ S=$R/.github/ISSUE_SPECS
 git init -q --bare -b main "$O"
 git init -q -b main "$R"
 git -C "$R" remote add origin "$O"
+install_tool "$R"
 mkdir -p "$S/BRIEFS"
 
 printf '# Ten\n\nten v1 line\nshared\n' >"$S/10-sync.md"
@@ -271,8 +282,13 @@ run() { # args...: runs the tool inside RUNCWD (default: the repository) against
     rc=0
     (
         cd "${RUNCWD:-$R}"
+        case ${RUNCWD:-$R} in # the copy inside the repository the run happens in
+        "$R3" | "$R3"/*) tool=$R3/scripts/operator/sync-spec-bodies.sh ;;
+        "$R2" | "$R2"/*) tool=$R2/scripts/operator/sync-spec-bodies.sh ;;
+        *) tool=$R/scripts/operator/sync-spec-bodies.sh ;;
+        esac
         PATH="$T/bin:$PATH" GH_STUB_DIR=$G STUB_BACKUP_DIR=$STUB_BACKUP_DIR STUB_ORIGIN_URL=$STUB_ORIGIN_URL \
-            SYNC_SPEC_BODIES_TEST_CEILING=$CEILING bash "$SCRIPT" "$@"
+            SYNC_SPEC_BODIES_TEST_CEILING=$CEILING bash "$tool" "$@"
     ) >"$T/out" 2>"$T/err" || rc=$?
     if [[ -e $G/unmodelled ]]; then
         bad "stub saw an unmodelled gh command (run: $*)"
@@ -446,7 +462,7 @@ assert 'reconcile-source-blob-file' cmp -s "$RD/15.source.md" "$T/src15"
 git -C "$R" show "$C2:.github/ISSUE_SPECS/15-unmatched.md" >"$T/near15"
 assert 'reconcile-nearest-blob-file' cmp -s "$RD/15.nearest.md" "$T/near15"
 assert 'reconcile-header-names-nearest-commit' grep -q "commit $C2 path .github/ISSUE_SPECS/15-unmatched.md" "$RD/15.header.txt"
-assert 'reconcile-dir-must-not-exist' bash -c '! (cd "$1" && PATH="$2:$PATH" GH_STUB_DIR="$3" bash "$4" --check --reconcile-dir "$5" 15) >/dev/null 2>&1' _ "$R" "$T/bin" "$G" "$SCRIPT" "$RD"
+assert 'reconcile-dir-must-not-exist' bash -c '! (cd "$1" && PATH="$2:$PATH" GH_STUB_DIR="$3" bash "$4" --check --reconcile-dir "$5" 15) >/dev/null 2>&1' _ "$R" "$T/bin" "$G" "$R/scripts/operator/sync-spec-bodies.sh" "$RD"
 
 # --- L: every gh call is bound to origin's repository --------------------------------------------
 # (the stub refuses any argv whose --repo is not test-owner/test-repo, so every run above proves the flag)
@@ -533,6 +549,7 @@ R2=$T/repo2
 git init -q --bare -b main "$O2"
 git init -q -b main "$R2"
 git -C "$R2" remote add origin "$O2"
+install_tool "$R2"
 mkdir -p "$R2/.github/ISSUE_SPECS"
 printf '# Thirty-one\n\na\n' >"$R2/.github/ISSUE_SPECS/31-a.md"
 printf '# Thirty-one\n\nb\n' >"$R2/.github/ISSUE_SPECS/31-b.md"
@@ -557,6 +574,7 @@ S3=$R3/.github/ISSUE_SPECS
 git init -q --bare -b main "$O3"
 git init -q -b main "$R3"
 git -C "$R3" remote add origin "$O3"
+install_tool "$R3"
 mkdir -p "$S3"
 printf '# Forty\n\nforty v1\nbody\n' >"$S3/40-a.md"
 printf '# Forty-one\n\nforty-one v1\nx\n' >"$S3/41-a.md"

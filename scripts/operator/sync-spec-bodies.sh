@@ -147,7 +147,9 @@ fi
 for tool in awk cat cmp cp git gh head jq mktemp sort tail wc; do
     command -v "$tool" >/dev/null 2>&1 || die2 "required tool is unavailable: $tool"
 done
-repo=$(git rev-parse --show-toplevel) || die2 'not inside a git checkout'
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+repo_top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die2 'not inside a git checkout'
+[[ $repo_top -ef $repo ]] || die2 'the script is not at scripts/operator/ of a git checkout'
 cd "$repo"
 
 # --- the GitHub repository: origin's, for every gh call -------------------------------------------
