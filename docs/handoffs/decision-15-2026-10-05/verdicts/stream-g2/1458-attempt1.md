@@ -60,7 +60,7 @@ Spec `:177` and `:194-200`. I confirmed that both rows are green on the old copi
     are worded to match.
 
 **For root (outside #1458's paths).** #1409's spec is still at
-`2a589d360:.github/ISSUE_SPECS/1409-keep-every-effect-parameter-ramp-inside-its-endpoints.md`; the rows are at
+`88c62e7f5:.github/ISSUE_SPECS/1409-keep-every-effect-parameter-ramp-inside-its-endpoints.md`; the rows are at
 `:505` and `:516`. I recommend a pointer in that record, or on GitHub #1409 once the spec leaves:
 "gate-2 reach of row 505 lost at `f6f599d84` and of row 516 at `00a0445c5`; both rows stayed red
 elsewhere (gate 1; soft-clip `ramp_law.rs`); gate-2 reach restored by #1458 `88c62e7f5`."
