@@ -10,8 +10,6 @@ pub struct Policy {
     pub marked_files_floor: usize,
     /// The fewest marked regions a tree may hold.
     pub marked_regions_floor: usize,
-    /// Files that are parsed whether or not they hold a marker.
-    pub always_parsed: Vec<String>,
 }
 
 impl Policy {
@@ -48,7 +46,6 @@ impl Policy {
                 .collect(),
             marked_files_floor: 26,
             marked_regions_floor: 93,
-            always_parsed: vec!["crates/capi/src/ffi.rs".to_owned()],
         }
     }
 }

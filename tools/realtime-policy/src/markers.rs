@@ -4,8 +4,9 @@
 //! line that mentions a marker word in any other way is malformed, so a marker the tool cannot
 //! read as a marker is a finding and never a silently dropped region.
 
-use proc_macro2::{LineColumn, TokenStream, TokenTree};
+use proc_macro2::{LineColumn, TokenStream};
 
+use crate::leaf;
 use crate::report::{Class, Finding};
 use crate::source::Source;
 
@@ -48,9 +49,9 @@ fn marker_kind(line: &str) -> Option<Kind> {
     (rest.is_empty() || rest.starts_with(": ")).then_some(kind)
 }
 
-/// A token's extent. `end` is one past its last character.
+/// A leaf token's extent. `end` is one past its last character.
 #[derive(Clone, Copy)]
-struct Leaf {
+struct Extent {
     start: LineColumn,
     end: LineColumn,
 }
@@ -58,54 +59,34 @@ struct Leaf {
 /// The positions of the lexer's leaf tokens: identifiers, punctuation, literals and group
 /// delimiters, sorted by start. Everything between two of them is whitespace and comments.
 struct Leaves {
-    sorted: Vec<Leaf>,
+    sorted: Vec<Extent>,
     /// `reach[i]` is the greatest end among `sorted[..=i]`.
     reach: Vec<LineColumn>,
 }
 
 impl Leaves {
     fn collect(tokens: &TokenStream) -> Self {
-        let mut sorted = Vec::new();
-        collect_into(tokens, &mut sorted);
-        sorted.sort_by_key(|leaf| (leaf.start.line, leaf.start.column));
+        let mut sorted: Vec<Extent> = leaf::flatten(tokens)
+            .iter()
+            .map(|leaf| Extent {
+                start: leaf.start,
+                end: leaf.end,
+            })
+            .collect();
+        sorted.sort_by_key(|extent| (extent.start.line, extent.start.column));
         let mut reach: Vec<LineColumn> = Vec::with_capacity(sorted.len());
-        for leaf in &sorted {
+        for extent in &sorted {
             let greatest = match reach.last() {
                 Some(previous)
-                    if (previous.line, previous.column) > (leaf.end.line, leaf.end.column) =>
+                    if (previous.line, previous.column) > (extent.end.line, extent.end.column) =>
                 {
                     *previous
                 }
-                _ => leaf.end,
+                _ => extent.end,
             };
             reach.push(greatest);
         }
         Self { sorted, reach }
-    }
-}
-
-fn collect_into(tokens: &TokenStream, leaves: &mut Vec<Leaf>) {
-    for token in tokens.clone() {
-        match token {
-            TokenTree::Group(group) => {
-                // A group's own span covers every line inside it, so it is not a leaf. Its two
-                // delimiters are.
-                for span in [group.span_open(), group.span_close()] {
-                    leaves.push(Leaf {
-                        start: span.start(),
-                        end: span.end(),
-                    });
-                }
-                collect_into(&group.stream(), leaves);
-            }
-            other => {
-                let span = other.span();
-                leaves.push(Leaf {
-                    start: span.start(),
-                    end: span.end(),
-                });
-            }
-        }
     }
 }
 

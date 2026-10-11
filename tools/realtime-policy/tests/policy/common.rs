@@ -31,6 +31,11 @@ pub(crate) fn policy() -> Policy {
     }
 }
 
+/// `body` between a begin and an end marker line.
+pub(crate) fn region(body: &str) -> String {
+    format!("// {BEGIN}\n{body}\n// {END}\n")
+}
+
 /// One edit of the base tree.
 pub(crate) enum Edit<'a> {
     /// Replace the one line that is exactly `old` in `path` with `new` (which may span lines).

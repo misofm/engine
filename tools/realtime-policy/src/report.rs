@@ -3,6 +3,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use crate::whole_plan;
+
 /// What a finding says. The declaration order is the order in which a report lists findings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
@@ -34,6 +36,18 @@ pub enum Class {
     UnmatchedMarkers,
     /// A file's markers do not alternate begin, end, begin, end.
     MisorderedMarkers,
+    /// A region marker sits inside a syntax node instead of between two; the text names the node.
+    RegionSplits(&'static str),
+    /// A region's markers sit in different containers and one of them is a macro token tree.
+    RegionSplitsMacroTree,
+    /// A marked region holds a forbidden spelling.
+    ForbiddenBody,
+    /// `crates/capi/src/ffi.rs` does not exist.
+    MissingCapiFfi,
+    /// `crates/capi/src/ffi.rs` has no production render entry point.
+    NoRenderEntry,
+    /// Production code of `crates/capi/src/ffi.rs` borrows the whole plan.
+    WholePlanReference,
     /// Fewer marked files than the policy's floor; the number is the floor.
     MarkedFileFloor(usize),
     /// Fewer marked regions than the policy's floor; the number is the floor.
@@ -59,6 +73,14 @@ impl fmt::Display for Class {
             Self::MalformedMarker => out.write_str("malformed realtime policy marker"),
             Self::UnmatchedMarkers => out.write_str("unmatched realtime policy markers"),
             Self::MisorderedMarkers => out.write_str("misordered realtime policy markers"),
+            Self::RegionSplits(node) => write!(out, "region boundary splits {node}"),
+            Self::RegionSplitsMacroTree => out.write_str("region boundary splits a macro token tree"),
+            Self::ForbiddenBody => out.write_str("marked realtime forbidden-body predicate"),
+            Self::MissingCapiFfi => write!(out, "missing {}", whole_plan::CAPI_FFI),
+            Self::NoRenderEntry => out.write_str("has no production render entry point to scan"),
+            Self::WholePlanReference => out.write_str(
+                "the C ABI forms a reference to a whole Plan; project the field with &raw const or &raw mut",
+            ),
             Self::MarkedFileFloor(floor) => {
                 write!(out, "expected at least {floor} marked realtime files")
             }

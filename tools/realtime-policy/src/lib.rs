@@ -1,5 +1,5 @@
-//! Checks the marked realtime regions and the unsafe-ownership boundary of the workspace from
-//! Rust's own lexer and syntax tree.
+//! Checks the marked realtime regions, the C ABI's whole-plan rule and the unsafe-ownership
+//! boundary of the workspace from Rust's own lexer and syntax tree.
 //!
 //! [`check`] walks `crates`, `hosts` and `tools` under a workspace root and returns a [`Report`].
 //! [`run`] is the binary's whole behaviour with its environment passed in. [`Policy`] holds the
@@ -8,7 +8,10 @@
 //! The walk fails closed: a path the tool cannot read, list or classify is a finding, never a
 //! skip.
 
+mod boundary;
 mod cli;
+mod forbidden;
+mod leaf;
 mod markers;
 mod policy;
 mod report;
@@ -16,6 +19,7 @@ mod source;
 mod syntax;
 mod unsafe_scan;
 mod walk;
+mod whole_plan;
 
 use std::path::Path;
 
@@ -37,6 +41,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     }
     let mut regions = 0;
     let mut files = 0;
+    let mut capi_ffi = None;
     for file in walk::rust_files(workspace_root, &mut findings) {
         let source = match Source::load(&file.absolute, &file.path) {
             Ok(source) => source,
@@ -50,10 +55,21 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         if !markers.regions.is_empty() {
             regions += markers.regions.len();
             files += 1;
+            forbidden::scan(&source, &markers.regions, &mut findings);
         }
-        if markers.mentions_marker || policy.always_parsed.contains(&source.path) {
-            let _ = syntax::parse(&source, &mut findings);
+        if (markers.mentions_marker || source.path == whole_plan::CAPI_FFI)
+            && let Some(file) = syntax::parse(&source, &mut findings)
+        {
+            boundary::check(&source, &file, &markers.regions, &mut findings);
+            if source.path == whole_plan::CAPI_FFI {
+                capi_ffi = Some((source, file));
+            }
         }
+    }
+    if !workspace_root.join(whole_plan::CAPI_FFI).is_file() {
+        findings.push(Finding::bare(Class::MissingCapiFfi));
+    } else if let Some((source, file)) = &capi_ffi {
+        whole_plan::scan(source, file, &mut findings);
     }
     if files < policy.marked_files_floor {
         findings.push(Finding::bare(Class::MarkedFileFloor(
