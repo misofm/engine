@@ -721,6 +721,64 @@ fn live_document() -> String {
     session::canonical_session_json(&model).expect("canonical")
 }
 
+/// The stateless fixture cut to two strips whose levels the output shows apart: `eq0` reaches only
+/// the output's left plane and `eq1` only its right plane (a route matrix with one diagonal
+/// entry), so a block's last sample on each plane is that strip's fader level times its source
+/// channel. `eq0` starts at 0 dB and `eq1` at -6 dB, the levels [`pair_command`]'s even edits set.
+fn pair_document() -> String {
+    let mut model = session::parse_session_json(&live_document()).expect("live fixture");
+    model.tracks.truncate(2);
+    model.routes.retain(|route| {
+        matches!(&route.source, session::RouteSource::Track { track_id, .. }
+            if model.tracks.iter().any(|track| &track.id == track_id))
+    });
+    assert_eq!(model.routes.len(), 2, "one route per kept strip");
+    for (index, route) in model.routes.iter_mut().enumerate() {
+        let on = |present: bool| f32::from(u8::from(present));
+        route.channel_matrix = session::ChannelMatrix {
+            ll: on(index == 0),
+            lr: 0.0,
+            rl: 0.0,
+            rr: on(index == 1),
+        };
+    }
+    model.tracks[1].fader.left_db = -6.0;
+    model.tracks[1].fader.right_db = -6.0;
+    session::canonical_session_json(&model).expect("canonical")
+}
+
+/// One live transaction that sets both strips of [`pair_document`] at once: edit `n` (counting
+/// from 1) sets `eq0` to -6 dB and `eq1` to 0 dB when `n` is odd, and the reverse when it is even.
+fn pair_command(request_id: u64, revision: u64, edit: u64) -> Vec<u8> {
+    let (first, second) = if edit % 2 == 1 {
+        (-6.0, 0.0)
+    } else {
+        (0.0, -6.0)
+    };
+    let edits = [("eq0", first), ("eq1", second)].map(|(id, db)| SessionEdit::SetTrackFader {
+        track_id: StableId::parse(id).expect("track ID"),
+        fader: session::DualMonoFader {
+            left_db: db,
+            right_db: db,
+            left_mute: false,
+            right_mute: false,
+        },
+    });
+    let mut bytes = vec![0_u8; 4_096];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("pair command");
+    bytes.truncate(len);
+    bytes
+}
+
 fn live_limits() -> CompileLimits {
     CompileLimits {
         source_ring_frames: 4 * LIVE_QUANTUM,
@@ -797,6 +855,63 @@ fn live_levels(document: &str) -> [[u32; 2]; 2] {
     [unity, attenuated]
 }
 
+/// The two steady states of [`pair_document`], measured on one thread: the last samples of a block
+/// before any edit (`eq0` at 0 dB, `eq1` at -6 dB), and of the first block after edit 1, whose
+/// ramps must end inside it. Edit 2 must return to the first state bit for bit.
+fn pair_levels(document: &str) -> [[u32; 2]; 2] {
+    // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
+    let (session, plan) = unsafe { compile_c(document, &live_limits()) };
+    let first = watermark_c(plan as usize)
+        .expect("no render in flight")
+        .revision;
+    let mut pcm = [f32::NAN; 2 * LIVE_FRAMES];
+    let block = |index: u64, pcm: &mut [f32; 2 * LIVE_FRAMES]| {
+        let start = index * u64::from(LIVE_QUANTUM);
+        // SAFETY: This thread is the session's and the plan's only caller.
+        unsafe {
+            assert_eq!(
+                submit_dc_block::<LIVE_FRAMES>(session, start),
+                (RESULT_OK, u64::from(LIVE_QUANTUM))
+            );
+            assert_eq!(render_live(plan, start, pcm), RESULT_OK);
+        }
+        last_samples(pcm)
+    };
+    let initial = block(0, &mut pcm);
+    assert_eq!(block(1, &mut pcm), initial, "the document starts steady");
+    let mut flipped = initial;
+    for edit in 1..=2 {
+        // SAFETY: as above.
+        let code = unsafe {
+            commit_c(
+                session,
+                &pair_command(edit, first + edit - 1, edit),
+                first + edit - 1,
+            )
+        };
+        assert_eq!(code, RESULT_OK);
+        let state = block(2 * edit, &mut pcm);
+        assert_eq!(
+            block(2 * edit + 1, &mut pcm),
+            state,
+            "the ramps end within a block"
+        );
+        if edit == 1 {
+            assert_ne!(state[0], initial[0], "edit 1 changes eq0's plane");
+            assert_ne!(state[1], initial[1], "edit 1 changes eq1's plane");
+            flipped = state;
+        } else {
+            assert_eq!(state, initial, "edit 2 restores the first state");
+        }
+    }
+    // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
+    unsafe {
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
+    [initial, flipped]
+}
+
 /// The handshake that times a render call against a commit, in nanoseconds since `base`.
 ///
 /// When control has an edit ready it sets `want`. The render thread then parks before its next
@@ -840,11 +955,13 @@ impl RenderGate {
     }
 }
 
-/// Offsets per sweep: edit `n` lands its revision store about `n % PHASES` steps along a span
-/// from a quarter of a render call before the call to the call's end.
+/// Offsets per sweep: an edit lands its revision store about its phase, `0..PHASES`, steps along
+/// its sweep. The one-way race sweeps from a quarter of a render call before the call to the
+/// call's end.
 const PHASES: u64 = 16;
 
-/// The control side of [`a_watermark_advance_names_a_block_that_applied_the_edit`]: it feeds the
+/// The control side of the live races ([`a_watermark_advance_names_a_block_that_applied_the_edit`]
+/// and [`a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it`]): it feeds the
 /// source and, once the watermark covers the last edit, commits the next live fader edit against
 /// a parked render call, so at most one edit is in flight and each advance covers exactly one
 /// revision.
@@ -852,6 +969,12 @@ struct LiveControl<'a> {
     session_address: usize,
     plan_address: usize,
     edits: u64,
+    /// Encodes edit `n` (the request ID, the expected revision, `n`) as one transaction.
+    command: fn(u64, u64, u64) -> Vec<u8>,
+    /// The sweeps of a revision store across a render call, each in 64ths of the call from its
+    /// `from` to its `to`; edit `n` takes sweep `n % len` and, in it, the offset
+    /// `from + (to - from) * (n / len % PHASES) / PHASES`.
+    windows: &'static [(i64, i64)],
     committed: u64,
     revision: u64,
     gate: &'a RenderGate,
@@ -886,10 +1009,14 @@ impl LiveControl<'_> {
         // `commit_nanos - target` before the store when that is positive, else start it now and
         // commit `target - commit_nanos` later.
         let render = self.gate.render_nanos.load(Ordering::Acquire);
-        let sweep = i128::from((self.committed % PHASES) * render * 5 / (4 * PHASES));
-        let target = sweep - i128::from(render / 4);
+        let (from, to) = self.windows[self.committed as usize % self.windows.len()];
+        let phase = self.committed / self.windows.len() as u64 % PHASES;
+        let span = i128::from(to - from);
+        let target = (i128::from(from) * i128::from(render)
+            + span * i128::from(render) * i128::from(phase) / i128::from(PHASES))
+            / 64;
         let lead = i128::from(self.commit_nanos) - target;
-        let request = fader_command(self.committed + 1, self.revision, self.committed + 1);
+        let request = (self.command)(self.committed + 1, self.revision, self.committed + 1);
         self.gate.want.store(false, Ordering::Relaxed);
         let now = self.gate.now();
         let start = now + u64::try_from(lead.max(1)).expect("positive");
@@ -926,9 +1053,8 @@ impl LiveControl<'_> {
 /// After each block this thread reads the watermark. When it advanced, to `r`, it must name this
 /// block's first sample, and the block's last samples must be the steady level `r` targets
 /// (measured single-threaded by [`live_levels`]): the ramp started at or before the block's first
-/// sample and ends within the block. The reverse does not hold, and the test does not ask it: an
-/// edit whose record a drain takes after render took the snapshot is applied in a block the
-/// watermark reports later.
+/// sample and ends within the block. The converse, that a block that shows a new level is the block
+/// the watermark advanced at, is [`a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it`]'s.
 ///
 /// Taking the snapshot after the executor rendered lets a commit that lands after the block's drains
 /// advance the watermark at that block, which renders the previous level throughout.
@@ -959,6 +1085,8 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
         session_address: session as usize,
         plan_address,
         edits: EDITS,
+        command: fader_command,
+        windows: &[(-16, 64)],
         committed: 0,
         revision: first,
         gate: &gate,
@@ -1009,6 +1137,143 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
                 );
                 last.store(watermark.revision, Ordering::Release);
             }
+            rendered.store(block + 1, Ordering::Release);
+        },
+    );
+    let overlapped = control.overlapped;
+    // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
+    unsafe {
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
+    assert_eq!(
+        last.load(Ordering::Acquire),
+        first + EDITS,
+        "every edit completed"
+    );
+    assert!(
+        overlapped > EDITS / 10,
+        "vacuous: {overlapped} of {EDITS} revision stores fell inside a render call"
+    );
+}
+
+/// #1505, #1312, D15-2 and D15-17: under a racing render, one live transaction that changes two
+/// strips lands in one block, and the watermark names that block, neither a block early nor a block
+/// late. This is the converse of [`a_watermark_advance_names_a_block_that_applied_the_edit`], which
+/// could not be asked before the strips drained their cells under the block's snapshot.
+///
+/// The harness is that test's, over [`pair_document`]: each commit is one transaction that sets
+/// `eq0` and `eq1`, whose levels the output's two planes show apart, to opposite levels, and the
+/// next commit waits until the watermark covers the last, so each advance covers one revision.
+/// Per rendered block this thread asserts that:
+///
+/// * the two planes' last samples are both the old state or both the new one, never a mix (a
+///   transaction split across two blocks);
+/// * a watermark advance to `r` at this block names this block's first sample, and the block shows
+///   `r`'s state; and
+/// * a block that shows a state different from the previous block's is the block the watermark
+///   advanced at (a watermark published a block late).
+///
+/// Reading the cells under [`engine::realtime::LiveSnapshot::ALL`] instead of the block's snapshot,
+/// or publishing the watermark a block late, turns the third assertion red; the one-way test
+/// accepts both. Half of the commits sweep their revision store across the whole render call, as
+/// the one-way test does, and half across the call's first few percent, where a store lands after
+/// the snapshot and before the strips' drains.
+#[test]
+fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
+    const EDITS: u64 = 640;
+    let document = pair_document();
+    let states = pair_levels(&document);
+    assert_ne!(states[0], states[1]);
+
+    // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
+    let (session, plan) = unsafe { compile_c(&document, &live_limits()) };
+    let plan_address = plan as usize;
+    let first = watermark_c(plan_address)
+        .expect("no render in flight")
+        .revision;
+    let gate = RenderGate {
+        base: std::time::Instant::now(),
+        want: AtomicBool::new(false),
+        parked: AtomicBool::new(false),
+        start: AtomicU64::new(0),
+        in_render: AtomicBool::new(false),
+        render_nanos: AtomicU64::new(0),
+    };
+    let rendered = AtomicU64::new(0);
+    // The newest revision a block's watermark read returned.
+    let last = AtomicU64::new(first);
+    let mut control = LiveControl {
+        session_address: session as usize,
+        plan_address,
+        edits: EDITS,
+        command: pair_command,
+        windows: &[(-16, 64), (-2, 6)],
+        committed: 0,
+        revision: first,
+        gate: &gate,
+        commit_nanos: 0,
+        overlapped: 0,
+        next_frame: 0,
+    };
+    let block_bound = usize::try_from(EDITS * 64).expect("block bound");
+    // The previous block's last samples; the document starts in the first state.
+    let mut shown = states[0];
+    render_while_producing(
+        block_bound,
+        &mut control,
+        |control| control.step(),
+        |control| {
+            last.load(Ordering::Acquire) == first + EDITS
+                || control.next_frame
+                    >= (rendered.load(Ordering::Acquire) + 1) * u64::from(LIVE_QUANTUM)
+        },
+        |_| {
+            let newest = last.load(Ordering::Acquire);
+            if newest == first + EDITS {
+                return;
+            }
+            let block = rendered.load(Ordering::Acquire);
+            let start = block * u64::from(LIVE_QUANTUM);
+            let mut pcm = [f32::NAN; 2 * LIVE_FRAMES];
+            gate.wait_for_start();
+            let started = gate.now();
+            gate.in_render.store(true, Ordering::SeqCst);
+            // SAFETY: This thread is the plan's only renderer.
+            let code = unsafe { render_live(plan_address as *mut Plan, start, &mut pcm) };
+            gate.in_render.store(false, Ordering::SeqCst);
+            gate.render_nanos
+                .store(gate.now() - started, Ordering::Release);
+            assert_eq!(code, RESULT_OK, "render refused block {block}");
+            let watermark = watermark_c(plan_address).expect("the renderer never reads busy");
+            let now_shown = last_samples(&pcm);
+            assert!(
+                states.contains(&now_shown),
+                "block {block} mixes the two strips' states: {now_shown:08x?}, steady states \
+                 {states:08x?}"
+            );
+            if watermark.revision != newest {
+                let edit = watermark.revision - first;
+                assert_eq!(watermark.revision, newest + 1, "one edit per advance");
+                assert_eq!(
+                    watermark.first_sample, start,
+                    "an advance names the block that made it"
+                );
+                assert_eq!(
+                    now_shown,
+                    states[usize::from(edit % 2 == 1)],
+                    "block {block}: the watermark advanced to edit {edit} in a block that does \
+                     not show it"
+                );
+                last.store(watermark.revision, Ordering::Release);
+            } else {
+                assert_eq!(
+                    now_shown, shown,
+                    "block {block} shows a new state, but the watermark (revision {newest}) did \
+                     not advance at it"
+                );
+            }
+            shown = now_shown;
             rendered.store(block + 1, Ordering::Release);
         },
     );

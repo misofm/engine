@@ -87,3 +87,68 @@ drained at its own node.
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b3`, one test-only commit)
+
+**What landed.** Only `crates/capi/tests/plan_swap_race.rs`; no engine, control-plane or harness change.
+
+- `pair_document` (beside `live_document`): the stateless fixture cut to `eq0` and `eq1`, the two
+  routes' matrices set to one diagonal entry each (`eq0` to the left plane only, `eq1` to the right
+  plane only), so one block's last sample on each plane shows one strip. `eq0` starts at 0 dB and
+  `eq1` at -6 dB.
+- `pair_command`: one transaction with two `SetTrackFader` edits: odd edits set `eq0` -6 dB and
+  `eq1` 0 dB, even edits the reverse (D1). `pair_levels` measures both steady states single-threaded
+  (the ramps end within the 1024-frame block, the second block repeats the first, edit 2 restores the
+  first state bit for bit).
+- `a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it`, in the one-way test's
+  harness (`RenderGate`, `LiveControl`, `render_while_producing`), 640 edits. Per block: both planes
+  show one of the two steady states (D2 first bullet); an advance to `r` names the block's first
+  sample and the block shows `r`'s state (second bullet); a block that shows a state different from
+  the previous block's is the block the watermark advanced at (third bullet).
+  The D3 guard is the one-way test's: more than a tenth of the revision stores inside a render call.
+- `LiveControl` gained two fields: `command` (the transaction encoder) and `windows` (the sweeps of
+  the revision store across the render call). The one-way test passes `fader_command` and the one
+  sweep it always had (`(-16, 64)` in 64ths of a call: its formula is unchanged). Its doc no longer
+  says the converse does not hold.
+
+**Harness finding (not a product defect).** The test is green on the unmodified tree. The first form
+of the sweep (the one-way test's, over the whole render call) did not catch mutation M1 in the debug
+profile: in debug a render call is about 2.2 ms and a strip drains within a few microseconds of the
+block's snapshot, so only a store inside that sliver of a sweep that spans 1.25 calls can hit it
+(1 red in 6 runs). The new test therefore alternates two sweeps: the whole call, and
+`(-2, 6)` 64ths, the first few percent of the call, where a store lands after the snapshot and
+before the drains. With that, M1 is red in 8 of 8 runs in each profile.
+
+**Gate 1, clean tree.** Ten runs of `plan_swap_race` in each profile, all 4 tests green
+(debug 3.5 to 4.8 s, release 0.35 to 0.52 s). D3 measured on 10 debug and 10 release runs of the new
+test: 450 to 472 of 640 revision stores inside a render call in debug (70 to 74 percent), 392 to 438
+in release (61 to 68 percent). Debug: commit about 0.45 ms, render call about 2.2 ms. Release: commit
+about 31 us, render call about 13 us.
+
+**Mutations (each applied to unmodified product code, then reverted with `git checkout`).**
+
+| Mutation | New test, debug | New test, release | One-way test (unchanged) |
+| --- | --- | --- | --- |
+| M1: `GraphExecutor::begin_live_block` stores `LiveSnapshot::ALL` (drains read the latest cells, the watermark still names `S`) | red 8/8 ("block N shows a new state, but the watermark did not advance at it") | red 8/8 | green, both profiles |
+| M2: snapshot taken after `render_block` (drains under `ALL`) | red ("advanced to edit 1 in a block that does not show it") | red | red, both profiles |
+| M3: report taken from a second `gate.snapshot()` after the block rendered | red | red | red, both profiles |
+| M4: watermark advances to `S - 1` | red | red | red (the edits never complete) |
+| M5: watermark advances to the previous block's `S` (one block late) | red (3/3) | red (3/3) | red in debug (3/3), green in release (3/3) |
+
+M1 is the defect only the new test catches in both profiles, and M5 in release: a revision whose
+cell stores land after a block's snapshot and before its drains is applied a block early, and a
+watermark that is a block late both pass the one-way test's "an advance names a block that applied
+the edit". M2 to M4 are also caught by the one-way test, which the spec's second mutation already
+implies; they are recorded as the new test's own red runs, not as unique catches. The first
+assertion (mixed planes) did not fire in any mutation run, because under M1 the drains read both
+strips' cells in the same sliver and the "new state without an advance" assertion fires first; it
+defends a transaction whose two strips straddle a block boundary, which no available mutation
+produces without a hook in the product, and the spec's D2 names it.
+
+**Gates run.** `cargo fmt --all -- --check` ok. `cargo clippy --locked -p capi --all-targets
+--all-features -- -D warnings` clean. `bash scripts/check-workspace-policy.sh` ok. `cargo test
+--locked -p capi`: all suites green (4 in `plan_swap_race`). `cargo test --locked --release -p capi
+--test plan_swap_race` green, 10 runs. The workspace-wide clippy of gate 2 was not run (the change is
+one test file in `capi`).
