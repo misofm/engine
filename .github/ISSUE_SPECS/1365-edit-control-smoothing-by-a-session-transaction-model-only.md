@@ -153,3 +153,97 @@ ordinary session transaction" holds.
 
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054).
+
+## Attempt record
+
+**Attempt 1** (implementer, branch `codex/d15-stream-e2`, base `bd8a92e9d`, after #1394 attempt 2). One
+implementation commit (`9db950add`: D1-D6, the five tests, every pin file and the docs, in one commit as
+the single re-pin requires), then this record.
+
+**Preflight at the base.** Opcode `0x0008` was free in `SessionEditOpcode` (the only other `0x0008` in the
+crate is `TransportSet`, a different registry). The all-opcode count was 46 and the controller test's limit
+45, as the spec says; the lines moved (`controller/tests.rs:327-328` is now `:327-329` after the comment,
+`model.rs` is longer after #1394), but no number changed. `COMPLETE_SCHEMA_HASH` stood at
+`5429f052592101ef` (#1394 attempt 2), and the re-pin runs from it.
+
+**Where the spec and the tree differed (recorded, not improvised around).**
+
+1. *The call site.* `LiveRamps::for_session(next)` is in `crates/control-plane/src/control.rs`
+   (`commit_live`, `:1348-1351`), not `crates/capi/.../control.rs:1207-1211`. The code is as D4 assumes
+   (the ramps come from `next`); the file is not edited.
+2. *`.clone()` is `*`.* `ControlSmoothing` is `Copy`, so D3 is `session.control_smoothing =
+   *control_smoothing` (clippy refuses `.clone()` on a `Copy` type).
+3. *Decode refusal code.* "The protocol's existing domain code" is `DecodeError::InvalidTlv`
+   (`MALFORMED_FRAME`), the code `read_f32_exact` and the bit-depth decoder already use for a value outside
+   its domain. A partial message is refused by the schema's required-field check, as every other nested
+   message is.
+4. *`record_edit_ramps`.* The exhaustive match in `crates/protocol/src/model.rs` lists
+   `SetControlSmoothing` with the edits that write no keyed row (a no-op), as the brief said. The edit has
+   no `ramp_samples`, so `SessionEdit::ramp_samples()` returns `None` for it by its `_` arm.
+5. *No compiler-forced edit outside the authorized paths.* host-web, the SDK and the rest of the workspace
+   compile and pass unchanged.
+
+**The re-pin.** `COMPLETE_SCHEMA_HASH` `5429f052592101ef` -> `8eb4cc8d075a4355`, history line "#1365
+appends `SetControlSmoothing` (`0x0008`)". The corpus transaction gains one edit (`Some`, lengths 5, 15 and
+25 ms, so a field cannot be read as its neighbour) after `SetConsole`, so it carries 47 edits; the frame
+count stays 46. Moved together: the constant and its history (`protocol_corpus.rs`), both spellings in
+`scripts/check-protocol-wasm-parity.sh` (`:172-173`), the count 47 and limit 46 in
+`controller/tests.rs`, the allocated-opcode count in `model.rs`'s registry test (46 -> 47, with an
+assertion for `0x0008`), the hash, count and history in `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
+`fuzz/corpus/complete-schema-manifest.md` and the "exactly 47 allocated opcodes" line of
+`docs/CONTROL_PROTOCOL_REGISTRY.md`. The reason for the re-pin is the new opcode; nothing else moved. The
+parity script and `conformance_corpus` agree on the new value.
+
+**Digests that moved: none.** `audit capi` `pcm_digest a9738fa800afcab3` (as before this slice), 0
+allocations, 0 syscalls; `check-browser-expected-resources.py --artifacts` agrees with the rebuilt
+simd128 module.
+
+**Tests added.** Each answers "which plausible defect turns this red that no existing test catches?".
+
+| Gate | Test | Defect it catches |
+| --- | --- | --- |
+| 1 | `protocol` `session_wire::tests::set_control_smoothing_round_trips_and_decode_refuses_a_partial_or_out_of_range_message` | encoder and decoder disagree on a length's field or on the optional message; a partial message completed with a default; a length outside `[0, 1000]` (or non-finite) accepted at decode and left to validation |
+| 2 | `protocol` `model::tests::set_control_smoothing_sets_then_clears_the_key_in_the_committed_snapshot` | the apply arm ignores `None`, merges into the old lengths or writes a length into its neighbour; canonical JSON spells the key wrongly |
+| 3 | `capi` `model_only_edits_commit_without_a_plan_rebuild` (its edit list gains the edit) | the mask misses the key, so the edit rebuilds: new provider epoch, pending candidate, source-ring reset |
+| 4 | `capi` `a_control_smoothing_edit_makes_the_next_mute_a_step`, `a_control_smoothing_edit_gives_the_next_unmute_its_ramp` | `LiveRamps` read from the pre-commit model, so the edit takes effect one transaction late; the key read as the default table; the ramp not landing on its control |
+| 5 | `host-core` `live_delta` `a_control_smoothing_edit_is_live_and_its_lengths_govern_the_same_transactions_records`, plus the edit joins `model_only_edits_are_live_with_no_records` | the classifier treats the key as structure (set, change and clear are each tried) |
+
+Gate 5's second half (the fader record carries the new length) is the classifier fed
+`LiveRamps::for_session(next)`, the call the control plane makes; the classifier itself only forwards the
+ramps it is given, so the "old length in the same transaction" defect is a caller defect and is caught by
+gate 4's same-transaction row, which runs through the C ABI.
+
+**Mutation runs** (apply the defect: red; revert: green; each run reverted before the next).
+
+| # | Defect applied | Red |
+| --- | --- | --- |
+| M1a | `parse_control_smoothing` checks only `is_finite`, no range | gate 1: `-0.001 in field 1` accepted (`Ok(ControlSmoothing { mute_ms: -0.001, .. })` where `Err(InvalidTlv)`) |
+| M1b | `parse_control_smoothing` swaps the fader and pan fields | gate 1 red on the round trip |
+| M2a | apply arm `control_smoothing.or(session.control_smoothing)` (`None` does not clear) | gate 2 red at the third commit (left `Some(..)`, right `None`) |
+| M2b | apply arm swaps `fader_ms` and `pan_ms` | gate 2 red (fader 25, pan 15 against 15, 25) |
+| M3 | delete `masked.control_smoothing = current.control_smoothing` in `classify_live_delta` | gate 3 (`model_only_edits_commit_without_a_plan_rebuild`), gate 4 (both tests, the edit rebuilds) and gate 5 (both host-core tests) red |
+| M4 | `commit_live` builds `LiveRamps::for_session` from the pre-commit model | gate 4 red: `a_control_smoothing_edit_makes_the_next_mute_a_step` fails in its "in the mute's transaction" row (block 0 is not the muted control), and `a_control_smoothing_edit_gives_the_next_unmute_its_ramp` fails (the unmute steps) |
+
+Every mutated file was restored from a copy and the tree was clean afterwards (`git status` showed only the
+intended files); the full suites below ran after the last revert.
+
+**Gates run (all green).**
+
+- `cargo test --locked -p protocol --features test-support` (135 lib tests and the integration tests),
+  `-p conformance` (with `conformance_corpus`), `-p host-core --features test-support,control-provider
+  --test live_delta` (35 passed, so the feature is on), `-p capi` (86, 5, 3, 13).
+- The `test-debug-a` leg (workspace debug tests and doctests with the CI feature list) and the `test-debug-b`
+  leg (DSP crates and `conformance`, doctests, `conformance_fixtures --check`).
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --
+  --check`.
+- `check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-protocol-control-policy.sh`,
+  `check-host-core-policy.sh`, `check-cross-targets.sh`, `check-protocol-wasm-parity.sh`,
+  `check-capi-abi.sh`; `cargo build --release -p audit` with `audit capi` and
+  `run-protocol-allocation-audit.sh`.
+- The worklet chain from `qualification.yml`: `build-web-audioworklet.sh --named-twin`,
+  `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+  --artifacts`, `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh` (private TMPDIR left empty).
+  Not run here: the V8 spill gate, which needs the exact Node 22.23.2 and reads the EQ cascade loops this
+  slice does not touch. AArch64 runs only in CI.
+
+**Open items.** None for this slice. The browser has no transaction API for the edit (non-goal; #1309).
