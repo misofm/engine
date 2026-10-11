@@ -255,3 +255,134 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 
 #1055 closes with `FINDINGS.md` section 9 (D2's values and D3's table). *Carry an optional
 per-edit ramp length on live session edits* (#1394) depends on this issue.
+
+## Attempt record
+
+**Attempt 1** (implementer, branch `codex/d15-stream-e2`, base `8c0deee2c`). Commits in deliverable
+order: D1/D2 (`8a68e257f`), D1a migration alone (`351650a5b`), capi snapshot re-pin, session tests and
+writer corpus, D4/D5, C ABI tests and doc, then one commit per re-pinned digest (below), and two test
+tidy-ups. The first commit leaves the checked-in documents without the key, so tests that read them
+are red at that checkpoint only; D1a is the next commit.
+
+**Section 9 against D3.** `FINDINGS.md` section 9.1's key and default table matches D3 row for row
+(fader/trim/send gain/VCA offset/link glide on `faderMs`; mute/solo/send mute/`follows_mute`/VCA
+mute/bypass on `muteMs`; polarity `muteMs` x 2; pan/matrix/send matrix on `panMs`; 10/20/20 ms). Nothing
+to correct.
+
+**Where the spec and the tree differed (recorded, not improvised around).**
+
+1. *Deliverable 2 is empty.* No `SessionModel { .. }` struct literal exists outside `crates/session`
+   (the "about 98 sites" are return types and patterns; every other session comes through
+   `parse_session_json`). Nothing was added to any literal. `cargo check --workspace --all-targets
+   --all-features` was green with the model field alone.
+2. *The `commit_live` call moved* to `crates/control-plane/src/control.rs:1354`; the call is
+   unchanged.
+3. *Gate 3's command runs 0 tests* as written: `crates/host-core/tests/live_delta.rs` is
+   `#![cfg(feature = "control-provider")]` and `--features test-support` alone does not enable it.
+   It was run with `--features test-support,control-provider` (33 tests); the workspace debug leg
+   unifies the feature.
+4. *Gate 2's claim that an `f32` conversion gives 220 at 5 ms and 44.1 kHz is wrong for the two
+   natural spellings*: `ms * rate as f32 / 1000.0 + 0.5` and `ms * (rate as f32 / 1000.0) + 0.5` both
+   give 221 there (the product is exact). A search of 0.01 ms steps over the four rates found the
+   `f32` pipelines differ at 45 ms / 44.1 kHz (1984.5, a tie: 1984 in the second spelling) and at
+   263.39 ms / 44.1 kHz (11615.4996: 11616 in the first). Both are in the test, with expected values
+   from exact rational arithmetic on the `f32` value (not the crate's formula). The 5 ms tie stays
+   (it catches truncation and half-even).
+5. *Gate 4's "the commit ... allocate nothing"* cannot hold for the commit itself: the commit is the
+   control plane, and `classify_live_delta` documents that it allocates there (the masked clone and
+   two canonical JSON strings); measured at 150 allocations for the mute transaction. The test counts
+   the render calls that carry the ramp (`bench_support::alloc` thread counters around the `render`
+   call alone, process statics warmed by earlier blocks) and asserts exactly 0 allocations and 0
+   frees in each of them, the realtime rule of `AGENTS.md`. If the owner meant the commit to be
+   counted, that is a different (control-plane) claim and needs its own issue.
+6. *The explicit-0 / hard-switch tests need a latency-free session.* Gates 4 and 5 use the
+   stateless session (`stateless_session`: no console slot, insert or input filter), asserted at
+   latency 0, so "from the first block" is exact; the parity session's EQ latency would make the
+   first block a mix of old and new samples.
+7. *One edited test is outside the authorized path list.* `crates/capi/tests/resource_lifecycle.rs`
+   `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` compares the raced
+   plan's final block with a fresh plan after a settle of `latency + one quantum` blocks; with the
+   default table the fader and mute ramps (960 and 480 samples at 48 kHz) outlast that, and the test
+   went red (final block `[-0.1245, 0.0068]` against `[-0.1212, 0.0398]`). The spec's hazard names
+   `live_tests.rs` only, so this is a gap in its list. The edit adds `race_settle_blocks`, which
+   lengthens the settle by the session's longest ramp (`control_smoothing_samples`); the comparison
+   itself (bit-identity, every render call allocating and freeing nothing) is untouched. The race
+   keeps the default table, so ramps start and retarget under swaps. Reverting the settle makes it red
+   again (it was red before the edit).
+8. *Editing `control_smoothing` is a structural difference* in `classify_live_delta` (it is not
+   masked), so it rebuilds until #1365. `docs/C_ABI_V1_QUALIFICATION.md` says so.
+
+**What changed.** `control_smoothing` is a required tagged root object (parse, validate, visitor field
+17, canonical writer, `docs/SESSION_SCHEMA_V1.md`, `docs/session-v1.schema.json`, SDK writer and
+builder); `CONTROL_SMOOTHING_DEFAULT`, `ControlSmoothing`, `ControlSmoothingSamples` and the one
+conversion `SessionModel::control_smoothing_samples`; `LiveRamps { fader, mute, pan, link }_samples`,
+`LiveRampRow`, `LiveRamps::for_row`, the matrix precedence (the model's non-zero window, else
+`pan_samples`) in `live_delta.rs`, nothing else there. The author-session skill text gained the key.
+Existing C ABI live tests: the bit-exact-to-rebuild ones compare after the session ramp
+(`live_pcm_shape` runs under both the default table and an explicit 0; the pending-candidate and
+submix tests use the ramp in `window`); the carrying-swap test, whose claim is bit-identity from the
+swap block, authors `control_smoothing` at 0 (D6).
+
+**Digests that moved (gate 7), each re-pinned on its own, reason "D1a adds the required
+`control_smoothing` key"; no render digest moved** (`ACCEPTED_GRAPH_PCM_SHA256`, `_METERS_`,
+`audit capi` `pcm_digest a9738fa800afcab3`, the browser module's render digests and the builtins
+`resources.jsonl` all unchanged):
+
+| pin | file | old -> new |
+|---|---|---|
+| canonical session snapshot length | `crates/capi/src/runtime/tests.rs` `ALL_COMMAND_RESPONSE_VECTORS[1]` | 14,193 (0x3771) -> 14,245 (0x37a5), +52 bytes |
+| `session_template_sha256` of `fixtures/session/v1/canonical.json` | `tools/audit/src/fixture_builtins.rs` (generator) and the regenerated `fixtures/builtins/v1/benchmark/prepare_256_tracks-{48000,96000}.toml`, `MANIFEST.tsv` | `dc19e091f9fd...` -> `4c5756345cf9...`; a fresh `--write` differed from the tree in exactly these three files |
+| `ACCEPTED_MANIFEST_SHA256` | `tools/audit/src/builtins_graph.rs` | `0834666e8f2e...` -> `d8d3d6a39d6a...` |
+| joined-corpus manifest identity | `tools/audit/src/fixture_builtins.rs` `issue064_checked_corpus_is_read_only_and_complete` | same pair |
+| `sessionDocumentBytes` | `hosts/host-web/tests/browser-v1/expected.json` | "1969" -> "2021", +52 |
+| the self-test's one-byte mutation of it | `scripts/check-browser-expected-resources.py` | 1970 -> 2022 (kept at pinned + 1) |
+
+`artifacts/steps/*/web-rebuild-cost.jsonl` and `chromium.json` name four migrated fixtures by their old
+sha256. They are recorded measurements of past runs and no gate reads them; they were not edited.
+`fixtures/session/v1/canonical.json` stops at validator stage 5 with `effect.native.unavailable`, as
+`tools/session-validator/tests/validate.rs` expects; the other 20 migrated documents PASS all stages.
+
+**Test value and mutation runs** (defect applied by `python` text edit, test run, file restored; "R" is
+red, "G" green). Where a range check exists in both the parser and the validator, a single-site
+mutation is an equivalent mutant (the other site refuses the same code at the same path), so the
+bound mutations change both.
+
+| Test | Plausible defect (mutation) | Result |
+|---|---|---|
+| `control_smoothing.rs` refusals | upper bound 1001 (parser and validator) | R `every_malformed_control_smoothing_is_refused_at_its_path`, `a_built_model_with_a_length_outside_the_domain_is_refused` |
+| same | lower bound -1 (both) | R, same two |
+| same | `default` accepts a length (the `reject_key` loop emptied) | R refusals |
+| same | a missing root key means `default` (no diagnostic) | R refusals |
+| same | an unknown kind accepted as `default` | R refusals |
+| `a_built_model_...` | the validator's range check removed | R |
+| `both_kinds_round_trip...` | writer emits the key after `outputs` | R |
+| `control_smoothing_samples_round_half_up_in_f64` | truncating `floor(x)`; half-even `round_ties_even`; `f32` pipelines `ms * rate as f32 / 1000 + 0.5` and `ms * (rate as f32 / 1000) + 0.5` | R in all four |
+| `the_default_table_is_...`, `the_default_pan_ramp_...` | default `pan_ms` 15; default `mute_ms` 12 | R both tests in both runs |
+| `live_delta.rs` (`records_carry_the_session_ramps_and_the_models_own_pan_window`, `a_raw_matrix_without_a_window_...`, `for_row_returns_the_key_field_of_every_row`) | `for_session` returns 0; matrix ignores `pan_samples`; matrix ignores the model window; fader row reads mute key; mute row reads fader key; polarity at the plain mute length; polarity on the fader key; pan rows on the fader key; link glide on the mute key; `link_samples` filled from pan; a session 0 read as the default; the fader record on the mute ramp | R in each (one or more of the three; the polarity and link mutants only in `for_row_...`) |
+| `a_live_mute_ramps_over_the_session_mute_ramp_and_lands_on_the_muted_control` (gate 4) | `for_session` returns steps; mute ramp cut to a quarter; mute row on the fader key | R each |
+| `a_live_mute_under_an_explicit_zero_is_the_muted_control_from_the_first_block` (gate 5) | a session 0 read as the default (mute 480) | R (also `live_fader_mute_and_pan_edits_change_the_running_plan_bit_exactly` under `HARD_SWITCH`) |
+| SDK `builder-evals.mjs` (corpus loop, builder) | writer drops the root key; explicit key order swapped; ms keys missing from the float set; builder omits the key | R each (4, 1, 1, 4 evals) |
+| `visit_model.rs` (existing, edited) | covered by the registry assertion `("control_smoothing", 17)` and the root count 9 | not mutated separately |
+
+Which defect each new test catches that no existing test does: the grammar test, a parser that
+defaults, over-accepts or reorders the key (no test read it before); the rounding test, a
+truncating/half-even/`f32` conversion; the default-table tests, a #1388 value change that breaks
+`pan_ms >= 2 x mute_ms`; the classifier tests, a row on the wrong key, polarity at the plain mute
+length, or a pan window of 0; the gate 4 test, a mute that still steps (every other C ABI live test
+waits the ramp out and cannot hear it) or a ramp block that allocates; the gate 5 test, a session 0
+treated as unset.
+
+**Gates run (all on the final tree unless noted).** `cargo test --locked -p session`;
+`-p protocol --features test-support`; `-p host-core --features test-support,control-provider --test
+live_delta` (33); `-p capi`; the `test-debug-a` leg (`--no-fail-fast`, the CI feature list) and its
+doctest leg; `cargo build --locked --release -p audit && ./target/release/audit capi` (0 allocations, 0
+syscalls); `cargo test --locked --release -p audit -p bench -p console-workload`;
+`scripts/build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`,
+`check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh` (after an offline
+`npm ci`, deleted again), `check-sdk-headless.sh` (363 evals), `sdk-package.sh check`;
+`check-builtins-fixtures.sh`, `check-console-fixtures.sh`, `check-console-benchmark-fixture.sh`;
+`check-session-policy.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`,
+`check-realtime-policy.sh`, `check-cross-targets.sh`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; `cargo fmt --all -- --check`. Not run: the browser (Chromium) legs and
+anything AArch64-only.

@@ -2823,6 +2823,21 @@ fn race_session() -> String {
 /// The largest pan smoothing the race edits use: one quantum (D1).
 const RACE_MAX_SMOOTHING: u32 = QUANTUM as u32;
 
+/// The blocks after the last edit that a live ramp may still be settling in: the plan's latency
+/// plus the longest ramp a race edit can start -- a pan's one quantum, or the session's own fader,
+/// mute or pan ramp (#1054: the race session says `default`) -- in quanta, and one more.
+fn race_settle_blocks(latency: u64, document: &str) -> u64 {
+    let ramps = session::parse_session_json(document)
+        .expect("race session")
+        .control_smoothing_samples();
+    let longest = ramps
+        .fader
+        .max(ramps.mute)
+        .max(ramps.pan)
+        .max(RACE_MAX_SMOOTHING);
+    (latency + u64::from(longest)).div_ceil(QUANTUM as u64) + 1
+}
+
 /// The control thread's edit sequence: a live fader, pan or mute edit on each of the nine tracks
 /// in turn, and every eighth edit a structural one that renders identically (D2: a new content
 /// string on the source, which the race never reads by content).
@@ -3220,7 +3235,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
         feed.restart(session)
             .unwrap_or_else(|failure| panic!("run {run}: {failure}"));
         let latency = resources_c(plan).latency_samples;
-        let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
+        let settle = race_settle_blocks(latency, &document);
         for _ in 0..settle {
             fed_render_c(session, plan, &mut feed, block);
             block += 1;
@@ -3243,7 +3258,7 @@ fn race_live_edits(run: usize) -> RaceCounts {
         let (session, plan) = compile_c(&final_document, &limits());
         assert_eq!(resources_c(plan).latency_samples, latency);
         let mut feed = ConstantFeed::new();
-        let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
+        let settle = race_settle_blocks(latency, &final_document);
         let mut last = Vec::new();
         for block in 0..=settle {
             last = fed_render_c(session, plan, &mut feed, block);
