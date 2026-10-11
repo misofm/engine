@@ -217,8 +217,10 @@ impl Rig {
         parse_session_json(&self.snapshot()).expect("committed snapshot")
     }
 
-    /// The free fader and matrix room of a track's producer in the current or the pending epoch.
-    fn room(&self, epoch: Epoch, track_id: &str) -> (usize, usize) {
+    /// How many writes a track's cells have taken in the current or the pending epoch: the fader
+    /// lane's four cells together (fader left and right, mute left and right), then the matrix
+    /// cell (#1312 D3).
+    fn writes(&self, epoch: Epoch, track_id: &str) -> (u64, u64) {
         let snapshot = crate::ffi::test_transaction_snapshot(self.session);
         let epoch = match epoch {
             Epoch::Current => snapshot.provider_epoch,
@@ -228,18 +230,19 @@ impl Rig {
                 .expect("a pending candidate"),
         };
         snapshot
-            .live_rooms
+            .strip_cells
             .iter()
             .find(|(row_epoch, id, ..)| *row_epoch == epoch && &**id == track_id)
-            .map(|&(_, _, fader, matrix)| (fader, matrix))
+            .map(|&(_, _, fader, matrix)| (fader.iter().sum(), matrix))
             .expect("track producer")
     }
 
-    /// Every producer's room in the current epoch.
-    fn current_rooms(&self) -> Vec<(usize, usize)> {
+    /// Every strip's cell write counts in the current epoch, per cell: `([fader left, fader
+    /// right, mute left, mute right], matrix)`.
+    fn current_cells(&self) -> Vec<([u64; 4], u64)> {
         let snapshot = crate::ffi::test_transaction_snapshot(self.session);
         snapshot
-            .live_rooms
+            .strip_cells
             .iter()
             .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
             .map(|&(_, _, fader, matrix)| (fader, matrix))
@@ -602,141 +605,122 @@ fn refusal_state(rig: &Rig) -> (u64, Vec<u8>, usize, protocol::QueueReport) {
     )
 }
 
-/// Gate 3 (a): a full lane is typed backpressure before anything changes, and a retry after one
-/// render succeeds. The room check's matrix term and its fader record count are each exercised
-/// too: a full matrix lane, and a two-record fader edit against room for one.
-#[test]
-fn a_full_live_lane_refuses_before_anything_changes() {
-    let mut rig = Rig::new(&long_session(10, 48_000));
-    rig.step();
-    let depth = LIVE_QUEUE_DEPTH.get();
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth));
-    for edit in 0..depth {
-        assert_eq!(
-            rig.apply(&[left_db_edit("eq0", -1.0 - edit as f32)]),
-            crate::RESULT_OK,
-            "edit {edit}"
+impl Rig {
+    /// One counter of `COUNTERS_GET`, read through the C command path.
+    fn counter(&mut self, id: protocol::CounterId) -> u64 {
+        let request = self.next_request();
+        let bytes = command_bytes(
+            request,
+            protocol::CommandPayload::CountersGet(&protocol::CountersRequest {
+                all: false,
+                ids: vec![id as u32],
+            }),
         );
+        let (result, response) = command_c(self.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        let mut fields = [0_u16; 64];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("counters response")
+        else {
+            panic!("expected a counter snapshot")
+        };
+        snapshot
+            .values
+            .iter()
+            .find(|value| value.id == id)
+            .expect("the counter is in the snapshot")
+            .value
     }
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (0, depth));
-    let before = refusal_state(&rig);
-    assert_eq!(
-        rig.apply(&[left_db_edit("eq0", -20.0)]),
-        crate::RESULT_BACKPRESSURE
-    );
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
-    assert_eq!(refusal_state(&rig), before, "the refusal changed nothing");
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (0, depth));
-    assert_eq!(rig.summary().3, 0, "the refusal prepared no plan");
-
-    rig.step();
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth));
-    assert_eq!(rig.apply(&[left_db_edit("eq0", -20.0)]), crate::RESULT_OK);
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth - 1, depth));
-
-    // The matrix term: sixteen pan edits fill eq3's matrix lane, and the seventeenth refuses.
-    let pan = |edit: usize| SessionEdit::SetTrackMatrixOrPan {
-        track_id: StableId::parse("eq3").expect("eq3"),
-        matrix_or_pan: MatrixOrPan::Pan {
-            left: -0.5 + edit as f32 / 64.0,
-            right: 0.5,
-            smoothing_samples: 0,
-        },
-    };
-    for edit in 0..depth {
-        assert_eq!(rig.apply(&[pan(edit)]), crate::RESULT_OK, "pan {edit}");
-    }
-    assert_eq!(rig.room(Epoch::Current, "eq3"), (depth, 0));
-    let before = (refusal_state(&rig), rig.current_rooms());
-    assert_eq!(rig.apply(&[pan(depth)]), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
-    assert_eq!(
-        (refusal_state(&rig), rig.current_rooms()),
-        before,
-        "a full matrix lane refuses before anything changes"
-    );
-    assert_eq!(rig.summary().3, 0, "the refusal prepared no plan");
-
-    // The fader term counts records, not edits: with room for one record, an edit whose two lanes
-    // move to different dB values (two records) refuses.
-    for edit in 0..depth - 1 {
-        assert_eq!(
-            rig.apply(&[left_db_edit("eq4", -1.0 - edit as f32)]),
-            crate::RESULT_OK,
-            "edit {edit}"
-        );
-    }
-    assert_eq!(rig.room(Epoch::Current, "eq4"), (1, depth));
-    let before = (refusal_state(&rig), rig.current_rooms());
-    let two_records = fader_edit(
-        "eq4",
-        DualMonoFader {
-            left_db: -40.0,
-            right_db: -30.0,
-            left_mute: false,
-            right_mute: false,
-        },
-    );
-    assert_eq!(rig.apply(&[two_records]), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
-    assert_eq!(
-        (refusal_state(&rig), rig.current_rooms()),
-        before,
-        "two records against room for one refuse before anything changes"
-    );
-    assert_eq!(rig.room(Epoch::Current, "eq4"), (1, depth));
 }
 
-/// Gate 3 (b): a transaction is all or nothing across tracks.
+/// Gate 1: a paused host sends forty fader edits, each a `Both` record, and none is refused for
+/// room. One render applies the last, so the output equals a twin that made only that edit, and
+/// `COUNTERS_GET` reports `LIVE_VALUES_SUPERSEDED` as 78: the 39 writes each of the two channel
+/// cells that a later write replaced before a block read them (D2).
+///
+/// Test value: red if a fader lane is still a bounded queue (the seventeenth edit refuses), or if
+/// the counter's unit is not the per-cell replaced-write count.
 #[test]
-fn a_live_transaction_with_one_full_lane_pushes_to_no_lane() {
-    let mut rig = Rig::new(&long_session(10, 48_000));
+fn forty_fader_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
+    let document = long_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    let mut quiet = Rig::new(&document);
     rig.step();
-    let depth = LIVE_QUEUE_DEPTH.get();
-    for edit in 0..depth {
-        assert_eq!(
-            rig.apply(&[left_db_edit("eq1", -1.0 - edit as f32)]),
-            crate::RESULT_OK
-        );
-    }
-    let before = refusal_state(&rig);
-    // The delta is in canonical track order, eq0 before the full eq1: an arm that pushed each
-    // strip as soon as its own room checked would leave eq0's records behind.
-    let edits = [
-        left_db_edit("eq1", -30.0),
-        left_db_edit("eq0", -3.0),
-        SessionEdit::SetTrackMatrixOrPan {
-            track_id: StableId::parse("eq0").expect("eq0"),
-            matrix_or_pan: MatrixOrPan::Pan {
-                left: 0.5,
-                right: 0.25,
-                smoothing_samples: 16,
+    twin.step();
+    quiet.step();
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 0);
+    let both = |db: f32| {
+        fader_edit(
+            "eq0",
+            DualMonoFader {
+                left_db: db,
+                right_db: db,
+                left_mute: false,
+                right_mute: false,
             },
-        },
-    ];
-    assert_eq!(rig.apply(&edits), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
-    assert_eq!(refusal_state(&rig), before);
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth));
-    assert_eq!(rig.room(Epoch::Current, "eq1"), (0, depth));
+        )
+    };
+    let last = -1.0 - 39.0 * 0.25;
+    for edit in 0..40 {
+        assert_eq!(
+            rig.apply(&[both(-1.0 - edit as f32 * 0.25)]),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert_eq!(rig.writes(Epoch::Current, "eq0"), (80, 0));
+    assert_eq!(twin.apply(&[both(last)]), crate::RESULT_OK);
+    // The counter is the render side's: nothing has been read yet.
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 0);
+    // The plan's latency delays the first audible block; render past it.
+    let blocks = u64::from(rig.latency()) / rig.quantum as u64 + 4;
+    let mut audible = false;
+    for block in 0..blocks {
+        let heard = rig.step();
+        assert_eq!(
+            bits(&heard),
+            bits(&twin.step()),
+            "block {block}: the last edit is heard"
+        );
+        audible |= bits(&heard) != bits(&quiet.step());
+        if block == 0 {
+            assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 78);
+        }
+    }
+    assert!(
+        audible,
+        "the edit changes the output against an unedited run"
+    );
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 78);
+    assert_eq!(twin.counter(protocol::CounterId::LiveValuesSuperseded), 0);
+    // Nothing is pending now: another block replaces nothing.
+    rig.step();
+    assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 78);
 }
 
-/// Gate 3 (c): an exact replay of a live edit returns the cached response and pushes nothing.
+/// Gate 3 (c): an exact replay of a live edit returns the cached response and writes nothing.
 #[test]
-fn a_replayed_live_edit_pushes_nothing() {
+fn a_replayed_live_edit_writes_nothing() {
     let mut rig = Rig::new(&long_session(10, 48_000));
     rig.step();
     let edits = [left_db_edit("eq2", -4.5)];
     let bytes = rig.transaction(&edits);
     let (result, first) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK);
-    let room = rig.room(Epoch::Current, "eq2");
-    assert_eq!(room.0, LIVE_QUEUE_DEPTH.get() - 1);
+    let writes = rig.writes(Epoch::Current, "eq2");
+    assert_eq!(writes, (1, 0), "the edit wrote its one cell");
+    let cells = rig.current_cells();
     let revision = rig.summary().0;
     let (result, replay) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK);
     assert_eq!(replay, first, "the replay is the cached response");
-    assert_eq!(rig.room(Epoch::Current, "eq2"), room);
+    assert_eq!(rig.writes(Epoch::Current, "eq2"), writes);
+    assert_eq!(rig.current_cells(), cells, "no cell took a write");
     assert_eq!(rig.summary().0, revision);
 }
 
@@ -749,8 +733,7 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
     rig.step();
     assert_eq!(rig.apply(&[content_edit(&model)]), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "a candidate is pending");
-    let depth = LIVE_QUEUE_DEPTH.get();
-    assert_eq!(rig.room(Epoch::Pending, "eq3"), (depth, depth));
+    assert_eq!(rig.writes(Epoch::Pending, "eq3"), (0, 0));
 
     let edits = [
         fader_edit(
@@ -773,9 +756,9 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
     ];
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "still the one candidate");
-    // Two fader records (left and right dB differ), one mute record (right only), one matrix.
-    assert_eq!(rig.room(Epoch::Pending, "eq3"), (depth - 3, depth - 1));
-    assert_eq!(rig.room(Epoch::Current, "eq3"), (depth, depth));
+    // Two fader cells (left and right dB differ), one mute cell (right only), one matrix cell.
+    assert_eq!(rig.writes(Epoch::Pending, "eq3"), (3, 1));
+    assert_eq!(rig.writes(Epoch::Current, "eq3"), (0, 0));
 
     rig.render();
     rig.seek_to_start();
@@ -965,7 +948,6 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
             ..fader
         },
     )];
-    let depth = LIVE_QUEUE_DEPTH.get();
     let mut rig = Rig::new(&document);
     for _ in 0..4 {
         rig.step();
@@ -974,13 +956,17 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
     if live_first {
         assert_eq!(rig.apply(&live), crate::RESULT_OK, "{label}");
         assert_eq!(rig.summary().3, 0, "{label}: the fader edit is live");
-        assert!(rig.room(Epoch::Current, "eq0").0 < depth, "{label}");
+        assert_eq!(
+            rig.writes(Epoch::Current, "eq0"),
+            (2, 0),
+            "{label}: both fader cells took the write"
+        );
         assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{label}");
         assert_eq!(rig.summary().3, 1, "{label}: the transaction rebuilds");
         assert_eq!(
-            rig.room(Epoch::Pending, "eq0"),
-            (depth, depth),
-            "{label}: the successor bakes -6 dB and inherits no record"
+            rig.writes(Epoch::Pending, "eq0"),
+            (0, 0),
+            "{label}: the successor bakes -6 dB and inherits no write"
         );
     } else {
         assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{label}");
@@ -991,8 +977,8 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
             "{label}: the live edit reaches the pending successor"
         );
         assert_eq!(rig.summary().3, 1, "{label}: still the one candidate");
-        assert!(rig.room(Epoch::Pending, "eq0").0 < depth, "{label}");
-        assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth), "{label}");
+        assert_eq!(rig.writes(Epoch::Pending, "eq0"), (2, 0), "{label}");
+        assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 0), "{label}");
     }
     let committed = rig.model();
     let track = committed
@@ -1071,12 +1057,11 @@ fn assert_rebuilds(document: &str, edits: &[SessionEdit], label: &str) {
         (revision + 1, 1),
         "{label}: a rebuild prepares a candidate"
     );
-    let depth = LIVE_QUEUE_DEPTH.get();
     assert!(
-        rig.current_rooms()
+        rig.current_cells()
             .iter()
-            .all(|&room| room == (depth, depth)),
-        "{label}: the rendering plan got no record"
+            .all(|&cells| cells == ([0; 4], 0)),
+        "{label}: the rendering plan got no write"
     );
 }
 
@@ -1130,9 +1115,9 @@ fn submix_session(follows_mute: bool) -> String {
     })
 }
 
-/// Gate 4: every delta outside the live set rebuilds, and a domain failure reaches no queue.
+/// Gate 4: every delta outside the live set rebuilds, and a domain failure writes no cell.
 #[test]
-fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing() {
+fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_writes_nothing() {
     let base = long_session(10, 48_000);
     let quiet = DualMonoFader {
         left_db: -2.0,
@@ -1184,7 +1169,7 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing() {
     let model = parse_session_json(&base).expect("model");
     assert_rebuilds(&base, &[content_edit(&model)], "a source content edit");
 
-    // A fader outside the setter's domain is today's compile rejection, and pushes nothing.
+    // A fader outside the setter's domain is today's compile rejection, and writes nothing.
     let mut rig = Rig::new(&base);
     rig.step();
     let before = refusal_state(&rig);
@@ -1202,31 +1187,62 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing() {
         "the live arm reports today's preparation diagnostic"
     );
     assert_eq!(refusal_state(&rig), before);
-    let depth = LIVE_QUEUE_DEPTH.get();
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth));
+    assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 0));
     assert_eq!(rig.summary().3, 0);
 }
 
-/// Every refusal before the push leaves the queues alone, including the commit predicate's slot.
+/// Gate 2: a refusal after the commit predicate and before the write leaves every cell, the
+/// output and the model alone. A cell write is acked state once its revision is published: a write
+/// made before the last fallible step would be revealed by the next transaction's publication
+/// (the stamp's revision is not consumed by a refusal), so the next transaction here is a
+/// different edit, and the output must show that edit alone.
+///
+/// Red mutation: the strip cell writes moved above the commit predicate (#1312 D7).
 #[test]
-fn a_fault_before_the_live_push_leaves_every_queue_and_the_model_alone() {
-    let mut rig = Rig::new(&long_session(10, 48_000));
+fn a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone() {
+    let document = long_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
     rig.step();
+    twin.step();
     let before = refusal_state(&rig);
+    let cells = rig.current_cells();
+    // A fader edit and a pan edit: two lanes, three cells.
+    let refused = [
+        left_db_edit("eq0", -9.0),
+        SessionEdit::SetTrackMatrixOrPan {
+            track_id: StableId::parse("eq3").expect("eq3"),
+            matrix_or_pan: MatrixOrPan::Pan {
+                left: -0.75,
+                right: 0.25,
+                smoothing_samples: 0,
+            },
+        },
+    ];
     crate::ffi::test_set_structural_faults(
         rig.session,
         [Some(TestStructuralFaultPhase::BeforeLivePush), None],
     );
-    assert_eq!(
-        rig.apply(&[left_db_edit("eq0", -9.0)]),
-        crate::RESULT_BACKPRESSURE
-    );
+    assert_eq!(rig.apply(&refused), crate::RESULT_BACKPRESSURE);
     assert_eq!(refusal_state(&rig), before);
-    let depth = LIVE_QUEUE_DEPTH.get();
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth));
-    // The same edit then commits.
-    assert_eq!(rig.apply(&[left_db_edit("eq0", -9.0)]), crate::RESULT_OK);
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth - 1, depth));
+    assert_eq!(rig.current_cells(), cells, "no cell took a write");
+    assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 0));
+    assert_eq!(rig.writes(Epoch::Current, "eq3"), (0, 0));
+
+    // A different edit then commits, and only it is heard: the twin takes it alone.
+    let next = [left_db_edit("eq1", -3.0)];
+    assert_eq!(rig.apply(&next), crate::RESULT_OK);
+    assert_eq!(twin.apply(&next), crate::RESULT_OK);
+    assert_eq!(rig.writes(Epoch::Current, "eq1"), (1, 0));
+    assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 0));
+    assert_eq!(rig.writes(Epoch::Current, "eq3"), (0, 0));
+    for block in 0..6 {
+        assert_eq!(
+            bits(&rig.step()),
+            bits(&twin.step()),
+            "block {block}: the output is the twin's, which took the second edit alone"
+        );
+    }
 }
 
 /// Gate 1 on a session with a submix strip: the producer table holds the tracks, then the
@@ -1237,13 +1253,12 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
     let mut rig = Rig::new(&document);
     let quantum = rig.quantum;
     let latency = rig.latency();
-    let depth = LIVE_QUEUE_DEPTH.get();
     for _ in 0..3 {
         rig.step();
     }
     let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
     let strips: Vec<_> = snapshot
-        .live_rooms
+        .strip_cells
         .iter()
         .map(|(_, id, ..)| &**id)
         .collect();
@@ -1276,9 +1291,9 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
     ];
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 0, "the edit is live");
-    assert_eq!(rig.room(Epoch::Current, "eq9"), (depth - 1, depth));
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth - 1));
-    assert_eq!(rig.room(Epoch::Current, "bus"), (depth, depth));
+    assert_eq!(rig.writes(Epoch::Current, "eq9"), (2, 0));
+    assert_eq!(rig.writes(Epoch::Current, "eq0"), (0, 1));
+    assert_eq!(rig.writes(Epoch::Current, "bus"), (0, 0));
 
     let committed = rig.snapshot();
     let settled = settle(&mut rig, window(latency, smoothing, quantum), 3);
@@ -1297,12 +1312,13 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
 }
 
 /// #1258 gate 4: with the two-slot reliable-event lane full, a live edit is the protocol's own
-/// `Backpressure` response under `RESULT_OK`, decided before a token exists, so it reaches no lane.
+/// `Backpressure` response under `RESULT_OK`, decided before a token exists, so it writes no cell.
 ///
-/// Test value: red if the live arm pushes its records before the reliable-event capacity check (a
-/// strip's room would drop with no commit), or if that check stops refusing a live transaction.
+/// Test value: red if the live arm writes its cells before the reliable-event capacity check (a
+/// refused transaction's value would be heard with no commit), or if that check stops refusing a
+/// live transaction.
 #[test]
-fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_nothing() {
+fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_writes_nothing() {
     let mut rig = Rig::new(&long_session(10, 48_000));
     rig.step();
     // Two live edits, never dequeued: each commits one `SESSION_COMMITTED` event.
@@ -1310,9 +1326,8 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_n
         let bytes = rig.transaction(&[left_db_edit("eq0", db)]);
         assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK);
     }
-    let depth = LIVE_QUEUE_DEPTH.get();
-    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth - 2, depth));
-    let rooms = crate::ffi::test_transaction_snapshot(rig.session).live_rooms;
+    assert_eq!(rig.writes(Epoch::Current, "eq0"), (2, 0));
+    let cells = crate::ffi::test_transaction_snapshot(rig.session).strip_cells;
     let (revision, ..) = rig.summary();
 
     let edits = [
@@ -1346,17 +1361,17 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_n
     assert_eq!(rig.summary().0, revision, "the revision is unchanged");
     assert_eq!(rig.summary().3, 0, "no plan was prepared");
     assert_eq!(
-        crate::ffi::test_transaction_snapshot(rig.session).live_rooms,
-        rooms,
-        "no strip queue's room changed"
+        crate::ffi::test_transaction_snapshot(rig.session).strip_cells,
+        cells,
+        "no strip cell took a write"
     );
 
     // Once the events are dequeued, the same edit under a new request ID commits live.
     rig.drain_reliable();
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
     assert_eq!(rig.summary().0, revision + 1);
-    assert_eq!(rig.room(Epoch::Current, "eq1"), (depth - 1, depth));
-    assert_eq!(rig.room(Epoch::Current, "eq2"), (depth, depth - 1));
+    assert_eq!(rig.writes(Epoch::Current, "eq1"), (1, 0));
+    assert_eq!(rig.writes(Epoch::Current, "eq2"), (0, 1));
 }
 
 /// #1257 hazard 1 (#1053 D7): the live arm adds no report row, so it skips the epoch-lag check
@@ -1428,12 +1443,11 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
     );
     let result = children.session.command(&live, 4_096);
     let snapshot = children.session.test_transaction_snapshot();
-    let depth = LIVE_QUEUE_DEPTH.get();
-    let rooms: Vec<_> = snapshot
-        .live_rooms
+    let writes: Vec<_> = snapshot
+        .strip_cells
         .iter()
         .filter(|(_, id, ..)| &**id == "eq0")
-        .map(|&(epoch, _, fader, matrix)| (epoch, fader, matrix))
+        .map(|&(epoch, _, fader, matrix)| (epoch, fader.iter().sum::<u64>(), matrix))
         .collect();
     assert_eq!(
         (
@@ -1445,7 +1459,7 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
             snapshot.active_plan_epoch,
             snapshot.provider_epoch,
             snapshot.pending_provider_epochs,
-            rooms,
+            writes,
         ),
         (
             Ok(()),
@@ -1453,10 +1467,10 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
             old_epoch,
             new_epoch,
             Vec::new(),
-            vec![(new_epoch, depth - 1, depth)],
+            vec![(new_epoch, 1, 0)],
         ),
-        "the live edit commits inside the window, prepares no candidate, and takes one record \
-         from the promoted provider's fader lane"
+        "the live edit commits inside the window, prepares no candidate, and takes one write \
+         in the promoted provider's fader cells"
     );
 }
 
@@ -1717,6 +1731,7 @@ impl LaneReference {
             },
             HostLiveLanes::ALL,
             None,
+            &host_core::LiveValuesSuperseded::default(),
         )
         .expect("lane prepare");
         Self {
@@ -2435,27 +2450,6 @@ fn a_refused_eq_transaction_leaves_its_owner_idle() {
         )
     };
 
-    // eq1's fader lane is full; the EQ edit on eq0 rides beside a fader edit on eq1.
-    for edit in 0..depth {
-        assert_eq!(
-            rig.apply(&[left_db_edit("eq1", -1.0 - edit as f32)]),
-            crate::RESULT_OK
-        );
-    }
-    let before = (refusal_state(&rig), effect_owners(&rig));
-    let rooms = effect_room(&rig, Epoch::Current, "eq0", "eq");
-    let transaction = [gain(3.0), left_db_edit("eq1", -30.0)];
-    assert_eq!(rig.apply(&transaction), crate::RESULT_BACKPRESSURE);
-    assert_eq!(rig.last_error(), b"control.live.backpressure");
-    assert_eq!((refusal_state(&rig), effect_owners(&rig)), before);
-    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), rooms);
-    assert_eq!(owner_phase(&rig, "eq0", "eq"), (0, "Idle".to_owned()));
-    rig.step();
-    assert_eq!(rig.apply(&transaction), crate::RESULT_OK);
-    assert_eq!(rig.summary().3, 0, "the retry is live");
-    assert_eq!(owner_phase(&rig, "eq0", "eq"), (1, "Idle".to_owned()));
-    rig.step();
-
     // Each band-1 left gain edit designs one target: sixteen fill eq0's EQ lane, and the
     // seventeenth is typed backpressure that changes nothing.
     for edit in 0..depth {
@@ -2475,7 +2469,7 @@ fn a_refused_eq_transaction_leaves_its_owner_idle() {
     assert_eq!(rig.apply(&[gain(-20.0)]), crate::RESULT_OK);
     assert_eq!(
         owner_phase(&rig, "eq0", "eq"),
-        (2 + depth as u64, "Idle".to_owned())
+        (1 + depth as u64, "Idle".to_owned())
     );
     drop(rig);
 

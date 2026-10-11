@@ -253,6 +253,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
+        // #1312 D2: the session's `live_values_superseded` count, one `Arc<AtomicU64>`.
+        checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState<A::Row>>>(1)?,
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
@@ -595,6 +597,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     limits: ControlLimits,
     successor: Option<SuccessorBase<'_>>,
     bound_cache: &mut InputBoundCache<'_>,
+    superseded: &host_core::LiveValuesSuperseded,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
@@ -620,6 +623,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             C_ABI_LIVE_LANES,
             base,
             Some(&mut *bound_cache),
+            superseded,
         ),
         None => prepare_host_runtime_with_live_lanes(
             compiled,
@@ -627,6 +631,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             &live,
             C_ABI_LIVE_LANES,
             Some(&mut *bound_cache),
+            superseded,
         ),
     };
     let bound_seed = bound_cache.take_journal();
@@ -767,7 +772,16 @@ where
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
     let mut compile_cache = InputBoundCache::new();
     let engine_cache = engine_cache.unwrap_or(&mut compile_cache);
-    let runtime = prepare_runtime::<A>(store.compiled(), limits, None, engine_cache)?;
+    // #1312 D2: the session's `live_values_superseded` count, one for every plan it prepares.
+    // Made here, with the session's other fixed rows, and charged by `capi_resources`.
+    let live_values_superseded = host_core::LiveValuesSuperseded::default();
+    let runtime = prepare_runtime::<A>(
+        store.compiled(),
+        limits,
+        None,
+        engine_cache,
+        &live_values_superseded,
+    )?;
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -888,6 +902,7 @@ where
             publisher,
             retirer,
             limits,
+            live_values_superseded,
             decode_fields: decode_fields.into_boxed_slice(),
             response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
             shared: Arc::clone(&shared),

@@ -262,9 +262,10 @@ pub struct TestTransactionSnapshot<Row> {
     pub telemetry_counters: protocol::TelemetryCounters,
     /// The controller's, provider's and replay cache's retained capacities.
     pub retained_capacities: [usize; 7],
-    /// Every strip producer's free fader and matrix room, current epoch first, then each pending
-    /// candidate: `(epoch, strip ID, fader room, matrix room)`.
-    pub live_rooms: Vec<(u64, Box<str>, usize, usize)>,
+    /// How many writes every strip producer's cells have taken, current epoch first, then each
+    /// pending candidate: `(epoch, strip ID, fader left, fader right, mute left, mute right,
+    /// matrix)`. A cell's count is its write sequence (#1312 D3).
+    pub strip_cells: Vec<(u64, Box<str>, [u64; 4], u64)>,
     /// Every effect producer's free room, current epoch first, then each pending candidate:
     /// `(epoch, strip ID, effect instance ID, room)`.
     pub effect_rooms: Vec<(u64, Box<str>, Box<str>, usize)>,
@@ -354,6 +355,10 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) publisher: PlanPublisher,
     pub(crate) retirer: PlanRetirer,
     pub(crate) limits: ControlLimits,
+    /// The session's `live_values_superseded` count (#1312 D2): one for every plan the session
+    /// prepares. Render adds to it; the control plane copies it into the provider's counters in
+    /// the service step (D8).
+    pub(crate) live_values_superseded: host_core::LiveValuesSuperseded,
     /// `u16` scratch the protocol decoder writes field offsets into. It is exactly
     /// `max_frame_bytes / 2` entries; the odd trailing byte of an odd frame limit used to buy a
     /// one-byte box that nothing ever read (audit F7).
@@ -813,15 +818,15 @@ where
                 replay.0,
                 replay.1,
             ],
-            live_rooms: core::iter::once(&self.providers)
+            strip_cells: core::iter::once(&self.providers)
                 .chain(&self.pending_providers)
                 .flat_map(|provider| {
                     provider.strips.controls.iter().map(|producer| {
                         (
                             provider.epoch,
                             producer.track_id.clone(),
-                            producer.fader.available_capacity(),
-                            producer.producer.available_capacity(),
+                            producer.fader.test_only_write_counts(),
+                            producer.producer.test_only_write_count(),
                         )
                     })
                 })
@@ -1056,14 +1061,16 @@ where
         Ok(())
     }
 
-    /// Sets every counter the provider serves from a source outside it (#1348 D8): today the
-    /// controller's telemetry counters. A counter added later joins this refresh, never a single
+    /// Sets every counter the provider serves from a source outside it (#1348 D8): the
+    /// controller's telemetry counters and the session's `live_values_superseded` count (#1312
+    /// D8). A counter added later joins this refresh, never a single
     /// control call.
     fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
-        self.controller
-            .provider_mut()
-            .set_telemetry_counters(telemetry_counters);
+        let superseded = self.live_values_superseded.get();
+        let provider = self.controller.provider_mut();
+        provider.set_telemetry_counters(telemetry_counters);
+        provider.set_live_values_superseded(superseded);
     }
 
     /// Runs one control command frame. A success returns the response's length in the response
@@ -1135,6 +1142,7 @@ where
                         committed: self.controller.session().compiled().normalized_model(),
                     }),
                     &mut InputBoundCache::with_seed(&self.newest_providers().bound_seed),
+                    &self.live_values_superseded,
                 )
                 .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
@@ -1246,6 +1254,20 @@ where
                     return Err(CommandError::Backpressure);
                 }
 
+                // #1312 D7: the candidate's gate is stamped with the structural revision, as the
+                // last fallible step before the protocol commit. A fresh gate takes any revision
+                // in `1..=GATE_REVISION_MAX`, which #1503 holds for a prepared transaction, so
+                // this cannot refuse; were it to, the candidate and its handle are dropped here
+                // with nothing published. Nothing else is stamped on the handle before the
+                // publication below.
+                let revision = prepared.get().prospective_session().revision().0;
+                if candidate_provider.revision_gate.stamp(revision).is_err() {
+                    drop(reports);
+                    drop(reservation);
+                    drop(candidate_provider);
+                    drop(prepared);
+                    return Err(CommandError::Internal);
+                }
                 let committed = prepared
                     .commit(&mut self.controller)
                     .map_err(|_| CommandError::Internal)?;
@@ -1266,9 +1288,12 @@ where
                 // candidate's own gate before the candidate is published, so render reports it
                 // when it adopts the candidate and never earlier, and nothing is stamped on the
                 // handle in between.
-                candidate_provider
-                    .revision_gate
-                    .publish(self.controller.session().revision().0);
+                debug_assert_eq!(
+                    revision,
+                    self.controller.session().revision().0,
+                    "the revision stamped is the revision committed (#1312 D7)"
+                );
+                candidate_provider.revision_gate.publish(revision);
                 self.pending_providers.push(candidate_provider);
                 reports.push((epoch, A::Row::from(resources)));
                 reservation.commit();
@@ -1292,21 +1317,27 @@ where
     /// producer resolution by strip ID, and by strip ID and live address for an effect, in the
     /// newest epoch (#1053 D7), each EQ owner's transaction -- `begin_owner`, `edit_owner` per
     /// edit and `preflight_candidate_targets` for the classifier's designed targets (#1265 D2) --
-    /// the room check on every other queue the delta touches, every pushed effect record's
+    /// the room check on every effect queue the delta touches, every pushed effect record's
     /// preflight and every changed value's readback handle (#1264 D3, D4), and the protocol's own
-    /// commit predicate. Each of them refuses before any queue or the model changes, and a refusal
-    /// after an owner was begun discards every begun owner (`OpenOwners`). An effect instance
-    /// whose records, or an EQ's targets, outnumber its queue's whole capacity could never fit,
-    /// so the token goes back for a rebuild instead of an endless `BACKPRESSURE` (#1264 D3,
-    /// #1265 D2). An instance's `Bypass` record (#1266 D2) is an ordinary pushed record on every
-    /// instance, the EQ's included, where it rides with the targets (no order is promised to the
-    /// host, under #1053 D2) and counts toward their room. Only then does it push every record,
-    /// publish every EQ owner's targets, commit the token and commit every owner, and none of
-    /// them can fail: the room was checked, every
-    /// effect record passed its producer's preflight and every target prefix its owner's, the
-    /// control thread is the only producer, a render pop only grows the room, and the predicate is
-    /// the commit's own under this `&mut` borrow. So no acked edit is ever dropped, and no refused
-    /// edit leaves a record, a target or an open owner behind.
+    /// commit predicate. Each of them refuses before any cell, queue or the model changes, and a
+    /// refusal after an owner was begun discards every begun owner (`OpenOwners`). An effect
+    /// instance whose records, or an EQ's targets, outnumber its queue's whole capacity could
+    /// never fit, so the token goes back for a rebuild instead of an endless `BACKPRESSURE`
+    /// (#1264 D3, #1265 D2). An instance's `Bypass` record (#1266 D2) is an ordinary pushed record
+    /// on every instance, the EQ's included, where it rides with the targets (no order is
+    /// promised to the host, under #1053 D2) and counts toward their room.
+    ///
+    /// A strip's fader, mute and matrix/pan values are latest-target cells (#1312): a write needs
+    /// no room, so no strip term refuses a delta for `LIVE_BACKPRESSURE`. After the predicate and
+    /// the test fault hook, the commit takes its stamp from the newest epoch's gate as its last
+    /// fallible step (D7). Only then does it write every strip cell, push every effect record,
+    /// publish every EQ owner's targets, commit the token and every owner, and publish the stamped
+    /// revision on the gate, and none of them can fail: the cells have no room to want, the queue
+    /// room was checked, every effect record passed its producer's preflight and every target
+    /// prefix its owner's, the control thread is the only producer, a render pop only grows the
+    /// room, and the predicate is the commit's own under this `&mut` borrow. So no acked edit is
+    /// ever dropped, and no refused edit leaves a cell write, a record, a target, an open stamp
+    /// or an open owner behind.
     ///
     /// It never reserves a plan, adds a report row or replaces the provider catalog. After the
     /// commit it sets each live effect value in the catalog in place, so the parameter readback
@@ -1334,7 +1365,10 @@ where
         // producer table are both in canonical track order, so the search resumes where the last
         // one stopped; it still finds a strip anywhere, since it wraps.
         let ProviderEpoch {
-            strips, effects, ..
+            strips,
+            effects,
+            revision_gate,
+            ..
         } = match self.pending_providers.last_mut() {
             Some(provider) => provider,
             None => &mut self.providers,
@@ -1435,16 +1469,9 @@ where
             }
         }
 
-        // 4. Room on every other queue the delta touches. Each strip and each effect instance
-        // appears once in the delta, so a queue's need is its own record count.
-        for (strip, &index) in delta.strips.iter().zip(&resolved) {
-            let producer = &tracks[index];
-            if producer.fader.available_capacity() < strip.fader_records().count()
-                || producer.producer.available_capacity() < usize::from(strip.matrix.is_some())
-            {
-                return LiveCommit::Done(Err(CommandError::LiveBackpressure));
-            }
-        }
+        // 4. Room on every queue the delta touches. Each effect instance appears once in the
+        // delta, so a queue's need is its own record count. A strip's fader, mute and matrix
+        // values are latest-target cells (#1312): a write needs no room.
         // An EQ owner's preflight checked room for its targets alone; its `Bypass` record is
         // pushed ahead of them, so their sum must fit (#1266 D2).
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
@@ -1533,21 +1560,26 @@ where
             return LiveCommit::Done(Err(CommandError::Backpressure));
         }
 
-        // 6. Push, then publish each EQ owner's targets. Nothing above changed anything but the
-        // owners' open candidates; nothing below can fail.
+        // 6. The stamp is the last fallible step (#1312 D7): the revision this transaction commits
+        // as, from the gate of the newest epoch, whose producers the writes below target. A
+        // refusal writes and pushes nothing and uses no revision. Every step from here to the
+        // revision's publication cannot fail: a cell write has no room to want, the pushes' room
+        // was checked, and the commit's predicate held under this borrow.
+        let revision = prepared.get().prospective_session().revision().0;
+        let Ok(stamp) = revision_gate.stamp(revision) else {
+            drop(owners);
+            drop(prepared);
+            return LiveCommit::Done(Err(CommandError::Internal));
+        };
+        // Write the strips' cells, then push each effect's records and publish each EQ owner's
+        // targets. Nothing above changed anything but the owners' open candidates.
         for (strip, &index) in delta.strips.iter().zip(&resolved) {
             let producer = &mut tracks[index];
             for record in strip.fader_records() {
-                producer
-                    .fader
-                    .try_push(record)
-                    .unwrap_or_else(|_| unreachable!("the fader queue's room was checked"));
+                producer.fader.write(stamp, record);
             }
             if let Some(record) = strip.matrix {
-                producer
-                    .producer
-                    .try_push(record)
-                    .unwrap_or_else(|_| unreachable!("the matrix queue's room was checked"));
+                producer.producer.write(stamp, record);
             }
         }
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
@@ -1588,6 +1620,11 @@ where
         let committed = prepared
             .commit(&mut self.controller)
             .expect("the commit predicate was checked under this borrow");
+        debug_assert_eq!(
+            revision,
+            self.controller.session().revision().0,
+            "the revision stamped is the revision committed (#1312 D7)"
+        );
         for index in published {
             owners.effects[index]
                 .commit_owner()
@@ -1598,28 +1635,17 @@ where
         for (handle, value) in readback {
             provider.set_parameter_value(handle, value);
         }
-        // 8. The revision, as the commit's last write (#1314 D2).
-        self.publish_committed_revision();
+        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
+        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
+        // producers were chosen by, so the cells a commit writes and the gate that reveals them
+        // are one plan's. Every record push, cell write, target publication and owner commit is
+        // before it, so render's `Acquire` snapshot of the gate sees them all and the watermark
+        // never reports the revision before its values can apply. The stamp's revision is
+        // published, read into a local, so the always-on bound of `stamp` covers the publication.
+        revision_gate.publish(revision);
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
-    }
-
-    /// Publish the revision just committed by a live or model-only commit on the gate of the
-    /// plan that carries its content: the newest provider epoch's, which is the last pending
-    /// provider, else the current one (#1502 D6). That is the routing `commit_live` chose the
-    /// producers by, so the cells a commit writes and the gate that reveals them are one plan's.
-    /// It is the commit's last write: every record push, target publication and owner commit is
-    /// before it, so render's `Acquire` snapshot of the gate sees them all, and the watermark
-    /// never reports the revision before its records can apply.
-    ///
-    /// A candidate published into the mailbox is always recorded as a pending provider until
-    /// `synchronize_plan_epochs` learns of its adoption. Render may adopt it after this command
-    /// synchronized; the gate is the candidate's either way, so the revision lands on the plan
-    /// that holds its content.
-    fn publish_committed_revision(&mut self) {
-        let revision = self.controller.session().revision().0;
-        self.newest_providers_mut().revision_gate.publish(revision);
     }
 
     /// The live admission's inputs, read from the report table and the epochs (#1053 D8).

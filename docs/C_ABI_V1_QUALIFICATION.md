@@ -353,21 +353,34 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
   reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
   `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
-- **Timing (#1053 D2).** A live edit applies no later than the first render call that begins after
-  the submit returns, and a stage that has not drained yet may apply it one block earlier, so one
-  transaction's records can land up to one quantum apart. It is heard up to `latency_samples`
-  later. There is no block-atomicity claim.
-- **Backpressure.** Each strip's fader/mute and matrix/pan lanes hold 16 records each. A
-  transaction that does not fit every lane it touches returns `BACKPRESSURE` with last error
-  `control.live.backpressure` (a full plan queue stays `control.plan.backpressure`). The model,
-  the revision, the replay cache, the events and every lane are unchanged; the host retries with a
-  new request ID after a render call. A host that is not rendering takes 16 single-value edits
-  per lane before the first refusal.
-- **No ack before a drop (#1053 D6).** Classification, the live admission (#1053 D8), the
-  producer lookup, the room check on every lane and the protocol's commit predicate all run before
-  the first push; nothing changes until the last of them passes. The push and the commit then
-  cannot fail, and render applies every record it pops, because the classifier refuses every value
-  the setters would refuse.
+- **Timing (#1053 D2, #1312).** A committed fader, mute or pan/matrix value reaches render no
+  later than the first block whose render call begins after the submit returns or, while a
+  replacement plan is pending, at that plan's adoption, which the watermark reports. Every such
+  value of one transaction takes effect in the same block, and the watermark names that block's
+  first sample (D15-2). It is heard up to `latency_samples` later. An effect value rides a queue
+  until #1345 and may apply one block earlier, so a transaction's effect values can land up to one
+  quantum apart.
+- **Latest-target cells, no backpressure (#1312).** Each strip's fader, mute and matrix/pan values
+  are held in latest-target cells: four on the fader lane (fader left and right, mute left and
+  right) and one on the matrix lane. A write cannot fail and never waits, so a host that is not
+  rendering can send any number of fader, mute or pan edits and none returns `BACKPRESSURE`. A
+  later value for a cell committed before the block that reads it replaces the earlier one; the
+  block applies the newest value whose revision its snapshot covers. `LIVE_VALUES_SUPERSEDED`
+  (protocol counter 16, reported by `COUNTERS_GET` after any control call) counts, per cell, each
+  write to a plan that render adopts which the block that covers it does not apply because a later
+  write to the same cell exists. A `Both` record writes two cells and counts in each: forty `Both`
+  fader edits before one block add 78. A write to a candidate that is withdrawn, and a value on a
+  lane a swap restarts, are not counted. The effect lanes keep their queues and their 16-record
+  room (`min(16, automation capacity)`) until #1345; a transaction that does not fit an effect
+  lane returns `BACKPRESSURE` with last error `control.live.backpressure` (a full plan queue stays
+  `control.plan.backpressure`), changes nothing, and is retried with a new request ID after a
+  render call.
+- **No ack before a drop (#1053 D6, #1312 D7, D11).** Classification, the live admission
+  (#1053 D8), the producer lookup, the room check on every effect lane and the protocol's commit
+  predicate all run before the commit's stamp, and the stamp is the last fallible step; nothing
+  changes until the last of them passes. The cell writes, the pushes and the commit then cannot
+  fail, and render applies every value it reads, because the classifier refuses every value the
+  setters would refuse. A refused transaction writes no cell and uses no revision.
 - **Same response and events.** A live edit returns `TransactionApplied` and emits one
   `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
   The reliable event lane holds two events, so a host drains it after each edit either way.
@@ -470,7 +483,7 @@ and compares the resolved values bit by bit.
   records. A transaction whose records for one instance outnumber that capacity could never fit,
   so it takes the rebuild path instead of an endless `BACKPRESSURE`. A transaction that fits the
   capacity but not the lane's current room returns `BACKPRESSURE` with
-  `control.live.backpressure`, exactly as a full fader lane does, and changes nothing.
+  `control.live.backpressure`, exactly as a full effect lane does, and changes nothing.
 - **No ack before a drop.** Every record passes its producer's preflight, and every readback row
   is looked up, before the first push, beside the room check of #1257.
 - **The readback follows.** After the commit, the protocol's parameter state

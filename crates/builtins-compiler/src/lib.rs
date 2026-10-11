@@ -393,6 +393,21 @@ impl FaderCells {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl FaderCells {
+    /// Test-only: how many writes each cell has taken (fader left, fader right, mute left, mute
+    /// right). Valid while no write is in flight, which a quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_counts(&self) -> [u64; FADER_CELLS] {
+        core::array::from_fn(|index| {
+            CellReader::new()
+                .peek_unread(&self.lane.cells[index])
+                .map_or(0, |(_, sequence)| sequence)
+        })
+    }
+}
+
 /// Control's write end of one strip's matrix/pan cell (#1312 D5).
 pub struct MatrixCells {
     lane: Arc<MatrixLane>,
@@ -417,6 +432,18 @@ impl MatrixCells {
                 record.smoothing_samples,
             ],
         );
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MatrixCells {
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_count(&self) -> u64 {
+        CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
     }
 }
 

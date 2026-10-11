@@ -13,7 +13,7 @@ name = "control_plane"
 default = []
 # Observers and fault hooks for the adapters' own tests (#1309 D8). Never enabled by a product
 # build: capi turns it on from its `[dev-dependencies]` only.
-test-support = []
+test-support = ["host-core/test-support"]
 
 [dependencies]
 engine.workspace = true
