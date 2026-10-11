@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
-use bench_support::producer::render_while_producing;
+use bench_support::producer::{StopOnDrop, render_while_producing};
 use capi::*;
 use protocol::{
     CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
@@ -274,16 +274,6 @@ fn query(plan_address: usize) -> u32 {
     }
 }
 
-/// Stops the reader threads however the render loop leaves their scope, so a failed assertion
-/// cannot hang the join. (`render_while_producing` stops its own producer thread.)
-struct StopOnDrop<'a>(&'a AtomicBool);
-
-impl Drop for StopOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 /// The control thread's state: the session it calls, its transaction sequence and its source
 /// feed. `render_while_producing` hands it to the producer thread one iteration at a time.
 struct Control<'a> {
@@ -533,6 +523,8 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
                 })
             })
             .collect::<Vec<_>>();
+        // Stops the reader threads however the render loop leaves their scope, so a failed
+        // assertion cannot hang the join. (`render_while_producing` stops its own producer thread.)
         let stop_readers = StopOnDrop(&stop);
         render_while_producing(
             block_bound,

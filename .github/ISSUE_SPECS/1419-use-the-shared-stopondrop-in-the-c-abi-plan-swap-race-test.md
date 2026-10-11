@@ -80,3 +80,28 @@ private copy.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (Sonnet 5.5; branch `codex/d15-stream-j3`, from `main` at `2a589d360`)
+
+Re-measured on this branch (stream B batch 1 merged): the private guard in `plan_swap_race.rs` was at
+`:256-263` (spec: `:209-217`), its use at `:512` (spec: `:496`) and the `drop` at `:541` (spec: `:525`);
+the `resource_lifecycle.rs` doc comment ran `:2065-2069` (spec: `:2031-2042`). The meaning is the same.
+
+Changes: D1 deleted the private `StopOnDrop` and its doc comment and imported
+`bench_support::producer::StopOnDrop`; the reason (stops the reader threads however the render loop
+leaves their scope) moved to a comment at the use site. D2 replaced the last sentence of the
+`resource_lifecycle.rs` guard comment with "`plan_swap_race.rs` uses the shared guard."
+
+Gate 2 (planted failure): `assert!(block < 3, "planted failure at block {block}")` before
+`rendered.store` in the render loop closure of
+`resource_queries_racing_plan_swaps_always_find_the_published_row`. Result: the test failed with
+`planted failure at block 3` and the binary exited (status 101) in 0.75 s wall time, no hang.
+Control mutation: with the planted failure kept and the `StopOnDrop` binding removed, the same run was
+still going at a 40 s `timeout` (exit 124), so the shared guard is what ends the test. Both reverted.
+
+Gates, all exit 0: `cargo test --locked -p capi --test plan_swap_race` (3 passed);
+`cargo test --locked -p capi --test resource_lifecycle` (11 passed); `cargo fmt --all -- --check`;
+`cargo clippy --locked -p capi --all-targets --all-features -- -D warnings`;
+`bash scripts/check-workspace-policy.sh`.
