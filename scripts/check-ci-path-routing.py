@@ -1082,13 +1082,15 @@ def check_nightly_self_tests(root: pathlib.Path) -> None:
     reported = [name.strip() for name in needs.group(1).replace("\n", " ").split(",")]
     for name in reported:
         reported_job = job(text, name)
-        require(re.search(r"^    continue-on-error:", reported_job, re.MULTILINE) is None,
-                f"nightly: {name} is reported by failure-notice and must not set job-level "
-                "continue-on-error")
+        # The key may be quoted; any value, even a literal `false`, is refused: the key has no use
+        # on a job the notice reports.
+        require(re.search(r"^    ['\"]?continue-on-error['\"]?\s*:", reported_job, re.MULTILINE) is None,
+                f"nightly: {name} is reported by failure-notice and must not carry the job-level "
+                "continue-on-error key")
         for step in job_steps(reported_job):
-            require("continue-on-error:" not in step,
-                    f"nightly: {name} is reported by failure-notice and must not set "
-                    "continue-on-error on any step")
+            require(re.search(r"['\"]?continue-on-error['\"]?\s*:", step) is None,
+                    f"nightly: {name} is reported by failure-notice and must not carry the "
+                    "continue-on-error key on any step")
 
 
 def check_qualification_workflow(root: pathlib.Path) -> None:

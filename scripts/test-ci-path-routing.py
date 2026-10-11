@@ -665,6 +665,10 @@ def test_self_test_contract_mutations(checker) -> None:
                                 "      - name: Workspace release build (single panic variant, --no-run)\n"
                                 "        continue-on-error: true\n")  # release-link-proof
         workflow_mutation_fails("nightly.yml",
+                                "      - name: Generate report and run red mutations\n",
+                                "      - name: Generate report and run red mutations\n"
+                                "        \"continue-on-error\": true\n")  # a quoted key
+        workflow_mutation_fails("nightly.yml",
                                 "            moved-mutation-suites, release-budgets, full-size-tests]",
                                 "            release-budgets, full-size-tests]")  # the notice stops reporting it
         workflow_mutation_fails(
