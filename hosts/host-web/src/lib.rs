@@ -1790,7 +1790,8 @@ impl ReadyOwnership {
         if slot < tracks * 3 {
             return u32::try_from(
                 // #1254 D4: a strip prepared without its input lane is unaddressable here, like an
-                // absent effect lane; the browser always prepares with it, so this never fires.
+                // absent effect lane; a plan that takes commands always has it and an option-0
+                // plan takes none (it refuses every command first), so this never fires.
                 self.controls
                     .get(slot - tracks * 2)?
                     .input

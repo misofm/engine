@@ -11,7 +11,6 @@ pub struct CompiledChildren<A: ControlAdapter> {
 }
 
 /// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
-/// One number for both hosts: [`host_core::STRIP_LIVE_QUEUE_DEPTH`] (#1326 D2).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]

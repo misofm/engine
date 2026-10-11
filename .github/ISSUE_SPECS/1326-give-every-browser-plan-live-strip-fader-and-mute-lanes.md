@@ -223,3 +223,11 @@ no other row moves (bridge metadata and retained, graph, source rows identical).
 ("`0n` to attach no control channel"), `.d.ts:44`, `miso-engine-v1-audio-worklet.js:1549` and
 `sdk/src/browser/shipped-host.d.ts:44` still say option 0 has no control channel; they are stream
 H's files. The merge with stream B on `crates/control-plane/src/compile.rs` is the one constant line.
+
+**Follow-ups after the PASS verdict** (comment-only edits; no code moved). The `host-web` "input lane
+never fires" comment now gives the true reason (an option-0 plan refuses every command first); the
+130-column `route_controls` doc line in `host-core/src/prepare.rs` is rewrapped; the extra doc line
+above `LIVE_QUEUE_DEPTH` in `control-plane/src/compile.rs` is removed, so only the constant line
+differs from `2a589d360` (the original doc already stays true); the `four_lanes` ceiling comment in
+`retained_ceilings.rs` says the 3,776 is inferred from the x86-64 measurement, because AArch64 runs
+only in CI. The stale `.d.ts`/`.js` wording and STREAMS.md's hot-file row stay with root.
