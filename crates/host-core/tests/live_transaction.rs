@@ -175,6 +175,7 @@ fn one_transaction_is_applied_whole_in_the_block_its_revision_is_published_for()
             ..HostLiveControlRequest::default()
         },
         HostLiveLanes::FADER_AND_MATRIX,
+        None,
         &LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));

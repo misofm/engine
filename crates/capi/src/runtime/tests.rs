@@ -3734,7 +3734,7 @@ fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
         &format!("\"revision\": \"{ceiling}\""),
         1,
     );
-    let refused = compile_children(&above, limits())
+    let refused = compile_children(&above, limits(), None)
         .err()
         .expect("above the ceiling");
     assert!(

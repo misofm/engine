@@ -713,6 +713,7 @@ impl HostHalf {
                 routes: false,
             },
             Some(&mut cache),
+            &host_core::LiveValuesSuperseded::default(),
         )
         .unwrap_or_else(|_| panic!("the session prepares again"));
         cache.take_journal().retained_bytes()

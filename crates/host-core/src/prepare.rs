@@ -1103,6 +1103,7 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
         None,
         lanes,
         None,
+        None,
     )?;
     Ok((prepared, handles))
 }
