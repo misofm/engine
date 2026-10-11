@@ -134,9 +134,10 @@ of `MISO_ENGINE_V1_OUTCOME_*` over the revisions the last advance covered. Submi
 synchronous only for what can fail (validate, classify, prepare a rebuild and reserve its
 credits, commit); every committed revision is pending until the watermark covers it, and a paused
 host's revisions stay pending until render resumes. Each revision travels with the plan that
-carries it (a revision word in each publication-mailbox cell), the control plane routes each
-commit's revision to the newest pending candidate as the commit's last write, and render reads
-only the word of the plan it runs, after the adoption decision and before any drain. The
+carries it (a revision gate in each plan, #1502), the control plane publishes each commit's
+revision on the gate of the newest pending candidate, else the running plan, as the commit's last
+write, and render takes one snapshot of the gate of the plan it runs per block, after the adoption
+decision and before the executor renders. The
 watermark is a level, not a queue: render overwrites it, never waits and drops no command, so an
 acknowledged edit cannot be dropped behind it. A wrong `struct_size` or a nonzero reserved word is
 `RESULT_INVALID_ARGUMENT`; a copy that keeps landing inside render's publication (bounded at 64

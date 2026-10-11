@@ -27,6 +27,9 @@ pub(crate) struct SharedPlanState<Row> {
     /// the `provider_features.meters` term, so it can only ever cause the scan to run when it was
     /// not strictly needed, never to be skipped when it was.
     pub(crate) render_peak_observed: AtomicBool,
+    /// Blocks the executor failed after the live snapshot (#1502 D7), mirrored from the plan
+    /// owner on the render thread when such a block happens.
+    pub(crate) live_block_errors: AtomicU64,
     /// The applied-revision watermark render publishes (#1314 D4): any thread reads it.
     pub(crate) watermark: PlanWatermarkReader,
 }
@@ -93,6 +96,12 @@ impl<A: ControlAdapter> PlanQueries<A> {
     /// Copies the resource row of the currently active plan epoch.
     pub fn resources(&self) -> A::Row {
         active_resources(&self.shared)
+    }
+
+    /// Blocks the executor failed after the block's live snapshot (#1502 D7): such a block may
+    /// have applied live values and rendered no output. A defect path, normally 0.
+    pub fn live_block_errors(&self) -> u64 {
+        self.shared.live_block_errors.load(Ordering::Acquire)
     }
 
     /// The applied-revision watermark (#1314): which committed revision is in effect, since which
@@ -167,14 +176,6 @@ impl<'a> ObservedReservation<'a> {
 
     pub(crate) fn epoch(&self) -> u64 {
         self.inner.as_ref().expect("reservation is live").epoch().0
-    }
-
-    /// The newest committed revision whose content the candidate carries (#1314 D2).
-    pub(crate) fn set_revision(&mut self, revision: u64) {
-        self.inner
-            .as_mut()
-            .expect("reservation is live")
-            .set_revision(revision);
     }
 
     pub(crate) fn commit(mut self) {
@@ -254,9 +255,19 @@ impl<A: ControlAdapter> PlanState<A> {
         absolute_sample: u64,
         output: PlanarBufferMut<'_>,
     ) -> Result<(), RenderError> {
-        let report = self
+        let report = match self
             .owner
-            .render_contiguous(RenderIo { output }, absolute_sample)?;
+            .render_contiguous(RenderIo { output }, absolute_sample)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                // Only an errored block can move the count (#1502 D7).
+                self.shared
+                    .live_block_errors
+                    .store(self.owner.live_block_errors(), Ordering::Release);
+                return Err(error);
+            }
+        };
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);
@@ -292,5 +303,91 @@ impl<A: ControlAdapter> Drop for PlanState<A> {
         self.shared.plan_alive.store(false, Ordering::Release);
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_disposed += 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::num::NonZeroUsize;
+    use engine::realtime::{
+        BufferArena, PrepareRenderPlan, PreparedPlanExecutor, RenderEnvelope, RenderTime,
+        plan_exchange,
+    };
+    use engine::{QuantumFrames, SampleRateHz};
+
+    struct FailAfterSnapshot;
+
+    impl PreparedPlanExecutor for FailAfterSnapshot {
+        fn render(
+            &mut self,
+            _arena: &mut BufferArena,
+            _output: PlanarBufferMut<'_>,
+            _time: RenderTime,
+        ) -> Result<(), RenderError> {
+            Err(RenderError::InvalidEnvelope)
+        }
+    }
+
+    struct TestAdapter;
+
+    impl ControlAdapter for TestAdapter {
+        type Row = PlanResources;
+        const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    }
+
+    /// #1502 D7: a block the executor fails after the live snapshot is mirrored to the any-thread
+    /// query, and a block the shape check refuses is not.
+    #[test]
+    fn the_live_block_error_count_reaches_the_any_thread_query() {
+        let plan = PreparedRenderPlan::prepare_with_executor(
+            PrepareRenderPlan {
+                plan_id: 1,
+                envelope: RenderEnvelope {
+                    sample_rate: SampleRateHz(48_000),
+                    quantum: QuantumFrames(2),
+                    output_channels: NonZeroUsize::new(1).expect("one"),
+                },
+                scratch: &[],
+            },
+            Box::new(FailAfterSnapshot),
+        )
+        .expect("plan");
+        let (publisher, owner, _retirer) = plan_exchange(
+            plan,
+            PlanExchangeConfig {
+                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+            },
+        )
+        .expect("exchange");
+        let shared = Arc::new(SharedPlanState {
+            plan_alive: AtomicBool::new(true),
+            active_epoch: AtomicU64::new(0),
+            reports: Mutex::new(Vec::new()),
+            render_sequence: AtomicU64::new(0),
+            render_sample: AtomicU64::new(0),
+            render_peak_bits: AtomicU32::new(0),
+            render_peak_observed: AtomicBool::new(false),
+            live_block_errors: AtomicU64::new(0),
+            watermark: publisher.watermark_reader(),
+        });
+        let mut state = PlanState::<TestAdapter>::new(owner, shared);
+        let queries = state.queries();
+
+        let mut wide = [0.0_f32; 4];
+        let refused = state.render(
+            0,
+            PlanarBufferMut::try_new(&mut wide, 2, 2, 2).expect("output"),
+        );
+        assert_eq!(refused, Err(RenderError::OutputShape));
+        assert_eq!(queries.live_block_errors(), 0);
+
+        let mut output = [0.0_f32; 2];
+        let failed = state.render(
+            0,
+            PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+        );
+        assert_eq!(failed, Err(RenderError::InvalidEnvelope));
+        assert_eq!(queries.live_block_errors(), 1);
     }
 }

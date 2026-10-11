@@ -837,7 +837,7 @@ fn watermark(rig: &Rig) -> (u64, u64, u64, u64) {
 
 /// #1314 gate 2: a rebuild (r1) and then a live fader edit (r2), committed before any render,
 /// both complete at the swap block and not one block earlier: the live edit went to the pending
-/// candidate's revision word, so the running plan never reports either revision.
+/// candidate's revision gate, so the running plan never reports either revision.
 #[test]
 fn a_live_edit_on_a_pending_candidate_completes_at_the_swap() {
     let document = long_session(1, 48_000);

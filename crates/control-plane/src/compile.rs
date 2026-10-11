@@ -33,6 +33,8 @@ pub(crate) struct PreparedRuntime {
     /// One live-control producer per prepared effect instance (#1263 D2).
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     pub(crate) plan: PreparedRenderPlan,
+    /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
+    pub(crate) revision_gate: PlanRevisionGate,
     pub(crate) resources: PlanResources,
     /// The part of `resources`' source rows the plan carries from its predecessor.
     pub(crate) carried: CarriedSourceBytes,
@@ -660,6 +662,12 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         return Err(failure(ResourceFault::Limit));
     }
     let host = prepared.report;
+    // #1502 D1: the plan's control handle moves into its provider epoch, so the gate, the cells
+    // and the producers that write them follow one routing.
+    let mut plan = prepared.plan;
+    let revision_gate = plan
+        .take_revision_gate()
+        .expect("a freshly prepared plan hands out its revision gate");
     let largest_named = host.largest_engine_allocation_bytes.max(capi.largest);
     let carried = CarriedSourceBytes {
         total: host.carried_source_total_bytes,
@@ -679,7 +687,8 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         sources: prepared.sources,
         strips,
         effects,
-        plan: prepared.plan,
+        plan,
+        revision_gate,
         resources: PlanResources {
             sample_rate_hz: host.sample_rate_hz,
             quantum_frames: host.quantum_frames,
@@ -687,9 +696,14 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             track_count: host.track_count,
             latency_samples: host.latency_samples,
             output_tail: host.output_tail,
+            // The carry program's bytes and the plan's revision gate (#1502 D1) are the plan's own
+            // allocations that the host-core row does not count.
             graph_session_plus_plan_bytes: with_carried(
-                host.graph_session_plus_plan_bytes,
-                host.carry_program_retained_bytes,
+                with_carried(
+                    host.graph_session_plus_plan_bytes,
+                    host.carry_program_retained_bytes,
+                )?,
+                plan_revision_gate_retained_bytes(),
             )?,
             graph_incremental_plan_bytes: host.graph_incremental_plan_bytes,
             graph_metadata_bytes: host.graph_metadata_bytes,
@@ -785,6 +799,7 @@ where
         strips,
         effects,
         plan,
+        mut revision_gate,
         resources,
         carried: _,
         inventory,
@@ -792,10 +807,11 @@ where
         capi,
         bound_seed,
     } = runtime;
-    // #1314 D1: the initial plan carries the store's initial revision, and the watermark starts
-    // there.
+    // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
+    // own gate, and the watermark starts there.
     let (publisher, owner, retirer) = plan_exchange_at_revision(
         plan,
+        &mut revision_gate,
         store.revision().0,
         PlanExchangeConfig {
             retirement_capacity: one,
@@ -816,6 +832,7 @@ where
         render_peak_bits: AtomicU32::new(0),
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
+        live_block_errors: AtomicU64::new(0),
         watermark: publisher.watermark_reader(),
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
@@ -858,7 +875,13 @@ where
         session: SessionState {
             controller: ObservedController::new(controller),
             providers: ProviderEpoch::current(
-                sources, inventory, strips, effects, capi, bound_seed,
+                sources,
+                inventory,
+                strips,
+                effects,
+                capi,
+                bound_seed,
+                revision_gate,
             ),
             pending_providers,
             retired_providers,

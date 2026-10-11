@@ -1936,8 +1936,9 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             .prepared
             .report
             .graph_session_plus_plan_bytes
-            + successor.carry_program_retained_bytes,
-        "the swapped-in plan's graph row counts its carry program"
+            + successor.carry_program_retained_bytes
+            + engine::realtime::plan_revision_gate_retained_bytes(),
+        "the swapped-in plan's graph row counts its carry program and its revision gate"
     );
     println!(
         "carried ring {} bytes ({} overhead); carry program {} bytes; inventory {} bytes",

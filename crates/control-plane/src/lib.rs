@@ -33,9 +33,10 @@ pub(crate) use std::sync::{
 pub(crate) use effect_contract::TailSamples;
 pub(crate) use engine::realtime::{
     PlanAdoption, PlanExchangeConfig, PlanPublisher, PlanReplacementReservation,
-    PlanReplacementReservationError, PlanRetirer, PlanWatermark, PlanWatermarkReader,
-    PlanarBufferMut, PreparedRenderPlan, RealtimePlanOwner, RenderError, RenderIo, RevisionTarget,
-    WatermarkBusy, plan_exchange_at_revision, plan_exchange_resource_report,
+    PlanReplacementReservationError, PlanRetirer, PlanRevisionGate, PlanWatermark,
+    PlanWatermarkReader, PlanarBufferMut, PreparedRenderPlan, RealtimePlanOwner, RenderError,
+    RenderIo, WatermarkBusy, plan_exchange_at_revision, plan_exchange_resource_report,
+    plan_revision_gate_retained_bytes,
 };
 pub(crate) use host_core::{
     HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, PlanStateInventory,

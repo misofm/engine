@@ -916,9 +916,9 @@ impl LiveControl<'_> {
     }
 }
 
-/// #1314 D3 (verifier F2): render loads the running plan's revision word before `render_inner`,
-/// so a watermark advance to `r` at a block's first sample means that block applied `r` from its
-/// first drain on.
+/// #1314 D3 (verifier F2), #1502 D2: render takes the running plan's snapshot before the executor
+/// renders the block, so a watermark advance to `r` at a block's first sample means that block
+/// applied `r` from its first drain on.
 ///
 /// The control thread commits live fader edits on `eq0`, alternating -6 dB and 0 dB, one at a time,
 /// each timed by a [`RenderGate`] against a render call, so the revision stores sweep the call:
@@ -927,10 +927,10 @@ impl LiveControl<'_> {
 /// block's first sample, and the block's last samples must be the steady level `r` targets
 /// (measured single-threaded by [`live_levels`]): the ramp started at or before the block's first
 /// sample and ends within the block. The reverse does not hold, and the test does not ask it: an
-/// edit whose record a drain takes after render loaded the revision word is applied in a block the
+/// edit whose record a drain takes after render took the snapshot is applied in a block the
 /// watermark reports later.
 ///
-/// Loading the revision after `render_inner` lets a commit that lands after the block's drains
+/// Taking the snapshot after the executor rendered lets a commit that lands after the block's drains
 /// advance the watermark at that block, which renders the previous level throughout.
 #[test]
 fn a_watermark_advance_names_a_block_that_applied_the_edit() {

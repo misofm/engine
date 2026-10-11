@@ -1,8 +1,11 @@
 //! Structurally immutable prepared plan and bounded silence reference renderer.
 
-use super::{BufferArena, BufferArenaError, PlanarBufferMut};
+use super::{
+    BufferArena, BufferArenaError, GatePin, LiveSnapshot, LiveStamp, PlanarBufferMut, RevisionGate,
+};
 use crate::{QuantumFrames, SampleRateHz, is_launch_sample_rate};
-use core::{cell::Cell, num::NonZeroUsize};
+use core::{alloc::Layout, cell::Cell, num::NonZeroUsize, sync::atomic::AtomicUsize};
+use std::sync::Arc;
 
 /// Why an exclusive live-response capture was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -335,6 +338,15 @@ pub trait PreparedPlanExecutor: Send {
     /// exposing graph types through the engine foundation seam.
     #[doc(hidden)]
     fn invalidate_observers(&mut self) {}
+    /// Receive the block's live snapshot `S` (#1502 D2): the revision the plan's own gate held
+    /// when the block began. Called once per block, on the render thread inside the render scope,
+    /// after the block's output shape and clock checks and before [`render`](Self::render). A
+    /// block those checks refuse never calls it.
+    ///
+    /// **Render-thread code.** No allocation, free, lock, syscall, log or unbounded loop. The
+    /// default ignores the snapshot, which is right for an executor whose live drains still pop
+    /// queues at their nodes (#1504 hands `S` to the drains).
+    fn begin_live_block(&mut self, _snapshot: LiveSnapshot) {}
     /// Render one already-validated block using only preallocated state.
     fn render(
         &mut self,
@@ -551,6 +563,84 @@ pub struct RenderReport {
     pub next_absolute_sample: u64,
     /// Number of PCM frames rendered.
     pub frames: u32,
+    /// The block's live snapshot `S`, taken from the plan's own revision gate (#1502 D2): the
+    /// newest committed revision whose live values the block applied.
+    pub live_snapshot: LiveSnapshot,
+}
+
+/// Why a block failed, and whether it failed after the live snapshot.
+///
+/// A block the output-shape or clock checks refuse takes no snapshot and applies nothing. A block
+/// the executor fails after [`PreparedPlanExecutor::begin_live_block`] may have applied live
+/// values without rendering output (#1502 D7), which the owner counts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BlockFailure {
+    pub(crate) error: RenderError,
+    pub(crate) after_snapshot: bool,
+}
+
+/// The control handle of one plan's revision gate (#1502 D1): the shared gate and the one
+/// [`GatePin`] that publishes to it. [`PreparedRenderPlan::take_revision_gate`] hands it out once.
+///
+/// Only the holder publishes on the plan's gate, and only the holder stamps writes to the plan's
+/// cells. The handle moves between threads only by ownership transfer, and only with no open
+/// stamp: every revision it stamped has been published. The control plane keeps it in the plan's
+/// provider epoch, so a handle follows its plan, its cells and the producers that write them.
+pub struct PlanRevisionGate {
+    gate: Arc<RevisionGate>,
+    pin: GatePin,
+}
+
+impl core::fmt::Debug for PlanRevisionGate {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PlanRevisionGate")
+            .field("revision", &self.gate.revision())
+            .field("pin", &self.pin)
+            .finish()
+    }
+}
+
+impl PlanRevisionGate {
+    /// The newest revision published on the gate.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.gate.revision()
+    }
+
+    /// The revision the gate was last published at, or built at.
+    #[must_use]
+    pub const fn last_published(&self) -> u64 {
+        self.pin.last_published()
+    }
+
+    /// Stamp the writes of a transaction that commits as `revision` (#1432 `GatePin::stamp`). The
+    /// stamp borrows the handle, so the revision cannot be published while a write holds it.
+    #[must_use]
+    pub fn stamp(&mut self, revision: u64) -> LiveStamp<'_> {
+        self.pin.stamp(revision)
+    }
+
+    /// Publish `revision` on the plan's gate, as the commit's last write (#1432
+    /// `GatePin::publish`). Render's next snapshot of the gate covers it.
+    pub fn publish(&mut self, revision: u64) {
+        self.pin.publish(&self.gate, revision);
+    }
+}
+
+#[repr(C)]
+struct SharedGateAllocation {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    gate: RevisionGate,
+}
+
+/// Exact engine-owned bytes one plan's revision gate retains: the gate word with the shared-owner
+/// header, one allocation (#1502 D1). The control plane charges it to each prepared plan.
+#[must_use]
+pub fn plan_revision_gate_retained_bytes() -> u64 {
+    u64::try_from(Layout::new::<SharedGateAllocation>().size())
+        .expect("a gate allocation's size fits u64")
 }
 /// Exclusive realtime state. It is `Send` but intentionally `!Sync`.
 ///
@@ -566,6 +656,11 @@ pub struct PreparedRenderPlan {
     next_absolute_sample: u64,
     response_snapshot_valid: bool,
     executor: Option<Box<dyn PreparedPlanExecutor>>,
+    /// This plan's revision gate (#1502 D1), built at revision 0 on the control thread. Render
+    /// takes the block's live snapshot from it.
+    gate: Arc<RevisionGate>,
+    /// The pin of `gate` until [`Self::take_revision_gate`] hands the control handle out.
+    gate_pin: Option<GatePin>,
     _not_sync: Cell<()>,
     #[cfg(test)]
     drop_observer: Option<DropObserver>,
@@ -590,6 +685,9 @@ impl PreparedRenderPlan {
     /// Compile fixed storage and immutable program outside the render plane.
     pub fn prepare(request: PrepareRenderPlan<'_>) -> Result<Self, RenderError> {
         let envelope = request.envelope.validate()?;
+        // Revision 0, below every revision the plan will stamp (#1432: a gate built at `r` cannot
+        // take a stamp of `r`).
+        let (gate, gate_pin) = RevisionGate::pair(0);
         Ok(Self {
             program: PreparedProgram {
                 plan_id: request.plan_id,
@@ -600,10 +698,26 @@ impl PreparedRenderPlan {
             next_absolute_sample: 0,
             response_snapshot_valid: true,
             executor: None,
+            gate: Arc::new(gate),
+            gate_pin: Some(gate_pin),
             _not_sync: Cell::new(()),
             #[cfg(test)]
             drop_observer: None,
         })
+    }
+    /// Hand out this plan's one revision-gate handle (#1502 D1): the first call returns it, every
+    /// later call `None`. The plan keeps the shared gate for render; only the holder of the
+    /// handle publishes on it.
+    pub fn take_revision_gate(&mut self) -> Option<PlanRevisionGate> {
+        let pin = self.gate_pin.take()?;
+        Some(PlanRevisionGate {
+            gate: Arc::clone(&self.gate),
+            pin,
+        })
+    }
+    /// Whether `handle` is the control handle of this plan's gate, by pointer identity.
+    pub(crate) fn owns_revision_gate(&self, handle: &PlanRevisionGate) -> bool {
+        Arc::ptr_eq(&self.gate, &handle.gate)
     }
     /// Construct a plan with an already validated internal executor.
     ///
@@ -872,7 +986,8 @@ impl PreparedRenderPlan {
         io: RenderIo<'_>,
         time: RenderTime,
     ) -> Result<RenderReport, RenderError> {
-        let result = super::audit::in_render_scope(|| self.render_inner(io, time));
+        let result = super::audit::in_render_scope(|| self.render_inner(io, time))
+            .map_err(|failure| failure.error);
         if result.is_err()
             && let Some(executor) = self.executor.as_deref_mut()
         {
@@ -949,30 +1064,35 @@ impl PreparedRenderPlan {
         }
     }
 
+    /// Render one block through the plan's own revision gate (#1502 D2). After the output-shape
+    /// and clock checks and before the executor renders, it takes the block's live snapshot `S`
+    /// from this plan's gate and hands it to the executor; the report carries it. A block those
+    /// checks refuse takes none.
     pub(crate) fn render_inner(
         &mut self,
-        mut io: RenderIo<'_>,
+        io: RenderIo<'_>,
         time: RenderTime,
-    ) -> Result<RenderReport, RenderError> {
+    ) -> Result<RenderReport, BlockFailure> {
         self.response_snapshot_valid = false;
         let envelope = self.program.envelope;
         let frames = envelope.quantum.0 as usize;
+        let before = |error: RenderError| BlockFailure {
+            error,
+            after_snapshot: false,
+        };
         if io.output.frames() != frames || io.output.channels() != envelope.output_channels.get() {
-            return Err(RenderError::OutputShape);
+            return Err(before(RenderError::OutputShape));
         }
         let next = time
             .absolute_sample
             .checked_add(u64::from(envelope.quantum.0))
-            .ok_or(RenderError::TimeOverflow)?;
-        if let Some(executor) = &mut self.executor {
-            executor.render(&mut self.arena, io.output, time)?;
-        } else {
-            let mut channel = 0;
-            while channel < envelope.output_channels.get() {
-                io.output.plane_mut(channel)?.fill(0.0);
-                channel += 1;
-            }
-        }
+            .ok_or_else(|| before(RenderError::TimeOverflow))?;
+        let live_snapshot = self.gate.snapshot();
+        self.render_block(io, time, live_snapshot)
+            .map_err(|error| BlockFailure {
+                error,
+                after_snapshot: true,
+            })?;
         self.rendered_blocks = self.rendered_blocks.saturating_add(1);
         self.next_absolute_sample = next;
         self.response_snapshot_valid = true;
@@ -980,7 +1100,28 @@ impl PreparedRenderPlan {
             plan_id: self.program.plan_id,
             next_absolute_sample: next,
             frames: envelope.quantum.0,
+            live_snapshot,
         })
+    }
+
+    /// The part of a block that follows its live snapshot.
+    fn render_block(
+        &mut self,
+        mut io: RenderIo<'_>,
+        time: RenderTime,
+        live_snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        if let Some(executor) = &mut self.executor {
+            executor.begin_live_block(live_snapshot);
+            executor.render(&mut self.arena, io.output, time)?;
+        } else {
+            let mut channel = 0;
+            while channel < self.program.envelope.output_channels.get() {
+                io.output.plane_mut(channel)?.fill(0.0);
+                channel += 1;
+            }
+        }
+        Ok(())
     }
     // REALTIME_POLICY_END
 }

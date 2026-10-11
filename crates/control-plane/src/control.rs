@@ -47,6 +47,12 @@ pub struct ProviderEpoch {
     /// newest epoch's seed and journals its own, which its candidate epoch then owns; it drops
     /// with this epoch. Control thread only: render never reads it and no plan holds it.
     pub(crate) bound_seed: InputBoundRecord,
+    /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
+    /// revision the plan carries on it, and #1312 stamps the plan's cell writes from it, so the
+    /// gate, the cells and the producers that write them follow one routing. It stays here for
+    /// the epoch's life and moves only with the epoch, which holds no open stamp between
+    /// commands.
+    pub(crate) revision_gate: PlanRevisionGate,
 }
 
 impl ProviderEpoch {
@@ -93,6 +99,7 @@ impl ProviderEpoch {
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
         bound_seed: InputBoundRecord,
+        revision_gate: PlanRevisionGate,
     ) -> Self {
         let owner = Self {
             epoch: 0,
@@ -102,6 +109,7 @@ impl ProviderEpoch {
             effects,
             capi,
             bound_seed,
+            revision_gate,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
@@ -115,6 +123,7 @@ impl ProviderEpoch {
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
         bound_seed: InputBoundRecord,
+        revision_gate: PlanRevisionGate,
     ) -> Self {
         let owner = Self {
             epoch: u64::MAX,
@@ -124,6 +133,7 @@ impl ProviderEpoch {
             effects,
             capi,
             bound_seed,
+            revision_gate,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -1031,7 +1041,7 @@ where
     /// since the last call.
     ///
     /// **Pending candidates (D7).** Nothing here takes a pending candidate: it stays in its
-    /// mailbox cell, with its plan, epoch, revision word and retirement credit, until render adopts
+    /// mailbox cell, with its plan, epoch, revision gate and retirement credit, until render adopts
     /// it or a publication withdraws it. A provider is promoted only once render has adopted its
     /// plan.
     ///
@@ -1138,6 +1148,7 @@ where
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
                     bound_seed,
+                    revision_gate,
                 } = prepared_runtime;
                 let mut candidate_provider = ProviderEpoch::candidate(
                     sources,
@@ -1146,6 +1157,7 @@ where
                     effects,
                     prospective_capi,
                     bound_seed,
+                    revision_gate,
                 );
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(feature = "test-support")]
@@ -1202,7 +1214,7 @@ where
                         return Err(CommandError::Backpressure);
                     }
                 };
-                let mut reservation = ObservedReservation::new(reservation);
+                let reservation = ObservedReservation::new(reservation);
                 #[cfg(feature = "test-support")]
                 {
                     if take_test_fault_state(TestStructuralFaultPhase::AfterPlanReservation) {
@@ -1250,11 +1262,15 @@ where
                 self.controller
                     .provider_mut()
                     .replace_session_catalog(candidate_catalog);
+                // #1502 D6: the candidate carries the revision just committed. It goes on the
+                // candidate's own gate before the candidate is published, so render reports it
+                // when it adopts the candidate and never earlier, and nothing is stamped on the
+                // handle in between.
+                candidate_provider
+                    .revision_gate
+                    .publish(self.controller.session().revision().0);
                 self.pending_providers.push(candidate_provider);
                 reports.push((epoch, A::Row::from(resources)));
-                // #1314 D2: the candidate carries the revision just committed; render reports it
-                // when it adopts the candidate.
-                reservation.set_revision(self.controller.session().revision().0);
                 reservation.commit();
                 #[cfg(feature = "test-support")]
                 {
@@ -1589,25 +1605,21 @@ where
         )))
     }
 
-    /// Route the revision just committed by a live or model-only commit to the newest pending
-    /// candidate, or to the running plan when none is pending (#1314 D2). It is the commit's last
-    /// write: every record push, target publication and owner commit is before it, so render's
-    /// `Acquire` load of the revision word sees them all, and the watermark never reports the
-    /// revision before its records can apply.
+    /// Publish the revision just committed by a live or model-only commit on the gate of the
+    /// plan that carries its content: the newest provider epoch's, which is the last pending
+    /// provider, else the current one (#1502 D6). That is the routing `commit_live` chose the
+    /// producers by, so the cells a commit writes and the gate that reveals them are one plan's.
+    /// It is the commit's last write: every record push, target publication and owner commit is
+    /// before it, so render's `Acquire` snapshot of the gate sees them all, and the watermark
+    /// never reports the revision before its records can apply.
     ///
-    /// The control plane never holds a candidate outside the mailbox across commands, so the
-    /// publisher's routing is the whole rule. A candidate published into the mailbox is always
-    /// recorded as a pending provider until `synchronize_plan_epochs` learns of its adoption, so a
-    /// `Pending` write with no pending provider is a broken invariant. (The converse is not one:
-    /// render may adopt the candidate after this command synchronized, and then the `Active` cell
-    /// is the candidate's.)
+    /// A candidate published into the mailbox is always recorded as a pending provider until
+    /// `synchronize_plan_epochs` learns of its adoption. Render may adopt it after this command
+    /// synchronized; the gate is the candidate's either way, so the revision lands on the plan
+    /// that holds its content.
     fn publish_committed_revision(&mut self) {
         let revision = self.controller.session().revision().0;
-        let target = self.publisher.set_revision(revision);
-        debug_assert!(
-            target == RevisionTarget::Active || !self.pending_providers.is_empty(),
-            "a revision went to a published candidate the control plane does not record"
-        );
+        self.newest_providers_mut().revision_gate.publish(revision);
     }
 
     /// The live admission's inputs, read from the report table and the epochs (#1053 D8).
