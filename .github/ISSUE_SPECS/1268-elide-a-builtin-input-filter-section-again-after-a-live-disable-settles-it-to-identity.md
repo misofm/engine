@@ -13,11 +13,15 @@ already disables filters live.
 After a live edit disables an input filter section, the section stops costing work once its
 coefficient ramp settles: the block that completes the ramp leaves the lane's integrators exactly
 `+0.0`, and the plan elides the section again. The strip's output is bit-identical to a strip whose
-filter was never enabled, and that holds with or without the clear: a stale integrator cannot
-change an output bit, the sign of an exact zero included (the stage that follows ends in
-`v + 0.0`; see Context, "What the older tests check, and what they do not"), so the clear's only
-observable effect is the state words and the plan, that is, cost. The first deliverable measures
-whether `main` already does this; what follows depends only on that measurement.
+filter was never enabled. For the HPF section, which the LPF stage follows, that holds with or
+without the clear: a stale HPF integrator cannot change an output bit, the sign of an exact zero
+included, because the LPF stage that follows, elided or running over `+0.0` integrators, ends in
+`v + 0.0` (see Context, "What the older tests check, and what they do not"), so for the HPF the
+clear's only observable effect is the state words and the plan, that is, cost. For the LPF
+section nothing follows it, so a stale LPF integrator can change the sign of an exact zero at the
+output, and the clear is also what keeps the LPF's output bit-identical (D4). The first
+deliverable measures whether `main` already does this; what follows depends only on that
+measurement.
 
 ## Context
 
@@ -25,10 +29,13 @@ whether `main` already does this; what follows depends only on that measurement.
   **and** both integrators are exactly `+0.0`, in every bank lane (`section_is_identity`,
   `crates/lane/src/kernels/builtins.rs:1590-1599`). The state words are compared bitwise, so a
   section whose integrators hold any other bits, `-0.0` included, is never elided. (Corrected
-  2026-10-11, root direction, after attempt 1: the filed reason, that identity coefficients over a
-  `-0.0` integrator would emit `-0.0` where the elided form gives `+0.0`, does not hold at the
-  output. The next stage ends in `v + 0.0`, which sends `-0.0` to `+0.0`, so a stale integrator
-  never changes an output bit and only costs work; see "What no test checks".)
+  2026-10-11, root direction, after attempt 1; scoped again the same day after the spec check: the
+  filed reason, that identity coefficients over a `-0.0` integrator would emit `-0.0` where the
+  elided form gives `+0.0`, does not hold for the HPF section at the output. The LPF stage that
+  follows it ends in `v + 0.0`, which sends `-0.0` to `+0.0`, so a stale HPF integrator never
+  changes an output bit and only costs work. The LPF section has no stage after it, so for the LPF
+  a stale integrator can still change the sign of an exact zero; see "What the older tests check,
+  and what they do not".)
 - **The original premise.** The filed body (on `54b0a1bf8`) said that after a live disable the
   integrators keep their last values, because `svf_step` does not drive them to zero with identity
   coefficients (`crates/lane/src/kernels.rs:1076-1077`, with the step's body in `svf_step_when` at `:1093`), so the section is never elided again.
@@ -53,11 +60,21 @@ whether `main` already does this; what follows depends only on that measurement.
   (dual body only), and `filter_prefix_ends_at_countdown_for_dual_and_mono_paths`
   (`crates/builtins/src/tests.rs`) reads the plan of a one-lane stage on both bodies. No older
   test reads a bank lane's integrators and the plan next to the lane-isolation output of its
-  neighbours on the one-plane body. No output leg can prove the clear: with identity coefficients
-  and a stale integrator pair, the settled section's output is `fma(0, ic2, fma(0, ic1, 1 * x))`
-  and the next stage, elided or running over `+0.0` integrators, ends in `v + 0.0`, so a stale
-  state never changes an output bit and only costs work, because the section is never elided
-  again. The state and plan legs prove the clear; the output legs guard lane isolation.
+  neighbours on the one-plane body. For the HPF section no output leg can prove the clear: with
+  identity coefficients and a stale pair `(ic1, ic2)` of finite integrators, the settled section's
+  output is `fma(0, v2, fma(0, v1, 1 * v0))`, where `v0` is the section's input and `v1 = ic1 + d1`,
+  `v2 = ic2 + d2` are the step's outputs with `d1`, `d2` signed zeros (`svf_step_when`,
+  `crates/lane/src/kernels.rs:1093`). `v1` and `v2` equal `ic1` and `ic2` bit for bit except where
+  an integrator is itself a zero, and the result is `v0` unchanged whenever `v0` is not a zero. The
+  LPF stage that follows, elided or running over `+0.0` integrators, ends in `v + 0.0`, so a stale
+  HPF state never changes an output bit and only costs work, because the section is never elided
+  again. The state and plan legs prove the clear; the output legs guard lane isolation. This holds
+  for the HPF only. The LPF section is last in the chain and nothing adds `+0.0` after it: a stale
+  identity LPF over negative integrators fed an exact `-0.0` (a rested real HPF passes `-0.0`
+  through) can emit `-0.0`, where the never-enabled twin, whose LPF is elided, emits `+0.0`. The
+  spec check measured it on the real kernel (`input_chain_block_elided`, f32 lane, 120 Hz HPF at
+  48 kHz, LPF integrators `(-0.1, -0.05)`, input `-0.0`): bank output `0x80000000`, twin `0x0`;
+  for a stale HPF the same probe gives `0x0` and `0x0`.
 - **Readback.** `builtins::test_support::bank_lane_state_words` and `bank_elision_plan`
   (`crates/builtins/src/lib.rs:5822-5830`, feature `test-support`). The bank renders through
   `BuiltinInputBank::process` (`:3909`, dual body) and `process_mono` (`:3925`, mono body).
@@ -73,12 +90,20 @@ whether `main` already does this; what follows depends only on that measurement.
   coefficients, set that lane's two integrators of that section to `+0.0` (per lane, under the
   ramp's own `done` mask; banking must not couple lanes' bits), and leave `refresh_filter_plan` to
   elide it. Then gate 1 must be green and gate 2's mutation must turn it red.
-- **D4. Class.** Under D3, zeroing the state of an identity section changes no output bit, the
-  sign of an exact zero included. With identity coefficients and a stale pair `(ic1, ic2)` the
-  settled section's output is `fma(0, ic2, fma(0, ic1, 1 * x))`, and the stage that follows ends in
-  `v + 0.0`, which sends `-0.0` to `+0.0`; so a stale integrator never changes an output sample and
-  only costs work, because the section is never elided again. The clear moves the state words and
-  the plan to the never-enabled plan's and moves no output bit. The PR says so.
+- **D4. Class.** Under D3, zeroing the state of an identity section moves its state words and the
+  plan to the never-enabled plan's, and the effect on the output depends on the section.
+  - **HPF (section 0).** The clear changes no output bit, the sign of an exact zero included. With
+    identity coefficients and a stale pair `(ic1, ic2)` of finite integrators the settled section's
+    output is `fma(0, v2, fma(0, v1, 1 * v0))` (`v1 = ic1 + d1`, `v2 = ic2 + d2`, `d1` and `d2`
+    signed zeros: equal to `ic1` and `ic2` bit for bit except where an integrator is itself a
+    zero), and the LPF stage that follows, elided or running over `+0.0` integrators, ends in
+    `v + 0.0`, which sends `-0.0` to `+0.0`; so a stale HPF integrator never changes an output
+    sample and only costs work, because the section is never elided again.
+  - **LPF (section 1).** The clear changes no output sample except the sign of an exact zero, and
+    moves that bit to the never-enabled plan's: nothing follows the LPF to add `+0.0`, so a stale
+    LPF over negative integrators and an exact `-0.0` at its input can emit `-0.0` where the
+    never-enabled twin emits `+0.0` (Context, "What the older tests check, and what they do not").
+  The PR says so.
 - No change to the filter design, the 64-update ramp, the elision rule, or `svf_step` (the joint
   flush is *Flush the SVF jointly so builtin and EQ filters reach exact rest*, #1328).
 
@@ -115,8 +140,8 @@ Run every command from the repository root.
    - History: apply a prepared HPF target (120 Hz, from `prepare_input_filter_pair`) to lane 1, then
      render the history blocks of a signed per-lane sawtooth (about [-0.4, 0.4), a different period
      per lane, so negative samples are included). During the history lanes 0, 2 and 3 are
-     bit-identical to the twin's; lane 1's first two state words are not zero and its HPF section is
-     not elided; in the `neighbour` scenario the twin's lane 3 holds a live state.
+     bit-identical to the twin's; lane 1's first two state words are not both zero and its HPF section
+     is not elided; in the `neighbour` scenario the twin's lane 3 holds a live state.
    - Disable: apply the disabled pair's targets to lane 1 and render six blocks (the 64-update ramp
      completes mid-block 2), every sample an exact `-0.0`, the twin's own input.
    - After the ramp-completing block (blocks 2 to 5):
@@ -129,9 +154,11 @@ Run every command from the repository root.
    - Lanes 0, 2 and 3 are bit-identical to the twin's in output, and equal in state words, in every
      block after the disable.
 
-   The state and plan legs prove the clear. The output legs do not: no output bit depends on a stale
-   integrator (D4), so they guard lane isolation, and the bit-identity of lane 1 holds with or
-   without the clear.
+   The state and plan legs prove the clear. In this scenario (a disabled HPF, followed by the
+   never-enabled LPF) no output bit depends on a stale HPF integrator (D4), so the output legs
+   guard lane isolation, and the bit-identity of lane 1 holds with or without the clear. The test
+   disables the HPF only; for a disabled LPF the output can depend on the clear (D4), which this
+   gate does not exercise (see Root Amendment 1, open item).
 
    `cargo test --locked --all-targets -p builtins --features builtins/test-support --test filter_liveness`
 2. **The mutation.** With the integrator clear removed locally from the dual body (and, separately,
@@ -156,8 +183,10 @@ Run every command from the repository root.
   defects are also read by older tests (see Context), so they are not unique catches. The unique
   catch is the third: a one-plane (`process_mono`) ramp completion that clears the integrators of
   every lane when any lane settles wipes a neighbouring lane's live HPF state, and only this
-  test's neighbour-lane output leg turns red on it. The test claims no output difference from a stale
-  integrator: none exists (D4), so its output legs compare bits only as a lane-isolation guard. Gate 2 is the evidence that the state legs turn red when a
+  test's neighbour-lane output leg turns red on it. The test disables the HPF only and claims no
+  output difference from a stale HPF integrator: none exists (D4), so its output legs compare bits
+  only as a lane-isolation guard. It does not exercise a disabled LPF, where a stale integrator can
+  change the sign of an exact zero (D4). Gate 2 is the evidence that the state legs turn red when a
   clear is removed.
 
 ## Dependencies
@@ -285,14 +314,28 @@ issue closes under D2 once verified.
 
 ## Root Amendment 1 (2026-10-11): text aligned with the attempt-1 evidence; no gate weakened
 
+(corrected 2026-10-11 after the spec check: the no-output-bit claim is scoped to the HPF section)
+
 Root direction, after the attempt-1 verdict (`docs/handoffs/decision-15-2026-10-05/verdicts/stream-dfg/1268-attempt1.md`,
-PASS). The body made two claims the evidence refutes: that a stale integrator can change the sign of
-an exact zero at the output, and the output leg as proof of the clear. One statement now stands in
-the Product outcome, D4, gate 1 and Test value: with identity coefficients the settled section's
-output is `fma(0, ic2, fma(0, ic1, 1 * x))` and the next stage ends in `v + 0.0`, so a stale
-integrator never changes an output bit and only costs work (the section is never elided again);
-the state and plan legs prove the clear, and the output legs guard lane isolation. The verifier's
+PASS). The body made two claims the evidence refutes for the HPF section: that a stale integrator can
+change the sign of an exact zero at the output, and the output leg as proof of the clear. One
+statement now stands in the Product outcome, D4, gate 1 and Test value, scoped to the HPF section:
+with identity coefficients the settled HPF's output is `fma(0, v2, fma(0, v1, 1 * v0))`, where `v1`
+and `v2` are the step's outputs (equal to the stale `ic1` and `ic2` bit for bit except where an
+integrator is itself a zero), and the LPF stage that follows ends in `v + 0.0`, so a stale HPF
+integrator never changes an output bit and only costs work (the section is never elided again); the
+state and plan legs prove the clear, and the output legs guard lane isolation. The verifier's
 output-only runs (state and plan assertions removed) stay green under both clear mutations, M1 and M2.
+
+The spec check (2026-10-11, verdict `stream-dfg-spec-check`) found that this amendment first stated
+the claim for every section. It does not hold for the LPF section: nothing follows it, so a stale
+identity LPF over negative integrators and an exact `-0.0` input can emit `-0.0` where the
+never-enabled twin emits `+0.0` (measured: bank `0x80000000`, twin `0x0`; the same probe on a stale
+HPF gives `0x0` and `0x0`). The original D4's caveat ("no output sample except the sign of an exact
+zero") is therefore restored in true form for the LPF in D4, and the Product outcome, Context, D4,
+gate 1's closing note and Test value are scoped to the HPF section, with the LPF stated separately.
+The Decision record and the Attempt record state the output claim without that scope; read them with
+it.
 
 Changed passages:
 
@@ -317,7 +360,16 @@ Changed passages:
   lane 1 bit-identical to the twin from the next block, other lanes identical in output and state
   every block. The command is unchanged.
 - **Test value:** "The test makes no signed-zero claim" now reads that the test claims no output
-  difference from a stale integrator, because none exists.
+  difference from a stale HPF integrator, because none exists, and that it does not exercise a
+  disabled LPF.
+- **Gate 1, state words (spec-check correction):** "lane 1's first two state words are not zero"
+  now reads "not both zero", which is what the test asserts (`assert_ne!(&live[..2], &[0, 0])`,
+  `filter_liveness.rs`), and the neighbour's live-state check uses the same assertion.
+
+**Open item for root.** Gate 1 disables the HPF only, so none of its output legs can see the clear for
+the LPF section, where a stale integrator can change the sign of an exact zero at the output (D4).
+Whether gate 1, or a sibling test, should also disable the LPF (a rested real HPF, an exact `-0.0`
+input, negative stale LPF integrators) is for root to decide. This amendment adds no such gate.
 
 Not weakened: gate 1 asserts everything the test asserts (the earlier text asked for less: no
 `neighbour` scenario, no history lengths, no other-lane state words); gate 2 (the mutations) and the
