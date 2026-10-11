@@ -42,7 +42,7 @@ architectural decision that changes the order of half the work.
   is still useful as the browser's rebuild primitive, but B3 and B3b (three-way merge of document
   and live overlays, `2a589d360:.github/ISSUE_SPECS/1291-keep-browser-live-strip-state-across-a-session-replacement.md`) exist only because the browser has no
   committed model. Under one control plane the committed model *is* the merge result, exactly as
-  P1 already argues for the C ABI (`1269-…md` P1, "Why the committed model"). Doing B3/B3b now and
+  P1 already argues for the C ABI (`2a589d360:.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md` P1, "Why the committed model"). Doing B3/B3b now and
   #1057 later is the "fix it later" pattern the owner ruled out.
 - **P10 "meters restart at the swap" on the browser is a shortcut too.** Meter, observation and
   spectrum windows of unchanged strips are state owners like any other; a producer watching a
