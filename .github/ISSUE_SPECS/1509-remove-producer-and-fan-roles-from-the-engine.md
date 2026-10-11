@@ -18,7 +18,7 @@ cross-target bit identity, the core-owned committed session with canonical JSON 
 
 **Decisions frozen.**
 - D1. Handoffs under `docs/handoffs/`, dated audits under `docs/audits/` and closed verdicts are records and are not edited.
-- D2. Rulings are not rewritten. Each of the three rulings gets one dated note (text below); owner quotes stay verbatim.
+- D2. Rulings are not rewritten. Each of the three rulings gets a dated note (the engine-footprint ruling two) (text below); owner quotes stay verbatim.
 - D3. Open specs and current docs are reworded in place with the exact replacements in the table below. Each
   edited open spec's GitHub body is synced in the same batch.
 - D4. The personal-mix question is closed as "not an engine question". The generic
@@ -92,5 +92,5 @@ Append this note (adapted per file) to each ruling; do not edit the existing tex
 > host or app: "a plan booted without live controls" for fan playback, "a session's stored automation"
 > for a producer's automation, and "an iOS or Android app" for a fan's phone. The personal-mix question
 > (#1057, section 7) is not an engine question and is closed: an app keeps its users' edits itself, with
-> canonical JSON snapshots and transactions. Decision 16 (fan level offsets, personal mixes) was not
-> adopted.
+> canonical JSON snapshots and transactions. Decision 16 (fan level offsets, send automation and personal
+> mixes) was not adopted; this note decides none of its role-free parts.
