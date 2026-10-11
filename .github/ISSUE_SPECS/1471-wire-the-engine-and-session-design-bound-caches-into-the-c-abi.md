@@ -137,3 +137,114 @@ session's first rebuild computes them again. Root chose option (1), the journal:
   memory is measured and recorded beside gate 4.
 
 ## Attempt record
+
+### Attempt 1 (implementer, 2026-10-11) -- BLOCKED on one accounting question for root
+
+**What landed** (`28de9b791` builtins journal; the wiring commit after it).
+- `builtins` (`tail.rs`, named exception): `InputBoundCache::begin_journal` / `take_journal`. The open
+  journal is a record with no entry cap of its own; `lookup` (the former `get`, now `&mut self`)
+  records a hit, `insert` records a computed value, so a `ChargeAbove` is recorded as a `Bound` is.
+  `take_journal` closes it and returns the record as a cache with the cache's cap (an empty cache
+  when none is open). `input_section_bounds_within` reads through `lookup`.
+- `host-core`: `prepare_host_runtime_with_live_lanes` and `..._successor` gain
+  `bound_cache: Option<&mut InputBoundCache>` (D2), passed to the policy function; `InputBoundCache`
+  is re-exported from `host-core/src/lib.rs` (capi and control-plane do not depend on `builtins`).
+  Callers updated by adding `None`: `host-core/tests/live_lanes.rs`, capi `runtime/tests.rs`,
+  `runtime/live_tests.rs`, `tests/resource_lifecycle.rs`.
+- `control-plane`: `compile_children(document, limits, engine_cache: Option<&mut InputBoundCache>)`
+  opens the journal on the cache (a local cache when `None`), prepares, closes the journal on every
+  path, and seeds `SessionState::bound_cache` from `take_journal`. `prepare_runtime` takes the
+  cache; the structural rebuild moves the session's cache out with `mem::take`, prepares with it and
+  puts it back before the result is looked at. `InputBoundCache` is re-exported.
+- `capi`: `Engine::bound_cache: RefCell<InputBoundCache>`; `miso_engine_v1_compile_session` passes
+  it; the capi `compile_children` wrapper takes the same `Option` (test callers pass `None`).
+- Policy: `scripts/check-realtime-policy.sh` lists the new test file in its `unsafe` allow-list
+  (the file calls the exported C functions).
+
+**Gate 1 and Amendment 1.** `capi/tests/design_bound_cache.rs`: (1) 64-track fixture, cold compile
+computes 64 designs; two rebuilds in a row and a second compile compute 0 designs and walk 0 frames.
+(2) The engine's cache is filled to 8,160 designs (11 compiles of at most 800 cheap distinct
+designs, each asserted computed whole), then the 64-track document is compiled: its 33rd insertion
+clears the cache (a second compile of it recomputes exactly 32, asserted), and the session's first
+rebuild computes 0 designs and walks 0 frames. (3) 1,200 slow designs pass the budget (cold compile
+computes 752): the warm compile and the rebuild compute 0 and walk 0 (the stopped design is cached
+and journaled as a horizon).
+
+**Mutation runs** (each red, then reverted green):
+- Seed the session from the post-compile copy of the engine's cache: test 2 red (rebuild computes 32
+  designs, 333,120 frames); test 1 stays green. No existing test reads the counters through capi or
+  control-plane, so none catches it (`grep` of `fixed_input_*` users: builtins, builtins-compiler,
+  this file).
+- Seed the session empty: tests 1 and 2 red (64 designs). Pass `None` for the engine cache in
+  `compile_session`: tests 1 and 2 red. Pass `None` for the session cache in the rebuild: tests 1
+  and 2 red. None of these has another catcher.
+- Journal: `lookup` does not record: `a_journal_holds_the_hits_...` red. `insert` does not record:
+  `a_journal_holds_every_design_...` red. Only `Bound` entries journaled: the hits-and-stopped-walks
+  test red and the past-budget capi test red (194 frames walked). Journal capped at the cache's cap:
+  the through-a-clear test red.
+- A cache hit that charges 0: the capi past-budget test red (570 designs computed on the warm
+  compile), but `tail_contract::the_live_bound_is_taken_exactly_when_the_budget_is_exhausted` already
+  catches it; the past-budget capi test's own catch is the horizon in the seed.
+- Test-value sentences. `a_journal_holds_every_design_a_preparation_used_through_a_clear`: a journal
+  that drops a design when the cache clears mid-preparation. `a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used`:
+  a journal that records only computed values, or only bounds. `a_compile_that_clears_the_engine_cache_still_seeds_its_session`:
+  seeding the session from the engine's cache after the compile (Amendment 1). `a_rebuild_and_a_recompile_compute_no_design_bound`:
+  a session or engine cache that is not wired into the rebuild or the compile.
+  `a_session_past_the_budget_rebuilds_without_walking`: a seed or hit that loses a stopped design's horizon.
+
+**Gates.** `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D warnings`,
+`check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-capi-abi.sh` (no header change),
+`check-cross-targets.sh` PASS. `target/release/audit capi`: 0 allocations, 0 syscalls, `pcm_digest`
+`cb10fbface44a3a4` (unchanged). Worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts`, `check-scalar-oracle-absent.py`, `check-web-audioworklet-v8-spill.py`,
+`test-web-audioworklet.sh`) all pass; the shipped module's sha256 is
+`02a77253fb99ac1280d1917bc077fd7891248d792571a690a8fec8cc78f9d71c` (the browser passes `None`; the
+bytes still move because `InputBoundCache` gained a field and `lookup`).
+Tests: builtins `tail_contract`, control-plane, host-core, builtins-compiler, capi lib and
+`design_bound_cache` and `plan_swap_race` pass.
+
+**Open: two tests red, awaiting a root ruling.** `resource_lifecycle`'s
+`capi_retained_bytes_charge_every_byte_the_compile_retains` and
+`tiny_control_frame_still_accounts_three_provider_counters_exactly` observe the bytes a C ABI compile
+leaves live and require `capi_retained_bytes` to charge them exactly. The session's cache is such
+memory (2,608 bytes on the nine-track fixture; with the seed mutated to empty both pass), and the
+spec does not say how it is accounted. It also grows past its seed on every rebuild, up to
+`INPUT_BOUND_CACHE_ENTRIES` entries (about 2.4 MiB), so a charge of the seed alone would let the
+retained limit be passed silently. Options for root: (1) charge the cache's ceiling in
+`control_retained_bytes` for every session (about +2.4 MiB a session in every report) and let the
+exactness tests treat the cache as an owner charged at its ceiling; (2) give the session a lower
+entry cap and charge that; (3) leave it out of `capi_retained_bytes` as the engine's cache is, state
+it as a control-thread cache outside the limits, and have the tests subtract it.
+
+**Gate 4 (descriptive; release, `taskset -c 7`, one invocation per document and trim setting, each
+with the process's first compile, one warmup round and two measured rounds; a round is a cold
+compile on a fresh engine, a rebuild of the unchanged session, a warm second compile).** The
+workload is the nine-track fixture, `console-sixty-four-track.json`, and a generated 65,537-strip
+document (the nine-track strip cloned with cutoffs `i mod 8000`); whole `miso_engine_v1_compile_session`
+and `miso_engine_v1_submit_command` times, design-bound counters beside. The scratch driver is not
+committed.
+
+| document | cold compile (ms, M1/M2) | rebuild (ms) | warm compile (ms) | designs / frames / charged, cold | rebuild, warm |
+|---|---|---|---|---|---|
+| 9 strips | 1.63 / 1.65 | 1.29 / 1.28 | 1.44 / 1.43 | 1 / 12,033 / 13,193 | 0 / 0 / 0 |
+| 64 strips | 26.90 / 26.84 | 12.33 / 12.31 | 14.21 / 14.01 | 64 / 658,816 / 807,296 | 0 / 0 / 0 |
+| 65,537 strips | 26,348 / 26,119 | 27,216 / 27,817 | 28,075 / 29,568 | 752 / 637,168 / 1,509,488 | 0 / 0 / 0 |
+
+The first compile's design-bound work is within #1457's budget (charged 13,193; 807,296; and
+1,509,488 of 1,510,000 at 65,537 strips, where the budget stops the 753rd design). The 64-track
+rebuild is 13.5 ms faster than its cold compile, 14.2 ms of design work removed at 18 ns a charged
+frame-equivalent (807,296 x 18 ns). First-touch, first compile in a fresh process against the
+measured cold compile: trimming on, 9 strips 2.41 vs 1.65 ms (0.76 ms, 31 % of the first compile),
+64 strips 29.18 vs 26.87 ms (2.3 ms, 8 %); trimming off (`MALLOC_TRIM_THRESHOLD_=4294967295`), 9
+strips 2.46 vs 1.66 ms, 64 strips 30.28 vs 27.20 ms (3.1 ms). So at these sizes first-touch is
+about 1-3 ms and is not changed by trimming. At 65,537 strips the compile is 26-30 s whole (the
+document's protocol store, graph and plan, not the design bounds), the run-to-run spread is a few
+seconds, and the 54 ms first-touch of #1457's attempt 2 is under 0.2 % of it and cannot be
+resolved: first 27,975 ms trimming on and 29,749 ms off against measured colds of 26,119-26,348 and
+25,928-26,566 ms. The warm compile is not faster than the cold one at 65,537 strips for the same
+reason (design bounds are 27 ms of 27 s).
+**Per-session seed memory** (the engine cache after one cold compile holds the same designs in the
+same insertion order as the journal; bytes freed by `engine_destroy` less the empty engine's 336):
+9 strips (1 design) 2,608 B; 64 strips (64 designs) 18,352 B; 65,537 strips (752 designs)
+327,728 B. A preparation can seed at most 1,805 designs, about 0.5 MiB.
