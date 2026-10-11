@@ -348,3 +348,23 @@ code changed, n3), `check-web-audioworklet.sh --without-metadata-regeneration`,
 `test-web-audioworklet.sh` (private TMPDIR left empty): pass. Not run: the Playwright `browser` legs
 (no browsers on this box). Open: #1345 re-sizes the four observation fills (m1); STREAMS hot-file rows
 (m5) are root's.
+
+### Follow-up after attempt 1: the SDK eval of the removed input queue
+
+**`sdk/test/writer-evals.mjs`: "a paired builtin filter edit stays whole when only one queue slot
+remains" is deleted.** `scripts/check-sdk-headless.sh` has failed on it since #1346: it booted with
+`commandQueueRecords: 2`, seeded one `hpfHz` edit "into one of two queue slots", and expected the
+next `inputFilters` pair (a `both`-channel record) to be refused `backpressure` with
+`admitted == 0` and `pending == 1`, then admitted after one render. The input filter band is cells
+and no queue, so the second submit is admitted at once, which is the cell contract; the eval's
+refusal and its "queue drain" no longer exist. The defect it defended, a pair acknowledged as one
+half, cannot happen in a cell: both channel cells are written under the batch's one stamp after
+every check, and a render applies the pair whole or not at all. That is held by host-web
+`prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches` (a refused batch writes
+neither cell) and by builtins-compiler `the_input_witness_folds_from_the_final_cell_contents`
+(`paired_channels` collapses equal words into one `Both` record). I looked for a defect only an
+SDK-level rewrite would catch (the SDK lowering a `both` filter record to one channel's cell) and
+found none: the eval observed acknowledgements, not cells, and a rewrite on the cell path would
+need a render and a bit comparison, which the host-web twin tests already make. The other SDK
+evals that set `commandQueueRecords` (the bounded-queue writer evals run on EQ parameter records,
+an effect lane) are unaffected. `compressorDocument` stays: the raw queue-cost probe still uses it.

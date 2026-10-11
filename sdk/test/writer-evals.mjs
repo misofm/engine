@@ -370,45 +370,6 @@ describe("the writer contract -- paused", () => {
       engine.dispose();
     }
   });
-
-  test("a paired builtin filter edit stays whole when only one queue slot remains", async () => {
-    const engine = await createOfflineEngine(compressorDocument(), {
-      asset,
-      liveControls: { commandQueueRecords: 2 },
-    });
-    try {
-      const liveControls = engine.liveControls();
-      const seed = await liveControls.submit(liveControls.edit.track("t").hpfHz(80, { channel: "both" }));
-      assert.equal(seed.ok, true, "one prepared section target occupies one of two queue slots");
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-        maximumBatch: 1,
-      });
-      writer.stage({
-        kind: "inputFilters",
-        trackIndex: 0,
-        rack: 255,
-        channel: 2,
-        effectIndex: 0,
-        parameterId: 0,
-        smoothingSamples: 0,
-        values: [80, 12_000, 0, 0],
-      });
-      const refused = await writer.flush();
-      assert.equal(refused.refused, true);
-      assert.equal(refused.admitted, 0, "the pair cannot acknowledge a first half");
-      assert.equal(writer.pending, 1, "the one original pair record remains pending");
-      assert.equal(writer.stats.escalations, 0);
-
-      feedAndRender(engine);
-      const admitted = await writer.drain();
-      assert.equal(admitted.refused, false);
-      assert.equal(admitted.admitted, 1, "the complete pair lands after one queue drain");
-      assert.equal(writer.pending, 0);
-    } finally {
-      engine.dispose();
-    }
-  });
 });
 
 describe("the writer contract -- playing", () => {
