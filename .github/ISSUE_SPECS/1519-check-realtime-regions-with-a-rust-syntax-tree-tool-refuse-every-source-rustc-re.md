@@ -85,7 +85,7 @@ Root's text, verbatim (it closes the three open items that attempt 1 reproduced;
 - `use std::include as inc;` with `inc!("z.txt")`: red if (c) is dropped.
 - Placement (Root Amendment 1; the case list follows the amendment's rules, not rule text of this spec). Each is
   refused, each has a one-sentence test value and a mutation in the Attempt record:
-  - Rule 1: `macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path = "y.rs");` and a `path` (also `r#path`)
+  - Rule 1 (NOT implemented in attempt 2: it refuses the real tree, see the Attempt 2 section): `macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path = "y.rs");` and a `path` (also `r#path`)
     followed by anything in a macro token tree; `#[$m]` and `#![$m]` in a macro token tree.
   - Rule 2: `macro_rules! inc { ($i:ident) => { $i!("z.txt") } } inc!(include);` and `r#include` not followed by
     `!` outside a `use` item.
@@ -195,3 +195,74 @@ swallows the next item).
 3. An `include!` inside a `macro_rules!` body reads its file relative to the file that expands the macro, not the
    file that holds the body (`sub/def.rs` defines it, `./w.in` was read, not `sub/w.in`). The tool judges the
    file beside the body. The real tree has no `include!` in a macro.
+
+## Attempt 2 (J batch branch `codex/d15-stream-j3`, head `d6b1d1e35`, then the Root Amendment 1 commit `d681c036a`)
+
+Attempt 1 got no separate verdict: root ordered Root Amendment 1 carried in attempt 2 without waiting.
+
+**Measured first (root's rule 4 condition).** `include_str!`/`include_bytes!` (or their identifiers) inside a macro
+token tree: none on the real tree. The measurement ran the new walk with those identifiers refused in macro trees
+over `crates hosts tools`; the only two findings were the tool's own method named `include` (rule 2, renamed
+`judge_include`). So rule 4 is implemented. The 223 `include_str`/`include_bytes` lines of the tree all stand
+outside macro token trees (argument of a call, a `const` initialiser).
+
+**Rules 2, 3 and 4 are built** in `tools/realtime-policy/src/source_reads.rs` (and one new class,
+`RefusedIncludeLiteralInMacro`, plus a wider `RefusedInclude` message, in `report.rs`):
+- Rule 2: an identifier `include` (r# read as `include`) that is not directly followed by `!` is refused anywhere
+  outside a `use` item (inside one, (c) refuses it as `RefusedIncludeImport`, only).
+- Rule 3: inside a macro token tree an identifier `include` in any form is refused (`include!` with any path
+  prefix, `include != x`, `include ! x`). The (b) content judgement now runs outside macro trees only.
+- Rule 4: inside a macro token tree `include_str` and `include_bytes` (r# included) are refused in any form, class
+  `RefusedIncludeLiteralInMacro`; outside a macro tree they stay allowed.
+- The `use` scan now marks the item's tokens (up to its `;`, carried into groups) instead of a second walk.
+- `if !(..)` matches the macro shape `name ! group`. This is harmless over-refusal: it can only refuse a condition
+  that names `include`, `include_str` or `include_bytes` inside the parentheses, and none exists on the tree.
+  Recorded here and in the module comment; not pinned by a test.
+
+**Rule 1 is NOT built: it fails its own gate on the real tree.** Root Amendment 1 rule 1 refuses any identifier `path`
+in any macro token tree, "whatever follows it", and any `#[$m]`/`#![$m]` there. Measured over the J3 branch tree
+(`crates hosts tools`): 132 refused lines in 54 files (103 outside `tools/realtime-policy`, 29 inside). 124 are an
+ordinary identifier `path` in a macro invocation or definition (`assert_eq!(entry.path, ..)`, `write!`,
+`vec![..]`, `json!({"path": path})`, a `path: ..` field in `vec![Diagnostic { .. }]`, a `$path:expr` or
+`$path:literal` metavariable in `crates/session/src/estimate.rs:130-137` and
+`crates/session/tests/diagnostic_parity.rs:81-85`), and 8 are the `$(#[$enum_meta])*` / `#[$variant_meta:meta]`
+shape of the enum-forwarding macros at `crates/session/src/model.rs:11,12,14,16,50,51,53,55`. The tree cannot be
+edited here (the authorised paths are the tool and this spec), the amendment names no exception, and any narrowing
+(a `path` after `.` or `$`, before `:`) is rule text that is root's. The `m!(path = "y.rs")` bypass (open item 1)
+therefore stays open. Rule 1 needs a root ruling before it can land. The 132 lines reproduce by refusing a `path` identifier in
+macro token trees in `source_reads.rs` and running the tool on the tree.
+
+**Tests** (`tests/policy/source_reads.rs`, 180 in the crate, 163 before attempt 1, +14, +3 here; one row deleted):
+- `an_include_word_without_a_bang_is_a_finding` (rule 2): the `inc!(include)` splice, a function, call, binding,
+  method and raw identifier named `include`. Test value: a macro-spliced `include!("z.txt")`, which reads a
+  file no rule judges, passes a check that only looks at `include!`.
+- `an_include_in_a_macro_token_tree_is_a_finding_even_for_a_file_of_literals` (rule 3): `digests.in` is a file of
+  literals that the same `include!` outside a macro passes, so only the macro tree makes the row red. Test value:
+  an `include!` in a macro body, read relative to the expanding file, judged against the file beside the body.
+  Rows `include != 1` and `include ! x` defend the word in any form.
+- `include_str_and_include_bytes_in_a_macro_token_tree_are_findings` (rule 4). Test value: the same
+  relative-to-expander read for a literal macro; the accepted-forms test (`include_str!`/`include_bytes!` as a
+  constant and as a call argument) defends that they stay allowed outside.
+- Deleted row: `m!(include!("looping.in"))` of the cannot-judge test, superseded by the rule 3 test (it is refused
+  by rule 3 whatever the file holds). Accepted-forms test: the `fn include()` lines are gone (rule 2 refuses
+  them); `include_nothing` and `include_more` stay, to defend the word boundary.
+
+**Mutations** (each alone on `source_reads.rs`, then reverted; red = the tests that fail):
+| Mutation | Red | Real tree |
+|---|---|---|
+| R2 bare `include` allowed | `an_include_word_without_a_bang_is_a_finding` only | ok |
+| R3 `include` in a macro tree judged like outside (word and `include!`) | the rule 3 test only | ok |
+| R3w only the word form (no group follows) dropped in macros | the rule 3 test only (rows `!=`, `! x`) | ok |
+| R4 `include_str`/`include_bytes` allowed in macros | the rule 4 test only | ok |
+| R4b `include_str`/`include_bytes` refused outside macros too | `the_accepted_forms_pass` only | fails on the tree |
+| V `use` item mask runs past `;` | `the_accepted_forms_pass` only | fails on the tree (4 digest `include!`) |
+| O `use` mask not carried into brace groups | `naming_include_in_a_use_item_is_a_finding` only | ok |
+
+**Gates.** Real tree: zero refusals; the release tool and `scripts/check-realtime-policy.sh` give `ok (94 marked
+regions in 26 files)`. `cargo test --locked -p realtime-policy` 180 passed. `cargo fmt --check`, `cargo clippy
+--locked -p realtime-policy --all-targets -- -D warnings`, `scripts/check-workspace-policy.sh` (`ok`) and
+`scripts/test-realtime-policy.sh` (`ok`) exit 0. Gate 4 (shipped artifacts): as attempt 1, `realtime-policy` has no
+dependent crate; no artifact built.
+
+**Open items.** Rule 1 (above): a root ruling is needed. Of attempt 1's open items, 2 (`inc!(include)`) and 3
+(`include!` in a macro body read relative to the expanding file) are closed by rules 2 and 3; 1 stays open.

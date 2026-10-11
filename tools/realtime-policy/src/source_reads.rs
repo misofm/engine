@@ -12,7 +12,24 @@
 //! - an `include!("file")` of a file that holds literals and punctuation only, such as a digest
 //!   array.
 //!
-//! `include_str!` and `include_bytes!` produce a literal and are not read.
+//! `include_str!` and `include_bytes!` produce a literal and are not read outside a macro token
+//! tree.
+//!
+//! Inside a macro token tree the scan refuses more (root Amendment 1 to #1519), because it cannot
+//! follow what rustc builds there:
+//!
+//! - an identifier `include` in any form: an `include!` there is read relative to the file that
+//!   expands the macro, which the scan cannot judge (rule 3);
+//! - `include_str!` and `include_bytes!`, in any form (rule 4, measured to have no real site);
+//!
+//! and everywhere outside a `use` item, an identifier `include` that is not directly followed by
+//! `!` is refused, because a macro can splice the `!` on (`inc!(include)`, rule 2).
+//!
+//! The matching of `name ! group` as a macro also matches `if !(..)`. That can only over-refuse
+//! a condition that names `include`, `include_str` or `include_bytes`, and none exists.
+//!
+//! Root Amendment 1 rule 1 (any `path` identifier in a macro token tree, and any `#[$m]`) is not
+//! here: it refuses 132 lines of the real tree (see the #1519 spec).
 
 use std::fs;
 use std::path::Path;
@@ -23,6 +40,13 @@ use proc_macro2::{Delimiter, Group, Ident, TokenStream, TokenTree};
 use crate::report::{Class, Finding};
 use crate::source::Source;
 
+/// Where a token stream stands.
+#[derive(Clone, Copy)]
+struct Context {
+    in_macro: bool,
+    in_use: bool,
+}
+
 /// Scan `source`; `absolute` is the file's path on disk, whose directory a relative `include!`
 /// argument is read from.
 pub(crate) fn scan(source: &Source, absolute: &Path, findings: &mut Vec<Finding>) {
@@ -30,7 +54,7 @@ pub(crate) fn scan(source: &Source, absolute: &Path, findings: &mut Vec<Finding>
         directory: absolute.parent(),
         found: Vec::new(),
     };
-    scan.stream(&source.tokens, false);
+    scan.stream(&source.tokens, false, false);
     scan.found.sort();
     scan.found.dedup();
     for (line, class) in scan.found {
@@ -52,11 +76,14 @@ struct Scan<'a> {
 
 impl Scan<'_> {
     /// Scan one token stream. `in_macro` is true inside a macro token tree: a `macro_rules!` or
-    /// `macro` definition, or a macro invocation's delimited tokens.
-    fn stream(&mut self, stream: &TokenStream, in_macro: bool) {
+    /// `macro` definition, or a macro invocation's delimited tokens. `in_use` is true inside a
+    /// `use` item.
+    fn stream(&mut self, stream: &TokenStream, in_macro: bool, in_use: bool) {
         let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
-        // The groups of this stream that are macro token trees, by index.
+        // The groups of this stream that are macro token trees, and the tokens of `use` items,
+        // by index.
         let mut macro_trees = vec![false; tokens.len()];
+        let mut use_items = vec![in_use; tokens.len()];
         for (index, token) in tokens.iter().enumerate() {
             match token {
                 TokenTree::Punct(punct) if punct.as_char() == '#' => {
@@ -72,37 +99,54 @@ impl Scan<'_> {
                     }
                 }
                 TokenTree::Ident(ident) => {
-                    self.ident(&tokens, index, ident, &mut macro_trees);
+                    self.ident(
+                        &tokens,
+                        index,
+                        ident,
+                        Context {
+                            in_macro,
+                            in_use: use_items[index],
+                        },
+                        (&mut macro_trees, &mut use_items),
+                    );
                 }
                 _ => {}
             }
         }
-        for (token, is_macro_tree) in tokens.iter().zip(macro_trees) {
+        for (index, token) in tokens.iter().enumerate() {
             if let TokenTree::Group(group) = token {
-                self.stream(&group.stream(), in_macro || is_macro_tree);
+                self.stream(
+                    &group.stream(),
+                    in_macro || macro_trees[index],
+                    use_items[index],
+                );
             }
         }
     }
 
     /// The forms that start at an identifier of `tokens`: a macro invocation or definition (whose
-    /// groups are marked), `include!` and a `use` item.
+    /// groups are marked), `include!`, a `use` item (whose tokens are marked), and the words that
+    /// are refused where they stand.
     fn ident(
         &mut self,
         tokens: &[TokenTree],
         index: usize,
         ident: &Ident,
-        macro_trees: &mut [bool],
+        context: Context,
+        (macro_trees, use_items): (&mut [bool], &mut [bool]),
     ) {
         let word = name(ident);
         let after = |offset: usize| tokens.get(index + offset);
+        let bang_follows =
+            matches!(after(1), Some(TokenTree::Punct(bang)) if bang.as_char() == '!');
         match (after(1), after(2)) {
             // `name!(..)`, `path::name!{..}`: the group is a macro invocation's token tree.
             (Some(TokenTree::Punct(bang)), Some(TokenTree::Group(group)))
                 if bang.as_char() == '!' =>
             {
                 macro_trees[index + 2] = true;
-                if word == "include" {
-                    self.include(group, ident);
+                if word == "include" && !context.in_macro && !context.in_use {
+                    self.judge_include(group, ident);
                 }
             }
             // `macro_rules! name { .. }`
@@ -127,7 +171,28 @@ impl Scan<'_> {
         if word == "use"
             && !matches!(after(1), Some(TokenTree::Punct(open)) if open.as_char() == '<')
         {
-            self.use_item(&tokens[index + 1..]);
+            // The item's tokens, up to its `;` (or the end of the stream).
+            let rest = &tokens[index + 1..];
+            let length = rest
+                .iter()
+                .position(|token| matches!(token, TokenTree::Punct(semi) if semi.as_char() == ';'))
+                .unwrap_or(rest.len());
+            use_items[index + 1..index + 1 + length].fill(true);
+        }
+        match word.as_str() {
+            // An `include` in a `use` item renames the macro past the `include!` rule.
+            "include" if context.in_use => self.refuse(ident, Class::RefusedIncludeImport),
+            // In a macro token tree an `include` in any form is refused (an `include!` there is
+            // read relative to the expanding file); anywhere else one without a `!` is.
+            "include" if context.in_macro || !bang_follows => {
+                self.refuse(ident, Class::RefusedInclude);
+            }
+            // `include_str!` and `include_bytes!` produce a literal outside a macro token tree
+            // and are allowed there; inside one they are refused in any form.
+            "include_str" | "include_bytes" if context.in_macro => {
+                self.refuse(ident, Class::RefusedIncludeLiteralInMacro);
+            }
+            _ => {}
         }
     }
 
@@ -158,8 +223,8 @@ impl Scan<'_> {
         }
     }
 
-    /// `include!(<group>)` at `ident`.
-    fn include(&mut self, group: &Group, ident: &Ident) {
+    /// `include!(<group>)` at `ident`, outside a macro token tree.
+    fn judge_include(&mut self, group: &Group, ident: &Ident) {
         let accepted = string_literal(&group.stream())
             .and_then(|argument| {
                 let path = Path::new(&argument);
@@ -174,30 +239,6 @@ impl Scan<'_> {
             .is_some_and(|tokens| literals_and_punctuation_only(&tokens));
         if !accepted {
             self.refuse(ident, Class::RefusedInclude);
-        }
-    }
-
-    /// The tokens after a `use` keyword, up to the item's `;` (or the end of the stream).
-    fn use_item(&mut self, tokens: &[TokenTree]) {
-        let end = tokens
-            .iter()
-            .position(|token| matches!(token, TokenTree::Punct(semi) if semi.as_char() == ';'))
-            .unwrap_or(tokens.len());
-        self.use_tokens(&tokens[..end]);
-    }
-
-    fn use_tokens(&mut self, tokens: &[TokenTree]) {
-        for token in tokens {
-            match token {
-                TokenTree::Ident(ident) if name(ident) == "include" => {
-                    self.refuse(ident, Class::RefusedIncludeImport);
-                }
-                TokenTree::Group(group) => {
-                    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-                    self.use_tokens(&inner);
-                }
-                _ => {}
-            }
         }
     }
 

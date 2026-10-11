@@ -11,6 +11,7 @@ use super::common::{Edit, Tree, assert_classes, expect_failure, expect_valid};
 const PATH: Class = Class::RefusedPathAttribute;
 const INCLUDE: Class = Class::RefusedInclude;
 const INCLUDE_IMPORT: Class = Class::RefusedIncludeImport;
+const LITERAL_IN_MACRO: Class = Class::RefusedIncludeLiteralInMacro;
 
 const READS: &str = "crates/lane/src/reads.rs";
 
@@ -233,10 +234,6 @@ fn an_include_that_the_tool_cannot_judge_is_a_finding() {
             "reads-include-brackets",
             "const X: u8 = include![\"looping.in\"];\n",
         ),
-        (
-            "reads-include-in-macro-argument",
-            "m!(include!(\"looping.in\"));\n",
-        ),
     ];
     for (name, text) in rows {
         expect_failure(
@@ -247,6 +244,123 @@ fn an_include_that_the_tool_cannot_judge_is_a_finding() {
                 create("crates/lane/src/digests.in", "[1u8, 2, 3]\n"),
             ],
             &[INCLUDE],
+        );
+    }
+}
+
+/// Root Amendment 1, rule 2: a macro can splice the `!` on, so the word alone is refused. The
+/// first row is the reproduced bypass: it reads `z.txt`, which no `include!` the scan sees names.
+#[test]
+fn an_include_word_without_a_bang_is_a_finding() {
+    let rows = [
+        (
+            "reads-include-spliced",
+            "macro_rules! inc { ($i:ident) => { $i!(\"z.txt\") } }\nconst X: u8 = inc!(include);\n",
+        ),
+        ("reads-include-function", "fn include() {}\n"),
+        ("reads-include-call", "fn f() { include(); }\n"),
+        ("reads-include-binding", "fn f() { let include = 1; }\n"),
+        ("reads-include-method", "fn f(x: X) { x.include(); }\n"),
+        ("reads-include-raw", "fn f() { let r#include = 1; }\n"),
+        ("reads-include-path-prefix", "const X: u8 = std::include;\n"),
+    ];
+    for (name, text) in rows {
+        expect_failure(
+            name,
+            &[
+                create(READS, text),
+                create("crates/lane/src/z.txt", LOOPING_TRAIT),
+            ],
+            &[INCLUDE],
+        );
+    }
+}
+
+/// Root Amendment 1, rule 3: an `include!` in a macro token tree is read relative to the file that
+/// expands the macro, so it is refused though `digests.in` is a file of literals that the same
+/// `include!` outside a macro passes.
+#[test]
+fn an_include_in_a_macro_token_tree_is_a_finding_even_for_a_file_of_literals() {
+    let rows = [
+        (
+            "reads-include-macro-invocation",
+            "const X: u8 = m!(include!(\"digests.in\"));\n",
+        ),
+        (
+            "reads-include-macro-invocation-nested",
+            "const X: u8 = m!([n!({ std::include!(\"digests.in\") })]);\n",
+        ),
+        (
+            "reads-include-macro-rules-body",
+            "macro_rules! m { () => { include!(\"digests.in\") } }\nconst X: u8 = m!();\n",
+        ),
+        (
+            "reads-include-macro-decl-body",
+            "macro m() { include!(\"digests.in\") }\n",
+        ),
+        (
+            "reads-include-macro-raw",
+            "const X: u8 = m!(r#include!(\"digests.in\"));\n",
+        ),
+        // The word in any form, with a `!` that no group follows.
+        (
+            "reads-include-macro-ne",
+            "const X: bool = m!(include != 1);\n",
+        ),
+        (
+            "reads-include-macro-bang-word",
+            "const X: bool = m!(include ! x);\n",
+        ),
+    ];
+    for (name, text) in rows {
+        expect_failure(
+            name,
+            &[
+                create(READS, text),
+                create("crates/lane/src/digests.in", "[1u8]\n"),
+            ],
+            &[INCLUDE],
+        );
+    }
+}
+
+/// Root Amendment 1, rule 4: `include_str!` and `include_bytes!` are allowed outside a macro token
+/// tree (the accepted-forms test) and refused inside one, where the file is read relative to the
+/// expanding file.
+#[test]
+fn include_str_and_include_bytes_in_a_macro_token_tree_are_findings() {
+    let rows = [
+        (
+            "reads-literal-invocation",
+            "const X: &str = m!(include_str!(\"looping.in\"));\n",
+        ),
+        (
+            "reads-literal-vec",
+            "const X: &[&[u8]] = &vec![include_bytes!(\"looping.in\")];\n",
+        ),
+        (
+            "reads-literal-macro-rules-body",
+            "macro_rules! m { () => { include_str!(\"looping.in\") } }\nconst X: &str = m!();\n",
+        ),
+        (
+            "reads-literal-nested",
+            "const X: &str = m!([n!({ core::include_bytes!(\"looping.in\") })]);\n",
+        ),
+        (
+            "reads-literal-raw",
+            "const X: &str = m!(r#include_str!(\"looping.in\"));\n",
+        ),
+        // The identifier alone, which a macro can splice a `!` onto.
+        ("reads-literal-word", "const X: &str = m!(include_str);\n"),
+    ];
+    for (name, text) in rows {
+        expect_failure(
+            name,
+            &[
+                create(READS, text),
+                create("crates/lane/src/looping.in", LOOPING_TRAIT),
+            ],
+            &[LITERAL_IN_MACRO],
         );
     }
 }
@@ -376,9 +490,10 @@ fn the_accepted_forms_pass() {
                 // The macros that produce a literal.
                 "const J: &str = include_str!(\"looping.in\");\n",
                 "const K: &[u8] = include_bytes!(\"looping.in\");\n",
-                // A word `include` that is not a macro call or a use item.
-                "fn include() {}\nconst L: u8 = 0;\nfn m() { include(); }\n",
-                "macro_rules! include_nothing { () => {} }\n",
+                // The literal macros as an argument, outside a macro token tree.
+                "fn l() -> &'static str { g(include_str!(\"looping.in\")) }\n",
+                // A word that only starts with `include`.
+                "fn include_nothing() {}\nmacro_rules! include_more { () => {} }\n",
             ),
         ),
         create(

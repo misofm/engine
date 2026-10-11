@@ -32,8 +32,11 @@ pub enum Class {
     /// token trees: rustc reads the module from a file no rule would see.
     RefusedPathAttribute,
     /// An `include!` of source: its argument is not a string literal naming a readable file of
-    /// literals and punctuation only.
+    /// literals and punctuation only, or an `include` the scan cannot read as an `include!`: one
+    /// inside a macro token tree, or one that is not followed by `!`.
     RefusedInclude,
+    /// An `include_str!` or `include_bytes!` inside a macro token tree.
+    RefusedIncludeLiteralInMacro,
     /// An identifier `include` in a `use` item, which renames the macro past the `include!` rule.
     RefusedIncludeImport,
     /// Unsafe code outside the allowlisted ownership files.
@@ -84,8 +87,11 @@ impl fmt::Display for Class {
                 "path attribute that is not a plain relative .rs file outside cfg_attr and macros",
             ),
             Self::RefusedInclude => out.write_str(
-                "include! of source (only a string literal naming a file of literals and punctuation is allowed)",
+                "include! of source, or an include that is not an include! call outside a macro (only an include! of a string literal naming a file of literals and punctuation, outside macro token trees, is allowed)",
             ),
+            Self::RefusedIncludeLiteralInMacro => {
+                out.write_str("include_str or include_bytes inside a macro token tree")
+            }
             Self::RefusedIncludeImport => out.write_str("include named in a use item"),
             Self::UnsafeOutsideOwnership => {
                 out.write_str("unsafe code exists outside the issue-approved ownership/audit files")
