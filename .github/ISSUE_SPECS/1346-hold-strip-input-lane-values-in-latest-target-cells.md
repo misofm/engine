@@ -130,3 +130,147 @@ block applied.
 - Followed by *Apply value-only input trim and polarity edits to the running C ABI plan* (#1261)
   and *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets*
   (#1262), which write to these cells.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b3`, commits `62ad55156`, `864dbf13a` and the evidence commit that carries this record)
+
+**What landed.**
+
+- `builtins-compiler`: `InputCells` (the writer: eight cells, trim left and right, polarity left and
+  right, then the filter cells of section 0 and section 1, left before right; cell index = dirty bit
+  = canonical drain order) and `InputReader` replace `Producer`/`Consumer<TrackInputRecord>`.
+  `InputCells::write(stamp, record)` is infallible on a value; a filter target naming a section other
+  than 0 or 1 panics, and every caller has run `validate_prepared_input_filter_target` before its
+  first write. `InputReader::drain(snapshot, witness, apply)` reads each pending cell under the
+  block's snapshot, pairs the two channel cells of a kind into one `Both` record when both were
+  applied with equal words (D2), admits each record through `ChannelSymmetryWitness::admit` before it
+  is applied (D3: the witness folds from final contents), applies trim, polarity, then filter
+  section 0, then section 1 (D2), applies every value read before it returns the first refusal, and
+  adds the replaced count to the session counter once. `BuiltinBankProcessor::begin_block` and the
+  test-only `LiveControlInputProcessor::process` drain through it; `drain_for_carry` reads with
+  `LiveSnapshot::ALL` and counts a refused apply (D5).
+- `TrackControlRequest::queue_capacity` is gone: it sized the input ring only, and no lane has a
+  depth now. The seal's control rows lose the capacity (`(track, input_lane)`), and the resource plan
+  charges one `Arc<InputLane>` allocation per request with `input_lane` in place of the ring rows.
+- `GraphPreparedBuiltinBankProcessor::live_lanes` (default `0`), implemented by the input, fader,
+  matrix and fused-pair banks (bit `n` is lane `n` holding a reader), forwarded by `BuiltinStage`
+  (the Dependencies deferral from #1504).
+- `host-core::prepare`: the control requests lose the depth; docs follow.
+- `host-web`: `write_strip_cells` also writes the batch's `Input` records and the prepared builtin
+  filter targets (a prepared owner marker's companion targets) under the batch's one stamp; the
+  input band takes no room and no `in_flight` credit; the room pass only checks that the strip holds
+  its input cells (`UNSUPPORTED_KIND` otherwise, as before). The slot layout is unchanged (the band
+  stays an unaddressable queue slot range, as the matrix and fader bands did after #1312). The
+  filter shadows stay the control-side authority for the designed pair (D6). A `#[cfg(test)]` field
+  `ReadyOwnership::live_values_superseded` holds the session count for the tests; the status field
+  that reports it is #1399's, which removes the `cfg`.
+
+**Choices the spec left open, and files outside the authorized list (each forced).**
+
+1. `crates/graph/src/{lib,runtime}.rs`: the `live_lanes` method and its forward, per the
+   Dependencies section (the STREAMS row for `crates/graph` lists #1504's drain signatures only).
+2. `crates/graph-compiler/src/lib.rs` (four test literals) and
+   `crates/builtins-compiler/tests/allocation_tracker.rs`: the removed `queue_capacity` field.
+3. `crates/control-plane/src/compile.rs`: one doc comment that still said each strip's input queue
+   holds 16 records.
+4. `crates/host-core/tests/{collapse_arming,input_liveness_live_controls,randomized,successor_swap}.rs`:
+   they wrote input records with `try_push`; they now write cells through the plan's own gate
+   handle.
+5. Re-pins (each individually, reason in the file): `tools/audit/src/fixture_builtins.rs`
+   `STRIP_PREPARATION_BYTES` 1088 to 1136 (+48 = `InputReader` 88 bytes in place of the 40-byte
+   ring consumer, measured with `size_of`); `fixtures/builtins/v1/resources.jsonl` (+48 bytes per
+   track in every processor payload count and in the largest allocation; allocation counts do not
+   move; regenerated with `audit fixture-builtins --write`, only that file and `MANIFEST.tsv`
+   differ); the joined manifest digest in `fixture_builtins.rs` and `ACCEPTED_MANIFEST_SHA256` in
+   `builtins_graph.rs` (`0834666e` to `28f109c9`, the measured `sha256sum` of the manifest);
+   `fixtures/graph/v1/direct-route.resources.json` `builtin_bank_bytes` 6663 to 7047 (+384 = 8 input
+   lanes x 48; regenerated with `graph_fixture --write`, no other graph fixture moved).
+6. Realtime-policy floors: the tree held 100 marked regions in 27 files against a floor of 96; this
+   slice adds two regions (the input drain, and the paired-channel read with `InputReader::drain`)
+   and raises the awk gate's floor to 102 regions, 27 files, and the self-test's pad with it (one pad
+   file of 20 regions, thirteen of 3, on top of the 13 files and 43 regions).
+7. `InputReader::drain` pairing makes equal words written to the two channels in one block a `Both`
+   record, as D2 says, so `a_symmetric_ride_renders_the_same_bits_collapsed_or_not` can no longer
+   split the ride into two per-lane records to decline the collapse (two equal records are now one
+   `Both` record by design). Its dual arm declines the collapse with a left-only polarity write to
+   the polarity the lane already has, which changes no arithmetic; the bits comparison is unchanged.
+8. Gate 1's HPF edits are HPF-only edits (selector 3), which touch section 0 alone; a whole-pair
+   edit touches both sections and so writes four cells per edit. With selector 3 each kind adds
+   `2 x 29` and the total is 116, as the gate says.
+9. Filter section order (section 0 before 1) is a determinism convention: the two sections hold
+   independent state, so no bit depends on it and no test can tell it. A mutation that drains section
+   1 first stays green and is recorded as such below.
+
+**Tests moved or deleted.** Deleted: `a_block_drains_every_input_record_queued_at_its_entry`
+(builtins-compiler `input_drain.rs`; it filled the 16-record ring), replaced by
+`a_block_applies_the_last_of_many_input_edits` (banked and scalar arms, 40-edit walks, one
+transaction per edit); `the_input_queue_is_a_destination_of_its_own` (host-web; two queues that
+refuse each other's records), replaced by gate 1; the queue-room half of
+`a_both_lane_trim_command_is_one_record_and_one_queue_slot` (now
+`a_both_lane_trim_command_addresses_both_lanes`: the left-only/right-only/both bits half stays);
+`the_carry_drain_applies_every_record_past_a_refused_one` (now
+`the_input_drains_apply_every_value_past_a_refused_one`, which also holds the block drain).
+Rewritten on a queue that is still one (an effect bypass queue): `idle_render_skips_admission_counter_clear_...`
+(plus a line that an input trim takes no credit), `a_refused_solo_submission_leaves_the_live_controls_untouched`
+(new `solo_host_with_insert`), `prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues`
+(track 1's console EQ queue is the unrelated full queue),
+`prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches` (the full queue is the effect
+queue; the refused batch writes no input cell and no fader cell). Adapted for the new types:
+`builtin_bank_resource_charges_two_planes_and_actual_members` (the hand formula names
+`Option<InputReader>`), the allocation tracker's input test and rings test (renamed `..cell..`),
+`the_per_node_live_control_input_processor_drains_and_folds_its_witness`.
+
+**New tests (the plausible defect each defends).**
+
+| Test | Defect it turns red |
+|---|---|
+| builtins-compiler `input_cells_drain_in_the_canonical_order_whatever_the_write_order` (gate 2) | polarity drained before trim: the two windows differ, so the last call's window wins and the bits move |
+| `the_input_witness_folds_from_the_final_cell_contents` (gate 3, five cases) | a witness folded per write or fixed: a `Both` write, or equal words written per channel, retiring the mono collapse; unequal words, a differing window or a lone channel keeping it |
+| host-core `equal_words_written_per_channel_in_one_block_keep_the_collapse` (gate 3, banked plan) | the same, as the collapse census of a real mono plan and its bits |
+| `many_input_edits_before_one_block_apply_the_last_and_count_each_replaced_value` | replaced writes uncounted or counted on one channel; the oldest value applied |
+| `the_input_drain_reads_under_the_blocks_snapshot` | `begin_block` reading `ALL`: a value of a later revision applied early |
+| `the_input_drains_apply_every_value_past_a_refused_one` | a drain that stops at the first refusal (carry and block drains) |
+| `a_block_applies_the_last_of_many_input_edits` (integration, banked and scalar) | an input drain skipped or reading an old walk value |
+| host-web `many_input_edits_before_one_render_apply_the_last_and_are_counted` (gate 1) | the 17th edit refused (a ring back in the band); counter 58 instead of 116; input records not written |
+| graph `a_builtin_stage_forwards_its_banks_live_lanes` | `BuiltinStage` dropping `live_lanes`, which makes #1504's slot guard vacuous for builtin banks again |
+
+**Gates (final tree unless noted).**
+
+| Gate | Result |
+|---|---|
+| `cargo test --locked --workspace --no-fail-fast` | see the final run below |
+| `cargo test --locked -p builtins-compiler --features test-support` | 65 lib + integration tests pass |
+| `cargo test --locked -p host-web --features test-support` | 190 + integration pass |
+| `cargo test --locked -p host-core --features control-provider,test-support --no-fail-fast` | pass, the #1276 carry tests (`successor_swap`) included (gate 4) |
+| `cargo build --locked --release -p audit -p capi && target/release/audit capi` | allocations, deallocations, locks, syscalls 0; `total_violations` 0 |
+| `check-realtime-policy.sh`, `test-realtime-policy.sh` | ok (102 marked regions in 27 files) |
+| `check-rack-policy.sh`, `check-workspace-policy.sh`, `check-builtins-policy.sh`, `check-graph-policy.sh`, `check-host-core-policy.sh` | ok |
+| `check-builtins-fixtures.sh . target/release/audit`, `check-console-fixtures.sh`, `check-graph-determinism.sh`, `cargo test --release -p audit --bin audit` | ok (50 files; 33 passed) |
+| `trace-builtins-graph-audit.sh`, `trace-graph-audit.sh` | PASS |
+| `check-cross-targets.sh` | PASS |
+| `cargo fmt --all -- --check`; clippy `--workspace --all-targets --all-features -D warnings` | ok |
+| Worklet chain: `build-web-audioworklet.sh --named-twin` (shipped module `ffec707c...`), `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts` (graphSessionPlusPlanBytes 30098 of 35648), `check-scalar-oracle-absent.py --wasm`, `check-web-audioworklet-v8-spill.py`, `test-web-audioworklet.sh` | pass |
+
+**Mutation evidence.** Each applies one defect to a committed file, runs the named tests, reverts.
+
+| Defect | Red |
+|---|---|
+| witness admitted as a fixed `Desymmetrize` per drained value | `the_input_witness_folds_from_the_final_cell_contents` (cases 1 and 2), `the_per_node_live_control_input_processor_...`; host-core `equal_words_written_per_channel_...`, `a_both_lane_record_drained_while_collapsed_...`, `a_symmetric_ride_renders_...`, `the_collapse_census_follows_the_commands` |
+| witness admitted as a fixed `Preserve` | the same two builtins-compiler tests; host-core `a_symmetric_ride_renders_...`, `the_collapse_census_follows_the_commands` |
+| equal channel words not paired into one `Both` record | `the_input_witness_folds_...`; the four host-core tests above |
+| polarity drained before trim | `input_cells_drain_in_the_canonical_order_...` |
+| filter section 1 drained before section 0 | none: the sections' state is independent (item 9) |
+| `begin_block` reads `LiveSnapshot::ALL` | `the_input_drain_reads_under_the_blocks_snapshot` |
+| `begin_block` does not drain the input cells | `a_block_applies_the_last_of_many_input_edits` |
+| the replaced count not added / added for the left trim cell only | `many_input_edits_before_one_block_...`; host-web `many_input_edits_before_one_render_...` (the first) |
+| the drain stops applying after the first refusal | `the_input_drains_apply_every_value_past_a_refused_one` |
+| the carry drain applies nothing | `successor_swap`: `a_pending_trim_record_survives_the_swap_at_eight_lanes` and at four lanes, `a_one_channel_record_keeps_its_chain_dual_after_the_swap` |
+| `BuiltinStage` does not forward `live_lanes` | `a_builtin_stage_forwards_its_banks_live_lanes` |
+| browser cells written before the room pass | `prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches`, `a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone`, `a_refused_solo_submission_leaves_the_live_controls_untouched`, `a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` |
+| browser admission skips the input records' cell write | `a_trim_command_reaches_the_render_plane`, `many_input_edits_before_one_render_...` |
+
+**Open items.** (a) The browser input band's queue slots stay as unaddressable slot numbers beside
+the matrix and fader bands; a renumbering of the queue-slot layout is a separate change. (b) The
+C ABI's input edits (#1261, #1262) write `TrackControlProducer::input` with `InputCells::write`
+behind the stamp, as #1312's fader edits do. (c) Filter section order is unobservable (item 9).
