@@ -1525,6 +1525,11 @@ struct ReadyOwnership {
     /// declared first so they are released before the plan that owns their consumer endpoints.
     /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
     controls: Vec<TrackControlProducer>,
+    /// The session's `live_values_superseded` count (#1312 D2), which every strip cell reader adds
+    /// to. Tests read it to prove the cells' replaced writes are counted (#1346 gate 1); the
+    /// status field that reports it is #1399's.
+    #[cfg(test)]
+    live_values_superseded: host_core::LiveValuesSuperseded,
     /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
     /// stamps those writes from this handle and publishes their revision on it, as the control
     /// plane does through its provider epoch; the plan's own render takes its snapshot from the
@@ -1579,7 +1584,8 @@ struct ReadyOwnership {
     /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
     has_in_flight_commands: bool,
     /// Per-strip semantic input-filter shadows (tracks, then submixes; issue #1213 D1), retained
-    /// only when input queues exist.
+    /// only when commands are enabled. They stay the control-side authority for the designed
+    /// pair (#1346 D6); the strip's input cells hold the prepared targets.
     input_filter_shadows: Box<[BuiltinInputShadow]>,
     /// The compiled session rate used by input-filter semantic validation.
     sample_rate_hz: u32,
@@ -1760,7 +1766,7 @@ impl ReadyOwnership {
     /// |---|---|
     /// | `0 .. strips` | strip `s`'s matrix/pan cell (#1312: no queue, no room) |
     /// | `strips .. 2 * strips` | strip `s`'s fader/mute cells (#1312: no queue, no room) |
-    /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity queue (#210 phase 3) |
+    /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity/filter cells (#1346: no queue, no room) |
     /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
     /// | `3 * strips + E ..` | live send `r`'s queue, by live-route index (issue #1222 D4) |
     ///
@@ -1785,26 +1791,13 @@ impl ReadyOwnership {
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
-    /// The free room of one destination queue. The matrix and fader bands are latest-target cells
-    /// (#1312), which have no room to want and are never asked: they answer `None`, as an
-    /// unaddressable queue does.
+    /// The free room of one destination queue. The matrix, fader and input bands are
+    /// latest-target cells (#1312, #1346), which have no room to want and are never asked: they
+    /// answer `None`, as an unaddressable queue does.
     fn queue_available(&self, slot: usize) -> Option<u32> {
         let tracks = self.strip_count();
-        if slot < tracks * 2 {
-            return None;
-        }
         if slot < tracks * 3 {
-            return u32::try_from(
-                // #1254 D4: a strip prepared without its input lane is unaddressable here, like an
-                // absent effect lane; a plan that takes commands always has it and an option-0
-                // plan takes none (it refuses every command first), so this never fires.
-                self.controls
-                    .get(slot - tracks * 2)?
-                    .input
-                    .as_ref()?
-                    .available_capacity(),
-            )
-            .ok();
+            return None;
         }
         let effect = slot - tracks * 3;
         if let Some(route) = effect.checked_sub(self.effect_controls.len()) {
@@ -1831,13 +1824,10 @@ impl ReadyOwnership {
     ) -> Result<(), ()> {
         let tracks = self.strip_count();
         match record {
-            // The strips' fader, mute and matrix values are cells, written under the batch's
-            // stamp by the admission itself (`write_strip_cells`), never pushed.
-            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) => Err(()),
-            AdmittedCommand::Input(record) => {
-                let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
-                let input = producer.input.as_mut().ok_or(())?;
-                input.try_push(record).map_err(|_| ())
+            // The strips' fader, mute, matrix and input values are cells, written under the
+            // batch's stamp by the admission itself (`write_strip_cells`), never pushed.
+            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) | AdmittedCommand::Input(_) => {
+                Err(())
             }
             AdmittedCommand::Route(record) => {
                 let route = (slot - tracks * 3)
@@ -4682,8 +4672,23 @@ fn admit_commands(
     }
 }
 
-/// Write the admitted fader, mute and matrix/pan records of one batch into the strips' cells as
-/// one transaction (#1312 D7), then publish its revision on the plan's gate.
+/// Whether `staged` writes a strip's cells: a fader, mute, matrix/pan, input trim or polarity
+/// record, or a prepared builtin input-filter marker with at least one target.
+fn writes_strip_cells(staged: &StagedCommand) -> bool {
+    match staged.kind {
+        StagedCommandKind::Command(
+            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) | AdmittedCommand::Input(_),
+        ) => true,
+        StagedCommandKind::PreparedOwner(marker) => {
+            marker.kind == PreparedOwnerKind::BuiltinInput && marker.target_count != 0
+        }
+        _ => false,
+    }
+}
+
+/// Write the admitted fader, mute, matrix/pan, input trim, polarity and prepared-filter values of
+/// one batch into the strips' cells as one transaction (#1312 D7, #1346 D6), then publish its
+/// revision on the plan's gate.
 ///
 /// A batch that stages none takes no stamp and no revision. The stamp is the batch's last
 /// fallible step: its refusal (a revision past the gate's ceiling) writes nothing and returns the
@@ -4694,25 +4699,15 @@ fn write_strip_cells(
     ready: &mut ReadyOwnership,
     lowered: usize,
     strip_count: usize,
+    companion: Option<&PreparedCompanion<'_>>,
 ) -> Result<(), CommandRejection> {
-    let writes_cells = ready.command_decoded[..lowered].iter().any(|staged| {
-        matches!(
-            staged.kind,
-            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
-        )
-    });
-    if !writes_cells {
-        return Ok(());
-    }
-    let first_wire_index = ready.command_decoded[..lowered]
+    let Some(first_wire_index) = ready.command_decoded[..lowered]
         .iter()
-        .find(|staged| {
-            matches!(
-                staged.kind,
-                StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
-            )
-        })
-        .map_or(0, |staged| staged.original_wire_index);
+        .find(|staged| writes_strip_cells(staged))
+        .map(|staged| staged.original_wire_index)
+    else {
+        return Ok(());
+    };
     let revision = ready.plan_gate.last_published().saturating_add(1);
     let Ok(stamp) = ready.plan_gate.stamp(revision) else {
         return Err(CommandRejection {
@@ -4747,6 +4742,53 @@ fn write_strip_cells(
                     .expect("a staged fader record addresses a strip with a cell producer")
                     .fader
                     .write(stamp, record);
+            }
+            StagedCommandKind::Command(AdmittedCommand::Input(record)) => {
+                ready
+                    .controls
+                    .get_mut(
+                        slot.checked_sub(strip_count * 2)
+                            .expect("a staged input record sits in the input band"),
+                    )
+                    .and_then(|control| control.input.as_mut())
+                    .expect("the room pass checked this strip's input cells")
+                    .write(stamp, record);
+            }
+            StagedCommandKind::PreparedOwner(marker)
+                if marker.kind == PreparedOwnerKind::BuiltinInput =>
+            {
+                let track = slot
+                    .checked_sub(strip_count * 2)
+                    .expect("a builtin input owner marker sits in the input band");
+                let mut written = 0_usize;
+                if let Some(companion) = companion {
+                    for index in 0..companion.target_count {
+                        let target = companion_target(companion, index)
+                            .expect("the companion's targets were decoded while staging");
+                        // `prepared_queue_address` for a builtin input target: the strip's input
+                        // band slot, which is this marker's exactly when the strip index is. It is
+                        // spelled out because the open stamp borrows the plan's gate, and that
+                        // function borrows all of `ready`.
+                        let addressed = target.rack == RACK_NOT_APPLICABLE
+                            && target.effect_index == 0
+                            && target.track_index as usize == track;
+                        if addressed {
+                            let target = companion_builtin_target(target)
+                                .expect("the builtin target was validated while staging");
+                            ready
+                                .controls
+                                .get_mut(track)
+                                .and_then(|control| control.input.as_mut())
+                                .expect("the room pass checked this strip's input cells")
+                                .write(stamp, TrackInputRecord::PreparedFilter { target });
+                            written += 1;
+                        }
+                    }
+                }
+                assert_eq!(
+                    written, marker.target_count as usize,
+                    "the targets written are the targets staged"
+                );
             }
             _ => {}
         }
@@ -5688,6 +5730,24 @@ fn admit_commands_staged(
         if slot < strip_count * 2 {
             continue;
         }
+        // So is the input band (#1346): no room to want, but the strip must hold the cells. A
+        // strip prepared without its input lane is unaddressable here, like an absent effect lane
+        // (#1254 D4); a plan that takes commands always has it and an option-0 plan takes none
+        // (it refuses every command first), so this never fires.
+        if slot < strip_count * 3 {
+            if ready
+                .controls
+                .get(slot - strip_count * 2)
+                .and_then(|control| control.input.as_ref())
+                .is_none()
+            {
+                return Err(refuse(
+                    COMMAND_REASON_UNSUPPORTED_KIND,
+                    staged.original_wire_index as usize,
+                ));
+            }
+            continue;
+        }
         let needed = ready.command_wanted[slot];
         let Some(available) = ready.queue_available(slot) else {
             return Err(refuse(
@@ -5708,13 +5768,17 @@ fn admit_commands_staged(
     // is published as soon as the batch's cells are written, whatever the later passes do: the
     // writes are made, so the revision that reveals them must follow, or a later batch would
     // reveal them under its own.
-    write_strip_cells(ready, lowered, strip_count)?;
+    write_strip_cells(ready, lowered, strip_count, companion.as_ref())?;
     for entry in 0..lowered {
         let staged = ready.command_decoded[entry];
         let slot = staged.queue_slot as usize;
         match staged.kind {
             // Cells were written above.
-            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_)) => {}
+            StagedCommandKind::Command(
+                AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) | AdmittedCommand::Input(_),
+            ) => {}
+            StagedCommandKind::PreparedOwner(marker)
+                if marker.kind == PreparedOwnerKind::BuiltinInput => {}
             StagedCommandKind::Command(record) => {
                 ready
                     .push(slot, record, applied_at_sample)
@@ -5762,41 +5826,6 @@ fn admit_commands_staged(
                         .expect("an Eq owner marker addresses a prepared effect producer")
                         .publish_candidate_targets(marker.base_revision, &targets[..target_count])
                         .expect("the owner's targets were preflighted");
-                } else {
-                    let mut target_count = 0_usize;
-                    if let Some(companion) = companion.as_ref() {
-                        for index in 0..companion.target_count {
-                            let target = companion_target(companion, index)
-                                .expect("the companion's targets were decoded while staging");
-                            let addressed = prepared_queue_address(
-                                ready,
-                                target.track_index as usize,
-                                target.rack,
-                                target.effect_index,
-                            )
-                            .is_some_and(|(addressed, kind)| {
-                                kind == PreparedOwnerKind::BuiltinInput && addressed == slot
-                            });
-                            if addressed {
-                                let target = companion_builtin_target(target)
-                                    .expect("the builtin target was validated while staging");
-                                ready
-                                    .push(
-                                        slot,
-                                        AdmittedCommand::Input(TrackInputRecord::PreparedFilter {
-                                            target,
-                                        }),
-                                        applied_at_sample,
-                                    )
-                                    .expect("the free-room pass checked this record's room");
-                                target_count += 1;
-                            }
-                        }
-                    }
-                    assert_eq!(
-                        target_count, marker.target_count as usize,
-                        "the targets pushed are the targets staged"
-                    );
                 }
                 ready.in_flight[slot] += marker.target_count;
                 ready.has_in_flight_commands = true;
@@ -7252,6 +7281,8 @@ fn compile_ready(
     let ready = ReadyOwnership {
         commands_enabled,
         controls: handles.strip_controls,
+        #[cfg(test)]
+        live_values_superseded: handles.live_values_superseded.clone(),
         plan_gate,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),

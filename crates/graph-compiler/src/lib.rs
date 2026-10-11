@@ -2930,7 +2930,6 @@ mod tests {
             .expect("compiled scalar session");
             let controls = [TrackControlRequest {
                 track_id: model.tracks[0].id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(4).expect("queue"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             }];
@@ -11392,7 +11391,6 @@ mod tests {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -11686,7 +11684,6 @@ mod tests {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })
@@ -11845,7 +11842,6 @@ mod tests {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
-                queue_capacity: NonZeroUsize::new(16).expect("constant"),
                 superseded: builtins_compiler::LiveValuesSuperseded::default(),
                 input_lane: true,
             })

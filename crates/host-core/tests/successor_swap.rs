@@ -24,6 +24,7 @@
 #[path = "support/successor.rs"]
 mod successor;
 
+use builtins_compiler::TestOnlyWriteGate;
 use engine::realtime::{CarryOutcome, SwapOutcome};
 use graph_compiler::Backend;
 use host_core::{PrepareRejection, SourceControlError, SourceControlSet, SourceSubmission};
@@ -958,10 +959,12 @@ struct LiveWrite {
     record: builtins_compiler::TrackInputRecord,
 }
 
-/// One plan prepared with a live-control queue on every strip, and its handles.
+/// One plan prepared with live controls on every strip, its handles, and its gate handle: every
+/// input write is a transaction stamped from the plan's own gate (#1346 D7).
 struct LivePlan {
     prepared: host_core::PreparedHost,
     handles: host_core::HostLiveControlHandles,
+    gate: engine::realtime::PlanRevisionGate,
 }
 
 impl LivePlan {
@@ -969,6 +972,21 @@ impl LivePlan {
         host_core::HostLiveControlRequest {
             control_queue_depth: Some(core::num::NonZeroUsize::new(8).expect("depth")),
             ..host_core::HostLiveControlRequest::default()
+        }
+    }
+
+    fn new(
+        mut prepared: host_core::PreparedHost,
+        handles: host_core::HostLiveControlHandles,
+    ) -> Self {
+        let gate = prepared
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
+        Self {
+            prepared,
+            handles,
+            gate,
         }
     }
 
@@ -980,7 +998,7 @@ impl LivePlan {
             backend,
         )
         .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
-        Self { prepared, handles }
+        Self::new(prepared, handles)
     }
 
     fn successor(
@@ -1002,7 +1020,7 @@ impl LivePlan {
                 backend,
             )
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-        Self { prepared, handles }
+        Self::new(prepared, handles)
     }
 
     fn push(&mut self, write: &LiveWrite) {
@@ -1012,12 +1030,12 @@ impl LivePlan {
             .iter()
             .position(|strip| &**strip == write.strip)
             .expect("strip");
-        self.handles.strip_controls[index]
+        let input = self.handles.strip_controls[index]
             .input
             .as_mut()
-            .expect("input lane")
-            .try_push(write.record)
-            .unwrap_or_else(|_| panic!("queue room"));
+            .expect("input lane");
+        self.gate
+            .write_published(|stamp| input.write(stamp, write.record));
     }
 
     fn submit(&mut self, feed: &Feed, quantum: usize, block: usize) {

@@ -307,10 +307,10 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
-/// The depth of every strip's input queue and every effect's queue when the caller names no depth
-/// of its own: 16 records (#1053 D4). The C ABI always uses it; the browser uses it for a session
-/// that did not opt in to live commands (#1326 D2), so both hosts read one number. The strip's
-/// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312).
+/// The depth of every effect's queue and every route's queue when the caller names no depth of its
+/// own: 16 records (#1053 D4). The C ABI always uses it; the browser uses it for a session that
+/// did not opt in to live commands (#1326 D2), so both hosts read one number. The strip's input,
+/// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312, #1346).
 pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
 
 /// What live controls ask preparation to attach (issue #137 D1/D2).
@@ -323,14 +323,14 @@ pub struct HostLiveControlRequest {
     /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
     /// Issue #140 turns this into the depth of every live *queue* a strip owns (a submix too,
-    /// issue #1211 D1): the input queue and one queue per prepared effect instance. The
-    /// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312); they are
-    /// attached whenever this is `Some`. Which of the others are attached is the caller's
-    /// [`HostLiveLanes`] (issue #1254 D2): the input queue when
-    /// [`HostLiveLanes::strip_input`] is set, the effect queues when [`HostLiveLanes::effects`] is
-    /// set, and the route queues when [`HostLiveLanes::routes`] is set. Every entry takes the
-    /// selection from its caller, except the ones with no `lanes` argument, which attach
-    /// [`HostLiveLanes::ALL`]. Each
+    /// issue #1211 D1): one queue per prepared effect instance. The input, fader/mute and
+    /// matrix/pan lanes are latest-target cells with no depth (#1312, #1346); they are attached
+    /// whenever this is `Some`, except that the input cells need [`HostLiveLanes::strip_input`].
+    /// Which of the others are attached is the caller's [`HostLiveLanes`] (issue #1254 D2): the
+    /// input cells when [`HostLiveLanes::strip_input`] is set, the effect queues when
+    /// [`HostLiveLanes::effects`] is set, and the route queues when [`HostLiveLanes::routes`] is
+    /// set. Every entry takes the selection from its caller, except the ones with no `lanes`
+    /// argument, which attach [`HostLiveLanes::ALL`]. Each
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
     /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
@@ -1685,11 +1685,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_control_tracks = &live_control_strips[..live_control_track_count];
     let control_requests: Vec<TrackControlRequest> = match live_controls.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => live_control_strips
+        Some(_) => live_control_strips
             .iter()
             .map(|strip| TrackControlRequest {
                 track_id: strip.to_string(),
-                queue_capacity: depth,
                 superseded: live_superseded.clone(),
                 input_lane: lanes.strip_input,
             })

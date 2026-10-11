@@ -1431,6 +1431,13 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         let _ = (owner, lane, predecessor, predecessor_lane);
         false
     }
+    /// The lanes (bit `n` is lane `n`) whose [`Self::begin_block`] drains a live lane, or `0` for
+    /// a bank with none. `BuiltinStage` forwards it to `rack::BankStage::live_lanes`, which
+    /// `BankChain::new` checks against the slot's active lanes in a debug build, off the render
+    /// thread (#1504 D3). The default `0` is a bank that holds no live lane.
+    fn live_lanes(&self) -> u8 {
+        0
+    }
     /// Preparation metadata only; render never reads this policy.
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::Concurrent

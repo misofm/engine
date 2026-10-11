@@ -707,18 +707,20 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
     records
 }
 
-/// Pushes one record and says whether the lane took it. A fader or matrix write is a cell write
-/// and always lands; a queue lane (input, effect) answers the same on every arm, because every arm
+/// Pushes one record and says whether the lane took it. A fader, matrix or input write is a cell
+/// write and always lands; a queue lane (effect) answers the same on every arm, because every arm
 /// has seen the same records.
 fn push(arm: &mut Arm, record: Live) -> bool {
     let Arm { handles, gate, .. } = arm;
     match record {
-        Live::Input(track, record) => handles.strip_controls[track]
-            .input
-            .as_mut()
-            .expect("input lane")
-            .try_push(record)
-            .is_ok(),
+        Live::Input(track, record) => {
+            let input = handles.strip_controls[track]
+                .input
+                .as_mut()
+                .expect("input lane");
+            gate.write_published(|stamp| input.write(stamp, record));
+            true
+        }
         Live::Fader(track, record) => {
             gate.write_published(|stamp| handles.strip_controls[track].fader.write(stamp, record));
             true

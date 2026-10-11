@@ -32,7 +32,7 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::{BuiltinLaneSelector, MeterTap};
-use builtins_compiler::TrackInputRecord;
+use builtins_compiler::{TestOnlyWriteGate, TrackInputRecord};
 use engine::realtime::{PlanUnitEligibility, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
@@ -271,7 +271,7 @@ fn misaligned_model() -> SessionModel {
     model
 }
 
-/// One input-queue record pushed on track `track`'s trim/polarity channel before block `block`.
+/// One input value written on track `track`'s trim/polarity channel before block `block`.
 struct LiveWrite {
     block: usize,
     track: usize,
@@ -293,15 +293,18 @@ fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: b
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
     prepared.plan.force_mono_collapse_off(forced_off);
+    let mut gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     let mut planes = [Vec::new(), Vec::new()];
     for block in 0..BLOCKS {
         if let Some(write) = live.filter(|write| write.block == block) {
-            handles.strip_controls[write.track]
+            let input = handles.strip_controls[write.track]
                 .input
                 .as_mut()
-                .expect("input lane")
-                .try_push(write.record)
-                .expect("bounded queue room");
+                .expect("input lane");
+            gate.write_published(|stamp| input.write(stamp, write.record));
         }
         let base = block * QUANTUM;
         let plane: Vec<f32> = (0..QUANTUM).map(|frame| signal(base + frame)).collect();

@@ -2504,6 +2504,30 @@ fn stage_prepared_input_filter(
     hpf_hz: f32,
     lpf_hz: f32,
 ) -> u32 {
+    stage_prepared_input_edit(host, wire_index, track_index, 0, hpf_hz, lpf_hz, 2)
+}
+
+/// Stage one HPF-only edit (selector 3): it touches section 0 alone, so one target.
+fn stage_prepared_input_hpf(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    hpf_hz: f32,
+) -> u32 {
+    stage_prepared_input_edit(host, wire_index, track_index, 3, hpf_hz, 0.0, 1)
+}
+
+/// Stage one `inputFilters` record for `parameter_id` (0 pair, 3 HPF, 4 LPF) with its companion,
+/// designed from the owner's committed seeds; `expected_targets` is how many sections it touches.
+fn stage_prepared_input_edit(
+    host: &mut AudioWorkletEngineHost,
+    wire_index: usize,
+    track_index: u32,
+    parameter_id: u32,
+    value0: f32,
+    value1: f32,
+    expected_targets: usize,
+) -> u32 {
     stage_command(
         host,
         wire_index,
@@ -2512,9 +2536,9 @@ fn stage_prepared_input_filter(
         2,
         track_index,
         0,
+        parameter_id,
         0,
-        0,
-        [hpf_hz, lpf_hz, 0.0, 0.0],
+        [value0, value1, 0.0, 0.0],
     );
     assert_eq!(host.copy_input_filter_config(track_index), RESULT_OK);
     let config = host.eq_target_config().expect("input filter config");
@@ -2539,15 +2563,18 @@ fn stage_prepared_input_filter(
             sample_rate,
             &seeds,
             &[InputFilterEdit {
-                parameter_id: 0,
+                parameter_id,
                 channel: ParameterChannel::Both,
-                value0: hpf_hz,
-                value1: lpf_hz,
+                value0,
+                value1,
             }],
             &mut targets,
         )
         .expect("prepared input filter target");
-    assert_eq!(target_count, 2, "whole pair touches both sections");
+    assert_eq!(
+        target_count, expected_targets,
+        "the edit touches the expected sections"
+    );
     let companion_bytes = 24 + target_count * 80;
     let companion = host.prepared_companion_mut().expect("prepared companion");
     companion.fill(0);
@@ -2713,6 +2740,24 @@ fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u6
     assert_eq!(host.render_next(), RESULT_OK);
 }
 
+/// Stage one `effectBypass` record for the first insert of track 0: a record that rides an effect
+/// queue, which stays a queue (a fader, matrix or input value is a latest-target cell with no room
+/// to fill, #1312, #1346).
+fn stage_effect_bypass(host: &mut AudioWorkletEngineHost, index: usize) {
+    stage_command(
+        host,
+        index,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+}
+
 /// #514 IO7: command-free blocks skip the dense admission-counter reset while command ownership
 /// and the existing transactional capacity contract remain exact.
 #[test]
@@ -2720,7 +2765,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     const QUANTUM: u32 = 128;
     const QUEUE_DEPTH: usize = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
 
-    let mut host = live_control_host(QUANTUM, 0);
+    let mut host = effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
     reset_admission_counter_clear();
     for block in 0..3_u64 {
         feed_and_render(&mut host, 1, block, 0.25);
@@ -2736,11 +2781,12 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
 
-    // Repeated records on the input queue preserve the exact per-queue count until the successful
-    // render drains it. A fader or matrix record is a latest-target cell (#1312): it takes no queue
-    // credit and counts nowhere, so the third record below leaves the counters as they were.
-    stage_trim(&mut host, 0, 0, 2, -1.0, 0);
-    stage_trim(&mut host, 1, 0, 2, -1.0, 0);
+    // Repeated records on the effect queue preserve the exact per-queue count until the successful
+    // render drains it. A fader, matrix or input record is a latest-target cell (#1312, #1346): it
+    // takes no queue credit and counts nowhere, so the fader record below leaves the counters as
+    // they were.
+    stage_effect_bypass(&mut host, 0);
+    stage_effect_bypass(&mut host, 1);
     assert_eq!(host.submit_commands(2), RESULT_OK);
     let application_sample = 3 * u64::from(QUANTUM);
     assert_eq!(
@@ -2757,8 +2803,8 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         }
     );
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[..3],
-        [0, 0, 2]
+        host.ready.as_ref().expect("ready").in_flight[..4],
+        [0, 0, 0, 2]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
@@ -2789,14 +2835,22 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         }
     );
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[..3],
-        [0, 0, 2]
+        host.ready.as_ref().expect("ready").in_flight[..4],
+        [0, 0, 0, 2]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
+    // An input trim is a cell too (#1346): it takes no queue credit either.
+    stage_trim(&mut host, 0, 0, 2, -1.0, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.ready.as_ref().expect("ready").in_flight[..4],
+        [0, 0, 0, 2]
+    );
+
     reset_admission_counter_clear();
     feed_and_render(&mut host, 1, 3, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 3));
+    assert_eq!(admission_counter_clear_stats(), (1, 4));
     assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
     assert!(
         host.ready
@@ -2807,23 +2861,23 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
     feed_and_render(&mut host, 1, 4, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 3));
+    assert_eq!(admission_counter_clear_stats(), (1, 4));
 
     // A healthy drained host can refill a queue to its exact old capacity; one more record is the
     // existing typed refusal and leaves the accepted prefix's ownership untouched.
     for index in 0..QUEUE_DEPTH {
-        stage_trim(&mut host, index, 0, 2, -1.0, 0);
+        stage_effect_bypass(&mut host, index);
     }
     assert_eq!(
         host.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS),
         RESULT_OK
     );
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[2],
+        host.ready.as_ref().expect("ready").in_flight[3],
         DEFAULT_COMMAND_QUEUE_RECORDS
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-    stage_trim(&mut host, 0, 0, 2, -1.0, 0);
+    stage_effect_bypass(&mut host, 0);
     assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE);
     assert_eq!(
         *host.command_report(),
@@ -2839,14 +2893,14 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         }
     );
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[..3],
-        [0, 0, DEFAULT_COMMAND_QUEUE_RECORDS]
+        host.ready.as_ref().expect("ready").in_flight[..4],
+        [0, 0, 0, DEFAULT_COMMAND_QUEUE_RECORDS]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
     reset_admission_counter_clear();
     feed_and_render(&mut host, 1, 5, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 3));
+    assert_eq!(admission_counter_clear_stats(), (1, 4));
     assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
     assert!(
         host.ready
@@ -2872,13 +2926,13 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         6 * u64::from(QUANTUM)
     );
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[..3],
-        [0, 0, DEFAULT_COMMAND_QUEUE_RECORDS]
+        host.ready.as_ref().expect("ready").in_flight[..4],
+        [0, 0, 0, DEFAULT_COMMAND_QUEUE_RECORDS]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
     reset_admission_counter_clear();
     feed_and_render(&mut host, 1, 6, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 3));
+    assert_eq!(admission_counter_clear_stats(), (1, 4));
     assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
     assert!(
         host.ready
@@ -2893,7 +2947,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(admission_counter_clear_stats(), (0, 0));
 
     // Malformed and backpressured submissions on an idle host cannot create pending ownership.
-    let mut refused = live_control_host(QUANTUM, 0);
+    let mut refused = effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
     stage_command(
         &mut refused,
         0,
@@ -2924,7 +2978,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
     for index in 0..=QUEUE_DEPTH {
-        stage_trim(&mut refused, index, 0, 2, -1.0, 0);
+        stage_effect_bypass(&mut refused, index);
     }
     assert_eq!(
         refused.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS + 1),
@@ -2948,7 +3002,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
 
     // A refusal after accepted records preserves those records and the dirty flag.
-    stage_trim(&mut refused, 0, 0, 2, -1.0, 0);
+    stage_effect_bypass(&mut refused, 0);
     assert_eq!(refused.submit_commands(1), RESULT_OK);
     stage_command(
         &mut refused,
@@ -2970,7 +3024,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .expect("ready")
             .has_in_flight_commands
     );
-    assert_eq!(refused.ready.as_ref().expect("ready").in_flight[2], 1);
+    assert_eq!(refused.ready.as_ref().expect("ready").in_flight[3], 1);
 
     // Solo can be a successful zero-emission submission; it must not mark the counters dirty.
     let mut solo = live_control_host(QUANTUM, 0);
@@ -2988,8 +3042,8 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
 
     // A render failure is sticky: pending ownership and the untouched clear counters survive the
     // failed block and the subsequent WRONG_STATE re-entry.
-    let mut failed = live_control_host(QUANTUM, 0);
-    stage_trim(&mut failed, 0, 0, 2, -1.0, 0);
+    let mut failed = effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    stage_effect_bypass(&mut failed, 0);
     assert_eq!(failed.submit_commands(1), RESULT_OK);
     let before = failed.ready.as_ref().expect("ready").in_flight.to_vec();
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
@@ -3716,8 +3770,17 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
         [300.0, 2_000.0, 300.0, 2_000.0]
     );
     assert_eq!(
-        ready.in_flight[input_slot], 2,
-        "both prepared sections reached input queue"
+        ready.in_flight[input_slot], 0,
+        "the prepared sections are cells and take no queue credit"
+    );
+    assert_eq!(
+        ready.controls[0]
+            .input
+            .as_ref()
+            .expect("input lane")
+            .test_only_write_counts(),
+        [0, 0, 0, 0, 1, 1, 1, 1],
+        "both prepared sections reached their cells, both lanes"
     );
     assert_eq!(
         ready.in_flight[1], 0,
@@ -3850,12 +3913,13 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
     assert_eq!(ready.input_filter_shadows[0].revision, 0);
     assert!(ready.in_flight.iter().all(|count| *count == 0));
 
-    // A full input queue (a matrix or fader value is a cell with no room to fill, #1312) refuses
-    // the mixed transaction at the prepared owner's first record while leaving the builtin shadow
-    // at its committed seed.
-    let mut full = input_filter_live_control_host(QUANTUM, 2);
+    // A full effect queue (a matrix, fader or input value is a cell with no room to fill, #1312,
+    // #1346) refuses the mixed transaction at the effect record behind the prepared owner's, and
+    // the builtin shadow stays at its committed seed with no cell written: the cells are written
+    // only after every check of the batch has passed.
+    let mut full = effect_input_filter_live_control_host(QUANTUM, 2);
     for index in 0..2 {
-        stage_trim(&mut full, index, 0, 2, -1.0 - index as f32, 0);
+        stage_effect_bypass(&mut full, index);
     }
     assert_eq!(full.submit_commands(2), RESULT_OK);
     let companion_bytes = stage_prepared_input_filter(&mut full, 0, 0, 300.0, 2_000.0);
@@ -3871,23 +3935,30 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
         0,
         [-3.0, 0.0, 0.0, 0.0],
     );
+    stage_effect_bypass(&mut full, 2);
     assert_eq!(
-        full.submit_prepared_commands(2, companion_bytes),
+        full.submit_prepared_commands(3, companion_bytes),
         RESULT_BACKPRESSURE
     );
-    assert_eq!(full.command_report().rejected_index, 0);
+    assert_eq!(full.command_report().rejected_index, 2);
+    let ready = full.ready.as_ref().unwrap();
+    assert_eq!(ready.input_filter_shadows[0].revision, 0);
     assert_eq!(
-        full.ready.as_ref().unwrap().input_filter_shadows[0].revision,
-        0
-    );
-    assert_eq!(
-        full.ready.as_ref().unwrap().controls[0]
-            .fader
-            .test_only_write_counts(),
+        ready.controls[0].fader.test_only_write_counts(),
         [0; 4],
         "the fader value in the refused batch was not written"
     );
-    assert_eq!(full.ready.as_ref().unwrap().in_flight[input_slot], 2);
+    assert_eq!(
+        ready.controls[0]
+            .input
+            .as_ref()
+            .expect("input lane")
+            .test_only_write_counts(),
+        [0; 8],
+        "the prepared targets in the refused batch were not written"
+    );
+    let effect_slot = 3;
+    assert_eq!(ready.in_flight[effect_slot], 2);
 }
 
 /// A single prepared admission can commit the existing EQ owner, the builtin input owner and a
@@ -4128,29 +4199,61 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
         assert_eq!(success, 0, "stale {label} changed queue");
     }
 
-    // Fill the input queue (a matrix value is a cell with no room to fill, #1312), then submit a
-    // valid prepared EQ edit plus a later trim record. The unrelated full queue refuses the whole
-    // batch; after one render, the EQ edit recovers.
-    let mut full = effect_live_control_host(QUANTUM, 1);
-    stage_trim(&mut full, 0, 0, 2, -1.0, 0);
+    // Fill an unrelated effect queue (track 1's console EQ; a matrix, fader or input value is a
+    // cell with no room to fill, #1312, #1346), then submit a valid prepared EQ edit plus a later
+    // record for the full queue. The unrelated full queue refuses the whole batch; after one
+    // render, the EQ edit recovers.
+    let bypass_track_1 = |host: &mut AudioWorkletEngineHost, index: usize| {
+        stage_command(
+            host,
+            index,
+            COMMAND_EFFECT_BYPASS,
+            RACK_CONSOLE,
+            255,
+            1,
+            0,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+    };
+    let owner_snapshot = |host: &mut AudioWorkletEngineHost| {
+        assert_eq!(
+            host.copy_eq_target_config(0, u32::from(RACK_CONSOLE), 0),
+            RESULT_OK
+        );
+        let config = host.eq_target_config().expect("EQ owner config").to_vec();
+        let revision = u64::from_le_bytes(config[24..32].try_into().expect("revision"));
+        let ready = host.ready.as_ref().expect("ready");
+        let effect = ready
+            .effect_slot(0, LiveEffectAddress::console(0))
+            .expect("EQ slot");
+        let success = ready
+            .effect_controls
+            .get(effect)
+            .and_then(Option::as_ref)
+            .expect("EQ producer")
+            .success_count();
+        (revision, success)
+    };
+    let mut full = bank_effect_live_control_host(QUANTUM, 1);
+    bypass_track_1(&mut full, 0);
     assert_eq!(full.submit_commands(1), RESULT_OK);
-    stage_prepared_eq_parameter(&mut full, 0, 0, 1, 0, 4, -12.0);
-    stage_trim(&mut full, 1, 0, 2, -2.0, 0);
+    stage_prepared_eq_parameter(&mut full, 0, 0, RACK_CONSOLE, 0, 4, -12.0);
+    bypass_track_1(&mut full, 1);
     assert_eq!(full.submit_prepared_commands(2, 104), RESULT_BACKPRESSURE);
     assert_eq!(full.command_report().reason, COMMAND_REASON_BACKPRESSURE);
     assert_eq!(full.command_report().rejected_index, 1);
     assert_eq!(full.command_report().admitted, 0);
-    let (_, revision, success) = eq_owner_snapshot(&mut full);
-    assert_eq!(revision, 0);
-    assert_eq!(success, 0);
-    assert_eq!(full.render_next(), RESULT_OK);
+    assert_eq!(owner_snapshot(&mut full), (0, 0));
+    feed_and_render_tracks(&mut full, 0, 0.25);
     assert_eq!(
         full.submit_prepared_commands(2, 104),
         RESULT_OK,
-        "the same mixed EQ/trim batch recovers after the unrelated queue drains"
+        "the same mixed EQ/bypass batch recovers after the unrelated queue drains"
     );
     assert_eq!(full.command_report().admitted, 2);
-    assert_eq!(eq_owner_snapshot(&mut full).1, 1);
+    assert_eq!(owner_snapshot(&mut full).0, 1);
 }
 
 #[test]
@@ -4166,10 +4269,16 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
                     [
                         (owner.producer.test_only_write_count(), 0),
                         (owner.fader.test_only_write_counts().iter().sum::<u64>(), 0),
-                        {
-                            let input = owner.input.as_ref().expect("browser input lane");
-                            (input.success_count(), input.full_count())
-                        },
+                        (
+                            owner
+                                .input
+                                .as_ref()
+                                .expect("browser input lane")
+                                .test_only_write_counts()
+                                .iter()
+                                .sum::<u64>(),
+                            0,
+                        ),
                     ]
                 })
                 .collect::<Vec<_>>(),
@@ -7249,6 +7358,28 @@ fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEn
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot")
 }
 
+/// A live-control host over [`solo_session`] whose track 0 also carries the command fixture's
+/// parametric EQ insert, so the session has an effect queue to fill: a fader, mute, matrix or
+/// input value is a latest-target cell with no room to overfill (#1312, #1346).
+fn solo_host_with_insert(quantum: u32, tracks: usize) -> AudioWorkletEngineHost {
+    let mut model =
+        parse_session_json(&solo_session(quantum, tracks, &[])).expect("accepted solo session");
+    let effect = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+        .expect("accepted command fixture")
+        .tracks[0]
+        .inserts
+        .effects[0]
+        .clone();
+    model.tracks[0].inserts.effects.push(effect);
+    let document = canonical_session_json(&model).expect("canonical solo session with an insert");
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 4,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot with an insert")
+}
+
 /// Stage one `solo` record: `rack`/`channel` are both `255`, the bit rides `values[0]`.
 fn stage_solo(
     host: &mut AudioWorkletEngineHost,
@@ -7603,8 +7734,8 @@ fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
     const QUANTUM: u32 = 128;
     const TRACKS: usize = 4;
     const DEPTH: u32 = DEFAULT_COMMAND_QUEUE_RECORDS;
-    let mut refused = solo_host(QUANTUM, TRACKS, &[]);
-    let mut untouched = solo_host(QUANTUM, TRACKS, &[]);
+    let mut refused = solo_host_with_insert(QUANTUM, TRACKS);
+    let mut untouched = solo_host_with_insert(QUANTUM, TRACKS);
     render_pair_and_compare(
         &mut refused,
         &mut untouched,
@@ -7615,11 +7746,12 @@ fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
     );
 
     // One batch: soloing track 1 (which pass one applies to the host's solo state, and which owes
-    // track 0 a gate value) behind one more trim record than track 0's input queue can hold. The
-    // queue is a real one: a fader or mute value is a cell with no room to overfill (#1312).
+    // track 0 a gate value) behind one more bypass record than track 0's insert queue can hold.
+    // The queue is a real one: a fader, mute or trim value is a cell with no room to overfill
+    // (#1312, #1346).
     stage_solo(&mut refused, 0, 1, true, QUANTUM);
     for index in 0..=DEPTH as usize {
-        stage_trim(&mut refused, 1 + index, 0, 2, -1.0, 0);
+        stage_effect_bypass(&mut refused, 1 + index);
     }
     assert_eq!(refused.submit_commands(DEPTH + 2), RESULT_BACKPRESSURE);
     assert_eq!(refused.command_report().reason, COMMAND_REASON_BACKPRESSURE,);
@@ -8231,60 +8363,23 @@ fn trim_and_polarity_refuse_on_the_declared_terms() {
     }
 }
 
-/// A `channel = both` command is **one** record and takes **one** queue slot.
+/// A `channel = both` command addresses **both** lanes.
 ///
-/// The departure from the effect-parameter lowering, asserted where it is observable: an
-/// `effectParam` on a `PerLane` parameter lowers to two records and takes two slots, while a
-/// `trimDb` addressed at both lanes lowers to one carrying `BuiltinLaneSelector::Both`. The reason
-/// is the channel-symmetry witness -- two per-lane records present as two `Desymmetrize` events and
-/// would retire the track's mono collapse on a command that moves both channels identically -- and
-/// the queue arithmetic is where the control plane shows which one it did.
+/// A `trimDb` addressed at both lanes lowers to one record carrying `BuiltinLaneSelector::Both`,
+/// which the strip's input cells take as a value for each channel (#1346). A lowering that emitted
+/// one record carrying a single lane would render the wrong audio, so the `both` arm is compared
+/// with a left-only and a right-only trim.
 ///
-/// The queue depth is the live-control default; filling it with `depth` both-commands must be
-/// admitted, and one more must be `backpressure`. A two-record lowering would refuse at half that
-/// count.
+/// The queue-room half this test had (one record, one slot, a full queue refusing the next) went
+/// with the input queue: a value written to a cell needs no room, and the witness folds from the
+/// cells' final contents, so a two-record lowering would no longer retire the collapse.
 ///
-/// Red mutation: lower `channel = 2` to two per-lane records the way `into_effect_records` does ->
-/// the queue fills at half the depth and the `admitted` count below doubles.
+/// Red mutation: lower `channel = 2` as `BuiltinLaneSelector::Left` -> the `both` arm renders the
+/// `left` arm's bits and this fails.
 #[test]
-fn a_both_lane_trim_command_is_one_record_and_one_queue_slot() {
+fn a_both_lane_trim_command_addresses_both_lanes() {
     const QUANTUM: u32 = 128;
     const TRACKS: usize = 2;
-    // The live-control default queue depth, which is the bound the room pre-check enforces.
-    let depth = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
-    assert!(depth >= 2, "the live-control default depth is meaningful");
-
-    // Exactly `depth` both-lane commands fit.
-    let mut host = solo_host(QUANTUM, TRACKS, &[]);
-    for index in 0..depth {
-        stage_trim(&mut host, index, 0, 2, -6.0, QUANTUM);
-    }
-    assert_eq!(
-        host.submit_commands(depth as u32),
-        RESULT_OK,
-        "reason {}",
-        host.command_report().reason
-    );
-    assert_eq!(
-        host.command_report().admitted,
-        depth as u32,
-        "one wire record lowered to one queue record"
-    );
-
-    // And one more does not, because the queue is full rather than because the batch is.
-    let mut host = solo_host(QUANTUM, TRACKS, &[]);
-    for index in 0..depth + 1 {
-        stage_trim(&mut host, index, 0, 2, -6.0, QUANTUM);
-    }
-    assert_eq!(host.submit_commands(depth as u32 + 1), RESULT_BACKPRESSURE);
-    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
-
-    // The other half of "one record": that record addresses **both** lanes. A lowering that
-    // emitted one record carrying a single lane would satisfy the arithmetic above and render the
-    // wrong audio, so the two halves are asserted together.
-    //
-    // Red mutation: lower `channel = 2` as `BuiltinLaneSelector::Left` -> the `both` arm renders
-    // the `left` arm's bits and this fails.
     let mut both = solo_host(QUANTUM, TRACKS, &[]);
     let mut left_only = solo_host(QUANTUM, TRACKS, &[]);
     let mut right_only = solo_host(QUANTUM, TRACKS, &[]);
@@ -8322,74 +8417,103 @@ fn a_both_lane_trim_command_is_one_record_and_one_queue_slot() {
     assert_ne!(left_bits, right_bits, "the two lanes are distinguishable");
 }
 
-/// The input queue is its own destination: filling it does not refuse a fader or matrix command,
-/// and filling the fader queue does not refuse a trim command.
+/// Any number of input edits between two renders is accepted, the render applies the last of each
+/// cell, and the session count records every replaced value (#1346 gate 1).
 ///
-/// The band the phase added to the frozen slot layout, asserted as a band rather than as
-/// arithmetic. A slot collision -- an input command counted against the fader queue's room -- would
-/// show here as a `backpressure` on a queue with room.
+/// 30 `Both` trim edits and then 30 `Both` HPF edits (section 0), each its own admitted
+/// transaction, then one render. A twin that sent only the last of each renders the same bits, and
+/// an untouched host renders others. Each `Both` edit writes two cells, so each kind adds `2 x 29`
+/// replaced writes: 116. The 17th edit of a kind used to meet the input queue's depth.
 ///
-/// **One mutation is deliberately not red here**, and it is worth naming rather than leaving for a
-/// reader to find: making `ReadyOwnership::queue_capacity` return `producer.fader.capacity()` for
-/// an input slot changes nothing observable, because live controls lease all three of a track's
-/// queues at **one** depth -- `TrackControlRequest::queue_capacity` is a single field, and
-/// `prepare_session_builtins_with_live_controls` builds the three rings from it. The wrong queue's
-/// capacity is the right number. It becomes observable the day the three depths can differ, and
-/// the line is written per band anyway so that day is a one-line change rather than a bug.
+/// Red mutation: give the input band a ring again (push the trim records to a depth-16 queue) ->
+/// the 17th trim is refused. Count the replaced writes of the left cell only -> 58, not 116. Apply
+/// the oldest value of each cell -> the bits differ from the twin's.
+#[cfg(feature = "test-support")]
 #[test]
-fn the_input_queue_is_a_destination_of_its_own() {
+fn many_input_edits_before_one_render_apply_the_last_and_are_counted() {
     const QUANTUM: u32 = 128;
-    const TRACKS: usize = 2;
-    let depth = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
+    const EDITS: usize = 30;
+    let mut many = input_filter_live_control_host(QUANTUM, 8);
+    let mut last_only = input_filter_live_control_host(QUANTUM, 8);
+    let mut untouched = input_filter_live_control_host(QUANTUM, 8);
+    let trim_db = |index: usize| -1.0 - index as f32;
+    let hpf_hz = |index: usize| 120.0 + 10.0 * index as f32;
 
-    // Fill the input queue, then move the fader on the same track.
-    let mut host = solo_host(QUANTUM, TRACKS, &[]);
-    for index in 0..depth {
-        stage_trim(&mut host, index, 1, 2, -6.0, QUANTUM);
+    for index in 0..EDITS {
+        stage_trim(&mut many, 0, 0, 2, trim_db(index), 16);
+        assert_eq!(many.submit_commands(1), RESULT_OK, "trim edit {index}");
     }
-    assert_eq!(host.submit_commands(depth as u32), RESULT_OK);
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_FADER_DB,
-        255,
-        2,
-        1,
-        0,
-        0,
-        QUANTUM,
-        [-3.0, 0.0, 0.0, 0.0],
-    );
-    assert_eq!(
-        host.submit_commands(1),
-        RESULT_OK,
-        "a full input queue must not refuse a fader command: reason {}",
-        host.command_report().reason
-    );
-
-    // And the reverse.
-    let mut host = solo_host(QUANTUM, TRACKS, &[]);
-    for index in 0..depth {
-        stage_command(
-            &mut host,
-            index,
-            COMMAND_FADER_DB,
-            255,
-            2,
-            1,
-            0,
-            0,
-            QUANTUM,
-            [-3.0, 0.0, 0.0, 0.0],
+    for index in 0..EDITS {
+        let bytes = stage_prepared_input_hpf(&mut many, 0, 0, hpf_hz(index));
+        assert_eq!(
+            many.submit_prepared_commands(1, bytes),
+            RESULT_OK,
+            "HPF edit {index}"
         );
     }
-    assert_eq!(host.submit_commands(depth as u32), RESULT_OK);
-    stage_trim(&mut host, 0, 1, 2, -6.0, QUANTUM);
+    stage_trim(&mut last_only, 0, 0, 2, trim_db(EDITS - 1), 16);
+    assert_eq!(last_only.submit_commands(1), RESULT_OK);
+    let bytes = stage_prepared_input_hpf(&mut last_only, 0, 0, hpf_hz(EDITS - 1));
+    assert_eq!(last_only.submit_prepared_commands(1, bytes), RESULT_OK);
+
+    let ready = many.ready.as_ref().expect("ready ownership");
     assert_eq!(
-        host.submit_commands(1),
-        RESULT_OK,
-        "a full fader queue must not refuse a trim command: reason {}",
-        host.command_report().reason
+        ready.in_flight.iter().sum::<u32>(),
+        0,
+        "the input band holds no queue credit"
+    );
+    assert_eq!(
+        ready.controls[0]
+            .input
+            .as_ref()
+            .expect("input lane")
+            .test_only_write_counts(),
+        [30, 30, 0, 0, 30, 30, 0, 0],
+        "every edit wrote its cells"
+    );
+    assert_eq!(
+        ready.live_values_superseded.get(),
+        0,
+        "nothing was read yet"
+    );
+
+    for host in [&mut many, &mut last_only, &mut untouched] {
+        feed_and_render(host, 1, 0, -0.25);
+    }
+    let bits = |host: &AudioWorkletEngineHost| -> Vec<u32> {
+        host.output_pcm()
+            .expect("output")
+            .iter()
+            .map(|value| value.to_bits())
+            .collect()
+    };
+    assert_ne!(
+        bits(&last_only),
+        bits(&untouched),
+        "the edits move the output, or the comparison proves nothing"
+    );
+    assert_eq!(
+        bits(&many),
+        bits(&last_only),
+        "the render applied the last value of each cell"
+    );
+    assert_eq!(
+        many.ready
+            .as_ref()
+            .expect("ready ownership")
+            .live_values_superseded
+            .get(),
+        116,
+        "2 x 29 replaced writes for each of the two kinds"
+    );
+    assert_eq!(
+        last_only
+            .ready
+            .as_ref()
+            .expect("ready ownership")
+            .live_values_superseded
+            .get(),
+        0
     );
 }
 

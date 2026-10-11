@@ -4121,6 +4121,11 @@ impl BankStage for BuiltinStage {
     ) -> Result<(), RenderError> {
         self.0.begin_block(first_sample, snapshot)
     }
+    /// The lanes whose drain reads live cells, forwarded: [`BankChain::new`]'s slot guard (#1504 D3)
+    /// reads it, so a builtin bank's live lanes are checked like an effect bank's.
+    fn live_lanes(&self) -> u8 {
+        self.0.live_lanes()
+    }
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
     }

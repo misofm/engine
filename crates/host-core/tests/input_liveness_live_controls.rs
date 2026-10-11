@@ -42,8 +42,8 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeMap;
 
 use builtins::{BuiltinLaneSelector, MeterTap};
-use builtins_compiler::TrackInputRecord;
-use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use builtins_compiler::{TestOnlyWriteGate, TrackInputRecord};
+use engine::realtime::{PlanRevisionGate, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceSubmission, prepare_host_session, prepare_host_session_with_live_controls,
@@ -105,33 +105,45 @@ fn live_controls() -> HostLiveControlRequest {
 struct Host {
     prepared: PreparedHost,
     handles: Option<HostLiveControlHandles>,
+    /// The plan's gate handle: every input write is a transaction stamped from it (#1346 D7).
+    gate: PlanRevisionGate,
     block: usize,
     peaks: BTreeMap<String, Vec<[u32; 2]>>,
 }
 
 fn prepare_with_live_controls(document: &str) -> Host {
-    let (_, prepared, handles) =
+    let (_, mut prepared, handles) =
         prepare_host_session_with_live_controls(document, &caps(), &live_controls())
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
     assert_eq!(handles.strips.len(), TRACKS);
     assert_eq!(handles.strip_controls.len(), TRACKS);
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     Host {
         prepared,
         handles: Some(handles),
+        gate,
         block: 0,
         peaks: BTreeMap::new(),
     }
 }
 
 fn prepare_without_live_controls(document: &str) -> Host {
-    let (_, prepared) = prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
+    let (_, mut prepared) = prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
+    let gate = prepared
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     Host {
         prepared,
         handles: None,
+        gate,
         block: 0,
         peaks: BTreeMap::new(),
     }
@@ -208,7 +220,8 @@ fn peaks(host: &Host) -> &BTreeMap<String, Vec<[u32; 2]>> {
 }
 
 fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
-    host.handles
+    let input = host
+        .handles
         .as_mut()
         .expect("live controls")
         .strip_controls
@@ -216,9 +229,9 @@ fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
         .expect("a control channel for the addressed track")
         .input
         .as_mut()
-        .expect("input lane")
-        .try_push(record)
-        .expect("bounded queue room");
+        .expect("input lane");
+    host.gate
+        .write_published(|stamp| input.write(stamp, record));
 }
 
 fn census(host: &Host) -> [u64; 2] {
