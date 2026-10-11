@@ -4033,6 +4033,14 @@ fn a_chain_that_could_not_collapse_hands_over_no_agreement(backend: Backend) {
     );
     assert_eq!(free.collapses[1][0], 0, "{backend:?}: it stays dual");
     assert_eq!(free.refusals, 0, "{backend:?}");
+    // The claim, not the bits: the channels of a mirrored source agree in the predecessor too, so
+    // collapsing would be sound. The chain still hands over no claim of agreement, because it
+    // never kept the flag the claim rests on, and the successor stays dual (every launch effect
+    // declines the proof that would bring a collapse back).
+    let mut mirrored = bursty_feed(SOURCE, 9);
+    mirrored.planes[1] = mirrored.planes[0].clone();
+    let run = plain_run(&a, Some((&b, &a.model)), &mirrored, backend, false);
+    assert_eq!(run.collapses[1][0], 0, "{backend:?}: a mirrored source");
 }
 
 #[cfg(target_feature = "avx2")]
