@@ -1734,7 +1734,7 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
 /// | block | command admitted before it |
 /// |---|---|
 /// | 1 | `matrix`, `ll = 0.5` |
-/// | 2 | three refusals: unknown track, a queue flood, an unknown effect parameter |
+/// | 2 | three refusals: unknown track, a bypass-record queue flood, an unknown effect parameter |
 /// | 3 | `pan`, one-quantum window |
 /// | 4 | `faderDb` to `-6 dB`, one-quantum window |
 /// | 5 | `mute` on, one-quantum window |
@@ -1815,8 +1815,21 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     matrix(&mut host, 0, 5);
     assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TRACK);
+    // The flood is bypass records, which stay a queue: a matrix or fader value is a latest-target
+    // cell with no room to overfill (#1312).
     for index in 0..DEPTH as usize + 1 {
-        matrix(&mut host, index, 0);
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_EFFECT_BYPASS,
+            1,
+            255,
+            0,
+            0,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        );
     }
     assert_eq!(host.submit_commands(DEPTH + 1), RESULT_BACKPRESSURE);
     assert_eq!(host.command_report().admitted, 0);
@@ -2723,32 +2736,11 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
 
-    // Repeated records on one destination and one record on a second destination preserve the
-    // exact per-queue counts until the successful render drains them.
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [1.0, 0.0, 0.0, 1.0],
-    );
-    stage_command(
-        &mut host,
-        1,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [1.0, 0.0, 0.0, 1.0],
-    );
+    // Repeated records on the input queue preserve the exact per-queue count until the successful
+    // render drains it. A fader or matrix record is a latest-target cell (#1312): it takes no queue
+    // credit and counts nowhere, so the third record below leaves the counters as they were.
+    stage_trim(&mut host, 0, 0, 2, -1.0, 0);
+    stage_trim(&mut host, 1, 0, 2, -1.0, 0);
     assert_eq!(host.submit_commands(2), RESULT_OK);
     let application_sample = 3 * u64::from(QUANTUM);
     assert_eq!(
@@ -2766,7 +2758,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[..3],
-        [2, 0, 0]
+        [0, 0, 2]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
@@ -2798,7 +2790,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[..3],
-        [2, 1, 0]
+        [0, 0, 2]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
@@ -2820,40 +2812,18 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // A healthy drained host can refill a queue to its exact old capacity; one more record is the
     // existing typed refusal and leaves the accepted prefix's ownership untouched.
     for index in 0..QUEUE_DEPTH {
-        stage_command(
-            &mut host,
-            index,
-            COMMAND_MATRIX,
-            255,
-            255,
-            0,
-            0,
-            0,
-            0,
-            [1.0, 0.0, 0.0, 1.0],
-        );
+        stage_trim(&mut host, index, 0, 2, -1.0, 0);
     }
     assert_eq!(
         host.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS),
         RESULT_OK
     );
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[0],
+        host.ready.as_ref().expect("ready").in_flight[2],
         DEFAULT_COMMAND_QUEUE_RECORDS
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [1.0, 0.0, 0.0, 1.0],
-    );
+    stage_trim(&mut host, 0, 0, 2, -1.0, 0);
     assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE);
     assert_eq!(
         *host.command_report(),
@@ -2870,7 +2840,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[..3],
-        [DEFAULT_COMMAND_QUEUE_RECORDS, 0, 0]
+        [0, 0, DEFAULT_COMMAND_QUEUE_RECORDS]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
 
@@ -2903,7 +2873,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[..3],
-        [DEFAULT_COMMAND_QUEUE_RECORDS, 0, 0]
+        [0, 0, DEFAULT_COMMAND_QUEUE_RECORDS]
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
     reset_admission_counter_clear();
@@ -2954,18 +2924,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .all(|count| *count == 0)
     );
     for index in 0..=QUEUE_DEPTH {
-        stage_command(
-            &mut refused,
-            index,
-            COMMAND_MATRIX,
-            255,
-            255,
-            0,
-            0,
-            0,
-            0,
-            [1.0, 0.0, 0.0, 1.0],
-        );
+        stage_trim(&mut refused, index, 0, 2, -1.0, 0);
     }
     assert_eq!(
         refused.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS + 1),
@@ -2989,18 +2948,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
 
     // A refusal after accepted records preserves those records and the dirty flag.
-    stage_command(
-        &mut refused,
-        0,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [1.0, 0.0, 0.0, 1.0],
-    );
+    stage_trim(&mut refused, 0, 0, 2, -1.0, 0);
     assert_eq!(refused.submit_commands(1), RESULT_OK);
     stage_command(
         &mut refused,
@@ -3022,7 +2970,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
             .expect("ready")
             .has_in_flight_commands
     );
-    assert_eq!(refused.ready.as_ref().expect("ready").in_flight[0], 1);
+    assert_eq!(refused.ready.as_ref().expect("ready").in_flight[2], 1);
 
     // Solo can be a successful zero-emission submission; it must not mark the counters dirty.
     let mut solo = live_control_host(QUANTUM, 0);
@@ -3041,18 +2989,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // A render failure is sticky: pending ownership and the untouched clear counters survive the
     // failed block and the subsequent WRONG_STATE re-entry.
     let mut failed = live_control_host(QUANTUM, 0);
-    stage_command(
-        &mut failed,
-        0,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [1.0, 0.0, 0.0, 1.0],
-    );
+    stage_trim(&mut failed, 0, 0, 2, -1.0, 0);
     assert_eq!(failed.submit_commands(1), RESULT_OK);
     let before = failed.ready.as_ref().expect("ready").in_flight.to_vec();
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
@@ -3296,8 +3233,8 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
         witness.process_members, 9,
         "eight bank members plus the one scalar track-8 tail member"
     );
-    assert_eq!(witness.fader_records_drained, 1);
-    assert_eq!(witness.matrix_records_drained, 1);
+    assert_eq!(witness.fader_values_applied, 1);
+    assert_eq!(witness.matrix_values_applied, 1);
     let selected_left = f32::from_bits(witness.first_left_bits);
     let selected_right = f32::from_bits(witness.first_right_bits);
     assert!(
@@ -3783,8 +3720,13 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
         "both prepared sections reached input queue"
     );
     assert_eq!(
-        ready.in_flight[1], 1,
-        "mixed fader record reached its own queue"
+        ready.in_flight[1], 0,
+        "the mixed fader record is a cell and takes no queue credit"
+    );
+    assert_eq!(
+        ready.controls[0].fader.test_only_write_counts(),
+        [1, 1, 0, 0],
+        "the mixed fader record reached its cells, both lanes"
     );
 
     assert_eq!(host.copy_input_filter_config(0), RESULT_OK);
@@ -3908,47 +3850,44 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
     assert_eq!(ready.input_filter_shadows[0].revision, 0);
     assert!(ready.in_flight.iter().all(|count| *count == 0));
 
-    // A full unrelated matrix queue refuses the mixed transaction while leaving the builtin
-    // shadow at its committed seed.
+    // A full input queue (a matrix or fader value is a cell with no room to fill, #1312) refuses
+    // the mixed transaction at the prepared owner's first record while leaving the builtin shadow
+    // at its committed seed.
     let mut full = input_filter_live_control_host(QUANTUM, 2);
     for index in 0..2 {
-        stage_command(
-            &mut full,
-            index,
-            COMMAND_MATRIX,
-            255,
-            255,
-            0,
-            0,
-            0,
-            0,
-            [1.0, 0.0, 0.0, 1.0],
-        );
+        stage_trim(&mut full, index, 0, 2, -1.0 - index as f32, 0);
     }
     assert_eq!(full.submit_commands(2), RESULT_OK);
     let companion_bytes = stage_prepared_input_filter(&mut full, 0, 0, 300.0, 2_000.0);
     stage_command(
         &mut full,
         1,
-        COMMAND_MATRIX,
+        COMMAND_FADER_DB,
         255,
-        255,
+        2,
         0,
         0,
         0,
         0,
-        [1.0, 0.0, 0.0, 1.0],
+        [-3.0, 0.0, 0.0, 0.0],
     );
     assert_eq!(
         full.submit_prepared_commands(2, companion_bytes),
         RESULT_BACKPRESSURE
     );
-    assert_eq!(full.command_report().rejected_index, 1);
+    assert_eq!(full.command_report().rejected_index, 0);
     assert_eq!(
         full.ready.as_ref().unwrap().input_filter_shadows[0].revision,
         0
     );
-    assert_eq!(full.ready.as_ref().unwrap().in_flight[input_slot], 0);
+    assert_eq!(
+        full.ready.as_ref().unwrap().controls[0]
+            .fader
+            .test_only_write_counts(),
+        [0; 4],
+        "the fader value in the refused batch was not written"
+    );
+    assert_eq!(full.ready.as_ref().unwrap().in_flight[input_slot], 2);
 }
 
 /// A single prepared admission can commit the existing EQ owner, the builtin input owner and a
@@ -4189,35 +4128,14 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
         assert_eq!(success, 0, "stale {label} changed queue");
     }
 
-    // Fill the matrix queue, then submit a valid prepared EQ edit plus a later matrix record.
-    // The unrelated full queue refuses the whole batch; after one render, the EQ edit recovers.
+    // Fill the input queue (a matrix value is a cell with no room to fill, #1312), then submit a
+    // valid prepared EQ edit plus a later trim record. The unrelated full queue refuses the whole
+    // batch; after one render, the EQ edit recovers.
     let mut full = effect_live_control_host(QUANTUM, 1);
-    stage_command(
-        &mut full,
-        0,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [0.5, 0.0, 0.0, 1.0],
-    );
+    stage_trim(&mut full, 0, 0, 2, -1.0, 0);
     assert_eq!(full.submit_commands(1), RESULT_OK);
     stage_prepared_eq_parameter(&mut full, 0, 0, 1, 0, 4, -12.0);
-    stage_command(
-        &mut full,
-        1,
-        COMMAND_MATRIX,
-        255,
-        255,
-        0,
-        0,
-        0,
-        0,
-        [0.25, 0.0, 0.0, 1.0],
-    );
+    stage_trim(&mut full, 1, 0, 2, -2.0, 0);
     assert_eq!(full.submit_prepared_commands(2, 104), RESULT_BACKPRESSURE);
     assert_eq!(full.command_report().reason, COMMAND_REASON_BACKPRESSURE);
     assert_eq!(full.command_report().rejected_index, 1);
@@ -4229,7 +4147,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
     assert_eq!(
         full.submit_prepared_commands(2, 104),
         RESULT_OK,
-        "the same mixed EQ/matrix batch recovers after the unrelated queue drains"
+        "the same mixed EQ/trim batch recovers after the unrelated queue drains"
     );
     assert_eq!(full.command_report().admitted, 2);
     assert_eq!(eq_owner_snapshot(&mut full).1, 1);
@@ -4246,8 +4164,8 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
                 .iter()
                 .map(|owner| {
                     [
-                        (owner.producer.success_count(), owner.producer.full_count()),
-                        (owner.fader.success_count(), owner.fader.full_count()),
+                        (owner.producer.test_only_write_count(), 0),
+                        (owner.fader.test_only_write_counts().iter().sum::<u64>(), 0),
                         {
                             let input = owner.input.as_ref().expect("browser input lane");
                             (input.success_count(), input.full_count())
@@ -4649,10 +4567,11 @@ fn an_effect_bypass_command_returns_the_dry_signal() {
 
 /// #140 C: a submission that mixes kinds is still one transaction, and the free-room pre-check is
 /// per *destination queue* -- one full queue refuses the whole batch, including the records bound
-/// for queues that had room.
+/// for queues that had room. The matrix record is a latest-target cell (#1312) and the flood is
+/// effect-bypass records, which stay a queue.
 ///
 /// Red mutation: make the free-room pass read `ready.command_wanted[0]` instead of
-/// `ready.command_wanted[slot]` -> the fader flood is checked against the matrix queue's count,
+/// `ready.command_wanted[slot]` -> the bypass flood is checked against another queue's count,
 /// the batch is admitted, and the "nothing was admitted" comparison against the clean host fails.
 #[test]
 fn a_mixed_batch_is_one_transaction_across_every_queue() {
@@ -4663,7 +4582,8 @@ fn a_mixed_batch_is_one_transaction_across_every_queue() {
     feed_and_render(&mut clean, 1, 0, 0.25);
     feed_and_render(&mut flooded, 1, 0, 0.25);
 
-    // One matrix record (room), then one more fader record than the fader queue can hold.
+    // One matrix record (a cell, no room to want), then one more bypass record than the effect
+    // queue can hold.
     stage_command(
         &mut flooded,
         0,
@@ -4680,14 +4600,14 @@ fn a_mixed_batch_is_one_transaction_across_every_queue() {
         stage_command(
             &mut flooded,
             index + 1,
-            COMMAND_FADER_DB,
+            COMMAND_EFFECT_BYPASS,
+            1,
             255,
-            2,
             0,
             0,
             0,
             0,
-            [-6.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
         );
     }
     assert_eq!(flooded.submit_commands(DEPTH + 2), RESULT_BACKPRESSURE);
@@ -4720,14 +4640,14 @@ fn a_mixed_batch_is_one_transaction_across_every_queue() {
         stage_command(
             &mut flooded,
             index + 1,
-            COMMAND_FADER_DB,
+            COMMAND_EFFECT_BYPASS,
+            1,
             255,
-            2,
             0,
             0,
             0,
             0,
-            [-6.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
         );
     }
     assert_eq!(flooded.submit_commands(DEPTH + 1), RESULT_OK);
@@ -4772,8 +4692,9 @@ fn a_live_control_free_host_refuses_every_live_kind_as_unsupported() {
     );
 }
 
-/// #137 E3: flooding past the bounded queue is a typed local rejection that admits nothing and
-/// disturbs no rendered sample.
+/// #137 E3: flooding past a bounded queue is a typed local rejection that admits nothing and
+/// disturbs no rendered sample. The flood is observation subscriptions: they stay a queue after
+/// the fader, mute and matrix lanes became latest-target cells with no room to overfill (#1312).
 ///
 /// Red mutation: delete the free-room pre-check loop in `admit_commands` -> the flood is admitted
 /// record by record until `try_push` fails, the transaction is no longer all-or-nothing, and the
@@ -4783,24 +4704,24 @@ fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
     const QUANTUM: u32 = 128;
     let depth = DEFAULT_COMMAND_QUEUE_RECORDS;
 
-    let mut clean = live_control_host(QUANTUM, 0);
-    let mut flooded = live_control_host(QUANTUM, 0);
+    let mut clean = observation_host(QUANTUM, 1, None);
+    let mut flooded = observation_host(QUANTUM, 1, None);
     for block in 0..4_u64 {
-        feed_and_render(&mut clean, 1, block, 0.25);
-        feed_and_render(&mut flooded, 1, block, 0.25);
+        feed_and_render_tracks(&mut clean, block, 0.25);
+        feed_and_render_tracks(&mut flooded, block, 0.25);
         // One more record than the queue can hold, submitted as one batch.
         for index in 0..depth as usize + 1 {
             stage_command(
                 &mut flooded,
                 index,
-                COMMAND_MATRIX,
+                COMMAND_OBSERVE_SUBSCRIBE,
+                1,
                 255,
-                255,
                 0,
                 0,
-                0,
-                0,
-                [0.5, 0.0, 0.0, 1.0],
+                1,
+                4,
+                [0.0; 4],
             );
         }
         assert_eq!(flooded.submit_commands(depth + 1), RESULT_BACKPRESSURE);
@@ -4811,6 +4732,11 @@ fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
             clean.output_pcm().expect("clean output"),
             flooded.output_pcm().expect("flooded output"),
             "block {block}: control traffic never disturbs a rendered sample",
+        );
+        assert_eq!(
+            flooded.observation_armed_taps(),
+            clean.observation_armed_taps(),
+            "block {block}: no subscription armed"
         );
     }
     assert_eq!(
@@ -7661,8 +7587,8 @@ fn mute_and_solo_are_separate_states() {
     assert_eq!([state.user_mute(1, 0), state.user_mute(1, 1)], [true, true]);
 }
 
-/// P1-5: a solo submission refused for backpressure applies *nothing* -- not to a queue, and not
-/// to the host's own solo state.
+/// P1-5: a solo submission refused for backpressure applies *nothing* -- not to a queue or a cell,
+/// and not to the host's own solo state.
 ///
 /// This is the correction the adversarial verification named as the likeliest implementation bug:
 /// pass one mutates solo state while the submission is still being validated, so a pass-two
@@ -7688,39 +7614,14 @@ fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
         "before any command",
     );
 
-    // Fill track 0's fader queue exactly, without rendering: nothing drains until the next block.
-    for _ in 0..DEPTH {
-        stage_command(
-            &mut refused,
-            0,
-            COMMAND_FADER_DB,
-            255,
-            2,
-            0,
-            0,
-            0,
-            0,
-            [-1.0, 0.0, 0.0, 0.0],
-        );
-        assert_eq!(refused.submit_commands(1), RESULT_OK);
-        stage_command(
-            &mut untouched,
-            0,
-            COMMAND_FADER_DB,
-            255,
-            2,
-            0,
-            0,
-            0,
-            0,
-            [-1.0, 0.0, 0.0, 0.0],
-        );
-        assert_eq!(untouched.submit_commands(1), RESULT_OK);
-    }
-
-    // Soloing track 1 owes track 0 one gate record, and track 0 has no room for it.
+    // One batch: soloing track 1 (which pass one applies to the host's solo state, and which owes
+    // track 0 a gate value) behind one more trim record than track 0's input queue can hold. The
+    // queue is a real one: a fader or mute value is a cell with no room to overfill (#1312).
     stage_solo(&mut refused, 0, 1, true, QUANTUM);
-    assert_eq!(refused.submit_commands(1), RESULT_BACKPRESSURE);
+    for index in 0..=DEPTH as usize {
+        stage_trim(&mut refused, 1 + index, 0, 2, -1.0, 0);
+    }
+    assert_eq!(refused.submit_commands(DEPTH + 2), RESULT_BACKPRESSURE);
     assert_eq!(refused.command_report().reason, COMMAND_REASON_BACKPRESSURE,);
     assert_eq!(refused.command_report().admitted, 0);
     {
@@ -8722,7 +8623,7 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
     }
     let before = host.ready.as_ref().unwrap().controls[0]
         .producer
-        .success_count();
+        .test_only_write_count();
     assert_eq!(
         host.submit_prepared_commands(2, 24),
         RESULT_INVALID_ARGUMENT
@@ -8732,7 +8633,7 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
     assert_eq!(
         host.ready.as_ref().unwrap().controls[0]
             .producer
-            .success_count(),
+            .test_only_write_count(),
         before
     );
     // A malformed envelope also cannot publish the already valid ordinary command.
@@ -8743,7 +8644,7 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
     assert_eq!(
         host.ready.as_ref().unwrap().controls[0]
             .producer
-            .success_count(),
+            .test_only_write_count(),
         before
     );
     assert_eq!(host.submit_prepared_commands(1, 24), RESULT_OK);
@@ -8751,7 +8652,7 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
     assert_eq!(
         host.ready.as_ref().unwrap().controls[0]
             .producer
-            .success_count(),
+            .test_only_write_count(),
         before + 1
     );
 
@@ -10405,9 +10306,9 @@ fn a_solo_at_a_bus_index_refuses_not_soloable_and_stages_nothing() {
         assert!(!ready.solo.transaction_open(), "the transaction closed");
         for (strip, controls) in ready.controls.iter().enumerate() {
             assert_eq!(
-                controls.fader.available_capacity(),
-                DEFAULT_COMMAND_QUEUE_RECORDS as usize,
-                "strip {strip}'s fader queue untouched"
+                controls.fader.test_only_write_counts(),
+                [0; 4],
+                "strip {strip}'s fader cells untouched"
             );
         }
     }
@@ -10496,18 +10397,20 @@ fn a_bus_record_ahead_of_a_bad_track_record_is_never_pushed() {
     );
     for (strip, controls) in ready.controls.iter().enumerate() {
         assert_eq!(
-            controls.fader.available_capacity(),
-            4,
-            "strip {strip}'s fader queue"
+            controls.fader.test_only_write_counts(),
+            [0; 4],
+            "strip {strip}'s fader cells"
         );
     }
 }
 
 /// Issue #1213 gate 4(b): a batch that overfills one bus queue is typed backpressure at the first
-/// record that does not fit, and nothing -- the track record before it included -- is pushed.
+/// record that does not fit, and nothing -- the track record before it included -- is written. The
+/// overfilled queue is the bus compressor's parameter lane; the track record is a fader value,
+/// which is a latest-target cell with no room of its own to overfill (#1312).
 ///
 /// Test value: red if the room check skips a bus queue, so admission pushes into it and fails
-/// half-way.
+/// half-way, or if the track's fader cell is written before the room check passes.
 #[test]
 fn overfilling_a_bus_queue_is_typed_backpressure_with_no_push() {
     let (mut a, _) = strip_pair(None, 4, 0);
@@ -10527,14 +10430,14 @@ fn overfilling_a_bus_queue_is_typed_backpressure_with_no_push() {
         stage_command(
             &mut a,
             index,
-            COMMAND_FADER_DB,
-            255,
+            COMMAND_EFFECT_PARAM,
+            RACK_INSERTS,
             2,
             STRIP_BUS,
             0,
+            1,
             0,
-            0,
-            [-6.0, 0.0, 0.0, 0.0],
+            [-20.0, 0.0, 0.0, 0.0],
         );
     }
     assert_eq!(a.submit_commands(6), RESULT_BACKPRESSURE);
@@ -10551,9 +10454,9 @@ fn overfilling_a_bus_queue_is_typed_backpressure_with_no_push() {
     );
     for (strip, controls) in ready.controls.iter().enumerate() {
         assert_eq!(
-            controls.fader.available_capacity(),
-            4,
-            "strip {strip}'s fader queue"
+            controls.fader.test_only_write_counts(),
+            [0; 4],
+            "strip {strip}'s fader cells"
         );
     }
 }
@@ -11337,14 +11240,14 @@ fn a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits() {
     seeded_send_edits_land_on_a_fresh_plan(true, 0xB0B);
 }
 
-/// Require a refused submission's typed report, an empty staging count, untouched send and fader
-/// queues and an unchanged, closed send mirror.
+/// Require a refused submission's typed report, an empty staging count, untouched send queues and
+/// fader cells and an unchanged, closed send mirror.
 fn assert_send_refusal(
     host: &AudioWorkletEngineHost,
     reason: u32,
     rejected_index: u32,
     room: &[usize],
-    fader_room: &[usize],
+    fader_writes: &[u64],
     what: &str,
 ) {
     let report = *host.command_report();
@@ -11353,12 +11256,12 @@ fn assert_send_refusal(
     assert_eq!(report.admitted, 0, "{what}: admitted");
     assert_eq!(send_queue_room(host), room, "{what}: send queues");
     let ready = host.ready.as_ref().expect("ready");
-    let faders: Vec<usize> = ready
+    let faders: Vec<u64> = ready
         .controls
         .iter()
-        .map(|controls| controls.fader.available_capacity())
+        .map(|controls| controls.fader.test_only_write_counts().iter().sum())
         .collect();
-    assert_eq!(faders, fader_room, "{what}: fader queues");
+    assert_eq!(faders, fader_writes, "{what}: fader cell writes");
     assert!(!ready.routes.transaction_open(), "{what}: mirror closed");
     assert_eq!(send_mirror(host), SEND_SEEDS, "{what}: mirror unchanged");
 }
@@ -11376,7 +11279,7 @@ fn assert_send_refusal(
 fn a_live_send_edit_outside_the_route_domain_is_refused() {
     const DEPTH: u64 = 4;
     let room = vec![DEPTH as usize; SEND_ROUTES.len()];
-    let fader_room = vec![DEPTH as usize; SEND_STRIPS as usize];
+    let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let gain = |value: f32| (COMMAND_ROUTE_GAIN_DB, [value, 0.0, 0.0, 0.0]);
     let matrix = |position: usize, value: f32| {
         let mut values = SEND_SEEDS[0].matrix;
@@ -11482,9 +11385,9 @@ fn a_subnormal_route_renders_as_a_zero_coefficient() {
 ///   stage nothing and refuse `DOMAIN` at the second record.
 /// * A batch that overfills one send queue is typed backpressure at its first record on that
 ///   queue, behind a valid fader record, and pushes nothing.
-/// * A valid send record and a valid fader record, with that fader queue already full, push
-///   neither; nor, in a session with an insert on every track, do a valid send record and a valid
-///   effect-bypass record with that effect queue already full.
+/// * In a session with an insert on every track, a valid send record and a valid effect-bypass
+///   record, with that effect queue already full, push neither. (A fader record has no full queue
+///   to meet: its value is a latest-target cell, #1312.)
 ///
 /// In every case the send mirror is unchanged. And a refused batch after an admitted one keeps
 /// the admitted values: the mirror holds them, and a further edit settles on a fresh plan holding
@@ -11497,7 +11400,7 @@ fn a_subnormal_route_renders_as_a_zero_coefficient() {
 fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
     const DEPTH: u64 = 4;
     let depth = DEPTH as usize;
-    let fader_room = vec![depth; SEND_STRIPS as usize];
+    let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let room = vec![depth; SEND_ROUTES.len()];
 
     // `ll = 1.5` is outside the route coefficient domain `[-1, 1]` (issue #1237; before the
@@ -11562,52 +11465,6 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
         &room,
         &fader_room,
         "send full",
-    );
-
-    let mut host = send_host(&SEND_SEEDS, DEPTH);
-    send_render(&mut host, 0);
-    for index in 0..depth {
-        stage_command(
-            &mut host,
-            index,
-            COMMAND_FADER_DB,
-            255,
-            2,
-            3,
-            0,
-            0,
-            0,
-            [-6.0, 0.0, 0.0, 0.0],
-        );
-    }
-    assert_eq!(
-        host.submit_commands(DEPTH as u32),
-        RESULT_OK,
-        "fill t3's fader queue"
-    );
-    stage_send(&mut host, 0, COMMAND_ROUTE_MUTE, 4, 0, [1.0, 0.0, 0.0, 0.0]);
-    stage_command(
-        &mut host,
-        1,
-        COMMAND_FADER_DB,
-        255,
-        2,
-        3,
-        0,
-        0,
-        0,
-        [-3.0, 0.0, 0.0, 0.0],
-    );
-    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE);
-    let mut full = fader_room.clone();
-    full[3] = 0;
-    assert_send_refusal(
-        &host,
-        COMMAND_REASON_BACKPRESSURE,
-        1,
-        &room,
-        &full,
-        "fader full",
     );
 
     // With an insert on every track the effect band sits between the strip bands and the send
@@ -11746,7 +11603,7 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
 #[test]
 fn every_kind_is_bounded_by_the_count_it_addresses() {
     let room = vec![16_usize; SEND_ROUTES.len()];
-    let fader_room = vec![16_usize; SEND_STRIPS as usize];
+    let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let mut host = send_host(&SEND_SEEDS, 16);
     send_render(&mut host, 0);
     for strip in [SEND_STRIPS, SEND_STRIPS + 1, u32::MAX] {
@@ -11863,7 +11720,7 @@ fn send_records_are_shape_checked() {
     let mut host = send_host(&SEND_SEEDS, 16);
     send_render(&mut host, 0);
     let room = vec![16_usize; SEND_ROUTES.len()];
-    let fader_room = vec![16_usize; SEND_STRIPS as usize];
+    let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let gain = [-2.0, 0.0, 0.0, 0.0];
     let malformed: [SendShape; 7] = [
         ("a lane", COMMAND_ROUTE_GAIN_DB, 255, 2, 0, 0, gain),
@@ -12350,14 +12207,14 @@ fn follow_lanes(host: &AudioWorkletEngineHost) -> Vec<[bool; 2]> {
         .collect()
 }
 
-/// Every fader queue's free room, by strip.
-fn follow_fader_room(host: &AudioWorkletEngineHost) -> Vec<usize> {
+/// How many writes every strip's fader cells have taken, by strip.
+fn follow_fader_room(host: &AudioWorkletEngineHost) -> Vec<u64> {
     host.ready
         .as_ref()
         .expect("ready")
         .controls
         .iter()
-        .map(|controls| controls.fader.available_capacity())
+        .map(|controls| controls.fader.test_only_write_counts().iter().sum())
         .collect()
 }
 
@@ -13510,11 +13367,12 @@ fn a_vca_muted_member_stays_muted_through_solo_and_an_explicit_unmute() {
     assert_eq!(live.submit_commands(2), RESULT_OK, "solo drums and vocal");
     assert_eq!(follow_lanes(&live), [[true; 2], [true; 2]], "solo follow");
     let mut owed = room.clone();
-    owed[0] -= 1;
+    owed[0] += 2;
     assert_eq!(
         follow_fader_room(&live),
         owed,
-        "the solo stages one record, on `bass`, and none for the VCA-muted `drums` or `room`"
+        "the solo stages one record, on `bass`, which writes its two mute cells, and none for the \
+         VCA-muted `drums` or `room`"
     );
     assert!(
         follow_lockstep(
@@ -13614,12 +13472,12 @@ fn a_live_send_edit_keeps_a_vca_muted_column_zeroed() {
 /// the strip, its following send `drums-verb` and the solo state's mirrors all stay where they
 /// were: bit-identical to a host that received nothing (the member's own mute was already
 /// `false`). Each lane mute is taken in turn. The same submission un-mutes `bass` (no VCA) on both
-/// lanes: `drums`' queue takes two records (the split) and `bass`' takes one.
+/// lanes: each strip's two mute cells take a write (#1312: a cell has no queue slot a split could
+/// double).
 ///
 /// Test value: red if a `Both` kind 4 stages one record from the first covered lane's effective
 /// mute, which re-opens a VCA-muted right lane, or silences an un-muted right lane while its
-/// follow send stays open; or if every `Both` kind 4 splits, doubling fader-queue use for every
-/// both-lanes mute.
+/// follow send stays open.
 #[test]
 fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
     for vca_mutes in [[true, false], [false, true]] {
@@ -13633,7 +13491,7 @@ fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
             false,
             "warm-up",
         );
-        let room = follow_fader_room(&live);
+        let writes = follow_fader_room(&live);
         stage_lane_mute(&mut live, 0, SOLO_FOLLOW_DRUMS, 2, false, 0);
         stage_lane_mute(&mut live, 1, 0, 2, false, 0);
         assert_eq!(
@@ -13642,8 +13500,10 @@ fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
             "un-mute drums and bass, both lanes"
         );
         let after = follow_fader_room(&live);
-        assert_eq!(room[1] - after[1], 2, "split: two records on drums");
-        assert_eq!(room[0] - after[0], 1, "agree: one record on bass");
+        // Drums split into two lane records and bass takes one both-lane record; each writes the
+        // two mute cells once, since a cell has no queue slot a split could double.
+        assert_eq!(after[1] - writes[1], 2, "drums: both mute cells");
+        assert_eq!(after[0] - writes[0], 2, "bass: both mute cells");
         let solo = &live.ready.as_ref().expect("ready").solo;
         let drums = SOLO_FOLLOW_DRUMS as usize;
         for (lane, &vca_muted) in vca_mutes.iter().enumerate() {
@@ -14074,10 +13934,10 @@ fn vca_solo_mirror(host: &AudioWorkletEngineHost) -> Vec<[bool; 4]> {
         .collect()
 }
 
-/// Everything a refused submission must leave as it was: every fader and send queue's room, the
-/// VCA state, the strip-mute owner and the send mirror.
+/// Everything a refused submission must leave as it was: every fader cell's write count, every send
+/// queue's room, the VCA state, the strip-mute owner and the send mirror.
 type VcaSnapshot = (
-    Vec<usize>,
+    Vec<u64>,
     Vec<usize>,
     Vec<([u32; 2], [bool; 2])>,
     Vec<[bool; 4]>,
@@ -14637,19 +14497,155 @@ fn a_vca_move_that_changes_no_effective_value_stages_nothing() {
     ));
 }
 
+/// Issue #1312 gate 9: a refused browser batch leaves no trace in the strips' cells or the plan's
+/// gate. Batch 1 is a fader edit on strip `t1` and an effect-bypass record whose queue is full, so
+/// the batch's last check refuses it; batch 2 is a fader edit on strip `t2` and is admitted. Two
+/// blocks render: `t2`'s edit is heard, `t1`'s never is, and no debug assertion of the revision
+/// gate's pin fires, in a debug build (this one).
+///
+/// The twin took batch 2 alone and must render the same bits; a control host that was handed
+/// `t1`'s edit in an admitted batch must not, so the comparison is not vacuous.
+///
+/// Test value: a browser path that writes a cell or takes its stamp before the batch's last
+/// check. Gate 2 sees only the C ABI, and no other browser test covers cell writes: a write moved
+/// before the check is heard through the next batch's publication, and a stamp taken before the
+/// check trips the pin's open-stamp assertion when batch 2 stamps a higher revision.
+#[test]
+fn a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone() {
+    const DEPTH: u64 = 4;
+    let boot = || {
+        let mut host = strip_boot(
+            &seeded_send_document(&seeded_send_values(), true),
+            strip_options(DEPTH, 0, 0),
+        );
+        send_render(&mut host, 0);
+        // Fill t0's insert queue: the bypass record in batch 1 meets a full queue.
+        for index in 0..DEPTH as usize {
+            stage_command(
+                &mut host,
+                index,
+                COMMAND_EFFECT_BYPASS,
+                RACK_INSERTS,
+                255,
+                0,
+                0,
+                0,
+                0,
+                [(index % 2) as f32, 0.0, 0.0, 0.0],
+            );
+        }
+        assert_eq!(host.submit_commands(DEPTH as u32), RESULT_OK, "fill");
+        host
+    };
+    let fader = |host: &mut AudioWorkletEngineHost, index: usize, track: u32, db: f32| {
+        stage_command(
+            host,
+            index,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            track,
+            0,
+            0,
+            0,
+            [db, 0.0, 0.0, 0.0],
+        );
+    };
+    let refused_bypass = |host: &mut AudioWorkletEngineHost, index: usize| {
+        stage_command(
+            host,
+            index,
+            COMMAND_EFFECT_BYPASS,
+            RACK_INSERTS,
+            255,
+            0,
+            0,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+    };
+
+    let mut subject = boot();
+    let mut twin = boot();
+    let mut leaked = boot();
+    let cells = |host: &AudioWorkletEngineHost| -> Vec<[u64; 4]> {
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .controls
+            .iter()
+            .map(|control| control.fader.test_only_write_counts())
+            .collect()
+    };
+    let published = |host: &AudioWorkletEngineHost| {
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .plan_gate
+            .last_published()
+    };
+
+    // Batch 1: t1's fader edit, then the bypass record that meets the full queue.
+    fader(&mut subject, 0, 1, -18.0);
+    refused_bypass(&mut subject, 1);
+    assert_eq!(subject.submit_commands(2), RESULT_BACKPRESSURE);
+    assert_eq!(subject.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(subject.command_report().rejected_index, 1);
+    assert_eq!(subject.command_report().admitted, 0);
+    assert_eq!(
+        cells(&subject),
+        cells(&twin),
+        "the refused batch wrote no cell"
+    );
+    assert_eq!(
+        published(&subject),
+        published(&twin),
+        "the refused batch published no revision"
+    );
+
+    // Batch 2: t2's fader edit, admitted on the subject, the twin and the control host; the control
+    // host was also handed t1's edit, admitted.
+    fader(&mut leaked, 0, 1, -18.0);
+    assert_eq!(leaked.submit_commands(1), RESULT_OK);
+    for host in [&mut subject, &mut twin, &mut leaked] {
+        fader(host, 0, 2, -6.0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "batch 2");
+    }
+    assert_eq!(
+        published(&subject),
+        published(&twin),
+        "batch 2 took the same revision on the subject and the twin"
+    );
+    let mut audible = false;
+    for block in 1..3_u64 {
+        let heard = send_render(&mut subject, block);
+        assert_eq!(
+            heard,
+            send_render(&mut twin, block),
+            "block {block}: only batch 2 is heard"
+        );
+        audible |= heard != send_render(&mut leaked, block);
+    }
+    assert!(
+        audible,
+        "t1's edit is audible, so the comparison can tell it was not applied"
+    );
+}
+
 /// Issue #1245 gate 4: all or nothing, at queue depth 4.
 ///
-/// * With `bass`'s fader queue full, a ride of VCA `band` (`bass`, `drums`) is typed backpressure
-///   at its wire index: nothing is pushed (not even `drums`' record) and the VCA, strip-mute and
-///   send mirrors are unchanged.
-/// * With `drums-verb`'s send queue full, a mute of `band`, whose follow records would land there,
-///   is refused the same way.
+/// With `drums-verb`'s send queue full, a mute of VCA `band` (`bass`, `drums`), whose follow
+/// records would land there, is typed backpressure at its wire index: nothing is pushed or
+/// written (not even the members' mute cells) and the VCA, strip-mute and send mirrors are
+/// unchanged. A ride into a member's fader is not such a case any more: a fader value is a
+/// latest-target cell with no room to overfill (#1312).
 ///
-/// After a render drains the queues, the identical submission is admitted and renders
+/// After a render drains the queue, the identical submission is admitted and renders
 /// bit-identically to a twin that never received the refused one.
 ///
-/// Test value: red if any record is pushed, or a mirror commits, before every destination's room
-/// is checked.
+/// Test value: red if any record is pushed or cell written, or a mirror commits, before every
+/// destination's room is checked.
 #[test]
 fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
     let model = vca_ride_model(
@@ -14659,45 +14655,6 @@ fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
     let mut live = vca_ride_host(&model, 4);
     let mut twin = vca_ride_host(&model, 4);
     vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
-    for host in [&mut live, &mut twin] {
-        for index in 0..4 {
-            stage_fader_db(host, index, VCA_BASS, 2, -2.0 - index as f32, 0);
-        }
-        assert_eq!(
-            host.submit_commands(4),
-            RESULT_OK,
-            "fill bass's fader queue"
-        );
-    }
-    assert_eq!(follow_fader_room(&live)[VCA_BASS as usize], 0);
-    stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, -9.0, 0);
-    assert_vca_refusal(
-        &mut live,
-        1,
-        RESULT_BACKPRESSURE,
-        COMMAND_REASON_BACKPRESSURE,
-        0,
-        "a ride into a full member queue",
-    );
-    vca_lockstep(
-        &mut [&mut live, &mut twin],
-        Some(1),
-        1,
-        1,
-        "after the refusal",
-    );
-    for host in [&mut live, &mut twin] {
-        stage_vca(host, 0, COMMAND_VCA_FADER_DB, 0, 2, -9.0, 0);
-        assert_eq!(host.submit_commands(1), RESULT_OK, "the identical ride");
-    }
-    assert!(vca_lockstep(
-        &mut [&mut live, &mut twin],
-        Some(1),
-        2,
-        2,
-        "the admitted ride vs twin"
-    ));
-
     for host in [&mut live, &mut twin] {
         for index in 0..4 {
             stage_send(
@@ -14728,7 +14685,7 @@ fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
     vca_lockstep(
         &mut [&mut live, &mut twin],
         Some(1),
-        4,
+        1,
         1,
         "after the refusal",
     );
@@ -14740,7 +14697,7 @@ fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
     assert!(vca_lockstep(
         &mut [&mut live, &mut twin],
         Some(1),
-        5,
+        2,
         3,
         "the admitted mute vs twin"
     ));
@@ -15152,15 +15109,17 @@ fn the_decode_staging_holds_a_full_batch_and_its_vca_records() {
         host.command_report().reason,
     );
     assert_eq!(host.command_report().admitted, MAXIMUM_COMMAND_RECORDS);
-    let owed: Vec<usize> = room
+    // Two fader records (the lanes differ), and for every strip but the soloed one a mute record
+    // for both lanes, which writes both mute cells.
+    let owed: Vec<u64> = room
         .iter()
         .enumerate()
-        .map(|(strip, room)| room - if strip == 0 { 2 } else { 3 })
+        .map(|(strip, writes)| writes + if strip == 0 { 2 } else { 4 })
         .collect();
     assert_eq!(
         follow_fader_room(&host),
         owed,
-        "two fader and one mute record each"
+        "two fader cells each, and both mute cells for every strip but the soloed one"
     );
 }
 

@@ -35,7 +35,8 @@ use effect_contract::{
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent, TailSamples,
 };
 use engine::realtime::{
-    Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
+    CellRead, CellReader, CellWriter, Consumer, DirtyReader, DirtyWord, LatestCell, LiveSnapshot,
+    LiveStamp, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
     bounded_spsc, bounded_spsc_retained_payload,
 };
 use graph::{
@@ -49,6 +50,8 @@ use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
 use session::{CompiledSession, MatrixOrPan, StripRef, Track};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -99,8 +102,9 @@ pub struct SelectedMeterRequest {
 /// matrix stage and nothing else, because a bounded SPSC queue has exactly one consumer and the
 /// matrix stage is a different graph node from the fader and the input chain.
 ///
-/// The record is `Copy` and fixed-size, so the queue is a plain `bounded_spsc` and the render-side
-/// drain allocates nothing.
+/// The record is `Copy` and fixed-size. Since #1312 it is the value written to the strip's
+/// latest-target matrix cell ([`MatrixCells::write`]), not an element of a queue: the cell holds
+/// the newest value, the render-side drain allocates nothing, and a write has no room to want.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackControlRecord {
     /// New 2x2 target, already domain-checked by the producer.
@@ -111,12 +115,13 @@ pub struct TrackControlRecord {
 
 /// One live-control fader or mute record for a track's fader/mute stage (issue #140 B).
 ///
-/// # Why this is a second record type and a second queue
+/// # Why this is a second record type and a second set of cells
 ///
-/// The matrix stage and the fader stage are two different graph nodes, so one SPSC queue cannot
-/// serve both -- a queue has exactly one consumer, and that consumer is the processor bound to the
-/// node. `TrackControlRecord` therefore stays exactly the 20-byte matrix record #137 froze, and
-/// this rides its own bounded queue to `TrackStage::PostFader`.
+/// The matrix stage and the fader stage are two different graph nodes, so one lane cannot serve
+/// both -- a lane has exactly one reader, and that reader is the processor bound to the node.
+/// `TrackControlRecord` therefore stays exactly the 20-byte matrix record #137 froze, and this
+/// is written to its own four latest-target cells (fader left and right, mute left and right,
+/// [`FaderCells::write`]) read by `TrackStage::PostFader` (#1312: it was a bounded queue before).
 ///
 /// `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget` in
 /// `BUILTIN_PARAMETER_DESCRIPTORS`. (This paragraph read "still declare `PreparedOnly`" until
@@ -234,8 +239,13 @@ impl LiveControlRecord for TrackInputRecord {
 pub struct TrackControlRequest {
     /// Session-stable track identity. It must name a track of the compiled session.
     pub track_id: String,
-    /// Exact bounded depth of this track's control queue. A full queue is typed backpressure.
+    /// Exact bounded depth of this track's input queue (the input lane's ring, #210 phase 3). A
+    /// full queue is typed backpressure. The fader and matrix lanes are latest-target cells and
+    /// have no depth (#1312).
     pub queue_capacity: NonZeroUsize,
+    /// The session's `live_values_superseded` count, which this strip's cell readers add to
+    /// (#1312 D2). Every request of one session carries clones of one count.
+    pub superseded: LiveValuesSuperseded,
     /// Whether the strip also gets the live input trim/polarity/filter lane (#1254 D1).
     ///
     /// `true` attaches all three lanes, as every request did before #1254. `false` attaches only
@@ -245,24 +255,389 @@ pub struct TrackControlRequest {
     pub input_lane: bool,
 }
 
+/// The session's count of live values a later write replaced before render read them (D15-2,
+/// #1312 D2): `live_values_superseded`.
+///
+/// One per session, shared by every plan the session prepares. Render is its only writer, with a
+/// load, a saturating add and a store (never a read-modify-write: a plan swap hands render from
+/// one plan to the next on the same single render thread, so two writers never overlap); control
+/// reads it. A clone shares the count.
+#[derive(Clone, Debug, Default)]
+pub struct LiveValuesSuperseded(Arc<AtomicU64>);
+
+impl LiveValuesSuperseded {
+    /// A count at zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Exact bytes of the one allocation a count retains: the word with the shared-owner header.
+    /// A host that makes a count per plan charges it to that plan's row; a host that makes one per
+    /// session charges it once (#1312 D2).
+    #[must_use]
+    pub fn retained_bytes() -> u64 {
+        u64::try_from(core::alloc::Layout::new::<SharedAllocation<AtomicU64>>().size())
+            .expect("a count allocation's size fits u64")
+    }
+
+    /// Control: the writes counted so far.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.0.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Render: add `count` replaced writes. Saturating. Render is the only writer.
+    // REALTIME_POLICY_BEGIN
+    fn add(&self, count: u64) {
+        if count != 0 {
+            let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+            self.0.store(
+                now.saturating_add(count),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+impl PartialEq for LiveValuesSuperseded {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LiveValuesSuperseded {}
+
+/// Words of one fader or mute cell: the value (`fader_db` bits, or `0`/`1`) and the ramp window.
+const FADER_CELL_WORDS: usize = 2;
+/// Words of the matrix cell: `ll`, `lr`, `rl`, `rr` bits and the ramp window.
+const MATRIX_CELL_WORDS: usize = 5;
+/// Cells of one fader stage: fader left, fader right, mute left, mute right. The cell index is
+/// its dirty bit, and the stage's canonical drain order (#1312 D4).
+const FADER_CELLS: usize = 4;
+const FADER_LEFT: usize = 0;
+const MUTE_LEFT: usize = 2;
+
+/// What one strip's fader/mute stage shares between its writer (control) and its reader (render):
+/// four latest-target cells and their one dirty word (#1312 D3).
+struct FaderLane {
+    cells: [LatestCell<FADER_CELL_WORDS>; FADER_CELLS],
+    dirty: DirtyWord,
+}
+
+impl FaderLane {
+    fn new() -> Self {
+        Self {
+            cells: core::array::from_fn(|_| LatestCell::new()),
+            dirty: DirtyWord::new(),
+        }
+    }
+}
+
+/// What one strip's matrix/pan stage shares between its writer and its reader: one cell and its
+/// dirty word (#1312 D3).
+struct MatrixLane {
+    cell: LatestCell<MATRIX_CELL_WORDS>,
+    dirty: DirtyWord,
+}
+
+impl MatrixLane {
+    fn new() -> Self {
+        Self {
+            cell: LatestCell::new(),
+            dirty: DirtyWord::new(),
+        }
+    }
+}
+
+/// The layout of an `Arc<T>` allocation: the two counts, then `T` (the allocation `Arc::new`
+/// makes). The resource plan charges each lane by it.
+#[repr(C)]
+struct SharedAllocation<T> {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    value: T,
+}
+
+/// Control's write end of one strip's fader/mute cells (#1312 D5). A write cannot fail and never
+/// waits.
+pub struct FaderCells {
+    lane: Arc<FaderLane>,
+    writers: [CellWriter<FADER_CELL_WORDS>; FADER_CELLS],
+}
+
+impl FaderCells {
+    /// Write `record` as the newest value of the cell(s) it addresses, stamped with the revision
+    /// of the transaction that commits it. A `Both` record writes the left and the right cell.
+    ///
+    /// The caller publishes the stamp's revision on the plan's gate after every write of the
+    /// transaction (#1312 D7); a value is not applied before that.
+    pub fn write(&mut self, stamp: LiveStamp<'_>, record: TrackFaderRecord) {
+        let (base, words, lanes) = match record {
+            TrackFaderRecord::FaderDb {
+                lanes,
+                db,
+                smoothing_samples,
+            } => (FADER_LEFT, [db.to_bits(), smoothing_samples], lanes),
+            TrackFaderRecord::Mute {
+                lanes,
+                muted,
+                smoothing_samples,
+            } => (MUTE_LEFT, [u32::from(muted), smoothing_samples], lanes),
+        };
+        let cells = match lanes {
+            BuiltinLaneSelector::Left => base..=base,
+            BuiltinLaneSelector::Right => base + 1..=base + 1,
+            BuiltinLaneSelector::Both => base..=base + 1,
+        };
+        for index in cells {
+            // `index` is below `FADER_CELLS`, so it is a valid dirty bit.
+            self.writers[index].write(
+                &self.lane.cells[index],
+                &self.lane.dirty,
+                index as u32,
+                stamp,
+                words,
+            );
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FaderCells {
+    /// Test-only: how many writes each cell has taken (fader left, fader right, mute left, mute
+    /// right). Valid while no write is in flight, which a quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_counts(&self) -> [u64; FADER_CELLS] {
+        core::array::from_fn(|index| {
+            CellReader::new()
+                .peek_unread(&self.lane.cells[index])
+                .map_or(0, |(_, sequence)| sequence)
+        })
+    }
+}
+
+/// Control's write end of one strip's matrix/pan cell (#1312 D5).
+pub struct MatrixCells {
+    lane: Arc<MatrixLane>,
+    writer: CellWriter<MATRIX_CELL_WORDS>,
+}
+
+impl MatrixCells {
+    /// Write `record` as the newest matrix target, stamped with the revision of the transaction
+    /// that commits it. A write cannot fail and never waits.
+    pub fn write(&mut self, stamp: LiveStamp<'_>, record: TrackControlRecord) {
+        let matrix = record.matrix;
+        self.writer.write(
+            &self.lane.cell,
+            &self.lane.dirty,
+            0,
+            stamp,
+            [
+                matrix.ll.to_bits(),
+                matrix.lr.to_bits(),
+                matrix.rl.to_bits(),
+                matrix.rr.to_bits(),
+                record.smoothing_samples,
+            ],
+        );
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MatrixCells {
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_count(&self) -> u64 {
+        CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
+    }
+}
+
+/// Render's read end of one strip's fader/mute cells: the cells' readers, the stage's deferred
+/// mask and the session counter (#1312 D3).
+struct FaderReader {
+    lane: Arc<FaderLane>,
+    cells: [CellReader; FADER_CELLS],
+    dirty: DirtyReader,
+    superseded: LiveValuesSuperseded,
+}
+
+/// Which cell kind a drain applies.
+#[derive(Clone, Copy)]
+enum FaderKind {
+    Fader,
+    Mute,
+}
+
+// REALTIME_POLICY_BEGIN
+impl FaderReader {
+    /// Read the stage's pending cells under `snapshot` and apply them in the canonical order
+    /// (#1312 D4): fader before mute, left before right. When both channel cells of a kind were
+    /// applied in this drain with equal words, `apply` is called once with `Both`; a cell that
+    /// read `Unchanged` is not paired.
+    ///
+    /// Every applied value is applied even if an earlier one is refused; the first refusal is
+    /// returned after the last. The count of writes the reads replaced is added to the session
+    /// counter once. It allocates nothing and takes no lock.
+    fn drain(
+        &mut self,
+        snapshot: LiveSnapshot,
+        mut apply: impl FnMut(
+            FaderKind,
+            BuiltinLaneSelector,
+            [u32; FADER_CELL_WORDS],
+        ) -> Result<(), BuiltinParameterError>,
+    ) -> Result<(), BuiltinParameterError> {
+        let pending = self.dirty.pending(&self.lane.dirty);
+        if pending == 0 {
+            return Ok(());
+        }
+        let mut applied = [None; FADER_CELLS];
+        let mut superseded = 0_u64;
+        for (index, slot) in applied.iter_mut().enumerate() {
+            if pending & (1 << index) == 0 {
+                continue;
+            }
+            if let CellRead::Applied {
+                words,
+                superseded: replaced,
+                ..
+            } = self.cells[index].read(
+                &self.lane.cells[index],
+                snapshot,
+                &mut self.dirty,
+                index as u32,
+            ) {
+                superseded = superseded.saturating_add(replaced);
+                *slot = Some(words);
+            }
+        }
+        self.superseded.add(superseded);
+        let mut first_error = Ok(());
+        for (kind, base) in [(FaderKind::Fader, FADER_LEFT), (FaderKind::Mute, MUTE_LEFT)] {
+            let mut run = |selector, words| {
+                // Every value is applied; the first refusal is the one returned.
+                first_error = first_error.and(apply(kind, selector, words));
+            };
+            match (applied[base], applied[base + 1]) {
+                (Some(left), Some(right)) if left == right => {
+                    run(BuiltinLaneSelector::Both, left);
+                }
+                (left, right) => {
+                    if let Some(left) = left {
+                        run(BuiltinLaneSelector::Left, left);
+                    }
+                    if let Some(right) = right {
+                        run(BuiltinLaneSelector::Right, right);
+                    }
+                }
+            }
+        }
+        first_error
+    }
+}
+// REALTIME_POLICY_END
+
+/// Render's read end of one strip's matrix/pan cell.
+struct MatrixReader {
+    lane: Arc<MatrixLane>,
+    cell: CellReader,
+    dirty: DirtyReader,
+    superseded: LiveValuesSuperseded,
+}
+
+// REALTIME_POLICY_BEGIN
+impl MatrixReader {
+    /// Read the stage's pending cell under `snapshot` and apply its newest value in range, if
+    /// any. The first refusal is returned; the replaced count is added to the session counter.
+    fn drain(
+        &mut self,
+        snapshot: LiveSnapshot,
+        mut apply: impl FnMut(Matrix2x2, u32) -> Result<(), BuiltinParameterError>,
+    ) -> Result<(), BuiltinParameterError> {
+        let pending = self.dirty.pending(&self.lane.dirty);
+        if pending == 0 {
+            return Ok(());
+        }
+        let CellRead::Applied {
+            words, superseded, ..
+        } = self
+            .cell
+            .read(&self.lane.cell, snapshot, &mut self.dirty, 0)
+        else {
+            return Ok(());
+        };
+        self.superseded.add(superseded);
+        apply(
+            Matrix2x2 {
+                ll: f32::from_bits(words[0]),
+                lr: f32::from_bits(words[1]),
+                rl: f32::from_bits(words[2]),
+                rr: f32::from_bits(words[3]),
+            },
+            words[4],
+        )
+    }
+}
+// REALTIME_POLICY_END
+
+/// One strip's fader/mute lane, as its two ends: control's writers and render's reader.
+fn fader_lane(superseded: &LiveValuesSuperseded) -> (FaderCells, FaderReader) {
+    let lane = Arc::new(FaderLane::new());
+    (
+        FaderCells {
+            lane: Arc::clone(&lane),
+            writers: core::array::from_fn(|_| CellWriter::new()),
+        },
+        FaderReader {
+            lane,
+            cells: core::array::from_fn(|_| CellReader::new()),
+            dirty: DirtyReader::new(),
+            superseded: superseded.clone(),
+        },
+    )
+}
+
+/// One strip's matrix/pan lane, as its two ends.
+fn matrix_lane(superseded: &LiveValuesSuperseded) -> (MatrixCells, MatrixReader) {
+    let lane = Arc::new(MatrixLane::new());
+    (
+        MatrixCells {
+            lane: Arc::clone(&lane),
+            writer: CellWriter::new(),
+        },
+        MatrixReader {
+            lane,
+            cell: CellReader::new(),
+            dirty: DirtyReader::new(),
+            superseded: superseded.clone(),
+        },
+    )
+}
+
 /// The control-side producer half of one prepared live-control channel.
 ///
-/// The consumer half is owned by the track's matrix processor inside the render plan, exactly as
-/// `MeterConsumer` is the mirror image for metering. Each ring is an `Arc` shared by the producer
-/// and the consumer, so either may drop first: the last owner frees the ring, on the control
-/// thread, since the render thread never drops a plan.
+/// The fader/mute and matrix/pan halves are latest-target cells (#1312): a write cannot fail, and
+/// render applies the last committed value of each cell. The input half is still a bounded SPSC
+/// ring until #1346. Each is an `Arc` (or ring) shared by the producer and the consumer, so either
+/// may drop first: the last owner frees the storage, on the control thread, since the render
+/// thread never drops a plan.
 pub struct TrackControlProducer {
     /// Session-stable track identity this channel addresses.
     pub track_id: Box<str>,
-    /// Bounded producer endpoint for the matrix/pan stage; `try_push` returns the record on a
-    /// full queue.
-    pub producer: Producer<TrackControlRecord>,
-    /// Bounded producer endpoint for the fader/mute stage (issue #140 B), at the same depth.
+    /// The matrix/pan stage's cell writer (#137 D1, #1312 D5).
+    pub producer: MatrixCells,
+    /// The fader/mute stage's cell writers (issue #140 B, #1312 D5).
     ///
     /// It is a field of the same struct rather than a second vector so that "one track, one
     /// live-control channel" stays one object with one lifetime: all three halves are created
     /// together, handed to the caller together, and dropped together.
-    pub fader: Producer<TrackFaderRecord>,
+    pub fader: FaderCells,
     /// Bounded producer endpoint for the input trim/polarity stage (#210 phase 3), at the same
     /// depth, for the reason the field above states. `None` when the request set
     /// [`TrackControlRequest::input_lane`] to `false` (#1254 D1).
@@ -307,8 +682,8 @@ struct StripControlConsumers {
     /// side is also `None` from the start when the request had `input_lane: false` (#1254 D1);
     /// that strip's input section is then the plain one, banked or per node.
     input: Option<Consumer<TrackInputRecord>>,
-    fader: Option<Consumer<TrackFaderRecord>>,
-    matrix: Option<Consumer<TrackControlRecord>>,
+    fader: Option<FaderReader>,
+    matrix: Option<MatrixReader>,
 }
 
 /// Everything one track's fader and matrix stages need, before their binding form is decided.
@@ -532,8 +907,13 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
     /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
     /// documentation for why that ordering is the whole reason this is not folded into `process`.
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        let _ = first_sample;
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: engine::realtime::LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        // The trim and polarity lanes are queues: they ignore `S` until #1346 moves them to cells.
+        let _ = (first_sample, snapshot);
         self.drain_controls(false).map(|_| ()).map_err(render_error)
     }
 
@@ -724,10 +1104,27 @@ struct FaderBankProcessor {
     bank: BuiltinFaderBank,
     /// One channel per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
     /// so the lane index is the array index and no lane map is stored.
-    controls: Box<[Option<Consumer<TrackFaderRecord>>]>,
+    controls: Box<[Option<FaderReader>]>,
     process_calls: u64,
     frames_processed: u64,
     control_delivery: BuiltinControlDelivery,
+}
+
+impl FaderBankProcessor {
+    /// The block drain under `snapshot`: the body of `begin_block`.
+    fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let Self { bank, controls, .. } = self;
+        drain_fader_controls(bank, controls, snapshot)
+    }
+
+    /// Apply every pending value of every lane's cells, whatever its revision: the block drain
+    /// with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls it on a
+    /// quiescent predecessor before it exports a lane (#1277); no production render path takes
+    /// `ALL`.
+    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    fn apply_pending(&mut self) -> Result<(), RenderError> {
+        self.drain(LiveSnapshot::ALL)
+    }
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
@@ -743,6 +1140,15 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
+    /// The fader and mute cells' drain, before any lane of the block is dispatched (#1312 D12).
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        let _ = first_sample;
+        self.drain(snapshot)
+    }
     fn process(
         &mut self,
         left: &mut [f32],
@@ -751,8 +1157,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         first_sample: u64,
     ) -> Result<(), RenderError> {
         let _ = first_sample;
-        let Self { bank, controls, .. } = self;
-        drain_fader_controls(bank, controls)?;
+        let Self { bank, .. } = self;
         bank.process(left, right, frames);
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
@@ -786,10 +1191,24 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
 struct MatrixBankProcessor {
     bank: BuiltinMatrixBank,
     /// One channel per bank lane; `None` for a lane no live control addresses.
-    controls: Box<[Option<Consumer<TrackControlRecord>>]>,
+    controls: Box<[Option<MatrixReader>]>,
     process_calls: u64,
     frames_processed: u64,
     control_delivery: BuiltinControlDelivery,
+}
+
+impl MatrixBankProcessor {
+    /// The block drain under `snapshot`: the body of `begin_block`.
+    fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let Self { bank, controls, .. } = self;
+        drain_matrix_controls(bank, controls, snapshot)
+    }
+
+    /// The matrix cells' counterpart of [`FaderBankProcessor::apply_pending`].
+    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    fn apply_pending(&mut self) -> Result<(), RenderError> {
+        self.drain(LiveSnapshot::ALL)
+    }
 }
 
 impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
@@ -802,6 +1221,15 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
+    /// The matrix cell's drain, before any lane of the block is dispatched (#1312 D12).
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        let _ = first_sample;
+        self.drain(snapshot)
+    }
     fn process(
         &mut self,
         left: &mut [f32],
@@ -810,8 +1238,7 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
         first_sample: u64,
     ) -> Result<(), RenderError> {
         let _ = first_sample;
-        let Self { bank, controls, .. } = self;
-        drain_matrix_controls(bank, controls)?;
+        let Self { bank, .. } = self;
         bank.process(left, right, frames);
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
@@ -882,6 +1309,69 @@ struct TestOnlyInitialMatrixTrace {
     words: [[u32; 15]; SCALAR_STATE_TRACE_CAPACITY],
 }
 
+/// Test-only source of stamps: a gate that stamps the next revision for a write and publishes it
+/// when the write is done, as a transaction's commit does (#1312 D7).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub trait TestOnlyWriteGate {
+    /// Stamp the next revision, run `write` with the stamp, then publish that revision.
+    fn write_published<R>(&mut self, write: impl FnOnce(LiveStamp<'_>) -> R) -> R;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestOnlyWriteGate for engine::realtime::PlanRevisionGate {
+    fn write_published<R>(&mut self, write: impl FnOnce(LiveStamp<'_>) -> R) -> R {
+        let revision = self.last_published() + 1;
+        let stamp = self.stamp(revision).expect("a legal test revision");
+        let result = write(stamp);
+        self.publish(revision);
+        result
+    }
+}
+
+/// A gate with no plan, for tests that render a bound graph directly under
+/// [`LiveSnapshot::ALL`]: every write stamps the next revision and publishes it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct TestOnlyGate {
+    gate: engine::realtime::RevisionGate,
+    pin: engine::realtime::GatePin,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for TestOnlyGate {
+    fn default() -> Self {
+        let (gate, pin) = engine::realtime::RevisionGate::pair(0);
+        Self { gate, pin }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestOnlyGate {
+    /// A gate at revision 0.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The snapshot a block rendered now would take.
+    #[must_use]
+    pub fn snapshot(&self) -> LiveSnapshot {
+        self.gate.snapshot()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestOnlyWriteGate for TestOnlyGate {
+    fn write_published<R>(&mut self, write: impl FnOnce(LiveStamp<'_>) -> R) -> R {
+        let revision = self.pin.last_published() + 1;
+        let stamp = self.pin.stamp(revision).expect("a legal test revision");
+        let result = write(stamp);
+        self.pin.publish(&self.gate, revision);
+        result
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 const EMPTY_SCALAR_STATE_TRACE: TestOnlyScalarStateTrace = TestOnlyScalarStateTrace {
     fader_len: 0,
@@ -926,8 +1416,8 @@ pub struct TestOnlyFaderMatrixWitness {
     pub factory_calls: u64,
     pub process_members: u64,
     pub factory_members: u64,
-    pub fader_records_drained: u64,
-    pub matrix_records_drained: u64,
+    pub fader_values_applied: u64,
+    pub matrix_values_applied: u64,
     pub first_left_bits: u32,
     pub first_right_bits: u32,
     pub scalar_fader_words: [u32; 14],
@@ -969,8 +1459,8 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
         factory_calls: values[3],
         process_members: values[4],
         factory_members: values[5],
-        fader_records_drained: values[6],
-        matrix_records_drained: values[7],
+        fader_values_applied: values[6],
+        matrix_values_applied: values[7],
         first_left_bits: FADER_MATRIX_OUTPUT_WITNESS.with(std::cell::Cell::get)[0],
         first_right_bits: FADER_MATRIX_OUTPUT_WITNESS.with(std::cell::Cell::get)[1],
         scalar_fader_words: SCALAR_FADER_STATE_WITNESS.with(std::cell::Cell::get),
@@ -1069,76 +1559,63 @@ fn scalar_owner_id(track_id: &StableGraphId) -> u16 {
 }
 
 // REALTIME_POLICY_BEGIN
+/// Drain every lane's fader and mute cells into `bank` under the block's `snapshot` (#1312 D4,
+/// D12). Each lane reads and applies in the canonical order, an applied value is never lost to a
+/// refusal of another, and the first refusal is returned after the last lane.
 fn drain_fader_controls(
     bank: &mut BuiltinFaderBank,
-    controls: &mut [Option<Consumer<TrackFaderRecord>>],
+    controls: &mut [Option<FaderReader>],
+    snapshot: LiveSnapshot,
 ) -> Result<(), RenderError> {
+    let mut result = Ok(());
     for (lane, control) in controls.iter_mut().enumerate() {
         let Some(control) = control.as_mut() else {
             continue;
         };
-        // Pop only what was published at block entry: a record pushed while this drain runs
-        // waits for the next block, so the work stays bounded under a concurrent producer.
-        let available = control.available_at_entry();
-        for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
-                break;
-            };
+        let drained = control.drain(snapshot, |kind, lanes, words| {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
                 counters[6] = counters[6].saturating_add(1);
                 value.set(counters);
             });
-            match record {
-                TrackFaderRecord::FaderDb {
-                    lanes,
-                    db,
-                    smoothing_samples,
-                } => bank
-                    .set_fader_db(lane, lanes, db, smoothing_samples)
-                    .map_err(render_error)?,
-                TrackFaderRecord::Mute {
-                    lanes,
-                    muted,
-                    smoothing_samples,
-                } => bank
-                    .set_mute(lane, lanes, muted, smoothing_samples)
-                    .map_err(render_error)?,
+            match kind {
+                FaderKind::Fader => {
+                    bank.set_fader_db(lane, lanes, f32::from_bits(words[0]), words[1])
+                }
+                FaderKind::Mute => bank.set_mute(lane, lanes, words[0] != 0, words[1]),
             }
-        }
+        });
+        result = result.and(drained.map_err(render_error));
     }
-    Ok(())
+    result
 }
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
+/// The matrix counterpart of [`drain_fader_controls`].
 fn drain_matrix_controls(
     bank: &mut BuiltinMatrixBank,
-    controls: &mut [Option<Consumer<TrackControlRecord>>],
+    controls: &mut [Option<MatrixReader>],
+    snapshot: LiveSnapshot,
 ) -> Result<(), RenderError> {
+    let mut result = Ok(());
     for (lane, control) in controls.iter_mut().enumerate() {
         let Some(control) = control.as_mut() else {
             continue;
         };
-        // Pop only what was published at block entry: a record pushed while this drain runs
-        // waits for the next block, so the work stays bounded under a concurrent producer.
-        let available = control.available_at_entry();
-        for _ in 0..available {
-            let Ok(record) = control.try_pop() else {
-                break;
-            };
+        let drained = control.drain(snapshot, |target, smoothing_samples| {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
                 counters[7] = counters[7].saturating_add(1);
                 value.set(counters);
             });
-            bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples)
-                .map_err(render_error)?;
-        }
+            bank.set_target_smoothed(lane, target, smoothing_samples)
+        });
+        result = result.and(drained.map_err(render_error));
     }
-    Ok(())
+    result
 }
 // REALTIME_POLICY_END
 
@@ -1177,6 +1654,22 @@ fn make_fader_matrix(
     Ok(Box::new(FaderMatrixBankProcessor { fader, matrix }))
 }
 
+impl FaderMatrixBankProcessor {
+    /// The fused stage's block drain under `snapshot`: the fader stage's, then the matrix
+    /// stage's. A refusal of the first does not skip the second.
+    fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let fader = self.fader.drain(snapshot);
+        let matrix = self.matrix.drain(snapshot);
+        fader.and(matrix)
+    }
+
+    /// Both stages' [`FaderBankProcessor::apply_pending`] and its matrix counterpart.
+    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    fn apply_pending(&mut self) -> Result<(), RenderError> {
+        self.drain(LiveSnapshot::ALL)
+    }
+}
+
 impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -1186,6 +1679,16 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::BetweenRenderCalls
+    }
+    /// Both stages' drains, fader first (#1312 D12). Each stage applies everything it read; the
+    /// first refusal is returned after both.
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        let _ = first_sample;
+        self.drain(snapshot)
     }
     fn process(
         &mut self,
@@ -1204,13 +1707,6 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
             value.set(counters);
         });
         let Self { fader, matrix } = self;
-        drain_fader_controls(&mut fader.bank, &mut fader.controls)?;
-        if let Err(error) = drain_matrix_controls(&mut matrix.bank, &mut matrix.controls) {
-            fader.bank.process(left, right, frames);
-            fader.process_calls = fader.process_calls.saturating_add(1);
-            fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
-            return Err(error);
-        }
         if !fader
             .bank
             .try_process_settled_with_matrix(&mut matrix.bank, left, right, frames)
@@ -1333,8 +1829,8 @@ impl TestOnlyFaderMatrixPair {
 /// lane with no channel holds `None`. That is deliberate -- it is what makes a banked session's
 /// retained payload independent of whether the host leased live controls, rather than merely equal
 /// to what it was before live controls existed.
-fn strip_control_bytes<T: Copy + Send + 'static>(width: effect_contract::BankWidth) -> Option<u64> {
-    u64::try_from(core::mem::size_of::<Option<Consumer<T>>>())
+fn strip_control_bytes<T>(width: effect_contract::BankWidth) -> Option<u64> {
+    u64::try_from(core::mem::size_of::<Option<T>>())
         .ok()?
         .checked_mul(u64::from(width.lanes()))
 }
@@ -1350,12 +1846,12 @@ fn strip_processor_bytes(stage: TrackStage, width: effect_contract::BankWidth) -
     let inline = u64::try_from(inline).ok()?;
     match stage {
         TrackStage::PostInputBuiltins => {
-            inline.checked_add(strip_control_bytes::<TrackInputRecord>(width)?)
+            inline.checked_add(strip_control_bytes::<Consumer<TrackInputRecord>>(width)?)
         }
         TrackStage::PostFader => inline
-            .checked_add(strip_control_bytes::<TrackFaderRecord>(width)?)?
+            .checked_add(strip_control_bytes::<FaderReader>(width)?)?
             .checked_add(core::mem::size_of::<FaderMatrixBankProcessor>() as u64),
-        _ => inline.checked_add(strip_control_bytes::<TrackControlRecord>(width)?),
+        _ => inline.checked_add(strip_control_bytes::<MatrixReader>(width)?),
     }
 }
 
@@ -1857,6 +2353,29 @@ pub struct PreparedBuiltinsGraphBound {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub test_only_post_fader_node: Option<GraphNodeId>,
+    /// The plan's gate handle, taken by the first [`Self::test_only_write`].
+    #[cfg(any(test, feature = "test-support"))]
+    test_gate: Option<engine::realtime::PlanRevisionGate>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PreparedBuiltinsGraphBound {
+    /// Test-only: write the strips' cells as one transaction, stamped from the plan's own gate,
+    /// then publish its revision on that gate, as a commit does (#1312 D7). The plan's next block
+    /// takes a snapshot that covers it.
+    #[doc(hidden)]
+    pub fn test_only_write<R>(
+        &mut self,
+        write: impl FnOnce(&mut [TrackControlProducer], LiveStamp<'_>) -> R,
+    ) -> R {
+        let gate = self.test_gate.get_or_insert_with(|| {
+            self.plan
+                .take_revision_gate()
+                .expect("the bound plan's gate handle is untaken")
+        });
+        let controls = &mut self.track_controls;
+        gate.write_published(|stamp| write(controls, stamp))
+    }
 }
 
 /// A rejected external binding preserves the opaque artifact and caller-owned bindings.
@@ -2217,7 +2736,8 @@ impl PreparedBuiltinsSession {
             .map(|control| {
                 (
                     control.track_id.as_ref(),
-                    control.producer.capacity(),
+                    // The cells have no depth (#1312): only the input ring's is sealed.
+                    control.input.as_ref().map_or(0, Producer::capacity),
                     control.input.is_some(),
                 )
             })
@@ -2665,7 +3185,7 @@ impl PreparedBuiltinsSession {
                         })
                     }
                     TrackStage::PostFader => {
-                        let mut controls: Vec<Option<Consumer<TrackFaderRecord>>> =
+                        let mut controls: Vec<Option<FaderReader>> =
                             (0..lanes).map(|_| None).collect();
                         let mut parameters = Vec::with_capacity(members.len());
                         for (lane, member) in members.iter().enumerate() {
@@ -2689,7 +3209,7 @@ impl PreparedBuiltinsSession {
                         })
                     }
                     TrackStage::PostMatrix => {
-                        let mut controls: Vec<Option<Consumer<TrackControlRecord>>> =
+                        let mut controls: Vec<Option<MatrixReader>> =
                             (0..lanes).map(|_| None).collect();
                         let mut targets = Vec::with_capacity(members.len());
                         for (lane, member) in members.iter().enumerate() {
@@ -3112,6 +3632,8 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
                 .map(|selected| selected.buffer),
             #[cfg(feature = "test-support")]
             test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
+            #[cfg(any(test, feature = "test-support"))]
+            test_gate: None,
         }
     }
 
@@ -3574,11 +4096,16 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let effective_faders = session.normalized_model().effective_strip_faders();
     // The request index is a transient lookup, not retained storage, so it is built before the
     // phase-two observation that compares retained allocations with the report (#1254 gate 3).
-    let mut control_capacity: BTreeMap<&str, (NonZeroUsize, bool)> = BTreeMap::new();
+    let mut control_capacity: BTreeMap<&str, (NonZeroUsize, bool, &LiveValuesSuperseded)> =
+        BTreeMap::new();
     for control in controls {
         control_capacity.insert(
             control.track_id.as_str(),
-            (control.queue_capacity, control.input_lane),
+            (
+                control.queue_capacity,
+                control.input_lane,
+                &control.superseded,
+            ),
         );
     }
     // #1329 D7, Amendment 4 R7: each distinct input design's certified tail and rest bound is
@@ -3596,7 +4123,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let input_lane_live = |track_id: &str| {
         control_capacity
             .get(track_id)
-            .is_some_and(|(_, input_lane)| *input_lane)
+            .is_some_and(|(_, input_lane, _)| *input_lane)
     };
     let design_bounds = builtins::input_section_bounds(
         session.sample_rate().0,
@@ -3619,7 +4146,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let mut design_bounds = design_bounds.into_iter();
     let live_bound = control_capacity
         .values()
-        .any(|(_, input_lane)| *input_lane)
+        .any(|(_, input_lane, _)| *input_lane)
         .then(|| live_input_bound(session.sample_rate().0));
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
@@ -3671,13 +4198,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         };
         let control = match control_capacity.get(strip.id.as_str()) {
             None => None,
-            Some(&(capacity, input_lane)) => {
-                let (producer, control) =
-                    bounded_spsc::<TrackControlRecord>(capacity, QueueGeneration(0))
-                        .map_err(|_| control_failure())?;
-                let (fader_producer, fader_control) =
-                    bounded_spsc::<TrackFaderRecord>(capacity, QueueGeneration(0))
-                        .map_err(|_| control_failure())?;
+            Some(&(capacity, input_lane, superseded)) => {
+                let (producer, control) = matrix_lane(superseded);
+                let (fader_producer, fader_control) = fader_lane(superseded);
                 let (input_producer, input_control) = if input_lane {
                     let (producer, consumer) =
                         bounded_spsc::<TrackInputRecord>(capacity, QueueGeneration(0))
@@ -3704,7 +4227,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
                 });
                 control_seal.push((
                     Box::<str>::from(strip.id.as_str()),
-                    capacity.get(),
+                    if input_lane { capacity.get() } else { 0 },
                     input_lane,
                 ));
                 Some(StripControlConsumers {
@@ -3850,7 +4373,7 @@ fn resource_plan(
         // sections now live *inline* in the strip vector charged above rather than behind a `Box`,
         // so they are charged by that vector's layout and not per track. `controlled` therefore
         // changes no byte of the *section* storage, and the only live-control-dependent rows left
-        // are the two or three bounded rings charged below.
+        // are the input ring (until #1346) and the fader and matrix cells' `Arc`s charged below.
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
     add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
@@ -3864,45 +4387,28 @@ fn resource_plan(
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
     add_vector_layout::<(Box<str>, usize, bool)>(&mut processor, controls.len())?;
     for control in controls {
-        // Two or three bounded rings per controlled track at the same depth: #137 D1's matrix
-        // channel, #140 B's fader/mute channel and, when requested, #210 phase 3's input
-        // trim/polarity channel. All of them are charged here, in the same accumulator, for the same reason -- they are per-track
-        // processor storage, not meter storage.
-        let matrix_queue = bounded_spsc_retained_payload::<TrackControlRecord>(
-            control.queue_capacity,
-        )
-        .map_err(|_| {
-            diag(
-                "builtin.resource.arithmetic_overflow",
-                &control_path(control),
-            )
-        })?;
-        let fader_queue = bounded_spsc_retained_payload::<TrackFaderRecord>(control.queue_capacity)
-            .map_err(|_| {
+        // #1312 D5: the fader/mute and matrix/pan lanes are latest-target cells, one `Arc`
+        // allocation each, charged by the allocation's own layout. Only the input lane (#210
+        // phase 3, until #1346) is still a bounded ring, charged here when requested (#1254 D1).
+        for layout in [
+            core::alloc::Layout::new::<SharedAllocation<MatrixLane>>(),
+            core::alloc::Layout::new::<SharedAllocation<FaderLane>>(),
+        ] {
+            processor.add_layout(layout).ok_or_else(|| {
                 diag(
                     "builtin.resource.arithmetic_overflow",
                     &control_path(control),
                 )
             })?;
-        // #1254 D1: the input ring exists, and is charged, only when the request asked for it.
-        let input_queue = if control.input_lane {
-            Some(
-                bounded_spsc_retained_payload::<TrackInputRecord>(control.queue_capacity).map_err(
-                    |_| {
-                        diag(
-                            "builtin.resource.arithmetic_overflow",
-                            &control_path(control),
-                        )
-                    },
-                )?,
-            )
-        } else {
-            None
-        };
-        for queue in [Some(matrix_queue), Some(fader_queue), input_queue]
-            .into_iter()
-            .flatten()
-        {
+        }
+        if control.input_lane {
+            let queue = bounded_spsc_retained_payload::<TrackInputRecord>(control.queue_capacity)
+                .map_err(|_| {
+                diag(
+                    "builtin.resource.arithmetic_overflow",
+                    &control_path(control),
+                )
+            })?;
             processor
                 .add_layout(
                     core::alloc::Layout::from_size_align(
@@ -4409,7 +4915,7 @@ impl GraphRuntimeProcessor for LiveControlInputProcessor {
 #[cfg(any(test, feature = "test-support"))]
 struct LiveControlMatrixProcessor {
     matrix: MatrixBuiltins,
-    control: Consumer<TrackControlRecord>,
+    control: MatrixReader,
     control_delivery: BuiltinControlDelivery,
     #[cfg(any(test, feature = "test-support"))]
     test_only_owner: u16,
@@ -4427,7 +4933,7 @@ impl Drop for LiveControlMatrixProcessor {
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        self.drain_controls().inspect_err(|_| {
+        self.drain_controls(block.live_snapshot).inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             record_scalar_matrix_state(self.test_only_owner, &self.matrix);
         })?;
@@ -4441,23 +4947,27 @@ impl GraphRuntimeProcessor for LiveControlMatrixProcessor {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl LiveControlMatrixProcessor {
-    fn drain_controls(&mut self) -> Result<(), RenderError> {
-        let available = self.control.available_at_entry();
-        for _ in 0..available {
-            let Ok(record) = self.control.try_pop() else {
-                break;
-            };
-            #[cfg(any(test, feature = "test-support"))]
-            FADER_MATRIX_LIVE_WITNESS.with(|value| {
-                let mut counters = value.get();
-                counters[7] = counters[7].saturating_add(1);
-                value.set(counters);
-            });
-            self.matrix
-                .set_target_smoothed(record.matrix, record.smoothing_samples)
-                .map_err(render_error)?;
-        }
-        Ok(())
+    /// The matrix cell's drain under the block's `snapshot` (#1312 D12).
+    fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let matrix = &mut self.matrix;
+        self.control
+            .drain(snapshot, |target, smoothing_samples| {
+                #[cfg(any(test, feature = "test-support"))]
+                FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                    let mut counters = value.get();
+                    counters[7] = counters[7].saturating_add(1);
+                    value.set(counters);
+                });
+                matrix.set_target_smoothed(target, smoothing_samples)
+            })
+            .map_err(render_error)
+    }
+
+    /// Apply every pending value, whatever its revision (#1312 D6): the block drain with
+    /// [`LiveSnapshot::ALL`].
+    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    fn apply_pending(&mut self) -> Result<(), RenderError> {
+        self.drain_controls(LiveSnapshot::ALL)
     }
 }
 /// The fader/mute stage of one track that live controls drive (issue #140 B).
@@ -4470,7 +4980,7 @@ impl LiveControlMatrixProcessor {
 #[cfg(any(test, feature = "test-support"))]
 struct LiveControlFaderProcessor {
     fader: FaderMuteRampBuiltins,
-    control: Consumer<TrackFaderRecord>,
+    control: FaderReader,
     control_delivery: BuiltinControlDelivery,
     #[cfg(any(test, feature = "test-support"))]
     test_only_owner: u16,
@@ -4488,7 +4998,7 @@ impl Drop for LiveControlFaderProcessor {
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        self.drain_controls().inspect_err(|_| {
+        self.drain_controls(block.live_snapshot).inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             record_scalar_fader_state(self.test_only_owner, &self.fader);
         })?;
@@ -4511,35 +5021,35 @@ impl GraphRuntimeProcessor for LiveControlFaderProcessor {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl LiveControlFaderProcessor {
-    fn drain_controls(&mut self) -> Result<(), RenderError> {
-        let available = self.control.available_at_entry();
-        for _ in 0..available {
-            let Ok(record) = self.control.try_pop() else {
-                break;
-            };
-            #[cfg(any(test, feature = "test-support"))]
-            FADER_MATRIX_LIVE_WITNESS.with(|value| {
-                let mut counters = value.get();
-                counters[6] = counters[6].saturating_add(1);
-                value.set(counters);
-            });
-            match record {
-                TrackFaderRecord::FaderDb {
-                    lanes,
-                    db,
-                    smoothing_samples,
-                } => self
-                    .fader
-                    .set_fader_db(lanes, db, smoothing_samples)
-                    .map_err(render_error)?,
-                TrackFaderRecord::Mute {
-                    lanes,
-                    muted,
-                    smoothing_samples,
-                } => self.fader.set_mute(lanes, muted, smoothing_samples),
-            }
-        }
-        Ok(())
+    /// The fader and mute cells' drain under the block's `snapshot` (#1312 D12).
+    fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let fader = &mut self.fader;
+        self.control
+            .drain(snapshot, |kind, lanes, words| {
+                #[cfg(any(test, feature = "test-support"))]
+                FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                    let mut counters = value.get();
+                    counters[6] = counters[6].saturating_add(1);
+                    value.set(counters);
+                });
+                match kind {
+                    FaderKind::Fader => {
+                        fader.set_fader_db(lanes, f32::from_bits(words[0]), words[1])
+                    }
+                    FaderKind::Mute => {
+                        fader.set_mute(lanes, words[0] != 0, words[1]);
+                        Ok(())
+                    }
+                }
+            })
+            .map_err(render_error)
+    }
+
+    /// Apply every pending value, whatever its revision (#1312 D6): the block drain with
+    /// [`LiveSnapshot::ALL`].
+    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    fn apply_pending(&mut self) -> Result<(), RenderError> {
+        self.drain_controls(LiveSnapshot::ALL)
     }
 }
 
@@ -4581,8 +5091,9 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             left,
             right,
             first_sample,
+            live_snapshot,
         } = block;
-        self.fader.drain_controls().inspect_err(|_| {
+        self.fader.drain_controls(live_snapshot).inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             record_scalar_state(
                 self.fader.test_only_owner,
@@ -4595,7 +5106,7 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
         let fused = {
             let mut fused_block =
                 DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
-            let matrix_error = self.matrix.drain_controls().err();
+            let matrix_error = self.matrix.drain_controls(live_snapshot).err();
             if let Some(error) = matrix_error {
                 // Preserve the original failure order: the fader arithmetic completes even when
                 // a later matrix command is invalid.
@@ -4707,18 +5218,21 @@ impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
             counters[4] = counters[4].saturating_add(1);
             value.set(counters);
         });
-        self.fader.drain_controls().inspect_err(|_| {
-            #[cfg(any(test, feature = "test-support"))]
-            record_scalar_state(
-                self.fader.test_only_owner,
-                &self.fader.fader,
-                &self.matrix.matrix,
-            );
-        })?;
+        self.fader
+            .drain_controls(block.live_snapshot)
+            .inspect_err(|_| {
+                #[cfg(any(test, feature = "test-support"))]
+                record_scalar_state(
+                    self.fader.test_only_owner,
+                    &self.fader.fader,
+                    &self.matrix.matrix,
+                );
+            })?;
         let GraphBindingBlock {
             left,
             right,
             first_sample,
+            live_snapshot: _,
         } = block;
         // Validate the envelope before recording deferred state. A malformed fader block must
         // leave the later matrix consumer untouched and cannot leave a completion to run after
@@ -4750,8 +5264,9 @@ impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
             left,
             right,
             first_sample,
+            live_snapshot,
         } = block;
-        if let Err(error) = self.matrix.drain_controls() {
+        if let Err(error) = self.matrix.drain_controls(live_snapshot) {
             if self.pending_fader {
                 self.fader.fader.process_pending(left, right);
                 self.pending_fader = false;
@@ -5226,6 +5741,8 @@ mod tests {
         PreparedPorts, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
         StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
+    #[cfg(test)]
+    use engine::realtime::LiveSnapshot;
     use engine::{QuantumFrames, SampleRateHz};
     use graph::{
         EffectNodeId, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId,
@@ -6597,6 +7114,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect::<Vec<_>>();
@@ -7003,6 +7521,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(8).expect("queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect::<Vec<_>>();
@@ -7467,6 +7986,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(8).expect("queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: false,
             })
             .collect::<Vec<_>>();
@@ -7539,26 +8059,30 @@ mod tests {
                     .iter()
                     .all(|control| control.input.is_none())
             );
-            bound.track_controls[0]
-                .fader
-                .try_push(TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Left,
-                    muted: true,
-                    smoothing_samples: 0,
-                })
-                .expect("fader queue room");
-            bound.track_controls[1]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix: Matrix2x2 {
-                        ll: 0.5,
-                        lr: 0.25,
-                        rl: -0.5,
-                        rr: 0.75,
+            bound.test_only_write(|controls, stamp| {
+                controls[0].fader.write(
+                    stamp,
+                    TrackFaderRecord::Mute {
+                        lanes: BuiltinLaneSelector::Left,
+                        muted: true,
+                        smoothing_samples: 0,
                     },
-                    smoothing_samples: 0,
-                })
-                .expect("matrix queue room");
+                )
+            });
+            bound.test_only_write(|controls, stamp| {
+                controls[1].producer.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix: Matrix2x2 {
+                            ll: 0.5,
+                            lr: 0.25,
+                            rl: -0.5,
+                            rr: 0.75,
+                        },
+                        smoothing_samples: 0,
+                    },
+                )
+            });
             let mut bits = Vec::new();
             for block in 0..4_u64 {
                 bits.extend(render_bound(&mut bound, block * HARNESS_QUANTUM as u64));
@@ -7621,10 +8145,7 @@ mod tests {
         // settled pair (always fused: nothing is queued for it) on top of track 1's branch.
         assert_eq!((selected.factory_calls, selected.factory_members), (2, 2));
         assert_eq!(
-            (
-                settled.fader_records_drained,
-                settled.matrix_records_drained
-            ),
+            (settled.fader_values_applied, settled.matrix_values_applied),
             (0, 0)
         );
 
@@ -7642,7 +8163,7 @@ mod tests {
         ];
         for record in fader_fifo {
             for bound in [&mut paired, &mut separate] {
-                bound.track_controls[1].fader.try_push(record).unwrap();
+                bound.test_only_write(|controls, stamp| controls[1].fader.write(stamp, record));
             }
         }
         let matrix_now = TrackControlRecord {
@@ -7655,10 +8176,7 @@ mod tests {
             smoothing_samples: 0,
         };
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1]
-                .producer
-                .try_push(matrix_now)
-                .unwrap();
+            bound.test_only_write(|controls, stamp| controls[1].producer.write(stamp, matrix_now));
         }
         let immediate = render_scalar_pair_and_compare(
             &mut paired,
@@ -7669,12 +8187,14 @@ mod tests {
             2,
             (2, 0),
         );
+        // The two `Left` fader writes share one cell: render applies the second, and the first
+        // is the one write a later write replaced before any block read it.
         assert_eq!(
             (
-                immediate.fader_records_drained,
-                immediate.matrix_records_drained
+                immediate.fader_values_applied,
+                immediate.matrix_values_applied
             ),
-            (2, 1)
+            (1, 1)
         );
 
         let ramp = TrackFaderRecord::Mute {
@@ -7683,7 +8203,7 @@ mod tests {
             smoothing_samples: 3,
         };
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1].fader.try_push(ramp).unwrap();
+            bound.test_only_write(|controls, stamp| controls[1].fader.write(stamp, ramp));
         }
         let ramping = render_scalar_pair_and_compare(
             &mut paired,
@@ -7694,7 +8214,7 @@ mod tests {
             2,
             (1, 1),
         );
-        assert_eq!(ramping.fader_records_drained, 1);
+        assert_eq!(ramping.fader_values_applied, 1);
         let _settled_again = render_scalar_pair_and_compare(
             &mut paired,
             &mut separate,
@@ -7706,21 +8226,25 @@ mod tests {
         );
 
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -18.0,
-                    smoothing_samples: 96,
-                })
-                .unwrap();
-            bound.track_controls[1]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix: Matrix2x2::IDENTITY,
-                    smoothing_samples: 96,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                controls[1].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -18.0,
+                        smoothing_samples: 96,
+                    },
+                )
+            });
+            bound.test_only_write(|controls, stamp| {
+                controls[1].producer.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix: Matrix2x2::IDENTITY,
+                        smoothing_samples: 96,
+                    },
+                )
+            });
         }
         let _long_ramp = render_scalar_pair_and_compare(
             &mut paired,
@@ -7732,14 +8256,16 @@ mod tests {
             (1, 1),
         );
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Right,
-                    db: -3.0,
-                    smoothing_samples: 3,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                controls[1].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Right,
+                        db: -3.0,
+                        smoothing_samples: 3,
+                    },
+                )
+            });
         }
         let _mid_ramp_retarget = render_scalar_pair_and_compare(
             &mut paired,
@@ -7759,22 +8285,27 @@ mod tests {
             2,
             (2, 0),
         );
+        // One transaction: the mute and the fader move of the same lane.
         for bound in [&mut paired, &mut separate] {
-            let producer = &mut bound.track_controls[1].fader;
-            producer
-                .try_push(TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Left,
-                    muted: true,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
-            producer
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Left,
-                    db: -2.0,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                let producer = &mut controls[1].fader;
+                producer.write(
+                    stamp,
+                    TrackFaderRecord::Mute {
+                        lanes: BuiltinLaneSelector::Left,
+                        muted: true,
+                        smoothing_samples: 0,
+                    },
+                );
+                producer.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Left,
+                        db: -2.0,
+                        smoothing_samples: 0,
+                    },
+                );
+            });
         }
         let muted = render_scalar_pair_and_compare(
             &mut paired,
@@ -7792,14 +8323,16 @@ mod tests {
         );
         assert_eq!(muted.scalar_fader_words[0], 0.0_f32.to_bits());
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1]
-                .fader
-                .try_push(TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Left,
-                    muted: false,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                controls[1].fader.write(
+                    stamp,
+                    TrackFaderRecord::Mute {
+                        lanes: BuiltinLaneSelector::Left,
+                        muted: false,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
         }
         let unmuted = render_scalar_pair_and_compare(
             &mut paired,
@@ -8280,8 +8813,8 @@ mod tests {
             }) if track_id.as_str() == "t00"
         ));
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[0].fader.try_push(fader).unwrap();
-            bound.track_controls[0].producer.try_push(matrix).unwrap();
+            bound.test_only_write(|controls, stamp| controls[0].fader.write(stamp, fader));
+            bound.test_only_write(|controls, stamp| controls[0].producer.write(stamp, matrix));
         }
 
         INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
@@ -8292,8 +8825,8 @@ mod tests {
         let paired_failed_trace = test_only_scalar_state_trace();
         assert_eq!(paired_error, RenderError::InvalidEnvelope);
         assert_eq!(INTERVENING_OBSERVER_ERRORS.load(Ordering::Relaxed), 1);
-        assert_eq!(paired_failed.fader_records_drained, 1);
-        assert_eq!(paired_failed.matrix_records_drained, 0);
+        assert_eq!(paired_failed.fader_values_applied, 1);
+        assert_eq!(paired_failed.matrix_values_applied, 0);
 
         INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
         test_only_reset_fader_matrix_witness();
@@ -8302,8 +8835,8 @@ mod tests {
         let separate_failed = test_only_fader_matrix_witness();
         let separate_failed_trace = test_only_scalar_state_trace();
         assert_eq!(separate_error, paired_error);
-        assert_eq!(separate_failed.fader_records_drained, 1);
-        assert_eq!(separate_failed.matrix_records_drained, 0);
+        assert_eq!(separate_failed.fader_values_applied, 1);
+        assert_eq!(separate_failed.matrix_values_applied, 0);
         // Per owner, because the pending fader is completed after t01's separate fader ran, so
         // the globally last-recorded word names a different owner in the two runs.
         assert!(!paired_failed_trace.fader_overflow && !paired_failed_trace.matrix_overflow);
@@ -8351,9 +8884,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             "retry renders the same PCM after the observer error"
         );
-        assert_eq!(paired_retry.matrix_records_drained, 1);
+        assert_eq!(paired_retry.matrix_values_applied, 1);
         assert_eq!(
-            separate_retry.matrix_records_drained, 1,
+            separate_retry.matrix_values_applied, 1,
             "the separate twin drains the same queued matrix command on retry"
         );
         assert_owner_states_match(paired_retry_trace, separate_retry_trace);
@@ -8400,14 +8933,16 @@ mod tests {
                 true,
             )
             .0;
-            bound.track_controls[0].fader.try_push(fader).unwrap();
-            bound.track_controls[0]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| controls[0].fader.write(stamp, fader));
+            bound.test_only_write(|controls, stamp| {
+                controls[0].producer.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
             bound
         };
 
@@ -8463,8 +8998,8 @@ mod tests {
             initial_matrix,
             "observer failure preserves t00 matrix state at completion"
         );
-        assert_eq!(paired_failed.matrix_records_drained, 0);
-        assert_eq!(separate_failed.matrix_records_drained, 0);
+        assert_eq!(paired_failed.matrix_values_applied, 0);
+        assert_eq!(separate_failed.matrix_values_applied, 0);
 
         // The same post-fader assertion must discriminate the executor's completion step. With
         // completion disabled, the split owner leaves its deferred fader output behind while the
@@ -8491,24 +9026,21 @@ mod tests {
                 1,
                 None,
             );
-            bound.track_controls[0].fader.try_push(fader).unwrap();
-            bound.track_controls[0]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
-            bound.track_controls[0]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix: Matrix2x2 {
-                        ll: f32::NAN,
-                        ..matrix
+            // One transaction: a valid fader move and a matrix target render refuses. The cell
+            // holds the refused target alone, since a later write replaces an earlier one.
+            bound.test_only_write(|controls, stamp| {
+                controls[0].fader.write(stamp, fader);
+                controls[0].producer.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix: Matrix2x2 {
+                            ll: f32::NAN,
+                            ..matrix
+                        },
+                        smoothing_samples: 0,
                     },
-                    smoothing_samples: 0,
-                })
-                .unwrap();
+                )
+            });
             bound
         };
         let mut paired = make_matrix_case(true);
@@ -8560,15 +9092,15 @@ mod tests {
             first_matrix_state(separate_trace, 0),
             "matrix failure preserves t00 matrix state at M_A/error completion"
         );
-        assert_eq!(paired_failed.fader_records_drained, 1);
-        assert_eq!(paired_failed.matrix_records_drained, 2);
+        assert_eq!(paired_failed.fader_values_applied, 1);
+        assert_eq!(paired_failed.matrix_values_applied, 1);
         assert_eq!(
-            paired_failed.fader_records_drained,
-            separate_failed.fader_records_drained
+            paired_failed.fader_values_applied,
+            separate_failed.fader_values_applied
         );
         assert_eq!(
-            paired_failed.matrix_records_drained,
-            separate_failed.matrix_records_drained
+            paired_failed.matrix_values_applied,
+            separate_failed.matrix_values_applied
         );
     }
 
@@ -8688,14 +9220,16 @@ mod tests {
         // matrix boundary uses the original two-stage fallback and leaves no pending fader.
         let (mut paired, mut separate, paired_capture, separate_capture) = make_pair();
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[0]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -6.0,
-                    smoothing_samples: 3,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                controls[0].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -6.0,
+                        smoothing_samples: 3,
+                    },
+                )
+            });
         }
         let (paired_ramp, separate_ramp, paired_trace, separate_trace) = render_and_compare(
             &mut paired,
@@ -8714,8 +9248,8 @@ mod tests {
         );
         assert_eq!(
             (
-                paired_ramp.fader_records_drained,
-                paired_ramp.matrix_records_drained
+                paired_ramp.fader_values_applied,
+                paired_ramp.matrix_values_applied
             ),
             (1, 0)
         );
@@ -8729,28 +9263,32 @@ mod tests {
             first_fader_state(separate_trace, 0)
         );
         assert_eq!(
-            paired_ramp.fader_records_drained,
-            separate_ramp.fader_records_drained
+            paired_ramp.fader_values_applied,
+            separate_ramp.fader_values_applied
         );
 
         // A settled fader plus a ramping matrix must defer only the fader and fall back at M_A.
         let (mut paired, mut separate, paired_capture, separate_capture) = make_pair();
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[0]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -6.0,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
-            bound.track_controls[0]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix: matrix_a,
-                    smoothing_samples: 96,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                controls[0].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -6.0,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
+            bound.test_only_write(|controls, stamp| {
+                controls[0].producer.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix: matrix_a,
+                        smoothing_samples: 96,
+                    },
+                )
+            });
         }
         let (paired_matrix_ramp, separate_matrix_ramp, _, _) = render_and_compare(
             &mut paired,
@@ -8768,26 +9306,28 @@ mod tests {
         );
         assert_eq!(
             (
-                paired_matrix_ramp.fader_records_drained,
-                paired_matrix_ramp.matrix_records_drained
+                paired_matrix_ramp.fader_values_applied,
+                paired_matrix_ramp.matrix_values_applied
             ),
             (1, 1)
         );
         assert_eq!(
-            paired_matrix_ramp.matrix_records_drained,
-            separate_matrix_ramp.matrix_records_drained
+            paired_matrix_ramp.matrix_values_applied,
+            separate_matrix_ramp.matrix_values_applied
         );
 
         // Retargeting the matrix while its prior ramp is in flight must still run at M_A. The
         // second block also proves that the split owner clears its pending flag on success.
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[0]
-                .producer
-                .try_push(TrackControlRecord {
-                    matrix: matrix_b,
-                    smoothing_samples: 3,
-                })
-                .unwrap();
+            bound.test_only_write(|controls, stamp| {
+                controls[0].producer.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix: matrix_b,
+                        smoothing_samples: 3,
+                    },
+                )
+            });
         }
         let (paired_retarget, separate_retarget, _, _) = render_and_compare(
             &mut paired,
@@ -8801,13 +9341,13 @@ mod tests {
             (0, 1)
         );
         assert_eq!(
-            paired_retarget.matrix_records_drained,
-            separate_retarget.matrix_records_drained
+            paired_retarget.matrix_values_applied,
+            separate_retarget.matrix_values_applied
         );
 
-        // A failed M_A render must complete the pending fader before returning, retain the matrix
-        // queue tail, and retry exactly once. The valid ramp before the malformed record makes
-        // the failure path exercise both a matrix retarget and the original error boundary.
+        // A failed M_A render must complete the pending fader before returning and retry exactly
+        // once with the next write. A cell holds the newest value only, so the malformed target
+        // is the one the failed block reads, and the tail is written after it.
         let (mut paired, mut separate, paired_capture, separate_capture) = make_pair();
         let invalid_matrix = TrackControlRecord {
             matrix: Matrix2x2 {
@@ -8821,24 +9361,19 @@ mod tests {
             smoothing_samples: 0,
         };
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[0]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -6.0,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
-            for record in [
-                TrackControlRecord {
-                    matrix: matrix_a,
-                    smoothing_samples: 96,
-                },
-                invalid_matrix,
-                matrix_tail,
-            ] {
-                bound.track_controls[0].producer.try_push(record).unwrap();
-            }
+            bound.test_only_write(|controls, stamp| {
+                controls[0].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -6.0,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
+            bound.test_only_write(|controls, stamp| {
+                controls[0].producer.write(stamp, invalid_matrix)
+            });
         }
         let selected_buffer = paired
             .test_only_post_fader_buffer
@@ -8857,19 +9392,19 @@ mod tests {
         assert_eq!(paired_failed_capture, separate_failed_capture);
         assert_eq!(
             (
-                paired_failed.fader_records_drained,
-                paired_failed.matrix_records_drained
+                paired_failed.fader_values_applied,
+                paired_failed.matrix_values_applied
             ),
-            (1, 2)
+            (1, 1)
         );
         assert_eq!(
             (
-                paired_failed.fader_records_drained,
-                paired_failed.matrix_records_drained
+                paired_failed.fader_values_applied,
+                paired_failed.matrix_values_applied
             ),
             (
-                separate_failed.fader_records_drained,
-                separate_failed.matrix_records_drained
+                separate_failed.fader_values_applied,
+                separate_failed.matrix_values_applied
             )
         );
         assert_eq!(
@@ -8880,9 +9415,12 @@ mod tests {
         assert_eq!(
             last_matrix_state(paired_failed_trace, 0),
             last_matrix_state(separate_failed_trace, 0),
-            "failed M_A render retains the valid matrix prefix"
+            "failed M_A render leaves the matrix state alone"
         );
 
+        for bound in [&mut paired, &mut separate] {
+            bound.test_only_write(|controls, stamp| controls[0].producer.write(stamp, matrix_tail));
+        }
         let (paired_retry, separate_retry, _, _) = render_and_compare(
             &mut paired,
             &mut separate,
@@ -8894,17 +9432,17 @@ mod tests {
             (paired_retry.fused_calls, paired_retry.fallback_calls),
             (1, 0)
         );
-        assert_eq!(paired_retry.matrix_records_drained, 1);
+        assert_eq!(paired_retry.matrix_values_applied, 1);
         assert_eq!(
             (
-                paired_retry.fader_records_drained,
-                paired_retry.matrix_records_drained
+                paired_retry.fader_values_applied,
+                paired_retry.matrix_values_applied
             ),
             (
-                separate_retry.fader_records_drained,
-                separate_retry.matrix_records_drained
+                separate_retry.fader_values_applied,
+                separate_retry.matrix_values_applied
             ),
-            "retry drains only the retained matrix tail once"
+            "retry applies only the write after the error, once"
         );
     }
 
@@ -8966,57 +9504,32 @@ mod tests {
                 (0, 0),
                 "{label} reference preparation keeps separate owners"
             );
+            // The cell holds the refused value alone: a later write replaces an earlier one.
             for bound in [&mut paired, &mut separate] {
                 if invalid_fader {
-                    bound.track_controls[track]
-                        .fader
-                        .try_push(TrackFaderRecord::FaderDb {
-                            lanes: BuiltinLaneSelector::Both,
-                            db: -6.0,
-                            smoothing_samples: 0,
-                        })
-                        .unwrap();
-                    bound.track_controls[track]
-                        .fader
-                        .try_push(TrackFaderRecord::FaderDb {
-                            lanes: BuiltinLaneSelector::Both,
-                            db: f32::NAN,
-                            smoothing_samples: 0,
-                        })
-                        .unwrap();
-                    bound.track_controls[track]
-                        .fader
-                        .try_push(TrackFaderRecord::FaderDb {
-                            lanes: BuiltinLaneSelector::Both,
-                            db: -3.0,
-                            smoothing_samples: 0,
-                        })
-                        .unwrap();
-                } else {
-                    bound.track_controls[track]
-                        .producer
-                        .try_push(TrackControlRecord {
-                            matrix: Matrix2x2::IDENTITY,
-                            smoothing_samples: 0,
-                        })
-                        .unwrap();
-                    bound.track_controls[track]
-                        .producer
-                        .try_push(TrackControlRecord {
-                            matrix: Matrix2x2 {
-                                ll: f32::NAN,
-                                ..Matrix2x2::IDENTITY
+                    bound.test_only_write(|controls, stamp| {
+                        controls[track].fader.write(
+                            stamp,
+                            TrackFaderRecord::FaderDb {
+                                lanes: BuiltinLaneSelector::Both,
+                                db: f32::NAN,
+                                smoothing_samples: 0,
                             },
-                            smoothing_samples: 0,
-                        })
-                        .unwrap();
-                    bound.track_controls[track]
-                        .producer
-                        .try_push(TrackControlRecord {
-                            matrix: Matrix2x2::IDENTITY,
-                            smoothing_samples: 0,
-                        })
-                        .unwrap();
+                        )
+                    });
+                } else {
+                    bound.test_only_write(|controls, stamp| {
+                        controls[track].producer.write(
+                            stamp,
+                            TrackControlRecord {
+                                matrix: Matrix2x2 {
+                                    ll: f32::NAN,
+                                    ..Matrix2x2::IDENTITY
+                                },
+                                smoothing_samples: 0,
+                            },
+                        )
+                    });
                 }
             }
 
@@ -9043,29 +9556,29 @@ mod tests {
             assert_eq!(paired_error, separate_error, "{label} error identity");
             if invalid_fader {
                 assert_eq!(
-                    paired_failed.fader_records_drained, 2,
-                    "{label} fader prefix"
+                    paired_failed.fader_values_applied, 1,
+                    "{label} refused fader value"
                 );
                 assert_eq!(
-                    paired_failed.matrix_records_drained, 0,
+                    paired_failed.matrix_values_applied, 0,
                     "{label} matrix untouched"
                 );
             } else {
                 assert_eq!(
-                    paired_failed.fader_records_drained, 0,
+                    paired_failed.fader_values_applied, 0,
                     "{label} fader untouched"
                 );
                 assert_eq!(
-                    paired_failed.matrix_records_drained, 2,
-                    "{label} matrix prefix"
+                    paired_failed.matrix_values_applied, 1,
+                    "{label} refused matrix value"
                 );
             }
             assert_eq!(
-                paired_failed.fader_records_drained, separate_failed.fader_records_drained,
+                paired_failed.fader_values_applied, separate_failed.fader_values_applied,
                 "{label} fader drain order"
             );
             assert_eq!(
-                paired_failed.matrix_records_drained, separate_failed.matrix_records_drained,
+                paired_failed.matrix_values_applied, separate_failed.matrix_values_applied,
                 "{label} matrix drain order"
             );
             assert_eq!(
@@ -9086,6 +9599,31 @@ mod tests {
                 );
             }
 
+            // The write after the failed block is the value the retry applies.
+            for bound in [&mut paired, &mut separate] {
+                if invalid_fader {
+                    bound.test_only_write(|controls, stamp| {
+                        controls[track].fader.write(
+                            stamp,
+                            TrackFaderRecord::FaderDb {
+                                lanes: BuiltinLaneSelector::Both,
+                                db: -3.0,
+                                smoothing_samples: 0,
+                            },
+                        )
+                    });
+                } else {
+                    bound.test_only_write(|controls, stamp| {
+                        controls[track].producer.write(
+                            stamp,
+                            TrackControlRecord {
+                                matrix: Matrix2x2::IDENTITY,
+                                smoothing_samples: 0,
+                            },
+                        )
+                    });
+                }
+            }
             let mut paired_retry_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
             let mut separate_retry_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
             test_only_reset_fader_matrix_witness();
@@ -9129,11 +9667,11 @@ mod tests {
             assert_eq!((retry.process_calls, retry.process_members), (1, 1));
             assert_eq!((retry.fused_calls, retry.fallback_calls), (1, 0));
             assert_eq!(
-                retry.fader_records_drained, separate_retry.fader_records_drained,
+                retry.fader_values_applied, separate_retry.fader_values_applied,
                 "{label} retry fader drain order"
             );
             assert_eq!(
-                retry.matrix_records_drained, separate_retry.matrix_records_drained,
+                retry.matrix_values_applied, separate_retry.matrix_values_applied,
                 "{label} retry matrix drain order"
             );
             assert_eq!(
@@ -9152,23 +9690,20 @@ mod tests {
                 "{label} retry t00 matrix state at M_A"
             );
             if invalid_fader {
-                assert_eq!(retry.fader_records_drained, 1, "{label} fader tail retry");
+                assert_eq!(retry.fader_values_applied, 1, "{label} fader retry");
                 assert_eq!(
-                    retry.matrix_records_drained, 0,
+                    retry.matrix_values_applied, 0,
                     "{label} matrix remains empty"
                 );
             } else {
-                assert_eq!(
-                    retry.fader_records_drained, 0,
-                    "{label} fader remains empty"
-                );
-                assert_eq!(retry.matrix_records_drained, 1, "{label} matrix tail retry");
+                assert_eq!(retry.fader_values_applied, 0, "{label} fader remains empty");
+                assert_eq!(retry.matrix_values_applied, 1, "{label} matrix retry");
             }
         }
     }
 
     #[test]
-    fn actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail() {
+    fn actual_scalar_graph_preserves_scheduled_matrix_error_and_applies_the_next_write() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -9197,15 +9732,6 @@ mod tests {
             db: -9.0,
             smoothing_samples: 0,
         };
-        let prefix = TrackControlRecord {
-            matrix: Matrix2x2 {
-                ll: 0.5,
-                lr: 0.25,
-                rl: -0.25,
-                rr: 0.75,
-            },
-            smoothing_samples: 0,
-        };
         let invalid = TrackControlRecord {
             matrix: Matrix2x2 {
                 ll: f32::NAN,
@@ -9217,11 +9743,13 @@ mod tests {
             matrix: Matrix2x2::IDENTITY,
             smoothing_samples: 0,
         };
+        // One transaction: a valid fader move and a matrix target render refuses. A cell holds
+        // the newest value only, so the next write is the one the retry reads.
         for bound in [&mut paired, &mut separate] {
-            bound.track_controls[1].fader.try_push(fader).unwrap();
-            for record in [prefix, invalid, tail] {
-                bound.track_controls[1].producer.try_push(record).unwrap();
-            }
+            bound.test_only_write(|controls, stamp| {
+                controls[1].fader.write(stamp, fader);
+                controls[1].producer.write(stamp, invalid);
+            });
         }
         let mut pcm = vec![0.0; HARNESS_QUANTUM as usize * 2];
         test_only_reset_fader_matrix_witness();
@@ -9232,8 +9760,8 @@ mod tests {
         let separate_error = render_bound_result(&mut separate, 0, &mut pcm).unwrap_err();
         let separate_state = test_only_fader_matrix_witness();
         assert_eq!(paired_error, separate_error);
-        assert_eq!(paired_state.fader_records_drained, 1);
-        assert_eq!(paired_state.matrix_records_drained, 2);
+        assert_eq!(paired_state.fader_values_applied, 1);
+        assert_eq!(paired_state.matrix_values_applied, 1);
         assert_eq!(
             paired_state.scalar_fader_words,
             separate_state.scalar_fader_words
@@ -9243,6 +9771,9 @@ mod tests {
             separate_state.scalar_matrix_words
         );
 
+        for bound in [&mut paired, &mut separate] {
+            bound.test_only_write(|controls, stamp| controls[1].producer.write(stamp, tail));
+        }
         // Issue #916: track 0 pairs beside track 1, and its settled pair fuses on the retry too.
         let retry = render_scalar_pair_and_compare(
             &mut paired,
@@ -9254,8 +9785,8 @@ mod tests {
             (2, 0),
         );
         assert_eq!(
-            retry.matrix_records_drained, 1,
-            "the queued tail survived the error"
+            retry.matrix_values_applied, 1,
+            "the write after the error applies in the next block"
         );
     }
 
@@ -9619,7 +10150,7 @@ mod tests {
                 .as_mut()
                 .expect("input lane requested")
                 .try_push(command)
-                .unwrap();
+                .expect("input queue");
         }
         let collapsed_host = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
         let collapsed_asymmetric = std::mem::take(&mut *collapsed_capture.lock().unwrap());
@@ -9978,11 +10509,48 @@ mod tests {
         paired: Box<FaderMatrixBankProcessor>,
         separate_fader: FaderBankProcessor,
         separate_matrix: MatrixBankProcessor,
-        paired_fader_tx: Producer<TrackFaderRecord>,
-        paired_matrix_tx: Producer<TrackControlRecord>,
-        separate_fader_tx: Producer<TrackFaderRecord>,
-        separate_matrix_tx: Producer<TrackControlRecord>,
+        paired_fader_tx: FaderCells,
+        paired_matrix_tx: MatrixCells,
+        separate_fader_tx: FaderCells,
+        separate_matrix_tx: MatrixCells,
+        gate: TestOnlyGate,
         lanes: usize,
+    }
+
+    impl PairFixture {
+        /// The block's snapshot, taken from the fixture's gate as render takes it.
+        fn snapshot(&self) -> LiveSnapshot {
+            self.gate.snapshot()
+        }
+
+        /// One transaction: the same fader record into the paired and the separate owners' cells,
+        /// published as one revision.
+        fn write_fader(&mut self, record: TrackFaderRecord) {
+            let Self {
+                gate,
+                paired_fader_tx,
+                separate_fader_tx,
+                ..
+            } = self;
+            gate.write_published(|stamp| {
+                paired_fader_tx.write(stamp, record);
+                separate_fader_tx.write(stamp, record);
+            });
+        }
+
+        /// The matrix counterpart of [`Self::write_fader`].
+        fn write_matrix(&mut self, record: TrackControlRecord) {
+            let Self {
+                gate,
+                paired_matrix_tx,
+                separate_matrix_tx,
+                ..
+            } = self;
+            gate.write_published(|stamp| {
+                paired_matrix_tx.write(stamp, record);
+                separate_matrix_tx.write(stamp, record);
+            });
+        }
     }
 
     fn pair_fixture(backend: Backend, members: usize) -> PairFixture {
@@ -10008,12 +10576,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let make = || {
-            let (fader_tx, fader_rx) =
-                bounded_spsc(NonZeroUsize::new(16).expect("queue"), QueueGeneration(0))
-                    .expect("fader queue");
-            let (matrix_tx, matrix_rx) =
-                bounded_spsc(NonZeroUsize::new(16).expect("queue"), QueueGeneration(0))
-                    .expect("matrix queue");
+            let counter = LiveValuesSuperseded::default();
+            let (fader_tx, fader_rx) = fader_lane(&counter);
+            let (matrix_tx, matrix_rx) = matrix_lane(&counter);
             (
                 FaderBankProcessor {
                     bank: BuiltinFaderBank::new(backend, width, params.clone()).expect("fader"),
@@ -10059,6 +10624,7 @@ mod tests {
             paired_matrix_tx,
             separate_fader_tx,
             separate_matrix_tx,
+            gate: TestOnlyGate::new(),
             lanes: width.lanes() as usize,
         }
     }
@@ -10075,6 +10641,11 @@ mod tests {
             .collect::<Vec<_>>();
         let (mut paired_l, mut paired_r) = (input_l.clone(), input_r.clone());
         let (mut separate_l, mut separate_r) = (input_l, input_r);
+        let snapshot = fixture.snapshot();
+        fixture
+            .paired
+            .begin_block(0, snapshot)
+            .expect("paired drain");
         fixture
             .paired
             .process(&mut paired_l, &mut paired_r, frames, 0)
@@ -10086,6 +10657,14 @@ mod tests {
             if expect_fused { (1, 0) } else { (0, 1) },
             "the named call must take its expected actual dispatch branch"
         );
+        fixture
+            .separate_fader
+            .begin_block(0, snapshot)
+            .expect("separate fader drain");
+        fixture
+            .separate_matrix
+            .begin_block(0, snapshot)
+            .expect("separate matrix drain");
         fixture
             .separate_fader
             .process(&mut separate_l, &mut separate_r, frames, 0)
@@ -10141,15 +10720,6 @@ mod tests {
         );
     }
 
-    fn push_both<T: Copy + Send + core::fmt::Debug + 'static>(
-        left: &mut Producer<T>,
-        right: &mut Producer<T>,
-        record: T,
-    ) {
-        left.try_push(record).expect("paired queue");
-        right.try_push(record).expect("separate queue");
-    }
-
     #[test]
     fn composite_live_sequence_matches_original_owners_and_discriminates_both_branches() {
         let _guard = PAIR_WITNESS_LOCK
@@ -10164,58 +10734,45 @@ mod tests {
             assert_pair_call(&mut fixture, 3, 1, true);
 
             for db in [-6.0, -12.0] {
-                push_both(
-                    &mut fixture.paired_fader_tx,
-                    &mut fixture.separate_fader_tx,
-                    TrackFaderRecord::FaderDb {
-                        lanes: BuiltinLaneSelector::Left,
-                        db,
-                        smoothing_samples: 0,
-                    },
-                );
-            }
-            push_both(
-                &mut fixture.paired_matrix_tx,
-                &mut fixture.separate_matrix_tx,
-                TrackControlRecord {
-                    matrix: Matrix2x2 {
-                        ll: 0.5,
-                        lr: 0.25,
-                        rl: -0.5,
-                        rr: 0.75,
-                    },
+                fixture.write_fader(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Left,
+                    db,
                     smoothing_samples: 0,
+                });
+            }
+            fixture.write_matrix(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.5,
+                    rr: 0.75,
                 },
-            );
+                smoothing_samples: 0,
+            });
             assert_pair_call(&mut fixture, 2, 2, true);
 
-            push_both(
-                &mut fixture.paired_fader_tx,
-                &mut fixture.separate_fader_tx,
-                TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Right,
-                    muted: true,
-                    smoothing_samples: 4,
-                },
-            );
-            push_both(
-                &mut fixture.paired_matrix_tx,
-                &mut fixture.separate_matrix_tx,
-                TrackControlRecord {
-                    matrix: Matrix2x2::IDENTITY,
-                    smoothing_samples: 4,
-                },
-            );
+            fixture.write_fader(TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Right,
+                muted: true,
+                smoothing_samples: 4,
+            });
+            fixture.write_matrix(TrackControlRecord {
+                matrix: Matrix2x2::IDENTITY,
+                smoothing_samples: 4,
+            });
             // Drain both queues without arithmetic, then prove the narrow bridge's false result
             // itself mutates neither DSP state nor PCM before the original whole-call sequence.
+            let snapshot = fixture.snapshot();
             drain_fader_controls(
                 &mut fixture.paired.fader.bank,
                 &mut fixture.paired.fader.controls,
+                snapshot,
             )
             .unwrap();
             drain_matrix_controls(
                 &mut fixture.paired.matrix.bank,
                 &mut fixture.paired.matrix.controls,
+                snapshot,
             )
             .unwrap();
             let before_fader =
@@ -10241,27 +10798,19 @@ mod tests {
                 before_matrix
             );
             assert_pair_call(&mut fixture, 2, 3, false);
-            push_both(
-                &mut fixture.paired_fader_tx,
-                &mut fixture.separate_fader_tx,
-                TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Right,
-                    db: -9.0,
-                    smoothing_samples: 2,
-                },
-            );
+            fixture.write_fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Right,
+                db: -9.0,
+                smoothing_samples: 2,
+            });
             assert_pair_call(&mut fixture, 2, 4, false);
             assert_pair_call(&mut fixture, 1, 5, true);
 
-            push_both(
-                &mut fixture.paired_fader_tx,
-                &mut fixture.separate_fader_tx,
-                TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Right,
-                    muted: false,
-                    smoothing_samples: 0,
-                },
-            );
+            fixture.write_fader(TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Right,
+                muted: false,
+                smoothing_samples: 0,
+            });
             assert_pair_call(&mut fixture, 1, 6, true);
             fixture
                 .paired
@@ -10296,89 +10845,398 @@ mod tests {
         }
     }
 
+    /// The fused stage's drain refuses a value render cannot apply (a raw cell can hold what the
+    /// producer's domain check would have refused) and still applies the other stage's value: a
+    /// refusal returns the error after both stages drained, so no acked value is lost to it, and
+    /// the block does not render.
     #[test]
-    fn composite_raw_record_errors_preserve_the_frozen_arithmetic_order() {
+    fn composite_drain_applies_the_other_stages_value_when_one_stage_is_refused() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut fader_error = pair_fixture(Backend::Simd4, 4);
-        fader_error
-            .paired_fader_tx
-            .try_push(TrackFaderRecord::FaderDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: f32::NAN,
-                smoothing_samples: 0,
-            })
-            .unwrap();
-        let mut left = [0.25; 8];
-        let mut right = [-0.5; 8];
-        let before = (left, right);
-        assert!(
-            fader_error
-                .paired
-                .process(&mut left, &mut right, 2, 0)
-                .is_err()
-        );
-        assert_eq!((left, right), before);
-        assert_eq!(fader_error.paired.qualification_counters(), [0, 0]);
-
-        let mut matrix_error = pair_fixture(Backend::Simd4, 4);
-        let mut matrix_error_oracle = pair_fixture(Backend::Simd4, 4);
-        let completed_fader = TrackFaderRecord::FaderDb {
-            lanes: BuiltinLaneSelector::Both,
-            db: -6.0,
-            smoothing_samples: 0,
+        let moved = Matrix2x2 {
+            ll: 0.5,
+            lr: 0.25,
+            rl: -0.5,
+            rr: 0.75,
         };
-        matrix_error
-            .paired_fader_tx
-            .try_push(completed_fader)
-            .unwrap();
-        matrix_error_oracle
-            .separate_fader_tx
-            .try_push(completed_fader)
-            .unwrap();
-        matrix_error
-            .paired_matrix_tx
-            .try_push(TrackControlRecord {
-                matrix: Matrix2x2 {
-                    ll: f32::NAN,
-                    ..Matrix2x2::IDENTITY
+        let refused_matrix = Matrix2x2 {
+            ll: f32::NAN,
+            ..Matrix2x2::IDENTITY
+        };
+        for fader_is_refused in [true, false] {
+            let mut fixture = pair_fixture(Backend::Simd4, 4);
+            let fader_before =
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
+            let matrix_before =
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
+            fixture.write_fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: if fader_is_refused { f32::NAN } else { -6.0 },
+                smoothing_samples: 0,
+            });
+            fixture.write_matrix(TrackControlRecord {
+                matrix: if fader_is_refused {
+                    moved
+                } else {
+                    refused_matrix
                 },
                 smoothing_samples: 0,
-            })
+            });
+            let snapshot = fixture.snapshot();
+            assert!(
+                fixture.paired.begin_block(0, snapshot).is_err(),
+                "the refused value is the drain's error (fader refused: {fader_is_refused})"
+            );
+            // The oracle drains the two stages on their own: the applied one moves, the refused
+            // one is left as it was.
+            let _ = fixture.separate_fader.begin_block(0, snapshot);
+            let _ = fixture.separate_matrix.begin_block(0, snapshot);
+            assert_eq!(
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0),
+                builtins::test_support::fader_bank_lane_words(&fixture.separate_fader.bank, 0),
+            );
+            assert_eq!(
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0),
+                builtins::test_support::matrix_bank_lane_words(&fixture.separate_matrix.bank, 0),
+            );
+            let (fader_after, matrix_after) = (
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0),
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0),
+            );
+            if fader_is_refused {
+                assert_eq!(
+                    fader_after, fader_before,
+                    "the refused fader value stays out"
+                );
+                assert_ne!(matrix_after, matrix_before, "the matrix value was applied");
+            } else {
+                assert_eq!(
+                    matrix_after, matrix_before,
+                    "the refused matrix value stays out"
+                );
+                assert_ne!(fader_after, fader_before, "the fader value was applied");
+            }
+            assert_eq!(
+                fixture.paired.qualification_counters(),
+                [0, 0],
+                "a refused drain renders nothing"
+            );
+        }
+    }
+
+    /// `apply_pending` is the block drain with `ALL`, the same code (#1312 D6): a fused stage
+    /// whose pending cells were applied by it, then drained an empty block, renders the bits of a
+    /// stage whose block drain applied them. The writes mix a fader move, a mute and a ramping
+    /// matrix on one lane, so a different application order or a skipped kind moves a bit.
+    #[test]
+    fn apply_pending_equals_the_block_drain() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for &backend in Backend::VECTOR {
+            let members = if backend.width() == 4 { 4 } else { 5 };
+            let mut fixture = pair_fixture(backend, members);
+            fixture.write_fader(TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Right,
+                muted: true,
+                smoothing_samples: 5,
+            });
+            fixture.write_fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -6.0,
+                smoothing_samples: 3,
+            });
+            fixture.write_fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -9.0,
+                smoothing_samples: 7,
+            });
+            fixture.write_matrix(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.5,
+                    rr: 0.75,
+                },
+                smoothing_samples: 6,
+            });
+            let fader_before =
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
+            let matrix_before =
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
+            fixture.paired.apply_pending().unwrap();
+            // `apply_pending` alone has moved the paired side to where the separate stages' block
+            // drain moves theirs, in every bank word.
+            let snapshot = fixture.snapshot();
+            fixture.separate_fader.begin_block(0, snapshot).unwrap();
+            fixture.separate_matrix.begin_block(0, snapshot).unwrap();
+            let fader_after =
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
+            let matrix_after =
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
+            assert_ne!(fader_after, fader_before, "the fader writes were applied");
+            assert_ne!(matrix_after, matrix_before, "the matrix write was applied");
+            assert_eq!(
+                fader_after,
+                builtins::test_support::fader_bank_lane_words(&fixture.separate_fader.bank, 0)
+            );
+            assert_eq!(
+                matrix_after,
+                builtins::test_support::matrix_bank_lane_words(&fixture.separate_matrix.bank, 0)
+            );
+            // The empty-drain blocks that follow render the bits the block drain renders.
+            assert_pair_call(&mut fixture, 4, 9, false);
+            assert_pair_call(&mut fixture, 4, 10, false);
+        }
+    }
+
+    /// The drain applies a strip's fader cells before its mute cells (#1312 D4), whatever order the
+    /// writes came in: they share one gain ramp, and a fader move after a mute would cut the
+    /// mute's ramp short. The oracle applies the same two values directly in D4's order; the
+    /// reverse order is shown to differ, so the comparison can tell them apart.
+    #[test]
+    fn the_drain_applies_the_fader_before_the_mute_whatever_the_write_order() {
+        let new_bank = || {
+            BuiltinFaderBank::new(
+                Backend::Simd4,
+                BankWidth::Four,
+                vec![BuiltinParameters::default(); 4],
+            )
+            .expect("bank")
+        };
+        let words =
+            |bank: &BuiltinFaderBank| builtins::test_support::fader_bank_lane_words(bank, 0);
+        let (fader_db, mute_ramp, fader_ramp) = (-6.0_f32, 5_u32, 9_u32);
+
+        let mut canonical = new_bank();
+        canonical
+            .set_fader_db(0, BuiltinLaneSelector::Left, fader_db, fader_ramp)
             .unwrap();
-        let mut left = [0.25; 8];
-        let mut right = [-0.5; 8];
-        let mut oracle_left = left;
-        let mut oracle_right = right;
-        assert!(
-            matrix_error
-                .paired
-                .process(&mut left, &mut right, 2, 0)
-                .is_err()
+        canonical
+            .set_mute(0, BuiltinLaneSelector::Left, true, mute_ramp)
+            .unwrap();
+        let mut reversed = new_bank();
+        reversed
+            .set_mute(0, BuiltinLaneSelector::Left, true, mute_ramp)
+            .unwrap();
+        reversed
+            .set_fader_db(0, BuiltinLaneSelector::Left, fader_db, fader_ramp)
+            .unwrap();
+        assert_ne!(
+            words(&canonical),
+            words(&reversed),
+            "the order is observable in the ramp state"
         );
-        assert_ne!(left, [0.25; 8], "fader arithmetic completed");
-        matrix_error_oracle
-            .separate_fader
-            .process(&mut oracle_left, &mut oracle_right, 2, 0)
-            .unwrap();
-        assert_eq!(left.map(f32::to_bits), oracle_left.map(f32::to_bits));
-        assert_eq!(right.map(f32::to_bits), oracle_right.map(f32::to_bits));
-        assert_eq!(matrix_error.paired.fader.process_calls, 1);
-        assert_eq!(matrix_error.paired.matrix.process_calls, 0);
-        assert_eq!(matrix_error.paired.qualification_counters(), [1, 2]);
+
+        for mute_first in [true, false] {
+            let counter = LiveValuesSuperseded::default();
+            let (mut cells, reader) = fader_lane(&counter);
+            let mut processor = FaderBankProcessor {
+                bank: new_bank(),
+                controls: core::iter::once(Some(reader))
+                    .chain((1..4).map(|_| None))
+                    .collect(),
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            };
+            let mut gate = TestOnlyGate::new();
+            let mute = TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Left,
+                muted: true,
+                smoothing_samples: mute_ramp,
+            };
+            let fader = TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: fader_db,
+                smoothing_samples: fader_ramp,
+            };
+            let order = if mute_first {
+                [mute, fader]
+            } else {
+                [fader, mute]
+            };
+            gate.write_published(|stamp| {
+                for record in order {
+                    cells.write(stamp, record);
+                }
+            });
+            processor.begin_block(0, gate.snapshot()).unwrap();
+            assert_eq!(
+                words(&processor.bank),
+                words(&canonical),
+                "mute written first: {mute_first}"
+            );
+        }
+    }
+
+    /// A drain applies only what its block's snapshot covers: a value written for a later
+    /// revision stays pending and is applied by the block whose snapshot reaches it, and not
+    /// before (#1312 D1, D12). Forty `Both` writes of one cell count `39` replaced writes per
+    /// channel cell (D2), and the fused stage applies the pair once.
+    #[test]
+    fn a_drain_applies_the_newest_value_its_snapshot_covers_and_counts_the_rest() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let counter = LiveValuesSuperseded::default();
+        let (mut cells, reader) = fader_lane(&counter);
+        let width = BankWidth::Four;
+        let mut processor = FaderBankProcessor {
+            bank: BuiltinFaderBank::new(
+                Backend::Simd4,
+                width,
+                vec![BuiltinParameters::default(); 4],
+            )
+            .expect("bank"),
+            controls: core::iter::once(Some(reader))
+                .chain((1..width.lanes()).map(|_| None))
+                .collect(),
+            process_calls: 0,
+            frames_processed: 0,
+            control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+        };
+        let mut gate = TestOnlyGate::new();
+        let initial = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        for index in 0..40_u32 {
+            gate.write_published(|stamp| {
+                cells.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -(index as f32) * 0.25,
+                        smoothing_samples: 0,
+                    },
+                );
+            });
+        }
+        test_only_reset_fader_matrix_witness();
+        // The block's snapshot covers the 40th write; the 39 before it were replaced.
+        let covers_forty = gate.snapshot();
+        // A 41st write is published after the snapshot: this block must not apply it.
+        gate.write_published(|stamp| {
+            cells.write(
+                stamp,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -30.0,
+                    smoothing_samples: 0,
+                },
+            );
+        });
+        processor.begin_block(0, covers_forty).unwrap();
+        assert_eq!(counter.get(), 78, "39 replaced writes in each channel cell");
         assert_eq!(
-            matrix_error.paired.qualification_counters(),
-            matrix_error_oracle.separate_fader.qualification_counters()
+            test_only_fader_matrix_witness().fader_values_applied,
+            1,
+            "two channel cells with equal words are one `Both` apply"
+        );
+        let after_forty = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        assert_ne!(after_forty, initial);
+        // The next block's snapshot reaches the 41st write, which replaced nothing.
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(counter.get(), 78);
+        assert_ne!(
+            builtins::test_support::fader_bank_lane_words(&processor.bank, 0),
+            after_forty,
+            "the later write applied in the block whose snapshot covers it"
+        );
+        // Nothing is pending now.
+        let settled = builtins::test_support::fader_bank_lane_words(&processor.bank, 0);
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(
+            builtins::test_support::fader_bank_lane_words(&processor.bank, 0),
+            settled
+        );
+    }
+
+    /// The matrix counterpart of the fader drain test above (#1312 D2): the matrix/pan cell counts
+    /// the writes a later write replaced, in the same session counter, and applies only what its
+    /// block's snapshot covers. Thirty writes of the one matrix cell count `29` replaced writes.
+    #[test]
+    fn a_matrix_drain_counts_the_replaced_writes_and_applies_only_what_its_snapshot_covers() {
+        let counter = LiveValuesSuperseded::default();
+        let (mut cells, reader) = matrix_lane(&counter);
+        let width = BankWidth::Four;
+        let mut processor = MatrixBankProcessor {
+            bank: BuiltinMatrixBank::new(
+                Backend::Simd4,
+                width,
+                vec![(Matrix2x2::IDENTITY, 0); width.lanes() as usize],
+            )
+            .expect("bank"),
+            controls: core::iter::once(Some(reader))
+                .chain((1..width.lanes()).map(|_| None))
+                .collect(),
+            process_calls: 0,
+            frames_processed: 0,
+            control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+        };
+        let record = |index: u32| TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 1.0 - index as f32 * 0.01,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+            },
+            smoothing_samples: 0,
+        };
+        let mut gate = TestOnlyGate::new();
+        let initial = builtins::test_support::matrix_bank_lane_words(&processor.bank, 0);
+        for index in 0..30_u32 {
+            gate.write_published(|stamp| cells.write(stamp, record(index)));
+        }
+        // The block's snapshot covers the 30th write; the 29 before it were replaced.
+        let covers_thirty = gate.snapshot();
+        // A 31st write is published after the snapshot: this block must not apply it.
+        gate.write_published(|stamp| cells.write(stamp, record(30)));
+        processor.begin_block(0, covers_thirty).unwrap();
+        assert_eq!(counter.get(), 29, "29 replaced writes in the matrix cell");
+        let after_thirty = builtins::test_support::matrix_bank_lane_words(&processor.bank, 0);
+        assert_ne!(after_thirty, initial);
+        // The next block's snapshot reaches the 31st write, which replaced nothing.
+        processor.begin_block(0, gate.snapshot()).unwrap();
+        assert_eq!(counter.get(), 29);
+        assert_ne!(
+            builtins::test_support::matrix_bank_lane_words(&processor.bank, 0),
+            after_thirty,
+            "the later write applied in the block whose snapshot covers it"
         );
     }
 
     type ScalarLiveControlOwners = (
         Box<dyn GraphRuntimeProcessor>,
         Box<dyn GraphRuntimeProcessor>,
-        Producer<TrackFaderRecord>,
-        Producer<TrackControlRecord>,
+        FaderCells,
+        MatrixCells,
     );
+
+    /// One transaction into two owners' cells: the same fader record, published as one revision.
+    fn write_fader_both(
+        gate: &mut TestOnlyGate,
+        left: &mut FaderCells,
+        right: &mut FaderCells,
+        record: TrackFaderRecord,
+    ) {
+        gate.write_published(|stamp| {
+            left.write(stamp, record);
+            right.write(stamp, record);
+        });
+    }
+
+    /// The matrix counterpart of [`write_fader_both`].
+    fn write_matrix_both(
+        gate: &mut TestOnlyGate,
+        left: &mut MatrixCells,
+        right: &mut MatrixCells,
+        record: TrackControlRecord,
+    ) {
+        gate.write_published(|stamp| {
+            left.write(stamp, record);
+            right.write(stamp, record);
+        });
+    }
 
     fn scalar_live_control_owners(
         fader_delivery: BuiltinControlDelivery,
@@ -10404,12 +11262,9 @@ mod tests {
         let (_, _, matrix) = BuiltinChain::new(48_000, parameters)
             .expect("scalar sections")
             .into_sections();
-        let (fader_tx, fader_rx) =
-            bounded_spsc(NonZeroUsize::new(4).expect("queue"), QueueGeneration(0))
-                .expect("fader queue");
-        let (matrix_tx, matrix_rx) =
-            bounded_spsc(NonZeroUsize::new(4).expect("queue"), QueueGeneration(0))
-                .expect("matrix queue");
+        let counter = LiveValuesSuperseded::default();
+        let (fader_tx, fader_rx) = fader_lane(&counter);
+        let (matrix_tx, matrix_rx) = matrix_lane(&counter);
         (
             Box::new(LiveControlFaderProcessor {
                 fader: FaderMuteRampBuiltins::new(parameters).expect("fader"),
@@ -10432,6 +11287,7 @@ mod tests {
 
     #[test]
     fn scalar_factory_checks_both_exact_owners_and_policies_without_consuming_state() {
+        let mut gate = TestOnlyGate::new();
         struct AdvertisedWrongOwner {
             calls: Arc<AtomicUsize>,
         }
@@ -10500,19 +11356,25 @@ mod tests {
         ] {
             let (fader, matrix, mut fader_tx, mut matrix_tx) =
                 scalar_live_control_owners(fader_policy, matrix_policy);
-            fader_tx
-                .try_push(TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Left,
-                    muted: true,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
-            matrix_tx
-                .try_push(TrackControlRecord {
-                    matrix: Matrix2x2::IDENTITY,
-                    smoothing_samples: 0,
-                })
-                .unwrap();
+            gate.write_published(|stamp| {
+                fader_tx.write(
+                    stamp,
+                    TrackFaderRecord::Mute {
+                        lanes: BuiltinLaneSelector::Left,
+                        muted: true,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
+            gate.write_published(|stamp| {
+                matrix_tx.write(
+                    stamp,
+                    TrackControlRecord {
+                        matrix: Matrix2x2::IDENTITY,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
             let returned = make_scalar_pair(fader, matrix)
                 .err()
                 .expect("either concurrent owner declines");
@@ -10529,6 +11391,7 @@ mod tests {
                     left: &mut left,
                     right: &mut right,
                     first_sample: 0,
+                    live_snapshot: LiveSnapshot::ALL,
                 })
                 .unwrap();
             matrix
@@ -10536,6 +11399,7 @@ mod tests {
                     left: &mut left,
                     right: &mut right,
                     first_sample: 0,
+                    live_snapshot: LiveSnapshot::ALL,
                 })
                 .unwrap();
             assert_eq!(left, [0.0, 0.0], "queued fader state stayed with owner");
@@ -10544,6 +11408,7 @@ mod tests {
 
     #[test]
     fn scalar_split_owner_defers_settled_fader_and_completes_before_matrix_error() {
+        let mut gate = TestOnlyGate::new();
         let make = || {
             scalar_live_control_owners(
                 BuiltinControlDelivery::BetweenRenderCalls,
@@ -10569,10 +11434,10 @@ mod tests {
             matrix: Matrix2x2::IDENTITY,
             smoothing_samples: 0,
         };
-        paired_matrix.try_push(invalid).unwrap();
-        paired_matrix.try_push(tail).unwrap();
-        separate_matrix_tx.try_push(invalid).unwrap();
-        separate_matrix_tx.try_push(tail).unwrap();
+        // A cell holds only the newest value: the invalid target is the one render reads, and the
+        // value written after the failed block is the one the retry reads.
+        gate.write_published(|stamp| paired_matrix.write(stamp, invalid));
+        gate.write_published(|stamp| separate_matrix_tx.write(stamp, invalid));
         let mut paired_left = [0.5_f32, 0.25];
         let mut paired_right = [-0.25_f32, -0.125];
         let mut separate_left = paired_left;
@@ -10582,6 +11447,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(paired_left, [0.5, 0.25], "settled fader remains deferred");
@@ -10597,6 +11463,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         let error = split
@@ -10604,6 +11471,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap_err();
         assert_eq!(error, RenderError::InvalidEnvelope);
@@ -10620,9 +11488,12 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap_err();
 
+        gate.write_published(|stamp| paired_matrix.write(stamp, tail));
+        gate.write_published(|stamp| separate_matrix_tx.write(stamp, tail));
         let mut paired_left = [0.75_f32, 0.5];
         let mut paired_right = [-0.5_f32, -0.25];
         let mut separate_left = paired_left;
@@ -10632,6 +11503,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         split
@@ -10639,6 +11511,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_fader
@@ -10646,6 +11519,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_matrix
@@ -10653,6 +11527,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(
@@ -10667,6 +11542,7 @@ mod tests {
 
     #[test]
     fn scalar_split_invalid_begin_envelope_does_not_arm_pending_or_drain_matrix() {
+        let mut gate = TestOnlyGate::new();
         let (fader, matrix, mut fader_tx, mut matrix_tx) = scalar_live_control_owners(
             BuiltinControlDelivery::BetweenRenderCalls,
             BuiltinControlDelivery::BetweenRenderCalls,
@@ -10676,24 +11552,30 @@ mod tests {
             .expect("exact live fader advertises split owner");
         let mut split =
             factory(fader, matrix).unwrap_or_else(|_| panic!("split owner accepts exact owners"));
-        fader_tx
-            .try_push(TrackFaderRecord::FaderDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -9.0,
-                smoothing_samples: 0,
-            })
-            .unwrap();
-        matrix_tx
-            .try_push(TrackControlRecord {
-                matrix: Matrix2x2 {
-                    ll: 0.5,
-                    lr: 0.25,
-                    rl: -0.75,
-                    rr: 0.125,
+        gate.write_published(|stamp| {
+            fader_tx.write(
+                stamp,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -9.0,
+                    smoothing_samples: 0,
                 },
-                smoothing_samples: 0,
-            })
-            .unwrap();
+            )
+        });
+        gate.write_published(|stamp| {
+            matrix_tx.write(
+                stamp,
+                TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.75,
+                        rr: 0.125,
+                    },
+                    smoothing_samples: 0,
+                },
+            )
+        });
 
         let mut short_left = [0.5_f32];
         let mut long_right = [-0.25_f32, -0.5];
@@ -10703,15 +11585,16 @@ mod tests {
                 left: &mut short_left,
                 right: &mut long_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             }),
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!(short_left, [0.5]);
         assert_eq!(long_right, [-0.25, -0.5]);
         let failed = test_only_fader_matrix_witness();
-        assert_eq!(failed.fader_records_drained, 1);
+        assert_eq!(failed.fader_values_applied, 1);
         assert_eq!(
-            failed.matrix_records_drained, 0,
+            failed.matrix_values_applied, 0,
             "the direct invalid envelope must not drain the later matrix owner"
         );
 
@@ -10724,6 +11607,7 @@ mod tests {
             left: &mut left,
             right: &mut right,
             first_sample: 0,
+            live_snapshot: LiveSnapshot::ALL,
         });
         assert_eq!(
             (left, right),
@@ -10734,6 +11618,7 @@ mod tests {
 
     #[test]
     fn scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched() {
+        let mut gate = TestOnlyGate::new();
         let make = || {
             let (fader, matrix, fader_tx, matrix_tx) = scalar_live_control_owners(
                 BuiltinControlDelivery::BetweenRenderCalls,
@@ -10761,10 +11646,10 @@ mod tests {
             },
             smoothing_samples: 0,
         };
-        interrupted_fader.try_push(fader_record).unwrap();
-        interrupted_matrix.try_push(matrix_record).unwrap();
-        reference_fader.try_push(fader_record).unwrap();
-        reference_matrix.try_push(matrix_record).unwrap();
+        gate.write_published(|stamp| interrupted_fader.write(stamp, fader_record));
+        gate.write_published(|stamp| interrupted_matrix.write(stamp, matrix_record));
+        gate.write_published(|stamp| reference_fader.write(stamp, fader_record));
+        gate.write_published(|stamp| reference_matrix.write(stamp, matrix_record));
 
         test_only_reset_fader_matrix_witness();
         let mut short_left = [0.5_f32];
@@ -10774,14 +11659,15 @@ mod tests {
                 left: &mut short_left,
                 right: &mut long_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             }),
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!((short_left, long_right), ([0.5], [-0.25, -0.5]));
         let failed = test_only_fader_matrix_witness();
-        assert_eq!(failed.fader_records_drained, 1);
+        assert_eq!(failed.fader_values_applied, 1);
         assert_eq!(
-            failed.matrix_records_drained, 0,
+            failed.matrix_values_applied, 0,
             "invalid envelope returns before the later matrix queue is touched"
         );
 
@@ -10794,6 +11680,7 @@ mod tests {
                 left: &mut interrupted_left,
                 right: &mut interrupted_right,
                 first_sample: 2,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         reference
@@ -10801,6 +11688,7 @@ mod tests {
                 left: &mut reference_left,
                 right: &mut reference_right,
                 first_sample: 2,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(
@@ -10850,8 +11738,15 @@ mod tests {
             },
             smoothing_samples: 7,
         };
-        push_both(&mut paired_fader_tx, &mut separate_fader_tx, fader_record);
-        push_both(
+        let mut gate = TestOnlyGate::new();
+        write_fader_both(
+            &mut gate,
+            &mut paired_fader_tx,
+            &mut separate_fader_tx,
+            fader_record,
+        );
+        write_matrix_both(
+            &mut gate,
             &mut paired_matrix_tx,
             &mut separate_matrix_tx,
             matrix_record,
@@ -10863,6 +11758,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         let mut separate_left = [0.5_f32; 3];
@@ -10872,6 +11768,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_matrix
@@ -10879,6 +11776,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
 
@@ -10905,6 +11803,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 3,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_fader
@@ -10912,6 +11811,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 3,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_matrix
@@ -10919,6 +11819,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 3,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(
@@ -10939,28 +11840,20 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut fixture = pair_fixture(Backend::Simd4, 4);
-        push_both(
-            &mut fixture.paired_fader_tx,
-            &mut fixture.separate_fader_tx,
-            TrackFaderRecord::FaderDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -12.0,
-                smoothing_samples: 3,
+        fixture.write_fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -12.0,
+            smoothing_samples: 3,
+        });
+        fixture.write_matrix(TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.25,
+                rr: 0.75,
             },
-        );
-        push_both(
-            &mut fixture.paired_matrix_tx,
-            &mut fixture.separate_matrix_tx,
-            TrackControlRecord {
-                matrix: Matrix2x2 {
-                    ll: 0.5,
-                    lr: 0.25,
-                    rl: -0.25,
-                    rr: 0.75,
-                },
-                smoothing_samples: 3,
-            },
-        );
+            smoothing_samples: 3,
+        });
         assert_pair_call(&mut fixture, 2, 0x4590, false);
         assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
         assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
@@ -11080,6 +11973,7 @@ mod tests {
         matrix_members: usize,
         concurrent_matrix: bool,
     ) {
+        let mut gate = TestOnlyGate::new();
         let mut fader_fixture = pair_fixture(fader_backend, fader_members);
         let mut matrix_fixture = pair_fixture(matrix_backend, matrix_members);
         let mut fader_oracle = pair_fixture(fader_backend, fader_members);
@@ -11098,22 +11992,14 @@ mod tests {
             },
             smoothing_samples: 3,
         };
-        fader_fixture
-            .separate_fader_tx
-            .try_push(fader_record)
-            .unwrap();
-        fader_oracle
-            .separate_fader_tx
-            .try_push(fader_record)
-            .unwrap();
-        matrix_fixture
-            .separate_matrix_tx
-            .try_push(matrix_record)
-            .unwrap();
-        matrix_oracle
-            .separate_matrix_tx
-            .try_push(matrix_record)
-            .unwrap();
+        gate.write_published(|stamp| fader_fixture.separate_fader_tx.write(stamp, fader_record));
+        gate.write_published(|stamp| fader_oracle.separate_fader_tx.write(stamp, fader_record));
+        gate.write_published(|stamp| {
+            matrix_fixture
+                .separate_matrix_tx
+                .write(stamp, matrix_record)
+        });
+        gate.write_published(|stamp| matrix_oracle.separate_matrix_tx.write(stamp, matrix_record));
         if concurrent_matrix {
             matrix_fixture.separate_matrix.control_delivery = BuiltinControlDelivery::Concurrent;
         }
@@ -11233,6 +12119,7 @@ mod tests {
 
     #[test]
     fn declined_factory_owners_keep_queued_state_and_render_in_original_order() {
+        let mut gate = TestOnlyGate::new();
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11252,10 +12139,10 @@ mod tests {
             },
             smoothing_samples: 3,
         };
-        declined.separate_fader_tx.try_push(fader_record).unwrap();
-        declined.separate_matrix_tx.try_push(matrix_record).unwrap();
-        oracle.separate_fader_tx.try_push(fader_record).unwrap();
-        oracle.separate_matrix_tx.try_push(matrix_record).unwrap();
+        gate.write_published(|stamp| declined.separate_fader_tx.write(stamp, fader_record));
+        gate.write_published(|stamp| declined.separate_matrix_tx.write(stamp, matrix_record));
+        gate.write_published(|stamp| oracle.separate_fader_tx.write(stamp, fader_record));
+        gate.write_published(|stamp| oracle.separate_matrix_tx.write(stamp, matrix_record));
         let saved_fader =
             builtins::test_support::fader_bank_lane_words(&declined.separate_fader.bank, 0);
         let saved_matrix =
@@ -11335,6 +12222,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("nonzero queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect::<Vec<_>>();
@@ -11403,6 +12291,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("control queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect::<Vec<_>>();
@@ -11456,6 +12345,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             })
             .collect::<Vec<_>>();
@@ -11475,10 +12365,10 @@ mod tests {
             "the charged outer covers the larger split owner"
         );
         let fader_fields = core::mem::size_of::<FaderMuteRampBuiltins>()
-            + core::mem::size_of::<Consumer<TrackFaderRecord>>()
+            + core::mem::size_of::<FaderReader>()
             + core::mem::size_of::<BuiltinControlDelivery>();
         let matrix_fields = core::mem::size_of::<MatrixBuiltins>()
-            + core::mem::size_of::<Consumer<TrackControlRecord>>()
+            + core::mem::size_of::<MatrixReader>()
             + core::mem::size_of::<BuiltinControlDelivery>();
         assert!(core::mem::size_of::<LiveControlFaderProcessor>() >= fader_fields);
         assert!(core::mem::size_of::<LiveControlMatrixProcessor>() >= matrix_fields);
@@ -12032,6 +12922,7 @@ mod tests {
             &[TrackControlRequest {
                 track_id: "vocal".to_owned(),
                 queue_capacity: NonZeroUsize::new(1).expect("queue"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             }],
             caps(),
@@ -12129,6 +13020,7 @@ mod tests {
                 .map(|(index, id)| TrackControlRequest {
                     track_id: id.clone(),
                     queue_capacity: NonZeroUsize::new(1).expect("queue"),
+                    superseded: LiveValuesSuperseded::default(),
                     input_lane: live.contains(&index),
                 })
                 .collect()
@@ -13108,7 +14000,7 @@ mod tests {
                 db: -144.0,
                 smoothing_samples: 0,
             })
-            .expect("room");
+            .expect("queue");
         let mut left = [1.0_f32; 4];
         let mut right = [1.0_f32; 4];
         processor
@@ -13116,6 +14008,7 @@ mod tests {
                 left: &mut left,
                 right: &mut right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .expect("render");
         assert!(
@@ -13138,7 +14031,7 @@ mod tests {
                     ..prepared.targets[0]
                 },
             })
-            .expect("room");
+            .expect("queue");
         let mut left = [1.0_f32; 65];
         let mut right = [1.0_f32; 65];
         processor
@@ -13146,6 +14039,7 @@ mod tests {
                 left: &mut left,
                 right: &mut right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .expect("render");
         assert_eq!(left[0].to_bits(), 1.0_f32.to_bits());
@@ -13170,7 +14064,7 @@ mod tests {
                 inverted: true,
                 smoothing_samples: 0,
             })
-            .expect("room");
+            .expect("queue");
         let mut left = [1.0_f32; 4];
         let mut right = [1.0_f32; 4];
         processor
@@ -13178,6 +14072,7 @@ mod tests {
                 left: &mut left,
                 right: &mut right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .expect("render");
         assert!(
@@ -13245,6 +14140,7 @@ mod tests {
             &[TrackControlRequest {
                 track_id: track.clone(),
                 queue_capacity: depth,
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             }],
             caps(),
@@ -13279,11 +14175,13 @@ mod tests {
                 TrackControlRequest {
                     track_id: track.clone(),
                     queue_capacity: depth,
+                    superseded: LiveValuesSuperseded::default(),
                     input_lane: true,
                 },
                 TrackControlRequest {
                     track_id: track.clone(),
                     queue_capacity: depth,
+                    superseded: LiveValuesSuperseded::default(),
                     input_lane: true,
                 },
             ],
@@ -13306,6 +14204,7 @@ mod tests {
             &[TrackControlRequest {
                 track_id: "no-such-track".to_owned(),
                 queue_capacity: depth,
+                superseded: LiveValuesSuperseded::default(),
                 input_lane: true,
             }],
             caps(),

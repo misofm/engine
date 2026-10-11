@@ -176,15 +176,16 @@ V0_CRATE_HASH = re.compile(r"Cs[0-9A-Za-z]*_")
 # review of new dynamic dispatch on the render thread, never a re-pin without its reason.
 INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_render": {
-        "_RNvMs2_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan6render": (
+        "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan6render": (
             1,
             "`executor.invalidate_observers()` on a failed block, through the plan's "
             "`Box<dyn PreparedPlanExecutor>`",
         ),
-        "_RNvMs2_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
-            1,
-            "`executor.render(...)`: the whole plan executor, through the plan's "
-            "`Box<dyn PreparedPlanExecutor>`; the runtime render-locked count covers it",
+        "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
+            2,
+            "`executor.begin_live_block(snapshot)` (#1502 D2: hands the block's live snapshot to "
+            "the executor) and `executor.render(...)` (the whole plan executor), both through the "
+            "plan's `Box<dyn PreparedPlanExecutor>`; the runtime render-locked count covers them",
         ),
     },
     "miso_engine_web_v1_meter_poll": {},

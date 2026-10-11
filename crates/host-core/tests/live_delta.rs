@@ -799,7 +799,11 @@ fn pushed_records_render_the_rebuilt_plan() {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    push_delta(&mut handles, &delta);
+    let mut gate = live
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
+    push_delta(&mut handles, &mut gate, &delta);
     let prepare = |compiled: &session::CompiledSession| {
         prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -829,7 +833,7 @@ fn pushed_records_render_the_rebuilt_plan() {
             None
         )]
     );
-    push_delta(&mut handles, &unmute);
+    push_delta(&mut handles, &mut gate, &unmute);
     let rebuilt = render_blocks(&mut prepare(&compile(&unmuted)), &planes, 0..2 * BLOCKS);
     let second_half = rebuilt[rebuilt.len() / 2..].to_vec();
     assert!(
@@ -842,24 +846,29 @@ fn pushed_records_render_the_rebuilt_plan() {
     );
 }
 
-/// Pushes every record of `delta` to its strip's lanes.
-fn push_delta(handles: &mut host_core::HostLiveControlHandles, delta: &LiveDelta<'_>) {
-    for strip in &delta.strips {
-        let control = handles
-            .strip_controls
-            .iter_mut()
-            .find(|control| &*control.track_id == strip.strip_id)
-            .expect("strip lane");
-        for record in strip.fader_records() {
-            control.fader.try_push(record).expect("fader queue room");
+/// Writes every record of `delta` to its strip's cells as one transaction, stamped from the
+/// plan's own gate and published on it.
+fn push_delta(
+    handles: &mut host_core::HostLiveControlHandles,
+    gate: &mut engine::realtime::PlanRevisionGate,
+    delta: &LiveDelta<'_>,
+) {
+    use builtins_compiler::TestOnlyWriteGate;
+    gate.write_published(|stamp| {
+        for strip in &delta.strips {
+            let control = handles
+                .strip_controls
+                .iter_mut()
+                .find(|control| &*control.track_id == strip.strip_id)
+                .expect("strip lane");
+            for record in strip.fader_records() {
+                control.fader.write(stamp, record);
+            }
+            if let Some(record) = strip.matrix {
+                control.producer.write(stamp, record);
+            }
         }
-        if let Some(record) = strip.matrix {
-            control
-                .producer
-                .try_push(record)
-                .expect("matrix queue room");
-        }
-    }
+    });
 }
 
 // Issue #1264: effect parameter records.

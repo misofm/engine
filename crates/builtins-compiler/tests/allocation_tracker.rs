@@ -13,9 +13,9 @@ use std::sync::Mutex;
 
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
-    BuiltinCompileCaps, MeterRequest, TEST_ONLY_PAIR_GRAPH_TRACKS, TestOnlyFaderMatrixPair,
-    TrackControlRecord, TrackControlRequest, TrackFaderRecord, TrackInputRecord,
-    prepare_session_builtins, prepare_session_builtins_with_live_controls,
+    BuiltinCompileCaps, LiveValuesSuperseded, MeterRequest, TEST_ONLY_PAIR_GRAPH_TRACKS,
+    TestOnlyFaderMatrixPair, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
+    TrackInputRecord, prepare_session_builtins, prepare_session_builtins_with_live_controls,
     test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
     test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
     test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
@@ -26,7 +26,7 @@ use builtins_compiler::{
     test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
     test_only_scalar_split_outer_layout,
 };
-use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{LiveSnapshot, PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
 
 /// Serializes the two tests below (each measures the process-global phase-two tracker) so no
@@ -287,7 +287,7 @@ fn audit_runtime_bank_render(
     LIVE_FREES.set(0);
     armed(|| {
         chain
-            .run(planes, 1, first_sample)
+            .run(planes, 1, first_sample, LiveSnapshot::ALL)
             .expect("runtime bank render")
     });
     assert_eq!(
@@ -325,47 +325,52 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     assert_eq!(settled.process_members, members);
 
     {
-        let tail = eligible
-            .track_controls
-            .iter_mut()
-            .find(|control| control.track_id.as_ref() == tail_id)
-            .expect("eligible tail controls");
-        tail.fader
-            .try_push(TrackFaderRecord::FaderDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -12.0,
-                smoothing_samples: 3,
-            })
-            .unwrap();
-        tail.producer
-            .try_push(TrackControlRecord {
-                matrix: Matrix2x2 {
-                    ll: 0.5,
-                    lr: 0.25,
-                    rl: -0.25,
-                    rr: 0.75,
+        eligible.test_only_write(|controls, stamp| {
+            let tail = controls
+                .iter_mut()
+                .find(|control| control.track_id.as_ref() == tail_id)
+                .expect("eligible tail controls");
+            tail.fader.write(
+                stamp,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -12.0,
+                    smoothing_samples: 3,
                 },
-                smoothing_samples: 3,
-            })
-            .unwrap();
+            );
+            tail.producer.write(
+                stamp,
+                TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.25,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 3,
+                },
+            );
+        });
     }
     let ramp_a = audit_graph_render(&mut eligible, &mut output, 64);
     assert_eq!((ramp_a.fused_calls, ramp_a.fallback_calls), (1, 1));
     let ramp_b = audit_graph_render(&mut eligible, &mut output, 128);
     assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (2, 0));
 
-    eligible
-        .track_controls
-        .iter_mut()
-        .find(|control| control.track_id.as_ref() == tail_id)
-        .expect("eligible tail controls")
-        .fader
-        .try_push(TrackFaderRecord::FaderDb {
-            lanes: BuiltinLaneSelector::Left,
-            db: -3.0,
-            smoothing_samples: 2,
-        })
-        .unwrap();
+    eligible.test_only_write(|controls, stamp| {
+        let tail = controls
+            .iter_mut()
+            .find(|control| control.track_id.as_ref() == tail_id)
+            .expect("eligible tail controls");
+        tail.fader.write(
+            stamp,
+            TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -3.0,
+                smoothing_samples: 2,
+            },
+        );
+    });
     let retarget = audit_graph_render(&mut eligible, &mut output, 192);
     assert_eq!((retarget.fused_calls, retarget.fallback_calls), (1, 1));
     let resettled = audit_graph_render(&mut eligible, &mut output, 256);
@@ -430,31 +435,32 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     let settled = audit_graph_render(&mut selected, &mut output, 0);
     assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
     {
-        let scalar = selected
-            .track_controls
-            .iter_mut()
-            .find(|control| control.track_id.as_ref() == "t01")
-            .expect("selected scalar controls");
-        scalar
-            .fader
-            .try_push(TrackFaderRecord::FaderDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -12.0,
-                smoothing_samples: 96,
-            })
-            .unwrap();
-        scalar
-            .producer
-            .try_push(TrackControlRecord {
-                matrix: Matrix2x2 {
-                    ll: 0.5,
-                    lr: 0.25,
-                    rl: -0.25,
-                    rr: 0.75,
+        selected.test_only_write(|controls, stamp| {
+            let scalar = controls
+                .iter_mut()
+                .find(|control| control.track_id.as_ref() == "t01")
+                .expect("selected scalar controls");
+            scalar.fader.write(
+                stamp,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -12.0,
+                    smoothing_samples: 96,
                 },
-                smoothing_samples: 96,
-            })
-            .unwrap();
+            );
+            scalar.producer.write(
+                stamp,
+                TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.25,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 96,
+                },
+            );
+        });
     }
     for (sample, expected) in [(64, (1, 1)), (128, (1, 1)), (192, (2, 0))] {
         let witness = audit_graph_render(&mut selected, &mut output, sample);
@@ -1369,6 +1375,7 @@ fn live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_inpu
             .map(|index| TrackControlRequest {
                 track_id: format!("track-{index}"),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                superseded: LiveValuesSuperseded::default(),
                 input_lane,
             })
             .collect()

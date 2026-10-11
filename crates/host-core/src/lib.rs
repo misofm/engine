@@ -238,7 +238,7 @@ pub use builtins::{InputBoundCache, InputBoundRecord};
 /// One strip's live-control producers (`HostLiveControlHandles::strip_controls`), re-exported so a
 /// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
 /// depending on `builtins-compiler`.
-pub use builtins_compiler::TrackControlProducer;
+pub use builtins_compiler::{FaderCells, LiveValuesSuperseded, MatrixCells, TrackControlProducer};
 pub use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 pub use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 

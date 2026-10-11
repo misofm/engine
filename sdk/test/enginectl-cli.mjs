@@ -182,14 +182,14 @@ describe("enginectl session build", () => {
     assert.doesNotMatch(result.stdout.toString("utf8"), /"command":"session\.build"/);
 
     const maximum = request();
-    maximum.session.revision = "18446744073709551615";
+    maximum.session.revision = "9223372036854775807";
     maximum.sources[0].spec.frames = "18446744073709551615";
     maximum.sources[1].spec.frames = "18446744073709551615";
     maximum.automation[0].segments[0].endSample = "18446744073709551615";
     const accepted = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(maximum));
     assert.equal(accepted.status, 0, accepted.stderr.toString("utf8"));
     const document = JSON.parse(accepted.stdout.toString("utf8"));
-    assert.equal(document.revision, "18446744073709551615");
+    assert.equal(document.revision, "9223372036854775807");
     assert.equal(document.sources[0].frames, "18446744073709551615");
     assert.equal(document.automation[0].segments[0].end_sample, "18446744073709551615");
   });
@@ -362,7 +362,7 @@ process.stdout.write = function () {
     const numeric = request();
     numeric.automation[0].segments[0].startSample = Number.MAX_SAFE_INTEGER + 1;
     failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(numeric)), 3, "request.shape");
-    for (const invalid of ["00", "+1", " 1", "18446744073709551616"]) {
+    for (const invalid of ["00", "+1", " 1", "9223372036854775808", "18446744073709551616"]) {
       const malformed = request();
       malformed.session.revision = invalid;
       failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(malformed)), 3, "request.shape");

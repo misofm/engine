@@ -18,7 +18,9 @@ use protocol::{
     TransportSnapshot, TransportState,
 };
 
-const PROVIDER_COUNTER_SLOTS: usize = 3;
+/// The counters the provider holds itself: the two telemetry counters, the canceled-automation
+/// count and `live_values_superseded` (#1312 D8).
+const PROVIDER_COUNTER_SLOTS: usize = 4;
 
 /// Read-only, thread-safe projection of the active render plan's next absolute sample.
 pub trait PlanSampleSource: Send + Sync {
@@ -258,6 +260,18 @@ impl SessionControlProvider {
             &mut self.counter_snapshot,
             CounterId::TelemetryDropped,
             counters.telemetry_dropped,
+        );
+    }
+
+    /// Record the session's `live_values_superseded` count (#1312 D8): the writes to adopted
+    /// plans that a later write to the same cell replaced before a covering snapshot. The control
+    /// plane copies it in beside the telemetry counters, so a counters read after any control
+    /// call reports it.
+    pub fn set_live_values_superseded(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::LiveValuesSuperseded,
+            count,
         );
     }
 
@@ -921,6 +935,7 @@ mod tests {
             telemetry_dropped: 9,
         });
         provider.record_canceled_automation(11);
+        provider.set_live_values_superseded(13);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -931,6 +946,8 @@ mod tests {
         assert_eq!(counters.values[0].value, 7);
         assert_eq!(counters.values[1].value, 9);
         assert_eq!(counters.values[2].value, 11);
+        assert_eq!(counters.values[3].id, CounterId::LiveValuesSuperseded);
+        assert_eq!(counters.values[3].value, 13);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

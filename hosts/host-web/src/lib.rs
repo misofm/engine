@@ -1226,9 +1226,9 @@ pub struct WebBootOptions {
     /// Per-track live-control queue depth in records, or `0` to accept no live command and
     /// allocate no command staging (issue #137 D1).
     ///
-    /// Zero still leaves every strip's fader/mute and matrix/pan lanes on the plan, at the engine's
-    /// own depth ([`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a strip's mute for its
-    /// own transitions, and no command can reach them (issue #1326).
+    /// Zero still leaves every strip's fader/mute and matrix/pan cells on the plan (and its queues
+    /// at the engine's own depth, [`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a
+    /// strip's mute for its own transitions, and no command can reach them (issues #1326, #1312).
     pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -1525,6 +1525,13 @@ struct ReadyOwnership {
     /// declared first so they are released before the plan that owns their consumer endpoints.
     /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
     controls: Vec<TrackControlProducer>,
+    /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
+    /// stamps those writes from this handle and publishes their revision on it, as the control
+    /// plane does through its provider epoch; the plan's own render takes its snapshot from the
+    /// same gate. Until Worker admission (#1382) this is the one handle on the one plan. It is
+    /// never moved while a stamp is open: every revision stamped here is published in the same
+    /// admission.
+    plan_gate: engine::realtime::PlanRevisionGate,
     /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
     /// reaches its queue with one index and no search.
@@ -1751,8 +1758,8 @@ impl ReadyOwnership {
     ///
     /// | range | queue |
     /// |---|---|
-    /// | `0 .. strips` | strip `s`'s matrix/pan queue |
-    /// | `strips .. 2 * strips` | strip `s`'s fader/mute queue |
+    /// | `0 .. strips` | strip `s`'s matrix/pan cell (#1312: no queue, no room) |
+    /// | `strips .. 2 * strips` | strip `s`'s fader/mute cells (#1312: no queue, no room) |
     /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity queue (#210 phase 3) |
     /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
     /// | `3 * strips + E ..` | live send `r`'s queue, by live-route index (issue #1222 D4) |
@@ -1778,14 +1785,13 @@ impl ReadyOwnership {
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
+    /// The free room of one destination queue. The matrix and fader bands are latest-target cells
+    /// (#1312), which have no room to want and are never asked: they answer `None`, as an
+    /// unaddressable queue does.
     fn queue_available(&self, slot: usize) -> Option<u32> {
         let tracks = self.strip_count();
-        if slot < tracks {
-            return u32::try_from(self.controls.get(slot)?.producer.available_capacity()).ok();
-        }
         if slot < tracks * 2 {
-            return u32::try_from(self.controls.get(slot - tracks)?.fader.available_capacity())
-                .ok();
+            return None;
         }
         if slot < tracks * 3 {
             return u32::try_from(
@@ -1816,7 +1822,7 @@ impl ReadyOwnership {
     }
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
-    /// free-room pass has already ruled out.
+    /// free-room pass has already ruled out, or on a cell record, which is never pushed.
     fn push(
         &mut self,
         slot: usize,
@@ -1825,14 +1831,9 @@ impl ReadyOwnership {
     ) -> Result<(), ()> {
         let tracks = self.strip_count();
         match record {
-            AdmittedCommand::Matrix(record) => {
-                let producer = self.controls.get_mut(slot).ok_or(())?;
-                producer.producer.try_push(record).map_err(|_| ())
-            }
-            AdmittedCommand::Fader(record) => {
-                let producer = self.controls.get_mut(slot - tracks).ok_or(())?;
-                producer.fader.try_push(record).map_err(|_| ())
-            }
+            // The strips' fader, mute and matrix values are cells, written under the batch's
+            // stamp by the admission itself (`write_strip_cells`), never pushed.
+            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) => Err(()),
             AdmittedCommand::Input(record) => {
                 let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
                 let input = producer.input.as_mut().ok_or(())?;
@@ -3337,17 +3338,18 @@ impl AudioWorkletEngineHost {
     /// # The two-pass shape is the contract, not an optimisation
     ///
     /// Pass one validates every record -- shape, addressing, domain, and free queue room -- and
-    /// pushes nothing. Pass two pushes. A submission is therefore all-or-nothing: eval E4's
-    /// "engine state untouched" is a property of the code, not of a lucky ordering, and eval E3's
-    /// flood is refused before a single record reaches a queue.
+    /// pushes nothing. Pass two pushes (and writes the strip cells, which have no room to check,
+    /// #1312). A submission is therefore all-or-nothing: eval E4's "engine state untouched" is a
+    /// property of the code, not of a lucky ordering, and eval E3's flood of queued records is
+    /// refused before a single one reaches a queue.
     ///
     /// # Why this is not on the render thread's critical path
     ///
     /// This runs from `port.onmessage`, which the user agent dispatches between render quanta on
     /// the same thread as `process()`. It performs no allocation, no compilation and no plan
     /// replacement: both staging arrays were allocated at compilation, and the call moves at most
-    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues. The block that
-    /// follows drains them.
+    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues and strip cells.
+    /// The block that follows drains the queues and reads the cells.
     pub fn submit_commands(&mut self, count: u32) -> u32 {
         self.submit_commands_inner(count, None)
     }
@@ -4680,6 +4682,79 @@ fn admit_commands(
     }
 }
 
+/// Write the admitted fader, mute and matrix/pan records of one batch into the strips' cells as
+/// one transaction (#1312 D7), then publish its revision on the plan's gate.
+///
+/// A batch that stages none takes no stamp and no revision. The stamp is the batch's last
+/// fallible step: its refusal (a revision past the gate's ceiling) writes nothing and returns the
+/// internal refusal. After the stamp nothing can fail: each step is an `expect` on an invariant the
+/// staging pass checked (root's D7 ruling), so a refused batch's values can never be published
+/// and an open stamp never outlives the batch.
+fn write_strip_cells(
+    ready: &mut ReadyOwnership,
+    lowered: usize,
+    strip_count: usize,
+) -> Result<(), CommandRejection> {
+    let writes_cells = ready.command_decoded[..lowered].iter().any(|staged| {
+        matches!(
+            staged.kind,
+            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
+        )
+    });
+    if !writes_cells {
+        return Ok(());
+    }
+    let first_wire_index = ready.command_decoded[..lowered]
+        .iter()
+        .find(|staged| {
+            matches!(
+                staged.kind,
+                StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_))
+            )
+        })
+        .map_or(0, |staged| staged.original_wire_index);
+    let revision = ready.plan_gate.last_published().saturating_add(1);
+    let Ok(stamp) = ready.plan_gate.stamp(revision) else {
+        return Err(CommandRejection {
+            result: RESULT_INTERNAL,
+            reason: COMMAND_REASON_BACKPRESSURE,
+            index: first_wire_index,
+        });
+    };
+    // Every step from here to the publication cannot fail (root's D7 ruling): the staging pass
+    // gave each cell record a strip index below `strip_count`, and `controls` holds one producer
+    // set per strip. A violation is a bug, not a refusal: it must not leave a stamp open or
+    // publish a half-written batch under a refusal.
+    for entry in 0..lowered {
+        let staged = ready.command_decoded[entry];
+        let slot = staged.queue_slot as usize;
+        match staged.kind {
+            StagedCommandKind::Command(AdmittedCommand::Matrix(record)) => {
+                ready
+                    .controls
+                    .get_mut(slot)
+                    .expect("a staged matrix record addresses a strip with a cell producer")
+                    .producer
+                    .write(stamp, record);
+            }
+            StagedCommandKind::Command(AdmittedCommand::Fader(record)) => {
+                ready
+                    .controls
+                    .get_mut(
+                        slot.checked_sub(strip_count)
+                            .expect("a staged fader record sits in the fader band"),
+                    )
+                    .expect("a staged fader record addresses a strip with a cell producer")
+                    .fader
+                    .write(stamp, record);
+            }
+            _ => {}
+        }
+    }
+    ready.plan_gate.publish(revision);
+    Ok(())
+}
+
 /// The three passes themselves. Every exit from here is a transaction boundary for its caller.
 fn admit_commands_staged(
     ready: &mut ReadyOwnership,
@@ -5609,6 +5684,10 @@ fn admit_commands_staged(
     for entry in 0..lowered {
         let staged = ready.command_decoded[entry];
         let slot = staged.queue_slot as usize;
+        // The matrix and fader bands are cells (#1312): a write needs no room.
+        if slot < strip_count * 2 {
+            continue;
+        }
         let needed = ready.command_wanted[slot];
         let Some(available) = ready.queue_available(slot) else {
             return Err(refuse(
@@ -5623,28 +5702,34 @@ fn admit_commands_staged(
             ));
         }
     }
+    // The strips' cells, under one stamp (#1312 D7). Every check of the batch has passed, so the
+    // stamp is the last fallible step: a refused batch above stamped and wrote nothing, and used
+    // no revision. The revision is host-local, the next above the gate's last published one, and
+    // is published as soon as the batch's cells are written, whatever the later passes do: the
+    // writes are made, so the revision that reveals them must follow, or a later batch would
+    // reveal them under its own.
+    write_strip_cells(ready, lowered, strip_count)?;
     for entry in 0..lowered {
         let staged = ready.command_decoded[entry];
         let slot = staged.queue_slot as usize;
         match staged.kind {
+            // Cells were written above.
+            StagedCommandKind::Command(AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_)) => {}
             StagedCommandKind::Command(record) => {
-                if ready.push(slot, record, applied_at_sample).is_err() {
-                    return Err(CommandRejection {
-                        result: RESULT_INTERNAL,
-                        reason: COMMAND_REASON_BACKPRESSURE,
-                        index: staged.original_wire_index,
-                    });
-                }
+                ready
+                    .push(slot, record, applied_at_sample)
+                    .expect("the free-room pass checked this record's room");
                 ready.in_flight[slot] += 1;
                 ready.has_in_flight_commands = true;
             }
             StagedCommandKind::PreparedOwner(marker) => {
+                // Past the stamp (or the last check, without cells) nothing here fails: each step
+                // is an `expect` on an invariant the staging passes above checked (root's D7
+                // ruling).
                 if marker.kind == PreparedOwnerKind::Eq {
-                    let effect = slot.checked_sub(strip_count * 3).ok_or(CommandRejection {
-                        result: RESULT_INTERNAL,
-                        reason: COMMAND_REASON_MALFORMED,
-                        index: staged.original_wire_index,
-                    })?;
+                    let effect = slot
+                        .checked_sub(strip_count * 3)
+                        .expect("an Eq owner marker sits in the effect band");
                     let mut targets = [effect_contract::PreparedEffectTarget {
                         slot: 0,
                         channel: effect_contract::ParameterChannel::Both,
@@ -5653,13 +5738,8 @@ fn admit_commands_staged(
                     let mut target_count = 0_usize;
                     if let Some(companion) = companion.as_ref() {
                         for index in 0..companion.target_count {
-                            let target = companion_target(companion, index).map_err(|_| {
-                                CommandRejection {
-                                    result: RESULT_INTERNAL,
-                                    reason: COMMAND_REASON_MALFORMED,
-                                    index: staged.original_wire_index,
-                                }
-                            })?;
+                            let target = companion_target(companion, index)
+                                .expect("the companion's targets were decoded while staging");
                             let addressed = prepared_queue_address(
                                 ready,
                                 target.track_index as usize,
@@ -5675,36 +5755,19 @@ fn admit_commands_staged(
                             }
                         }
                     }
-                    let producer = ready
+                    ready
                         .effect_controls
                         .get_mut(effect)
                         .and_then(Option::as_mut)
-                        .ok_or(CommandRejection {
-                            result: RESULT_INTERNAL,
-                            reason: COMMAND_REASON_UNSUPPORTED_KIND,
-                            index: staged.original_wire_index,
-                        })?;
-                    if producer
+                        .expect("an Eq owner marker addresses a prepared effect producer")
                         .publish_candidate_targets(marker.base_revision, &targets[..target_count])
-                        .is_err()
-                    {
-                        return Err(CommandRejection {
-                            result: RESULT_INTERNAL,
-                            reason: COMMAND_REASON_BACKPRESSURE,
-                            index: staged.original_wire_index,
-                        });
-                    }
+                        .expect("the owner's targets were preflighted");
                 } else {
                     let mut target_count = 0_usize;
                     if let Some(companion) = companion.as_ref() {
                         for index in 0..companion.target_count {
-                            let target = companion_target(companion, index).map_err(|_| {
-                                CommandRejection {
-                                    result: RESULT_INTERNAL,
-                                    reason: COMMAND_REASON_MALFORMED,
-                                    index: staged.original_wire_index,
-                                }
-                            })?;
+                            let target = companion_target(companion, index)
+                                .expect("the companion's targets were decoded while staging");
                             let addressed = prepared_queue_address(
                                 ready,
                                 target.track_index as usize,
@@ -5715,13 +5778,8 @@ fn admit_commands_staged(
                                 kind == PreparedOwnerKind::BuiltinInput && addressed == slot
                             });
                             if addressed {
-                                let target = companion_builtin_target(target).map_err(|_| {
-                                    CommandRejection {
-                                        result: RESULT_INTERNAL,
-                                        reason: COMMAND_REASON_MALFORMED,
-                                        index: staged.original_wire_index,
-                                    }
-                                })?;
+                                let target = companion_builtin_target(target)
+                                    .expect("the builtin target was validated while staging");
                                 ready
                                     .push(
                                         slot,
@@ -5730,22 +5788,15 @@ fn admit_commands_staged(
                                         }),
                                         applied_at_sample,
                                     )
-                                    .map_err(|_| CommandRejection {
-                                        result: RESULT_INTERNAL,
-                                        reason: COMMAND_REASON_BACKPRESSURE,
-                                        index: staged.original_wire_index,
-                                    })?;
+                                    .expect("the free-room pass checked this record's room");
                                 target_count += 1;
                             }
                         }
                     }
-                    if target_count != marker.target_count as usize {
-                        return Err(CommandRejection {
-                            result: RESULT_INTERNAL,
-                            reason: COMMAND_REASON_MALFORMED,
-                            index: staged.original_wire_index,
-                        });
-                    }
+                    assert_eq!(
+                        target_count, marker.target_count as usize,
+                        "the targets pushed are the targets staged"
+                    );
                 }
                 ready.in_flight[slot] += marker.target_count;
                 ready.has_in_flight_commands = true;
@@ -5759,39 +5810,21 @@ fn admit_commands_staged(
         };
         if marker.kind == PreparedOwnerKind::Eq {
             let effect = marker.queue_slot as usize - strip_count * 3;
-            let producer = ready
+            ready
                 .effect_controls
                 .get_mut(effect)
                 .and_then(Option::as_mut)
-                .ok_or(CommandRejection {
-                    result: RESULT_INTERNAL,
-                    reason: COMMAND_REASON_UNSUPPORTED_KIND,
-                    index: staged.original_wire_index,
-                })?;
-            if producer.commit_owner().is_err() {
-                return Err(CommandRejection {
-                    result: RESULT_INTERNAL,
-                    reason: COMMAND_REASON_MALFORMED,
-                    index: staged.original_wire_index,
-                });
-            }
+                .expect("an Eq owner marker addresses a prepared effect producer")
+                .commit_owner()
+                .expect("the owner's targets were published");
         } else {
             let track = marker.queue_slot as usize - strip_count * 2;
-            let shadow = ready
+            ready
                 .input_filter_shadows
                 .get_mut(track)
-                .ok_or(CommandRejection {
-                    result: RESULT_INTERNAL,
-                    reason: COMMAND_REASON_UNSUPPORTED_KIND,
-                    index: staged.original_wire_index,
-                })?;
-            if shadow.commit(marker.base_revision).is_err() {
-                return Err(CommandRejection {
-                    result: RESULT_INTERNAL,
-                    reason: COMMAND_REASON_MALFORMED,
-                    index: staged.original_wire_index,
-                });
-            }
+                .expect("a builtin input owner marker addresses a track's shadow")
+                .commit(marker.base_revision)
+                .expect("the shadow's base revision was checked while staging");
         }
     }
     Ok(())
@@ -7211,9 +7244,15 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(decoded_bytes);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
+    let mut host = host;
+    let plan_gate = host
+        .plan
+        .take_revision_gate()
+        .ok_or_else(|| fixed_diagnostic("web.internal.plan_gate"))?;
     let ready = ReadyOwnership {
         commands_enabled,
         controls: handles.strip_controls,
+        plan_gate,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),

@@ -652,10 +652,12 @@ fn fold_mono_document(
             track.right_source_channel = 0;
         }
     }
-    model.revision = model
-        .revision
-        .checked_add(1)
-        .ok_or_else(|| fold_error("session revision exhausted"))?;
+    // The fold publishes revision + 1; the session schema's revision domain ends at
+    // `MAX_SESSION_REVISION` (#1503), so a document at the ceiling has no successor.
+    if model.revision >= session::MAX_SESSION_REVISION {
+        return Err(fold_error("session revision exhausted"));
+    }
+    model.revision += 1;
     let compiled = compile_session(&model, compile_caps()).map_err(|set| {
         fold_error(format!(
             "transformed session is invalid: {}",

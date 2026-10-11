@@ -10,7 +10,7 @@
 use core::num::NonZeroUsize;
 
 use builtins::BuiltinLaneSelector;
-use builtins_compiler::TrackFaderRecord;
+use builtins_compiler::{TestOnlyWriteGate, TrackFaderRecord};
 use dsp_reference::randomized::Draw;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
@@ -205,16 +205,23 @@ fn a_bus_fader_record_renders_as_the_session_with_that_fader() {
     };
     let feeds: Vec<[Vec<f32>; 2]> = TRACKS.iter().map(|_| [plane(), plane()]).collect();
 
+    let mut gate = live
+        .0
+        .plan
+        .take_revision_gate()
+        .expect("the plan's gate handle");
     for block in 0..BLOCKS {
         if block == COMMANDED {
-            live.1.strip_controls[3]
-                .fader
-                .try_push(TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -6.0,
-                    smoothing_samples: 0,
-                })
-                .expect("bounded queue room");
+            gate.write_published(|stamp| {
+                live.1.strip_controls[3].fader.write(
+                    stamp,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -6.0,
+                        smoothing_samples: 0,
+                    },
+                )
+            });
         }
         let commanded = bits(&render(&mut live.0, &feeds, block));
         let reference = bits(&render(&mut twin.0, &feeds, block));

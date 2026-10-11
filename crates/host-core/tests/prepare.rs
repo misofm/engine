@@ -8,9 +8,11 @@ use builtins::{MeterMetricSet, MeterTap};
 use core::mem::{size_of, size_of_val};
 use host_core::{
     EffectControlProducer, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, PrepareRejection,
-    SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
-    control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, LiveValuesSuperseded,
+    PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission,
+    compile_host_session, control_table_bytes, default_source_ring_frames, diagnostic_lines,
+    prepare_host_runtime, prepare_host_runtime_with_live_controls,
+    prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
     source_id_arena_bytes,
 };
@@ -701,7 +703,7 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
         ..HostLiveControlRequest::default()
     };
-    let (compiled, prepared, mut handles) =
+    let (compiled, prepared, handles) =
         prepare_host_session_with_live_controls(SESSION, &live_control_caps, &live_controls)
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
@@ -727,27 +729,6 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         assert_eq!(&*handles.meters[index].track_id, track.as_str());
     }
     assert!(prepared.report.builtin_meter_payload_bytes > 0);
-
-    // The control queue is bounded and a full queue hands the record back rather than dropping it.
-    let record = builtins_compiler::TrackControlRecord {
-        matrix: builtins::Matrix2x2 {
-            ll: 1.0,
-            lr: 0.0,
-            rl: 0.0,
-            rr: 1.0,
-        },
-        smoothing_samples: 0,
-    };
-    let producer = &mut handles.strip_controls[0].producer;
-    for _ in 0..4 {
-        producer
-            .try_push(record)
-            .expect("bounded depth admits four");
-    }
-    let full = producer
-        .try_push(record)
-        .expect_err("fifth is backpressure");
-    assert_eq!(full.value, record, "a full queue returns the record");
 }
 
 /// Issue #137: a host that asks for no live controls gets none, and pays for none.
@@ -824,5 +805,63 @@ fn dense_refusal_diagnostics_finish_under_one_second_in_release() {
     assert!(
         elapsed < Duration::from_secs(1),
         "bounded dense refusal took {elapsed:?}"
+    );
+}
+
+/// The graph row counts the allocations the plan makes for itself, for every host: its revision gate
+/// (#1502 D1) always, and its `live_values_superseded` count only where the count is both the
+/// preparation's own and held by the plan (#1312 D2). A host that passes the session's count
+/// charges it once itself (the C ABI), and a preparation with no strip controls has no cell reader
+/// holding a count, so the plan retains none. The browser's per-plan count has readers and copies
+/// this row unchanged into its exact retained total.
+///
+/// The graph compiler's row is `session_bytes + incremental_plan_bytes`, and the facade passes it
+/// no session bytes, so the report's incremental row is the independent term the plan's own
+/// allocations are measured against.
+#[test]
+fn the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let with_lanes = HostLiveControlRequest {
+        control_queue_depth: core::num::NonZeroUsize::new(4),
+        ..HostLiveControlRequest::default()
+    };
+    let gate = engine::realtime::plan_revision_gate_retained_bytes();
+    let row = |report: &HostPrepareReport| {
+        report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes
+    };
+
+    let lane_free = prepare_host_runtime(&compiled, &caps())
+        .unwrap_or_else(|_| panic!("prepare with no strip controls"))
+        .report;
+    assert_eq!(
+        row(&lane_free),
+        gate,
+        "no strip controls: no cell reader holds the preparation's count, so the row charges the \
+         gate and not the count"
+    );
+    let own = prepare_host_runtime_with_live_controls(&compiled, &caps(), &with_lanes)
+        .unwrap_or_else(|_| panic!("prepare with the preparation's own count"))
+        .0
+        .report;
+    assert_eq!(
+        row(&own),
+        gate + LiveValuesSuperseded::retained_bytes(),
+        "strip controls with the preparation's own count: the readers hold it, the row charges it"
+    );
+    let shared = prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps(),
+        &with_lanes,
+        HostLiveLanes::ALL,
+        None,
+        &LiveValuesSuperseded::default(),
+    )
+    .unwrap_or_else(|_| panic!("prepare with the session's count"))
+    .0
+    .report;
+    assert_eq!(
+        row(&shared),
+        gate,
+        "strip controls with the session's count: the host charges it once, not the row"
     );
 }

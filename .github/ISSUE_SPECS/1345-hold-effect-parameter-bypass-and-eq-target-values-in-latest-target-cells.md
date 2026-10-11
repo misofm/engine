@@ -144,6 +144,15 @@ Superseded values are counted by #1312's `live_values_superseded`.
 - *Hold live values in latest-target cells on both hosts* (#1312).
 - *Report live_values_superseded in the browser status and prove both hosts drain strip cells
   alike* (#1399): the cross-host test gate 5 extends.
+- **Deferred into this issue by #1504** (recorded in #1504's "Batch follow-ups", m1).
+  `crates/graph/tests/live_snapshot_drains.rs` probes a partial bank (inactive lanes), not a live
+  bypassed lane, because no probe seam exists for a bypassed lane until the effect lanes read cells.
+  This issue adds that case: a bank with one lane live-bypassed whose drain is skipped under the
+  block's snapshot. Until then only rack's `un_bypassing_returns_the_current_wet_signal` covers it.
+- **Header wording (#1312 batch follow-ups, NIT 5).** `crates/capi/include/miso_engine_v1.h` says a
+  transaction with both fader and effect values can see its effect values land one block before its
+  fader values. This issue deletes that sentence together with the "up to one quantum apart" text
+  when the effect values join the cells.
 
 Dependent: *Carry live-controlled effect lanes across a plan swap* (#1280) carries the cells this
 issue creates, so it lands after this issue and edits `crates/effect-contract/src/live.rs` after it.

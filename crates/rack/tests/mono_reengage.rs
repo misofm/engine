@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use effect_contract::{BankWidth, ChannelSymmetryWitness, SeamSide};
-use engine::realtime::RenderError;
+use engine::realtime::{LiveSnapshot, RenderError};
 use rack::{AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage};
 
 /// Planar per-lane buffers, the shape a chain gathers from and scatters to.
@@ -274,9 +274,11 @@ fn the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits() {
         }
         let mut planes = finite_planes(4, 8, block);
         let mut oracle_planes = finite_planes(4, 8, block);
-        chain.run(&mut planes, 8, block * 8).expect("render");
+        chain
+            .run(&mut planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
         oracle
-            .run(&mut oracle_planes, 8, block * 8)
+            .run(&mut oracle_planes, 8, block * 8, LiveSnapshot::ALL)
             .expect("render");
         for lane in 0..4 {
             for frame in 0..8 {
@@ -351,9 +353,11 @@ fn a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart() {
         oracle_stage.core().witness = witness;
         let mut planes = finite_planes(4, 8, block);
         let mut oracle_planes = finite_planes(4, 8, block);
-        chain.run(&mut planes, 8, block * 8).expect("render");
+        chain
+            .run(&mut planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
         oracle
-            .run(&mut oracle_planes, 8, block * 8)
+            .run(&mut oracle_planes, 8, block * 8, LiveSnapshot::ALL)
             .expect("render");
         for lane in 0..4 {
             for frame in 0..8 {
@@ -422,9 +426,11 @@ fn re_equal_words_after_a_desymmetrised_episode_do_not_re_engage() {
         }
         let mut planes = finite_planes(4, 8, block);
         let mut oracle_planes = finite_planes(4, 8, block);
-        chain.run(&mut planes, 8, block * 8).expect("render");
+        chain
+            .run(&mut planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
         oracle
-            .run(&mut oracle_planes, 8, block * 8)
+            .run(&mut oracle_planes, 8, block * 8, LiveSnapshot::ALL)
             .expect("render");
         for lane in 0..4 {
             for frame in 0..8 {
@@ -517,9 +523,11 @@ fn an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not() {
         } else {
             finite_planes(4, 8, block)
         };
-        chain.run(&mut planes, 8, block * 8).expect("render");
+        chain
+            .run(&mut planes, 8, block * 8, LiveSnapshot::ALL)
+            .expect("render");
         oracle
-            .run(&mut oracle_planes, 8, block * 8)
+            .run(&mut oracle_planes, 8, block * 8, LiveSnapshot::ALL)
             .expect("render");
         for lane in 0..4 {
             for frame in 0..8 {

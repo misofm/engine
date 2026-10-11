@@ -842,7 +842,8 @@ pub enum SessionStoreError {
         /// Current authoritative revision.
         current: SessionRevision,
     },
-    /// Incrementing an already maximum model revision is impossible.
+    /// The model revision is at the plan revision gate's ceiling, `GATE_REVISION_MAX`, so a
+    /// further commit would be unrepresentable in the gate.
     RevisionExhausted,
     /// One edit could not resolve against the candidate. Index is in wire order.
     Edit {
@@ -929,10 +930,14 @@ impl SessionStore {
         if edits.is_empty() {
             return Err(SessionStoreError::EmptyTransaction);
         }
-        let next_revision = current
-            .0
-            .checked_add(1)
-            .ok_or(SessionStoreError::RevisionExhausted)?;
+        // The plan revision gate cannot hold a revision above its ceiling (#1432, #1503): the
+        // store's own typed refusal comes after the cheap argument checks and before the candidate
+        // clone, any edit and the compile, so it wins over the schema's `$.revision` refusal and
+        // nothing is written.
+        if current.0 >= engine::realtime::GATE_REVISION_MAX {
+            return Err(SessionStoreError::RevisionExhausted);
+        }
+        let next_revision = current.0 + 1;
         let mut candidate = self.compiled.normalized_model().clone();
         for (operation_index, edit) in edits.iter().enumerate() {
             apply_session_edit(&mut candidate, edit).map_err(|error| SessionStoreError::Edit {
@@ -1168,8 +1173,8 @@ mod tests {
 
     const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
-    /// Largest revision a session may declare under the canonical decimal-string u64 contract.
-    const MAX_SESSION_REVISION: u64 = u64::MAX;
+    /// Largest revision a plan's revision gate can hold; the session schema's `revision` domain.
+    const CEILING: u64 = engine::realtime::GATE_REVISION_MAX;
 
     fn caps() -> CompileCaps {
         CompileCaps {
@@ -1395,33 +1400,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn any_and_maximum_revision_are_rejected_without_replacement() {
+    fn store_at(revision: u64) -> SessionStore {
         let mut model = parse_session_json(EXAMPLE).expect("fixture");
-        model.revision = MAX_SESSION_REVISION;
-        let mut store = SessionStore::new(model, caps()).expect("max revision compiles");
+        model.revision = revision;
+        SessionStore::new(model, caps()).expect("revision within the ceiling compiles")
+    }
+
+    fn rename(name: &str) -> [SessionEdit; 1] {
+        [SessionEdit::SetSessionId {
+            session_id: id(name),
+        }]
+    }
+
+    #[test]
+    fn the_last_commit_reaches_the_ceiling_and_the_next_is_exhausted_before_any_work() {
+        let mut store = store_at(CEILING - 1);
+        let commit = store
+            .apply_transaction(
+                ExpectedRevision::Exact(SessionRevision(CEILING - 1)),
+                &rename("last-commit"),
+            )
+            .expect("the commit that reaches the ceiling");
+        assert_eq!(commit.revision, SessionRevision(CEILING));
+        assert_eq!(store.revision(), SessionRevision(CEILING));
         let before = store.canonical_snapshot().to_owned();
+        let at_ceiling = ExpectedRevision::Exact(SessionRevision(CEILING));
+
         assert_eq!(
-            store.apply_transaction(ExpectedRevision::Any, &[]),
+            store.apply_transaction(ExpectedRevision::Any, &rename("x")),
             Err(SessionStoreError::ExactRevisionRequired)
         );
         assert_eq!(
-            store.apply_transaction(
-                ExpectedRevision::Exact(SessionRevision(MAX_SESSION_REVISION)),
-                &[]
-            ),
+            store.apply_transaction(at_ceiling, &[]),
             Err(SessionStoreError::EmptyTransaction)
         );
         assert_eq!(
             store.apply_transaction(
-                ExpectedRevision::Exact(SessionRevision(MAX_SESSION_REVISION)),
-                &[SessionEdit::SetSessionId {
-                    session_id: id("never-committed"),
-                }],
+                ExpectedRevision::Exact(SessionRevision(CEILING - 1)),
+                &rename("x")
+            ),
+            Err(SessionStoreError::RevisionConflict {
+                current: SessionRevision(CEILING)
+            })
+        );
+        // The refusal is the store's own and comes before the candidate exists: an edit that
+        // would fail to apply, and one that would fail to compile, both report exhaustion.
+        assert_eq!(
+            store.apply_transaction(at_ceiling, &rename("never-committed")),
+            Err(SessionStoreError::RevisionExhausted)
+        );
+        assert_eq!(
+            store.apply_transaction(
+                at_ceiling,
+                &[SessionEdit::SetQuantumFrames { quantum_frames: 0 }]
             ),
             Err(SessionStoreError::RevisionExhausted)
         );
+        assert_eq!(store.revision(), SessionRevision(CEILING));
         assert_eq!(store.canonical_snapshot(), before);
+    }
+
+    #[test]
+    fn a_session_above_the_ceiling_is_refused_by_the_one_constructor() {
+        let mut model = parse_session_json(EXAMPLE).expect("fixture");
+        for revision in [CEILING + 1, u64::MAX] {
+            model.revision = revision;
+            let error = SessionStore::new(model.clone(), caps())
+                .err()
+                .expect("above the ceiling");
+            let found: Vec<_> = error
+                .diagnostics()
+                .iter()
+                .map(|d| (d.code, d.path.to_string()))
+                .collect();
+            assert_eq!(
+                found,
+                vec![(
+                    session::DiagnosticCode::NumericOutOfSchemaRange,
+                    "$.revision".to_owned()
+                )]
+            );
+        }
     }
 
     #[test]

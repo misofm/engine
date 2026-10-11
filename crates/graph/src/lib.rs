@@ -25,8 +25,9 @@ pub use runtime::{
     test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
-    test_only_route_activity_built, test_only_route_drained_counts, test_only_route_mix_counts,
-    test_only_route_mix_reset, test_only_selected_split_fader, test_only_set_bank_meter_declined,
+    test_only_route_activity_built, test_only_route_drain_calls, test_only_route_drain_snapshots,
+    test_only_route_drained_counts, test_only_route_mix_counts, test_only_route_mix_reset,
+    test_only_selected_split_fader, test_only_set_bank_meter_declined,
     test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
     test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
     test_only_set_source_in_place_declined, test_only_source_plane_counts,
@@ -217,9 +218,9 @@ use effect_contract::{
     ResponseSnapshotSummary, SeamSide, TailSamples,
 };
 use engine::realtime::{
-    BufferArena, CarryOutcome, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan,
-    PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError,
-    ResponseSnapshotSink,
+    BufferArena, CarryOutcome, LiveSnapshot, PlanUnitEligibility, PlanarBufferMut,
+    PrepareRenderPlan, PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
+    ResponseSnapshotError, ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -1407,8 +1408,18 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// one-channel retarget onto both channels of the block that admitted it.
     ///
     /// The default is a no-op, which is what a live-control-free plan pays.
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        let _ = first_sample;
+    ///
+    /// `snapshot` is the block's live snapshot `S` (#1504): the revision render read from the
+    /// running plan's gate at the start of the block. A drain that reads live cells reads under
+    /// it; a drain of a queue ignores it until its lane moves to cells. The bank stage hands every
+    /// bank the block's own, once per block, whether or not the block's audio is silent: silence
+    /// may skip a bank's processing and never this drain.
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        let _ = (first_sample, snapshot);
         Ok(())
     }
 
@@ -2416,6 +2427,12 @@ pub struct GraphBindingBlock<'a> {
     pub left: &'a mut [f32],
     pub right: &'a mut [f32],
     pub first_sample: u64,
+    /// The block's live snapshot `S` (#1504): the revision render read from the running plan's
+    /// gate at the start of the block. A processor that drains live values reads under it and
+    /// drains once in every block, whether or not its audio is silent. A drain of a queue ignores
+    /// it until its lane moves to cells. A caller that renders a processor outside a plan names
+    /// the snapshot it means; [`LiveSnapshot::ALL`] applies every value written.
+    pub live_snapshot: LiveSnapshot,
 }
 /// Preparation-only constructor of a serialized scalar fader/matrix pair.
 ///
@@ -2761,6 +2778,10 @@ struct GraphExecutor {
     /// The builtin-input section of the hand-over (issue #1276 D6), sorted by predecessor
     /// location; empty (and never allocated) when no strip input section carries.
     carry_inputs: Box<[GraphLaneMove]>,
+    /// The live snapshot `S` of the block about to render (#1504 D1): stored by
+    /// [`PreparedPlanExecutor::begin_live_block`] and taken by `render`, so a block that renders
+    /// without its own snapshot is refused and never reads the previous block's.
+    live_snapshot: Option<LiveSnapshot>,
 }
 
 /// Next graph executor identity; identities start at 1, so zero never names a plan.
@@ -3031,6 +3052,7 @@ struct GraphExecutorWithoutSplitPairTable {
     identity: u64,
     carry: Option<GraphCarryProgram>,
     carry_inputs: Box<[GraphLaneMove]>,
+    live_snapshot: Option<LiveSnapshot>,
 }
 
 fn scalar_split_runtime_owner_layout() -> (u64, u64) {
@@ -3141,6 +3163,7 @@ impl GraphExecutor {
             identity: next_graph_identity(),
             carry: None,
             carry_inputs: Box::default(),
+            live_snapshot: None,
         }
     }
 }
@@ -3230,6 +3253,14 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// Keep the block's live snapshot `S` for the drains `render` runs (#1504 D1): a store of one
+    /// word, nothing allocated.
+    fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
+        self.live_snapshot = Some(snapshot);
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
     /// Render one block into `output`, whose two planes are the session Output op's storage for
     /// the block (issue #916). Nothing is copied out of the arena afterwards: the Output op, and a
     /// folded chain whose master it is, write the planes directly.
@@ -3238,6 +3269,10 @@ impl PreparedPlanExecutor for GraphExecutor {
     ///
     /// * **`Ok`:** each plane's `frames` words are this block's master. Nothing past `frames` is
     ///   written, so a `plane_stride` wider than the block keeps its padding.
+    /// * **No live snapshot: untouched.** A block whose
+    ///   [`PreparedPlanExecutor::begin_live_block`] did not run is refused with `InvalidEnvelope`
+    ///   before any drain, because no drain falls back to a default snapshot (#1504 D2).
+    ///   `PreparedRenderPlan` calls it before every block.
     /// * **Envelope rejection: untouched.** A non-stereo `output` is refused with
     ///   `Buffer(InvalidPlane)`. A plane that is not exactly `arena.frames()` words is refused with
     ///   `InvalidEnvelope`. Both refusals come before any observer boundary, source work or unit.
@@ -3264,7 +3299,12 @@ impl PreparedPlanExecutor for GraphExecutor {
             identity: _,
             carry: _,
             carry_inputs: _,
+            live_snapshot,
         } = self;
+        // One block's snapshot: taken here, so the next block cannot reuse it.
+        let Some(live) = live_snapshot.take() else {
+            return Err(RenderError::InvalidEnvelope);
+        };
         #[cfg(any(test, feature = "test-support"))]
         let mut probe = test_only_phase_profile::Probe::start();
         let (left, right) = output.stereo_planes_mut()?;
@@ -3318,18 +3358,18 @@ impl PreparedPlanExecutor for GraphExecutor {
                 probe.unit(runtime.test_only_unit_phase(unit));
             }
             if let Err(error) =
-                runtime.execute(unit, time.absolute_sample, host.reborrow(), sources)
+                runtime.execute(unit, time.absolute_sample, live, host.reborrow(), sources)
             {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
-                    runtime.complete_pending(time.absolute_sample);
+                    runtime.complete_pending(time.absolute_sample, live);
                 }
                 #[cfg(any(test, feature = "test-support"))]
                 runtime.test_only_capture_failed_buffer();
                 #[cfg(not(any(test, feature = "test-support")))]
-                runtime.complete_pending(time.absolute_sample);
+                runtime.complete_pending(time.absolute_sample, live);
                 return Err(error);
             }
             if let Err(error) =
@@ -3339,12 +3379,12 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 #[cfg(any(test, feature = "test-support"))]
                 if !runtime::test_only_completion_disabled() {
-                    runtime.complete_pending(time.absolute_sample);
+                    runtime.complete_pending(time.absolute_sample, live);
                 }
                 #[cfg(any(test, feature = "test-support"))]
                 runtime.test_only_capture_failed_buffer();
                 #[cfg(not(any(test, feature = "test-support")))]
-                runtime.complete_pending(time.absolute_sample);
+                runtime.complete_pending(time.absolute_sample, live);
                 return Err(error);
             }
         }
@@ -5838,6 +5878,7 @@ mod tests {
                     left: &mut left,
                     right: &mut right,
                     first_sample: 0,
+                    live_snapshot: LiveSnapshot::ALL,
                 })
                 .expect("seeded source");
             expected.extend(left.iter().map(|sample| sample.to_bits()));
@@ -6922,7 +6963,7 @@ mod tests {
     /// #140 A / E1 for the dynamic rack: an admitted parameter command takes effect on the first
     /// sample of the next rendered block, and not one sample before.
     ///
-    /// Red mutation: move the `live.control.stage(..)` drain in `execute_op`'s `LiveControlEffect`
+    /// Red mutation: move the `live.stage(..)` drain in `execute_op`'s `LiveControlEffect`
     /// arm to *after* `effect.processor.process(block)` -> the command lands one block late and
     /// the `block 1` assertion below fails on its first sample.
     #[test]

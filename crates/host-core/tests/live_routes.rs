@@ -912,9 +912,12 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
         RouteControlResources::default()
     );
     assert_eq!(
-        admitted(&idle.host) + charged.total_bytes,
+        admitted(&idle.host)
+            + charged.total_bytes
+            + host_core::LiveValuesSuperseded::retained_bytes(),
         total,
-        "only the route lanes separate the two charges"
+        "only the route lanes and the count the strips' cell readers hold separate the two charges: \
+         an idle preparation has no reader, so it retains and charges no count"
     );
 }
 

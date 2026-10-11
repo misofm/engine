@@ -40,7 +40,7 @@ use effect_contract::{
     ParameterDomain, ParameterUnit, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
 };
-use engine::realtime::{QueueGeneration, bounded_spsc};
+use engine::realtime::{LiveSnapshot, QueueGeneration, bounded_spsc};
 use graph_compiler::Backend;
 use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
 
@@ -476,7 +476,12 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                     let mut expected = [members.left.clone(), members.right.clone()];
                     let mut enabled = expected.clone();
                     chain
-                        .run(&mut members, QUANTUM, block * u64::from(QUANTUM))
+                        .run(
+                            &mut members,
+                            QUANTUM,
+                            block * u64::from(QUANTUM),
+                            LiveSnapshot::ALL,
+                        )
                         .expect("bank render");
                     for lane in 0..lanes {
                         let [today, wet] = &mut oracles[lane];
@@ -723,7 +728,12 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
             let mut expected_left = members.left.clone();
             let mut expected_right = members.right.clone();
             chain
-                .run(&mut members, QUANTUM, block * u64::from(QUANTUM))
+                .run(
+                    &mut members,
+                    QUANTUM,
+                    block * u64::from(QUANTUM),
+                    LiveSnapshot::ALL,
+                )
                 .expect("bank render");
             for lane in 0..lanes {
                 if lane == 1 {

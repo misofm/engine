@@ -120,6 +120,13 @@ block applied.
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
+- **Deferred into this issue by #1504** (recorded in #1504's "Batch follow-ups", n3, and #1312's open
+  item 2). `BuiltinStage` (`crates/graph/src/runtime.rs`) reports `live_lanes() == 0`, so #1504's
+  slot-guard assertion in `BankChain::new` (`crates/rack/src/lib.rs`) is vacuous for builtin banks,
+  the fader and matrix cell lanes included. This issue moves the last builtin lane (input) to cells,
+  so it adds `live_lanes` to `GraphPreparedBuiltinBankProcessor` and its four implementations in
+  `crates/builtins-compiler` (fader, matrix, input and the fused pair) and forwards it from
+  `BuiltinStage`. It is safe until then because every builtin slot is always active.
 - Followed by *Apply value-only input trim and polarity edits to the running C ABI plan* (#1261)
   and *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets*
   (#1262), which write to these cells.

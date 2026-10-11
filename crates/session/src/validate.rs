@@ -38,6 +38,14 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
             "only version 1 is accepted",
         );
     }
+    if session.revision > crate::MAX_SESSION_REVISION {
+        error(
+            &mut diagnostics,
+            DiagnosticCode::NumericOutOfSchemaRange,
+            &root.key("revision"),
+            "revision must not exceed 9223372036854775807 (2^63 - 1), the plan revision gate's ceiling",
+        );
+    }
     if !is_launch_sample_rate(SampleRateHz(session.sample_rate_hz)) {
         error(
             &mut diagnostics,

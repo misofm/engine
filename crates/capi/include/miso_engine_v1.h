@@ -46,15 +46,26 @@ extern "C" {
  * value (its fader, its effects), any edit while the session declares a VCA, the mute of a track
  * that a follows_mute send reads, a fader outside its domain or effect parameters that
  * preparation refuses (refused as MISO_ENGINE_V1_COMPILE_REJECTED with the same diagnostic as
- * before), and every other field. A live edit applies no later than the first render call that
- * begins after miso_engine_v1_submit_command returns, and may apply one block earlier, so the
- * values of one transaction can take effect up to one quantum apart; it is heard up to
- * latency_samples later. Each track's fader and matrix lanes hold 16 pending live values each,
- * and each effect's lane the smaller of 16 and its automation capacity; an effect edit that
- * could never fit its lane rebuilds. Past a lane's room the edit returns
- * MISO_ENGINE_V1_BACKPRESSURE with the diagnostic "control.live.backpressure", the session and
- * its revision are unchanged, and the host retries after a render call. An
- * acknowledged live edit is never dropped. A live edit commits the same response and the same
+ * before), and every other field. A committed live fader, mute or pan or matrix value reaches
+ * render no later than the first block whose render call begins after
+ * miso_engine_v1_submit_command returns or, while a replacement plan is pending, at that plan's
+ * adoption, which the watermark reports. Every such value of one transaction takes effect in the
+ * same block, and the watermark names that block's first sample; it is heard up to
+ * latency_samples later. These values are held in latest-target cells, not queues: a host sends
+ * any number of fader, mute or pan edits between two render calls, a paused host included, and
+ * none is refused for room. A later value for the same lane committed before that block replaces
+ * the earlier one. The counter LIVE_VALUES_SUPERSEDED (protocol counter 16, read with
+ * COUNTERS_GET) counts, per cell, each write to a plan that render adopts which the block
+ * covering it does not apply because a later write to the same cell exists. A Both record writes
+ * two cells and counts in each. A write to a candidate that is withdrawn, and a value on a lane
+ * that a swap restarts, are not counted; no value is lost either way. A live effect value rides
+ * a queue until issue 1345 moves it to the same cells: it may apply one block earlier, so the
+ * effect values of one transaction can take effect up to one quantum apart, and a transaction
+ * with both fader and effect values can see its effect values land one block before its
+ * fader values. Each effect's lane holds the smaller of 16 and its automation capacity; an effect
+ * edit that could never fit its lane rebuilds. Past an effect lane's room the edit returns MISO_ENGINE_V1_BACKPRESSURE with the diagnostic
+ * "control.live.backpressure", the session and its revision are unchanged, and the host retries
+ * after a render call. An acknowledged live edit is never dropped. A live edit commits the same response and the same
  * reliable events as a replacement, so the host drains the reliable event lane after each edit
  * either way. After either one the host goes on submitting every source the transaction left
  * unchanged, with no seek; after a replacement it acts only on a source the transaction added,

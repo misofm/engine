@@ -71,7 +71,7 @@
         "bridgeRetainedBytes": "1181888",
         "sourceTotalBytes": "3648",
         "sourceOverheadBytes": "2496",
-        "builtinRetainedBytes": "3584",
+        "builtinRetainedBytes": "3008",
         "graphSessionPlusPlanBytes": "35648",
         "graphIncrementalPlanBytes": "35648",
         "graphMetadataBytes": "4608"

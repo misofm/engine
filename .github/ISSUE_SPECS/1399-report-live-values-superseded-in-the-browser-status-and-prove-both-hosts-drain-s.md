@@ -110,3 +110,9 @@ hosts, so the two admissions and drains cannot drift apart.
 ## Dependencies
 
 - *Hold live values in latest-target cells on both hosts* (#1312).
+- **Deferred into this issue by #1312** (recorded in #1312's "Batch follow-ups", m3). The browser
+  prepares each plan with its own `live_values_superseded` count (one `Arc<AtomicU64>` per plan,
+  charged per plan in host-core's graph row, and only when strip controls hold it), where the C ABI
+  passes one count per session. This issue must pass one count from `host-web` to every plan the
+  session prepares and charge it once, in place of the per-plan charge; the status field and the
+  cross-host agreement test are its other deliverables.

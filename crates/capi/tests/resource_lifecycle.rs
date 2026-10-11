@@ -613,6 +613,21 @@ struct HostHalf {
 const LIVE_QUEUE_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::new(16).unwrap();
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
+    host_half_counting(
+        document,
+        compile_limits,
+        &host_core::LiveValuesSuperseded::default(),
+    )
+}
+
+/// [`host_half`] with the session's `live_values_superseded` count made by the caller: capi makes
+/// that one allocation itself (#1312 D2) and charges it as a fixed row, so an observed replay
+/// takes it from outside its window and the compile's extra live bytes are that row.
+fn host_half_counting(
+    document: &str,
+    compile_limits: &CompileLimits,
+    superseded: &host_core::LiveValuesSuperseded,
+) -> HostHalf {
     let caps = host_caps(compile_limits);
     let model = host_core::parse_host_session(document)
         .unwrap_or_else(|_| panic!("the reference session parses"));
@@ -639,6 +654,7 @@ fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
             routes: false,
         },
         None,
+        superseded,
     )
     .unwrap_or_else(|_| panic!("the reference session prepares"));
     let host_core::HostLiveControlHandles {
@@ -697,6 +713,7 @@ impl HostHalf {
                 routes: false,
             },
             Some(&mut cache),
+            &host_core::LiveValuesSuperseded::default(),
         )
         .unwrap_or_else(|_| panic!("the session prepares again"));
         cache.take_journal().retained_bytes()
@@ -808,8 +825,9 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         miso_engine_v1_plan_destroy(plan);
         report
     };
+    let superseded = host_core::LiveValuesSuperseded::default();
     begin();
-    let host = host_half(document, compile_limits);
+    let host = host_half_counting(document, compile_limits, &superseded);
     let host_live = live_bytes(finish());
     let model = host.model_estimate();
     let HostHalf {
@@ -1918,6 +1936,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             committed: current_host.store.compiled().normalized_model(),
         },
         None,
+        &host_core::LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
     .0
@@ -3003,10 +3022,10 @@ impl RaceControl<'_> {
 /// fresh plan of the final committed snapshot.
 ///
 /// Halfway through, the render thread parks (as a paused audio session does) while this thread
-/// fills one track's fader lane to typed live backpressure and submits a second structural edit
-/// behind a pending candidate, which is typed plan backpressure; both are retried once the render
-/// thread resumes. Without the pause the render thread drains the lanes faster than this thread
-/// fills them, and no retry would ever run.
+/// sends forty live fader edits to one track, none of which may be refused (a fader value is a
+/// latest-target cell, #1312), and submits a second structural edit behind a pending candidate,
+/// which is typed plan backpressure; it is retried once the render thread resumes. Without the
+/// pause the render thread outruns this thread, and no plan retry would ever run.
 ///
 /// The render thread never waits for PCM, so the source falls behind the render clock by however
 /// many blocks the render thread outran this thread's feed. The source stays on the render clock:
@@ -3201,11 +3220,16 @@ fn race_live_edits(run: usize) -> RaceCounts {
     counts
 }
 
-/// The paused phase of [`race_live_edits`]: with the render thread parked, live edits on the
-/// first track until its fader lane refuses with `control.live.backpressure` (at most one lane's
-/// depth plus one), then a structural edit and a second one behind it, which
-/// `control.plan.backpressure` refuses. The render thread resumes and both refusals are retried
-/// through [`RaceControl::commit`].
+/// How many live fader edits the paused phase sends with the render thread parked: well past the
+/// sixteen records a fader queue held before latest-target cells (#1312), none of which may be
+/// refused.
+const PAUSED_LIVE_EDITS: u32 = 40;
+
+/// The paused phase of [`race_live_edits`]: with the render thread parked, [`PAUSED_LIVE_EDITS`]
+/// live edits on the first track, none of which may be refused for room (a fader value is a
+/// latest-target cell), then a structural edit and a second one behind it, which
+/// `control.plan.backpressure` refuses. The render thread resumes and the second structural edit
+/// is retried through [`RaceControl::commit`].
 fn paused_bursts(
     control: &mut RaceControl<'_>,
     edits: &mut RaceEdits,
@@ -3226,8 +3250,7 @@ fn paused_bursts(
         std::thread::yield_now();
     }
     let track_id = edits.tracks[0].clone();
-    let mut refused_live = None;
-    for step in 0..=16 {
+    for step in 0..PAUSED_LIVE_EDITS {
         edits.faders[0].left_db = -20.0 - 0.25 * step as f32;
         let edit = SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
@@ -3235,14 +3258,9 @@ fn paused_bursts(
         };
         match control.submit_once(&edit, true)? {
             Submitted::Committed => {}
-            Submitted::LiveBackpressure => {
-                refused_live = Some(edit);
-                break;
-            }
-            _ => return Err(format!("paused live edit {step}: an unexpected refusal")),
+            _ => return Err(format!("paused live edit {step}: refused for room")),
         }
     }
-    let refused_live = refused_live.ok_or("a parked render never filled a 16-record fader lane")?;
     let structural = |digits: &str| SessionEdit::SetSourceContent {
         source_id: edits.source.id.clone(),
         content: format!("blake3:{}", digits.repeat(32)),
@@ -3261,10 +3279,8 @@ fn paused_bursts(
         return Err("a structural edit behind a pending candidate was not refused".to_owned());
     }
     paused.store(false, Ordering::Release);
-    // The refused live edit goes to the candidate's fresh lanes if the swap has not happened yet,
-    // or to the swapped-in plan's; the second structural edit waits for the swap. `retries`
-    // counts only the resubmissions `commit` finds refused again.
-    control.commit(&refused_live, true)?;
+    // The second structural edit waits for the swap. `retries` counts only the resubmissions
+    // `commit` finds refused again.
     control.commit(&second, false)
 }
 
@@ -3283,7 +3299,10 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         let counts = race_live_edits(run);
         assert_eq!(counts.structural, RACE_EDITS / 8 + 2, "run {run}");
         assert!(counts.live >= RACE_EDITS - RACE_EDITS / 8, "run {run}");
-        assert!(counts.live_backpressure >= 1, "run {run}");
+        assert_eq!(
+            counts.live_backpressure, 0,
+            "run {run}: a fader, mute or pan edit is never refused for room"
+        );
         assert!(counts.plan_backpressure >= 1, "run {run}");
         // Every admitted structural transaction swapped in exactly one plan, and no live edit
         // swapped in one of its own: a live edit that silently rebuilt is counted here.

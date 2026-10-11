@@ -34,6 +34,11 @@ pub use visit::{FieldKey, ModelVisitor, Token, VisitModel, WalkOrder, keys};
 /// The only schema version accepted by [`parse_session_json`].
 pub const SESSION_SCHEMA_VERSION_V1: u32 = 1;
 
+/// The largest session `revision` the schema accepts: the largest revision a plan's revision
+/// gate can hold (bit 63 of the gate word is render's announcement, #1432 D1).  `validate_session`
+/// refuses a larger revision, so every session entry point shares this one domain.
+pub const MAX_SESSION_REVISION: u64 = engine::realtime::GATE_REVISION_MAX;
+
 #[cfg(test)]
 mod tests {
     #[test]

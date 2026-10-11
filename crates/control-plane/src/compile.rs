@@ -10,7 +10,8 @@ pub struct CompiledChildren<A: ControlAdapter> {
     pub plan: PlanState<A>,
 }
 
-/// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
+/// Every live queue's depth: each strip's input queue and each effect's queue hold 16 records
+/// (#1053 D4). The fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
@@ -33,6 +34,8 @@ pub(crate) struct PreparedRuntime {
     /// One live-control producer per prepared effect instance (#1263 D2).
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     pub(crate) plan: PreparedRenderPlan,
+    /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
+    pub(crate) revision_gate: PlanRevisionGate,
     pub(crate) resources: PlanResources,
     /// The part of `resources`' source rows the plan carries from its predecessor.
     pub(crate) carried: CarriedSourceBytes,
@@ -210,7 +213,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // (`validate_replacement_peak`); charging it here too counted one allocation twice (#1060).
     //
     // The strip producer table (#1256 D3) is the epoch's too, through host-core's mirror. Its
-    // rings are builtins' rows, charged in `builtin_retained_payload_bytes`. Builtins' processor
+    // queues and cells are builtins' rows, charged in `builtin_retained_payload_bytes`. Builtins' processor
     // accumulator also charges the producer vector itself (`add_vector_layout::<
     // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
     // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing
@@ -250,6 +253,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
+        checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
+        // #1312 D2: the session's `live_values_superseded` count, one `Arc<AtomicU64>`.
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState<A::Row>>>(1)?,
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
@@ -593,6 +598,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     limits: ControlLimits,
     successor: Option<SuccessorBase<'_>>,
     bound_cache: &mut InputBoundCache<'_>,
+    superseded: &host_core::LiveValuesSuperseded,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
@@ -618,6 +624,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             C_ABI_LIVE_LANES,
             base,
             Some(&mut *bound_cache),
+            superseded,
         ),
         None => prepare_host_runtime_with_live_lanes(
             compiled,
@@ -625,6 +632,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             &live,
             C_ABI_LIVE_LANES,
             Some(&mut *bound_cache),
+            superseded,
         ),
     };
     let bound_seed = bound_cache.take_journal();
@@ -660,6 +668,12 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         return Err(failure(ResourceFault::Limit));
     }
     let host = prepared.report;
+    // #1502 D1: the plan's control handle moves into its provider epoch, so the gate, the cells
+    // and the producers that write them follow one routing.
+    let mut plan = prepared.plan;
+    let revision_gate = plan
+        .take_revision_gate()
+        .expect("a freshly prepared plan hands out its revision gate");
     let largest_named = host.largest_engine_allocation_bytes.max(capi.largest);
     let carried = CarriedSourceBytes {
         total: host.carried_source_total_bytes,
@@ -679,7 +693,8 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         sources: prepared.sources,
         strips,
         effects,
-        plan: prepared.plan,
+        plan,
+        revision_gate,
         resources: PlanResources {
             sample_rate_hz: host.sample_rate_hz,
             quantum_frames: host.quantum_frames,
@@ -687,6 +702,9 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             track_count: host.track_count,
             latency_samples: host.latency_samples,
             output_tail: host.output_tail,
+            // The carry program's bytes are the plan's own allocation that the host-core row does
+            // not count. The plan's revision gate is in the host-core row (#1502 D1), shared with
+            // the browser.
             graph_session_plus_plan_bytes: with_carried(
                 host.graph_session_plus_plan_bytes,
                 host.carry_program_retained_bytes,
@@ -753,7 +771,16 @@ where
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
     let mut compile_cache = InputBoundCache::new();
     let engine_cache = engine_cache.unwrap_or(&mut compile_cache);
-    let runtime = prepare_runtime::<A>(store.compiled(), limits, None, engine_cache)?;
+    // #1312 D2: the session's `live_values_superseded` count, one for every plan it prepares.
+    // Made here, with the session's other fixed rows, and charged by `capi_resources`.
+    let live_values_superseded = host_core::LiveValuesSuperseded::default();
+    let runtime = prepare_runtime::<A>(
+        store.compiled(),
+        limits,
+        None,
+        engine_cache,
+        &live_values_superseded,
+    )?;
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -785,6 +812,7 @@ where
         strips,
         effects,
         plan,
+        mut revision_gate,
         resources,
         carried: _,
         inventory,
@@ -792,10 +820,11 @@ where
         capi,
         bound_seed,
     } = runtime;
-    // #1314 D1: the initial plan carries the store's initial revision, and the watermark starts
-    // there.
+    // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
+    // own gate, and the watermark starts there.
     let (publisher, owner, retirer) = plan_exchange_at_revision(
         plan,
+        &mut revision_gate,
         store.revision().0,
         PlanExchangeConfig {
             retirement_capacity: one,
@@ -816,6 +845,7 @@ where
         render_peak_bits: AtomicU32::new(0),
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
+        live_block_errors: AtomicU64::new(0),
         watermark: publisher.watermark_reader(),
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
@@ -858,13 +888,20 @@ where
         session: SessionState {
             controller: ObservedController::new(controller),
             providers: ProviderEpoch::current(
-                sources, inventory, strips, effects, capi, bound_seed,
+                sources,
+                inventory,
+                strips,
+                effects,
+                capi,
+                bound_seed,
+                revision_gate,
             ),
             pending_providers,
             retired_providers,
             publisher,
             retirer,
             limits,
+            live_values_superseded,
             decode_fields: decode_fields.into_boxed_slice(),
             response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
             shared: Arc::clone(&shared),

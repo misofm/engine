@@ -7,6 +7,7 @@
 pub mod audit;
 mod buffer;
 mod disjoint;
+mod latest_cell;
 mod observe;
 mod plan;
 mod plan_exchange;
@@ -17,21 +18,25 @@ pub use buffer::{BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, Pl
 pub use disjoint::{
     ARENA_SILENCE_BUFFER, ArenaStereoPair, ArenaStereoPlanes, DisjointArena, DisjointArenaError,
 };
+pub use latest_cell::{
+    CellRead, CellReader, CellWriter, DirtyReader, DirtyWord, GATE_REVISION_MAX, GatePin,
+    LatestCell, LiveSnapshot, LiveStamp, RevisionGate, StampRefused,
+};
 pub use observe::{
     ObservationPublisher, ObservationReader, ObservationSlot, ObservationWindow, observation_slot,
     observation_slot_retained_bytes,
 };
 pub use plan::{
-    CarryOutcome, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor, PreparedProgram,
-    PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport, RenderTime,
-    ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
+    CarryOutcome, PlanRevisionGate, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,
+    PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
+    RenderTime, ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
-    ResponseSnapshotSink,
+    ResponseSnapshotSink, plan_revision_gate_retained_bytes,
 };
 pub use plan_exchange::{
-    PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
+    PlanEpoch, PlanExchangeConfig, PlanExchangeError, PlanExchangeResourceReport, PlanPublisher,
     PlanReplacementReservation, PlanReplacementReservationError, PlanRetirer, PublishError,
-    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, RevisionTarget, SwapOutcome,
+    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome,
     UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_at_revision,
     plan_exchange_resource_report,
 };
@@ -582,9 +587,12 @@ mod tests {
         report
     }
 
-    /// #1314: the applied-revision watermark, read the way any thread reads it.
+    /// #1314, #1502: the applied-revision watermark, read the way any thread reads it, and the
+    /// per-plan revision gate that feeds it.
     mod watermark {
         use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         const QUANTUM: u64 = 2;
 
@@ -609,34 +617,71 @@ mod tests {
             render_once(owner, index * QUANTUM)
         }
 
-        fn publish_at(publisher: &mut PlanPublisher, id: u64, revision: u64) {
-            let mut reservation = publisher
-                .reserve_replacement(prepared(id), PlanAdoption::Next)
-                .expect("room");
-            reservation.set_revision(revision);
-            reservation.commit();
+        /// A plan with its gate handle taken, as the control plane takes it before publication.
+        fn plan_with_gate(id: u64) -> (PreparedRenderPlan, PlanRevisionGate) {
+            let mut plan = prepared(id);
+            let gate = plan.take_revision_gate().expect("a fresh plan's handle");
+            (plan, gate)
         }
 
-        /// #1314 gate 1: a revision completes when render adopts the plan that carries it, never
-        /// at publication, and a withdrawn candidate takes its revision out of the cell it left.
+        type Exchange = (
+            PlanRevisionGate,
+            PlanPublisher,
+            RealtimePlanOwner,
+            PlanRetirer,
+        );
+
+        /// The exchange with `plan` (and its handle) at `revision`; the handle stays with the
+        /// caller.
+        fn exchange_with(
+            plan: PreparedRenderPlan,
+            mut gate: PlanRevisionGate,
+            revision: u64,
+        ) -> Exchange {
+            let (publisher, realtime, retirer) =
+                plan_exchange_at_revision(plan, &mut gate, revision, one_retirement())
+                    .expect("exchange");
+            (gate, publisher, realtime, retirer)
+        }
+
+        /// The exchange with plan 1 at `revision`.
+        fn exchange_at(revision: u64) -> Exchange {
+            let (plan, gate) = plan_with_gate(1);
+            exchange_with(plan, gate, revision)
+        }
+
+        /// Publish plan `id` carrying `revision`: the revision goes on the candidate's own gate
+        /// before the commit (#1502 D6).
+        fn publish_at(publisher: &mut PlanPublisher, id: u64, revision: u64) -> PlanRevisionGate {
+            let (plan, mut gate) = plan_with_gate(id);
+            gate.publish(revision);
+            publisher
+                .reserve_replacement(plan, PlanAdoption::Next)
+                .expect("room")
+                .commit();
+            gate
+        }
+
+        /// #1314 gate 1 on plan gates: a revision completes when render adopts the plan that
+        /// carries it, never at publication, and a withdrawn candidate takes its revision with it.
         #[test]
         fn a_revision_completes_at_adoption_not_at_publication() {
-            let (mut publisher, mut realtime, mut retirer) =
-                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
+            let (_gate, mut publisher, mut realtime, mut retirer) = exchange_at(1);
             assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
             assert_eq!(read(&publisher).exact, 0);
 
-            publish_at(&mut publisher, 2, 7);
+            let _b = publish_at(&mut publisher, 2, 7);
             assert_eq!(
                 publisher.mailbox_cell_states(),
                 [MailboxCellState::Active, MailboxCellState::Full]
             );
+            assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
             assert_eq!(block(&mut realtime, 0).swap, SwapOutcome::Applied);
             assert_eq!(level(&publisher), (7, 0, OUTCOME_EXACT));
             let _ = retirer.try_reclaim().expect("plan one");
 
-            // B lands in cell 0, P0's old cell, and leaves it again with its revision.
-            publish_at(&mut publisher, 3, 8);
+            // C lands in cell 0, plan one's old cell, and leaves it again with its revision.
+            let _c = publish_at(&mut publisher, 3, 8);
             assert_eq!(
                 publisher.mailbox_cell_states(),
                 [MailboxCellState::Full, MailboxCellState::Active]
@@ -651,23 +696,24 @@ mod tests {
             assert_eq!(block(&mut realtime, 3).swap, SwapOutcome::Applied);
             assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
             assert_eq!(read(&publisher).exact, 7);
-            let _ = retirer.try_reclaim().expect("plan A");
+            let _ = retirer.try_reclaim().expect("plan C");
 
-            publish_at(&mut publisher, 4, 9);
+            let _d = publish_at(&mut publisher, 4, 9);
             assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
         }
 
-        /// #1314 gate 4: a candidate's `superseded` count and its outcome complete once, at the
-        /// first advance after its claim, and a withdrawn candidate takes its outcome with it.
+        /// #1314 gate 4 on plan gates: a candidate's `superseded` count and its outcome complete
+        /// once, at the first advance after its claim, and a withdrawn candidate takes its outcome
+        /// with it.
         #[test]
         fn superseded_and_fallback_revisions_complete_once_per_adoption() {
-            let (mut publisher, mut realtime, mut retirer) =
-                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
+            let (_gate, mut publisher, mut realtime, mut retirer) = exchange_at(1);
             let a = read(&publisher).revision;
+            let (plan, mut b_gate) = plan_with_gate(2);
+            b_gate.publish(a + 3);
             let mut reservation = publisher
-                .reserve_replacement(prepared(2), PlanAdoption::Next)
+                .reserve_replacement(plan, PlanAdoption::Next)
                 .expect("room");
-            reservation.set_revision(a + 3);
             reservation.set_superseded(2);
             reservation.commit();
             assert_eq!(block(&mut realtime, 0).swap, SwapOutcome::Applied);
@@ -687,7 +733,7 @@ mod tests {
             let _ = retirer.try_reclaim().expect("plan one");
 
             // A live edit on the adopted plan.
-            assert_eq!(publisher.set_revision(a + 4), RevisionTarget::Active);
+            b_gate.publish(a + 4);
             let _ = block(&mut realtime, 1);
             let live = read(&publisher);
             assert_eq!((live.revision, live.outcome_flags), (a + 4, OUTCOME_EXACT));
@@ -697,10 +743,11 @@ mod tests {
             );
 
             let b = live.revision;
+            let (plan, mut c_gate) = plan_with_gate(3);
+            c_gate.publish(b + 2);
             let mut reservation = publisher
-                .reserve_replacement(prepared(3), PlanAdoption::Next)
+                .reserve_replacement(plan, PlanAdoption::Next)
                 .expect("room");
-            reservation.set_revision(b + 2);
             reservation.set_outcome(CandidateOutcome::TransitionFallback);
             reservation.commit();
             let candidate = withdrawn(&mut publisher);
@@ -724,7 +771,7 @@ mod tests {
                 (2, 2, 2)
             );
 
-            assert_eq!(publisher.set_revision(b + 3), RevisionTarget::Active);
+            c_gate.publish(b + 3);
             let _ = block(&mut realtime, 3);
             let live = read(&publisher);
             assert_eq!((live.revision, live.outcome_flags), (b + 3, OUTCOME_EXACT));
@@ -734,16 +781,16 @@ mod tests {
             );
         }
 
-        /// #1314 gate 8: a revision committed while a candidate is pending, held by the control
-        /// thread or published, goes to that candidate and never to the running plan's cell.
+        /// #1314 gate 8 on plan gates: a revision published on the gate of a candidate that is
+        /// pending, held by the control thread or published, leaves the watermark unchanged until
+        /// that candidate is republished and adopted.
         #[test]
         fn a_revision_follows_a_held_or_published_candidate() {
-            let (mut publisher, mut realtime, mut retirer) =
-                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
-            publish_at(&mut publisher, 2, 7);
-            let mut held = withdrawn(&mut publisher);
-            // A model-only commit while control holds A.
-            held.set_revision(8);
+            let (_gate, mut publisher, mut realtime, mut retirer) = exchange_at(1);
+            let mut a_gate = publish_at(&mut publisher, 2, 7);
+            let held = withdrawn(&mut publisher);
+            // A model-only commit while control holds A: it publishes on A's gate.
+            a_gate.publish(8);
             for index in 0..=2 {
                 assert_eq!(block(&mut realtime, index).swap, SwapOutcome::None);
                 assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT), "block {index}");
@@ -753,13 +800,161 @@ mod tests {
             assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
             let _ = retirer.try_reclaim().expect("plan one");
 
-            publish_at(&mut publisher, 3, 9);
-            // A model-only commit while B is published.
-            assert_eq!(publisher.set_revision(10), RevisionTarget::Pending);
+            let mut b_gate = publish_at(&mut publisher, 3, 9);
+            // A model-only commit while B is published: B's gate again.
+            b_gate.publish(10);
             assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
             assert_eq!(block(&mut realtime, 4).swap, SwapOutcome::Applied);
             assert_eq!(level(&publisher), (10, 4 * QUANTUM, OUTCOME_EXACT));
             assert_eq!(read(&publisher).exact, 9);
+        }
+
+        /// An executor that records the snapshot `begin_live_block` hands it, and fails a block
+        /// on demand. Atomics only: it runs inside the render scope.
+        #[derive(Clone, Default)]
+        struct SnapshotProbe {
+            last: Arc<AtomicU64>,
+            calls: Arc<AtomicU64>,
+            fail: Arc<AtomicBool>,
+        }
+
+        impl SnapshotProbe {
+            fn last(&self) -> u64 {
+                self.last.load(Ordering::Relaxed)
+            }
+            fn calls(&self) -> u64 {
+                self.calls.load(Ordering::Relaxed)
+            }
+        }
+
+        struct Snapshotting(SnapshotProbe);
+
+        impl PreparedPlanExecutor for Snapshotting {
+            fn begin_live_block(&mut self, snapshot: LiveSnapshot) {
+                self.0.last.store(snapshot.revision(), Ordering::Relaxed);
+                self.0.calls.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn render(
+                &mut self,
+                _arena: &mut BufferArena,
+                mut output: PlanarBufferMut<'_>,
+                _time: RenderTime,
+            ) -> Result<(), RenderError> {
+                if self.0.fail.load(Ordering::Relaxed) {
+                    return Err(RenderError::InvalidEnvelope);
+                }
+                output.plane_mut(0)?.fill(0.0);
+                Ok(())
+            }
+        }
+
+        fn probed(id: u64, probe: &SnapshotProbe) -> (PreparedRenderPlan, PlanRevisionGate) {
+            let mut plan = PreparedRenderPlan::prepare_with_executor(
+                PrepareRenderPlan {
+                    plan_id: id,
+                    envelope: prepared(id).envelope(),
+                    scratch: &[],
+                },
+                Box::new(Snapshotting(probe.clone())),
+            )
+            .expect("plan");
+            let gate = plan.take_revision_gate().expect("a fresh plan's handle");
+            (plan, gate)
+        }
+
+        /// #1502 gate 1: each block's snapshot is the revision published on the gate of the plan
+        /// that renders it. A revision published on the running plan's gate after a candidate was
+        /// published is not the candidate's `S` at its adoption block, and the candidate's is not
+        /// the running plan's before it.
+        #[test]
+        fn each_block_takes_its_snapshot_from_its_own_plans_gate() {
+            let (first, second) = (SnapshotProbe::default(), SnapshotProbe::default());
+            let (plan, gate) = probed(1, &first);
+            let (mut first_gate, mut publisher, mut realtime, _retirer) =
+                exchange_with(plan, gate, 1);
+
+            let _ = block(&mut realtime, 0);
+            assert_eq!(first.last(), 1);
+            assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
+            first_gate.publish(2);
+            let _ = block(&mut realtime, 1);
+            assert_eq!(first.last(), 2);
+            assert_eq!(level(&publisher), (2, QUANTUM, OUTCOME_EXACT));
+
+            let (plan, mut second_gate) = probed(2, &second);
+            second_gate.publish(5);
+            publisher
+                .reserve_replacement(plan, PlanAdoption::Next)
+                .expect("room")
+                .commit();
+            // The running plan's gate moves while B is published; B's block must not see it.
+            first_gate.publish(3);
+            assert_eq!(block(&mut realtime, 2).swap, SwapOutcome::Applied);
+            assert_eq!((second.last(), second.calls()), (5, 1));
+            assert_eq!(first.calls(), 2, "the displaced plan rendered the block");
+            assert_eq!(level(&publisher), (5, 2 * QUANTUM, OUTCOME_EXACT));
+            second_gate.publish(6);
+            let _ = block(&mut realtime, 3);
+            assert_eq!(second.last(), 6);
+            assert_eq!(level(&publisher), (6, 3 * QUANTUM, OUTCOME_EXACT));
+        }
+
+        /// #1502 gate 1, the direct path: `PreparedRenderPlan::render` and `render_contiguous`
+        /// read their own gate too, with and without an executor, and no render path uses
+        /// `LiveSnapshot::ALL`.
+        #[test]
+        fn the_direct_render_paths_take_their_own_gates_snapshot() {
+            let probe = SnapshotProbe::default();
+            let (mut plan, mut gate) = probed(1, &probe);
+            gate.publish(4);
+            let mut output = [1.0_f32; 2];
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let report = plan
+                .render(io, RenderTime { absolute_sample: 0 })
+                .expect("render");
+            assert_eq!(report.live_snapshot.revision(), 4);
+            assert_eq!(probe.last(), 4);
+
+            gate.publish(5);
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let report = plan.render_contiguous(io, QUANTUM).expect("render");
+            assert_eq!(report.live_snapshot.revision(), 5);
+            assert_eq!(probe.last(), 5);
+
+            // No executor: the snapshot is still the plan's own gate's.
+            let (mut bare, mut bare_gate) = plan_with_gate(2);
+            bare_gate.publish(3);
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let report = bare
+                .render(io, RenderTime { absolute_sample: 0 })
+                .expect("render");
+            assert_eq!(report.live_snapshot.revision(), 3);
+        }
+
+        /// A plan hands out its gate handle once: a second handle would be a second writer with
+        /// its own pin (#1502 D1).
+        #[test]
+        fn a_plan_hands_out_its_gate_handle_once() {
+            let mut plan = prepared(1);
+            assert!(plan.take_revision_gate().is_some());
+            assert!(plan.take_revision_gate().is_none());
+        }
+
+        /// The initial revision is published on the initial plan's own gate: a handle of another
+        /// plan is refused (#1502 D5).
+        #[test]
+        #[should_panic(expected = "the initial plan's own gate")]
+        fn the_initial_revision_is_published_on_the_initial_plans_gate() {
+            let (plan, _own) = plan_with_gate(1);
+            let (_other, mut stranger) = plan_with_gate(2);
+            let _ = plan_exchange_at_revision(plan, &mut stranger, 1, one_retirement());
         }
 
         /// One block whose output has two channels where the plan has one, so `render_inner`
@@ -787,12 +982,17 @@ mod tests {
 
         /// #1314 D3: a block that errors publishes nothing, on either render path, even when the
         /// block adopted a candidate or a live edit is pending; the next block that renders
-        /// publishes the revision with its own first sample.
+        /// publishes the revision with its own first sample. A block the shape check refuses takes
+        /// no snapshot and is not a live-block error (#1502 D2, D7).
         #[test]
         fn a_block_that_errors_publishes_nothing() {
-            let (mut publisher, mut realtime, _retirer) =
-                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
-            publish_at(&mut publisher, 2, 7);
+            let probe = SnapshotProbe::default();
+            let (plan, gate) = probed(1, &probe);
+            let (_first_gate, mut publisher, mut realtime, _retirer) = exchange_with(plan, gate, 1);
+            // Plan one's own refused block takes no snapshot: its executor is never called.
+            refused_block(&mut realtime, 0, false);
+            assert_eq!(probe.calls(), 0);
+            let mut b_gate = publish_at(&mut publisher, 2, 7);
 
             // `render`: the refused block claims B but renders nothing.
             refused_block(&mut realtime, QUANTUM, false);
@@ -803,7 +1003,7 @@ mod tests {
             assert_eq!(level(&publisher), (7, 2 * QUANTUM, OUTCOME_EXACT));
 
             // `render_contiguous`: a live edit on the running plan.
-            assert_eq!(publisher.set_revision(8), RevisionTarget::Active);
+            b_gate.publish(8);
             let next = realtime.next_absolute_sample();
             refused_block(&mut realtime, next, true);
             assert_eq!(level(&publisher), (7, 2 * QUANTUM, OUTCOME_EXACT));
@@ -813,6 +1013,60 @@ mod tests {
             };
             let _ = realtime.render_contiguous(io, next).expect("render");
             assert_eq!(level(&publisher), (8, next, OUTCOME_EXACT));
+
+            assert_eq!(realtime.live_block_errors(), 0);
+            assert_eq!(probe.calls(), 0, "plan one never rendered a block");
+        }
+
+        /// A block the plan renders on either path, expecting the executor's failure.
+        fn failing_block(owner: &mut RealtimePlanOwner, contiguous: bool) {
+            let sample = owner.next_absolute_sample();
+            let mut output = [1.0_f32; 2];
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let result = if contiguous {
+                owner.render_contiguous(io, sample)
+            } else {
+                owner.render(
+                    io,
+                    RenderTime {
+                        absolute_sample: sample,
+                    },
+                )
+            };
+            assert!(
+                matches!(result, Err(RenderError::InvalidEnvelope)),
+                "{result:?}"
+            );
+        }
+
+        /// #1502 gate 5 (D7): a block the executor fails after the snapshot is counted, on both
+        /// render paths, publishes nothing, and the next rendered block publishes at its own first
+        /// sample.
+        #[test]
+        fn a_block_the_executor_fails_after_the_snapshot_is_counted() {
+            let probe = SnapshotProbe::default();
+            let (plan, gate) = probed(1, &probe);
+            let (mut gate, publisher, mut realtime, _retirer) = exchange_with(plan, gate, 1);
+            let _ = block(&mut realtime, 0);
+            gate.publish(2);
+            probe.fail.store(true, Ordering::Relaxed);
+
+            failing_block(&mut realtime, false);
+            assert_eq!(realtime.live_block_errors(), 1);
+            assert_eq!(probe.last(), 2, "the executor saw the snapshot");
+            assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
+            failing_block(&mut realtime, true);
+            assert_eq!(realtime.live_block_errors(), 2);
+            assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
+
+            probe.fail.store(false, Ordering::Relaxed);
+            let next = realtime.next_absolute_sample();
+            assert_eq!(next, QUANTUM, "a failed block did not advance the clock");
+            let _ = render_once(&mut realtime, next);
+            assert_eq!(level(&publisher), (2, next, OUTCOME_EXACT));
+            assert_eq!(realtime.live_block_errors(), 2);
         }
     }
 

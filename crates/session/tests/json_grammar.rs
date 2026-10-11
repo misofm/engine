@@ -135,21 +135,21 @@ fn bom_comments_trailing_commas_and_multiple_values_refuse_as_syntax() {
 
 #[test]
 fn u64_decimal_strings_cover_full_domain_and_reject_noncanonical_forms() {
+    // Source `frames` is the full-domain vehicle; `revision` stops at 2^63 - 1 (#1503).
     for value in [
-        "0",
+        "1",
         &i64::MAX.to_string(),
         "9223372036854775808",
         "18446744073709551615",
     ] {
         let source = CANONICAL.replacen(
-            "\"revision\": \"7\"",
-            &format!("\"revision\": \"{value}\""),
+            "\"frames\": \"48000\"",
+            &format!("\"frames\": \"{value}\""),
             1,
         );
         assert_eq!(
-            parse_session_json(&source)
-                .expect("valid u64")
-                .revision
+            parse_session_json(&source).expect("valid u64").sources[0]
+                .frames
                 .to_string(),
             value
         );
@@ -163,8 +163,8 @@ fn u64_decimal_strings_cover_full_domain_and_reject_noncanonical_forms() {
         "\"18446744073709551616\"",
     ] {
         let source = CANONICAL.replacen(
-            "\"revision\": \"7\"",
-            &format!("\"revision\": {replacement}"),
+            "\"frames\": \"48000\"",
+            &format!("\"frames\": {replacement}"),
             1,
         );
         assert!(
@@ -176,22 +176,11 @@ fn u64_decimal_strings_cover_full_domain_and_reject_noncanonical_forms() {
 
 #[test]
 fn every_u64_leaf_accepts_the_full_unsigned_domain() {
-    let maximum = "18446744073709551615";
-    for (needle, replacement) in [
-        (
-            "\"revision\": \"7\"",
-            format!("\"revision\": \"{maximum}\""),
-        ),
-        (
-            "\"frames\": \"48000\"",
-            format!("\"frames\": \"{maximum}\""),
-        ),
-    ] {
-        let source = CANONICAL.replacen(needle, &replacement, 1);
-        let model = parse_session_json(&source).expect("full-domain u64 leaf parses");
-        let canonical = canonical_session_json(&model).expect("full-domain u64 leaf writes");
-        assert!(canonical.contains(&replacement));
-    }
+    let replacement = "\"frames\": \"18446744073709551615\"";
+    let source = CANONICAL.replacen("\"frames\": \"48000\"", replacement, 1);
+    let model = parse_session_json(&source).expect("full-domain u64 leaf parses");
+    let canonical = canonical_session_json(&model).expect("full-domain u64 leaf writes");
+    assert!(canonical.contains(replacement));
 
     // The semantic interval rule requires start < end, so exercise both leaves at their highest
     // jointly valid values rather than weakening validation merely to test lexical width.

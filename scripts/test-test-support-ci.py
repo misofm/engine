@@ -180,18 +180,28 @@ def main() -> int:
             in_b_doc("-p parametric-eq ", ""))
 
     # Forwarding is modelled from the manifests, not from the feature list's spelling: host-web
-    # forwards host-core, which forwards effect-compiler, so both explicit entries are redundant
-    # until the manifest stops forwarding.
+    # and control-plane both forward host-core, which forwards effect-compiler, so both explicit
+    # entries are redundant until no manifest forwards.
     redundant = feature_a("host-core/test-support")
     redundant = (WORKFLOW, redundant[1],
                  redundant[2].replace("effect-compiler/test-support,", "", 1))
-    passes("host-core and effect-compiler still forwarded from host-web/test-support", redundant)
-    fails("host-web stops forwarding host-core/test-support",
+    host_web_forward = (
+        "hosts/host-web/Cargo.toml",
+        'test-support = ["builtins-compiler/test-support", "host-core/test-support"]',
+        'test-support = ["builtins-compiler/test-support"]')
+    control_plane_forward = (
+        "crates/control-plane/Cargo.toml",
+        'test-support = ["host-core/test-support"]',
+        "test-support = []")
+    passes("host-core and effect-compiler still forwarded from host-web and control-plane",
+           redundant)
+    passes("host-web stops forwarding host-core/test-support; control-plane still does",
+           redundant, host_web_forward)
+    passes("control-plane stops forwarding host-core/test-support; host-web still does",
+           redundant, control_plane_forward)
+    fails("neither host-web nor control-plane forwards host-core/test-support",
           {"effect-compiler", "effect-contract", "host-core"},
-          redundant,
-          ("hosts/host-web/Cargo.toml",
-           'test-support = ["builtins-compiler/test-support", "host-core/test-support"]',
-           'test-support = ["builtins-compiler/test-support"]'))
+          redundant, host_web_forward, control_plane_forward)
     passes("graph/test-support still forwarded from builtins-compiler/test-support",
            feature_a("graph/test-support"))
     passes("builtins-compiler/test-support still forwarded from host-web/test-support",
