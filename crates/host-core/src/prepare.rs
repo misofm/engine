@@ -31,8 +31,8 @@ use graph::{
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
-    CompileCaps, CompiledSession, MatrixOrPan, SessionModel, StripKind, StripRef, compile_session,
-    parse_session_json,
+    CompileCaps, CompiledSession, EditRampRow, EditRampTarget, EditRamps, MatrixOrPan,
+    SessionModel, StripKind, StripRef, compile_session, parse_session_json,
 };
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
@@ -798,6 +798,10 @@ pub struct SuccessorBase<'a> {
     /// `1 <= revision <= GATE_REVISION_MAX`; a preparation refuses any other with
     /// `host.successor.revision` before it allocates. It has no neutral value.
     pub revision: u64,
+    /// The ramp lengths the transaction's edits gave their rows (#1394 D2): a carry retarget
+    /// takes its length from here as the classifier's record of the same edit would, else from
+    /// the session's `control_smoothing`. Transaction metadata; [`EditRamps::new`] is "none".
+    pub edit_ramps: &'a EditRamps,
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -1552,7 +1556,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_strips = live_controls.control_queue_depth.is_some();
     let strip_joins: Vec<StripJoin<'_>> = match successor {
         None => Vec::new(),
-        Some(base) => join_strips(base.committed, model, live_strips),
+        Some(base) => join_strips(base.committed, model, live_strips, base.edit_ramps),
     };
     // Issue #1279 D1: how each strip's console slots and effect chain differ between the
     // predecessor's base and this model, resolved against the plans' lanes once this plan is
@@ -2493,6 +2497,46 @@ impl LiveRamps {
             LiveRampRow::Pan | LiveRampRow::Matrix | LiveRampRow::SendMatrix => self.pan_samples,
         }
     }
+
+    /// The length one record carries: the edit's own ramp when its transaction gave one (an
+    /// explicit 0 included, which steps that edit), else the row's session length
+    /// ([`Self::for_row`]). An edit's length is kept as given, so an absent polarity length is
+    /// twice `mute_samples` and an explicit one is not doubled (#1394 D5).
+    ///
+    /// Every record length goes through here; no record path reads a field directly.
+    #[must_use]
+    pub const fn resolve(self, row: LiveRampRow, edit_ramp: Option<u32>) -> u32 {
+        match edit_ramp {
+            Some(samples) => samples,
+            None => self.for_row(row),
+        }
+    }
+}
+
+/// The per-edit ramp lengths of one strip's three record rows, looked up once from the
+/// transaction's [`EditRamps`] (#1394 D6): the `(Strip, Fader)`, `(Strip, Mute)` and
+/// `(Strip, Matrix)` entries. `None` is "the edit gave no length": the session's applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StripEditRamps {
+    fader: Option<u32>,
+    mute: Option<u32>,
+    matrix: Option<u32>,
+}
+
+impl StripEditRamps {
+    /// The lengths the transaction gave strip `id`'s rows. The common transaction carries none:
+    /// then no lookup key is built.
+    pub(crate) fn of(edit_ramps: &EditRamps, id: &session::StableId) -> Self {
+        if edit_ramps.is_empty() {
+            return Self::default();
+        }
+        let target = EditRampTarget::Strip(id.clone());
+        Self {
+            fader: edit_ramps.get(&target, EditRampRow::Fader),
+            mute: edit_ramps.get(&target, EditRampRow::Mute),
+            matrix: edit_ramps.get(&target, EditRampRow::Matrix),
+        }
+    }
 }
 
 /// A fader or pan value outside the domain its render-side setter accepts.
@@ -2517,6 +2561,7 @@ pub(crate) fn fader_records(
     before: &session::DualMonoFader,
     after: &session::DualMonoFader,
     ramps: LiveRamps,
+    edit: StripEditRamps,
 ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
     let gain = |db| {
         checked_fader_gain(db)
@@ -2540,7 +2585,7 @@ pub(crate) fn fader_records(
         push(TrackFaderRecord::FaderDb {
             lanes,
             db: db_after[lane],
-            smoothing_samples: ramps.for_row(LiveRampRow::Fader),
+            smoothing_samples: ramps.resolve(LiveRampRow::Fader, edit.fader),
         });
     }
     let mute_changed = [0, 1].map(|lane| mutes_before[lane] != mutes_after[lane]);
@@ -2548,7 +2593,7 @@ pub(crate) fn fader_records(
         push(TrackFaderRecord::Mute {
             lanes,
             muted: mutes_after[lane],
-            smoothing_samples: ramps.for_row(LiveRampRow::Mute),
+            smoothing_samples: ramps.resolve(LiveRampRow::Mute, edit.mute),
         });
     }
     Ok(fader)
@@ -2586,6 +2631,7 @@ pub(crate) fn matrix_record(
     before: &MatrixOrPan,
     after: &MatrixOrPan,
     ramps: LiveRamps,
+    edit: StripEditRamps,
 ) -> Result<Option<TrackControlRecord>, OutOfDomain> {
     let bits = |matrix: builtins::Matrix2x2| {
         [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits)
@@ -2595,15 +2641,19 @@ pub(crate) fn matrix_record(
     Ok(
         (bits(matrix_before) != bits(matrix_after)).then_some(TrackControlRecord {
             matrix: matrix_after,
-            // #1054 D5: the post-commit model's own window if it has one, else the session's
-            // `pan_ms` ramp. A pan and a raw matrix share the row's key.
-            smoothing_samples: if smoothing_after != 0 {
+            // #1394 D5: the edit's own ramp; else #1054 D5, the post-commit model's own window if
+            // it has one, else the session's `pan_ms` ramp. A pan and a raw matrix share the
+            // row's key.
+            smoothing_samples: if edit.matrix.is_none() && smoothing_after != 0 {
                 smoothing_after
             } else {
-                ramps.for_row(match after {
-                    MatrixOrPan::Pan { .. } => LiveRampRow::Pan,
-                    MatrixOrPan::Matrix { .. } => LiveRampRow::Matrix,
-                })
+                ramps.resolve(
+                    match after {
+                        MatrixOrPan::Pan { .. } => LiveRampRow::Pan,
+                        MatrixOrPan::Matrix { .. } => LiveRampRow::Matrix,
+                    },
+                    edit.matrix,
+                )
             },
         }),
     )
@@ -2742,6 +2792,7 @@ fn join_strips<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,
     live: bool,
+    edit_ramps: &EditRamps,
 ) -> Vec<StripJoin<'a>> {
     let vca_in_play = !committed.vcas.is_empty() || !model.vcas.is_empty();
     let committed_effective = vca_in_play.then(|| committed.effective_strip_faders());
@@ -2775,8 +2826,11 @@ fn join_strips<'a>(
         // D3 decides per value, D4 per stage: a refusal of one family's value makes only that
         // family prepared. The classifier refuses a whole delta, but that does not turn the other
         // stage's own live change into a prepared one.
-        let fader_records = fader_records(&before, &after, ramps);
-        let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps);
+        // A retarget is the record of the same edit, so it carries the length that edit gave its
+        // row (#1394 D6), else the session's.
+        let edit = StripEditRamps::of(edit_ramps, strip.id);
+        let fader_records = fader_records(&before, &after, ramps, edit);
+        let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps, edit);
         let fader_live = live_family
             && fader_records.is_ok()
             && !followed_mute_changes(before_fader, strip.fader, model, id);

@@ -31,7 +31,7 @@ use host_core::{
     LiveRampRow, LiveRamps, PrepareRejection, SourceControlError, SourceControlSet,
     SourceSubmission,
 };
-use session::{RouteSource, SessionModel, Source, StableId, parse_session_json};
+use session::{EditRamps, RouteSource, SessionModel, Source, StableId, parse_session_json};
 use successor::{
     BLOCKS, Feed, QUANTUM, SWAP_BLOCK, Session, Successor, caps, first_difference, reference_run,
     swapped_run,
@@ -1019,6 +1019,7 @@ impl LivePlan {
                     inventory: predecessor,
                     committed,
                     revision: successor::SUCCESSOR_REVISION,
+                    edit_ramps: &EditRamps::new(),
                 },
                 backend,
             )
@@ -2615,6 +2616,7 @@ impl CellPlan {
         session: &Session,
         predecessor: &host_core::PlanStateInventory,
         committed: &SessionModel,
+        edit_ramps: &EditRamps,
         backend: Backend,
         form: Form,
     ) -> Self {
@@ -2624,6 +2626,7 @@ impl CellPlan {
                 inventory: predecessor,
                 committed,
                 revision: successor::SUCCESSOR_REVISION,
+                edit_ramps,
             },
             backend,
             form,
@@ -2675,6 +2678,8 @@ struct Swap<'a> {
     form: Form,
     /// Records written to the successor's cells after it is prepared, before it is swapped in.
     successor_writes: &'a [(&'static str, CellRecord)],
+    /// The ramp lengths the transaction's edits gave their rows (#1394 D6).
+    edit_ramps: &'a EditRamps,
 }
 
 struct CellRun {
@@ -2718,6 +2723,7 @@ fn cell_run(
                 swap.to,
                 &plan.live.prepared.inventory,
                 swap.committed,
+                swap.edit_ramps,
                 backend,
                 swap.form,
             );
@@ -2931,6 +2937,7 @@ fn a_ramp_in_flight_finishes_after_the_swap(backend: Backend, form: Form) {
             committed: &committed,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &writes,
@@ -2962,6 +2969,7 @@ fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend, f
             committed: &committed,
             form,
             successor_writes: &successor_writes,
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3047,6 +3055,7 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
             committed: &before,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3060,6 +3069,7 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
             committed: &moved,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &writes,
@@ -3088,6 +3098,7 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
             committed: &before,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3111,6 +3122,87 @@ fn a_live_difference_retargets_the_carried_stage_at_four_lanes() {
 fn a_live_difference_retargets_the_carried_stage_at_eight_lanes() {
     for form in forms() {
         a_live_difference_retargets_the_carried_stage(Backend::Simd8, form);
+    }
+}
+
+/// #1394 D6: the same transaction as gate 4, but its edits gave strip X's fader a 37-sample ramp,
+/// its mute none, and its pan an explicit 100 (against the model's own 300-sample window). A
+/// carry retarget is the record of that edit, so the run equals the one that writes the records
+/// the classifier derives for it: `FaderDb` over 37 and the pan over 100. Red if the join reads
+/// the session's lengths and ignores the transaction's: the retarget then ramps 480 and 300, and
+/// differs from the written run.
+fn a_retarget_carries_the_edit_ramp_of_its_transaction(backend: Backend, form: Form) {
+    let after = |model: SessionModel| {
+        let model = with_fader(model, MOVED, [-4.0, -6.0]);
+        with_pan(model, MOVED, [0.8, 0.6], 300)
+    };
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(after(strip_state_session())));
+    let before = strip_state_session();
+    let moved = after(strip_state_session());
+    let feed = feed_for_strips();
+    let mut edit_ramps = EditRamps::new();
+    let strip = session::EditRampTarget::Strip(id(MOVED));
+    edit_ramps.set(&strip, session::EditRampRow::Fader, Some(37));
+    edit_ramps.set(&strip, session::EditRampRow::Matrix, Some(100));
+    let writes: Vec<CellWrite> = [
+        CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -4.0,
+            smoothing_samples: 37,
+        }),
+        CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Right,
+            db: -6.0,
+            smoothing_samples: 37,
+        }),
+        CellRecord::Matrix(pan_record([0.8, 0.6], 100)),
+    ]
+    .into_iter()
+    .map(|record| CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record,
+    })
+    .collect();
+    let run = |committed: &SessionModel, edit_ramps: &EditRamps, writes: &[CellWrite]| {
+        cell_run(
+            &a,
+            form,
+            Some(Swap {
+                to: &b,
+                committed,
+                form,
+                successor_writes: &[],
+                edit_ramps,
+            }),
+            &feed,
+            writes,
+            backend,
+        )
+    };
+    let retargeted = run(&before, &edit_ramps, &[]);
+    let written = run(&moved, &EditRamps::new(), &writes);
+    assert_eq!(retargeted.carry, CarryOutcome::Carried);
+    assert_eq!(
+        first_cell_difference(&retargeted, &written),
+        None,
+        "{backend:?} {form:?}: the retarget ramps over the edit's lengths"
+    );
+    // Not vacuous: without the transaction's lengths the same retarget ramps over the session's.
+    let session_ramps = run(&before, &EditRamps::new(), &[]);
+    assert_ne!(
+        session_ramps.blocks[SWAP_BLOCK], retargeted.blocks[SWAP_BLOCK],
+        "{backend:?} {form:?}: the edit's lengths are audible"
+    );
+}
+
+#[test]
+fn a_retarget_carries_the_edit_ramp_of_its_transaction_on_every_width_and_form() {
+    for backend in backends() {
+        for form in forms() {
+            a_retarget_carries_the_edit_ramp_of_its_transaction(backend, form);
+        }
     }
 }
 
@@ -3174,6 +3266,7 @@ fn a_restarting_lane_does_not_count_its_replaced_writes(backend: Backend, form: 
                 committed: &a.model,
                 form,
                 successor_writes: &[],
+                edit_ramps: &EditRamps::new(),
             }),
             &feed,
             &writes,
@@ -3252,6 +3345,7 @@ fn a_prepared_change_restarts_the_stage(backend: Backend, form: Form) {
             committed: &a.model,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3345,6 +3439,7 @@ fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
                 committed: &a.model,
                 form,
                 successor_writes: &[],
+                edit_ramps: &EditRamps::new(),
             }),
             &feed,
             &[],
@@ -3388,6 +3483,7 @@ fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
             committed: &moved,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[CellWrite {
@@ -3439,6 +3535,7 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
             committed: &before,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3457,6 +3554,7 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
             committed: &moved,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &written,
@@ -3488,6 +3586,7 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
             committed: &before,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3518,6 +3617,7 @@ fn a_followed_mute_change_restarts_the_fused_stage_whole(backend: Backend) {
             committed: &before,
             form,
             successor_writes: &[],
+            edit_ramps: &EditRamps::new(),
         }),
         &feed,
         &[],
@@ -3613,6 +3713,7 @@ fn the_strip_carry_allocates_and_frees_nothing() {
                     committed: &committed,
                     form,
                     successor_writes: &[],
+                    edit_ramps: &EditRamps::new(),
                 }),
                 &feed,
                 &writes,
@@ -3646,6 +3747,7 @@ fn a_cross_form_pair_does_not_carry() {
                     committed: &a.model,
                     form: to,
                     successor_writes: &[],
+                    edit_ramps: &EditRamps::new(),
                 }),
                 &feed,
                 &[],
@@ -3667,8 +3769,14 @@ fn a_changed_control_kind_carries_no_strip_stage() {
     let b = Session::compile(with_muted_track(strip_state_session()));
     for backend in backends() {
         let predecessor = a.prepare(backend);
-        let successor =
-            CellPlan::successor(&b, &predecessor.inventory, &a.model, backend, Form::Split);
+        let successor = CellPlan::successor(
+            &b,
+            &predecessor.inventory,
+            &a.model,
+            &EditRamps::new(),
+            backend,
+            Form::Split,
+        );
         assert_eq!(successor.live.prepared.restarted_strips().len(), 9);
         assert_eq!(
             successor.live.prepared.report.carry_program_retained_bytes,
@@ -3693,6 +3801,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
                 inventory: &predecessor.inventory,
                 committed: &a.model,
                 revision,
+                edit_ramps: &EditRamps::new(),
             },
             backend,
             Form::Split,
@@ -3714,6 +3823,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
                 inventory: &predecessor.inventory,
                 committed: &a.model,
                 revision: accepted,
+                edit_ramps: &EditRamps::new(),
             },
             backend,
             Form::Split,
@@ -3741,6 +3851,7 @@ fn successor_handle(
                 inventory: &predecessor.live.prepared.inventory,
                 committed,
                 revision: successor::SUCCESSOR_REVISION,
+                edit_ramps: &EditRamps::new(),
             },
             backend,
         )

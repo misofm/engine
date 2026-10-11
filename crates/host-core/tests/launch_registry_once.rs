@@ -22,7 +22,7 @@ use host_core::{
     prepare_response_preview,
 };
 use session::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, ParameterChannel,
+    Automation, AutomationSegment, AutomationShape, AutomationTarget, EditRamps, ParameterChannel,
     ParameterUnit, RackName, SessionModel, StableId, canonical_session_json, parse_session_json,
 };
 
@@ -87,7 +87,8 @@ fn classify_parameter_change(current: &SessionModel) {
         .find(|param| param.parameter_id == 4 && param.channel == ParameterChannel::Left)
         .expect("the fixture's band-1 gain, left");
     gain.value = 3.0;
-    let delta = classify_live_delta(current, &next, STEP).expect("a live EQ gain change");
+    let delta = classify_live_delta(current, &next, STEP, &EditRamps::new())
+        .expect("a live EQ gain change");
     assert_eq!(delta.effects.len(), 1, "one instance's records");
 }
 
@@ -113,7 +114,8 @@ fn classify_automation_change(current: &SessionModel) {
             unit: ParameterUnit::Db,
         }],
     });
-    let delta = classify_live_delta(current, &next, STEP).expect("a block-rate EQ ride is live");
+    let delta = classify_live_delta(current, &next, STEP, &EditRamps::new())
+        .expect("a block-rate EQ ride is live");
     assert!(delta.effects.is_empty() && delta.strips.is_empty());
 }
 

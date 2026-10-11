@@ -26,12 +26,14 @@ use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, PreparedEffectTarget,
 };
-use session::{Effect, EffectIdentity, EffectParam, SessionModel, Track, canonical_session_json};
+use session::{
+    EditRamps, Effect, EffectIdentity, EffectParam, SessionModel, Track, canonical_session_json,
+};
 
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::LiveRamps;
-use crate::prepare::{fader_records, followed_mute_changes, matrix_record};
+use crate::prepare::{StripEditRamps, fader_records, followed_mute_changes, matrix_record};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -180,6 +182,11 @@ pub enum LiveRebuild {
 /// unmute. An effect record is emitted only for a resolved value whose bits change: a `Both`
 /// value rewritten as equal per-lane values gives none.
 ///
+/// A record's ramp length is [`LiveRamps::resolve`]'s: the length the transaction's own edit gave
+/// the record's `(strip, row)` in `edit_ramps` (an explicit 0 included), else the session's
+/// `ramps` for the row (#1394 D5, D6). A pan or matrix record without an edit length takes the
+/// post-commit model's own non-zero `smoothing_samples` before the session's `pan_ms` (#1054 D5).
+///
 /// No smoothing window is checked: host-core preparation passes `maximum_smoothing_samples:
 /// u32::MAX` and the render setters accept any `u32` window. If preparation ever gets a finite
 /// smoothing cap, this classifier must refuse a smoothing above it as [`LiveRebuild::Domain`];
@@ -202,6 +209,7 @@ pub fn classify_live_delta<'a>(
     current: &SessionModel,
     next: &'a SessionModel,
     ramps: LiveRamps,
+    edit_ramps: &EditRamps,
 ) -> Result<LiveDelta<'a>, LiveRebuild> {
     if !current.vcas.is_empty() || !next.vcas.is_empty() {
         return Err(LiveRebuild::Vca);
@@ -262,9 +270,10 @@ pub fn classify_live_delta<'a>(
 
     let mut delta = LiveDelta::default();
     for (before, after) in current.tracks.iter().zip(&next.tracks) {
-        let fader =
-            fader_records(&before.fader, &after.fader, ramps).map_err(|_| LiveRebuild::Domain)?;
-        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan, ramps)
+        let edit = StripEditRamps::of(edit_ramps, &after.id);
+        let fader = fader_records(&before.fader, &after.fader, ramps, edit)
+            .map_err(|_| LiveRebuild::Domain)?;
+        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan, ramps, edit)
             .map_err(|_| LiveRebuild::Domain)?;
         if followed_mute_changes(&before.fader, &after.fader, next, after.id.as_str()) {
             return Err(LiveRebuild::FollowedMute);

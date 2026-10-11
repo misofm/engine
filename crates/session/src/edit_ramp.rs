@@ -142,8 +142,10 @@ pub struct EditRamps {
 impl EditRamps {
     /// No lengths: every row uses the session's `control_smoothing`.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 
     /// The length recorded for `row` of `target`, if the transaction gave one.

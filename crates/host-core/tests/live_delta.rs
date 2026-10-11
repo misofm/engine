@@ -24,9 +24,10 @@ use host_core::{
 };
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
-    ConsoleSlot, ControlSmoothing, DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan,
-    ParameterChannel, ParameterUnit, RackName, RouteDestination, RouteSource, SendTap,
-    SessionModel, StableId, Submix, Vca, canonical_session_json, parse_session_json,
+    ConsoleSlot, ControlSmoothing, DualMonoFader, EditRampRow, EditRampTarget, EditRamps,
+    EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel, ParameterUnit, RackName,
+    RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix, Vca,
+    canonical_session_json, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -164,7 +165,7 @@ fn classify(
     edit: impl FnOnce(&mut SessionModel),
 ) -> Result<Vec<Strip>, LiveRebuild> {
     let next = edited(current, edit);
-    classify_live_delta(current, &next, STEP).map(|delta| flatten(&delta))
+    classify_live_delta(current, &next, STEP, &EditRamps::new()).map(|delta| flatten(&delta))
 }
 
 fn flatten(delta: &LiveDelta<'_>) -> Vec<Strip> {
@@ -619,6 +620,15 @@ fn ramps_of_a_move(
     control_smoothing: Option<ControlSmoothing>,
     pan_smoothing_samples: u32,
 ) -> [u32; 3] {
+    ramps_of_a_move_with(control_smoothing, pan_smoothing_samples, &EditRamps::new())
+}
+
+/// [`ramps_of_a_move`] for a transaction whose edits carried `edit_ramps` (#1394).
+fn ramps_of_a_move_with(
+    control_smoothing: Option<ControlSmoothing>,
+    pan_smoothing_samples: u32,
+    edit_ramps: &EditRamps,
+) -> [u32; 3] {
     use BuiltinLaneSelector::Both;
     let current = with_smoothing(&two_tracks(), control_smoothing);
     let next = edited(&current, |next| {
@@ -634,7 +644,7 @@ fn ramps_of_a_move(
         };
     });
     let ramps = LiveRamps::for_session(&next);
-    let delta = classify_live_delta(&current, &next, ramps).expect("live");
+    let delta = classify_live_delta(&current, &next, ramps, edit_ramps).expect("live");
     let [Some(db), Some(muted), None, None] = delta.strips[0].fader else {
         panic!(
             "one FaderDb and one Mute record: {:?}",
@@ -643,8 +653,6 @@ fn ramps_of_a_move(
     };
     let matrix = delta.strips[0].matrix.expect("a matrix record");
     assert_eq!(matrix.matrix, pan_matrix(0.5, 0.5).expect("pan"));
-    assert_eq!(db, fader_db(Both, -6.0, ramps.fader_samples));
-    assert_eq!(muted, mute(Both, true, ramps.mute_samples));
     let TrackFaderRecord::FaderDb {
         smoothing_samples: fader,
         ..
@@ -653,12 +661,15 @@ fn ramps_of_a_move(
         unreachable!()
     };
     let TrackFaderRecord::Mute {
-        smoothing_samples: muted,
+        smoothing_samples: muted_ramp,
         ..
     } = muted
     else {
         unreachable!()
     };
+    assert_eq!(db, fader_db(Both, -6.0, fader));
+    assert_eq!(muted, mute(Both, true, muted_ramp));
+    let muted = muted_ramp;
     [fader, muted, matrix.smoothing_samples]
 }
 
@@ -689,6 +700,66 @@ fn records_carry_the_session_ramps_and_the_models_own_pan_window() {
     assert_eq!(ramps_of_a_move(steps, 96), [0, 0, 96]);
 }
 
+/// #1394 gate 4. Red if the classifier ignores an edit's ramp, reads an explicit 0 as "use the
+/// default", lets a model pan window beat the edit's, or applies one row's or one strip's length
+/// to another.
+#[test]
+fn a_records_length_is_its_edits_own_when_the_edit_carried_one() {
+    let models = two_tracks();
+    let (first, second) = (models.tracks[0].id.clone(), models.tracks[1].id.clone());
+    let ramps = |entries: &[(&StableId, EditRampRow, u32)]| {
+        let mut ramps = EditRamps::new();
+        for (strip, row, samples) in entries {
+            ramps.set(
+                &EditRampTarget::Strip((*strip).clone()),
+                *row,
+                Some(*samples),
+            );
+        }
+        ramps
+    };
+    use EditRampRow::{Fader, Input, Link, Matrix, Mute};
+    let default_table = [960, 480, 960];
+
+    // Entries on the fader and matrix rows: those two records take 37, the mute keeps the
+    // session's 10 ms, and the model's own pan window of 96 does not beat the edit.
+    let fader_and_matrix = ramps(&[(&first, Fader, 37), (&first, Matrix, 37)]);
+    assert_eq!(
+        ramps_of_a_move_with(None, 0, &fader_and_matrix),
+        [37, 480, 37]
+    );
+    assert_eq!(
+        ramps_of_a_move_with(None, 96, &fader_and_matrix),
+        [37, 480, 37]
+    );
+    // An explicit 0 steps that record only; it is not "unset", whatever the model's window says.
+    let explicit_mute = ramps(&[(&first, Mute, 0)]);
+    assert_eq!(ramps_of_a_move_with(None, 0, &explicit_mute), [960, 0, 960]);
+    assert_eq!(
+        ramps_of_a_move_with(None, 96, &ramps(&[(&first, Matrix, 0)])),
+        [960, 480, 0]
+    );
+    // An edit's length beats an explicit session table too.
+    let table = Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    });
+    assert_eq!(
+        ramps_of_a_move_with(table, 0, &fader_and_matrix),
+        [37, 240, 37]
+    );
+    // Another strip's entries, and the rows this move does not write, change nothing.
+    let others = ramps(&[
+        (&second, Fader, 37),
+        (&second, Mute, 37),
+        (&second, Matrix, 37),
+        (&first, Input, 37),
+        (&first, Link, 37),
+    ]);
+    assert_eq!(ramps_of_a_move_with(None, 0, &others), default_table);
+}
+
 /// Gate 3, the raw matrix. Red if a raw matrix with no window of its own is given 0 instead of the
 /// session's `pan_ms` (D5 covers a pan and a matrix alike).
 #[test]
@@ -717,8 +788,13 @@ fn a_raw_matrix_without_a_window_takes_the_session_pan_ramp() {
                 smoothing_samples,
             };
         });
-        let delta = classify_live_delta(&current, &next, LiveRamps::for_session(&next))
-            .expect("a matrix move is live");
+        let delta = classify_live_delta(
+            &current,
+            &next,
+            LiveRamps::for_session(&next),
+            &EditRamps::new(),
+        )
+        .expect("a matrix move is live");
         delta.strips[0]
             .matrix
             .expect("a matrix record")
@@ -932,7 +1008,7 @@ fn pushed_records_render_the_rebuilt_plan() {
             smoothing_samples: 0,
         };
     }));
-    let delta = classify_live_delta(&current, &next, STEP).expect("live");
+    let delta = classify_live_delta(&current, &next, STEP, &EditRamps::new()).expect("live");
     assert_eq!(
         delta.strips.len(),
         8,
@@ -973,7 +1049,7 @@ fn pushed_records_render_the_rebuilt_plan() {
     let unmuted = normalized(&edited(&next, |next| {
         next.tracks[8].fader.left_mute = false
     }));
-    let unmute = classify_live_delta(&next, &unmuted, STEP).expect("live");
+    let unmute = classify_live_delta(&next, &unmuted, STEP, &EditRamps::new()).expect("live");
     assert_eq!(
         flatten(&unmute),
         vec![(
@@ -1091,7 +1167,7 @@ fn classify_effects(
     edit: impl FnOnce(&mut SessionModel),
 ) -> Result<(Vec<Strip>, Vec<EffectEntry>), LiveRebuild> {
     let next = edited(current, edit);
-    classify_live_delta(current, &next, STEP).map(|delta| {
+    classify_live_delta(current, &next, STEP, &EditRamps::new()).map(|delta| {
         let effects = delta
             .effects
             .iter()
@@ -1387,7 +1463,7 @@ fn eq_entry(
     edit: impl FnOnce(&mut SessionModel),
 ) -> Result<(Vec<EffectControlRecord>, Option<Vec<PreparedEffectTarget>>), LiveRebuild> {
     let next = edited(current, edit);
-    let delta = classify_live_delta(current, &next, STEP)?;
+    let delta = classify_live_delta(current, &next, STEP, &EditRamps::new())?;
     assert!(delta.strips.is_empty(), "no strip record");
     assert_eq!(delta.effects.len(), 1, "one instance");
     let entry = &delta.effects[0];
@@ -1538,7 +1614,7 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
     );
     // A console EQ entry un-bypassed on the second track: a bare record, no targets.
     let next = edited(&current, |next| next.tracks[1].console[0].bypass = false);
-    let delta = classify_live_delta(&current, &next, STEP).expect("live");
+    let delta = classify_live_delta(&current, &next, STEP, &EditRamps::new()).expect("live");
     assert_eq!(delta.effects.len(), 1);
     let entry = &delta.effects[0];
     assert_eq!(

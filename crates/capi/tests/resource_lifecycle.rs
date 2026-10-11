@@ -1981,6 +1981,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             inventory: &current_host.prepared.inventory,
             committed: current_host.store.compiled().normalized_model(),
             revision: 1,
+            edit_ramps: &session::EditRamps::new(),
         },
         None,
         &host_core::LiveValuesSuperseded::default(),
