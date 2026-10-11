@@ -157,6 +157,37 @@ this amendment and D1-D4 differ, this amendment holds. Recorded by root, 2026-10
   `--apply --all` with the backup directory root names, which writes only the `fast-forward` set.
   The `unmatched` set is reconciled by hand from `--reconcile-dir`, never by the script.
 
+## Amendment 2 (root, 2026-10-11): rulings on the first run's `unmatched` set
+
+Root's rulings on the 31 `unmatched` issues of A9's run (owner-approved syncs, 2026-10-11) need two
+additions. Recorded by root, 2026-10-11; the mechanism in A11 is the coordinator's, so that every
+ruling's sync still goes through A5's backup and read-back.
+
+- **A10. One normalization: a body without its H1.** Nineteen bodies (#948-#993, #1470, #1471)
+  hold an earlier committed spec with its title line removed. A blob *with its H1 removed* is the
+  blob minus its first two lines, defined only when the first line is `# <title>` (A2) and the second
+  line is empty. A GitHub body that matches (A3, one trailing newline allowed) the H1-removed form of
+  the source blob or of a history blob counts as a body match for `fast-forward`. It never makes an
+  issue `in-sync`: `in-sync` still needs the full blob, so the sync restores the title line. Nothing
+  else is normalized; any other difference stays `unmatched`.
+- **A11. A reviewed body: `--reviewed DIR`.** Some rulings sync an issue whose body is not an earlier
+  committed state (a body from an unmerged branch, a body with extra trailing blank lines, a title
+  set on GitHub). Root rules on each after a three-way reconcile. `--reviewed DIR` takes a directory
+  that an earlier `--reconcile-dir` run wrote. For an `unmatched` issue that is named explicitly on
+  the command line (never through `--all` or `--range`), the issue becomes `fast-forward` (printed
+  as `<n> fast-forward reviewed`) only when the current GitHub body is byte-equal to
+  `DIR/<n>.github.md` and the current GitHub title is byte-equal to `DIR/<n>.github-title.txt`. Any
+  change since the review leaves it `unmatched`. `--reconcile-dir` therefore also writes
+  `<n>.github-title.txt`, the title with no trailing newline. `--reviewed` changes nothing else: the
+  write is A5's, with the backup, the race check and the read-back, and the spec is still the
+  `origin/main` blob.
+- **A12. Self-test additions.** A body equal to a history blob with its H1 removed is
+  `fast-forward` and the read-back has the full blob. A body equal to the H1-removed form but with
+  any other one-byte change is `unmatched`. A body with the H1 line removed but the blank line kept,
+  or a blob whose second line is not empty, is `unmatched`. With `--reviewed`: a body and title equal
+  to the reviewed files sync; a one-byte change to either since the review is `unmatched`; an issue
+  selected with `--all` is not overridden. Each new assertion has a mutation run in the Evidence.
+
 ## Authorized paths
 
 - `scripts/operator/sync-spec-bodies.sh` and `scripts/operator/test-sync-spec-bodies.sh` (new)
