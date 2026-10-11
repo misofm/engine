@@ -64,14 +64,14 @@ function store(backend, locks, options = {}) {
   })
 }
 
-async function fanMixNarrative() {
+async function twoMixNarrative() {
   const stems = Array.from({ length: 12 }, (_, index) => fixture(`stem-${index}`))
   const mixA = stems.slice(0, 8)
   const mixB = [...stems.slice(0, 6), stems[8], stems[9]]
   const backend = new FakeOpfsBackend()
   const locks = new FakeLockManager()
   const resolver = new MemoryStemResolver(stemMap(stems), { chunkBytes: 257 })
-  const opfs = store(backend, locks, { tabId: "fan" })
+  const opfs = store(backend, locks, { tabId: "two-mix" })
 
   const leaseA = await opfs.openSession({
     sessionId: "A",
@@ -972,7 +972,7 @@ async function modeDetection() {
   )
 }
 
-await fanMixNarrative()
+await twoMixNarrative()
 await twoTabCollision()
 await corruptionSelfHeals()
 await indexRecoveryAdoptsSelfVerifyingFinals()

@@ -9,7 +9,7 @@ app-layer in the rulings that list it as open.
 **Owner direction (2026-10-11).** "It's crazy to have 'producer' and 'fan' concepts in a generic audio
 engine. That makes no sense. This should be something we do on the application layer."
 
-**Context.** The roles exist only in prose: 3 rulings, 9 open specs, `docs/TARGET_MATRIX.md` and one
+**Context.** The roles exist only in prose and in two test identifiers (`hosts/host-web/tests/stem-store-core-v1.mjs`: `fanMixNarrative` and the tab ID `"fan"`, renamed to `twoMixNarrative` and `"two-mix"`; amendment 1 after attempt 1's verdict): 3 rulings, 9 open specs, `docs/TARGET_MATRIX.md` and one
 `//!` comment in `tools/bench/src/console.rs`. No type, field, mode, boot option, gate or test is named
 for a role. The generic capabilities the prose motivated stay: a plan prepared without live controls
 (browser boot option `liveControls.commandQueueRecords` = 0), AArch64 as an official target with
@@ -17,7 +17,7 @@ cross-target bit identity, the core-owned committed session with canonical JSON 
 #1058 are closed; decision 16 was not adopted and was never filed.
 
 **Decisions frozen.**
-- D1. Handoffs under `docs/handoffs/` and closed verdicts are records and are not edited.
+- D1. Handoffs under `docs/handoffs/`, dated audits under `docs/audits/` and closed verdicts are records and are not edited.
 - D2. Rulings are not rewritten. Each of the three rulings gets one dated note (text below); owner quotes stay verbatim.
 - D3. Open specs and current docs are reworded in place with the exact replacements in the table below. Each
   edited open spec's GitHub body is synced in the same batch.
@@ -34,7 +34,8 @@ cross-target bit identity, the core-owned committed session with canonical JSON 
 - `docs/TARGET_MATRIX.md` (lines 100-101 only)
 - `tools/bench/src/console.rs` (lines 168-169, the `//!` comment only)
 - `.github/ISSUE_SPECS/` files for #1019, #1113, #1225, #1239, #1247, #1277, #1326, #1327, #1390 (the
-  quoted line only; #1277 after `codex/d15-stream-b2` merges, #1326 after `codex/d15-batch-dfg` merges)
+  quoted line only; in any order with the stream branches that also edit #1277 and #1326: no shared hunks)
+- `hosts/host-web/tests/stem-store-core-v1.mjs` (the two identifiers only; no behaviour change)
 - `AGENTS.md` (the one Mission sentence only)
 - this issue's own spec file
 
@@ -50,7 +51,7 @@ notion of person roles such as producer, fan or listener; apps own them."
 - G3. For each of the nine issues, `gh issue view <n> --json body` equals the local spec after the
   batch push (review evidence, not a committed test).
 - G4. Review evidence, not a committed test: the verifier re-runs `git grep -n -i -E '\\b(fans?|producers?|listeners?|personal mix)\\b'` (ignoring queue producer/consumer and fan-in/fan-out senses) on the merged
-  tree; every remaining person-role hit is under `docs/handoffs/`, in this issue's own spec (which quotes the old text), or inside a ruling's original text
+  tree; every remaining person-role hit is under `docs/handoffs/` or `docs/audits/`, in this issue's own spec (which quotes the old text), or inside a ruling's original text
   that a dated note covers.
 - No benchmark, fixture or digest changes; no rendered bit can move (no code change).
 

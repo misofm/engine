@@ -412,5 +412,5 @@ limiter argument by test.
 > **Note, 2026-10-11 (owner direction).** "It's crazy to have 'producer' and 'fan' concepts in a
 > generic audio engine. That makes no sense. This should be something we do on the application layer."
 > The engine has no producer, fan or listener role. Where "Each host on `main`" says "a fan's
-> control-free playback", read "a plan booted without live controls": live controls stay opt-in at
-> boot, and a plan prepared without them keeps every value prepared. Roles belong to the app layer.
+> control-free playback", read "a plan booted without live controls" (live controls were opt-in at
+> boot when this ruling was written), and a plan prepared without them keeps every value prepared. Roles belong to the app layer.

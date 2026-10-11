@@ -569,12 +569,11 @@ where it differs; the issue bodies are rewritten to match.
 
 > **Note, 2026-10-11 (owner direction).** "It's crazy to have 'producer' and 'fan' concepts in a
 > generic audio engine. That makes no sense. This should be something we do on the application layer."
-> The engine has no producer, fan or listener role. Where this ruling names one, read it as a generic
-> host or app: "a plan booted without live controls" for fan playback, "a session's stored automation"
-> for a producer's automation, and "an iOS or Android app" for a fan's phone. The personal-mix question
+> The engine has no producer, fan or listener role. This ruling names no person role except in the
+> #1057 personal-mix question; its "producer" (D15-5, D15-9) is the queue sense. The personal-mix question
 > (#1057, section 7) is not an engine question and is closed: an app keeps its users' edits itself, with
-> canonical JSON snapshots and transactions. Decision 16 (fan level offsets, personal mixes) was not
-> adopted.
+> canonical JSON snapshots and transactions. Decision 16 (fan level offsets, send automation and personal
+> mixes) was not adopted; this note decides none of its role-free parts.
 
 ### Issues closed by this decision
 

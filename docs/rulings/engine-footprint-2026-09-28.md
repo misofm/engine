@@ -72,7 +72,8 @@ aim, in the owner's words, is "minimizing the engine footprint".
 > is closed: an app keeps its users' edits itself, with canonical JSON snapshots and transactions. The
 > bullet "A producer's automation is rendered by the core engine from the session file" stands as
 > "a session's stored automation is rendered by the core engine from the session file". Decision 16
-> (fan level offsets, personal mixes) was not adopted.
+> (fan level offsets, send automation and personal mixes) was not adopted; this note decides none of
+> its role-free parts.
 
 ## Test rulings (2026-09-28)
 
