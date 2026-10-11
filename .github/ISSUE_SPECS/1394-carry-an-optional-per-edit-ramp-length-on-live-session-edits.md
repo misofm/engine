@@ -214,3 +214,109 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 #1054 delivers `LiveRamps` with `for_row`, the default table and D5's matrix precedence. These
 issues depend on this one: #1225, #1226, #1236, #1247, #1261, #1371, #1390 (the C ABI rows), #1382
 (browser lowering), #1383 and #1385 (SDK encoding).
+
+## Attempt record
+
+**Attempt 1** (implementer, branch `codex/d15-stream-e2`, base `adf234b19`, the end of #1054). Commits in
+deliverable order: D2 (`6a9f7192e`), D1/D3/D4 with the mechanical constructions and the registry
+(`70a0a8991`), the one corpus re-pin (`860e817ad`), D5/D6 and the `commit_live` call (`434df0140`), the C ABI
+test and doc (`7cf89f67e`), one more `EditRamps` unit test (`5a18bddde`), and this record.
+
+**Where the spec and the tree differed (recorded, not improvised around).**
+
+1. *The classifier produces three record kinds on this base:* `FaderDb`, `Mute` and the strip matrix record.
+   A VCA rebuilds (`LiveRebuild::Vca`) and no send or follow record exists, so D6 converts those three, all
+   on `(Strip, row)`. The `Input`, `Link`, `Route*` and `Vca*` entries are recorded by D3 and read by no
+   classifier path yet; the row slices that own those records read them through `EditRamps::get` and
+   `LiveRamps::resolve`.
+2. *The classifier signature* is `classify_live_delta(current, next, ramps, edit_ramps: &EditRamps)`. A lookup
+   key is built per strip only when the transaction recorded a length (`EditRamps::is_empty` otherwise), so
+   the common transaction allocates nothing more than before.
+3. *Gate 1's corpus has eight live-value edits, not eleven:* `all_opcode_edits_64()` predates `SetConsole`,
+   `SetTrackConsole` and `SetVcaFader`. The test builds those three beside the corpus and asserts all
+   eleven.
+4. *Gate 2 and 3 live in a new integration test,* `crates/protocol/tests/edit_ramps.rs` (authorized path), on
+   the canonical fixture plus a second track; a `model::tests` unit test would have needed the same
+   fixture. The tracks sort, so the fixture's `vocal` is the second track.
+5. *D4's bound is checked after the final compile,* against the compiled model's `sample_rate_hz`: an
+   invalid rate or a failed validation outranks the ramp refusal, and an edit error (`NotFound`, ...) at an
+   earlier index outranks both. Every edit is checked, not only the one that survives in `EditRamps`: a
+   `Some(48001)` followed by a `None` still refuses at the first edit's index.
+6. *Gate 6's "the commit and ramp blocks allocate nothing"* holds for the render calls only, as in #1054
+   (the commit is the control plane and allocates, `classify_live_delta` documents it). The test counts
+   every render call of the 96-frame ramp and of the following 480-frame unmute: 0 allocations, 0 frees.
+7. *`EditRamps` is one ordered map, not a map per target kind.* A strip rewrite then clears its own rows
+   and its effect instances' rows with one key range, and the token grows by one 24-byte empty map header
+   (no per-slot arrays). `size_of::<PreparedStructuralCommand>()`, the row `compile.rs` counts as the
+   prepared protocol layout, grows by `EditRamps`'s 24 bytes, to a measured 840 (the field is 8-aligned; the baseline was not built separately). No
+   test pins it: `-p capi`, the debug leg and `audit capi` are green with no re-pin.
+8. *Files outside the authorized list, forced by the compiler or by a field addition:*
+   `crates/host-core/tests/launch_registry_once.rs` (two `classify_live_delta` calls gain
+   `&EditRamps::new()`), and `ramp_samples: None` in `crates/capi/src/runtime/tests.rs`,
+   `crates/capi/tests/{design_bound_cache,plan_swap_race,resource_lifecycle}.rs`, `tools/audit/src/capi.rs`
+   and `crates/protocol/tests/{console_session_edits,session_edit_builtins_rack,submix_strip_edits,vca_edits}.rs`
+   (the last four are inside `crates/protocol/tests/`, authorized). No test body changed in them.
+9. *Removal edits leave entries behind.* `RemoveTrack`, `RemoveSubmix`, `RemoveRoute`, `RemoveVca` and the
+   rack edits do not clear their target (D3 names the four upserts only). A stale entry for a removed
+   target is unreachable: the classifier looks up existing strips, and the upsert that re-creates the ID
+   clears it.
+
+**What changed.** `crates/session/src/edit_ramp.rs` (`EditRampTarget`, `EditRampRow`, `EditRamps` with `get`,
+`set`, `clear_target`, `entries`, `is_empty`); `ramp_samples: Option<u32>` on eleven `SessionEdit` variants and
+`SessionEdit::ramp_samples()`; field specs and `schema::session::ramp_samples_field`; the encoder emits the
+field last and counts it, the decoder reads it with `optional_one` (absent stays `None`);
+`record_edit_ramps` in `prepare_transaction`; `SessionEditError::RampOutOfRange` /
+`session.edit.ramp_out_of_range`; `PreparedSessionTransaction::edit_ramps()`; `LiveRamps::resolve`; the
+classifier reads the three record lengths through it; `commit_live` passes `transaction.edit_ramps()`; the
+registry gains the per-edit table; `docs/C_ABI_V1_QUALIFICATION.md` states the override.
+
+**Digests that moved: one re-pin, one reason.** `COMPLETE_SCHEMA_HASH` `ab357b6c432f9755` ->
+`5429f052592101ef` (`crates/conformance/src/protocol_corpus.rs` with its history line "#1394 appends optional
+`ramp_samples` to the live-value edits", `scripts/check-protocol-wasm-parity.sh` lines 172-173,
+`docs/CONTROL_PROTOCOL_CONFORMANCE.md`, `fuzz/corpus/complete-schema-manifest.md`). The corpus's
+`SetTrackFader` sets `ramp_samples: Some(480)`; every other edit encodes an absent field to the same bytes,
+so that edit is the whole move (frame count 46 and edit count 46 unchanged; confirmed by the corpus staying
+green at the old hash with `None` at `70a0a8991`). **No render digest moved:** `audit capi` `pcm_digest
+a9738fa800afcab3`, the browser module's expected-resource digests (`check-browser-expected-resources.py
+--artifacts` green with no edit), and the builtins fixtures are unchanged.
+
+**Test value and mutation runs** (defect applied by a text edit, test run, file restored; "R" red, "G"
+green).
+
+| Test | Plausible defect (mutation) | Result |
+|---|---|---|
+| `session_wire/tests.rs` `live_value_edits_round_trip_their_optional_ramp_length` (gate 1) | decoder reads an absent field as `Some(0)`; encoder drops an explicit 0; field count ignores the field | R, R, R |
+| `protocol/tests/edit_ramps.rs` `the_last_edit_to_write_a_row_decides_its_length` (gate 2) | fader edit records the fader row only; `None` does not remove an earlier length; `UpsertTrack` does not clear | R each |
+| same file `every_live_value_edit_records_its_rows_on_its_target` (D3 table) | `SetRouteFollowsMute` recorded on the gain row | R |
+| same file `a_length_above_one_second_of_the_committed_rate_refuses_the_whole_transaction` (gate 3) | bound `>=`; bound from the base rate; bound `+1`; only the last edit checked | R each |
+| same | `rposition` instead of `position` (first vs last offending index) | G, equivalent: the test has one offending edit and the spec does not pin the index when two offend |
+| `session/src/edit_ramp.rs` unit tests | explicit 0 not stored; strip clear leaves its effects; effect clear takes its siblings; effect clear takes the whole strip | R each |
+| `host-core/tests/live_delta.rs` `a_records_length_is_its_edits_own_when_the_edit_carried_one` (gate 4) | edit ramps ignored; explicit 0 read as default (in the lookup and in `resolve`); the model's pan window beats the edit; mute reads the fader row; fader row ignored; matrix row ignored; strip lookup keyed on another strip | R each (7 runs) |
+| `capi/src/runtime/live_tests.rs` `a_live_edits_own_ramp_length_overrides_the_session_and_does_not_outlive_its_transaction` (gate 6) | `commit_live` passes an empty `EditRamps`; explicit 0 read as default; the previous transaction's lengths kept for the next | R each |
+
+Which defect each new test catches that no existing test does: gate 1, a codec that disagrees with itself on
+the one optional field or reads absent as 0 (no test carried the field); gate 2, wrong row, stale or kept
+length, upsert residue (no test covers transaction metadata); the D3 table test, an edit that writes the
+wrong row or target (this is the only place the table is pinned, and the rows it records are read by later
+slices); gate 3, an off-by-one, base-rate or last-edit-only bound, or a refused transaction that commits;
+gate 4, a classifier that ignores, defaults or misroutes a length; gate 6, an engine that reaches `commit_live`
+without the edits' lengths, or lets one leak into the next transaction.
+
+**Gates run (final tree).** `cargo test --locked -p session`; `-p protocol --features test-support` (132 lib
+tests, the new integration file, all others); `-p host-core --features test-support,control-provider --test
+live_delta` (34; the spec's command without `control-provider` runs 0 tests, as #1054 recorded);
+`-p capi`; `-p conformance` (incl. `conformance_corpus`); the `test-debug-a` leg (133 `ok` results, no
+failures) and its doctest leg; `cargo test --locked --release -p audit` (33); `cargo build --locked --release
+-p audit && ./target/release/audit capi` (0 allocations, 0 syscalls, `pcm_digest a9738fa800afcab3`);
+`bash scripts/run-protocol-allocation-audit.sh target/release/audit`; `bash scripts/check-capi-abi.sh`;
+`bash scripts/check-protocol-wasm-parity.sh` (ok, simd128); `bash scripts/check-builtins-fixtures.sh . target/release/audit`;
+`check-protocol-control-policy.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`,
+`check-realtime-policy.sh` and the three matching `test-*-policy.sh`; `bash scripts/check-cross-targets.sh`
+(PASS); `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `cargo fmt --all --
+--check`. The worklet chain, because `protocol` is compiled into the browser module: `build-web-audioworklet.sh
+--named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts` (32 red mutations, every budget met), and `test-web-audioworklet.sh` under a private `TMPDIR` (rc 0,
+nothing left behind). Not run: AArch64 (CI only), the browser matrix.
+
+**Open items.** The SDK does not encode the field (#1383, #1385) and browser records do not lower into it
+(#1382); both are non-goals here. `control_smoothing` itself stays a structural difference until #1365.
