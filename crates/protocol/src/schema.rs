@@ -1181,6 +1181,26 @@ pub(crate) mod session {
             fields: &[VALUE, RAMP_SAMPLES],
         };
     }
+    pub(crate) mod control_smoothing {
+        use super::*;
+        pub(crate) const MUTE_MS: FieldSpec = FieldSpec::req(1, Wire::F32);
+        pub(crate) const FADER_MS: FieldSpec = FieldSpec::req(2, Wire::F32);
+        pub(crate) const PAN_MS: FieldSpec = FieldSpec::req(3, Wire::F32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "ControlSmoothing",
+            fields: &[MUTE_MS, FADER_MS, PAN_MS],
+        };
+    }
+    pub(crate) mod set_control_smoothing {
+        use super::*;
+        /// #1365: the lengths, absent to clear the key so the default table applies.
+        pub(crate) const VALUE: FieldSpec =
+            FieldSpec::msg(1, false, false, &control_smoothing::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetControlSmoothing",
+            fields: &[VALUE],
+        };
+    }
     pub(crate) mod upsert_source {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &source::SPEC);
@@ -1611,6 +1631,7 @@ pub(crate) mod session {
             SetRenderProfile => &set_render_profile::SPEC,
             SetOutputProfile => &set_output_profile::SPEC,
             SetConsole => &set_console::SPEC,
+            SetControlSmoothing => &set_control_smoothing::SPEC,
             UpsertSource => &upsert_source::SPEC,
             RemoveSource => &remove_source::SPEC,
             SetSourceContent => &set_source_content::SPEC,

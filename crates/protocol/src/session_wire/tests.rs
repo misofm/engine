@@ -1928,3 +1928,86 @@ fn live_value_edits_round_trip_their_optional_ramp_length() {
         "absent, 0 and 96000 are three different encodings"
     );
 }
+
+/// #1365 gate 1: `SetControlSmoothing` with `Some` lengths (a zero, a negative zero and the 1000 ms
+/// bound included) and with `None` encodes and decodes to the same edit and re-encodes to the same
+/// bytes, and the two encodings differ. A message missing one of its three lengths, a negative
+/// length, 1000.5 and a non-finite length are refused at decode, whether the message is parsed
+/// alone or sits in a decoded transaction.
+///
+/// Red if the encoder and the decoder disagree on the optional field or on a length's field ID,
+/// if `None` is read as an empty or default message, if a partial message is completed with a
+/// default, or if a length outside `[0, 1000]` is accepted and left to a later validation.
+#[test]
+fn set_control_smoothing_round_trips_and_decode_refuses_a_partial_or_out_of_range_message() {
+    let codec = ProtocolCodec::default();
+    let lengths = |mute_ms, fader_ms, pan_ms| session::ControlSmoothing {
+        mute_ms,
+        fader_ms,
+        pan_ms,
+    };
+    let mut encodings = Vec::new();
+    for control_smoothing in [
+        Some(lengths(5.0, 15.0, 25.0)),
+        Some(lengths(0.0, -0.0, 1000.0)),
+        None,
+    ] {
+        let edits = [SessionEdit::SetControlSmoothing { control_smoothing }];
+        let bytes = encode(&edits);
+        let decoded = codec
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("SetControlSmoothing decodes");
+        assert_eq!(decoded.edits, edits, "{control_smoothing:?}");
+        assert_eq!(
+            encode(&decoded.edits),
+            bytes,
+            "{control_smoothing:?} re-encodes"
+        );
+        encodings.push(bytes);
+    }
+    assert!(encodings[0] != encodings[1] && encodings[1] != encodings[2]);
+
+    // The three fields of one message, hand-built so a field can be left out.
+    let f32_field = |id: u16, value: f32| (id, WIRE_F32, true, value.to_le_bytes().to_vec());
+    let parse = |fields: Vec<(u16, u8, bool, Vec<u8>)>| {
+        parse_control_smoothing(Message::nested(&raw_message(fields)).expect("nested"))
+    };
+    assert_eq!(
+        parse(vec![
+            f32_field(1, 5.0),
+            f32_field(2, 15.0),
+            f32_field(3, 25.0)
+        ]),
+        Ok(lengths(5.0, 15.0, 25.0))
+    );
+    for missing in 1..=3_u16 {
+        let fields = (1..=3_u16)
+            .filter(|id| *id != missing)
+            .map(|id| f32_field(id, 5.0))
+            .collect();
+        assert!(parse(fields).is_err(), "field {missing} missing");
+    }
+    for refused in [-0.001, 1000.5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for position in 1..=3_u16 {
+            let fields = (1..=3_u16)
+                .map(|id| f32_field(id, if id == position { refused } else { 5.0 }))
+                .collect();
+            assert_eq!(
+                parse(fields),
+                Err(DecodeError::InvalidTlv),
+                "{refused} in field {position}"
+            );
+        }
+        // The encoder writes what it is given; the decoder of a whole transaction refuses it.
+        let bytes = encode(&[SessionEdit::SetControlSmoothing {
+            control_smoothing: Some(lengths(5.0, refused, 25.0)),
+        }]);
+        assert_eq!(
+            codec
+                .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+                .err(),
+            Some(DecodeError::InvalidTlv),
+            "{refused} in a transaction"
+        );
+    }
+}

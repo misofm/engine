@@ -530,8 +530,8 @@ fn fader_ride(model: &SessionModel) -> Automation {
     }
 }
 
-/// The four model-only edits of #1260 D1.
-fn model_only_edits() -> [(&'static str, Edit); 4] {
+/// The model-only edits: #1260 D1's four and #1365 D4's `control_smoothing`.
+fn model_only_edits() -> [(&'static str, Edit); 5] {
     [
         ("session id", |next| next.session_id = id("another-session")),
         ("render profile id", |next| {
@@ -543,6 +543,13 @@ fn model_only_edits() -> [(&'static str, Edit); 4] {
         ("automation upsert", |next| {
             let ride = fader_ride(next);
             next.automation.push(ride);
+        }),
+        ("control smoothing", |next| {
+            next.control_smoothing = Some(ControlSmoothing {
+                mute_ms: 1.0,
+                fader_ms: 2.0,
+                pan_ms: 3.0,
+            });
         }),
     ]
 }
@@ -568,7 +575,7 @@ fn model_only_edits_are_live_with_no_records() {
             "{name} with a fader move"
         );
     }
-    // All four together, with the fader move.
+    // All of them together, with the fader move.
     assert_eq!(
         classify(&current, |next| {
             for (_, edit) in model_only_edits() {
@@ -671,6 +678,64 @@ fn ramps_of_a_move_with(
     assert_eq!(muted, mute(Both, true, muted_ramp));
     let muted = muted_ramp;
     [fader, muted, matrix.smoothing_samples]
+}
+
+/// #1365 gate 5. Red if the classifier treats `control_smoothing` as structure, or reads the
+/// pre-commit lengths for the records of the same transaction: setting, changing and clearing the
+/// key are each live, and a fader move beside them carries the lengths of `next`.
+#[test]
+fn a_control_smoothing_edit_is_live_and_its_lengths_govern_the_same_transactions_records() {
+    use BuiltinLaneSelector::Left;
+    let slow = ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 15.0,
+        pan_ms: 25.0,
+    };
+    let fast = ControlSmoothing {
+        mute_ms: 0.0,
+        fader_ms: 1.0,
+        pan_ms: 2.0,
+    };
+    let base = two_tracks();
+    // (before, after, the FaderDb length of `after` at 48 kHz).
+    for (before, after, fader_samples) in [
+        (None, Some(slow), 720),
+        (Some(slow), Some(fast), 48),
+        (Some(slow), None, 960),
+        (None, Some(fast), 48),
+    ] {
+        let current = with_smoothing(&base, before);
+        let alone = edited(&current, |next| next.control_smoothing = after);
+        let delta = classify_live_delta(
+            &current,
+            &alone,
+            LiveRamps::for_session(&alone),
+            &EditRamps::new(),
+        )
+        .expect("live");
+        assert!(delta.strips.is_empty(), "{before:?} -> {after:?}");
+
+        let moved = edited(&current, |next| {
+            next.control_smoothing = after;
+            next.tracks[0].fader.left_db = -6.0;
+        });
+        let delta = classify_live_delta(
+            &current,
+            &moved,
+            LiveRamps::for_session(&moved),
+            &EditRamps::new(),
+        )
+        .expect("live");
+        assert_eq!(
+            flatten(&delta),
+            vec![(
+                track_id(&current, 0),
+                vec![fader_db(Left, -6.0, fader_samples)],
+                None
+            )],
+            "{before:?} -> {after:?}"
+        );
+    }
 }
 
 /// Gate 3. Red if the classifier keeps a pan window of 0, ignores the session for one row, or maps

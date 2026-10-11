@@ -348,6 +348,9 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         (SessionEdit::SetAutomationSegments { segments, .. }, _) => {
             spec.field_count(&[(fields[1], segments.len())])?
         }
+        (SessionEdit::SetControlSmoothing { control_smoothing }, _) => {
+            spec.field_count(&[(fields[0], usize::from(control_smoothing.is_some()))])?
+        }
         (SessionEdit::SetTrackConsole { console, .. }, (Some(ramp_field), present)) => {
             spec.field_count(&[(fields[1], console.len()), (ramp_field, present)])?
         }
@@ -369,6 +372,13 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         }
         SessionEdit::SetConsole { console, .. } => {
             tx_message(sink, fields[0], |v| tx_console(v, console))
+        }
+        SessionEdit::SetControlSmoothing { control_smoothing } => {
+            // Absent clears the key; there is no empty message to mean it.
+            match control_smoothing {
+                Some(lengths) => tx_message(sink, fields[0], |v| tx_control_smoothing(v, lengths)),
+                None => Ok(()),
+            }
         }
         SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
@@ -886,6 +896,30 @@ fn tx_effect(sink: &mut dyn Sink, value: &Effect) -> Result<(), EncodeError> {
         tx_sidechain(v, &value.sidechain)
     })
 }
+fn tx_control_smoothing(
+    sink: &mut dyn Sink,
+    value: &session::ControlSmoothing,
+) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::control_smoothing::SPEC.field_count(&[])?,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::control_smoothing::MUTE_MS,
+        value.mute_ms,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::control_smoothing::FADER_MS,
+        value.fader_ms,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::control_smoothing::PAN_MS,
+        value.pan_ms,
+    )
+}
 fn tx_fader(sink: &mut dyn Sink, value: &DualMonoFader) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::fader::SPEC.field_count(&[])?)?;
     tx_f32(sink, schema::session::fader::LEFT_DB, value.left_db)?;
@@ -1230,6 +1264,12 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::SetConsole => Ok(SessionEdit::SetConsole {
             console: parse_console(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
             ramp_samples,
+        }),
+        crate::SessionEditOpcode::SetControlSmoothing => Ok(SessionEdit::SetControlSmoothing {
+            control_smoothing: payload
+                .optional_one(fields[0].id, fields[0].wire.raw())?
+                .map(|bytes| parse_control_smoothing(payload.nested_value(bytes)?))
+                .transpose()?,
         }),
         crate::SessionEditOpcode::UpsertSource => Ok(SessionEdit::UpsertSource {
             source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1731,6 +1771,24 @@ fn parse_effect(message: Message<'_>) -> Result<Effect, DecodeError> {
         sidechain: parse_sidechain(
             message.nested_value(one_spec!(message, schema::session::effect::SIDECHAIN)?)?,
         )?,
+    })
+}
+/// One explicit `control_smoothing` (#1365 D2): all three lengths present, each finite and in
+/// `[0, CONTROL_SMOOTHING_MS_MAXIMUM]`. `-0.0` is a legal zero, as in the session grammar.
+fn parse_control_smoothing(message: Message<'_>) -> Result<session::ControlSmoothing, DecodeError> {
+    let message = message.schema_spec(&schema::session::control_smoothing::SPEC)?;
+    let length = |spec: schema::FieldSpec| -> Result<f32, DecodeError> {
+        let value = read_f32_exact(one_spec!(message, spec)?)?;
+        if (0.0..=session::CONTROL_SMOOTHING_MS_MAXIMUM).contains(&value) {
+            Ok(value)
+        } else {
+            Err(DecodeError::InvalidTlv)
+        }
+    };
+    Ok(session::ControlSmoothing {
+        mute_ms: length(schema::session::control_smoothing::MUTE_MS)?,
+        fader_ms: length(schema::session::control_smoothing::FADER_MS)?,
+        pan_ms: length(schema::session::control_smoothing::PAN_MS)?,
     })
 }
 fn parse_fader(message: Message<'_>) -> Result<DualMonoFader, DecodeError> {

@@ -8,10 +8,11 @@ use core::fmt;
 
 use session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
-    Console, ConsoleEntry, DualMonoBuiltins, DualMonoFader, EditRampRow, EditRampTarget, EditRamps,
-    Effect, EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack,
-    RackName, RenderProfile, Route, RouteDestination, RouteSource, SessionModel,
-    SidechainDeclaration, Source, SourceBitDepth, StableId, Submix, Vca, compile_session,
+    Console, ConsoleEntry, ControlSmoothing, DualMonoBuiltins, DualMonoFader, EditRampRow,
+    EditRampTarget, EditRamps, Effect, EffectIdentity, EffectParam, EffectQuality, MatrixOrPan,
+    Output, OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination, RouteSource,
+    SessionModel, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix, Vca,
+    compile_session,
 };
 
 use crate::{ExpectedRevision, SessionRevision};
@@ -33,6 +34,8 @@ pub enum SessionEditOpcode {
     /// `SetConsole` (decision 12, #1094). Appended: `0x0006` is retired by #241 and never
     /// reallocated.
     SetConsole = 0x0007,
+    /// `SetControlSmoothing` (#1365). Appended to the root group.
+    SetControlSmoothing = 0x0008,
     /// `UpsertSource`.
     UpsertSource = 0x0100,
     /// `RemoveSource`.
@@ -133,6 +136,7 @@ impl SessionEditOpcode {
             0x0004 => Some(Self::SetRenderProfile),
             0x0005 => Some(Self::SetOutputProfile),
             0x0007 => Some(Self::SetConsole),
+            0x0008 => Some(Self::SetControlSmoothing),
             0x0100 => Some(Self::UpsertSource),
             0x0101 => Some(Self::RemoveSource),
             0x0103 => Some(Self::SetSourceContent),
@@ -206,6 +210,15 @@ pub enum SessionEdit {
         /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
         /// (#1394). Transaction metadata, never model state.
         ramp_samples: Option<u32>,
+    },
+    /// Set the session's `control_smoothing` lengths (#1365), or clear them with `None` so the
+    /// default table applies.
+    ///
+    /// A model-only edit: no prepared plan reads the key, so it commits without a plan rebuild
+    /// and carries no `ramp_samples` of its own. The next live record any later edit produces
+    /// uses the new lengths; a ramp already in flight keeps the length it started with.
+    SetControlSmoothing {
+        control_smoothing: Option<ControlSmoothing>,
     },
     /// Insert or replace one source by stable ID.
     UpsertSource { source: Source },
@@ -489,6 +502,7 @@ impl SessionEdit {
             Self::SetRenderProfile { .. } => SessionEditOpcode::SetRenderProfile,
             Self::SetOutputProfile { .. } => SessionEditOpcode::SetOutputProfile,
             Self::SetConsole { .. } => SessionEditOpcode::SetConsole,
+            Self::SetControlSmoothing { .. } => SessionEditOpcode::SetControlSmoothing,
             Self::UpsertSource { .. } => SessionEditOpcode::UpsertSource,
             Self::RemoveSource { .. } => SessionEditOpcode::RemoveSource,
             Self::SetSourceContent { .. } => SessionEditOpcode::SetSourceContent,
@@ -676,6 +690,7 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
         | SessionEdit::SetQuantumFrames { .. }
         | SessionEdit::SetRenderProfile { .. }
         | SessionEdit::SetOutputProfile { .. }
+        | SessionEdit::SetControlSmoothing { .. }
         | SessionEdit::UpsertSource { .. }
         | SessionEdit::RemoveSource { .. }
         | SessionEdit::SetSourceContent { .. }
@@ -753,6 +768,9 @@ pub fn apply_session_edit(
             session.output_profile = output_profile.clone()
         }
         SessionEdit::SetConsole { console, .. } => session.console = console.clone(),
+        SessionEdit::SetControlSmoothing { control_smoothing } => {
+            session.control_smoothing = *control_smoothing
+        }
         SessionEdit::UpsertSource { source } => {
             upsert(&mut session.sources, source, |item| &item.id)
         }
@@ -1492,6 +1510,55 @@ mod tests {
         }
     }
 
+    /// #1365 D1, D3: `SetControlSmoothing` (`0x0008`) sets the committed model's key and its
+    /// canonical snapshot to the explicit object, then clears it back to `{ "kind": "default" }`,
+    /// and nothing else of the snapshot moves. A `Some` over a `Some` replaces all three lengths.
+    ///
+    /// Red if the apply arm writes another field, ignores `None` (the clear), or merges the new
+    /// lengths into the old ones.
+    #[test]
+    fn set_control_smoothing_sets_then_clears_the_key_in_the_committed_snapshot() {
+        let mut store = store();
+        let open = store.canonical_snapshot().to_owned();
+        let default = "\"control_smoothing\": {\n    \"kind\": \"default\"\n  },";
+        assert!(open.contains(default));
+        let lengths = |mute_ms, fader_ms, pan_ms| ControlSmoothing {
+            mute_ms,
+            fader_ms,
+            pan_ms,
+        };
+        let explicit = |l: ControlSmoothing| {
+            format!(
+                "\"control_smoothing\": {{\n    \"kind\": \"explicit\",\n    \"mute_ms\": {:?},\n    \"fader_ms\": {:?},\n    \"pan_ms\": {:?}\n  }},",
+                l.mute_ms, l.fader_ms, l.pan_ms
+            )
+        };
+        // Three different keys, so a field cannot be written into its neighbour.
+        for (revision, value) in [
+            (7, Some(lengths(5.0, 15.0, 25.0))),
+            (8, Some(lengths(0.0, 1.0, 1000.0))),
+            (9, None),
+        ] {
+            store
+                .apply_transaction(
+                    ExpectedRevision::Exact(SessionRevision(revision)),
+                    &[SessionEdit::SetControlSmoothing {
+                        control_smoothing: value,
+                    }],
+                )
+                .expect("control smoothing commits");
+            assert_eq!(store.compiled().normalized_model().control_smoothing, value);
+            let expected = open
+                .replacen(
+                    "\"revision\": \"7\"",
+                    &format!("\"revision\": \"{}\"", revision + 1),
+                    1,
+                )
+                .replacen(default, &value.map_or(default.to_owned(), explicit), 1);
+            assert_eq!(store.canonical_snapshot(), expected, "revision {revision}");
+        }
+    }
+
     #[test]
     fn every_launch_rate_initializes_store_and_commits_as_the_final_candidate() {
         for rate in engine::LAUNCH_SAMPLE_RATES {
@@ -1749,9 +1816,9 @@ mod tests {
 
     /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), #1216 appends
     /// `SetRouteMute` (`0x0506`), #1218 appends `SetRouteFollowsMute` (`0x0507`) and #1241 opens
-    /// the VCA family with `UpsertVca`, `RemoveVca` and `SetVcaFader` (`0x0700`-`0x0702`): every
-    /// allocated code round-trips through `from_raw`, there are exactly 46 of them, and no retired
-    /// code came back.
+    /// the VCA family with `UpsertVca`, `RemoveVca` and `SetVcaFader` (`0x0700`-`0x0702`), and
+    /// #1365 appends `SetControlSmoothing` (`0x0008`): every allocated code round-trips through
+    /// `from_raw`, there are exactly 47 of them, and no retired code came back.
     ///
     /// Red if a new code reuses the retired `0x0006`, if a `from_raw` arm maps a code to another
     /// variant, or if an opcode is added to the enum but not to `from_raw`.
@@ -1760,11 +1827,15 @@ mod tests {
         let allocated = (0..=u16::MAX)
             .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
             .collect::<Vec<_>>();
-        assert_eq!(allocated.len(), 46);
+        assert_eq!(allocated.len(), 47);
         assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
         assert_eq!(
             SessionEditOpcode::from_raw(0x0007),
             Some(SessionEditOpcode::SetConsole)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0008),
+            Some(SessionEditOpcode::SetControlSmoothing)
         );
         assert_eq!(
             SessionEditOpcode::from_raw(0x0211),

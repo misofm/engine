@@ -93,6 +93,14 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             console,
             ramp_samples: None,
         },
+        // #1365: three different lengths, so a field cannot be read as its neighbour.
+        SessionEdit::SetControlSmoothing {
+            control_smoothing: Some(session::ControlSmoothing {
+                mute_ms: 5.0,
+                fader_ms: 15.0,
+                pan_ms: 25.0,
+            }),
+        },
         SessionEdit::UpsertSource {
             source: source.clone(),
         },
@@ -751,7 +759,9 @@ pub enum ConformanceDecoder {
 /// Issue #1394 repinned it from `ab357b6c432f9755`: #1394 appends optional `ramp_samples` to the
 /// live-value edits, and the corpus's `SetTrackFader` sets it (480). Absent bytes are unchanged, so
 /// that one edit is the whole move; the frame count and the edit count stay 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x5429_f052_5921_01ef;
+/// Issue #1365 repinned it from `5429f052592101ef`: #1365 appends `SetControlSmoothing` (`0x0008`),
+/// 47 edits, one per allocated opcode. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x8eb4_cc8d_075a_4355;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
