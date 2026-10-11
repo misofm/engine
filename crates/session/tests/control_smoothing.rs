@@ -245,11 +245,10 @@ fn control_smoothing_samples_round_half_up_in_f64() {
     );
 }
 
-/// Gate 2, the default: `None` gives the table, which keeps `pan_ms >= 2 x mute_ms` so that a
-/// matrix coefficient through zero clicks no more than a mute (#1055, `FINDINGS.md` 9.1). Red if a
-/// default change breaks that property or the default stops being the researched table.
+/// Gate 2, the default: `None` gives the researched table (#1055, `FINDINGS.md` sections 1 and 9) at
+/// every launch rate. Red if the default stops being that table.
 #[test]
-fn the_default_table_is_the_researched_one_and_keeps_pan_at_twice_mute() {
+fn the_default_table_is_the_researched_one() {
     assert_eq!(
         CONTROL_SMOOTHING_DEFAULT,
         ControlSmoothing {
@@ -258,8 +257,6 @@ fn the_default_table_is_the_researched_one_and_keeps_pan_at_twice_mute() {
             pan_ms: 20.0
         }
     );
-    let defaults = std::hint::black_box(CONTROL_SMOOTHING_DEFAULT);
-    assert!(defaults.pan_ms >= 2.0 * defaults.mute_ms);
     for (rate, mute, other) in [
         (44_100, 441, 882),
         (48_000, 480, 960),
@@ -276,4 +273,14 @@ fn the_default_table_is_the_researched_one_and_keeps_pan_at_twice_mute() {
             "{rate} Hz"
         );
     }
+}
+
+/// Gate 2, the matrix property: the default keeps `pan_ms >= 2 x mute_ms`, so a matrix coefficient
+/// through zero (a polarity flip of that path on the pan ramp) clicks no more than a mute (#1055,
+/// `FINDINGS.md` 9.1). Red if a later default change, such as the #1388 listening result, breaks
+/// it, even when the table test above is updated with it.
+#[test]
+fn the_default_pan_ramp_is_at_least_twice_the_mute_ramp() {
+    let defaults = std::hint::black_box(CONTROL_SMOOTHING_DEFAULT);
+    assert!(defaults.pan_ms >= 2.0 * defaults.mute_ms);
 }
