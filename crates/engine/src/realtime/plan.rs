@@ -583,10 +583,12 @@ pub(crate) struct BlockFailure {
 /// The control handle of one plan's revision gate (#1502 D1): the shared gate and the one
 /// [`GatePin`] that publishes to it. [`PreparedRenderPlan::take_revision_gate`] hands it out once.
 ///
-/// Only the holder publishes on the plan's gate, and only the holder stamps writes to the plan's
-/// cells. The handle moves between threads only by ownership transfer, and only with no open
-/// stamp: every revision it stamped has been published. The control plane keeps it in the plan's
-/// provider epoch, so a handle follows its plan, its cells and the producers that write them.
+/// Only the holder publishes on the plan's gate. The plan's owner stamps writes to the plan's
+/// cells before hand-out ([`PreparedRenderPlan::stamp_held_gate`]), and the holder after it; the
+/// open stamp moves with the pin into the handle (#1277 D11). The handle moves between threads
+/// only by ownership transfer, and only with no open stamp: every revision it stamped has been
+/// published. The control plane keeps it in the plan's provider epoch, so a handle follows its
+/// plan, its cells and the producers that write them.
 pub struct PlanRevisionGate {
     gate: Arc<RevisionGate>,
     pin: GatePin,
@@ -721,6 +723,25 @@ impl PreparedRenderPlan {
             gate: Arc::clone(&self.gate),
             pin,
         })
+    }
+    /// Stamp a write to this plan's cells on the plan's own pin, while the plan still holds its
+    /// handle (#1277 D11): the same stamp [`PlanRevisionGate::stamp`] gives, for the plan's owner
+    /// before [`Self::take_revision_gate`] hands the handle out. A preparation that writes cell
+    /// values into the plan it is building (a successor's carry retargets) stamps them here.
+    ///
+    /// The open stamp stays in the pin, so it moves with the pin into the handle: the holder
+    /// stamps the same revision again as its last fallible step (the pin allows a stamp at the
+    /// open revision) and publishes it. A plan that is dropped with an open stamp has published
+    /// nothing, so nothing it stamped is ever visible.
+    ///
+    /// `None` once the handle was taken, and nothing is stamped. Otherwise the result is exactly
+    /// [`GatePin::stamp`]'s: a refusal in every build for a revision at or below the last
+    /// published one or above [`GATE_REVISION_MAX`](crate::realtime::GATE_REVISION_MAX).
+    pub fn stamp_held_gate(
+        &mut self,
+        revision: u64,
+    ) -> Option<Result<LiveStamp<'_>, StampRefused>> {
+        Some(self.gate_pin.as_mut()?.stamp(revision))
     }
     /// Whether `handle` is the control handle of this plan's gate, by pointer identity.
     pub(crate) fn owns_revision_gate(&self, handle: &PlanRevisionGate) -> bool {
