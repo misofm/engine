@@ -302,7 +302,6 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     let _session_guard = SESSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut gate = TestOnlyGate::new();
     let mut output = [0.0_f32; 128];
     test_only_reset_fader_matrix_witness();
     let mut eligible = builtins_compiler::test_only_prepared_pair_graph(false);
@@ -326,12 +325,11 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     assert_eq!(settled.process_members, members);
 
     {
-        let tail = eligible
-            .track_controls
-            .iter_mut()
-            .find(|control| control.track_id.as_ref() == tail_id)
-            .expect("eligible tail controls");
-        gate.write_published(|stamp| {
+        eligible.test_only_write(|controls, stamp| {
+            let tail = controls
+                .iter_mut()
+                .find(|control| control.track_id.as_ref() == tail_id)
+                .expect("eligible tail controls");
             tail.fader.write(
                 stamp,
                 TrackFaderRecord::FaderDb {
@@ -359,12 +357,11 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     let ramp_b = audit_graph_render(&mut eligible, &mut output, 128);
     assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (2, 0));
 
-    let tail = eligible
-        .track_controls
-        .iter_mut()
-        .find(|control| control.track_id.as_ref() == tail_id)
-        .expect("eligible tail controls");
-    gate.write_published(|stamp| {
+    eligible.test_only_write(|controls, stamp| {
+        let tail = controls
+            .iter_mut()
+            .find(|control| control.track_id.as_ref() == tail_id)
+            .expect("eligible tail controls");
         tail.fader.write(
             stamp,
             TrackFaderRecord::FaderDb {
@@ -422,7 +419,6 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     armed(|| drop(liveness));
     assert!(LIVE_FREES.get() > 0, "scalar audit free liveness");
 
-    let mut gate = TestOnlyGate::new();
     let mut output = [0.0_f32; 128];
     test_only_reset_fader_matrix_witness();
     let mut selected = builtins_compiler::test_only_prepared_scalar_pair_graph(false);
@@ -439,12 +435,11 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     let settled = audit_graph_render(&mut selected, &mut output, 0);
     assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
     {
-        let scalar = selected
-            .track_controls
-            .iter_mut()
-            .find(|control| control.track_id.as_ref() == "t01")
-            .expect("selected scalar controls");
-        gate.write_published(|stamp| {
+        selected.test_only_write(|controls, stamp| {
+            let scalar = controls
+                .iter_mut()
+                .find(|control| control.track_id.as_ref() == "t01")
+                .expect("selected scalar controls");
             scalar.fader.write(
                 stamp,
                 TrackFaderRecord::FaderDb {
