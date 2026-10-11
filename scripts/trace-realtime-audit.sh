@@ -60,8 +60,11 @@ command -v jq >/dev/null 2>&1 || {
 jq -e --argjson blocks "$blocks" '
     .kind == "realtime_audit" and
     .blocks == $blocks and
-    .swaps_accepted > 0 and
-    .swaps_deferred > 0 and
+    .swaps_accepted == 2 and
+    .reservations_refused == ($blocks - 3) and
+    .prior_plan_renders_while_refused == ($blocks - 3) and
+    .withdrawals == 1 and
+    .republished_adoptions == 1 and
     .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null
 

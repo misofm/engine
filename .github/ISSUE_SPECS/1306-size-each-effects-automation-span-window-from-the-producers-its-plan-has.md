@@ -29,14 +29,13 @@ per eight-lane bank at S = 4,096 today).
 ## Context
 
 **Where S goes today.**
-- capi copies S into the host-core caps unchanged (`prepare_caps`, which #1309 moves to
-  `crates/control-plane/src/compile.rs`;
-  `crates/capi/src/runtime/compile.rs:523`, field at `:528`). The field is
+- capi copies S into the host-core caps unchanged (`prepare_caps`, which #1309 moved to
+  `crates/control-plane/src/compile.rs:531`, field at `:536`). The field is
   `HostPrepareCaps::maximum_automation_spans_per_block` (`crates/host-core/src/prepare.rs:110`).
   Host-core passes it on as `EffectCompileCaps::maximum_automation_spans_per_block`
   (`prepare.rs:1350`), and effect preparation makes it each effect's `automation_capacity`
   (`crates/effect-contract/src/lib.rs:2563`).
-- S is also the protocol's `per_block_automation_density` (`compile.rs:130-133`). That role stays.
+- S is also the protocol's `per_block_automation_density` (`compile.rs:158-161`). That role stays.
 - The browser derives its own S: its stored segment count, or its live queue records, whichever is
   larger (`hosts/host-web/src/lib.rs:6574-6583`, passed at `:6591`). No host renders stored
   automation yet (#1058), so the segment term is a producer that does not exist.
@@ -44,7 +43,7 @@ per eight-lane bank at S = 4,096 today).
 **How the window follows the capacity.**
 - Today an effect lane's ring holds `min(depth, automation_capacity)` records
   (`crates/effect-compiler/src/prepare.rs:1360-1365` and `:1399-1400`; the C ABI depth is
-  `LIVE_QUEUE_DEPTH` = 16, `compile.rs:11-13`). Each record stages at most one span. #1345
+  `LIVE_QUEUE_DEPTH` = 16, `compile.rs:13-17`). Each record stages at most one span. #1345
   replaces that ring with one latest-target cell per `(parameter_index, channel)` of every
   `Block`-rate parameter (#1345 D1), and its render stages at most `automation_capacity` parameter
   spans per block, deferring any excess dirty cell (#1345 D4). So the live producer of spans is
@@ -108,7 +107,7 @@ term.
     `prepare_native_session_effects_with_automation_capacity` takes the function;
   - host-core (`crates/host-core/src/prepare.rs:1344-1352`) calls that entry with D2's function
     and a ceiling of `u32::MAX`: the graph estimate already charges each window's bytes;
-  - capi keeps S only for `per_block_automation_density` (`compile.rs:130-133`);
+  - capi keeps S only for `per_block_automation_density` (`compile.rs:158-161`);
   - the browser's derivation at `hosts/host-web/src/lib.rs:6574-6583` is deleted;
   - every `HostPrepareCaps` literal loses the field's line.
 

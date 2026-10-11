@@ -14,7 +14,7 @@ blocks, with honest flags.
 
 - **The defect.** `collect_render_activity` stages, for every configured meter handle, one
   record `{ handle, component: Left, flags: 1, value: peak }`, where `peak` is one maximum over
-  both output planes of the last rendered block (`crates/capi/src/runtime/control.rs:537-557`).
+  both output planes of the last rendered block (`crates/control-plane/src/control.rs:640-660`).
   Every handle, whatever it names, gets the master peak labelled as the left channel, and
   `meter_period_blocks` is checked only for being nonzero
   (`crates/protocol/src/controller.rs:2445-2450`).
@@ -26,8 +26,8 @@ blocks, with honest flags.
   `docs/CONTROL_PROTOCOL_SEMANTICS.md:29`).
 - **The measurement.** After a successful render, capi scans both planes for one peak when
   `render_peak_observed` is set (`crates/capi/src/ffi.rs:886-912`) and publishes it through
-  `SharedPlanState::render_peak_bits` (`crates/capi/src/runtime/plan.rs:5-27`, `:234-243`; the
-  control plane's after #1309).
+  `SharedPlanState::render_peak_bits` (`crates/control-plane/src/plan.rs:8-30`, `:261-270`; the
+  control plane's since #1309).
 
 ## Decisions frozen for this slice
 

@@ -614,7 +614,6 @@ fn exchange(plan: engine::realtime::PreparedRenderPlan) -> Exchange {
     engine::realtime::plan_exchange(
         plan,
         engine::realtime::PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::MIN,
             retirement_capacity: NonZeroUsize::MIN,
         },
     )
@@ -651,7 +650,7 @@ fn anchored_swap_run(
     assert_eq!(prepared.sources.adopt_persisting(&mut a_sources), 1);
     let mut b_sources = prepared.sources;
     publisher
-        .reserve_replacement(prepared.plan)
+        .reserve_replacement(prepared.plan, engine::realtime::PlanAdoption::Next)
         .unwrap_or_else(|_| panic!("reserve the successor"))
         .commit();
     let anchor = (anchor_block * QUANTUM) as u64;

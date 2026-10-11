@@ -8,7 +8,7 @@ use crate::{
     PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
     RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
     RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session,
-    SourceChunk, SubmitReport,
+    SourceChunk, SubmitReport, WATERMARK_SIZE, Watermark,
 };
 use core::ffi::c_void;
 use core::ptr;
@@ -17,8 +17,9 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, compile_children,
-    limits_are_valid, plan_error,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailure,
+    SourceFailureReport, compile_children, failure_bytes, limits_are_valid, plan_error,
+    render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -624,6 +625,50 @@ unsafe fn source_seek_entry(
     })
 }
 
+/// Run one bounded step of control work between edits (#1348): reclaim retired plans, bring the
+/// provider epochs up to render, refresh the session counters and stage render telemetry. Every
+/// other session control call runs the same step first; this entry point runs only the step.
+///
+/// It commits and acknowledges nothing, never takes or drops a pending candidate, never waits for
+/// render, and does a bounded amount of work however long the host went without calling. A pending
+/// edit progresses only while the host makes session calls, so a host with edits pending calls
+/// this at least once per render-buffer period.
+///
+/// Returns `RESULT_OK`; a null or wrong handle as every session call; and `RESULT_INTERNAL` with
+/// the session diagnostic `capi.source.epoch` when the session's plan epochs cannot be
+/// synchronized.
+///
+/// # Safety
+///
+/// `session` must be a live session handle.
+///
+/// Thread: session, serialized with the other session calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
+        let session = unsafe { &mut *session };
+        match session.state.service() {
+            Ok(()) => {
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(_) => {
+                // The step's only failure is the epoch synchronization's, reported with the
+                // diagnostic the source calls already set for it.
+                let (code, diagnostic) = SourceFailure::Internal.report();
+                session.last_error.borrow_mut().set(diagnostic);
+                code
+            }
+        }
+    })
+}
+
 /// Process one bounded Issue-005 capability command with exact-byte replay.
 ///
 /// # Safety
@@ -703,7 +748,7 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                 RESULT_BACKPRESSURE
             }
             Err(CommandError::CompileRejected(failure)) => {
-                session.last_error.borrow_mut().set(&failure.diagnostics);
+                session.last_error.borrow_mut().set(&failure_bytes(failure));
                 RESULT_COMPILE_REJECTED
             }
             Err(CommandError::Internal) => {
@@ -844,12 +889,12 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
         // Issue #146 session-start re-attestation, on the thread that will render: the first block
         // this plan renders proves the canonical word actually took here, and refuses the render
         // rather than silently producing off-pin audio if it did not. Later blocks skip it.
-        if !state.fp_env_attested.get() {
+        if !state.fp_env_attested() {
             if !lane::fpenv::in_canonical_fp_environment() {
                 error.store(plan_error::FP_ENVIRONMENT, Ordering::Relaxed);
                 return RESULT_RENDER_REJECTED;
             }
-            state.fp_env_attested.set(true);
+            state.attest_fp_env();
         }
         if !output.samples.is_aligned() {
             error.store(plan_error::OUTPUT_UNALIGNED, Ordering::Relaxed);
@@ -913,8 +958,8 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
                 error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK
             }
-            Err(code) => {
-                error.store(code, Ordering::Relaxed);
+            Err(rejected) => {
+                error.store(render_error_code(rejected), Ordering::Relaxed);
                 RESULT_RENDER_REJECTED
             }
         }
@@ -957,6 +1002,67 @@ pub unsafe extern "C" fn miso_engine_v1_plan_resources(
         let report = queries.resources();
         // SAFETY: Exact struct size establishes writable ABI V1 report storage.
         unsafe { out.write(report) };
+        RESULT_OK
+    })
+}
+
+/// Copy the plan's applied-revision watermark (#1314): the highest committed revision in effect
+/// together with every revision before it, the render sample at the start of the block that
+/// reported it (never early; see `Watermark::first_sample` for the bound), the outcome flags of
+/// the last advance and the per-outcome counters.
+///
+/// The watermark is a level render overwrites; this copies it whole or not at all. A copy that
+/// keeps landing inside render's publication gives up after a bounded number of attempts with
+/// `RESULT_BACKPRESSURE`, leaves `out` untouched, and the host retries.
+///
+/// # Safety
+///
+/// `plan` must be live and `out` must satisfy the writable ABI V1 watermark contract.
+///
+/// Thread: any, concurrent with render.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_plan_watermark(
+    plan: *const Plan,
+    out: *mut Watermark,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { plan_kind(plan) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if out.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is nonnull and the caller promises readable watermark storage for these
+        // input-validation fields before the complete fixed-size write.
+        let (struct_size, reserved0, reserved) =
+            unsafe { ((*out).struct_size, (*out).reserved0, (*out).reserved) };
+        if struct_size != WATERMARK_SIZE || reserved0 != 0 || reserved != [0; 5] {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `plan` passed the live-kind check. Only the any-thread `queries` field is
+        // projected, so this query never aliases a concurrent render's exclusive `PlanState`
+        // borrow. The call is pure: it writes nothing back through the plan handle, its
+        // diagnostic word included.
+        let queries = unsafe { &*plan_queries(plan) };
+        let Ok(watermark) = queries.watermark() else {
+            return RESULT_BACKPRESSURE;
+        };
+        // SAFETY: Exact struct size establishes writable ABI V1 watermark storage.
+        unsafe {
+            out.write(Watermark {
+                struct_size: WATERMARK_SIZE,
+                reserved0: 0,
+                revision: watermark.revision,
+                first_sample: watermark.first_sample,
+                outcome_flags: watermark.outcome_flags,
+                exact_count: watermark.exact,
+                transition_fallback_count: watermark.transition_fallback,
+                superseded_count: watermark.superseded,
+                reserved: [0; 5],
+            });
+        }
         RESULT_OK
     })
 }
@@ -1080,6 +1186,12 @@ pub(crate) fn test_submit_command(
 }
 
 #[cfg(test)]
+pub(crate) fn test_service(session: *mut Session) -> u32 {
+    // SAFETY: Test callers pass a live session handle, or a null or wrong one to test refusal.
+    unsafe { miso_engine_v1_service(session) }
+}
+
+#[cfg(test)]
 pub(crate) fn test_dequeue_event(session: *mut Session, lane: u32, output: &mut BytesOut) -> u32 {
     // SAFETY: Test callers retain the live session and ABI output for this call.
     unsafe { miso_engine_v1_dequeue_event(session, lane, output) }
@@ -1113,13 +1225,39 @@ pub(crate) fn test_transaction_snapshot(
 pub(crate) fn test_plan_snapshot(plan: *mut Plan) -> (u64, PlanResourceReport) {
     // SAFETY: Test callers retain the exclusively owned live plan for this inspection.
     let plan = unsafe { &(*plan).state };
-    (plan.owner.next_absolute_sample(), plan.resources())
+    (plan.owner().next_absolute_sample(), plan.resources())
+}
+
+/// The plan's watermark through the exported entry point, with a valid zeroed struct.
+#[cfg(test)]
+pub(crate) fn test_plan_watermark(plan: *const Plan) -> (u32, Watermark) {
+    let mut out = Watermark {
+        struct_size: WATERMARK_SIZE,
+        reserved0: 0,
+        revision: 0,
+        first_sample: 0,
+        outcome_flags: 0,
+        exact_count: 0,
+        transition_fallback_count: 0,
+        superseded_count: 0,
+        reserved: [0; 5],
+    };
+    // SAFETY: Test callers pass a live plan; `out` is one complete local watermark.
+    let result = unsafe { miso_engine_v1_plan_watermark(plan, &mut out) };
+    (result, out)
 }
 
 #[cfg(test)]
 pub(crate) fn test_telemetry_counters(session: *mut Session) -> protocol::TelemetryCounters {
     // SAFETY: Test callers retain the exclusively owned live session for this inspection.
     unsafe { &(*session).state }.test_telemetry_counters()
+}
+
+/// The provider's counter snapshot as it stands, read without a control call (#1348 gate 3).
+#[cfg(test)]
+pub(crate) fn test_provider_counters(session: *mut Session) -> Vec<protocol::CounterValue> {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &mut (*session).state }.test_provider_counters()
 }
 
 /// How many applied plan swaps carried state from their predecessor, and how many found a
@@ -1139,8 +1277,8 @@ pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
     // the render-thread state aliases no exclusive borrow.
     let state = unsafe { &(*plan).state };
     (
-        state.owner.carried_count(),
-        state.owner.carry_mismatch_count(),
+        state.owner().carried_count(),
+        state.owner().carry_mismatch_count(),
     )
 }
 
@@ -1158,7 +1296,7 @@ pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
 pub unsafe fn plan_replacement_count(plan: *const Plan) -> u64 {
     // SAFETY: The caller guarantees a live plan with no concurrent render, so this shared read of
     // the render-thread state aliases no exclusive borrow.
-    unsafe { &(*plan).state }.owner.active_epoch().0
+    unsafe { &(*plan).state }.owner().active_epoch().0
 }
 
 #[cfg(test)]
@@ -1174,6 +1312,15 @@ pub(crate) fn test_set_structural_faults(
 ) {
     // SAFETY: Test callers retain the exclusively owned live session for deterministic faults.
     unsafe { &mut (*session).state }.test_set_structural_faults(faults);
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_next_adoption(
+    session: *mut Session,
+    adoption: engine::realtime::PlanAdoption,
+) {
+    // SAFETY: Test callers retain the exclusively owned live session for this schedule.
+    unsafe { &mut (*session).state }.test_set_next_adoption(adoption);
 }
 
 #[cfg(test)]
@@ -1467,8 +1614,10 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0x3f);
+        assert_eq!(capabilities.feature_mask, 0xff);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
+        assert_ne!(capabilities.feature_mask & crate::FEATURE_PLAN_WATERMARK, 0);
+        assert_ne!(capabilities.feature_mask & crate::FEATURE_SERVICE, 0);
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 
@@ -2484,6 +2633,60 @@ mod tests {
             read_last_error(plan.cast()),
             plan_error::text(plan_error::OUTPUT_LAYOUT),
             "a const-plan query must not clear the render diagnostic"
+        );
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// #1314 D6: `miso_engine_v1_plan_watermark` refuses a nonzero reserved word or a null `out`
+    /// with `RESULT_INVALID_ARGUMENT` and writes nothing, and, like `plan_resources`, it is pure:
+    /// a valid query leaves the plan's render diagnostic as the last render left it.
+    #[test]
+    fn plan_watermark_refuses_reserved_words_and_is_pure() {
+        let (engine, session, plan) = compiled_fixture();
+        let mut pcm = vec![0.0_f32; 256];
+        let output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: 255,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert_eq!(
+            // SAFETY: The plan is live; the short declared capacity is rejected before any write.
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
+            RESULT_RENDER_REJECTED
+        );
+        let (result, valid) = test_plan_watermark(plan);
+        assert_eq!(result, RESULT_OK);
+        assert_eq!(
+            read_last_error(plan.cast()),
+            plan_error::text(plan_error::OUTPUT_LAYOUT),
+            "a const-plan query must not clear the render diagnostic"
+        );
+        // `reserved0`, then each of the five `reserved` words alone.
+        for poison in 0..=5 {
+            let mut out = Watermark {
+                revision: u64::MAX,
+                ..valid
+            };
+            match poison {
+                0 => out.reserved0 = 1,
+                word => out.reserved[word - 1] = 1,
+            }
+            let before = out;
+            assert_eq!(
+                // SAFETY: The plan is live and `out` is one complete local watermark.
+                unsafe { miso_engine_v1_plan_watermark(plan, &mut out) },
+                RESULT_INVALID_ARGUMENT
+            );
+            assert_eq!(out, before, "a refused query writes nothing");
+        }
+        assert_eq!(
+            // SAFETY: The plan is live; a null `out` is refused before any access.
+            unsafe { miso_engine_v1_plan_watermark(plan, ptr::null_mut()) },
+            RESULT_INVALID_ARGUMENT
         );
         destroy_fixture(engine, session, plan);
     }

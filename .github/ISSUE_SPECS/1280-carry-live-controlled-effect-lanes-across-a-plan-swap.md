@@ -31,10 +31,12 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   - #1345 D1 gives each lane one cell per `(parameter_index, channel)` of a block-rate parameter,
     one bypass cell, and for the EQ one cell per `(target slot, channel)`. Observe records stay in a
     small FIFO (#1345 D2).
-  - #1312 D1-D2 make each cell a triple buffer whose slots carry a sequence. Render keeps the last
-    sequence it applied (`p`); reading sequence `s` adds `s - p - 1` to `live_values_superseded`.
-    #1312 D1 also gives the reader `peek_unread`, which returns the newest unread words and their
-    sequence without consuming them, valid once the writer is quiescent.
+  - #1312 D1-D2 make each cell a revision-bounded three-slot cell (#1432 D1, Amendment 1). Each
+    slot carries its revision and a sequence. Render applies, per cell, the newest value whose
+    revision is `<=` the block's snapshot `S`, and keeps the last sequence it applied (`p`).
+    Applying sequence `s` adds `s - p - 1` to `live_values_superseded`.
+  - #1432 D1 also gives the reader `peek_unread`. It returns the newest unread words and their
+    sequence without consuming them, and is valid once the writer is quiescent.
   - The control plane writes only the newest plan's cells: the pending candidate's if there is
     one (D15-17; #1053 D7). So no control write reaches a predecessor's cells once its successor is
     published, and render reads them whole.
@@ -66,9 +68,14 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   anything. The carried slot is render-owned state, like a ramp in flight. The predecessor would
   apply the same value at its next block, which is the same boundary B, so the adopted output is
   exact. It resolves in #1345 D3's order:
-  - if the successor's own cell holds an unread value, that value is newer (written after the
-    successor's publication or by D4's retarget). It applies;
-  - otherwise the carried value applies.
+  - if the successor's own cell's read under the adoption block's snapshot is `Applied` (an
+    unread value whose revision is `<= S`), that value is newer (written by D4's retarget or after
+    the successor's publication). It applies;
+  - otherwise the carried value applies, and a successor value whose revision is `> S` stays
+    pending for a later block (Amendment 1).
+
+  Every predecessor value is `<= S`: every write to the predecessor carries a revision below the
+  successor's revision (#1312 D6).
 
   Counting (#1312 D2, one unit, each superseded value once): the predecessor never reads again,
   so the successor counts for it. It adds `n` when its own newer value wins, and `n - 1` when the
@@ -155,6 +162,16 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
 - Gate 4: a shunt copy that ignores the shared cursor turns it red.
 - Gate 5: a retarget that loses to the carried value applies the old value last. A missing retarget
   keeps the old threshold. Either turns it red.
+
+## Amendment 1 (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement (2026-10-05) makes every live value of one revision take effect in one
+block (#1432 Amendment 1, #1312 Amendment 2). Two parts change:
+
+- the Context bullet on #1312 D1-D2;
+- D2's resolution, which now reads the successor's own cell under the adoption block's snapshot.
+
+The counting rule is unchanged.
 
 ## Dependencies
 

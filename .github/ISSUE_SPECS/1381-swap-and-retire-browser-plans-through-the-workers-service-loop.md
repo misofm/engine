@@ -40,11 +40,11 @@ the Rust host* (#1290) publishes through.
   `effect_observations` (`:1586`) and their bookkeeping. Nothing carries them with a plan.
 - **The control plane is capi's today.** *Extract the C ABI control plane into a portable crate
   both hosts call* (#1309) moves it to `crates/control-plane` (lib `control_plane`):
-  - `SessionState` (today `crates/capi/src/runtime/control.rs:237`) owns the controller,
+  - `SessionState` (today `crates/control-plane/src/control.rs:321`) owns the controller,
     provider epochs, publisher, retirer and render diagnostics;
   - its source routing is `newest_providers`, `submit`, `seek` and `seek_at` (today
-    `control.rs:1488`, `:1501`, `:1514`, `:1530`);
-  - `PlanState` (today `crates/capi/src/runtime/plan.rs:53`) wraps `RealtimePlanOwner` and
+    `control.rs:1628`, `:1641`, `:1655`, `:1671`);
+  - `PlanState` (today `crates/control-plane/src/plan.rs:57`) wraps `RealtimePlanOwner` and
     `SharedPlanState` for render.
 - **Sources.** After #1387 the producer half of every source ring (`SourceControlSet`, the
   `sources` field of host-core's prepared runtime, `crates/host-core/src/prepare.rs:529`) lives in

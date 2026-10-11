@@ -31,7 +31,7 @@ module* (#1386), which uses this slice's staging and outcome record.
   across swaps and supersession, and add a seek to audit capi* (#1319). This slice does not
   duplicate them.
 - On the C ABI the anchored seek is a control-thread call on the source producer only
-  (`crates/capi/src/runtime/control.rs:1530`); *Extract the C ABI control plane into a portable
+  (`crates/control-plane/src/control.rs:1671`); *Extract the C ABI control plane into a portable
   crate both hosts call* (#1309) moves it into the shared crate.
 - The export list is published and checked in several places: `scripts/check-web-audioworklet.sh`
   (`expected_exports`, `:203`), `tools/parameter-metadata/src/abi_layout.rs` (`EXPORTS`, `:135`),

@@ -81,7 +81,7 @@ same commit.
 - **D4. Count caps on the live path.** Move the count check at `prepare.rs:1162-1170` into one
   function that both preparation and the live admission call. A live delta whose `next` exceeds a
   cap is refused with the same `host.resource.count` diagnostic and changes nothing.
-  `compiled_model_admission` (`crates/capi/src/runtime/compile.rs:76`, in `crates/control-plane/src/compile.rs` after #1309) already charges model growth.
+  `compiled_model_admission` (`crates/control-plane/src/compile.rs:104`) already charges model growth.
 - **D5. Ramps (D15-1).** A `FaderDb` record uses the session's fader length, and a `Mute` record
   uses its mute length. Both come from `LiveRamps::for_session(next)` (#1054), read through
   `LiveRamps::resolve` with the VCA's `VcaFader` or `VcaMute` entry, so a `SetVcaFader` that

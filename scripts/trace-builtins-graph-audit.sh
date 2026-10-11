@@ -42,19 +42,20 @@ mkdir -p "$trace_root"
 trace_prefix="$trace_root/trace"
 find "$trace_root" -maxdepth 1 -type f -name 'trace.*' -delete
 strace -ff -qq -ttt -s 200 -o "$trace_prefix" "$binary" builtins-graph >"$trace_root/audit.json"
-"$validator" "$trace_root" MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN MISO_ENGINE_BUILTINS_GRAPH_RT_END 4 \
+"$validator" "$trace_root" MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN MISO_ENGINE_BUILTINS_GRAPH_RT_END 5 \
   >"$trace_root/validator.json"
 jq -e '
-  .schema_version == 1 and .trace_files >= 2 and .intervals == 4 and .violations == 0
+  .schema_version == 1 and .trace_files >= 2 and .intervals == 5 and .violations == 0
 ' "$trace_root/validator.json" >/dev/null
 jq -e '
   .kind == "issue069_graph_realtime_lifecycle_audit" and
   .renders == 1000000 and .quantum_frames == 128 and .observers == 7 and
-  .render_count_by_plan == {"A":1,"B":999999,"C":0} and
-  .swaps_applied == 1 and .swaps_deferred == 999998 and
-  .prior_plan_renders_on_deferred == 999998 and
+  .render_count_by_plan == {"A":1,"B":999998,"C":1} and
+  .swaps_applied == 2 and .reservations_refused == 999996 and
+  .prior_plan_renders_while_refused == 999996 and
+  .withdrawals == 1 and .republished_adoptions == 1 and
   .pdc_samples == 9 and .distinct_taps == 7 and
-  .retirement_owner_destroyed == 1 and .control_owner_destroyed == 2 and
+  .retirement_owner_destroyed == 2 and .control_owner_destroyed == 1 and
   .render_owner_destroyed == 0 and
   .stable_left_address == true and .stable_right_address == true and
   .allocations == 0 and .deallocations == 0 and .locks == 0 and

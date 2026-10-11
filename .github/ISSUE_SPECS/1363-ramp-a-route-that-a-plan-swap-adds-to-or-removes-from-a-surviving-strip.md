@@ -24,7 +24,7 @@ fade in with it. Every other path stays bit-identical. D15-9 covers added, edite
   (`crates/lane/src/kernels.rs:1097`, mixed by `route_mix_ramp_block`, `:1206`) and never folds.
   Routes into an output keep their prepared constants and their fold into the bank unit
   (`crates/graph/src/lib.rs:50`). `LiveRoute::control` is a required lane (`runtime.rs:861-877`).
-  The C ABI attaches no route lane (`crates/capi/src/runtime/compile.rs:14-21`); the browser
+  The C ABI attaches no route lane (`crates/control-plane/src/compile.rs:19-28`); the browser
   attaches them only with live commands enabled (`HostLiveLanes::routes`,
   `crates/host-core/src/prepare.rs:378`).
 - A route op mixes its input after the edge's compensation delay (`LiveRoute::delayed`,

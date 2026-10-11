@@ -22,14 +22,14 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
 ## Context
 
 - **The rebuild path today.** The control plane prepares a successor against the newest epoch
-  (`prepare_runtime` with a `SuccessorBase`, `crates/capi/src/runtime/control.rs:907-914`), runs the
-  resource admission (`validate_replacement_peak`, `:939`), reserves the publication
-  (`reserve_replacement`, `:962`), commits (`:1006-1008`), moves the persisting producers
-  (`adopt_persisting`, `:1018-1019`) and publishes (`reservation.commit()`, `:1025`). *Extract the C
+  (`prepare_runtime` with a `SuccessorBase`, `crates/control-plane/src/control.rs:1043-1050`), runs the
+  resource admission (`validate_replacement_peak`, `:1075`), reserves the publication
+  (`reserve_replacement`, `:1098`), commits (`:1142-1144`), moves the persisting producers
+  (`adopt_persisting`, `:1154-1155`) and publishes (`reservation.commit()`, `:1161`). *Extract the C
   ABI control plane into a portable crate both hosts call* (#1309) moves this path into
   `crates/control-plane`.
-- **Epoch synchronization.** `synchronize_plan_epochs` (`control.rs:783-824`) loads the active
-  epoch (`:784`) and promotes the pending provider render adopted (`:785-787`).
+- **Epoch synchronization.** `synchronize_plan_epochs` (`control.rs:920-961`) loads the active
+  epoch (`:921`) and promotes the pending provider render adopted (`:922-924`).
 - **Producers.** Each source's `HostChunkProvider` lives in its epoch's `SourceControlSet`
   (`crates/host-core/src/source.rs:25`); `adopt_persisting` (`:286`) moves them between sets.
 - Inputs from earlier slices:
@@ -62,7 +62,7 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
   - This slice adds a `test-support` constructor argument that sets it. Gates set both bounds
     directly, as #1354 D1 says.
 - **D2. Classification.** With `Some(config)`, the rebuild path calls `host_core::warm_lead`
-  (#1354 D2) before it prepares the successor (`control.rs:907`). The result routes the edit:
+  (#1354 D2) before it prepares the successor (`control.rs:1043`). The result routes the edit:
   - `Ordinary`: today's path, published `Next`.
   - `Warm(lead)` with `lead_samples > 0` and an empty duck set: *Duck-swap a strip whose state
     cannot continue across a plan swap* (#1324) D4's set, the strips the edit removes plus the

@@ -32,10 +32,10 @@ apply to every strip (its Q5 answer: buses keep trim and polarity).
   tracks (`HostLiveControlHandles::strip_controls`, `crates/host-core/src/prepare.rs:424-433`), with
   an input lane when `strip_input` is set (#1261 sets it on the C ABI). It attaches one effect
   producer per effect instance, submix effects included, with the submix ID in `track_id`
-  (`:434-441`). The C ABI already selects the effect lanes (`crates/capi/src/runtime/compile.rs:18-21`).
+  (`:434-441`). The C ABI already selects the effect lanes (`crates/control-plane/src/compile.rs:25-28`).
 - **The commit.** `commit_live` resolves strip producers in `strips.controls[..track_count]`
-  (`crates/capi/src/runtime/control.rs:1093-1109`) and effect producers by `(track_id, address)`
-  (`:1124-1128`). #1390 widens the strip resolution to submixes. #1309 moves `control.rs`
+  (`crates/control-plane/src/control.rs:1229-1245`) and effect producers by `(track_id, address)`
+  (`:1260-1264`). #1390 widens the strip resolution to submixes. #1309 moves `control.rs`
   unchanged to `crates/control-plane/src/control.rs`; capi's tests stay in capi.
 - **Delivered track rules.** Effect parameters (#1264), the parametric EQ through its owner
   (#1265) and bypass with the prepared-bypass exception (#1266) are closed and live on tracks.

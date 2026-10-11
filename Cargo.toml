@@ -25,6 +25,7 @@ members = [
     "crates/host-core",
     "crates/protocol",
     "crates/capi",
+    "crates/control-plane",
     "crates/target-smoke",
     "crates/dsp-reference",
     "crates/conformance",
@@ -59,6 +60,7 @@ session = { path = "crates/session", version = "0.1.0" }
 source = { path = "crates/source", version = "0.1.0" }
 protocol = { path = "crates/protocol", version = "0.1.0" }
 capi = { path = "crates/capi", version = "0.1.0" }
+control-plane = { path = "crates/control-plane", version = "0.1.0" }
 effect-contract = { path = "crates/effect-contract", version = "0.1.0" }
 effect-runtime = { path = "crates/effect-runtime", version = "0.1.0" }
 parametric-eq = { path = "crates/parametric-eq", version = "0.1.0" }

@@ -291,7 +291,7 @@ Source consumer still derives prepared channel/quantum offsets and contains expe
 
 Original candidate (N/A, medium): two hand-maintained resource projections that must each track every allocation Location: `crates/capi/src/runtime/compile.rs:106-205`, `hosts/host-web/src/lib.rs:2362-2434`.
 
-`capi/src/runtime/compile.rs` retains manual native resource composition (provider/report/build allocations) and host-web retains its WebResourceReport projection. Delivered pair work kept exact independent resource mirrors honest; it did not establish a single projection authority. Independent resource oracles are useful and must not be replaced with self-referential tests merely to reduce duplication.
+`crates/control-plane/src/compile.rs` (`capi_resources`, `:168`; moved from `capi/src/runtime/compile.rs` by #1309) retains manual native resource composition (provider/report/build allocations) and host-web retains its WebResourceReport projection. Delivered pair work kept exact independent resource mirrors honest; it did not establish a single projection authority. Independent resource oracles are useful and must not be replaced with self-referential tests merely to reduce duplication.
 
 ### IO16 — open
 

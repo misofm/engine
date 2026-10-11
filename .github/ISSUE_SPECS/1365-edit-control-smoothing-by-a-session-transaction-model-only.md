@@ -16,7 +16,7 @@ ordinary session transaction" holds.
 - **The setting.** *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and
   pan changes* (#1054) adds `SessionModel::control_smoothing: Option<ControlSmoothing>`. Its only
   reader is `LiveRamps::for_session(next)`, which the C ABI calls once per commit
-  (`crates/capi/src/runtime/control.rs:1071-1075`). No prepared plan reads it (#1054 D5; the
+  (`crates/control-plane/src/control.rs:1207-1211`). No prepared plan reads it (#1054 D5; the
   bypass crossfade carries its length in the record, #1341 D1).
 - **Opcodes.** `SessionEditOpcode` (`crates/protocol/src/model.rs:22-120`): the root edits are
   `0x0001`-`0x0005` and `SetConsole = 0x0007`; `0x0006` is retired (`:33-35`). The decode table is

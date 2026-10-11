@@ -22,8 +22,8 @@ nothing can bring them back.
   (`crates/graph-compiler/src/canonical.rs:141-145`).
 - **C ABI.** `MISO_ENGINE_V1_TAIL_FINITE`/`_TAIL_INFINITE` (`crates/capi/include/miso_engine_v1.h:127-128`)
   and the `tail_kind` field of `miso_engine_v1_plan_resource_report` (`:252`); Rust side
-  `crates/capi/src/abi.rs:36-39`, `:260-263`, mapping `crates/capi/src/runtime/compile.rs:649-650`,
-  import `crates/capi/src/runtime/mod.rs:45`, zero fill `crates/capi/src/ffi.rs:1414`;
+  `crates/capi/src/abi.rs:36-39`, `:260-263`, mapping `crates/capi/src/runtime/mod.rs:184-185`,
+  import `:24`, zero fill `crates/capi/src/ffi.rs:1414`;
   `crates/capi/tests/c/abi_smoke.c:20-21`. `MISO_ENGINE_V1_TAIL_FINITE` is `0`.
 - **Fault injection.** The conformance test effect's `ChangingTail` fault sets `Infinite`
   (`crates/conformance/src/effect.rs:396-398`).
@@ -39,7 +39,7 @@ nothing can bring them back.
   `tail_kind` word stays at its offset and name, is documented as reserved, and always reads `0`
   (`MISO_ENGINE_V1_TAIL_FINITE`, which stays defined as `0`). `tail_samples` is always the bound.
   `MISO_ENGINE_V1_TAIL_INFINITE` (header, `abi_smoke.c`) and the Rust `TAIL_INFINITE` are deleted,
-  so no producer can write `1`; `compile.rs` writes `TAIL_FINITE` unconditionally. Decision:
+  so no producer can write `1`; `runtime/mod.rs` writes `TAIL_FINITE` unconditionally. Decision:
   removing a mid-struct word would move every later field's offset, which a host built against
   today's header would misread with no diagnostic; a reserved word costs eight bytes and breaks
   nothing. A struct's size and offsets are unchanged, so the layout checker
@@ -71,7 +71,7 @@ slice starts, refresh its anchors by re-grep: `hosts/host-web/src/tests.rs`,
 - `crates/graph/src/lib.rs`, `crates/graph-compiler/src/`, `crates/graph-compiler/tests/`,
   `fixtures/graph/v1/`, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/`
 - `crates/capi/include/miso_engine_v1.h`, `crates/capi/src/` (including `abi.rs`, `ffi.rs`,
-  `runtime/mod.rs`, `runtime/compile.rs`, `runtime/tests.rs`), `crates/capi/tests/c/abi_smoke.c`
+  `runtime/mod.rs`, `runtime/tests.rs`), `crates/capi/tests/c/abi_smoke.c`
 - `crates/conformance/src/effect.rs`
 - The `TailSamples::Finite(n)` → `TailSamples(n)` spelling only, in every other file that names it
   (verified on `6fb211594`): `crates/graph/src/runtime.rs`, `crates/graph/src/program/tests.rs`,
@@ -108,7 +108,7 @@ slice starts, refresh its anchors by re-grep: `hosts/host-web/src/tests.rs`,
 ## Test value
 
 - The type change is the guard: an `Infinite` or `Unstated` value can no longer be written, so no
-  new type test is needed. The `tail_kind == 0` test: a `compile.rs` that still writes a kind from
+  new type test is needed. The `tail_kind == 0` test: a `runtime/mod.rs` that still writes a kind from
   a stale mapping, or a reserved word left uninitialised, is red. The updated `ChangingTail` fault keeps the metadata-mismatch path
   covered. Superseded: tests that assert `Infinite` (`crates/host-core/tests/live_lanes.rs`,
   `crates/graph-compiler/src/lib.rs` fixtures, `crates/capi/src/runtime/tests.rs:2725-2727`,

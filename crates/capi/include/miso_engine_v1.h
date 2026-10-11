@@ -18,16 +18,18 @@ extern "C" {
  *   session      Control thread. At most one thread at a time calls
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
  *                miso_engine_v1_source_seek_at, miso_engine_v1_submit_command,
- *                miso_engine_v1_dequeue_event, or
+ *                miso_engine_v1_dequeue_event, miso_engine_v1_service, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
  *                itself, and the exclusive owner of the plan's render state.
- *                miso_engine_v1_plan_resources and miso_engine_v1_last_error on a plan: any thread,
- *                at any time while the plan is live, including concurrently with a render call.
- *                They are pure with respect to the plan handle: the report is copied from the
- *                plan's frozen resource accounting and the diagnostic is one atomic error word.
- *                Neither call writes plan render state, allocates, or blocks the render thread.
+ *                miso_engine_v1_plan_resources, miso_engine_v1_plan_watermark and
+ *                miso_engine_v1_last_error on a plan: any thread, at any time while the plan is
+ *                live, including concurrently with a render call. They are pure with respect to
+ *                the plan handle: the report is copied from the plan's frozen resource
+ *                accounting, the watermark from the record render publishes, and the diagnostic
+ *                is one atomic error word. None of them writes plan render state, allocates, or
+ *                blocks the render thread.
  *   *_destroy    miso_engine_v1_engine_destroy, miso_engine_v1_session_destroy and
  *                miso_engine_v1_plan_destroy require quiescence: no other call on that handle is
  *                in flight or will start. A session and its plan may be destroyed in either order.
@@ -60,6 +62,51 @@ extern "C" {
  * in time" below). The ABI gives no signal that tells a live edit from a replacement, and a host
  * needs none. (miso_engine_v1_plan_resources describes whichever plan is active, so a replacement
  * may change it, but an unchanged report does not mean that no replacement happened.)
+ *
+ * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
+ * it validates and classifies the transaction, prepares a replacement plan and reserves its
+ * publication and retirement credit, commits, and returns; it never waits for a render call or a
+ * plan swap. Every committed revision is pending until the plan watermark covers it.
+ * miso_engine_v1_plan_watermark copies (revision, first_sample, outcome_flags) and per-outcome
+ * counters: revision is the highest committed revision in effect together with every revision
+ * before it, and first_sample the absolute render sample at the start of the block that reported
+ * it. The watermark is never early: a revision is in effect no later than the block it names.
+ * first_sample is the start of the first block that begins after the commit's last write, so at
+ * most one block after the submit returns (while a replacement plan is pending: the block that
+ * adopts it). A live value of that revision can apply earlier, in any block that
+ * ran between the submit's first push and its revision store. One transaction's values can
+ * spread across those blocks until issues 1502, 1503, 1504, 1312 and 1345 have all landed,
+ * which together make it exact. A replacement plan renders from first_sample. A host that
+ * renders nothing completes nothing: a paused host's revisions stay pending until render
+ * resumes. The watermark is a level, not a queue: render overwrites it, so a host that polls it
+ * late still reads the newest revision, and the counters still count every revision.
+ * outcome_flags is the OR
+ * over the revisions the last advance covered of MISO_ENGINE_V1_OUTCOME_EXACT,
+ * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and MISO_ENGINE_V1_OUTCOME_SUPERSEDED. The host
+ * polls the watermark to learn that an edit is audible, never the event lane. The caller zeroes
+ * reserved0 and reserved[] and sets struct_size, or the call returns
+ * MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's publication
+ * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
+ * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
+ *
+ * Control service (issue 1348). The engine owns no thread, so the host drives the control work
+ * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
+ * render has retired, brings the session's view of the running plan up to render, refreshes the
+ * session counters, and stages render telemetry. Every other session call (source submit, seek,
+ * seek_at, submit_command, dequeue_event) that passes its argument checks runs the same step
+ * first; a call refused for its arguments returns before the step. So a host that makes those
+ * calls anyway need not also call service. The step never waits for render, never commits or
+ * acknowledges anything, and never takes or drops a pending edit; its cost does not grow with the
+ * time since the last call. It returns MISO_ENGINE_V1_OK; a null session as
+ * MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE; and, should
+ * the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the session
+ * diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the host
+ * makes session calls, the same duty as draining events. A host that renders but never calls
+ * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
+ * successor that misses its deadline falls back only at the host's next session call. The plan
+ * watermark never covers an edit before it is in effect. While edits are pending, call
+ * miso_engine_v1_service (or another session call) at least once per render-buffer period. A host
+ * checks MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
  *
  * Borrowed pointers (session JSON, source IDs, request frames, chunk planes, output samples, and
  * every out pointer) are read or written only for the duration of the call and are never retained.
@@ -139,7 +186,13 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_PLANAR_STEREO_RENDER UINT64_C(8)
 #define MISO_ENGINE_V1_FEATURE_CAPABILITY_COMMAND UINT64_C(16)
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT UINT64_C(32)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(63)
+#define MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK UINT64_C(64)
+#define MISO_ENGINE_V1_FEATURE_SERVICE UINT64_C(128)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(255)
+
+#define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
+#define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
+#define MISO_ENGINE_V1_OUTCOME_SUPERSEDED UINT64_C(4)
 
 #define MISO_ENGINE_V1_ENGINE_CONFIG_SIZE UINT32_C(40)
 #define MISO_ENGINE_V1_COMPILE_LIMITS_SIZE UINT32_C(208)
@@ -149,6 +202,7 @@ extern "C" {
 #define MISO_ENGINE_V1_PLANAR_OUTPUT_SIZE UINT32_C(48)
 #define MISO_ENGINE_V1_CAPABILITIES_SIZE UINT32_C(56)
 #define MISO_ENGINE_V1_PLAN_RESOURCE_REPORT_SIZE UINT32_C(240)
+#define MISO_ENGINE_V1_WATERMARK_SIZE UINT32_C(96)
 
 typedef struct miso_engine_v1_engine miso_engine_v1_engine;
 typedef struct miso_engine_v1_session miso_engine_v1_session;
@@ -273,6 +327,18 @@ typedef struct miso_engine_v1_plan_resource_report {
     uint64_t reserved[4];
 } miso_engine_v1_plan_resource_report;
 
+typedef struct miso_engine_v1_watermark {
+    uint32_t struct_size;
+    uint32_t reserved0; /* Must be zero in ABI V1. */
+    uint64_t revision;
+    uint64_t first_sample;
+    uint64_t outcome_flags;
+    uint64_t exact_count;
+    uint64_t transition_fallback_count;
+    uint64_t superseded_count;
+    uint64_t reserved[5]; /* Must be zero in ABI V1. */
+} miso_engine_v1_watermark;
+
 uint32_t miso_engine_v1_abi_version(void);
 uint32_t miso_engine_v1_query_capabilities(miso_engine_v1_capabilities *out);
 uint32_t miso_engine_v1_engine_create(const miso_engine_v1_engine_config *config,
@@ -308,11 +374,14 @@ uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
 uint32_t miso_engine_v1_dequeue_event(miso_engine_v1_session *session,
                                       uint32_t lane,
                                       miso_engine_v1_bytes_out *event);
+uint32_t miso_engine_v1_service(miso_engine_v1_session *session);
 uint32_t miso_engine_v1_render_f32_planar(miso_engine_v1_plan *plan,
                                           uint64_t absolute_sample,
                                           const miso_engine_v1_planar_output *output);
 uint32_t miso_engine_v1_plan_resources(const miso_engine_v1_plan *plan,
                                        miso_engine_v1_plan_resource_report *out);
+uint32_t miso_engine_v1_plan_watermark(const miso_engine_v1_plan *plan,
+                                       miso_engine_v1_watermark *out);
 uint32_t miso_engine_v1_last_error(const void *live_handle, miso_engine_v1_bytes_out *out);
 void miso_engine_v1_session_destroy(miso_engine_v1_session *session);
 void miso_engine_v1_plan_destroy(miso_engine_v1_plan *plan);

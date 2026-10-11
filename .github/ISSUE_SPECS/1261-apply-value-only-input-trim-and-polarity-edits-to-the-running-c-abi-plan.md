@@ -41,19 +41,19 @@ bounded tail of decision 15 D15-4. Today such an edit rebuilds the plan.
   masks only track fader, pan/matrix and effect `params`/`bypass` (`:228-264`). Every other field,
   the input section included, is structural. `LiveRamps` (`:39-58`) carries fader and mute ramps only (both 0 today).
 - **The lanes.** capi selects `C_ABI_LIVE_LANES`: fader, matrix and effect lanes, no input lane
-  (`crates/capi/src/runtime/compile.rs:14-21`, comment `:583-585`). `HostLiveLanes::strip_input`
+  (`crates/control-plane/src/compile.rs:19-28`, comment `:589-591`). `HostLiveLanes::strip_input`
   (`crates/host-core/src/prepare.rs:371-395`) attaches one `TrackControlProducer::input` per strip,
   submixes included (`crates/builtins-compiler/src/lib.rs:254-270`).
 - **The tail today.** A strip with a live input lane reports `BuiltinTail::Infinite`
   (`crates/builtins-compiler/src/lib.rs:3261-3267` and `:3562-3568`). capi maps an infinite output
-  tail to `TAIL_INFINITE` (`crates/capi/src/runtime/compile.rs:648-651`). Decision 15 D15-4
+  tail to `TAIL_INFINITE` (`crates/capi/src/runtime/mod.rs:183-186`). Decision 15 D15-4
   replaces that rule: *State a bounded tail and an exact-rest bound for every node* (#1329) deletes
   `BuiltinTail`, and its `input_section_live_bound(rate)` gives a strip with a live input lane a
   bounded tail over the whole reachable filter domain (#1329 D5, D7). Effects keep their own
   tails until their follow-ups (for example #1372 for the parametric EQ), so a plan with such an
   effect can still report `Infinite` for that reason.
-- **The commit.** `commit_live` (`crates/capi/src/runtime/control.rs:1065`) classifies, admits,
-  resolves producers, checks every queue's room (step 4, `:1189`), pushes (step 6, `:1287`) and
+- **The commit.** `commit_live` (`crates/control-plane/src/control.rs:1201`) classifies, admits,
+  resolves producers, checks every queue's room (step 4, `:1325`), pushes (step 6, `:1423`) and
   commits. *Extract the C ABI control plane into a portable crate both hosts call* (#1309) moves
   `control.rs` and `compile.rs` unchanged into `crates/control-plane/src/` (lib `control_plane`);
   capi's tests stay in capi. The classifier stays in host-core. #1312 replaces the live value

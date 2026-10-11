@@ -33,7 +33,7 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
     `smoothing_samples` (`:271-274`, `:308-313`), through `lower_matrix_or_pan`
     (`crates/builtins-compiler/src/lib.rs:4925-4940`).
   - `commit_live` calls it with `LiveRamps::for_session(next)` once per commit
-    (`crates/capi/src/runtime/control.rs:1065-1075`), where `next` comes from the prepared token's
+    (`crates/control-plane/src/control.rs:1201-1211`), where `next` comes from the prepared token's
     `prospective_session()` (`crates/protocol/src/controller.rs:1139`).
 - **The model's pan window.** `MatrixOrPan::{Pan, Matrix}::smoothing_samples` is a required `u32`
   (`crates/session/src/model.rs:655-680`); `Submix::unity` writes 0 (`:749`). The prepared window
@@ -143,7 +143,7 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 2. Every `SessionModel { .. }` struct literal outside `crates/session` gains
    `control_smoothing: None` (mechanical; about 98 sites in tests and helpers).
 3. D4 and D5 in `crates/host-core/src/live_delta.rs`. The `commit_live` call
-   (`crates/capi/src/runtime/control.rs:1071-1075`) is unchanged: `for_session(next)` now returns
+   (`crates/control-plane/src/control.rs:1207-1211`) is unchanged: `for_session(next)` now returns
    the session's lengths.
 4. `docs/C_ABI_V1_QUALIFICATION.md:265-267`: live fader, mute and pan edits ramp over the session's
    `control_smoothing`, else the default table.

@@ -10,9 +10,10 @@
 #   3. A host re-implementing the control protocol's wire format by hand. capi carried a private
 #      header parser and replay cache until #102 made the protocol's own public.
 #   4. The facade making the host-specific control protocol mandatory/default, or any consumer
-#      except capi enabling its optional adapter. A default edge would push protocol into the
-#      browser artifact. The facade also exports no `no_mangle` symbol: a `cdylib` re-exports every
-#      one it links and would push the C ABI's exports into the browser artifact's frozen set.
+#      except the control-plane crate (#1309 D9) enabling its optional adapter. A default edge
+#      would push protocol into the browser artifact. The facade also exports no `no_mangle`
+#      symbol: a `cdylib` re-exports every one it links and would push the C ABI's exports into
+#      the browser artifact's frozen set.
 set -euo pipefail
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_directory/lib/gate.sh"
@@ -31,13 +32,16 @@ GATE_FAILURE_PREFIX='host-core policy failure'
 root="${1:-.}"
 facade_manifest="$root/crates/host-core/Cargo.toml"
 facade_source="$root/crates/host-core/src"
-capi_manifest="$root/crates/capi/Cargo.toml"
+control_plane_manifest="$root/crates/control-plane/Cargo.toml"
 # Every host under hosts/*/src is scanned; there is no exemption list. host-web was the last
 # holdout (tracked as "pending #106") and already depends on host-core
 # (hosts/host-web/Cargo.toml), so the exemption is dead and removing it only tightens the gate.
 
-host_sources=("$root/crates/capi/src")
-[[ -d "$root/crates/capi/src" ]] || fail "expected host source directory is missing: $root/crates/capi/src"
+# #1309 D10: the control plane both adapters call is held to the same rules as a host.
+host_sources=("$root/crates/capi/src" "$root/crates/control-plane/src")
+for host_source in "${host_sources[@]}"; do
+    [[ -d "$host_source" ]] || fail "expected host source directory is missing: $host_source"
+done
 
 [[ -d "$root/hosts" ]] || fail "expected hosts/ directory is missing: $root/hosts"
 host_count=0
@@ -65,7 +69,7 @@ gate_scan_forbidden 'a host hand-decodes the control wire format; use protocol' 
     '' "${host_sources[@]}"
 
 [[ -f "$facade_manifest" ]] || fail "expected host-core manifest is missing: $facade_manifest"
-[[ -f "$capi_manifest" ]] || fail "expected capi manifest is missing: $capi_manifest"
+[[ -f "$control_plane_manifest" ]] || fail "expected control-plane manifest is missing: $control_plane_manifest"
 exact_count() {
     local description="$1" text="$2" file="$3" output rc
     if output="$(grep -Fxc "$text" "$file" 2>&1)"; then rc=0; else rc=$?; fi
@@ -78,15 +82,15 @@ exact_count 'control-provider feature' 'control-provider = ["dep:protocol"]' "$f
     fail 'host-core must gate protocol behind exactly control-provider'
 exact_count 'optional protocol edge' 'protocol = { workspace = true, optional = true }' "$facade_manifest" ||
     fail 'host-core protocol dependency must be workspace-scoped and optional'
-exact_count 'capi control-provider edge' 'host-core = { workspace = true, features = ["control-provider"] }' "$capi_manifest" ||
-    fail 'capi must explicitly enable the host-core control-provider adapter'
+exact_count 'control-plane control-provider edge' 'host-core = { workspace = true, features = ["control-provider"] }' "$control_plane_manifest" ||
+    fail 'control-plane must explicitly enable the host-core control-provider adapter'
 
-# The feature name may appear in exactly the host-core declaration and capi's dependency. This
+# The feature name may appear in exactly the host-core declaration and control-plane's dependency. This
 # closes the browser/default-host leak while leaving comments and unrelated feature names free.
 feature_matches="$(gate_scan_collect 'control-provider declaration scan' 'control-provider' 'Cargo.toml' "$root")" || exit 1
 feature_occurrences="$(gate_count_lines 'control-provider declaration' "$feature_matches")" || exit 1
 [[ "$feature_occurrences" == 2 ]] ||
-    fail 'only host-core may declare and capi may enable control-provider'
+    fail 'only host-core may declare and control-plane may enable control-provider'
 protocol_matches="$(gate_scan_collect 'host-core protocol dependency scan' '^[[:space:]]*protocol[[:space:]]*=' '' "$facade_manifest")" || exit 1
 protocol_dependencies="$(gate_count_lines 'host-core protocol dependency' "$protocol_matches")" || exit 1
 [[ "$protocol_dependencies" == 1 ]] ||

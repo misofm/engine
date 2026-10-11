@@ -26,12 +26,14 @@ when the same transaction makes a structural edit that swaps the plan.
   (#1053 guard G1, documented at `:155-157`). The VCA guard (`:216-218`) belongs to #1247. The
   follow-mute guard (`:276-280`, with `follows_mute_from` at `:543-549`) belongs to #1226.
 - **#1309 moves capi's control plane** (`crates/capi/src/runtime/{control,compile,plan,error}.rs`,
-  `commit_live` at `control.rs:1065`) into `crates/control-plane` (lib `control_plane`), with names
-  unchanged. The classifier stays in `crates/host-core/src/live_delta.rs`, and capi's tests stay in
-  capi. The anchors below name the locations at `6fb211594`; the implementer edits the moved code.
+  `commit_live` now at `crates/control-plane/src/control.rs:1201`) into `crates/control-plane`
+  (lib `control_plane`), with names unchanged. The classifier stays in
+  `crates/host-core/src/live_delta.rs`, and capi's tests stay in capi. The anchors below into the
+  moved code name its locations in `crates/control-plane/src/`; the others name the locations at
+  `6fb211594`.
 - **capi resolves track producers only.** `commit_live` takes `strips.controls[..track_count]`
-  (`control.rs:1093-1094`) and searches it by strip ID.
-- **capi attaches no route lane.** `C_ABI_LIVE_LANES` (`crates/capi/src/runtime/compile.rs:18-21`)
+  (`control.rs:1229-1230`) and searches it by strip ID.
+- **capi attaches no route lane.** `C_ABI_LIVE_LANES` (`crates/control-plane/src/compile.rs:25-28`)
   is `FADER_AND_MATRIX` plus the effect lanes. `HostLiveLanes::routes`
   (`crates/host-core/src/prepare.rs:378`) is false, so `HostLiveControlHandles::route_controls`
   (`prepare.rs:465`) is empty on the C ABI. When the flag is set, host-core attaches one lane per
@@ -115,7 +117,7 @@ when the same transaction makes a structural edit that swaps the plan.
 - **D6. Commit order (D15-2).**
   1. Classify the delta.
   2. Build every strip and route record, which runs each domain and length check.
-  3. Run the live admission (`validate_live_peak`, `compile.rs:443`).
+  3. Run the live admission (`validate_live_peak`, `compile.rs:483`).
   4. Resolve every producer by ID in the newest epoch (#1053 D7).
   5. Run the protocol's commit predicate.
   6. Write the cells.
@@ -125,7 +127,7 @@ when the same transaction makes a structural edit that swaps the plan.
   `BACKPRESSURE`. When a value is written twice before one drain, the later write supersedes the
   earlier one, and #1312's `live_values_superseded` counts it.
 - **D7. Resources.** The route cells and their IDs are charged where the C ABI charges its strip
-  producers today (`capi_resources`, `compile.rs:140`). The graph rows grow by
+  producers today (`capi_resources`, `compile.rs:168`). The graph rows grow by
   `graph::route_control_resources`. The `resource_lifecycle` oracles change by exactly those rows.
 - **D8. Carry, then retarget (D15-7; formerly #1284 D3).** A transaction that makes a structural
   edit and also changes a carried send's live value sounds like "live edit, then structural edit".

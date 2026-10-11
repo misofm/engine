@@ -69,11 +69,13 @@ fi
 # The floors are the merged tree's own counts after #1269 phase 1 (the swap carry and the
 # #1071/#1278 effect-restore regions) and #1053 (#1253's builtins-compiler fader and matrix
 # drains): twenty-five files and eighty-nine regions (they were twelve and forty-one after #664's
-# complete LocalRing removal). Deleting a marker to silence the gate fails here -- the file leaves
+# complete LocalRing removal). Decision-15 stream B batch 1 (#1314 Amendment 1) raised them to
+# the tree's counts after #1309, #1343, #1314, #1311 and #1348: twenty-six files and ninety-three
+# regions. Deleting a marker to silence the gate fails here -- the file leaves
 # the discovered set or a region leaves the marked set -- instead of passing with less coverage.
 # Raising a floor is part of the change that adds a marker.
-[[ "$marked_file_count" -ge 25 ]] || fail "expected at least twenty-five marked realtime files"
-[[ "$marker_count" -ge 89 ]] || fail "expected at least eighty-nine marked realtime regions"
+[[ "$marked_file_count" -ge 26 ]] || fail "expected at least twenty-six marked realtime files"
+[[ "$marker_count" -ge 93 ]] || fail "expected at least ninety-three marked realtime regions"
 
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?

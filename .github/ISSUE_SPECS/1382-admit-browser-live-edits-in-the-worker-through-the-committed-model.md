@@ -40,10 +40,10 @@ term into effective mute, for strips and for sends that follow them.
   *Gate AudioWorklet render against allocation statically and at runtime* (#1333 D2) puts it in
   the render-locked set.
 - **The C ABI's live path.**
-  - `SessionState::command` (today `crates/capi/src/runtime/control.rs:843`) classifies a
+  - `SessionState::command` (today `crates/control-plane/src/control.rs:983`) classifies a
     transaction with `classify_live_delta` (`crates/host-core/src/live_delta.rs:211`).
-  - It first compiles the prospective session, in `prepare_command_frame` (`control.rs:855-862`).
-    Then `commit_live` (`:1065`) reads it (`:1066-1070`), classifies, checks everything, pushes,
+  - It first compiles the prospective session, in `prepare_command_frame` (`control.rs:991-998`).
+    Then `commit_live` (`:1201`) reads it (`:1202-1206`), classifies, checks everything, pushes,
     and commits. Compiling allocates. #1309 moves both into `crates/control-plane`.
   - The C ABI has no solo. *Let C ABI sends follow their source strip's mute live* (#1226) makes
     the shared commit build follow records from each strip's effective mute (own or VCA mute),

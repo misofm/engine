@@ -17,22 +17,22 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 ## Context
 
 - Today a structural transaction prepares a successor and publishes it for the next block:
-  `SessionState::command`'s structural arm (`crates/capi/src/runtime/control.rs:907` onward,
+  `SessionState::command`'s structural arm (`crates/control-plane/src/control.rs:1043` onward,
   `prepare_runtime` with a `SuccessorBase`). #1309 moves this into a portable control-plane crate.
 - A pending candidate makes the next structural edit BACKPRESSURE
-  (`crates/capi/src/runtime/control.rs:959`); #1310 replaces that with compare-and-swap supersession.
-- Source calls address the newest committed session: `newest_providers` (`control.rs:1488`), used by
-  `submit` (`:1501`), `seek` (`:1514`) and `seek_at` (`:1530`). A source the transaction removed is
+  (`crates/control-plane/src/control.rs:1095`); #1310 replaces that with compare-and-swap supersession.
+- Source calls address the newest committed session: `newest_providers` (`control.rs:1628`), used by
+  `submit` (`:1641`), `seek` (`:1655`) and `seek_at` (`:1671`). A source the transaction removed is
   refused at once as `source.id.unknown`, and its accepted PCM is discarded with its plan
   (`crates/capi/include/miso_engine_v1.h:85-94`).
 - The default source ring hides 100 ms (`default_source_ring_frames`,
   `crates/host-core/src/prepare.rs:65`), but a session mute ramp may be up to 1000 ms (#1054 bounds),
   so the ramp needs PCM submitted after the commit.
 - Every C ABI plan has each strip's live fader/mute lane (`C_ABI_LIVE_LANES`,
-  `crates/capi/src/runtime/compile.rs:18`, attached in `prepare_runtime`, `:572-600`). The browser
+  `crates/control-plane/src/compile.rs:25`, attached in `prepare_runtime`, `:578-606`). The browser
   gets them from #1326.
 - Render publishes the start of its next block after every block: `SharedPlanState::render_sample`
-  (`crates/capi/src/runtime/plan.rs:10`, stored at `:236`).
+  (`crates/control-plane/src/plan.rs:13`, stored at `:263`).
 - Live mute ramps: `LiveRamps::for_session(..).mute_samples` (`crates/host-core/src/live_delta.rs:52`),
   0 until #1054.
 - A route's source names a strip and a tap (`RouteSource`, `crates/session/src/model.rs:804-819`).
@@ -83,7 +83,7 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   - **Under supersession the producer may sit in the withdrawn candidate.** When the removing
     transaction supersedes a candidate that kept the source, that candidate's commit already moved
     the running plan's producer into its own set (`adopt_persisting`,
-    `crates/capi/src/runtime/control.rs:1019`; #1310 D2). #1310 D5 step 5,
+    `crates/control-plane/src/control.rs:1155`; #1310 D2). #1310 D5 step 5,
     `P0.sources.adopt_persisting(&mut A.sources)`, returns it to the running plan's set before the
     withdrawn candidate is dropped (step 6), so D4's routing finds it there.
 - **D5. Reporting.** The response path is `rebuild` (#1313). The revision completes when render

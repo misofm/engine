@@ -4,7 +4,7 @@ Issue key for the footprint cleanup: AArch64 CI = #1017, Darwin memset = #1018, 
 
 ## Question
 
-The owner wants fans to change a mix live in the mobile app ("they should be able to change it live"). Today a live fader or mute change through the C ABI reaches audio only by structural plan replacement, which resets source rings at the block boundary (`capi/src/runtime/control.rs:46-53`). The browser host already delivers live parameter changes without a plan swap (the effect control lane that #1004 and #1012 hardened). An unfinished second route exists: about 8,200 lines of control-provider endpoints (#528-#608, protocol `delivery.rs` and `controller_delivery.rs`) that nothing calls, the partial implementation of #140. Evidence: `docs/handoffs/dead-code-2026-09-28/VERIFY-DEAD-CODE.md`, finding F8; draft `issues/02-…` is held on this answer.
+The owner wants fans to change a mix live in the mobile app ("they should be able to change it live"). Today a live fader or mute change through the C ABI reaches audio only by structural plan replacement, which resets source rings at the block boundary (`crates/capi/src/runtime/control.rs:46-53` at `d70956bf8`). The browser host already delivers live parameter changes without a plan swap (the effect control lane that #1004 and #1012 hardened). An unfinished second route exists: about 8,200 lines of control-provider endpoints (#528-#608, protocol `delivery.rs` and `controller_delivery.rs`) that nothing calls, the partial implementation of #140. Evidence: `docs/handoffs/dead-code-2026-09-28/VERIFY-DEAD-CODE.md`, finding F8; draft `issues/02-…` is held on this answer.
 
 Establish, with code references and a prototype if cheap:
 

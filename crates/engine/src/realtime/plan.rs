@@ -311,6 +311,24 @@ pub trait PreparedPlanExecutor: Send {
     fn adopt_predecessor(&mut self, _predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
         CarryOutcome::NotRequested
     }
+    /// Whether this plan, running, is ready for its successor to adopt with a prime of
+    /// `lead_blocks` blocks at the block that starts at `block_start` (#1311 D3).
+    ///
+    /// **Where it runs.** On the render thread, inside the render scope, at block entry, on the
+    /// **active** plan (never on the candidate), and only for a candidate published
+    /// [`super::PlanAdoption::Primed`] whose `not_before` the block has reached. Render claims
+    /// the candidate only if this returns `true`, and adopts it in the same block.
+    ///
+    /// **Render-thread code.** No allocation, free, lock, syscall, log or unbounded loop. It may
+    /// read atomics the control thread stores before it publishes the candidate: an answer that
+    /// belongs to another publication goes with a mailbox word of another generation, so the
+    /// claim it would allow fails.
+    ///
+    /// The default `false` declares that this plan cannot check readiness, so a `Primed`
+    /// candidate is never adopted over it.
+    fn prime_ready(&self, _block_start: u64, _lead_blocks: u32) -> bool {
+        false
+    }
     /// Invalidate owner-side observers after a render refusal that happened before dispatch.
     ///
     /// This is an internal hook so a prepared executor can discard a partial capture without
@@ -911,6 +929,13 @@ impl PreparedRenderPlan {
     #[doc(hidden)]
     pub fn executor_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         self.executor.as_deref_mut()?.as_any_mut()
+    }
+
+    /// The executor's [`PreparedPlanExecutor::prime_ready`]; `false` without an executor.
+    pub(crate) fn prime_ready(&self, block_start: u64, lead_blocks: u32) -> bool {
+        self.executor
+            .as_deref()
+            .is_some_and(|executor| executor.prime_ready(block_start, lead_blocks))
     }
 
     /// Run the executor hand-over from `predecessor`, if both plans have executors.

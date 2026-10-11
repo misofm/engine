@@ -30,11 +30,11 @@ lateness assertion, test-only untimed reads) are #1350; see Non-goals.
   (`crates/source/src/lib.rs:1880`), so `held_seek` (`:1018`) travels with it today; nothing pins
   that.
 - A seek on the newest committed session goes to the pending candidate's ring
-  (`SessionState::seek_at`, `crates/capi/src/runtime/control.rs:1530-1545`, via
+  (`SessionState::seek_at`, `crates/control-plane/src/control.rs:1671-1686`, via
   `newest_providers_mut`). A persisting source's producer moves to the successor at commit
-  (`adopt_persisting`, `crates/host-core/src/source.rs:286`; called at `control.rs:1012-1019`).
+  (`adopt_persisting`, `crates/host-core/src/source.rs:286`; called at `control.rs:1148-1155`).
   Today a second structural transaction while a candidate waits is refused
-  (`control.rs:959-961`). *Supersede an unadopted candidate plan by compare-and-swap* (#1310)
+  (`control.rs:1095-1097`). *Supersede an unadopted candidate plan by compare-and-swap* (#1310)
   replaces it by withdraw-then-prepare (#1310 D1, on *Let the control thread withdraw an
   unadopted candidate plan*, #1343, and *Prepare a successor across a withdrawn candidate plan*,
   #1344): a withdrawn candidate A is succeeded by B prepared against the running plan P0, with A's

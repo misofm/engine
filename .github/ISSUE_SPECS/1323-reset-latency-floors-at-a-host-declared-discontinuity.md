@@ -91,7 +91,7 @@ with nothing to reset changes nothing.
       `crates/host-core/tests/support/successor.rs:101`;
     - `crates/capi/tests/resource_lifecycle.rs:1591`;
     - the control plane's sites in `crates/control-plane/src/`: the `prepare_runtime` call
-      (`crates/capi/src/runtime/control.rs:910` on `6fb211594`, moved by #1309 D2) and #1310 D2's
+      (`crates/control-plane/src/control.rs:1046`, moved there by #1309 D2) and #1310 D2's
       base across a withdrawn candidate;
     - `crates/host-core/tests/withdrawn_successor.rs`, the gates of *Prepare a successor across a
       withdrawn candidate plan* (#1344), which lands before this slice through #1310.

@@ -48,8 +48,9 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
 ## Decisions frozen for this slice
 
 - **D1. A link cell, not a record.** Each lane of an effect whose descriptor has `lane_link`
-  (#1368 D1) gains one latest-target cell on #1312's primitive (#1312 D1: a triple buffer whose
-  slots carry their own sequence), holding one word. Bits 0-23
+  (#1368 D1) gains one latest-target cell on #1312's primitive (#1312 D1, #1432 D1: a
+  revision-bounded three-slot cell whose slots carry their revision and their own sequence),
+  holding one word. Bits 0-23
   hold the ramp length in samples; bits 24-31 hold the mode's wire code (`dual_mono` 1, `maximum`
   2, `average` 3, as `enum_link`, `crates/protocol/src/session_wire.rs:237-241`). A ramp fits: the
   session ramp is bounded at 1000 ms (#1054 D1) and the per-edit ramp at the session rate (#1394
@@ -59,9 +60,10 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   the observation FIFO. The stage that owns the processor reads a dirty link cell at the block
   boundary, before processing, and calls `retarget_link(track, mode, samples)`. A `false` return
   increments the lane's existing refusal counter; the classifier makes it unreachable (D4).
-  #1312's read applies unchanged (#1312 D1-D2): render reads the newest completed word in one
-  pass, never tears and never skips, and when it reads sequence `s` after `p` it adds `s - p - 1`
-  superseded link words to `live_values_superseded`.
+  #1312's read applies unchanged (#1312 D1-D2): render applies the newest word whose revision is
+  `<=` the block's live snapshot, never tears and never skips it. When it applies sequence `s`
+  after `p`, it adds `s - p - 1` superseded link words to `live_values_superseded`. A link change
+  and the parameter changes of one transaction take effect in the same block (Amendment 1).
 - **D3. Ramp length.** The word's ramp is `LiveRamps::resolve(link row, edit_ramp)` (#1394 D5),
   where `edit_ramp` is the `EditRamps` entry for the write's `Link` row (#1394 D3, D6): the
   effect's entry for an insert link change, the strip's for a console-entry override, the
@@ -111,7 +113,7 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   A's files: coordinate)
 - `crates/host-core/src/live_delta.rs`, `crates/host-core/tests/live_delta.rs`,
   `crates/host-core/src/prepare.rs` (the carry rule only), `crates/control-plane/src/` (if #1309
-  has moved the classifier), `crates/capi/src/runtime/control.rs` (the link write in
+  has moved the classifier), `crates/control-plane/src/control.rs` (the link write in
   `commit_live`), `crates/capi/src/runtime/live_tests.rs`, `crates/capi/include/miso_engine_v1.h`
   (docs only); stream B owns these: coordinate the merge
 - `docs/C_ABI_V1_QUALIFICATION.md`
@@ -166,6 +168,13 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   forgets an unread link write leaves the successor on the old mode; either turns it red.
 - Superseded in this PR: any `live_delta.rs` test that asserts a link-mode change is structural for
   these four effects.
+
+## Amendment 1 (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement (2026-10-05) makes every live value of one revision take effect in one
+block. #1432 Amendment 1 replaced the triple buffer with the revision-bounded cell, read under
+each block's snapshot (#1312 Amendment 2). D1 and D2 follow. The link cell is one more cell in
+#1345's drain.
 
 ## Dependencies
 

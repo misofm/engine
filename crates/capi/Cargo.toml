@@ -14,17 +14,21 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 default = []
 
 [dependencies]
+control-plane.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
-host-core = { workspace = true, features = ["control-provider"] }
 lane.workspace = true
-protocol.workspace = true
-session.workspace = true
-source.workspace = true
 
 [dev-dependencies]
 bench-support.workspace = true
+# #1309 D8: the control plane's observers and fault hooks, for capi's tests only. A dev-dependency
+# feature never reaches the release `capi` build (`scripts/check-capi-abi.sh` builds `-p capi`).
+control-plane = { workspace = true, features = ["test-support"] }
 graph.workspace = true
+host-core.workspace = true
+protocol.workspace = true
+session.workspace = true
+source.workspace = true
 
 [lints]
 workspace = true

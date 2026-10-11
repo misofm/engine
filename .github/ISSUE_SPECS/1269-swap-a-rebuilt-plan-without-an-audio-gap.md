@@ -30,7 +30,7 @@ remains on `main`:
   moves source consumers and the input section only. Fader and pan ramps, effect lanes, per-node
   effects, compensation and delay lines restart.
 - **A pending candidate refuses the next structural edit** with `BACKPRESSURE`
-  (`crates/capi/src/runtime/control.rs:959-961`), permanently so while the host is paused.
+  (`crates/control-plane/src/control.rs:1095-1097`), permanently so while the host is paused.
 - **A latency change is not continuous**, and a removed or edited strip stops or restarts abruptly.
 - **The browser has no structural edit path.** `AudioWorkletEngineHost` owns one prepared host for
   its life (`ReadyOwnership`, `hosts/host-web/src/lib.rs:1509`). The engine is one Wasm instance
@@ -125,7 +125,7 @@ state" (AGENTS.md). Nothing is persisted, versioned or migrated.
 ### P3. Sources keep playing (delivered)
 
 Delivered by #1271-#1275: an unchanged source keeps its ring through a vacant successor entry; the
-control side moves its producer after the protocol commit (`control.rs:1010-1021`, infallible); a
+control side moves its producer after the protocol commit (`control.rs:1146-1157`, infallible); a
 new source starts at an exact render sample through the anchored seek
 (`miso_engine_v1_source_seek_at`). Decision 15 D15-12 anchors every seek on the plan's
 source-read clock (*Anchor every seek on the plan's source-read clock*, #1316), and a held
@@ -162,7 +162,7 @@ source-read clock (*Anchor every seek on the plan's source-read clock*, #1316), 
   `crates/rack/src/lib.rs:937`, drained at `:1257`). So the successor's lane **inherits** the
   predecessor lane's unconsumed controls and applies them before its own in its first block.
 - A record admitted while a successor is pending goes to the newest candidate (#1257's rule;
-  `commit_live` targets `pending_providers.last_mut()`, `control.rs:1089`). A pending warm
+  `commit_live` targets `pending_providers.last_mut()`, `control.rs:1225`). A pending warm
   successor is an ordinary pending candidate (#1053 D7, D15-17): the edit goes to its cells and
   applies at adoption. Its retargets were written once, at preparation (#1277 D5).
 - **Latest-target cells (D15-2, #1312)** replace the live value queues on both hosts. A cell holds
@@ -252,15 +252,15 @@ A deferred swap leaves the candidate pending and the predecessor rendering; the 
 the block that applies the swap, so it copies the latest state. A predecessor mutated by the carry
 is retired and reclaimed off the render thread. A structural edit while a candidate is unadopted
 replaces it by compare-and-swap (#1310; withdrawal #1343, preparation across a withdrawn candidate
-#1344), which removes the refusal at `control.rs:959-961`. If
+#1344), which removes the refusal at `control.rs:1095-1097`. If
 render has already taken the candidate, the newer candidate's carry program is retargeted to the
 adopted plan.
 
 ### P9. Acknowledgements: can an ack ever precede a drop? (D15-17)
 
 - **Structural transaction.** Submit validates, classifies, prepares the successor and reserves its
-  publication slot and retirement credit (`control.rs:962`), then commits (`:1007-1009`) and writes
-  the response (`:1033`). Preparation stays in submit because it can fail; nothing is acked before
+  publication slot and retirement credit (`control.rs:1098`), then commits (`:1143-1145`) and writes
+  the response (`:1169`). Preparation stays in submit because it can fail; nothing is acked before
   it succeeds. Submit never waits for render, a swap or a warm adoption.
 - **Completion.** The response carries `{revision, path}` (#1313). A committed revision is pending
   until the applied-revision watermark covers it (#1314; browser status #1349). It completes as
@@ -278,7 +278,7 @@ adopted plan.
 ### P10. Meters and observation (D15-14)
 
 - C ABI: the render-peak telemetry reads the output (`SharedPlanState`,
-  `crates/capi/src/runtime/plan.rs:5`); it is continuous.
+  `crates/control-plane/src/plan.rs:8`); it is continuous.
 - Meter, observation and spectrum state of an unchanged owner carries under P1, on both hosts (*Carry
   meter and effect observation state across a plan swap*, #1327). This replaces the 2026-10-04
   plan, which restarted the browser's windows at every swap. Only a new or restarted owner's windows

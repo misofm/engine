@@ -1,21 +1,28 @@
-//! capi's own resource projection, and the children `miso_engine_v1_compile_session` returns.
+//! The control plane's own resource projection, and the children a compile returns.
 
 use super::*;
 
-pub(crate) struct CompiledChildren {
-    pub(crate) session: SessionState,
-    pub(crate) session_error: FixedBytes,
-    pub(crate) plan: PlanState,
+/// What [`compile_children`] returns: the control-protocol session and the render plan it drives.
+pub struct CompiledChildren<A: ControlAdapter> {
+    /// The control-thread session.
+    pub session: SessionState<A>,
+    /// The render-thread plan.
+    pub plan: PlanState<A>,
 }
 
 /// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
-pub(crate) const LIVE_QUEUE_DEPTH: NonZeroUsize =
-    NonZeroUsize::new(16).expect("sixteen is nonzero");
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub const LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
 
 /// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
 /// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
 /// no route lane (#1225). An effect lane's depth is `min(LIVE_QUEUE_DEPTH, automation capacity)`.
-pub(crate) const C_ABI_LIVE_LANES: HostLiveLanes = HostLiveLanes {
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub const C_ABI_LIVE_LANES: HostLiveLanes = HostLiveLanes {
     effects: true,
     ..HostLiveLanes::FADER_AND_MATRIX
 };
@@ -26,7 +33,7 @@ pub(crate) struct PreparedRuntime {
     /// One live-control producer per prepared effect instance (#1263 D2).
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     pub(crate) plan: PreparedRenderPlan,
-    pub(crate) resources: PlanResourceReport,
+    pub(crate) resources: PlanResources,
     /// The part of `resources`' source rows the plan carries from its predecessor.
     pub(crate) carried: CarriedSourceBytes,
     /// What the plan holds, for preparing its successor (issue #1273 D1).
@@ -35,30 +42,45 @@ pub(crate) struct PreparedRuntime {
     pub(crate) capi: CapiResources,
 }
 
+/// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
 pub(crate) fn boxed_zeroed(bytes: u64) -> Result<Box<[u8]>, CompileFailure> {
-    Ok(FixedBytes::try_new(bytes)?.bytes)
+    let capacity = usize::try_from(bytes).map_err(|_| failure(ResourceFault::Platform))?;
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(capacity)
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+    buffer.resize(capacity, 0);
+    Ok(buffer.into_boxed_slice())
 }
 
 pub(crate) fn checked_layout<T>(count: usize) -> Result<u64, CompileFailure> {
-    let layout = Layout::array::<T>(count).map_err(|_| failure("capi.resource.arithmetic"))?;
-    u64::try_from(layout.size()).map_err(|_| failure("capi.resource.platform"))
+    let layout = Layout::array::<T>(count).map_err(|_| failure(ResourceFault::Arithmetic))?;
+    u64::try_from(layout.size()).map_err(|_| failure(ResourceFault::Platform))
 }
 
 pub(crate) fn checked_byte_layout(bytes: u64) -> Result<u64, CompileFailure> {
-    checked_layout::<u8>(usize::try_from(bytes).map_err(|_| failure("capi.resource.platform"))?)
+    checked_layout::<u8>(usize::try_from(bytes).map_err(|_| failure(ResourceFault::Platform))?)
 }
 
+/// The control plane's own retained rows for one prepared plan.
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy)]
-pub(crate) struct CapiResources {
-    pub(crate) active_retained: u64,
-    pub(crate) epoch_retained: u64,
-    pub(crate) prepared_protocol_retained: u64,
-    pub(crate) largest: u64,
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct CapiResources {
+    /// Every retained byte while the plan is active.
+    pub active_retained: u64,
+    /// The bytes each epoch retains on its own: control tables, inventory, producers.
+    pub epoch_retained: u64,
+    /// The bytes a prepared structural command retains until it commits.
+    pub prepared_protocol_retained: u64,
+    /// The largest single allocation among them.
+    pub largest: u64,
 }
 
 /// Source-ring bytes a successor plan carries from the plan it displaces (issue #1273 D5).
 ///
-/// The successor's [`PlanResourceReport`] counts them in its source rows, because it owns those
+/// The successor's [`PlanResources`] count them in its source rows, because it owns those
 /// rings once active; until the swap the running plan owns them, so the double-live admission
 /// subtracts them from the successor's rows and counts each carried ring once.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -67,10 +89,16 @@ pub(crate) struct CarriedSourceBytes {
     pub(crate) overhead: u64,
 }
 
+/// Both compiled models' charge while a prospective session lives beside the committed one.
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy)]
-pub(crate) struct CompiledModelAdmission {
-    pub(crate) retained_bytes: u64,
-    pub(crate) largest_allocation_bytes: u64,
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct CompiledModelAdmission {
+    /// Both models' retained bytes.
+    pub retained_bytes: u64,
+    /// The larger of the two models' largest single allocation.
+    pub largest_allocation_bytes: u64,
 }
 
 pub(crate) fn compiled_model_admission(
@@ -82,7 +110,7 @@ pub(crate) fn compiled_model_admission(
             .resource_estimate()
             .compiled_model_bytes
             .checked_add(prospective.resource_estimate().compiled_model_bytes)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         largest_allocation_bytes: current
             .resource_estimate()
             .single_allocation_bytes
@@ -107,12 +135,12 @@ pub(crate) fn checked_sum(rows: &[u64]) -> Result<u64, CompileFailure> {
     rows.iter().try_fold(0_u64, |total, row| {
         total
             .checked_add(*row)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))
     })
 }
 
 pub(crate) fn protocol_queue_config(
-    limits: CompileLimits,
+    limits: ControlLimits,
     quantum_frames: usize,
 ) -> Result<ProtocolQueueConfig, CompileFailure> {
     let one = NonZeroUsize::new(1).expect("one is nonzero");
@@ -120,9 +148,9 @@ pub(crate) fn protocol_queue_config(
         control_command_slots: one,
         control_command_bytes: NonZeroUsize::new(
             usize::try_from(limits.maximum_control_frame_bytes)
-                .map_err(|_| failure("capi.resource.platform"))?,
+                .map_err(|_| failure(ResourceFault::Platform))?,
         )
-        .ok_or_else(|| failure("capi.resource.limit"))?,
+        .ok_or_else(|| failure(ResourceFault::Limit))?,
         automation_batch_slots: one,
         reliable_response_slots: one,
         reliable_event_slots: NonZeroUsize::new(2).expect("two is nonzero"),
@@ -130,15 +158,15 @@ pub(crate) fn protocol_queue_config(
         per_block_automation_density: NonZeroUsize::new(
             limits.maximum_automation_spans_per_block as usize,
         )
-        .ok_or_else(|| failure("capi.resource.limit"))?,
+        .ok_or_else(|| failure(ResourceFault::Limit))?,
         quantum_frames: NonZeroUsize::new(quantum_frames)
-            .ok_or_else(|| failure("capi.resource.limit"))?,
+            .ok_or_else(|| failure(ResourceFault::Limit))?,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn capi_resources(
-    limits: CompileLimits,
+pub(crate) fn capi_resources<A: ControlAdapter>(
+    limits: ControlLimits,
     source_count: usize,
     source_id_bytes: usize,
     strip_table_bytes: u64,
@@ -149,28 +177,27 @@ pub(crate) fn capi_resources(
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
-        .map_err(|_| failure("capi.resource.arithmetic"))?;
+        .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let replay_config = ReplayCacheConfig {
         entries: NonZeroUsize::new(
             usize::try_from(limits.maximum_replay_entries)
-                .map_err(|_| failure("capi.resource.platform"))?,
+                .map_err(|_| failure(ResourceFault::Platform))?,
         )
-        .ok_or_else(|| failure("capi.resource.limit"))?,
+        .ok_or_else(|| failure(ResourceFault::Limit))?,
         bytes: NonZeroUsize::new(
             usize::try_from(limits.maximum_replay_bytes)
-                .map_err(|_| failure("capi.resource.platform"))?,
+                .map_err(|_| failure(ResourceFault::Platform))?,
         )
-        .ok_or_else(|| failure("capi.resource.limit"))?,
+        .ok_or_else(|| failure(ResourceFault::Limit))?,
         max_response_bytes: usize::try_from(limits.maximum_control_frame_bytes)
-            .map_err(|_| failure("capi.resource.platform"))?,
+            .map_err(|_| failure(ResourceFault::Platform))?,
     };
     let replay = ReplayCache::resource_report_for_config(replay_config)
-        .map_err(|_| failure("capi.resource.arithmetic"))?;
+        .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let exchange = plan_exchange_resource_report(PlanExchangeConfig {
-        publication_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
         retirement_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
     })
-    .map_err(|_| failure("capi.resource.arithmetic"))?;
+    .map_err(|_| failure(ResourceFault::Arithmetic))?;
     // The control-source table and ID arena are the facade's own layout; capi reads the mirror
     // (`control_table_bytes` / `source_id_arena_bytes`) rather than restating the struct, so this
     // pre-flight cannot drift when that struct changes.
@@ -197,11 +224,11 @@ pub(crate) fn capi_resources(
     // compile needs graph row + compiled model + this payload under the graph cap.
     let effect_row = effect_controls
         .total_bytes()
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let control_table_row = host_core::control_table_bytes(source_count)
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let source_id_row = host_core::source_id_arena_bytes(source_id_bytes)
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let epoch_rows = [
         control_table_row,
         source_id_row,
@@ -211,14 +238,14 @@ pub(crate) fn capi_resources(
         effect_row,
     ];
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
-        .map_err(|_| failure("capi.resource.platform"))?
+        .map_err(|_| failure(ResourceFault::Platform))?
         / size_of::<u16>();
     let fixed_allocation_rows = [
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_byte_layout(limits.maximum_control_frame_bytes)?,
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
-        checked_layout::<SharedArcAllocation<SharedPlanState>>(1)?,
+        checked_layout::<SharedArcAllocation<SharedPlanState<A::Row>>>(1)?,
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
@@ -229,10 +256,11 @@ pub(crate) fn capi_resources(
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<ProviderEpoch>(2)?,
-        checked_layout::<(u64, PlanResourceReport)>(2)?,
-        checked_layout::<crate::Session>(1)?,
-        checked_layout::<crate::Plan>(1)?,
+        checked_layout::<(u64, A::Row)>(2)?,
     ];
+    // #1309 D5: the adapter's own per-session handles (capi's `Session` and `Plan`) follow the
+    // report table, where capi's two rows stood.
+    let adapter_allocation_rows = A::ADAPTER_ALLOCATIONS;
     let fixed_aggregate_rows = [
         queue.retained_payload_bytes,
         replay.retained_payload_bytes,
@@ -244,15 +272,18 @@ pub(crate) fn capi_resources(
     ];
     let prepared_protocol_aggregate_rows = [replay.retained_payload_bytes];
     let epoch_retained = checked_sum(&epoch_rows)?;
-    let active_retained = checked_sum(&fixed_allocation_rows)?
+    let fixed_allocations = checked_sum(&fixed_allocation_rows)?
+        .checked_add(checked_sum(adapter_allocation_rows)?)
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    let active_retained = fixed_allocations
         .checked_add(checked_sum(&fixed_aggregate_rows)?)
         .and_then(|value| value.checked_add(epoch_retained))
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let prepared_protocol_retained = checked_sum(&prepared_protocol_allocation_rows)?
         .checked_add(checked_sum(&prepared_protocol_aggregate_rows)?)
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     // Conservative: the strip row is the producer slice plus every `track_id`, which are separate
     // allocations, so feeding the whole row overstates the largest single allocation when that
     // row is the maximum. The error only ever refuses earlier.
@@ -261,6 +292,7 @@ pub(crate) fn capi_resources(
         .into_iter()
         .chain([effect_controls.largest_allocation_bytes()])
         .chain(fixed_allocation_rows)
+        .chain(adapter_allocation_rows.iter().copied())
         .chain(prepared_protocol_allocation_rows)
         .chain([
             queue.largest_allocation_bytes,
@@ -278,12 +310,12 @@ pub(crate) fn capi_resources(
     })
 }
 
-pub(crate) fn prepared_capi_resources(
+pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     compiled: &CompiledSession,
     catalog: &PreparedSessionControlCatalog,
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
-    limits: CompileLimits,
+    limits: ControlLimits,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -293,7 +325,7 @@ pub(crate) fn prepared_capi_resources(
             .try_fold(0_usize, |total, source| {
                 total
                     .checked_add(source.id.as_str().len())
-                    .ok_or_else(|| failure("capi.resource.arithmetic"))
+                    .ok_or_else(|| failure(ResourceFault::Arithmetic))
             })?;
     // Every strip, tracks and submixes alike, carries one producer whose `track_id` is its ID.
     let (strip_count, strip_id_bytes) = compiled.normalized_model().strips().try_fold(
@@ -302,7 +334,7 @@ pub(crate) fn prepared_capi_resources(
             bytes
                 .checked_add(strip.id.as_str().len())
                 .map(|bytes| (count + 1, bytes))
-                .ok_or_else(|| failure("capi.resource.arithmetic"))
+                .ok_or_else(|| failure(ResourceFault::Arithmetic))
         },
     )?;
     let provider = SessionControlProvider::resource_report(
@@ -310,13 +342,13 @@ pub(crate) fn prepared_capi_resources(
         controller_retained_capacity(limits)?,
         RENDER_DIAGNOSTIC_SLOTS,
     )
-    .map_err(|_| failure("capi.resource.arithmetic"))?;
-    capi_resources(
+    .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    capi_resources::<A>(
         limits,
         compiled.source_count(),
         source_id_bytes,
         host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         compiled.quantum().0 as usize,
         provider,
         inventory.retained_bytes(),
@@ -325,10 +357,10 @@ pub(crate) fn prepared_capi_resources(
 }
 
 pub(crate) fn controller_retained_capacity(
-    limits: CompileLimits,
+    limits: ControlLimits,
 ) -> Result<ControllerRetainedCapacity, CompileFailure> {
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
-        .map_err(|_| failure("capi.resource.platform"))?;
+        .map_err(|_| failure(ResourceFault::Platform))?;
     let maximum_tlvs = control_bytes / size_of::<u16>();
     Ok(ControllerRetainedCapacity {
         meter_handles: maximum_tlvs,
@@ -337,32 +369,32 @@ pub(crate) fn controller_retained_capacity(
 }
 
 pub(crate) fn validate_replacement_peak(
-    current: PlanResourceReport,
-    prospective: PlanResourceReport,
+    current: PlanResources,
+    prospective: PlanResources,
     prospective_carried: CarriedSourceBytes,
     prospective_capi: CapiResources,
     compiled_models: CompiledModelAdmission,
-    limits: CompileLimits,
+    limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let combined = |left: u64, right: u64| {
         left.checked_add(right)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))
     };
     if combined(
         current.graph_session_plus_plan_bytes,
         prospective.graph_session_plus_plan_bytes,
     )?
     .checked_add(compiled_models.retained_bytes)
-    .ok_or_else(|| failure("capi.resource.arithmetic"))?
+    .ok_or_else(|| failure(ResourceFault::Arithmetic))?
         > limits.maximum_graph_session_plus_plan_bytes
     {
-        return Err(failure("graph.resource.limit"));
+        return Err(diagnostic("graph.resource.limit"));
     }
     // Issue #1273 D5: a carried ring is the current plan's until the swap, so the double-live
     // peak counts it once, there.
     let allocated = |row: u64, carried: u64| {
         row.checked_sub(carried)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))
     };
     if combined(
         current.source_total_bytes,
@@ -376,7 +408,7 @@ pub(crate) fn validate_replacement_peak(
             )?,
         )? > limits.maximum_source_overhead_bytes
     {
-        return Err(failure("source.resource.limit"));
+        return Err(diagnostic("source.resource.limit"));
     }
     if combined(
         current.effect_scalar_state_bytes,
@@ -387,22 +419,22 @@ pub(crate) fn validate_replacement_peak(
             prospective.effect_scalar_scratch_bytes,
         )? > limits.maximum_effect_scratch_bytes
     {
-        return Err(failure("effect.resource.limit"));
+        return Err(diagnostic("effect.resource.limit"));
     }
     if combined(
         current.builtin_retained_payload_bytes,
         prospective.builtin_retained_payload_bytes,
     )? > limits.maximum_builtin_retained_bytes
     {
-        return Err(failure("capi.resource.limit"));
+        return Err(failure(ResourceFault::Limit));
     }
     let capi_peak = current
-        .capi_retained_bytes
+        .control_retained_bytes
         .checked_add(prospective_capi.epoch_retained)
         .and_then(|value| value.checked_add(prospective_capi.prepared_protocol_retained))
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
-    if capi_peak > limits.maximum_capi_retained_bytes {
-        return Err(failure("capi.resource.limit"));
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    if capi_peak > limits.maximum_control_retained_bytes {
+        return Err(failure(ResourceFault::Limit));
     }
     if current
         .largest_named_allocation_bytes
@@ -411,17 +443,22 @@ pub(crate) fn validate_replacement_peak(
         .max(compiled_models.largest_allocation_bytes)
         > limits.maximum_named_allocation_bytes
     {
-        return Err(failure("capi.resource.limit"));
+        return Err(failure(ResourceFault::Limit));
     }
     Ok(())
 }
 
 /// One provider epoch's resources as the live admission reads them: its plan's report row and the
 /// capi resources it was prepared with (#1257 D4).
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy)]
-pub(crate) struct LiveEpochResources {
-    pub(crate) report: PlanResourceReport,
-    pub(crate) capi: CapiResources,
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct LiveEpochResources {
+    /// The epoch's plan row, read back from the adapter's report table.
+    pub report: PlanResources,
+    /// The capi resources the epoch's plan was prepared with.
+    pub capi: CapiResources,
 }
 
 /// The live arm's admission (#1053 D8, #1257 D5): may the prospective compiled model live beside
@@ -433,20 +470,23 @@ pub(crate) struct LiveEpochResources {
 ///
 /// - **graph:** both plans' `graph_session_plus_plan_bytes` plus both compiled models'
 ///   `retained_bytes`;
-/// - **capi:** the newest plan's `capi_retained_bytes`, plus the current epoch's `epoch_retained`
+/// - **capi:** the newest plan's `control_retained_bytes`, plus the current epoch's `epoch_retained`
 ///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
 ///   term includes a provider catalog (`catalog_retained_bytes`) that the live arm never builds,
 ///   because it never replaces the catalog: a conservative overcount, kept so that the term is the
 ///   same one a rebuild charges;
 /// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
 ///   newest epoch's capi `largest` and the compiled models' largest allocation.
-pub(crate) fn validate_live_peak(
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub fn validate_live_peak(
     current: LiveEpochResources,
     pending: Option<LiveEpochResources>,
     compiled_models: CompiledModelAdmission,
-    limits: CompileLimits,
+    limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
-    let arithmetic = || failure("capi.resource.arithmetic");
+    let arithmetic = || failure(ResourceFault::Arithmetic);
     let newest = pending.unwrap_or(current);
     let graph = current
         .report
@@ -455,16 +495,16 @@ pub(crate) fn validate_live_peak(
         .and_then(|value| value.checked_add(compiled_models.retained_bytes))
         .ok_or_else(arithmetic)?;
     if graph > limits.maximum_graph_session_plus_plan_bytes {
-        return Err(failure("graph.resource.limit"));
+        return Err(diagnostic("graph.resource.limit"));
     }
     let capi = newest
         .report
-        .capi_retained_bytes
+        .control_retained_bytes
         .checked_add(pending.map_or(0, |_| current.capi.epoch_retained))
         .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
         .ok_or_else(arithmetic)?;
-    if capi > limits.maximum_capi_retained_bytes {
-        return Err(failure("capi.resource.limit"));
+    if capi > limits.maximum_control_retained_bytes {
+        return Err(failure(ResourceFault::Limit));
     }
     if current
         .report
@@ -474,53 +514,21 @@ pub(crate) fn validate_live_peak(
         .max(compiled_models.largest_allocation_bytes)
         > limits.maximum_named_allocation_bytes
     {
-        return Err(failure("capi.resource.limit"));
+        return Err(failure(ResourceFault::Limit));
     }
     Ok(())
 }
 
-pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
-    limits.maximum_automation_spans_per_block != 0
-        && [
-            limits.maximum_document_bytes,
-            limits.maximum_diagnostic_bytes,
-            limits.maximum_tracks,
-            limits.maximum_sources,
-            limits.maximum_routes,
-            limits.maximum_effects,
-            limits.maximum_graph_session_plus_plan_bytes,
-            limits.maximum_source_total_bytes,
-            limits.maximum_source_overhead_bytes,
-            limits.maximum_effect_state_bytes,
-            limits.maximum_effect_scratch_bytes,
-            limits.maximum_builtin_retained_bytes,
-            limits.maximum_capi_retained_bytes,
-            limits.maximum_named_allocation_bytes,
-            limits.maximum_meter_streams,
-            limits.maximum_meter_items,
-            limits.maximum_meter_bytes,
-            limits.maximum_control_frame_bytes,
-            limits.maximum_replay_bytes,
-            limits.maximum_replay_entries,
-        ]
-        .into_iter()
-        .all(|value| value != 0)
-}
-
-pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
-    limits.struct_size == crate::COMPILE_LIMITS_SIZE
-        && limits.reserved0 == 0
-        && limits.reserved == [0; 2]
-        && all_limits_nonzero(limits)
-}
-
-/// Translate the frozen C ABI limits into the facade's caps, field for field, except
+/// Translate the control limits into the facade's caps, field for field, except
 /// `maximum_submixes` and `maximum_vcas`, whose zero means `maximum_tracks` (#1206 D2, #1243 D2).
 ///
 /// This is the only place the mapping is spelled. `AnyLaunchRate`: the C ABI compiles whatever
 /// launch rate the session declares (issue 032), unlike the browser host which is pinned to its
 /// `AudioContext`. `maximum_source_channels: None`: the C ABI has no such limit field.
-pub(crate) fn prepare_caps(limits: CompileLimits) -> HostPrepareCaps {
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub fn prepare_caps(limits: ControlLimits) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: limits.source_ring_frames,
@@ -556,22 +564,20 @@ pub(crate) fn prepare_caps(limits: CompileLimits) -> HostPrepareCaps {
 }
 
 pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure {
-    CompileFailure {
-        diagnostics: diagnostics.into_bytes(),
-    }
+    CompileFailure::Diagnostics(diagnostics.into_bytes())
 }
 
-/// Prepare one plan plus its source producers, and project the frozen ABI resource report.
+/// Prepare one plan plus its source producers, and project its resource accounting.
 ///
-/// The shared pipeline is `host-core`; capi adds only what is capi's: its own retained
-/// rows (protocol queues, replay storage, handle structs), and the ABI report shape.
+/// The shared pipeline is `host-core`; the control plane adds only what is its own: its retained
+/// rows (protocol queues, replay storage, the adapter's handle structs), and the resource shape.
 ///
 /// With a `successor` base (a structural transaction, issue #1273 D1) every source the
 /// transaction leaves unchanged is prepared vacant, to carry the displaced plan's ring; the
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
-pub(crate) fn prepare_runtime(
+pub(crate) fn prepare_runtime<A: ControlAdapter>(
     compiled: &CompiledSession,
-    limits: CompileLimits,
+    limits: ControlLimits,
     successor: Option<SuccessorBase<'_>>,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
@@ -617,17 +623,17 @@ pub(crate) fn prepare_runtime(
     // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
     // boxed slice is the allocation host-core walked for `effect_control_resources`.
     let effects = effect_controls.into_boxed_slice();
-    let capi = prepared_capi_resources(
+    let capi = prepared_capi_resources::<A>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
         prepared.report.effect_control_resources,
         limits,
     )?;
-    if capi.active_retained > limits.maximum_capi_retained_bytes
+    if capi.active_retained > limits.maximum_control_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
-        return Err(failure("capi.resource.limit"));
+        return Err(failure(ResourceFault::Limit));
     }
     let host = prepared.report;
     let largest_named = host.largest_engine_allocation_bytes.max(capi.largest);
@@ -639,31 +645,24 @@ pub(crate) fn prepare_runtime(
     // and the carry program it retains with its graph.
     let with_carried = |row: u64, carried: u64| {
         row.checked_add(carried)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))
+            .ok_or_else(|| failure(ResourceFault::Arithmetic))
     };
     let carried_payload = carried
         .total
         .checked_sub(carried.overhead)
-        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
-    let (tail_kind, tail_samples) = match host.output_tail {
-        TailSamples::Finite(samples) => (TAIL_FINITE, samples),
-        TailSamples::Infinite => (TAIL_INFINITE, 0),
-    };
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     Ok(PreparedRuntime {
         sources: prepared.sources,
         strips,
         effects,
         plan: prepared.plan,
-        resources: PlanResourceReport {
-            struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
-            abi_version: ABI_VERSION,
+        resources: PlanResources {
             sample_rate_hz: host.sample_rate_hz,
             quantum_frames: host.quantum_frames,
             source_count: host.source_count,
             track_count: host.track_count,
             latency_samples: host.latency_samples,
-            tail_kind,
-            tail_samples,
+            output_tail: host.output_tail,
             graph_session_plus_plan_bytes: with_carried(
                 host.graph_session_plus_plan_bytes,
                 host.carry_program_retained_bytes,
@@ -684,9 +683,8 @@ pub(crate) fn prepare_runtime(
             builtin_processor_payload_bytes: host.builtin_processor_payload_bytes,
             builtin_meter_payload_bytes: host.builtin_meter_payload_bytes,
             builtin_retained_payload_bytes: host.builtin_retained_payload_bytes,
-            capi_retained_bytes: capi.active_retained,
+            control_retained_bytes: capi.active_retained,
             largest_named_allocation_bytes: largest_named,
-            reserved: [0; 4],
         },
         carried,
         inventory: prepared.inventory,
@@ -695,10 +693,16 @@ pub(crate) fn prepare_runtime(
     })
 }
 
-pub(crate) fn compile_children(
+/// Compile `document` under `limits` into a control session and the plan it drives.
+///
+/// The adapter keeps its own per-session diagnostic storage; it builds that after this returns.
+pub fn compile_children<A: ControlAdapter>(
     document: &str,
-    mut limits: CompileLimits,
-) -> Result<CompiledChildren, CompileFailure> {
+    mut limits: ControlLimits,
+) -> Result<CompiledChildren<A>, CompileFailure>
+where
+    A::Row: Send + 'static,
+{
     // The C ABI needs the transactional `SessionStore` for the control protocol, so it parses and
     // caps through the facade and builds the store itself; the facade never sees the protocol.
     let model = parse_host_session(document).map_err(prepare_failure)?;
@@ -706,7 +710,7 @@ pub(crate) fn compile_children(
         limits.source_ring_frames =
             host_core::default_source_ring_frames(model.sample_rate_hz, model.quantum_frames);
         if limits.source_ring_frames == 0 {
-            return Err(failure("capi.resource.arithmetic"));
+            return Err(failure(ResourceFault::Arithmetic));
         }
     }
     let compile_caps = prepare_caps(limits)
@@ -714,16 +718,16 @@ pub(crate) fn compile_children(
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
-    let runtime = prepare_runtime(store.compiled(), limits, None)?;
+    let runtime = prepare_runtime::<A>(store.compiled(), limits, None)?;
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
-        .map_err(|_| failure("capi.resource.platform"))?;
+        .map_err(|_| failure(ResourceFault::Platform))?;
     let replay_bytes = usize::try_from(limits.maximum_replay_bytes)
-        .map_err(|_| failure("capi.resource.platform"))?;
+        .map_err(|_| failure(ResourceFault::Platform))?;
     let replay_entries = usize::try_from(limits.maximum_replay_entries)
-        .map_err(|_| failure("capi.resource.platform"))?;
+        .map_err(|_| failure(ResourceFault::Platform))?;
     let quantum_frames = usize::try_from(store.compiled().quantum().0)
-        .map_err(|_| failure("capi.resource.platform"))?;
+        .map_err(|_| failure(ResourceFault::Platform))?;
     let maximum_tlvs = u32::try_from(control_bytes / size_of::<u16>()).unwrap_or(u32::MAX);
     let codec = ProtocolCodec::new(ProtocolLimits {
         max_frame_bytes: control_bytes,
@@ -733,13 +737,13 @@ pub(crate) fn compile_children(
     });
     let one = NonZeroUsize::new(1).expect("one is nonzero");
     let queues = ProtocolQueues::prepare(protocol_queue_config(limits, quantum_frames)?)
-        .map_err(|_| failure("capi.protocol.queue"))?;
+        .map_err(|_| failure(ResourceFault::ProtocolQueue))?;
     let replay = ReplayCache::try_new(ReplayCacheConfig {
-        entries: NonZeroUsize::new(replay_entries).ok_or_else(|| failure("capi.resource.limit"))?,
-        bytes: NonZeroUsize::new(replay_bytes).ok_or_else(|| failure("capi.resource.limit"))?,
+        entries: NonZeroUsize::new(replay_entries).ok_or_else(|| failure(ResourceFault::Limit))?,
+        bytes: NonZeroUsize::new(replay_bytes).ok_or_else(|| failure(ResourceFault::Limit))?,
         max_response_bytes: control_bytes,
     })
-    .map_err(|_| failure("capi.resource.allocation"))?;
+    .map_err(|_| failure(ResourceFault::Allocation))?;
     let retained_capacity = controller_retained_capacity(limits)?;
     let PreparedRuntime {
         sources,
@@ -752,19 +756,21 @@ pub(crate) fn compile_children(
         control_catalog,
         capi,
     } = runtime;
-    let (publisher, owner, retirer) = plan_exchange(
+    // #1314 D1: the initial plan carries the store's initial revision, and the watermark starts
+    // there.
+    let (publisher, owner, retirer) = plan_exchange_at_revision(
         plan,
+        store.revision().0,
         PlanExchangeConfig {
-            publication_capacity: one,
             retirement_capacity: one,
         },
     )
-    .map_err(|_| failure("capi.plan.exchange"))?;
+    .map_err(|_| failure(ResourceFault::PlanExchange))?;
     let mut reports = Vec::new();
     reports
         .try_reserve_exact(2)
-        .map_err(|_| failure("capi.resource.allocation"))?;
-    reports.push((0, resources));
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+    reports.push((0, A::Row::from(resources)));
     let shared = Arc::new(SharedPlanState {
         plan_alive: AtomicBool::new(true),
         active_epoch: AtomicU64::new(0),
@@ -774,6 +780,7 @@ pub(crate) fn compile_children(
         render_peak_bits: AtomicU32::new(0),
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
+        watermark: publisher.watermark_reader(),
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(
@@ -782,7 +789,7 @@ pub(crate) fn compile_children(
         retained_capacity,
         RENDER_DIAGNOSTIC_SLOTS,
     )
-    .map_err(|_| failure("capi.resource.allocation"))?;
+    .map_err(|_| failure(ResourceFault::Allocation))?;
     let controller = ProtocolController::try_with_config_and_retained_capacity(
         store,
         queues,
@@ -796,20 +803,20 @@ pub(crate) fn compile_children(
         },
         retained_capacity,
     )
-    .map_err(|_| failure("capi.resource.allocation"))?;
+    .map_err(|_| failure(ResourceFault::Allocation))?;
     let mut pending_providers = Vec::new();
     pending_providers
         .try_reserve_exact(1)
-        .map_err(|_| failure("capi.resource.allocation"))?;
+        .map_err(|_| failure(ResourceFault::Allocation))?;
     let mut retired_providers = Vec::new();
     retired_providers
         .try_reserve_exact(1)
-        .map_err(|_| failure("capi.resource.allocation"))?;
+        .map_err(|_| failure(ResourceFault::Allocation))?;
     let decode_field_count = control_bytes / size_of::<u16>();
     let mut decode_fields = Vec::new();
     decode_fields
         .try_reserve_exact(decode_field_count)
-        .map_err(|_| failure("capi.resource.allocation"))?;
+        .map_err(|_| failure(ResourceFault::Allocation))?;
     decode_fields.resize(decode_field_count, 0);
     Ok(CompiledChildren {
         session: SessionState {
@@ -829,166 +836,6 @@ pub(crate) fn compile_children(
             render_diagnostic_len: 0,
             protocol_reliable_pending: false,
         },
-        session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
         plan: PlanState::new(owner, shared),
     })
-}
-
-#[cfg(test)]
-mod live_peak_tests {
-    //! #1257 gate 5: `validate_live_peak` charges each term of #1053 D8 against the right plan.
-
-    use super::*;
-    use crate::runtime::tests::{SESSION, limits};
-
-    /// Every term gets its own bit, so a missing or swapped term moves every sum it is part of.
-    struct Terms {
-        graph: u64,
-        capi_retained: u64,
-        largest_named: u64,
-        epoch_retained: u64,
-        prepared_protocol: u64,
-        capi_largest: u64,
-    }
-
-    fn epoch(base: PlanResourceReport, terms: &Terms) -> LiveEpochResources {
-        LiveEpochResources {
-            report: PlanResourceReport {
-                graph_session_plus_plan_bytes: terms.graph,
-                capi_retained_bytes: terms.capi_retained,
-                largest_named_allocation_bytes: terms.largest_named,
-                ..base
-            },
-            capi: CapiResources {
-                active_retained: u64::MAX,
-                epoch_retained: terms.epoch_retained,
-                prepared_protocol_retained: terms.prepared_protocol,
-                largest: terms.capi_largest,
-            },
-        }
-    }
-
-    fn caps(graph: u64, capi: u64, largest: u64) -> CompileLimits {
-        CompileLimits {
-            maximum_graph_session_plus_plan_bytes: graph,
-            maximum_capi_retained_bytes: capi,
-            maximum_named_allocation_bytes: largest,
-            ..limits()
-        }
-    }
-
-    fn verdict(
-        current: LiveEpochResources,
-        pending: Option<LiveEpochResources>,
-        models: CompiledModelAdmission,
-        limits: CompileLimits,
-    ) -> Result<(), String> {
-        validate_live_peak(current, pending, models, limits)
-            .map_err(|failure| String::from_utf8(failure.diagnostics).expect("UTF-8"))
-    }
-
-    /// Accepts with `cap` at `peak` and refuses with it one byte below, with `code`.
-    fn assert_cap(label: &str, peak: u64, code: &str, check: impl Fn(u64) -> Result<(), String>) {
-        assert_eq!(check(peak), Ok(()), "{label}: accepted at the cap");
-        assert_eq!(
-            check(peak - 1),
-            Err(format!("{code}\t$\n")),
-            "{label}: refused one byte below"
-        );
-    }
-
-    #[test]
-    fn the_live_admission_accepts_each_cap_and_refuses_one_byte_below() {
-        let base = compile_children(SESSION, limits())
-            .unwrap_or_else(|_| panic!("fixture compiles"))
-            .plan
-            .resources();
-        let current_terms = Terms {
-            graph: 1 << 0,
-            capi_retained: 1 << 1,
-            largest_named: 3,
-            epoch_retained: 1 << 2,
-            prepared_protocol: 1 << 3,
-            capi_largest: 5,
-        };
-        let pending_terms = Terms {
-            graph: 1 << 4,
-            capi_retained: 1 << 5,
-            largest_named: 7,
-            epoch_retained: 1 << 6,
-            prepared_protocol: 1 << 7,
-            capi_largest: 9,
-        };
-        let models = CompiledModelAdmission {
-            retained_bytes: 1 << 8,
-            largest_allocation_bytes: 11,
-        };
-        let current = epoch(base, &current_terms);
-        let pending = epoch(base, &pending_terms);
-        let huge = u64::MAX;
-
-        // Graph: both plans plus both compiled models.
-        for (label, pending, peak) in [
-            ("graph alone", None, 1 + (1 << 8)),
-            ("graph pending", Some(pending), 1 + (1 << 4) + (1 << 8)),
-        ] {
-            assert_cap(label, peak, "graph.resource.limit", |cap| {
-                verdict(current, pending, models, caps(cap, huge, huge))
-            });
-        }
-        // capi: the newest row, the current epoch's own rows while a candidate waits, and the
-        // newest epoch's prepared-protocol rows.
-        for (label, pending, peak) in [
-            ("capi alone", None, (1 << 1) + (1 << 3)),
-            (
-                "capi pending",
-                Some(pending),
-                (1 << 5) + (1 << 2) + (1 << 7),
-            ),
-        ] {
-            assert_cap(label, peak, "capi.resource.limit", |cap| {
-                verdict(current, pending, models, caps(huge, cap, huge))
-            });
-        }
-
-        // Largest allocation: make each term in turn the strict maximum. The current epoch's capi
-        // `largest` is a decoy while a candidate is pending: only the newest epoch's counts.
-        let big = 1_000;
-        for term in 0..4 {
-            let mut current_terms = Terms { ..current_terms };
-            let mut pending_terms = Terms { ..pending_terms };
-            let mut models = models;
-            match term {
-                0 => current_terms.largest_named = big,
-                1 => pending_terms.largest_named = big,
-                2 => pending_terms.capi_largest = big,
-                _ => models.largest_allocation_bytes = big,
-            }
-            current_terms.capi_largest = big * 2;
-            let current = epoch(base, &current_terms);
-            let pending = epoch(base, &pending_terms);
-            assert_cap(
-                &format!("largest pending, term {term}"),
-                big,
-                "capi.resource.limit",
-                |cap| verdict(current, Some(pending), models, caps(huge, huge, cap)),
-            );
-        }
-        for term in 0..3 {
-            let mut current_terms = Terms { ..current_terms };
-            let mut models = models;
-            match term {
-                0 => current_terms.largest_named = big,
-                1 => current_terms.capi_largest = big,
-                _ => models.largest_allocation_bytes = big,
-            }
-            let current = epoch(base, &current_terms);
-            assert_cap(
-                &format!("largest alone, term {term}"),
-                big,
-                "capi.resource.limit",
-                |cap| verdict(current, None, models, caps(huge, huge, cap)),
-            );
-        }
-    }
 }

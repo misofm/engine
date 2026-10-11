@@ -25,7 +25,7 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
 - **Browser admission.** The route band (`queue_available`, `hosts/host-web/src/lib.rs:1783-1786`;
   `push`, `:1821-1827`). `free()` is `#[inline(always)]` for the worklet call-graph gate
   (`crates/graph/src/lib.rs:1005-1013`).
-- **C ABI.** No route lane today (`crates/capi/src/runtime/compile.rs:15-21`); #1225 attaches
+- **C ABI.** No route lane today (`crates/control-plane/src/compile.rs:19-28`); #1225 attaches
   them, written to these cells.
 
 ## Decisions frozen for this slice
@@ -36,11 +36,13 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
   `route_control_resources`. The route-activity table rows are unchanged.
 - **D2. Producer.** `GraphRouteControlProducer::write(record)` is infallible; validation stays in
   `RouteControlRecord::new`, before any write.
-- **D3. Render.** At block entry the route op applies its cell if dirty: one retarget from the
-  coefficients it is at to the cell's target over its ramp, exactly as one drained record does
-  today. Render reads the newest completed write in one pass and never skips a dirty cell (#1312
-  D1); when it reads sequence `s` after `p` it adds `s - p - 1` to `live_values_superseded`
-  (#1312 D2).
+- **D3. Render.** At block entry the route op applies its cell if dirty, under the block's live
+  snapshot (#1312 D12; Amendment 1): one retarget from the coefficients it is at to the cell's
+  target over its ramp, exactly as one drained record does today. Its drain runs every block,
+  active or not (*Hand each block's live snapshot to every live drain*, #1504 D3). Render
+  applies the newest value whose revision is `<= S`, never a torn or newer one, and never skips
+  it (#1312 D1). When it applies sequence `s` after `p`, it adds `s - p - 1` to
+  `live_values_superseded` (#1312 D2).
 - **D4. Browser admission.** The route band leaves the room pass and `in_flight`; a send edit is
   validated (record construction, follow-mute composition) for the whole batch before the first
   write.
@@ -97,6 +99,12 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
 - Gate 1: a route lane left a queue, or a miscounted supersession.
 - Gate 2: a cell drain that ramps from the target or from rest instead of from the route's
   current coefficients, which clicks.
+
+## Amendment 1 (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement (2026-10-05) makes every live value of one revision take effect in one
+block (#1432 Amendment 1, #1312 Amendment 2). D3 reads the route's cell under the block's
+snapshot, which #1504 hands to the route op's drain.
 
 ## Dependencies
 

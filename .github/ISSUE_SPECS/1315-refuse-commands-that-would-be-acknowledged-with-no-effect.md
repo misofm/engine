@@ -23,9 +23,9 @@ in effect is not one: its commanded state holds.
    protocol's own tests ever dequeues it (`ProtocolQueues::try_dequeue_automation`,
    `crates/protocol/src/queue.rs:801`, has no production caller), so it reaches no PCM. The
    automation queue holds one batch (`automation_batch_slots: one`,
-   `crates/capi/src/runtime/compile.rs:114-139`), so after one accepted batch every later one is
+   `crates/control-plane/src/compile.rs:142-167`), so after one accepted batch every later one is
    `BACKPRESSURE` until a transport locate cancels it. capi enables every provider family
-   (`ProviderFeatures::ALL`, `compile.rs:795`), so the command is advertised. Documented as
+   (`ProviderFeatures::ALL`, `compile.rs:798`), so the command is advertised. Documented as
    undelivered in `docs/CONTROL_PROTOCOL_SEMANTICS.md:15` and in decision 14
    (`docs/rulings/live-update-versus-rebuild-2026-10-04.md:203-206`).
 2. **Browser `COMMAND_EFFECT_BYPASS` lifting a prepared bypass.** The delay and the multiband
@@ -65,7 +65,7 @@ advertises command `0x0006` (`crates/protocol/src/message_wire.rs:3496`, `:3512`
   (`controller.rs:3219`) omits command `0x0006` and flag bit 5. Event `0x8002` stays advertised,
   because the wire rule ties it to the session family; with no batch admitted, nothing raises it.
 - **D3. The control plane serves no automation.** Its controller config uses
-  `ProviderFeatures { automation: false, ..ProviderFeatures::ALL }` (today `compile.rs:795`).
+  `ProviderFeatures { automation: false, ..ProviderFeatures::ALL }` (today `compile.rs:798`).
   It stays false until the slice that answer A9 of *Research: render stored session automation in
   the engine, identically on every platform* (#1058) names wires a render-side drain.
 - **D4. Browser bypass lift is refused.** Preparation records on each effect producer whether its

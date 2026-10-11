@@ -30,9 +30,9 @@ use effect_compiler::{
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use engine::realtime::audit::{self, ForbiddenOperation};
 use engine::realtime::{
-    Consumer, PlanExchangeConfig, PlanRetirer, PlanarBufferMut, QueueGeneration, RealtimePlanOwner,
-    RealtimeRenderReport, RenderError, RenderIo, RenderTime, SwapOutcome, bounded_spsc_move,
-    plan_exchange,
+    Consumer, PlanExchangeConfig, PlanPublisher, PlanReplacementReservationError, PlanRetirer,
+    PlanarBufferMut, PreparedRenderPlan, QueueGeneration, RealtimePlanOwner, RealtimeRenderReport,
+    RenderError, RenderIo, RenderTime, SwapOutcome, Withdrawal, bounded_spsc_move, plan_exchange,
 };
 use graph::{
     GraphBindingBlock, GraphEdgeId, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
@@ -50,6 +50,10 @@ const OBSERVERS: usize = 7;
 const PLAN_A: u64 = 1;
 const PLAN_B: u64 = 2;
 const PLAN_C: u64 = 3;
+/// Blocks `2..BLOCKS - 2`: B renders each while the control side is refused C.
+const REFUSED_RANGE: u64 = BLOCKS - 4;
+/// B renders block 1, the refused range, and the block after C's withdrawal.
+const B_RENDERS: u64 = REFUSED_RANGE + 2;
 const ACCEPTED_MANIFEST_SHA256: &str =
     "d0bf619820c5c474c6f7475556cfbd5ea20ca9d69bab6fd41cf08d27962deff9";
 const ACCEPTED_GRAPH_PCM_SHA256: &str =
@@ -200,11 +204,10 @@ fn run_audit() {
     let control_thread_id = std::thread::current().id();
     let (initial, mut initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
     let (applied, mut applied_meters) = prepare_graph_plan(PLAN_B, Some(Arc::clone(&drops)));
-    let (deferred, _deferred_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
+    let (refused, mut refused_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
     let (mut publisher, mut owner, retirer) = plan_exchange(
         initial,
         PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("publication capacity"),
             retirement_capacity: NonZeroUsize::new(1).expect("retirement capacity"),
         },
     )
@@ -257,24 +260,17 @@ fn run_audit() {
         let second = traced_render(&mut owner, &mut output, 1);
         assert_applied(&second, PLAN_B, 1);
         assert_pcm_fixture(&output);
-        let second_epoch = match publisher.publish(deferred) {
-            Ok(epoch) => epoch,
-            Err(_) => panic!("C publication"),
-        };
-        assert_eq!(second_epoch.0, 2);
-        let third = traced_render(&mut owner, &mut output, 2);
-        assert_eq!(third.swap, SwapOutcome::DeferredRetirementFull);
-        assert_eq!(third.active_epoch.0, 1);
-        assert_eq!(third.render.plan_id, PLAN_B);
-        traced_range(&mut owner, &mut output, 3, BLOCKS, PLAN_B);
-        let second_meter_values = drain_values(&mut applied_meters, "B first window");
-        assert_eq!(second_meter_values, first_meter_values);
-
-        assert_eq!(owner.deferred_count(), BLOCKS - 2);
-        assert_eq!(output.as_ptr() as usize, left_address);
-        assert_eq!(output[QUANTUM..].as_ptr() as usize, right_address);
-        let audit = audit::snapshot();
-        assert_eq!(audit.total(), 0);
+        // Refused reservation: A fills the one-plan retirement queue, so before every block of
+        // the long range the control side is refused C, and render keeps rendering B.
+        let (refused, reservations_refused) = traced_refused_range(
+            &mut owner,
+            &mut publisher,
+            refused,
+            &mut output,
+            2,
+            BLOCKS - 2,
+        );
+        assert_eq!(reservations_refused, REFUSED_RANGE);
 
         command_sender
             .try_push(RetirementCommand::Reclaim)
@@ -284,49 +280,78 @@ fn run_audit() {
         });
         assert_eq!(reclaimed_epoch_plus_one.load(Ordering::Acquire), 1);
         assert_eq!(command_sender.success_count(), 1);
+
+        // Withdraw and republish: C is published, taken back before any render, and adopted
+        // with its own epoch once it is published again.
+        let c_epoch = match publisher.publish(refused) {
+            Ok(epoch) => epoch,
+            Err(_) => panic!("C publication after reclamation"),
+        };
+        assert_eq!(c_epoch.0, 2);
+        let candidate = match publisher.withdraw() {
+            Withdrawal::Withdrawn(candidate) => candidate,
+            other => panic!("an unclaimed C must withdraw, got {other:?}"),
+        };
+        assert_eq!((candidate.epoch().0, candidate.plan_id()), (2, PLAN_C));
+        let withdrawn = traced_render(&mut owner, &mut output, BLOCKS - 2);
+        assert_eq!(withdrawn.swap, SwapOutcome::None);
+        assert_eq!(withdrawn.active_epoch.0, 1);
+        assert_eq!(withdrawn.render.plan_id, PLAN_B);
+        // B's one-window meter queues filled at block 1 and have refused every later window.
+        let second_meter_values = drain_values(&mut applied_meters, "B first window");
+        assert_eq!(second_meter_values, first_meter_values);
+        assert_eq!(publisher.republish(candidate).0, 2);
+        let adopted = traced_render(&mut owner, &mut output, BLOCKS - 1);
+        assert_applied(&adopted, PLAN_C, 2);
+        assert_pcm_fixture(&output);
+        let third_meter_values = drain_values(&mut refused_meters, "C first window");
+        assert_eq!(third_meter_values, first_meter_values);
+
+        assert_eq!(output.as_ptr() as usize, left_address);
+        assert_eq!(output[QUANTUM..].as_ptr() as usize, right_address);
+        let audit = audit::snapshot();
+        assert_eq!(audit.total(), 0);
         stop.store(true, Ordering::Release);
         (retirement_thread.join().expect("retirement owner"), audit)
     });
     drop(owner);
     let drops = drops.lock().expect("drop records");
     assert_eq!(drops.len(), 3);
-    assert_eq!(
-        drops
-            .iter()
-            .filter(|row| **row == (PLAN_A, retirement_thread_id))
-            .count(),
-        1
-    );
-    assert_eq!(
-        drops
-            .iter()
-            .filter(|row| **row == (PLAN_B, control_thread_id))
-            .count(),
-        1
-    );
-    assert_eq!(
-        drops
-            .iter()
-            .filter(|row| **row == (PLAN_C, control_thread_id))
-            .count(),
-        1
-    );
+    // A is reclaimed by the worker; B, displaced by C, is destroyed when the worker drops its
+    // retirer; C is the active plan, destroyed with the owner on the control thread.
+    for (plan, expected_thread) in [
+        (PLAN_A, retirement_thread_id),
+        (PLAN_B, retirement_thread_id),
+        (PLAN_C, control_thread_id),
+    ] {
+        assert_eq!(
+            drops
+                .iter()
+                .filter(|row| **row == (plan, expected_thread))
+                .count(),
+            1,
+            "plan {plan} has one exact destruction role"
+        );
+    }
 
-    let queue_success_windows = 2 * OBSERVERS as u64;
-    let queue_full_windows = (BLOCKS - 2) * OBSERVERS as u64;
+    // A, B and C each push one meter window that is drained; B's later windows find its queue
+    // full.
+    let queue_success_windows = 3 * OBSERVERS as u64;
+    let queue_full_windows = (B_RENDERS - 1) * OBSERVERS as u64;
     println!(
         concat!(
             "{{\"schema_version\":1,\"kind\":\"issue069_graph_realtime_lifecycle_audit\",",
             "\"renders\":{},\"sample_rate_hz\":48000,\"quantum_frames\":{},\"observers\":{},",
-            "\"render_count_by_plan\":{{\"A\":1,\"B\":999999,\"C\":0}},",
-            "\"swaps_applied\":1,\"swaps_deferred\":999998,",
-            "\"prior_plan_renders_on_deferred\":999998,\"drained_blocks\":2,",
+            "\"render_count_by_plan\":{{\"A\":1,\"B\":{},\"C\":1}},",
+            "\"swaps_applied\":2,\"reservations_refused\":{},",
+            "\"prior_plan_renders_while_refused\":{},\"withdrawals\":1,",
+            "\"republished_adoptions\":1,\"drained_blocks\":3,",
             "\"observer_windows_per_drained_block\":7,",
             "\"queue_success_windows\":{},\"queue_full_windows\":{},",
             "\"pdc_samples\":9,\"distinct_taps\":7,",
             "\"accepted_manifest_sha256\":\"{}\",\"accepted_graph_pcm_sha256\":\"{}\",",
             "\"accepted_graph_meters_sha256\":\"{}\",",
-            "\"retirement_owner_destroyed\":1,\"control_owner_destroyed\":2,",
+            "\"retirement_owner_destroyed\":2,\"control_owner_destroyed\":1,",
             "\"render_owner_destroyed\":0,\"stable_left_address\":true,",
             "\"stable_right_address\":true,",
             "\"allocations\":{},\"deallocations\":{},\"locks\":{},\"feature_detection\":{},\"logs\":{},",
@@ -335,6 +360,9 @@ fn run_audit() {
         BLOCKS,
         QUANTUM,
         OBSERVERS,
+        B_RENDERS,
+        REFUSED_RANGE,
+        REFUSED_RANGE,
         queue_success_windows,
         queue_full_windows,
         ACCEPTED_MANIFEST_SHA256,
@@ -359,21 +387,41 @@ fn assert_applied(report: &RealtimeRenderReport, plan_id: u64, epoch: u64) {
     assert_eq!(report.active_epoch.0, epoch);
 }
 
-fn traced_range(
+/// The refused-reservation round: before each block in `first..end_exclusive` the control side
+/// tries to reserve `candidate` and is refused `RetirementFull`, then render renders B with
+/// epoch 1 and applies nothing. Returns the candidate and the exact number of refusals.
+fn traced_refused_range(
     owner: &mut RealtimePlanOwner,
+    publisher: &mut PlanPublisher,
+    candidate: PreparedRenderPlan,
     output: &mut [f32; QUANTUM * 2],
     first: u64,
     end_exclusive: u64,
-    plan_id: u64,
-) {
+) -> (PreparedRenderPlan, u64) {
+    let mut candidate = Some(candidate);
+    let mut refused = 0_u64;
     eprintln!("MISO_ENGINE_BUILTINS_GRAPH_RT_BEGIN");
     for block in first..end_exclusive {
+        let plan = candidate
+            .take()
+            .expect("the refused candidate is control-owned");
+        match publisher.reserve_replacement(plan, engine::realtime::PlanAdoption::Next) {
+            Err(PlanReplacementReservationError::RetirementFull(returned)) => {
+                candidate = Some(returned);
+                refused += 1;
+            }
+            _ => panic!("a reservation must be refused while the retirement queue is full"),
+        }
         let report = render(owner, output, block);
-        assert_eq!(report.swap, SwapOutcome::DeferredRetirementFull);
+        assert_eq!(report.swap, SwapOutcome::None);
         assert_eq!(report.active_epoch.0, 1);
-        assert_eq!(report.render.plan_id, plan_id);
+        assert_eq!(report.render.plan_id, PLAN_B);
     }
     eprintln!("MISO_ENGINE_BUILTINS_GRAPH_RT_END");
+    (
+        candidate.expect("the refused candidate is control-owned"),
+        refused,
+    )
 }
 
 fn traced_render(
@@ -817,11 +865,10 @@ mod tests {
         let control_thread_id = std::thread::current().id();
         let (initial, _initial_meters) = prepare_graph_plan(PLAN_A, Some(Arc::clone(&drops)));
         let (applied, _applied_meters) = prepare_graph_plan(PLAN_B, Some(Arc::clone(&drops)));
-        let (deferred, _deferred_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
+        let (refused, _refused_meters) = prepare_graph_plan(PLAN_C, Some(Arc::clone(&drops)));
         let (mut publisher, mut owner, retirer) = plan_exchange(
             initial,
             PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(1).expect("one publication"),
                 retirement_capacity: NonZeroUsize::new(1).expect("one retirement"),
             },
         )
@@ -861,16 +908,15 @@ mod tests {
             assert_eq!(b_epoch.0, 1);
             let mut output = [0.0_f32; QUANTUM * 2];
             assert_applied(&render(&mut owner, &mut output, 0), PLAN_B, 1);
-            let c_epoch = match publisher.publish(deferred) {
-                Ok(epoch) => epoch,
-                Err(_) => panic!("publish C"),
+            // A holds the only retirement credit, so C is refused on the control side and stays
+            // control-owned; render keeps B.
+            let refused = match publisher
+                .reserve_replacement(refused, engine::realtime::PlanAdoption::Next)
+            {
+                Err(PlanReplacementReservationError::RetirementFull(refused)) => refused,
+                _ => panic!("C must be refused while A awaits retirement"),
             };
-            assert_eq!(c_epoch.0, 2);
-            assert_eq!(
-                render(&mut owner, &mut output, 1).swap,
-                SwapOutcome::DeferredRetirementFull
-            );
-            assert_eq!(owner.deferred_count(), 1);
+            assert_eq!(render(&mut owner, &mut output, 1).swap, SwapOutcome::None);
 
             command_sender
                 .try_push(RetirementCommand::Reclaim)
@@ -881,7 +927,9 @@ mod tests {
             assert_eq!(reclaimed_epoch_plus_one.load(Ordering::Acquire), 1);
             assert_eq!(command_sender.success_count(), 1);
             stop.store(true, Ordering::Release);
-            retirement_thread.join().expect("retirement worker")
+            let retirement_thread_id = retirement_thread.join().expect("retirement worker");
+            drop(refused);
+            retirement_thread_id
         });
         drop(owner);
         let drops = drops.lock().expect("drop records");

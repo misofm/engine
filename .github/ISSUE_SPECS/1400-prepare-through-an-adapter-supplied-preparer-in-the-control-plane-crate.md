@@ -16,13 +16,13 @@ browser's boot already prepares through it, and its rendered bits do not change.
 ## Context
 
 - **The preparation is fixed to the C ABI today.** `prepare_runtime`
-  (`crates/capi/src/runtime/compile.rs:572`) validates the shape (`:581`), builds a live request
-  with `LIVE_QUEUE_DEPTH` (`:12-13`, `:588-591`) and calls
+  (`crates/control-plane/src/compile.rs:578`) validates the shape (`:587`), builds a live request
+  with `LIVE_QUEUE_DEPTH` (`:17`, `:594-597`) and calls
   `prepare_host_runtime_with_live_lanes` or `_with_live_lanes_successor` with `C_ABI_LIVE_LANES`
-  (`:18-21`, `:592-602`). The rest of it (`:603-695`) is the control plane's own accounting:
-  `StripLanes`, the effect producers, `prepared_capi_resources` (`:281`) and the report row.
-- Its two callers are the boot compile (`compile_children`, `compile.rs:717`) and the structural
-  arm (`crates/capi/src/runtime/control.rs:907`), which passes a `SuccessorBase`
+  (`:25-28`, `:598-608`). The rest of it (`:609-693`) is the control plane's own accounting:
+  `StripLanes`, the effect producers, `prepared_capi_resources` (`:313`) and the report row.
+- Its two callers are the boot compile (`compile_children`, `compile.rs:721`) and the structural
+  arm (`crates/control-plane/src/control.rs:1043`), which passes a `SuccessorBase`
   (`crates/host-core/src/prepare.rs:641`).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309) moves this code
   into `crates/control-plane` (lib `control_plane`) as it is. Its non-goal names this slice's

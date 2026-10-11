@@ -39,14 +39,14 @@ effect (D15-17, #1314).
 - **Delivered.** The core slices (#1253-#1258), model-only edits (#1260) and effects (#1263-#1266)
   are closed. The classifier is `host_core::classify_live_delta`
   (`crates/host-core/src/live_delta.rs:211`); capi's live arm is `SessionState::commit_live`
-  (`crates/capi/src/runtime/control.rs:1065`), which targets the newest epoch
-  (`pending_providers.last_mut()`, `:1089`).
+  (`crates/control-plane/src/control.rs:1201`), which targets the newest epoch
+  (`pending_providers.last_mut()`, `:1225`).
 - **Live records step.** `LiveRamps::for_session` returns 0 for fader and mute
   (`live_delta.rs:52-58`). D15-1 replaces it (#1054).
 - **Live lanes are FIFO queues of depth 16** (`LIVE_QUEUE_DEPTH`,
-  `crates/capi/src/runtime/compile.rs:11-13`; requested at `:589`). A full lane is
-  `control.live.backpressure` (`control.rs:404-405`). D15-2 replaces them with cells (#1312).
-- **A pending candidate refuses the next structural edit** (`control.rs:959-961`). D15-9 replaces
+  `crates/control-plane/src/compile.rs:13-17`; requested at `:595`). A full lane is
+  `control.live.backpressure` (`control.rs:493-494`). D15-2 replaces them with cells (#1312).
+- **A pending candidate refuses the next structural edit** (`control.rs:1095-1097`). D15-9 replaces
   that with supersession (#1310).
 - **A live input lane makes the strip's builtin tail infinite**
   (`crates/builtins-compiler/src/lib.rs:3559-3566`). The C ABI attaches no input lane yet. D15-4
@@ -54,7 +54,7 @@ effect (D15-17, #1314).
 - **Guards still in the classifier:** any VCA is a rebuild (`live_delta.rs:216-217`); a mute change
   of a `follows_mute` source is a rebuild (`:278-279`); a submix strip's fields are structural by
   the mask.
-- The reliable event lane holds 2 events (`compile.rs:128`).
+- The reliable event lane holds 2 events (`compile.rs:156`).
 
 ## Decision record
 
@@ -70,7 +70,10 @@ effect (D15-17, #1314).
   committed value no later than the first block whose render begins after the submit returns, or,
   while a successor is pending, at its adoption, which the watermark reports (D15-2 as refined by
   D15-17). It is heard up to `latency_samples` later, because the compensation delays are downstream
-  of the fader. It is never lost. #444's block-atomic batch claim is declined knowingly.
+  of the fader. It is never lost. Every live value of one transaction takes effect in the same
+  block, for every lane held in cells, and the watermark names that block's first sample (root,
+  2026-10-05: #1432 Amendment 1, #1312 Amendment 2). This delivers #444's block-atomic batch
+  claim, which an earlier version of this record declined.
 - **D3. Every live value ramps (D15-1).** A record with no ramp length uses the session's
   researched `controlSmoothing` default (#1055, then #1054); an explicit 0 stays legal. #1054 covers
   every live row: fader, mute, pan or matrix (a model `smoothing_samples` of 0 means "session
@@ -80,10 +83,11 @@ effect (D15-17, #1314).
   smoothness by omission.
 - **D4. Live values are latest-target cells (D15-2, #1312; effect lanes #1345, input lanes #1346,
   route lanes #1347).** Gated conditions: levels only; a value
-  is superseded only by a later commit before the same drain; every fallible check runs before the
+  is superseded only by a later commit before the same block's live snapshot; every fallible check runs before the
   first cell write; an exact `live_values_superseded` counter. Each cell holds its target words and
   ramp as one unit, with a per-lane dirty mask and a canonical drain order (fader before mute).
-  Each cell is #1312's triple buffer: render reads the newest completed write in one pass, never
+  Each cell is #1432's revision-bounded cell: each block applies, per cell, the newest value whose
+  revision is `<=` the block's snapshot `S`, from the running plan's revision gate (#1502); it never
   tears, never skips and never spins. Automation,
   Observe records, structural edits and time-stamped records stay FIFO. A paused host therefore
   never gets `BACKPRESSURE` for a live value. The ack bytes are unchanged.
@@ -100,7 +104,7 @@ effect (D15-17, #1314).
   Render applies every value it reads, because D1 refused every value the setter would refuse. **So
   no ack ever precedes a drop.** A superseded value is counted, never silently lost (D15-2).
 - **D7. Which plan gets the values.** The newest epoch: the pending candidate if there is one, else
-  the current provider (`replacement_base_report`, `control.rs:760`, uses the same rule). A pending
+  the current provider (`replacement_base_report`, `control.rs:897`, uses the same rule). A pending
   warm successor (D15-8, round-5 amendment) is an ordinary pending candidate: the edit goes to
   its cells and applies at its adoption (D15-17). Its retargets were written once, at preparation
   (*Carry fader, mute and pan ramps across a plan swap*, #1277 D5), so nothing overwrites the edit.
@@ -126,10 +130,13 @@ effect (D15-17, #1314).
     reliable lane after each edit.
   - The header, `docs/C_ABI_V1_QUALIFICATION.md` and `docs/CONTROL_PROTOCOL_SEMANTICS.md` say all of
     this (#1313, #1314).
-- **D11. Bounded drains.** Each builtin drain reads at most what is present at block entry (#1253).
-  With cells (#1312) the drain is a dirty-mask scan, still bounded. **A forward hazard:** any future
-  silence skip must still run every drain on a skipped block, or live edits stall through a silent
-  passage.
+- **D11. Bounded drains, run every block.** Each builtin drain reads at most what is present at
+  block entry (#1253). With cells (#1312) the drain is a dirty-mask scan, still bounded.
+  - Every live drain runs in every rendered block (*Hand each block's live snapshot to every live
+    drain*, #1504 D3, with its gate). A silence skip, now or later, skips processing but never
+    the drain, and a clean cell costs one `Relaxed` load (#1432 D4).
+  - Under the block snapshot, a skipped drain would make the watermark early, not only stall an
+    edit through a silent passage (review m3, root 2026-10-05).
 - **D12. Model-only edits** (#1260). The mask covers `session_id`, `render_profile.id`,
   `output_profile.id` and `automation`. The automation mask holds only while no host renders stored
   automation (#1058); the first issue that renders it takes `automation` out of the mask.
@@ -148,7 +155,7 @@ effect (D15-17, #1314).
   shunt* (#1339) and *Give the multiband compressor a live bypass shunt* (#1340) land (D15-13 E4);
   until then a change of it is a rebuild with a D15-9 transition. With cells (#1312) a transaction
   can no longer exceed an effect lane's capacity, so the "rebuild instead of endless
-  `BACKPRESSURE`" rule (`control.rs:1051`) is deleted with the queue.
+  `BACKPRESSURE`" rule (`control.rs:1187`) is deleted with the queue.
 - **D15. The span window (D15-5, *Size each effect's automation span window from the producers its
   plan has*, #1306).** It is sized once, from the producers the plan really has:
   the live lane depth plus the stored-automation spans per block that preparation computes, after
@@ -176,7 +183,12 @@ governs. Stream F is C ABI live completeness, built on cells.
 
 | Issue | Title | Stream | Depends on |
 |---|---|---|---|
-| #1312 | *Hold live values in latest-target cells on both hosts* | B | #1309, #1348 |
+| #1432 | *Add the latest-target cell primitive and its loom model* | B | #1309 |
+| #1502 | *Give each plan its own revision gate and take each block's live snapshot from it* | B | #1309, #1311, #1314, #1343, #1432 |
+| #1503 | *Bound committed revisions at the plan gate's ceiling* | B | #1432, #1502 |
+| #1504 | *Hand each block's live snapshot to every live drain* | B | #1502 |
+| #1312 | *Hold live values in latest-target cells on both hosts* | B | #1309, #1348, #1432, #1502, #1503, #1504 |
+| #1505 | *Prove under a racing render that a live transaction lands in one block and the watermark names it* | B | #1312 |
 | #1345 | *Hold effect parameter, bypass and EQ-target values in latest-target cells* | B | #1312, #1399 |
 | #1346 | *Hold strip input-lane values in latest-target cells* | B | #1312 |
 | #1347 | *Hold route-lane values in latest-target cells* | B | #1312 |
@@ -223,7 +235,8 @@ Every open slice in the table is closed with a Sol PASS and its evidence is upst
 - Ramp lengths: #1054 (D3 is the seam).
 - Stored automation rendering (#1058).
 - Solo on the C ABI. The app composes solo as mutes in one transaction, which is live.
-- #444's block-atomic batch claim, and sample-accurate transient automation.
+- Sample-accurate transient automation. (#444's block-atomic batch claim is in scope since
+  2026-10-05: D2.)
 - The fused fader-and-matrix pass on the C ABI. It needs `BetweenRenderCalls`, which a concurrent
   C ABI producer cannot declare.
 
@@ -234,12 +247,26 @@ Every open slice in the table is closed with a Sol PASS and its evidence is upst
 - **Q2** (`BACKPRESSURE` on a paused transport after 16 edits): D15-2. Live values are
   latest-target cells, so a paused host is never refused for one (#1312).
 - **Q3** (tell the host which path ran?): D15-3 and D15-17 reverse the earlier "not now". The
-  response carries the path (#1313), and the applied-revision watermark reports when and how it
-  took effect (#1314).
+  response carries the path (#1313), and the applied-revision watermark reports a
+  block by which a revision is in effect, and how (#1314).
 - **Q4** (an infinite tail for live input filters?): D15-4. No; the SVF reaches exact rest (#1328),
   every node states a bounded tail (#1329), and #1261 and #1262 report it.
 - **Q5** (#1306, formerly "size effect span windows by lane depth"): D15-5. The window is sized once from the
   plan's real producers, after #1058's design.
+
+## Amendment (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement: a live transaction committed while render is mid-block must not be
+torn across blocks, and the watermark's `first_sample` is exact.
+
+- D2 now delivers #444's block-atomic claim.
+- D4 is restated on #1432's revision-bounded cell, read under each block's snapshot from the
+  running plan's gate (#1502).
+- D11 states the drain-every-block invariant and names its gate (#1504).
+
+Batch 2 of stream B delivers it: #1432, #1502, #1503, #1504, #1312, then #1345,
+#1346 and #1347. *Prove under a racing render that a live transaction lands in one block and the
+watermark names it* (#1505) proves it under a race.
 
 ## History of the 2026-09-28 spec
 

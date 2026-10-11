@@ -29,7 +29,7 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
   (`crates/source/src/lib.rs:208-235`, built in `resource_report` at `:490-547`).
 - The C ABI reaches producers through `SourceControlSet` (`crates/host-core/src/source.rs`, `seek`
   `:200`, `seek_at` `:223`) of the newest committed session (`newest_providers`,
-  `crates/capi/src/runtime/control.rs:1488`).
+  `crates/control-plane/src/control.rs:1628`).
 - The engine's single-writer seqlock with bounded reads is `crates/engine/src/realtime/observe.rs`;
   #1314 adds `crates/engine/src/realtime/watermark.rs` on the same pattern.
 - The header defines the anchor on "the clock miso_engine_v1_render_f32_planar takes"
@@ -96,9 +96,10 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
 - `crates/source/src/lib.rs`, `crates/source/tests/*.rs`
 - `crates/engine/src/realtime/watermark.rs`, `mod.rs`
 - `crates/host-core/src/source.rs` (`seek_report` and the `seek_at` doc only)
-- `crates/capi/src/abi.rs`, `ffi.rs`, `lib.rs`, `runtime/control.rs` (or its successor file in the
-  crate that #1309 creates), `runtime/error.rs`, `runtime/tests.rs`, `include/miso_engine_v1.h`,
-  `tests/c/abi_smoke.c`, `tests/c/header_smoke.cpp`
+- `crates/capi/src/abi.rs`, `ffi.rs`, `lib.rs`, `runtime/error.rs`, `runtime/tests.rs`,
+  `include/miso_engine_v1.h`, `tests/c/abi_smoke.c`, `tests/c/header_smoke.cpp`
+- `crates/control-plane/src/control.rs` (the successor #1309 made of
+  `crates/capi/src/runtime/control.rs`)
 - `scripts/check-capi-abi.sh` (frozen list only), `docs/C_ABI_V1_QUALIFICATION.md`
 
 ## Non-goals

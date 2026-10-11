@@ -20,7 +20,7 @@ WORKFLOW = ".github/workflows/qualification.yml"
 DEBUG_A_FEATURES = (
     "--features builtins-compiler/test-support,graph/test-support,"
     "host-web/test-support,host-core/test-support,effect-compiler/test-support,"
-    "protocol/test-support,engine/realtime-audit\n"
+    "protocol/test-support,control-plane/test-support,engine/realtime-audit\n"
 )
 DEBUG_B_FEATURES = (
     "--features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support\n"
@@ -30,6 +30,9 @@ DEBUG_B_FEATURES = (
 # command that starts it, through the end of its `--features` line.
 DEBUG_A_COMMAND = "cargo test --locked --workspace --all-targets \\\n"
 DEBUG_B_COMMAND = "cargo test --locked --all-targets \\\n"
+DEBUG_A_DOC_COMMAND = "cargo test --locked --workspace --doc \\\n"
+DEBUG_B_DOC_COMMAND = "cargo test --locked --doc \\\n"
+DOCTEST_REFUSAL = "the doctest step must enable the same packages and features"
 
 
 def workspace() -> pathlib.Path:
@@ -113,6 +116,14 @@ def in_b(old: str, new: str) -> tuple[str, str, str]:
     return in_step(DEBUG_B_COMMAND, old, new)
 
 
+def in_a_doc(old: str, new: str) -> tuple[str, str, str]:
+    return in_step(DEBUG_A_DOC_COMMAND, old, new)
+
+
+def in_b_doc(old: str, new: str) -> tuple[str, str, str]:
+    return in_step(DEBUG_B_DOC_COMMAND, old, new)
+
+
 def feature_a(removed: str) -> tuple[str, str, str]:
     return in_a(DEBUG_A_FEATURES, DEBUG_A_FEATURES.replace(removed + ",", "", 1))
 
@@ -146,12 +157,27 @@ def main() -> int:
         fails(f"{package}/test-support removed from test-debug-b", {package},
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
-          {"builtins-compiler", "effect-compiler", "effect-contract", "graph", "host-core",
-           "host-web", "protocol", "rack"},
+          {"builtins-compiler", "control-plane", "effect-compiler", "effect-contract", "graph",
+           "host-core", "host-web", "protocol", "rack"},
           in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b",
           {"builtins", "lane", "parametric-eq"},
           in_b(DEBUG_B_FEATURES, "--features math/lane\n"))
+
+    # The doctest steps (#1422) run no `--all-targets`, so only the doctest-parity rule sees them:
+    # a feature or package set that drifts from the sibling test step is refused.
+    refused("control-plane/test-support removed from the test-debug-a doctest step only",
+            DOCTEST_REFUSAL,
+            in_a_doc(DEBUG_A_FEATURES,
+                     DEBUG_A_FEATURES.replace("control-plane/test-support,", "", 1)))
+    refused("builtins/test-support removed from the test-debug-b doctest step only",
+            DOCTEST_REFUSAL,
+            in_b_doc(DEBUG_B_FEATURES, DEBUG_B_FEATURES.replace(",builtins/test-support", "", 1)))
+    refused("host-web excluded from the test-debug-a doctest step only", DOCTEST_REFUSAL,
+            in_a_doc("--exclude wasm-gate-corpus \\\n",
+                     "--exclude wasm-gate-corpus --exclude host-web \\\n"))
+    refused("a package dropped from the test-debug-b doctest step only", DOCTEST_REFUSAL,
+            in_b_doc("-p parametric-eq ", ""))
 
     # Forwarding is modelled from the manifests, not from the feature list's spelling: host-web
     # forwards host-core, which forwards effect-compiler, so both explicit entries are redundant

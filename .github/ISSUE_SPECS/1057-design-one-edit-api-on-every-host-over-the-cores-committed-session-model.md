@@ -29,11 +29,11 @@ how completion is observed, how a save works, and what each choice costs.
   a revision. `SessionTransactionApply` (`crates/protocol/src/controller.rs:892`) and
   `SessionSnapshotGet` (`:888`) are its edit and save commands. The header documents live and
   structural transactions (`crates/capi/include/miso_engine_v1.h:35`, `:85`).
-- **The C ABI's control plane is adapter code.** `crates/capi/src/runtime/control.rs` (1,584
-  lines; `commit` at `:353`; `commit_live` at `:1065` calls `host_core::classify_live_delta` at
-  `:1071`) and `crates/capi/src/runtime/compile.rs` (994 lines; plan exchange with publication and
-  retirement capacity 1 at `:170-171`). A structural edit while a candidate is pending is refused
-  with BACKPRESSURE (`control.rs:959-961`).
+- **The C ABI's control plane is adapter code.** `crates/control-plane/src/control.rs` (1,707
+  lines; `commit` at `:437`; `commit_live` at `:1201` calls `host_core::classify_live_delta` at
+  `:1207`) and `crates/control-plane/src/compile.rs` (837 lines; plan exchange with retirement capacity 1
+  at `:198`). A structural edit while a candidate is pending is refused
+  with BACKPRESSURE (`control.rs:1095-1097`).
 - **Browser.** The TypeScript SDK owns the document. `BrowserEngine`
   (`sdk/src/browser/engine.ts:192`) has no edit or snapshot method. The live controls hold the
   booted document byte for byte (`assertBootedSession`, `sdk/src/core/live-controls.ts:276`). A

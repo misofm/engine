@@ -49,7 +49,8 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
   retirement credit) into the cell whose state is `Empty`. Then it compare-and-swaps the word to
   mark that cell `Full` (`Release`). Render changes the word only when a cell is `Full`, and
   control publishes only when none is, so this compare-and-swap cannot fail. A failure would be a
-  broken invariant: it is returned as a typed internal error and never retried.
+  broken invariant: it is never retried; the mailbox returns the typed error and the exchange treats
+  it as unreachable (Amendment 2).
 - **D4. Render claims in one compare-and-swap, with no separate release.** At block entry render
   loads the word (`Acquire`). If a cell is `Full`, one compare-and-swap of the whole word marks
   that cell `Active` and the previously `Active` cell `Empty`. That single transition is the
@@ -72,6 +73,18 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
   and fails `Full` without a credit. `legacy_outstanding`, `SwapOutcome::DeferredRetirementFull`
   and `deferred_count` are removed: a claimed candidate always finds retirement room for the plan
   it displaces. Their tests move to the reserved form or are deleted (gate 4).
+- **D8. The deferral audits (Amendment 1).** The `realtime`, `graph` and `builtins_graph` audits
+  and their trace scripts prove the render-side deferral path that D6 removes. Each audit replaces
+  its deferral round with two rounds, with exact asserted counts:
+  (i) **refused reservation**: while the retirement queue is full, every reservation is refused
+  `Full` on the control side; render keeps rendering the active plan with zero allocations,
+  deallocations, locks and syscalls. `swaps_deferred` becomes `reservations_refused`, and
+  `prior_plan_renders_on_deferred` becomes `prior_plan_renders_while_refused` (the builtins-graph
+  audit keeps its long range under the new names, each count exact);
+  (ii) **withdraw and republish**: a published candidate is withdrawn before any render
+  (`Withdrawn`), published again, and adopted at the next block with its epoch intact
+  (`withdrawals` and `republished_adoptions` exact).
+  Each trace script checks the new counts exactly in place of the deferred counts.
 - **D7. Acked-batch question: can an ack ever precede a drop? No.** Nothing in the exchange drops
   a candidate. A claimed candidate is adopted. A withdrawn one is returned whole to the control
   thread. A dropped `UnadoptedCandidate` is dropped only by the control thread's own choice.
@@ -90,6 +103,14 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
 - `crates/source/src/lib.rs` (its one test that publishes, `:3751`, only).
 - The control plane's publication call (`crates/control-plane/src/control.rs`), only as far as the
   API change requires. Withdrawal is used by #1310.
+- Amendment 1, mechanical edits only (the removed `publication_capacity` field and the move to
+  reserve-then-commit): `crates/control-plane/src/compile.rs`,
+  `crates/host-core/tests/successor_swap.rs`, `crates/host-core/tests/support/successor.rs`,
+  `crates/graph/tests/rt11_swap_carry_alloc.rs`, and `crates/source/src/lib.rs`'s
+  `exchange_config` test helper.
+- Amendment 1, the deferral audits (D8): `tools/audit/src/realtime.rs`, `tools/audit/src/graph.rs`,
+  `tools/audit/src/builtins_graph.rs`, `scripts/trace-realtime-audit.sh`,
+  `scripts/trace-graph-audit.sh`, `scripts/trace-builtins-graph-audit.sh`.
 
 ## Non-goals
 
@@ -122,6 +143,8 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
    --locked --release -p engine --lib spsc_loom`.
 3. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`
    reports allocations, deallocations, locks, syscalls and `total_violations` 0.
+   `bash scripts/trace-realtime-audit.sh`, `bash scripts/trace-graph-audit.sh` and
+   `bash scripts/trace-builtins-graph-audit.sh` pass with D8's counts (Amendment 1).
    `bash scripts/check-realtime-policy.sh` passes with the script unchanged (no `unsafe` outside
    `spsc.rs`); `bash scripts/test-realtime-policy.sh`.
 4. **Superseded tests.** The `DeferredRetirementFull` cases (`mod.rs:309-315`, `:465-470`) are
@@ -140,9 +163,244 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
   or a publication into the `Active` cell.
 - Gate 2: a claim/withdraw race in which both sides take the candidate, render reads a cell being
   written, or render loops on a failed compare-and-swap. Only loom's interleavings reach it.
+- D8's audit rounds: a control-side refusal that disturbs the running plan (an allocation, lock or
+  syscall on render, or a render that stops rendering the active plan), and a withdraw-republish
+  cycle that loses the candidate or its epoch in the release build the audits measure.
 - Gate 4's replacement: a credit-less candidate published, which could defer a swap forever.
+
+## Amendment 1 (root, 2026-10-05)
+
+D2 and D6 remove `publication_capacity`, the unreserved `publish`,
+`SwapOutcome::DeferredRetirementFull` and `deferred_count`. That breaks files the original
+authorized paths did not list: mechanical call sites in `crates/control-plane/src/compile.rs`,
+two host-core test files, one graph test and `crates/source/src/lib.rs`'s `exchange_config`; and
+three audit binaries with their trace scripts, which exist to prove the deferral path. Root ruled:
+authorize the mechanical files for mechanical edits only, and the three audits and trace scripts
+with the frozen proof of D8; add the three trace runs to gate 3. One issue, no sibling split: the
+tree compiles only with both, so a same-commit sibling would be ceremony. This takes the slice
+past AGENTS.md's half-day size (about half a day plus two to three hours for the audits); root
+accepted the overrun for that reason. The first run stopped before any change and is not an
+attempt.
+
+## Amendment 2 (root, 2026-10-05)
+
+D3 said a failed publication compare-and-swap "is returned as a typed internal error", while D5
+makes republication infallible and the exchange's commit runs after the protocol commit, where a
+returned error would leave a committed session with no plan published. Root ruled on the
+attempt-1 verdict: the mailbox returns the typed error (`MailboxInvariantBroken`), and the
+exchange (`commit`, `republish`) treats it as unreachable. D3 now says so.
 
 ## Dependencies
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for the call
   site's path.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+**What changed.**
+- `crates/engine/src/realtime/spsc.rs`: the loom shim gains `AtomicU64`. New generic mailbox
+  `plan_mailbox::<T>() -> (MailboxWriter<T>, MailboxReader<T>)` (D1, D2): one `AtomicU64` word
+  (generation in bits 4..64; 2-bit state per cell), two `UnsafeCell<Option<T>>` cells, invariants
+  I1-I6 in the doc comment. Writer: `try_reserve` -> `MailboxPermit::commit` (write, then one
+  `Release` CAS; a failed CAS returns `MailboxInvariantBroken(T)` with the value, never retried,
+  D3) and `withdraw` -> `Withdrawn(T)` / `Taken` / `Nothing` (one CAS; on failure the CAS's
+  current value is the one reload, D5). Reader (inside a `REALTIME_POLICY` region): `observe` (one
+  `Acquire` load) and `claim` (exactly one `AcqRel` CAS of the whole word, `Full -> Active` plus
+  `Active -> Empty`, then the move out; a lost CAS returns `None`, D4). Retained bytes:
+  `plan_mailbox_retained_bytes::<T>()`.
+- `crates/engine/src/realtime/plan_exchange.rs`: the publication SPSC, `publication_capacity`,
+  `legacy_outstanding`, `SwapOutcome::DeferredRetirementFull`, `deferred_count` and the owner's
+  `pending` slot are gone (D2, D6). A retirement credit is now an RAII value
+  (`RetirementCredit`) carried by every candidate; render moves it, never drops it: at adoption
+  it travels with the displaced plan into the retirement queue and returns at `try_reclaim` (after
+  the pop). `publish` is reserve-then-commit and fails `Full` without a credit. New
+  `PlanPublisher::withdraw() -> Withdrawal::{Withdrawn(UnadoptedCandidate), Taken, Nothing}` and
+  `PlanPublisher::republish(UnadoptedCandidate) -> PlanEpoch` (keeps epoch and credit).
+  `UnadoptedCandidate`: `epoch`, `plan_id`, `plan`, `into_plan` (returns the credit); dropping it
+  returns the credit. Render's `enter_block`: one load; only if a cell is `Full`, it reserves the
+  retirement slot (guaranteed by the credit) **before** the claim CAS, so a claimed candidate is
+  always adopted; then the one CAS. The resource report charges the mailbox allocation, the
+  retirement ring and one counter (D2). `PlanRetirer` keeps draining unreclaimed plans on its own
+  thread at drop.
+- `crates/engine/src/realtime/mod.rs`: exports `UnadoptedCandidate`, `Withdrawal`; tests below.
+- Mechanical (Amendment 1): `crates/control-plane/src/compile.rs` (two configs),
+  `crates/host-core/tests/successor_swap.rs`, `crates/host-core/tests/support/successor.rs`,
+  `crates/graph/tests/rt11_swap_carry_alloc.rs`, `crates/source/src/lib.rs` (`exchange_config`;
+  its `publish` call compiles unchanged). `crates/control-plane/src/control.rs` needed no change.
+- D8: `tools/audit/src/{realtime,graph,builtins_graph}.rs` and the three trace scripts, below.
+
+**Decisions taken inside the spec's text (for the verifier and root).**
+- D3 vs "commit is infallible" / D5 "republish, infallibly" (and #1310 D4 "republishing cannot
+  fail"): the typed error lives at the mailbox (`MailboxPermit::commit -> Result<(),
+  MailboxInvariantBroken<T>>`). `PlanReplacementReservation::commit` and `republish` stay
+  infallible in signature, because the control plane commits after its protocol commit and
+  dependents rely on it; they `panic!` on the typed error (unreachable: the permit proves no cell
+  was `Full`, and only this publisher publishes). Release builds abort on panic.
+- `republish` precondition: the candidate must hold the newest issued epoch and come from this
+  exchange (asserted, documented under `# Panics`). That proves the mailbox has an `Empty` cell
+  and keeps adopted epochs monotone. It fits #1310 D4 (A withdrawn, B reserved then refused,
+  A republished).
+- The generation counter (D2) is implemented. *Correction (attempt 2):* this record said no test
+  could turn red on its removal. That was wrong: a sequential test of D4's rule (a claim from a
+  load taken before a withdraw and republish fails) turns red without it; attempt 2 adds it.
+
+**Tests (each new or rewritten test, with its mutation run: defect applied -> red, reverted -> green).**
+Gate 1 (`crates/engine/src/realtime/mod.rs`):
+- `withdrawn_candidate_returns_whole_and_republishes_with_its_epoch`: U1 republish takes a new
+  epoch -> red; U7 withdrawal moves the payload but leaves the cell `Full` -> red (only this test);
+  A3 republish publishes nothing -> red.
+- `withdrawal_after_render_claimed_reports_taken`: U2 a claimed publication reported `Nothing` ->
+  red; U3 nothing-published reported `Taken` -> red.
+- `withdrawal_with_nothing_published_reports_nothing`: U3 -> red; U3b `into_plan` leaks the
+  credit -> red (only this test).
+- `second_publication_lands_in_the_cell_the_claim_left_empty`: U4 publication into the `Active`
+  cell -> red.
+- `publication_without_a_credit_fails_full`: U5 reservation without a credit -> red.
+- Rewritten `replacement_reservation_freezes_failure_precedence_and_serial_order` (the mailbox
+  holds one candidate): U6 publication over a `Full` cell -> red.
+- Edited only for the config: `plan_exchange_resource_projection_covers_mailbox_and_retirement_and_checks_overflow`
+  (renamed; overflow now through `retirement_capacity`), the concurrent stress, the reservation
+  tests.
+
+Gate 2 (`spsc.rs`, `spsc_loom_plan_mailbox_*`, real mailbox on loom types):
+- `spsc_loom_plan_mailbox_claim_races_withdrawal` and
+  `spsc_loom_plan_mailbox_withdraw_republish_and_next_publication`. M1 claim by plain store, not
+  CAS -> both red. M2 claim retries on a failed CAS -> `withdraw_republish...` red ("one CAS per
+  block"). M3 publish marks `Full` before writing the payload -> both red. M4 withdrawal by plain
+  swap, not CAS -> both red. Reverted -> all green.
+
+Gate 4 (deleted in this commit): `exchange_defers_without_retirement_capacity_then_applies`,
+`reservation_never_strands_a_queued_legacy_predecessor`,
+`reservation_never_strands_a_pending_legacy_predecessor`, the deferred second half of
+`carry::dropping_the_owner_never_hands_over_to_an_unapplied_candidate`, and
+`carry::hand_over_runs_only_on_the_applied_block`. A rewrite of the last one, with refused and
+withdrawn candidates, caught no defect that no other test catches: none of U1-U7 turned only it
+red, and `successor_continues_the_predecessor_state_gap_free` already pins one hand-over per
+applied block. So it was deleted. `publication_without_a_credit_fails_full` replaces their reason.
+
+D8 audit rounds (release `audit` binary, run directly, then reverted and rerun green):
+- U1 republish takes a new epoch -> `realtime`, `graph`, `builtins-graph` all abort (epoch assert).
+- U5 reservation without a credit -> all three abort ("a reservation must be refused while the
+  retirement queue is full").
+- A3 republish publishes nothing -> all three abort (adoption assert).
+- Counts: `realtime` (1,000,000 blocks): `swaps_accepted 2`, `reservations_refused 999997`,
+  `prior_plan_renders_while_refused 999997`, `withdrawals 1`, `republished_adoptions 1`
+  (the script checks `blocks - 3` exactly). `graph`: `2, 1, 1, 1, 1`,
+  `displaced_plans_destroyed_off_render 2`. `builtins-graph`: `render_count_by_plan
+  {"A":1,"B":999998,"C":1}`, `swaps_applied 2`, `reservations_refused 999996`,
+  `prior_plan_renders_while_refused 999996`, `withdrawals 1`, `republished_adoptions 1`,
+  `retirement_owner_destroyed 2`, `control_owner_destroyed 1`, 5 traced intervals. C's adopted
+  block equals the PCM fixture and its meter rows equal A's.
+
+**D7, the acked-batch question: can an ack ever precede a drop? No.** Evidence: a candidate
+leaves the mailbox only through a won CAS. The claim's win adopts it in the same block, because
+the retirement slot is reserved before the claim (`enter_block`). The withdrawal's win returns it
+whole (`Withdrawn`). The loom models check, under every interleaving, that each value ends
+exactly once and is never both adopted and withdrawn. A refused publication returns the plan
+(`Full`/`RetirementFull`). An `UnadoptedCandidate` drops only by the control thread's choice. No
+render path drops a candidate or a credit.
+
+**Gates.**
+1. Unit: `cargo test --locked -p engine --features realtime-audit`: 42 + 4 + 1 passed.
+2. Loom: `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom`: 3 passed.
+3. `target/release/audit capi`: allocations, deallocations, locks, syscalls, `total_violations`
+   0. `trace-realtime-audit.sh`, `trace-graph-audit.sh`, `trace-builtins-graph-audit.sh`: PASS with
+   D8's counts. `check-realtime-policy.sh` (script unchanged; 90 regions in 25 files) and
+   `test-realtime-policy.sh`: ok.
+4. Superseded tests deleted (above).
+5. `cargo test -p capi` (72+2+11), `-p host-core --features control-provider,test-support --test
+   successor_swap` (32), `-p graph --features test-support --test rt11_swap_carry_alloc` (1),
+   `-p source` (37+1+1), `-p control-plane --features test-support`, `-p audit --release` (33):
+   all pass. `check-cross-targets.sh`: PASS. `cargo fmt --all -- --check`: ok. `cargo clippy
+   --locked --workspace --all-targets --all-features -- -D warnings`: ok.
+   `check-workspace-policy.sh`: ok. Worklet chain (`build-web-audioworklet.sh --named-twin`,
+   `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+   `test-web-audioworklet.sh`): pass.
+
+### Attempt 2 (implementer, 2026-10-05)
+
+Folds the attempt-1 verdict (`FAIL`, one MAJOR, two MINOR). Test-only change; no production code
+changed, because the verdict found the implementation correct and only its proof incomplete.
+
+**What changed.**
+- M-1: `crates/engine/src/realtime/spsc.rs` gains the loom model
+  `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied`. Render claims until it has adopted two
+  candidates; control publishes three, waiting with `yield_now` until `try_reserve` finds an
+  `Empty` cell. So control writes into a cell render moved a payload out of at an earlier claim,
+  which is the steady state of every second publication. It asserts adoption order `[1, 2]` and
+  that each value drops exactly once. The waits use `yield_now` on both sides; a straight-line
+  control thread does not let loom schedule a claim between the publications (verifier's probe).
+- m-1: `crates/engine/src/realtime/mod.rs` restores `carry::hand_over_runs_only_on_the_applied_block`
+  without the deferral: publish B at block 1 (applied, carried, one hook call), reclaim and
+  publish C at block 3 and withdraw it before the render (no swap, no call), republish C at
+  block 5 (applied, carried, one call); then the output equals the reference and
+  `carried_count() == 2`.
+- m-2: `crates/engine/src/realtime/spsc.rs` gains
+  `stale_claim_after_withdraw_and_republish_fails_on_the_generation`: publish, observe, withdraw,
+  republish the same value, the stale claim returns `None`, and a fresh observe and claim return
+  the value. The attempt-1 statement that no such test could be written is corrected above.
+
+**Mutation runs (defect applied -> red; reverted -> green).**
+- Loom, gate-2 command (`spsc_loom`, now 4 tests):
+  - MA, the claim CAS success ordering `AcqRel` -> `Acquire`: only
+    `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied` red ("Causality violation: Concurrent
+    write accesses to `UnsafeCell`"); the two attempt-1 models stay green.
+  - MB, `try_reserve`'s load `Acquire` -> `Relaxed`: only the new model red (same violation).
+  - MC, the publication CAS `Release`/`Acquire` -> `Relaxed`/`Relaxed`: all three mailbox models
+    red, including the new one.
+  - Reverted: 4 passed (about 4 s of model time).
+- Carry, the hand-over runs only on an owner's first swap (`enter_block`'s `carry_from` behind
+  `if self.carried == 0 && self.carry_mismatched == 0`): only
+  `hand_over_runs_only_on_the_applied_block` red (engine 43/44); reverted 44 + 4 + 1.
+- Generation removed (`MailboxWord::advanced` returns `self`): only
+  `stale_claim_after_withdraw_and_republish_fails_on_the_generation` red (engine 43/44);
+  reverted 44 + 4 + 1.
+
+**Test value.**
+- `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied`: a claim CAS without `Release`, or a
+  `try_reserve` load without `Acquire`, lets control's write race render's move out of the same
+  cell; no other test reaches cell reuse.
+- `hand_over_runs_only_on_the_applied_block`: corrected by the batch follow-up below. Its defect (a
+  hand-over that runs only on an owner's first swap) is also caught by two `capi` tests, which the
+  attempt-1 search did not run, so the test had no catch of its own and is deleted.
+- `stale_claim_after_withdraw_and_republish_fails_on_the_generation`: a mailbox word whose
+  transitions never advance the generation, so a stale claim succeeds after a withdraw and
+  republish. One transition that alone forgets to advance (withdrawal only, or publication only)
+  keeps it green, correctly: every cycle that returns the cell states to the same values also
+  contains another advancing transition, so no ABA follows.
+
+**Gates.**
+1. `cargo test --locked -p engine --features realtime-audit`: 44 + 4 + 1 passed.
+2. `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom`: 4 passed.
+3. `cargo build --locked --release -p audit -p capi`; `target/release/audit capi`: allocations,
+   deallocations, locks, syscalls, `total_violations` 0. `trace-realtime-audit.sh` ok,
+   `trace-graph-audit.sh` PASS, `trace-builtins-graph-audit.sh` PASS (1,000,000 blocks each).
+   `check-realtime-policy.sh` ok (90 regions in 25 files), `test-realtime-policy.sh` ok.
+5. `-p capi` (73 + 2 + 11), `-p host-core --features control-provider,test-support --test
+   successor_swap` (32), `-p graph --features test-support --test rt11_swap_carry_alloc` (1),
+   `-p source` (37 + 1 + 1), `-p control-plane --features test-support` ok, `-p audit --release`
+   (33): all pass. `cargo fmt --all -- --check` ok; `cargo clippy --locked --workspace
+   --all-targets --all-features -- -D warnings` ok; `check-workspace-policy.sh` ok;
+   `check-cross-targets.sh` PASS. The worklet chain was not re-run: the change is inside
+   `#[cfg(test)]` modules, so the browser-compiled module is unchanged.
+
+### Batch follow-up (2026-10-05)
+
+Folds the attempt-2 verdict (`PASS`; MINOR m-1, NIT n-1).
+
+- m-1: `carry::hand_over_runs_only_on_the_applied_block` is deleted from
+  `crates/engine/src/realtime/mod.rs`. The pin on "the hand-over runs on every applied swap" is
+  `capi`'s `runtime::tests::control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`
+  (four carrying swaps on one owner, `carried_count() == round`) and
+  `runtime::live_tests::a_prepared_bypass_change_rebuilds_and_renders_the_committed_model` (the
+  rendered output). The attempt-1 deletion was right in effect; its stated reason was wrong.
+  Mutation run after the deletion (`enter_block`'s `carry_from` behind
+  `if self.carried == 0 && self.carry_mismatched == 0`): `cargo test --locked -p capi --lib` red on
+  exactly those two tests (79 passed, 2 failed; `tests.rs:1589` and `live_tests.rs:2910`);
+  `cargo test --locked -p engine --features realtime-audit` green (54 + 4 + 1), so the engine no
+  longer holds a redundant pin. Reverted: both green.
+- n-1: the attempt-2 test-value line for
+  `stale_claim_after_withdraw_and_republish_fails_on_the_generation` is narrowed above to the
+  defect it catches (no transition advances the generation).

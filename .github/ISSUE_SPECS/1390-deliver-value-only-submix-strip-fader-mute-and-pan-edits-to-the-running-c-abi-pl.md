@@ -37,12 +37,13 @@ that swaps the plan.
 - **The lanes exist already.** host-core attaches one control producer per strip, tracks first,
   then submixes, with the submix ID in `track_id` (`HostLiveControlHandles::strip_controls`,
   `crates/host-core/src/prepare.rs:424-433`). capi keeps all of them in its epoch
-  (`StripLanes`, `crates/capi/src/runtime/control.rs:13-17`; built at
-  `crates/capi/src/runtime/compile.rs:604-617`).
-- **capi resolves track producers only.** `commit_live` (`control.rs:1065`) searches
-  `strips.controls[..track_count]` (`:1093-1109`) by strip ID. #1309 moves `control.rs` unchanged
-  to `crates/control-plane/src/control.rs`; capi's tests stay in capi. The anchors name the
-  locations at `6fb211594`; the implementer edits the moved code.
+  (`StripLanes`, `crates/control-plane/src/control.rs:13-17`; built at
+  `crates/control-plane/src/compile.rs:610-623`).
+- **capi resolves track producers only.** `commit_live` (`control.rs:1201`) searches
+  `strips.controls[..track_count]` (`:1229-1245`) by strip ID. #1309 moves `control.rs` unchanged
+  to `crates/control-plane/src/control.rs`; capi's tests stay in capi. The anchors into the
+  moved code name its locations in `crates/control-plane/src/`; the others name the locations at
+  `6fb211594`.
 - **Opcodes.** `SetTrackFader` `0x020f` and `SetTrackMatrixOrPan` `0x0210` address a submix by its
   ID (#1204).
 - **After #1225:** route records and `LiveDelta::routes` exist; the classifier still treats every
@@ -89,8 +90,9 @@ that swaps the plan.
   run the live admission, resolve every producer, run the protocol's commit predicate, write the
   cells, commit. Every fallible step runs before the first cell write. A submix cell write cannot
   fail and never returns `BACKPRESSURE`. Acked-batch question: an ack can never precede a drop,
-  because a later write before the same drain supersedes the earlier one and #1312's
-  `live_values_superseded` counts it.
+  because a later commit before the same block's live snapshot supersedes the earlier one and
+  #1312's `live_values_superseded` counts it (#1312 D2, D11). Every value of one transaction,
+  submix and track strips alike, takes effect in the same block (#1312 D1; Amendment 1).
 - **D7. Carry, then retarget (D15-7).** A carried submix strip whose fader, mute or pan differs
   between the base and the successor's model is retargeted, not restarted. #1277 D3 calls a value
   live when the classifier would emit a record for it, so after D1-D2 these values are live.
@@ -203,6 +205,12 @@ that swaps the plan.
   changed it, or if the retarget applies a block early or late.
 - Gate 7 turns red if the widened resolution or the submix drain allocates on the render thread,
   or if a bus edit that races a swap reaches the retiring plan.
+
+## Amendment 1 (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement (2026-10-05) makes every live value of one revision take effect in one
+block. Cells are read under each block's snapshot (#1432 Amendment 1, #1312 Amendment 2). D6's
+supersession wording follows.
 
 ## Dependencies
 

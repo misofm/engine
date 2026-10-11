@@ -27,7 +27,7 @@ permanent latency reserve.
   samples.
 - The output latency is reported as `HostPrepareReport::latency_samples`
   (`crates/host-core/src/prepare.rs:224`, filled at `:1841`) and as the C ABI's plan resource
-  report (`crates/capi/src/runtime/compile.rs:664`).
+  report (`crates/control-plane/src/compile.rs:664`).
 - VST3 notes that a plug-in latency change may interrupt playback while the host recomputes delay
   compensation (`IAudioProcessor::getLatencySamples`). Floors remove the decrease case.
 - The full carry comes from *Carry strip delay lines and live send ramps across a plan swap*
