@@ -82,7 +82,7 @@ when a dependency forces the order, and then sequence the correct solution.
      landed. Until then a live value can apply in any block that ran between the submit's first
      push and its revision store, so one transaction's values can spread across those blocks. The
      watermark is never early, and its `first_sample` is at most one block after the submit
-     returns (while a replacement plan is pending: at the first block after its adoption).)
+     returns (while a replacement plan is pending: the block that adopts it).)
   3. every fallible check runs before the first cell write;
   4. an exact `live_values_superseded` counter.
 - Automation, Observe records, structural edits and every time-stamped record stay FIFO.

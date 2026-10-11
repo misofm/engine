@@ -72,8 +72,8 @@ extern "C" {
  * before it, and first_sample the absolute render sample at the start of the block that reported
  * it. The watermark is never early: a revision is in effect no later than the block it names.
  * first_sample is the start of the first block that begins after the commit's last write, so at
- * most one block after the submit returns (while a replacement plan is pending: at the first
- * block after its adoption). A live value of that revision can apply earlier, in any block that
+ * most one block after the submit returns (while a replacement plan is pending: the block that
+ * adopts it). A live value of that revision can apply earlier, in any block that
  * ran between the submit's first push and its revision store. One transaction's values can
  * spread across those blocks until issues 1502, 1503, 1504, 1312 and 1345 have all landed,
  * which together make it exact. A replacement plan renders from first_sample. A host that

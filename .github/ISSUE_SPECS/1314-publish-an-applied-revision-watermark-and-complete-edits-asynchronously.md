@@ -277,8 +277,8 @@ plan. D1-D8 above stay the record of what this issue delivered. They describe th
 
 - The watermark is never early: it never reports a revision before that revision is in effect.
   `first_sample` is the start of the first block that begins after the commit's last write, so at
-  most one block after the submit returns (while a replacement plan is pending: at the first
-  block after its adoption). A live value of that revision can apply earlier, in any block that
+  most one block after the submit returns (while a replacement plan is pending: the block
+  that adopts it). A live value of that revision can apply earlier, in any block that
   ran between the submit's first push and its revision store.
   - Render loads the running plan's revision word before `render_inner` (D3), but each strip
     drains its live lane at its own node inside `render_inner`, and the control plane releases
