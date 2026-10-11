@@ -293,3 +293,120 @@ reason (design bounds are 27 ms of 27 s).
 same insertion order as the journal; bytes freed by `engine_destroy` less the empty engine's 336):
 9 strips (1 design) 2,608 B; 64 strips (64 designs) 18,352 B; 65,537 strips (752 designs)
 327,728 B. A preparation can seed at most 1,805 designs, about 0.5 MiB.
+
+### Attempt 2 (implementer, 2026-10-11) -- Amendment 2 implemented
+
+Commits `6d56b1f15` (code and tests), `32241583c` (D5 header comment, qualification doc, ownership
+entry), then two test follow-ups. Builds on attempt 1; the open question of attempt 1 is closed by
+Amendment 2.
+
+**What changed.**
+- `builtins` `tail.rs` (named exception): `take_journal` returns `InputBoundRecord`, a sorted boxed
+  slice of exactly its length, found by binary search; `retained_bytes()` = len x 240
+  (`size_of::<(InputBoundKey, CachedDesign)>()`). `InputBoundCache<'seed>::with_seed(&record)` reads
+  a record read-only (own entries first, then the record); a design computed goes into the
+  cache's entries and journal only. The journal is a plain map with no cap (a clear of the entries
+  loses none of it) and `begin_journal` restarts it. The doc link to the private
+  `CachedDesign::ChargeAbove` is gone (workspace `cargo doc -D warnings` passes), and the cap
+  wording says a full cache's 2.4 MiB is one fill order, not a ceiling.
+- `control-plane`: `ProviderEpoch::bound_seed`; `prepare_runtime` takes the cache by `&mut`,
+  opens the journal, closes it before `prepared_capi_resources` on every path, and charges the
+  seed bytes as an `epoch_rows` row and a `largest` candidate (D4), so the existing
+  `active_retained` check and `validate_replacement_peak` refuse before commit (`ResourceFault::
+  Limit`). A compile passes the engine's cache (or a local one); a rebuild passes
+  `InputBoundCache::with_seed(&newest_providers().bound_seed)`; the candidate epoch owns the new
+  record. `SessionState` holds no cache. Attempt 1's `mem::take` pre-admission fill is gone.
+- `capi`: `Engine::bound_cache` is `InputBoundCache<'static>` (a comment only); the header gets
+  the D5 paragraph (comment only, `check-capi-abi.sh` passes).
+- Docs: `C_ABI_V1_QUALIFICATION.md` "Design-bound caches (#1471)" derives the engine ceiling;
+  `REALTIME_DEPENDENCY_POLICY.md` gets the `design_bound_cache.rs` ownership entry. The
+  `check-realtime-policy.sh` line was already in attempt 1.
+- `control.rs`/`compile.rs`/`abi.rs` hunks for stream B's overlap: `compile.rs` (PreparedRuntime
+  field; `capi_resources`/`prepared_capi_resources` one parameter; `prepare_runtime` journal and
+  signature; `compile_children` three lines and the epoch constructor), `control.rs`
+  (`ProviderEpoch` field, two constructors, a test accessor; the removed `SessionState` field;
+  the rebuild call and the candidate constructor), `lib.rs` (one re-export), `capi/abi.rs`
+  (one field type and its comment).
+
+**Engine ceiling (D5), derived.** 8,192 entries; entry = 124-byte key + 112-byte value; the std
+`BTreeMap` (B = 6) keeps 5 to 11 entries in every node but the root, so at most
+1 + 8,191 / 5 = 1,639 nodes, at most 273 internal; leaf 2,608 B, internal 2,704 B:
+1,639 x 2,608 + 273 x 96 = **4,300,720 bytes** (64-bit; allocator bookkeeping up to 16 B a node
+extra). The test fills 16,384 distinct designs (the cache fills, clears at the 8,193rd, fills
+again) and measured 3,602,112 B freed at engine destroy over an empty engine's.
+
+**Acked-batch question.** Can a commit be acknowledged while its seed is dropped? No. The
+candidate epoch owns its seed from `prepare_runtime`; every refusal before `prepared.commit`
+(admission, backpressure, test faults) drops the candidate with its seed and leaves the newest
+seed untouched (nothing is written to it); after the protocol commit `pending_providers.push`
+cannot fail (capacity was checked before the commit), and the ack is written after it. A seed
+drops only with its epoch, after the plan it belongs to is reclaimed. A live commit prepares and
+changes no seed.
+
+**Gates run.** `cargo fmt --check`; `clippy --workspace --all-targets --all-features -D warnings`;
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`; `cargo test` for `builtins`
+(test-support), `builtins-compiler`, `host-core`, `control-plane` (test-support) and `capi`, all
+suites, `resource_lifecycle` included (12 tests, about 37 s of which the ceiling test is most);
+`check-workspace-policy.sh`, `check-realtime-policy.sh`, `check-cross-targets.sh` (PASS),
+`check-capi-abi.sh` (ok); `target/release/audit capi`: 0 allocations, 0 syscalls, `pcm_digest`
+`cb10fbface44a3a4` (unchanged). Worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts`, `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`,
+`check-web-audioworklet-v8-spill.py`) pass; **shipped browser module sha256
+`f9e711daba98d87aa81d5a8ebfceafa25a9ea2fd2ff20091bc58e4faf71cda41`** (named twin
+`a794dc778b730624b636ac2f330b762968c3d09d7ac1f8697cb6e61ec0c61719`); attempt 1's value is
+superseded.
+
+**Per-session seed bytes (gate 4, exact size now).** len x 240: 9 strips (1 design) 240 B;
+64 strips (64 designs) 15,360 B; 65,537 strips (752 designs, attempt 1's count) 180,480 B; at
+most 1,805 designs a preparation, 433,200 B. Attempt 1's 2,608 / 18,352 / 327,728 B figures were
+a full-map copy; they are superseded. The timing table above is unchanged (the workload is the
+same; not re-run, as Amendment 2 does not change it). A second plan's pending seed lives beside
+the newest one until the older epoch is reclaimed, and the peak admission counts both.
+
+**Mutation runs** (each red on the named defect, then reverted green; "other catchers" is the
+rest of `capi` lib, `design_bound_cache`, `plan_swap_race`, `resource_lifecycle` or `tail_contract`
+run under the same mutant):
+1. Gate 1. Seed bytes passed as 0 to `prepared_capi_resources`: `capi_retained_bytes_charge_every_
+   byte_the_compile_retains` (240 B short) and `tiny_control_frame_...` red, and
+   `double_live_oracle_...` red. Both original tests are unedited and green on the real code.
+2. Gate 2. `retained_bytes` = min(len, 1) x 240: only the `three input designs` document of
+   `capi_retained_bytes_...` red (left 274,681 right 274,201); the four older documents (one
+   design or none), `tiny_control_frame_...` and `double_live_...` stay green, so none catches it.
+3. Gate 3. Seed charge 0 on a rebuild only (`successor.is_some()`): `double_live_oracle_...` red
+   (a cap one below the true peak is admitted); every other `capi` suite green.
+4. Gate 4. `begin_journal` pre-filled with the seed (a seed that keeps designs its plan does not
+   use): `a_rebuild_keeps_only_the_designs_its_plan_uses` (the revert computes 0 not 1) and the
+   `builtins` `a_cache_over_a_record_...` red; nothing else. With the seed ignored by `with_seed`
+   (recompute everything) all five `design_bound_cache` tests are red, test 4 among them
+   (64 designs, not 1), but the older ones catch that shape too.
+5. Gate 5. The rebuild writes its record into the newest seed before admission:
+   `a_refused_rebuild_leaves_the_seed_as_it_was` red (computes 0 not 1); every other suite green.
+6. Gate 6. `INPUT_BOUND_CACHE_ENTRIES` = 16,384: `the_engine_cache_stays_within_its_stated_
+   ceiling` red (7,151,872 B). **Limit, stated plainly:** a journal that `take_journal` leaves
+   open is restarted by the next `begin_journal`, so it holds one preparation (at most 433,200 B),
+   which fits the 0.70 MB of headroom between the measured 3.60 MB and the ceiling: that mutant
+   stays green here. The test also goes red only for an entry that grows by more than about 85
+   bytes. Closing the journal is defended by `prepare_runtime` taking it on every path and by the
+   builtins journal tests; a sharper check needs an engine-internal test, not in Amendment 2's
+   exceptions.
+7. Builtins record tests. A lookup reaching only the first three entries: `a_cache_over_a_record_
+   finds_every_design_and_journals_only_what_it_used` alone red (forty-design record). A seed hit
+   not journaled: that test and three `design_bound_cache` tests red. A reversed record: the two
+   older journal tests and the new one red.
+
+**Test-value sentences.**
+- `a_cache_over_a_record_finds_every_design_and_journals_only_what_it_used`: a record lookup that
+  loses designs of a large record, or a journal that omits the seed hits or copies the unused ones.
+- `a_rebuild_keeps_only_the_designs_its_plan_uses`: a session seed that keeps designs the newest
+  plan does not use (union growth toward 8,192 entries with nothing charging it).
+- `a_refused_rebuild_leaves_the_seed_as_it_was`: a rebuild that writes its designs into the newest
+  seed before commit.
+- `the_engine_cache_stays_within_its_stated_ceiling`: a cap that no longer applies, or an entry
+  grown beyond the headroom, past the header's figure (journal limit above).
+- `three input designs` in `capi_retained_bytes_...`: a seed charge right for one design but wrong
+  per design.
+- `double_live_oracle_...` seed term: a successor seed left out of the prospective epoch's charge.
+
+**Open.** Gate 6's journal-left-open sub-defect is not caught within the ceiling's headroom (above).
+The ceiling test takes about 37 s in debug. Stream B's overlapping hunks are listed above.
