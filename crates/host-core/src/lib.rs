@@ -75,16 +75,16 @@
 //!   `scripts/check-realtime-policy.sh` enforces the source-level half of that;
 //!   `tools/audit` and the browser call-graph gate enforce the binary half.
 //! * **A native render entry borrows the caller's floating-point environment; it never adopts it**
-//!   (issue #146). A native audio thread may run with hardware FTZ and DAZ set, and issue #144
-//!   measured what that does: 69-70 of the 331 cross-target corpus comparisons render off-pin,
-//!   because a transient intra-block denormal is not a recursive state word the master-plan D7
-//!   flush law can reach. So the entry saves the caller's control word, installs the canonical one,
-//!   renders, and restores the caller's exact word -- on the success path, on every rejection path
-//!   and while unwinding. A host does not have to configure its thread, and gets its thread back
-//!   unchanged. [`StartedRenderSession`] is that entry for an embedding host;
-//!   `miso_engine_v1_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
-//!   specification fixes round-to-nearest-even and full subnormal arithmetic, so the guard is a
-//!   zero-sized value there and the shipped artifact is unchanged.
+//!   (issue #146). A native audio thread may run with hardware FTZ and DAZ set (see
+//!   `crates/lane/src/fpenv.rs`), and issue #144 measured what that does: 69-70 of the 331 corpus
+//!   comparisons render off-pin, because a transient intra-block denormal is not a recursive state
+//!   word the master-plan D7 flush law can reach. So the entry saves the caller's control word,
+//!   installs the canonical one, renders, and restores the caller's exact word -- on the success
+//!   path, on every rejection path and while unwinding. A host does not have to configure its
+//!   thread, and gets its thread back unchanged. [`StartedRenderSession`] is that entry for an
+//!   embedding host; `miso_engine_v1_render_f32_planar` is it for the C ABI. Browser Wasm needs
+//!   neither: the core specification fixes round-to-nearest-even and full subnormal arithmetic, so
+//!   the guard is a zero-sized value there and the shipped artifact is unchanged.
 //! * **A started session is neither `Send` nor `Sync`.** The attestation is a statement about one
 //!   thread; a handle that could move would let a host launder it onto a thread that was never
 //!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
