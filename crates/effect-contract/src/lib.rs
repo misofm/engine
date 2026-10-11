@@ -2591,10 +2591,11 @@ pub trait PreparedNativeEffectBank: Send {
     /// (#1279), is no way back either: it overwrites a lane with the displaced plan's state, whose
     /// channels agree only if that plan's chain agreed, and the successor's chain inherits exactly
     /// that agreement. And [`ResetKind`] is not a symmetrising operation in any of the shipped
-    /// effects -- both kinds clear the *running* state to constants but re-seed the *designed* words from each channel's
-    /// own defaults or its own ramp targets, so a reset preserves whatever parameter asymmetry the
-    /// two channels already carried. It is the witness, not the reset, that would have to speak to
-    /// that half; the witness already does, and this method covers what it cannot see.
+    /// effects -- both kinds clear the *running* state to constants but re-seed the *designed*
+    /// words from each channel's own defaults or its own ramp targets, so a reset preserves
+    /// whatever parameter asymmetry the two channels already carried. It is the witness, not the
+    /// reset, that would have to speak to that half; the witness already does, and this method
+    /// covers what it cannot see.
     ///
     /// # Why no shipped effect implements this yet
     ///

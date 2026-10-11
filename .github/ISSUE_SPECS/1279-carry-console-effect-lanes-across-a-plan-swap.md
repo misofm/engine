@@ -281,9 +281,10 @@ the test, records the open reading, and takes the NITs. No production behaviour 
   a strip with a stateful insert restarts that insert at rest and is not in the set. The rustdoc of
   `restarted_strips` now says so. Root is asked to confirm the reading.
 - **NIT 1.** The five over-wide doc lines are rewrapped (`effect-contract/src/lib.rs` three,
-  `host-core/src/prepare.rs` one, `host-core/tests/successor_swap.rs` one). The only other lines
-  over 100 columns in the range are two shell lines of the realtime policy scripts, whose
-  one-sentence messages are the scripts' own style and unchanged.
+  `host-core/src/prepare.rs` one, `host-core/tests/successor_swap.rs` one). The rewrap of the
+  `effect-contract/src/lib.rs` lines left one new 121-column line (see Batch follow-ups); the only
+  other lines over 100 columns in the range are two shell lines of the realtime policy scripts,
+  whose one-sentence messages are the scripts' own style and unchanged.
 - **NIT 2.** `rack` calls `effect_contract::payload_sections_agree` at the restore. Its rustdoc
   (`effect-contract/src/symmetry.rs`, outside the authorized paths) still says "Off the render
   thread, at restore time"; a restore now also runs in the swap block. The function is a pure byte
@@ -325,3 +326,15 @@ the test-support features (`successor_swap`: 65 passed, 9 ignored), `cargo test 
 browser-compiled code): named-twin build, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
 `test-web-audioworklet.sh` with a private TMPDIR (empty afterwards), the V8 spill gate.
+
+### Batch follow-ups
+
+The attempt 2 verdict (PASS) found NIT 1: the rewrap above moved one doc line down without
+wrapping it, so `effect-contract/src/lib.rs` (the `reset` rustdoc, "both kinds clear the *running*
+state ...") carried a 121-column line, and the sentence above that only two shell lines exceed 100
+columns was wrong. The batch-end commit rewraps that doc paragraph to at most 100 columns and the
+one doc line this branch added at 102 columns in `host-core/tests/successor_swap.rs` (the
+eight-lane `a_strip_behind_an_effect_still_carries` doc). The remaining added lines over 100
+columns are the two realtime policy shell lines and one 101-column call in
+`host-core/tests/successor_swap.rs` (a function path rustfmt cannot split); none is a doc or
+comment line. Docs and comments only; no code changed.
