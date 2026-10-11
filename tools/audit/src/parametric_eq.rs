@@ -133,11 +133,18 @@ fn prepare_eq() -> Box<dyn PreparedNativeEffect> {
             limits: PrepareEffectLimits {
                 // Current state is 616 bytes; production admits 100 MB over the C ABI.
                 maximum_total_state_bytes: 1_024,
-                maximum_scratch_bytes: 1,
+                // The two rest planes' declared scratch (issue #1328).
+                maximum_scratch_bytes: QUANTUM as u64 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
                 maximum_automation_spans_per_block: 48,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(ParametricEqFactory),
+                48_000,
+                EffectQuality::Normal,
+            ),
         })
         .expect("prepared parametric EQ")
+        .processor
 }
 
 fn set(

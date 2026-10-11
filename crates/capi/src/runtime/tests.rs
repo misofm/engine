@@ -3100,6 +3100,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
 /// `CanonicalFpEnv::enter()` line from `miso_engine_v1_render_f32_planar`; the second arm collapses
 /// onto the third.
 #[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
 mod fp_environment {
     use super::*;
     use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ, read_mxcsr, write_mxcsr};
@@ -3114,7 +3115,9 @@ mod fp_environment {
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            write_mxcsr(self.0);
+            // SAFETY: `self.0` is the word the test read from this thread before it changed it, so
+            // it sets no reserved bit, and writing it hands the thread its own word back.
+            unsafe { write_mxcsr(self.0) };
         }
     }
 
@@ -3142,7 +3145,10 @@ mod fp_environment {
         )));
         let c_plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
 
-        write_mxcsr(caller);
+        // SAFETY: every caller of this function passes a word read from this thread with only
+        // FTZ (bit 15) and DAZ (bit 6) set or cleared, so no reserved bit. The test measures the
+        // render under it, and the write-back below (and `_restore`) restores `saved`.
+        unsafe { write_mxcsr(caller) };
         let mut rendered = Vec::with_capacity(BLOCKS as usize * QUANTUM * 2);
         let mut leaked = 0;
         for block in 0..BLOCKS {
@@ -3175,7 +3181,9 @@ mod fp_environment {
             leaked |= read_mxcsr() ^ caller;
             rendered.extend(pcm.iter().map(|sample| sample.to_bits()));
         }
-        write_mxcsr(saved);
+        // SAFETY: `saved` was read from this thread at the top of this function, so it sets no
+        // reserved bit; this hands the thread its own word back.
+        unsafe { write_mxcsr(saved) };
         crate::ffi::test_plan_destroy(c_plan);
         crate::ffi::test_session_destroy(c_session);
         (rendered, leaked)
@@ -3187,7 +3195,10 @@ mod fp_environment {
         let _restore = Restore(saved);
         let mut children = compile_children(SESSION, limits()).expect("direct children");
 
-        write_mxcsr(caller);
+        // SAFETY: every caller of this function passes a word read from this thread with only
+        // FTZ (bit 15) and DAZ (bit 6) set or cleared, so no reserved bit. The test measures the
+        // render under it, and the write-back below (and `_restore`) restores `saved`.
+        unsafe { write_mxcsr(caller) };
         let mut rendered = Vec::with_capacity(BLOCKS as usize * QUANTUM * 2);
         for block in 0..BLOCKS {
             let (left, right) = tail_block(block);
@@ -3215,7 +3226,9 @@ mod fp_environment {
                 .expect("direct render");
             rendered.extend(pcm.iter().map(|sample| sample.to_bits()));
         }
-        write_mxcsr(saved);
+        // SAFETY: `saved` was read from this thread at the top of this function, so it sets no
+        // reserved bit; this hands the thread its own word back.
+        unsafe { write_mxcsr(saved) };
         rendered
     }
 
@@ -3280,7 +3293,10 @@ mod fp_environment {
         let c_plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
 
         let mut pcm = vec![f32::NAN; QUANTUM * 2];
-        write_mxcsr(hostile);
+        // SAFETY: `hostile` sets FTZ, DAZ, RC and a status flag on a word read from this thread,
+        // all below bit 16. The test measures the C entry's rejections under it, and the
+        // write-back below (and `_restore`) restores `saved`.
+        unsafe { write_mxcsr(hostile) };
 
         // A malformed descriptor: refused before the plan is touched at all.
         let malformed = crate::PlanarOutput {
@@ -3321,7 +3337,9 @@ mod fp_environment {
         );
         assert_eq!(read_mxcsr(), hostile, "a rejected render leaked MXCSR");
 
-        write_mxcsr(saved);
+        // SAFETY: `saved` was read from this thread at the top of this function, so it sets no
+        // reserved bit; this hands the thread its own word back.
+        unsafe { write_mxcsr(saved) };
         crate::ffi::test_plan_destroy(c_plan);
         crate::ffi::test_session_destroy(c_session);
     }

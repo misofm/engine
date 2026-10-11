@@ -194,7 +194,7 @@ pub(crate) fn effect_control_resource(
     // Charge the five fields retained by `graph`'s `runtime::LiveControlEffect`.
     // `bypass_resources`' allocator-observed estimate test sees the box if it
     // ever outgrows this sum.
-    let live_control_effect_bytes = bytes(core::mem::size_of::<GraphPreparedEffect>())?
+    let live_control_effect_bytes = bytes(graph::EFFECT_RENDER_NODE_BYTES)?
         .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
         .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
         .checked_add(bytes(core::mem::size_of::<BypassShunt>())?)?
@@ -308,7 +308,7 @@ pub(crate) fn effect_control_resource(
             // The banked live-control owner: `rack::LiveControlEffectBankStage::new`, which
             // `graph`'s `stage_for` builds in place of a plain `EffectBankStage` for any slot with
             // a lane.
-            let metadata = bank.processor.metadata();
+            let metadata = &bank.metadata;
             let capacity = u64::from(metadata.program_key.automation_capacity);
             let (staging, packed) = if live {
                 (

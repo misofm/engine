@@ -34,7 +34,16 @@ fn descriptor_and_exact_zero_latency_resources_are_frozen() {
     {
         assert_eq!(quality.sample_rate, rate);
         assert_eq!(quality.latency, LatencySamples(0));
-        assert_eq!(quality.tail, TailSamples::Finite(0));
+        assert_eq!(
+            conformance::tail_bound_of(
+                Box::new(gate_expander::GateExpanderFactory),
+                quality.sample_rate,
+                quality.quality
+            )
+            .bound()
+            .tail,
+            TailSamples::Finite(0)
+        );
         assert_eq!(quality.maximum_state.common_bytes, 8);
         assert_eq!(quality.maximum_state.left_bytes, 88);
         assert_eq!(quality.maximum_state.right_bytes, 88);
@@ -89,7 +98,7 @@ fn exact_state_and_scratch_caps_prepare_and_one_byte_below_rejects() {
 fn payload_header_is_version_one_and_forty_four_words_and_restore_is_transactional() {
     let values = initial_values();
     let mut effect = prepare(request(&values));
-    let (common, left, right) = snapshot(effect.as_ref());
+    let (common, left, right) = snapshot(&effect);
     assert_eq!(common.len(), 8);
     assert_eq!(left.len(), 88);
     assert_eq!(right.len(), 88);
@@ -99,20 +108,24 @@ fn payload_header_is_version_one_and_forty_four_words_and_restore_is_transaction
     let mut malformed = right.clone();
     let before = (common, left, right);
     malformed[87] = 0x7f;
-    let sizes = effect.metadata().state_sizes;
+    let sizes = effect.metadata.state_sizes;
     let input = StatePayloadInput::new(&before.0, &before.1, &malformed, sizes).expect("sizes");
     assert!(
         effect
+            .processor
             .restore_state_payload(STATE_LAYOUT_VERSION, input)
             .is_err()
     );
-    assert_eq!(snapshot(effect.as_ref()), before);
+    assert_eq!(snapshot(&effect), before);
 
-    effect.reset(ResetKind::DiscontinuityKeepParameters);
+    effect
+        .processor
+        .reset(ResetKind::DiscontinuityKeepParameters);
     let mut output_common = vec![0; sizes.common_bytes as usize];
     let mut output_left = vec![0; sizes.left_bytes as usize];
     let mut output_right = vec![0; sizes.right_bytes as usize];
     effect
+        .processor
         .snapshot_state_payload(
             StatePayloadOutput::new(
                 &mut output_common,
@@ -214,10 +227,10 @@ fn bypass_is_exact_identity_at_all_rates() {
         let mut left = [f32::from_bits(0x8000_0000), 0.25, -0.5];
         let mut right = [-0.0, -0.25, 0.5];
         let expected = (left, right);
-        render_scalar(effect.as_mut(), &mut left, &mut right, 3);
+        render_scalar(&mut effect, &mut left, &mut right, 3);
         assert_eq!(left, expected.0);
         assert_eq!(right, expected.1);
-        assert_eq!(effect.metadata().latency, LatencySamples(0));
+        assert_eq!(effect.metadata.latency, LatencySamples(0));
     }
 }
 
@@ -230,7 +243,7 @@ fn enabled_ratio_one_is_exact_identity_with_a_nonzero_sample_zero() {
         let mut left = [0.5, -0.25, 0.125];
         let mut right = [-0.5, 0.25, -0.125];
         let expected = (left, right);
-        render_scalar(effect.as_mut(), &mut left, &mut right, 3);
+        render_scalar(&mut effect, &mut left, &mut right, 3);
         assert_eq!(left, expected.0, "ratio one at {rate} Hz");
         assert_eq!(right, expected.1, "ratio one at {rate} Hz");
     }
@@ -261,7 +274,7 @@ fn a_quiet_plateau_settles_on_the_range_floor_not_silence() {
         .collect();
     let mut left = input.clone();
     let mut right: Vec<f32> = input.iter().map(|value| -value).collect();
-    render_scalar(effect.as_mut(), &mut left, &mut right, 128);
+    render_scalar(&mut effect, &mut left, &mut right, 128);
     // 10^(-48/20), written out: the range floor as a linear gain.
     let floor = 0.003_981_071_7_f32;
     for frame in FRAMES - 480..FRAMES {
@@ -291,7 +304,7 @@ fn enabled_range_zero_is_exact_identity_with_a_nonzero_sample_zero() {
         let mut left = [0.5, -0.25, 0.125];
         let mut right = [-0.5, 0.25, -0.125];
         let expected = (left, right);
-        render_scalar(effect.as_mut(), &mut left, &mut right, 3);
+        render_scalar(&mut effect, &mut left, &mut right, 3);
         assert_eq!(left, expected.0, "range zero at {rate} Hz");
         assert_eq!(right, expected.1, "range zero at {rate} Hz");
     }
@@ -312,8 +325,8 @@ fn opening_and_future_suffixes_are_current_sample_causal() {
     let mut right_b = right_a.clone();
     left_b[2] = 0.9;
     right_b[2] = 0.9;
-    render_scalar(a.as_mut(), &mut left_a, &mut right_a, 4);
-    render_scalar(b.as_mut(), &mut left_b, &mut right_b, 4);
+    render_scalar(&mut a, &mut left_a, &mut right_a, 4);
+    render_scalar(&mut b, &mut left_b, &mut right_b, 4);
     assert_eq!(
         left_a[1].to_bits(),
         left_b[1].to_bits(),
@@ -350,8 +363,8 @@ fn a_closed_gate_opens_on_the_current_sample_and_uses_first_attack() {
     let mut effect = prepare(request(&values));
     let mut quiet = [0.01_f32, 0.01];
     let mut quiet_right = quiet;
-    render_scalar(effect.as_mut(), &mut quiet, &mut quiet_right, 2);
-    let (_, closed, _) = snapshot(effect.as_ref());
+    render_scalar(&mut effect, &mut quiet, &mut quiet_right, 2);
+    let (_, closed, _) = snapshot(&effect);
     assert_eq!(
         word(&closed, 1),
         0,
@@ -364,12 +377,12 @@ fn a_closed_gate_opens_on_the_current_sample_and_uses_first_attack() {
 
     let mut trigger = [0.5_f32];
     let mut trigger_right = trigger;
-    render_scalar(effect.as_mut(), &mut trigger, &mut trigger_right, 1);
+    render_scalar(&mut effect, &mut trigger, &mut trigger_right, 1);
     assert!(
         trigger[0] > 0.0 && trigger[0] < 0.5,
         "first attack is not unity"
     );
-    let (_, opened, _) = snapshot(effect.as_ref());
+    let (_, opened, _) = snapshot(&effect);
     assert_eq!(
         word(&opened, 1),
         1.0_f32.to_bits(),
@@ -383,8 +396,8 @@ fn hold_zero_closes_on_the_first_sample_below_the_close_band() {
     let mut effect = prepare(request(&values));
     let mut left = [0.01_f32];
     let mut right = left;
-    render_scalar(effect.as_mut(), &mut left, &mut right, 1);
-    let (_, payload, _) = snapshot(effect.as_ref());
+    render_scalar(&mut effect, &mut left, &mut right, 1);
+    let (_, payload, _) = snapshot(&effect);
     assert_eq!(word(&payload, 1), 0, "hold zero closes immediately");
     assert!(
         left[0].abs() < 0.01,
@@ -402,8 +415,8 @@ fn opening_and_rearm_are_inclusive_at_exact_thresholds() {
         let mut effect = prepare(request(&values));
         let mut left = source.to_vec();
         let mut right = left.clone();
-        render_scalar(effect.as_mut(), &mut left, &mut right, 128);
-        let (_, payload, _) = snapshot(effect.as_ref());
+        render_scalar(&mut effect, &mut left, &mut right, 128);
+        let (_, payload, _) = snapshot(&effect);
         (left, payload)
     };
     let below = level.next_down();
@@ -442,8 +455,8 @@ fn opening_and_rearm_are_inclusive_at_exact_thresholds() {
         let mut effect = prepare(request(&values));
         let mut left = source;
         let mut right = left;
-        render_scalar(effect.as_mut(), &mut left, &mut right, 128);
-        let (_, payload, _) = snapshot(effect.as_ref());
+        render_scalar(&mut effect, &mut left, &mut right, 128);
+        let (_, payload, _) = snapshot(&effect);
         (left[1], payload)
     };
     let (_below_rearm, below_state) = run_rearm(threshold_below);
@@ -474,7 +487,7 @@ fn connected_sidechain_is_current_and_not_ignored_or_delayed() {
     let side_left = [0.5_f32, 0.0];
     let side_right = side_left;
     render_scalar_sidechain(
-        effect.as_mut(),
+        &mut effect,
         &mut main_left,
         &mut main_right,
         Some((&side_left, &side_right)),
@@ -521,7 +534,7 @@ fn a_valid_connected_sidechain_uses_scalar_fallback_after_bank_rejection() {
     let mut main_right = [0.01_f32];
     let side = [0.5_f32];
     let report = render_scalar_sidechain(
-        scalar.as_mut(),
+        &mut scalar,
         &mut main_left,
         &mut main_right,
         Some((&side, &side)),
@@ -557,7 +570,7 @@ fn connected_sidechain_future_suffix_does_not_change_current_output() {
     let mut right_a = main_a.clone();
     let mut right_b = main_b.clone();
     support::render_scalar_sidechain(
-        a.as_mut(),
+        &mut a,
         &mut main_a,
         &mut right_a,
         Some((&side_a, &side_a)),
@@ -566,7 +579,7 @@ fn connected_sidechain_future_suffix_does_not_change_current_output() {
         0,
     );
     support::render_scalar_sidechain(
-        b.as_mut(),
+        &mut b,
         &mut main_b,
         &mut right_b,
         Some((&side_b, &side_b)),
@@ -593,7 +606,7 @@ fn connected_sidechain_nan_keeps_existing_detector_boundary_policy() {
     let side_left = vec![f32::NAN; 4];
     let side_right = vec![f32::NAN; 4];
     let report = support::render_scalar_sidechain(
-        effect.as_mut(),
+        &mut effect,
         &mut main_left,
         &mut main_right,
         Some((&side_left, &side_right)),
@@ -622,7 +635,7 @@ fn production_hold_is_k_plus_one_and_retrigger_is_current_sample() {
     let mut effect = prepare(request(&values));
     let mut left = vec![0.5, 0.006, 1.0e-4, 1.0e-4, 1.0e-4, 0.5];
     let mut right = left.clone();
-    render_scalar(effect.as_mut(), &mut left, &mut right, 6);
+    render_scalar(&mut effect, &mut left, &mut right, 6);
     assert_eq!(left[0].to_bits(), 0.5_f32.to_bits(), "trigger");
     assert_eq!(
         left[1].to_bits(),
@@ -676,7 +689,7 @@ fn a_padded_request_binds_and_still_validates_every_lane() {
         let bank = bind(&requests, &mask)
             .expect("a padded request is well formed")
             .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the bank binds"));
-        assert_eq!(bank.metadata().width, width);
+        assert_eq!(bank.metadata.width, width);
     }
     // Malform a member other than the first, so that a check of the first request alone -- or a
     // decision taken above the member loop -- goes red.

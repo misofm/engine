@@ -50,10 +50,11 @@ fn audited_allocator_proves_own_thread_allocation_and_free() {
 #[test]
 fn the_scalar_render_path_allocates_nothing() {
     let initial = varied_values(1);
-    let mut effect = MultibandCompressorFactory
+    let prepared = MultibandCompressorFactory
         .prepare(request_with(&initial, LinkMode::Maximum, 128, false))
         .expect("prepare");
-    let sizes = effect.metadata().state_sizes;
+    let sizes = prepared.metadata.state_sizes;
+    let mut effect = prepared.processor;
     let mut left = support::signal(128, 0x0BAD_C0DE);
     let mut right = support::signal(128, 0x0BAD_BEEF);
     let spans = [point(1, ParameterChannel::Left, 128, -30.0)];
@@ -96,8 +97,9 @@ fn the_bank_render_path_allocates_nothing() {
                 .iter()
                 .map(|set| request_with(set, LinkMode::Average, 128, false))
                 .collect::<Vec<_>>();
-            let mut bank = support::bank(width, &requests);
-            let sizes = bank.metadata().program_key.state_sizes;
+            let prepared = support::bank(width, &requests);
+            let sizes = prepared.metadata.program_key.state_sizes;
+            let mut bank = prepared.processor;
             let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
             let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
             let offsets = vec![0u32; lanes + 1];

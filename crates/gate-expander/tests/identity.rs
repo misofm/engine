@@ -92,7 +92,7 @@ fn scalar_and_native_bank_are_bit_exact_for_all_link_modes_and_ramps() {
         let mut bank_left = packed(&left_source);
         let mut bank_right = packed(&right_source);
         render_bank_native(
-            &mut *bank,
+            bank.processor.as_mut(),
             &mut bank_left,
             &mut bank_right,
             17,
@@ -103,7 +103,7 @@ fn scalar_and_native_bank_are_bit_exact_for_all_link_modes_and_ramps() {
             let mut right = right_source[track].clone();
             let spans = retarget_spans(0);
             render_scalar_sidechain(
-                scalar[track].as_mut(),
+                &mut scalar[track],
                 &mut left,
                 &mut right,
                 None,
@@ -121,10 +121,7 @@ fn scalar_and_native_bank_are_bit_exact_for_all_link_modes_and_ramps() {
                 &right,
                 &format!("{link:?} right {track}"),
             );
-            assert_eq!(
-                snapshot_bank(&*bank, track as u32),
-                snapshot(scalar[track].as_ref())
-            );
+            assert_eq!(snapshot_bank(&bank, track as u32), snapshot(&scalar[track]));
         }
     }
 }
@@ -139,7 +136,7 @@ fn partition_invariance_straddles_ramp_boundaries() {
     let mut one_left = source_left.clone();
     let mut one_right = source_right.clone();
     render_scalar_sidechain(
-        one.as_mut(),
+        &mut one,
         &mut one_left,
         &mut one_right,
         None,
@@ -156,7 +153,7 @@ fn partition_invariance_straddles_ramp_boundaries() {
             let end = (start + block).min(left.len());
             let batch = if start == 0 { &spans[..] } else { &[] };
             render_scalar_sidechain(
-                split.as_mut(),
+                &mut split,
                 &mut left[start..end],
                 &mut right[start..end],
                 None,
@@ -183,10 +180,10 @@ fn bypass_preserves_current_signed_zero_and_advances_state() {
     let mut effect = prepare(request);
     let mut left = [f32::from_bits(0x8000_0000), 0.5, 0.0];
     let mut right = [0.0, -0.25, f32::from_bits(0x8000_0000)];
-    render_scalar_sidechain(effect.as_mut(), &mut left, &mut right, None, 3, &[], 0);
+    render_scalar_sidechain(&mut effect, &mut left, &mut right, None, 3, &[], 0);
     assert_eq!(left[0].to_bits(), 0x8000_0000);
     assert_eq!(right[2].to_bits(), 0x8000_0000);
-    let (_, payload, _) = snapshot(effect.as_ref());
+    let (_, payload, _) = snapshot(&effect);
     assert_ne!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 0);
 }
 
@@ -196,7 +193,7 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
     let mut equal_left = noise(701, 257, 0.3);
     let mut equal_right = equal_left.clone();
     render_scalar_sidechain(
-        effect.as_mut(),
+        &mut effect,
         &mut equal_left,
         &mut equal_right,
         None,
@@ -209,7 +206,7 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
     let mut zero_left = vec![0.0_f32; 257];
     let mut zero_right = zero_left.clone();
     let report = render_scalar_sidechain(
-        effect.as_mut(),
+        &mut effect,
         &mut zero_left,
         &mut zero_right,
         None,

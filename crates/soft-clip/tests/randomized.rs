@@ -12,11 +12,12 @@
 //! sample in its dry history). #1071 made the restore accept every word the effect can hold, so
 //! this test runs without a narrowing.
 //!
-//! # Ramps that cross a domain edge
+//! # Ramps toward a domain edge
 //!
-//! A D11 ramp rounds its step once and then adds it, so a ramp toward an edge of a parameter's
-//! converted range can cross that edge before its final sample assigns the target (#1071 attempt
-//! 2). The shared harness's automation rarely starts a ramp a few ulps from an edge, and a crafted
+//! A D11 ramp rounds its step once and then adds it, so before issue #1409 a ramp toward an edge of
+//! a parameter's converted range could cross that edge before its final sample assigned the target
+//! (#1071 attempt 2); since #1409 the update holds every word inside its endpoints. The shared
+//! harness's automation rarely starts a ramp a few ulps from an edge, and a crafted
 //! restore cannot stand in for one: the harness does not assert that a crafted payload restores,
 //! and its own-snapshot restores seldom land inside a ramp's last samples. So
 //! [`a_restored_near_edge_ramp_continues_bit_for_bit`] drives the ramp itself, through the public
@@ -24,25 +25,14 @@
 
 mod support;
 
-use dsp_reference::randomized::{Draw, Profile, replaying, run_seeds};
+use dsp_reference::randomized::{Draw, Profile, run_seeds};
 use effect_contract::{BankWidth, ParameterChannel};
-use support::{
-    as_input, bits, prepare, prepare_bank, process, process_bank, values_from, word, word_f32,
-};
+use support::{as_input, bits, prepare, prepare_bank, process, process_bank, values_from, word};
 
 /// Each parameter's external range: drive and output in decibels, the mix as it is.
 const RANGES: [(f32, f32); 3] = [(-24.0, 36.0), (-24.0, 24.0), (0.0, 1.0)];
 /// Samples rendered after the restore: the rest of the ramp and well past its snap.
 const CONTINUATION: usize = 96;
-
-/// The converted value of parameter `parameter`'s external `value`.
-fn converted(parameter: usize, value: f32) -> f32 {
-    if parameter == 2 {
-        value
-    } else {
-        math::db_to_gain_f32(value)
-    }
-}
 
 /// `value` moved `ulps` steps toward `toward`, on the `f32` grid.
 fn inward(value: f32, toward: f32, ulps: u32) -> f32 {
@@ -60,9 +50,8 @@ fn inward(value: f32, toward: f32, ulps: u32) -> f32 {
 /// One parameter ramped from a few ulps inside an edge of its range to that edge, both channels,
 /// snapshotted mid-flight, restored into a fresh scalar instance and into a lane of a bank at every
 /// width this build binds, and continued: every restore must accept the snapshot and render what
-/// the source renders, bit for bit. Returns the crossed edge's index (`2 * parameter + at_top`) if
-/// the snapshot's current had crossed it.
-fn near_edge_case(draw: &mut Draw) -> Option<usize> {
+/// the source renders, bit for bit.
+fn near_edge_case(draw: &mut Draw) {
     let parameter = draw.below(3);
     let (minimum, maximum) = RANGES[parameter];
     let at_top = draw.chance(1, 2);
@@ -102,11 +91,6 @@ fn near_edge_case(draw: &mut Draw) -> Option<usize> {
     let payload = support::snapshot(source.as_ref());
     let base = parameter * 4;
     assert!(word(&payload.1, base + 3) > 0, "the ramp is in flight");
-    let (low, high) = (converted(parameter, minimum), converted(parameter, maximum));
-    let crossed = [&payload.1, &payload.2].into_iter().any(|section| {
-        let current = word_f32(section, base);
-        current < low || current > high
-    });
 
     let continuation_left = input(draw, CONTINUATION);
     let continuation_right = input(draw, CONTINUATION);
@@ -190,36 +174,20 @@ fn near_edge_case(draw: &mut Draw) -> Option<usize> {
             "{context}: {width:?} lane {lane} right"
         );
     }
-    crossed.then_some(2 * parameter + usize::from(at_top))
 }
 
 /// The soft clip's own mid-ramp snapshots near every domain edge restore and continue bit for bit,
 /// into a scalar instance and a bank lane (#1071 attempt 2).
 #[test]
 fn a_restored_near_edge_ramp_continues_bit_for_bit() {
-    let mut crossed = [0_u32; 6];
     let seeds = run_seeds(
         "a_restored_near_edge_ramp_continues_bit_for_bit",
         "cargo test -p soft-clip --test randomized -- --exact \
          a_restored_near_edge_ramp_continues_bit_for_bit",
         256,
-        |seed| {
-            if let Some(edge) = near_edge_case(&mut Draw::new(seed)) {
-                crossed[edge] += 1;
-            }
-        },
+        |seed| near_edge_case(&mut Draw::new(seed)),
     );
-    println!(
-        "{seeds} seeds; snapshots past each edge (drive, output, mix; bottom, top): {crossed:?}"
-    );
-    if !replaying() {
-        // Every edge is crossable: the mix's bottom by a negative subnormal, the rest by a few
-        // ulps. A generator that stops reaching one is red, not a quietly weaker gate.
-        assert!(
-            crossed.iter().all(|&count| count > 0),
-            "an edge no snapshot reached past: {crossed:?}"
-        );
-    }
+    println!("{seeds} seeds");
 }
 
 conformance::randomized_effect_test!(
@@ -238,5 +206,5 @@ conformance::randomized_effect_test!(
 #[test]
 #[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
-    conformance::assert_d7_reports(&soft_clip::SoftClipFactory);
+    conformance::assert_d7_reports(Box::new(soft_clip::SoftClipFactory));
 }

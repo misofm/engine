@@ -64,8 +64,15 @@ const OPS_PER_CYCLE: f64 = 3.7;
 const COMPRESSOR_LANE_OPS: f64 = 81.5;
 /// Required arithmetic per lane-sample, parametric-EQ stationary cascade, at the standing fixture's
 /// one live section: a select-free depth-one pass (`svf_step` 19 + output mix 5) and the 4.4
-/// boundary scan (3). Issue #976 dropped the identity padding section the depth-two pass used to
-/// run beside it.
+/// boundary scan (3): 27. Issue #976 dropped the identity padding section the depth-two pass used
+/// to run beside it. Issue #1328's joint SVF flush (`flush_pair`, 10 lane-ops for the two state
+/// words under amendment A9, its threshold loaded from the rest plane, against 6 for two `flush`)
+/// raised `svf_step` from 19 to 23 on every block until the follow-up gave the EQ an unarmed form:
+/// a block of live audio, on which no lane holding state can arm, runs the per-word flush
+/// (`lane::kernels::svf_step_when` with `armable = false`), so this is 27 again (31 under amendment
+/// A9 before the follow-up, 34 under amendment A8). The input's silence counter costs nothing per
+/// lane-sample on live audio: it advances once per block (`lane::kernels::silence_skip_block`, one
+/// last-frame compare); on a block that can arm the sections cost 28 and the rest plane 5 more.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "EQ inventory".
 const EQ_LANE_OPS: f64 = 27.0;
@@ -74,7 +81,12 @@ const EQ_LANE_OPS: f64 = 27.0;
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
 const LIMITER_LANE_OPS: f64 = 129.5;
 /// Required arithmetic per lane-sample, the builtins chain and the fixture's routing, with both
-/// SVF sections per channel carrying a real design.
+/// SVF sections per channel carrying a real design: 69. Under issue #1328's amendment A9 a block of
+/// live audio can arm no section's joint flush, so the chain runs the per-word flush
+/// (`lane::kernels::svf_step_when` with `armable = false`, 24 per section) and advances the input's
+/// silence counter once per block; that is the inventory of the standing workload, and the value
+/// before #1328 (83 under amendment A8). A block that can arm runs 82: 28 per section and 5 for the
+/// counter.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
 const BUILTINS_LANE_OPS: f64 = 69.0;
@@ -86,6 +98,9 @@ const BUILTINS_LANE_OPS: f64 = 69.0;
 /// is one `add(+0.0)` (`input_chain_block_elided`, and the appendix to the ruling). So the class-A
 /// arithmetic of the `dispatch_only` row is the 69 with both 24-op sections replaced by that single
 /// add: 7 sanitise + 1 identity add + 4 boundary scan + 2 fader + 4 pan + 3 route + 1 reduction.
+/// The identity body has no section to arm, so the input's silence counter advances once per block
+/// (`lane::kernels::silence_skip_block`, issue #1328 amendment A9) and adds no lane-op per
+/// lane-sample.
 ///
 /// The fader and the pan matrix stay at their full cost: a 0 dB fader is still a multiply and a
 /// mask clear, and the row's pan (hard right on both inputs, not the identity; see the workload's

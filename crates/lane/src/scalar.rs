@@ -167,6 +167,13 @@ impl Lane for f32 {
     }
 
     #[inline(always)]
+    fn max_u32(self, b: Self) -> Self {
+        // LANE-OP-OK(u32 max): an unsigned integer maximum of the raw bits, the `vpmaxud` /
+        // `i32x4.max_u` / `umax` the vector widths lower to; there is no float semantics to split.
+        f32::from_bits(self.to_bits().max(b.to_bits()))
+    }
+
+    #[inline(always)]
     fn exp2_int_in_range(n: Self) -> Self {
         debug_assert!((EXP2_INT_MIN..=EXP2_INT_MAX).contains(&n));
         let biased = n + EXP2_INT_MAGIC;

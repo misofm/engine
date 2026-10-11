@@ -15,9 +15,11 @@
 //!    on every target — which is why every case is digested at every width a build has: all
 //!    three where `avx2` is enabled, and `W = 1` and `W = 4` in the 4-lane (NEON/simd128) builds,
 //!    which have no eight-lane type (issues #1110 and #1112; see [`WIDTHS`]).
-//! 2. **No NaN reaches a digest.** D5 excludes NaN payloads because wasm canonicalises them. Every
-//!    case is built so its outputs are finite, and the host crate asserts that rather than assuming
-//!    it.
+//! 2. **No NaN payload reaches a digest.** D5 excludes NaN payloads because wasm canonicalises
+//!    them. Every case is built so its outputs are finite, and the host crate asserts that rather
+//!    than assuming it, with one exception: the delegated `runtime/ramp_toward` case pins that a
+//!    NaN `next` passes through `lane::kernels::ramp_toward`, so it replaces every NaN result word
+//!    with one fixed token before hashing and pins NaN-ness, never a payload (issue #1473).
 //! 3. **The corpus is frozen.** [`LANE_DIGESTS`] pins this case list, these seeds and this
 //!    operation order. Changing one of them is a re-pin, permitted only from the scalar `Lane`
 //!    oracle and only with the change stated in the commit message (master plan §8).
@@ -48,8 +50,8 @@ use effect_runtime::corpus as runtime_corpus;
 use gate_expander::corpus as gate_expander_corpus;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
-    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
-    svf_block, svf_block_ramped,
+    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, silence_block, sum_into_block,
+    sum2_block, svf_block, svf_block_ramped,
 };
 use lane::{Lane, LaneF64, Widen};
 use math::corpus as math_corpus;
@@ -102,8 +104,10 @@ macro_rules! at_width {
 }
 
 /// Cases built from the `Lane` trait and the block kernels.
-pub const LANE_CASE_COUNT: usize =
-    KERNELS.len() * SIGNALS.len() + ELEMENTWISE.len() + METER_PEAK_CASE_COUNT;
+pub const LANE_CASE_COUNT: usize = KERNELS.len() * SIGNALS.len()
+    + ELEMENTWISE.len()
+    + METER_PEAK_CASE_COUNT
+    + SVF_ARMED_CASE_COUNT;
 
 /// The banked sample-peak meter cases (issue #943), after the element-wise ones.
 ///
@@ -114,13 +118,25 @@ pub const LANE_CASE_COUNT: usize =
 /// form.
 pub const METER_PEAK_CASE_COUNT: usize = 1;
 
+/// The armed joint-flush SVF case (issue #1328), after the meter case.
+///
+/// One case: `svf_block` over impulse tails whose rest plane arms the joint flush while the tail
+/// crosses the joint band (`max_u32` of the two magnitudes against `REST_EPS`). Every other SVF
+/// case renders 1,024 frames from a fresh counter, shorter than any launch rate's window, so on
+/// wasm they execute the joint test only against unarmed `+0.0` thresholds, where it is false
+/// whatever `max_u32` returns; this is the case that would move if `i32x4.max_u` or the armed
+/// compare lowered to anything but the native operations.
+pub const SVF_ARMED_CASE_COUNT: usize = 1;
+
 /// Cases delegated to [`math::corpus`] (gate M3, replayed under wasm).
 pub const MATH_CASE_COUNT: usize = math_corpus::CASE_COUNT;
 
 /// Cases delegated to [`effect_runtime::corpus`] (gate D1, replayed under wasm).
 ///
-/// These are lane-generic — the dB curve a compressor rides, the followers that ride it, and the
-/// level conversions between them — so unlike the math cases they are digested at every width.
+/// These are lane-generic — the dB curve a compressor rides, the followers that ride it, the
+/// level conversions between them, and the clamped ramp step every effect ramp takes, at the
+/// points where its `min`/`max` operand order decides the bits (signed zeros and a NaN `next`,
+/// issue #1473) — so unlike the math cases they are digested at every width.
 pub const RUNTIME_CASE_COUNT: usize = runtime_corpus::CASE_COUNT;
 
 /// Cases delegated to [`transient_shaper::corpus`], replayed under wasm.
@@ -143,7 +159,9 @@ pub const DELAY_CASE_COUNT: usize = delay_corpus::CASE_COUNT;
 ///
 /// Lane generic, and their pins live in that crate: the Linkwitz-Riley split with its fused
 /// all-pass tap and the D7 flush of its four filter words, the band's dB chain through
-/// `log2_lane`/`exp2_lane`, the branching gain smoother and the stereo detector link.
+/// `log2_lane`/`exp2_lane`, the branching gain smoother and the stereo detector link, and one
+/// case rendered through the product `process_block` whose segments run the armed and the
+/// unarmed crossover, so a target that dispatched a segment differently moves it (issue #1473).
 pub const MULTIBAND_CASE_COUNT: usize = multiband_corpus::CASE_COUNT;
 
 /// Cases delegated to [`soft_clip::corpus`] (issue #91), replayed under wasm.
@@ -170,8 +188,9 @@ pub const PARAMETRIC_EQ_CASE_COUNT: usize = parametric_eq_corpus::CASE_COUNT;
 /// downward-expansion curve, the unfused/two-rounding `rate * (target - G) + G` mul+add one-pole
 /// with its D7 `flush`, `exp2_lane`
 /// and identity select. One case per link mode, one of gated bursts that drives both one-pole
-/// rates and the hold, one of subnormal input, and one with a D11 word ramp in flight across a
-/// block boundary.
+/// rates and the hold, one of subnormal input, one with a D11 word ramp in flight across a
+/// block boundary, and one whose ramp words the unclamped D11 law would take past their targets,
+/// each lane's window ending on a different frame, so issue #1409's clamp acts (issue #1459).
 pub const GATE_EXPANDER_CASE_COUNT: usize = gate_expander_corpus::CASE_COUNT;
 
 /// Cases delegated to [`builtins::corpus`] (issue #85), replayed under wasm.
@@ -417,6 +436,8 @@ enum Case {
     Elementwise(Elementwise),
     /// The banked sample-peak meter kernel (issue #943).
     MeterPeak,
+    /// `svf_block` with an armed rest plane (issue #1328).
+    SvfArmed,
     /// One case of the `math` M3 corpus.
     Math(usize),
     /// One case of the `effect-runtime` D1 corpus.
@@ -464,6 +485,10 @@ fn case_of(index: usize) -> Case {
         return Case::MeterPeak;
     }
     let index = index - METER_PEAK_CASE_COUNT;
+    if index < SVF_ARMED_CASE_COUNT {
+        return Case::SvfArmed;
+    }
+    let index = index - SVF_ARMED_CASE_COUNT;
     if index < MATH_CASE_COUNT {
         return Case::Math(index);
     }
@@ -541,7 +566,7 @@ pub fn is_width_dependent(index: usize) -> bool {
 pub fn has_lane_values(index: usize) -> bool {
     matches!(
         case_of(index),
-        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak | Case::SvfArmed
     )
 }
 
@@ -556,6 +581,7 @@ pub fn case_name(index: usize) -> String {
         Case::Kernel(kernel, signal) => format!("{}/{}", kernel.name(), signal.name()),
         Case::Elementwise(operation) => operation.name().to_string(),
         Case::MeterPeak => "meter_sample_peak_block/hostile".to_string(),
+        Case::SvfArmed => "svf_block/armed/impulse_tails".to_string(),
         Case::Math(case) => format!("math/{}", math_corpus::CASE_NAMES[case]),
         Case::Runtime(case) => format!("runtime/{}", runtime_corpus::CASE_NAMES[case]),
         Case::TransientShaper(case) => transient_shaper_corpus::CASE_NAMES[case].to_string(),
@@ -608,8 +634,10 @@ const MINMAX_LOWERING_POOL: [u32; 10] = [
 /// `maxps`/`minps` on x86, operand-swapped `f32x4.pmax`/`f32x4.pmin` on wasm `simd128` -- and the
 /// wasm half of that claim cannot be executed by any native gate. Gate G5 already runs this crate
 /// under wasmtime with `simd128`, so the cheapest honest proof is to run the truth table there and
-/// return a count. A count, not bits: rule 2 of this corpus is that no NaN reaches a digest, and
-/// the pool is full of them.
+/// return a count. A count, not bits: rule 2 of this corpus is that no NaN payload reaches a
+/// digest (the delegated `runtime/ramp_toward` case hashes NaN only as one fixed token), and the
+/// pool is full of payloads. That case also sees a swapped lowering, but only at its own points;
+/// the count checks every ordered pair of the pool.
 ///
 /// # Panics
 ///
@@ -1090,7 +1118,9 @@ pub fn lane_width(width: usize) -> usize {
 #[must_use]
 pub fn expected_digest(index: usize) -> [u8; 32] {
     match case_of(index) {
-        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak => LANE_DIGESTS[index],
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak | Case::SvfArmed => {
+            LANE_DIGESTS[index]
+        }
         Case::Math(case) => math_corpus::M3_DIGESTS[case],
         Case::Runtime(case) => runtime_corpus::D1_DIGESTS[case],
         Case::TransientShaper(case) => transient_shaper_corpus::CROSS_TARGET_DIGESTS[case],
@@ -1116,7 +1146,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
 pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
     assert!(width < WIDTHS, "width index out of range");
     match case_of(index) {
-        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak => {
+        Case::Kernel(..) | Case::Elementwise(_) | Case::MeterPeak | Case::SvfArmed => {
             digest_lanes(&lane_values(index, width, true))
         }
         Case::Math(case) => digest_math(case),
@@ -1202,6 +1232,7 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
             at_width!(width, |L| elementwise_values::<L>(operation, fused))
         }
         Case::MeterPeak => at_width!(width, |L| meter_peak_values::<L>()),
+        Case::SvfArmed => at_width!(width, |L| svf_armed_values::<L>()),
         Case::Math(_)
         | Case::Runtime(_)
         | Case::TransientShaper(_)
@@ -1338,19 +1369,31 @@ fn run_kernel<L: Lane>(kernel: Kernel, block: &mut [f32], state_seed: f32) {
         ic2: L::splat(state_seed),
     };
 
+    // The section's effect input is the block itself, with no history: a fresh silence counter
+    // and the rest plane it writes before the section runs (issue #1328, amendment A9).
+    let mut silence = L::zero();
+    let mut rest = vec![0.0_f32; block.len()];
+    silence_block::<L>(
+        block,
+        FRAMES,
+        &mut silence,
+        &mut rest,
+        L::splat(lane::silence_frames(48_000) as f32),
+    );
     match kernel {
         Kernel::SvfLow | Kernel::SvfHigh | Kernel::SvfBand | Kernel::SvfBell => {
-            svf_block::<L>(block, FRAMES, &svf_coef, &mut svf_state);
+            svf_block::<L, &[f32]>(block, FRAMES, &svf_coef, &mut svf_state, &rest);
         }
         Kernel::SvfRamped | Kernel::SvfRampedIdle => {
             let window = if ramping { RAMP_WINDOW } else { 0 };
-            svf_block_ramped::<L>(
+            svf_block_ramped::<L, &[f32]>(
                 block,
                 FRAMES,
                 &mut svf_coef,
                 &svf_step,
                 window,
                 &mut svf_state,
+                &rest,
             );
         }
         Kernel::OnePole => {
@@ -1617,6 +1660,67 @@ fn meter_peak_words(lane: usize) -> [f32; FRAMES] {
         }
     }
     words
+}
+
+/// The armed SVF case (issue #1328): per lane, a 1 kHz low-pass `svf_block` (the corpus's
+/// coefficients) fed a tiny impulse on frame 0 and zeros after it, with a per-lane silence window.
+/// The counter resets on the impulse and arms the joint flush on the window's frame, while the
+/// tail is near `REST_EPS`: on most lanes one word is still above it there, so the pair stays on
+/// the per-word law until both cross (a joint test on either word alone, or a `max_u32` that is not
+/// the larger magnitude, zeroes it early); on one lane both are already below it. The rest plane is
+/// written by `silence_block`, so the case also runs the counter's armed path.
+fn svf_armed_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
+    // `(impulse, window)` per lane. The window ends where the tail straddles `REST_EPS` -- one
+    // word below it, the other not -- with the low word `n2` (lanes 0, 1, 5) or `n1` (lanes 2, 3,
+    // 4, 6), and on lane 7 where both are already below it.
+    const LANE_TAILS: [(f32, f32); LANES] = [
+        (1.0e-12, 28.0),
+        (2.0e-12, 31.0),
+        (5.0e-12, 42.0),
+        (6.0e-12, 45.0),
+        (1.0e-11, 43.0),
+        (1.0e-10, 68.0),
+        (1.0e-10, 76.0),
+        (1.0e-12, 40.0),
+    ];
+    let mut lanes = [[0.0_f32; FRAMES]; LANES];
+    let mut windows = [0.0_f32; LANES];
+    for (index, lane) in lanes.iter_mut().enumerate() {
+        (lane[0], windows[index]) = LANE_TAILS[index];
+    }
+    let coefficients = Kernel::SvfLow.svf_coefficients();
+    let svf_coef = SvfCoef::<L> {
+        c1: L::splat(coefficients[0]),
+        a2: L::splat(coefficients[1]),
+        a3: L::splat(coefficients[2]),
+        m0: L::splat(coefficients[3]),
+        m1: L::splat(coefficients[4]),
+        m2: L::splat(coefficients[5]),
+    };
+    let width = L::WIDTH;
+    let mut block = vec![0.0_f32; FRAMES * width];
+    let mut rest = vec![0.0_f32; FRAMES * width];
+    for group in 0..LANES / width {
+        for frame in 0..FRAMES {
+            for offset in 0..width {
+                block[frame * width + offset] = lanes[group * width + offset][frame];
+            }
+        }
+        let mut silence = L::zero();
+        let window = L::load(&windows[group * width..(group + 1) * width]);
+        silence_block::<L>(&block, FRAMES, &mut silence, &mut rest, window);
+        let mut state = SvfState::<L> {
+            ic1: L::zero(),
+            ic2: L::zero(),
+        };
+        svf_block::<L, &[f32]>(&mut block, FRAMES, &svf_coef, &mut state, &rest);
+        for frame in 0..FRAMES {
+            for offset in 0..width {
+                lanes[group * width + offset][frame] = block[frame * width + offset];
+            }
+        }
+    }
+    lanes
 }
 
 /// Runs the sample-peak case at width `L::WIDTH`: every frame's value is the running window peak

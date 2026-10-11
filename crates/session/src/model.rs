@@ -777,6 +777,28 @@ pub struct Output {
     pub id: StableId,
 }
 
+/// Inclusive minimum of a route's `gain_db` (issue #1237; owner question Q2 of decision 13).
+///
+/// The route domain is spelled once in Rust, here: the session validator (`validate_routes`) and
+/// the graph compiler's `route_values`, which backs the lowering and every live route record, both
+/// read it. The SDK keeps a TypeScript copy (`ROUTE_GAIN_DB_DOMAIN` and `ROUTE_COEFFICIENT_DOMAIN`
+/// in `sdk/src/core/session.ts`), which `sdk/test/builder-evals.mjs` holds to the engine's own
+/// refusals; a domain change edits both.
+pub const ROUTE_GAIN_DB_MINIMUM: f32 = -144.0;
+
+/// Inclusive maximum of a route's `gain_db` (issue #1237; owner question Q2 of decision 13).
+///
+/// Read by the session validator and the graph compiler's `route_values`, as
+/// [`ROUTE_GAIN_DB_MINIMUM`] is.
+pub const ROUTE_GAIN_DB_MAXIMUM: f32 = 24.0;
+
+/// Inclusive maximum magnitude of each `channel_matrix` coefficient of a route: every coefficient
+/// is in `[-1, 1]` (issue #1237; owner question Q2 of decision 13).
+///
+/// Read by the session validator and the graph compiler's `route_values`, as
+/// [`ROUTE_GAIN_DB_MINIMUM`] is.
+pub const ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM: f32 = 1.0;
+
 /// One signal route declaration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {

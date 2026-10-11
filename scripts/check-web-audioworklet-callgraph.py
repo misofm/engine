@@ -16,15 +16,28 @@ Modes
     `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
     `--trap-owner` substrings the caller named.
 
-    The C allocator names (`free`, `malloc`, `calloc`, `realloc`) match only as the *whole* symbol
-    name (issue #1234). Searched as substrings they also matched any out-of-line Rust function
-    whose mangled name merely ends in `4free` -- an ordinary queue accessor named `free` read as
-    the allocator. On `wasm32-unknown-unknown` the Rust allocator is already matched by
-    `dlmalloc`, `dealloc`, `__rust_alloc` and `__rust_realloc`. This checker never sees an import:
-    an import has no body, so `wasm-objdump -d` prints no function header for it, and
-    `check-web-audioworklet.sh` refuses a module with any import before this gate runs. A member
-    named exactly `free`, `malloc`, `calloc` or `realloc` is therefore a defined C allocator
-    entry point, and that is exactly what the anchored alternative refuses.
+    A C allocator name (any name containing `free`, `alloc`, `memalign` or `sbrk`) fails anywhere
+    in an *unmangled* member name and never in a mangled Rust name (issues #1234 and #1417). A
+    Rust v0 (`_R`) name is a Rust item. A `_ZN` prefix is Itanium C++ mangling, which Rust's legacy
+    scheme and C++ namespaced names share: the rule assumes the worklet links no C++, so a `_ZN`
+    name in it is a Rust legacy item, and a C++ dependency would need this rule revisited. An
+    out-of-line accessor whose mangled name ends in `4free` is an ordinary method named `free`,
+    not the allocator. The Rust allocator's own symbols on `wasm32-unknown-unknown` are matched by
+    the other alternatives (`dlmalloc`, `dealloc`, `__rust_alloc`, `__rust_realloc`) or through
+    their dlmalloc callees: `__rdl_alloc`, `__rdl_alloc_zeroed` and `__rdl_realloc` match no
+    alternative themselves and fail because each calls dlmalloc's `malloc` or `memalign`. Any
+    other name is C or a `#[no_mangle]` symbol, and a C allocator is not always spelled with one
+    of the four bare names: `dlfree`, `__libc_malloc`, `mi_free` and `je_malloc` are prefixed,
+    and `posix_memalign`, `aligned_alloc`, `memalign`, jemalloc's `sdallocx` and `rallocx`,
+    mimalloc's `mi_zalloc` and snmalloc's `sn_rust_alloc` contain none of them. A C-backed
+    `#[global_allocator]` whose `__rust_*` shim LTO inlined would reach such a name with no other
+    alternative matching; on an over-aligned path it can call `posix_memalign` with no `malloc`
+    beside it. So any unmangled name that contains `free`, `alloc`, `memalign` or `sbrk` fails.
+    This fails safe: an unmangled engine function whose name matches fails too, and the fix is to
+    rename it, not to relax the rule. This checker never sees an import: an import has no body,
+    so `wasm-objdump -d` prints no function header for it, and `check-web-audioworklet.sh`
+    refuses a module with any import before this gate runs. `scripts/test-web-audioworklet.sh`
+    runs `--self-test`, which pins these cases.
 
     `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
     control path (`port.onmessage`), where the engine's rule is "never allocate on the render
@@ -37,6 +50,27 @@ Modes
     and `miso_engine_web_v1_command_submit` -- whose bodies inline the bounded SPSC endpoints'
     own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
     this export *calls* may trap" while admitting the one checked index the queue primitive emits.
+
+`--callgraph EXPORT --render-thread`
+    Issue #1333 D4: three more rules over the same direct-call closure, for the exports the
+    AudioWorklet calls on its render thread. They keep decision 15's rule ("the worklet never
+    allocates or frees after boot") visible once the module is built with atomics (#1332).
+
+    1. **Thread-local destructor registration.** A member whose name carries std's registration
+       path -- `thread_local` + `destructors` + `register`, or `thread_local` + `guard` +
+       `enable` -- fails. With atomics std registers a destructor for a thread local that needs
+       drop, lazily and by allocating; on today's non-atomic module no such path exists.
+    2. **Atomic wait.** A member containing `memory.atomic.wait32` or `memory.atomic.wait64`
+       fails: render never blocks. Today's module carries no atomic opcode at all
+       (`check-web-audioworklet.sh` bans them outright), so this rule is in place before #1332.
+    3. **Pinned `call_indirect` sites.** The direct-call closure cannot see what an indirect call
+       reaches -- the whole plan executor sits behind `Box<dyn PreparedPlanExecutor>` -- and
+       resolving indirect calls by signature is not sound (it flags drop glue the render path
+       never runs), so the runtime render-locked allocation count is the proof through them.
+       What this rule holds is the *set* of indirect sites: each closure member that contains
+       `call_indirect`, by its name without the mangling hash, with its count, must equal
+       `INDIRECT_SITES[EXPORT]`. A new, removed or changed site fails and prints the difference,
+       so new dynamic dispatch on the render path is reviewed, with its reason, in this table.
 
 `--kernel-shape --kernel-pattern REGEX --kernel-min K`
     Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
@@ -85,7 +119,7 @@ Modes
     absorbs by construction because it is expressed as a multiple of `vector`.
 
 `--self-test`
-    Synthetic disassembly cases (a)-(g) below, each the red mutation of one rule.
+    Synthetic disassembly cases (a)-(h) below, each the red mutation of one rule.
 
 Why the traversal stops at the panic entry functions
 ----------------------------------------------------
@@ -111,7 +145,7 @@ PANIC_ENTRY = re.compile(
     r"|panic_const|panic_fmt"
 )
 FORBIDDEN = re.compile(
-    r"^(free|malloc|calloc|realloc)$"
+    r"^(?!_R|_ZN).*(?:free|alloc|memalign|sbrk)"
     r"|dealloc|dlmalloc|drop_glue|drop_in_place|drop_slow|unlink_chunk"
     r"|insert_large_chunk|memory_grow|__rust_alloc|__rust_realloc"
 )
@@ -121,6 +155,65 @@ FORBIDDEN = re.compile(
 # web plan carries an executor (both graph binding paths end in `prepare_with_executor`), so the
 # branch is dead. It is core-owned (#84) and is not fixed from this job.
 TRAP_ALLOW_LIST = frozenset({"18PreparedRenderPlan12render_inner"})
+
+# Issue #1333 D4.1: std's thread-local destructor registration path, as substrings that must all
+# appear in one member name. `std::sys::thread_local::destructors::list::register` registers a
+# destructor; `std::sys::thread_local::guard::*::enable` arms the per-thread run of them.
+TLS_DESTRUCTOR_REGISTRATION: tuple[tuple[str, ...], ...] = (
+    ("thread_local", "destructors", "register"),
+    ("thread_local", "guard", "enable"),
+)
+# Issue #1333 D4.2: the two blocking waits a render-thread closure may never contain.
+ATOMIC_WAIT = frozenset({"memory.atomic.wait32", "memory.atomic.wait64"})
+# The mangling hash, stripped so a pinned site survives a rebuild: the legacy scheme's trailing
+# `17h<16 hex>E`, and the v0 scheme's crate disambiguator `Cs<base62>_`.
+LEGACY_HASH = re.compile(r"17h[0-9a-f]{16}E$")
+V0_CRATE_HASH = re.compile(r"Cs[0-9A-Za-z]*_")
+
+# Issue #1333 D4.3: the pinned `call_indirect` sites of each render-thread export's direct-call
+# closure, by member name without its mangling hash, with the count and the reason for each.
+# Measured on the named twin of the artifact this table was set with; a change to any entry is a
+# review of new dynamic dispatch on the render thread, never a re-pin without its reason.
+INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
+    "miso_engine_web_v1_render": {
+        "_RNvMs2_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan6render": (
+            1,
+            "`executor.invalidate_observers()` on a failed block, through the plan's "
+            "`Box<dyn PreparedPlanExecutor>`",
+        ),
+        "_RNvMs2_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
+            1,
+            "`executor.render(...)`: the whole plan executor, through the plan's "
+            "`Box<dyn PreparedPlanExecutor>`; the runtime render-locked count covers it",
+        ),
+    },
+    "miso_engine_web_v1_meter_poll": {},
+    "miso_engine_web_v1_command_submit": {
+        "_RNvMNtCs_9host_core16live_route_stateNtB2_14LiveRouteState6follow": (
+            2,
+            "the `effective_mute: &dyn Fn(usize, usize) -> bool` predicate, once per lane, when a "
+            "route follows its source strip's mute",
+        ),
+        "_RNvNtCs_9host_core16live_route_state14followed_lanes": (
+            2,
+            "the same `effective_mute: &dyn Fn` predicate, once per lane",
+        ),
+        "_RNvMs0_NtCs_15effect_compiler7controlNtB5_18EffectControlOwner4edit": (
+            1,
+            "`factory.descriptor()` on the owner's `Arc<dyn NativeEffectFactory>`",
+        ),
+        "_RNvMs2_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer25publish_candidate_targets": (
+            4,
+            "the owner's `Arc<dyn NativeEffectFactory>`: `target_preparation()` and the "
+            "capability's target-count and validation calls, inlined from `publish`",
+        ),
+        "_RNvMs2_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer27preflight_candidate_targets": (
+            4,
+            "the same factory and target-preparation capability calls, inlined from "
+            "`preflight_publication`",
+        ),
+    },
+}
 
 VECTOR = re.compile(r"^(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.")
 SIMD_ARITH = re.compile(r"^f32x4\.(mul|add|sub)$")
@@ -143,7 +236,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
 # well under the ~4x explosion de-vectorisation produces even in the smallest roster kernel
-# (the route ramp mix, 21 vector operations -> ~84 scalar), so the slack cannot hide a
+# (the route ramp mix, 22 vector operations -> ~88 scalar), so the slack cannot hide a
 # scalarisation.
 SCALAR_SLACK = 8
 
@@ -240,9 +333,10 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     ("soft-clip f32x4", r"soft_clip.*4wide6f32x4", 0.10),
     # #1220 verdict NIT-1: the live route's indexed-ramp mix. Its sub-vector frames are outlined
     # (`route_mix_ramp_tail`, `route_mix_settled_tail`); an inlined settled tail unrolls as 18
-    # scalar operations beside its 21 vector ones (22 before the #1220 amendment built each chunk's
-    # frame index from a `u32` counter), which the generic "vector > scalar" rule admits and this
-    # row's budget (max(0.10 x 21, slack 8) = 8) refuses.
+    # scalar operations beside its 22 vector ones (re-measured after #1452's undo 2 advanced the
+    # frame index by a vector add again; 21 between the #1220 amendment and that undo), which the
+    # generic "vector > scalar" rule admits and this row's budget (max(0.10 x 22, slack 8) = 8)
+    # refuses.
     (
         "route-mix-ramp f32x4",
         r"lane7kernels20route_mix_ramp_block.*4wide6f32x4",
@@ -303,7 +397,12 @@ def parse(text: str) -> dict[int, Function]:
 
 
 def closure(functions: dict[int, Function], export: str) -> list[Function]:
-    roots = [function for function in functions.values() if export in function.name]
+    # An exact name wins: `miso_engine_web_v1_render` is a prefix of
+    # `miso_engine_web_v1_render_allocation_count` (issue #1333), and an export's name-section
+    # entry is its exact symbol.
+    roots = [function for function in functions.values() if function.name == export]
+    if not roots:
+        roots = [function for function in functions.values() if export in function.name]
     if not roots:
         raise SystemExit(f"export not found in the disassembly: {export}")
     if len(roots) != 1:
@@ -361,6 +460,76 @@ def check_callgraph(
     print(
         f"{export}: closure={len(members)} traps={traps} "
         f"trap_owners={sorted(function.name for function in trap_owners)} entries={entries}"
+    )
+    return failures
+
+
+def unhashed(name: str) -> str:
+    """`name` without its mangling hash, so a pinned site survives an unrelated rebuild."""
+    return V0_CRATE_HASH.sub("Cs_", LEGACY_HASH.sub("E", name))
+
+
+def indirect_sites(members: list[Function]) -> dict[str, int]:
+    """Each member that contains `call_indirect`, by unhashed name, with its total count."""
+    sites: dict[str, int] = {}
+    for function in members:
+        count = function.opcodes.count("call_indirect")
+        if count:
+            name = unhashed(function.name)
+            sites[name] = sites.get(name, 0) + count
+    return sites
+
+
+def check_render_thread(
+    functions: dict[int, Function],
+    export: str,
+    pinned: dict[str, dict[str, tuple[int, str]]] | None = None,
+) -> int:
+    """Issue #1333 D4: destructor registration, atomic waits and pinned indirect sites."""
+    table = INDIRECT_SITES if pinned is None else pinned
+    members = closure(functions, export)
+    failures = 0
+    registering = sorted(
+        function.name
+        for function in members
+        if any(all(part in function.name for part in parts) for parts in TLS_DESTRUCTOR_REGISTRATION)
+    )
+    if registering:
+        failures += 1
+        print(
+            f"FAIL {export}: the render-thread closure registers a thread-local destructor:",
+            file=sys.stderr,
+        )
+        for name in registering:
+            print(f"  {name}", file=sys.stderr)
+    waiting = sorted(function.name for function in members if ATOMIC_WAIT.intersection(function.opcodes))
+    if waiting:
+        failures += 1
+        print(f"FAIL {export}: the render-thread closure contains an atomic wait:", file=sys.stderr)
+        for name in waiting:
+            print(f"  {name}", file=sys.stderr)
+    if export not in table:
+        failures += 1
+        print(f"FAIL {export}: no pinned call_indirect table for this export", file=sys.stderr)
+        return failures
+    expected = {name: count for name, (count, _reason) in table[export].items()}
+    actual = indirect_sites(members)
+    if actual != expected:
+        failures += 1
+        print(
+            f"FAIL {export}: the render-thread call_indirect sites differ from INDIRECT_SITES:",
+            file=sys.stderr,
+        )
+        for name in sorted(set(expected) | set(actual)):
+            if expected.get(name) != actual.get(name):
+                print(
+                    f"  {name}: pinned {expected.get(name, 0)}, found {actual.get(name, 0)}",
+                    file=sys.stderr,
+                )
+    print(
+        f"{export}: render-thread indirect_sites={sum(actual.values())} "
+        f"members={len(actual)} destructor_registration={len(registering)} "
+        f"atomic_waits={len(waiting)}"
     )
     return failures
 
@@ -623,36 +792,78 @@ def self_test() -> int:
     ) + "000030 func[2] <_ZN8dlmalloc4free17h0E>:\n 000031: 0b                         | end\n"
     expect("(a) dlmalloc free", check_callgraph(parse(freeing), "miso_engine_web_v1_render") == 1)
 
-    # (a1) issue #1234: the C allocator names are anchored to the whole symbol name.
+    # (a1) issues #1234 and #1417: a C allocator name fails anywhere in an unmangled name and
+    # never in a mangled Rust name.
     def reaching(name: str) -> dict[int, Function]:
         return parse(freeing.replace("<_ZN8dlmalloc4free17h0E>", f"<{name}>"))
 
     # An out-of-line Rust accessor that is merely *named* like a C allocator is not the
-    # allocator, for each of the four names (a name that contains or ends in one, unanchored).
+    # allocator, for each of the four names (v0 mangling) and for legacy mangling.
     for length, c_name in ((4, "free"), (6, "malloc"), (6, "calloc"), (7, "realloc")):
         expect(
-            f"(a1) out-of-line accessor named {c_name} passes",
+            f"(a1) out-of-line v0 accessor named {c_name} passes",
             check_callgraph(
                 reaching(f"_RNvMs_NtCs0_5graphNtB4_25GraphRouteControlProducer{length}{c_name}"),
                 "miso_engine_web_v1_render",
             )
             == 0,
         )
-    # An unmangled name that merely *begins* with a C allocator name is not the allocator: the
-    # anchor holds at the end too.
-    for c_name in ("free", "malloc", "calloc", "realloc"):
-        expect(
-            f"(a1) unmangled {c_name}_count passes",
-            check_callgraph(reaching(f"{c_name}_count"), "miso_engine_web_v1_render") == 0,
+    expect(
+        "(a1) out-of-line legacy accessor named free passes",
+        check_callgraph(
+            reaching("_ZN5graph25GraphRouteControlProducer4free17h0123456789abcdefE"),
+            "miso_engine_web_v1_render",
         )
+        == 0,
+    )
     # A member named exactly like a C allocator entry point fails, each of the four.
     for c_name in ("free", "malloc", "calloc", "realloc"):
         expect(
             f"(a1) bare C allocator {c_name}",
             check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
         )
-    # The Rust allocator's symbols still fail; `__rust_realloc` is new to the list.
-    for rust_name in ("_ZN8dlmalloc4free17h0E", "__rust_realloc"):
+    # A prefixed C or third-party allocator spelling fails: a C allocator is not always bare.
+    for c_name in (
+        "dlfree",
+        "__libc_free",
+        "mi_free",
+        "mi_malloc_aligned",
+        "je_malloc",
+        "tlsf_free",
+        "__libc_calloc",
+        "je_realloc",
+    ):
+        expect(
+            f"(a1) prefixed C allocator {c_name}",
+            check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
+        )
+    # A C allocator entry point that contains none of the four bare names fails (Amendment 1 of
+    # #1417): aligned and sized entry points, and allocators whose names end in `alloc`.
+    for c_name in (
+        "posix_memalign",
+        "aligned_alloc",
+        "memalign",
+        "sdallocx",
+        "rallocx",
+        "mi_zalloc",
+        "sn_rust_alloc",
+        "sbrk",
+    ):
+        expect(
+            f"(a1) C allocator entry point {c_name}",
+            check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
+        )
+    # An unmangled name that contains a C allocator name is refused, wherever the name sits: it
+    # may be a C allocator (`free_list`, `malloc_usable`), and an unmangled engine function so
+    # named is renamed rather than admitted.
+    for c_name in ("free", "malloc", "calloc", "realloc"):
+        expect(
+            f"(a1) unmangled {c_name}_count fails: an unmangled name containing a C allocator name",
+            check_callgraph(reaching(f"{c_name}_count"), "miso_engine_web_v1_render") == 1,
+        )
+    # The Rust allocator's symbols still fail, each through its own alternative: the mangled
+    # `__rust_realloc` shim is exempt from the C alternative, so only `__rust_realloc` matches it.
+    for rust_name in ("_ZN8dlmalloc4free17h0E", "_RNvCs0_7___rustc14___rust_realloc"):
         expect(
             f"(a1) Rust allocator {rust_name}",
             check_callgraph(reaching(rust_name), "miso_engine_web_v1_render") == 1,
@@ -889,6 +1100,81 @@ def self_test() -> int:
         "(g) a hash containing x8 is not eight lanes", check_no_eight_lanes(parse(hash_only)) == 0
     )
 
+    # (h) issue #1333 D4: the render-thread rules. A synthetic pinned table for `VALID_SHAPE`'s
+    # render export, with one indirect site in `render_next`.
+    def render_thread(text: str, table: dict[str, dict[str, tuple[int, str]]]) -> int:
+        return check_render_thread(parse(text), "miso_engine_web_v1_render", table)
+
+    indirect_line = " 000025: 11 00 00                   | call_indirect 0 0\n"
+    dispatching = VALID_SHAPE.replace(
+        " 000024: 0b                         | end", indirect_line + " 000024: 0b                         | end"
+    )
+    pinned_one = {"miso_engine_web_v1_render": {"render_next": (1, "self-test executor dispatch")}}
+    pinned_none: dict[str, dict[str, tuple[int, str]]] = {"miso_engine_web_v1_render": {}}
+    expect("(h) pinned indirect site passes", render_thread(dispatching, pinned_one) == 0)
+    expect("(h) no indirect site against an empty pin passes", render_thread(VALID_SHAPE, pinned_none) == 0)
+    # (h1) a new `call_indirect` in a render-thread closure fails.
+    expect("(h1) new indirect site", render_thread(dispatching, pinned_none) == 1)
+    # (h1a) a removed pinned site fails: the table must say what the closure does.
+    expect("(h1a) removed indirect site", render_thread(VALID_SHAPE, pinned_one) == 1)
+    # (h1b) a changed count fails.
+    doubled = dispatching.replace(indirect_line, indirect_line + indirect_line)
+    expect("(h1b) changed indirect count", render_thread(doubled, pinned_one) == 1)
+    # (h1c) an export with no pinned table fails rather than passing unchecked.
+    expect("(h1c) unpinned export", render_thread(dispatching, {}) == 1)
+    # (h1d) the mangling hash is not part of the pinned name, in either scheme.
+    for hashed, pinned_name in (
+        ("_ZN4plan6render17h0123456789abcdefE", "_ZN4plan6renderE"),
+        ("_RNvCs5yx8Jh2iHKX_4plan6render", "_RNvCs_4plan6render"),
+    ):
+        renamed = dispatching.replace("<render_next>", f"<{hashed}>").replace(
+            "call 1 <render_next>", f"call 1 <{hashed}>"
+        )
+        expect(
+            f"(h1d) hash-free pin of {hashed}",
+            render_thread(renamed, {"miso_engine_web_v1_render": {pinned_name: (1, "x")}}) == 0,
+        )
+    # (h2) a member that registers a thread-local destructor fails, by either std path.
+    for registrar in (
+        "_ZN3std3sys12thread_local11destructors4list8register17h0123456789abcdefE",
+        "_ZN3std3sys12thread_local5guard3key6enable17h0123456789abcdefE",
+    ):
+        registering = VALID_SHAPE.replace(
+            "000020 func[1] <render_next>:",
+            " 000013: 10 02                      | call 2 <x>\n000020 func[1] <render_next>:",
+        ) + f"000030 func[2] <{registrar}>:\n 000031: 0b                         | end\n"
+        expect(f"(h2) destructor registration {registrar}", render_thread(registering, pinned_none) == 1)
+    # A thread-local accessor that registers nothing is not a registration.
+    accessor = VALID_SHAPE.replace(
+        "000020 func[1] <render_next>:",
+        " 000013: 10 02                      | call 2 <x>\n000020 func[1] <render_next>:",
+    ) + "000030 func[2] <_ZN3std6thread5local17LocalKey$LT$T$GT$4with17h0123456789abcdefE>:\n"
+    accessor += " 000031: 0b                         | end\n"
+    expect("(h2) a thread-local accessor passes", render_thread(accessor, pinned_none) == 0)
+    # (h3) a member containing an atomic wait fails, either width; a notify is not a wait.
+    for opcode, verdict in (
+        ("memory.atomic.wait32 2 0", 1),
+        ("memory.atomic.wait64 3 0", 1),
+        ("memory.atomic.notify 2 0", 0),
+    ):
+        waiting = VALID_SHAPE.replace(
+            " 000024: 0b                         | end",
+            f" 000025: fe 01 02 00                | {opcode}\n 000024: 0b                         | end",
+        )
+        expect(f"(h3) {opcode.split()[0]}", render_thread(waiting, pinned_none) == verdict)
+
+    # (h4) an export whose name prefixes another export's resolves to the exact one:
+    # `miso_engine_web_v1_render` prefixes `miso_engine_web_v1_render_allocation_count`.
+    prefixed = VALID_SHAPE + (
+        "000040 func[3] <miso_engine_web_v1_render_allocation_count>:\n"
+        " 000041: 0b                         | end\n"
+    )
+    try:
+        resolved = check_callgraph(parse(prefixed), "miso_engine_web_v1_render")
+    except SystemExit:
+        resolved = -1
+    expect("(h4) exact export name wins over a prefix match", resolved == 0)
+
     # (e) a missing name section is refused rather than silently passing.
     try:
         parse("000010 func[0]:\n 000011: 0b                         | end\n")
@@ -909,6 +1195,7 @@ def main() -> int:
     parser.add_argument("--callgraph", metavar="EXPORT")
     parser.add_argument("--trap-owner", action="append", default=[], metavar="SUBSTRING")
     parser.add_argument("--allocation-only", action="store_true")
+    parser.add_argument("--render-thread", action="store_true")
     parser.add_argument("--kernel-shape", action="store_true")
     parser.add_argument("--kernel-pattern")
     parser.add_argument("--kernel-min", type=int)
@@ -917,6 +1204,8 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+    if args.render_thread and args.callgraph is None:
+        parser.error("--render-thread requires --callgraph")
     if args.callgraph is None and not args.kernel_shape:
         parser.error("one of --callgraph, --kernel-shape or --self-test is required")
 
@@ -928,6 +1217,8 @@ def main() -> int:
         failures += check_callgraph(
             functions, args.callgraph, tuple(args.trap_owner), args.allocation_only
         )
+        if args.render_thread:
+            failures += check_render_thread(functions, args.callgraph)
     if args.kernel_shape:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")

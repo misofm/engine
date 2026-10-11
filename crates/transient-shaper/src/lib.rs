@@ -38,15 +38,15 @@
 //! from the bytes: no heap value is created or dropped, and the payload calls are render-safe.
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
     ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
+    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
 use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
@@ -55,7 +55,7 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_within, read_f32, read_ramp, write_f32, write_ramp,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, write_f32, write_ramp,
 };
 use lane::kernels::gain_mix_step;
 use lane::{Backend, Lane};
@@ -149,7 +149,6 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: LANE_STATE_BYTES,
@@ -160,6 +159,18 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         // therefore the Issue-082 effect identity, so it belongs to #95 and not here.
         scratch_fixed_bytes: 24,
         scratch_bytes_per_frame: 0,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    effect_contract::NodeTailBound {
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
+        composition: effect_contract::CompositionBound::Unstated,
     }
 }
 
@@ -183,6 +194,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &TRANSIENT_SHAPER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 
@@ -439,13 +451,23 @@ impl<const W: usize> Ramps<W> {
 }
 
 /// One prepared transient shaper over `W` lanes: `W = 1` is the scalar product, `W = 4`/`8` a bank.
+///
+/// It keeps no copy of its `PreparedEffectMetadata` (issue #1461): the prepare result carries that
+/// record on the control side, and the shaper keeps only the prepared values its own code reads.
 struct Shaper<L: Lane, const W: usize> {
     coefficients: Coef<L>,
     left_env: Env<L>,
     right_env: Env<L>,
     left: Ramps<W>,
     right: Ramps<W>,
-    metadata: PreparedEffectMetadata,
+    /// The session's bypass, read by `run`.
+    bypass: bool,
+    /// The prepared detector-link mode, read by `process_block`.
+    link_mode: LinkMode,
+    /// The prepared automation span capacity, read by `apply_automation`.
+    automation_capacity: u32,
+    /// The prepared state payload sizes, read by the snapshot and restore length checks.
+    state_sizes: StatePayloadSizes,
     nonfinite: NonFiniteReport,
     /// Bit `l` is set when lane `l` carries a member (issue #1092). A padded lane's bit is clear:
     /// it takes no automation, and D7 recovers it without charging it to `nonfinite` (the padding
@@ -455,8 +477,9 @@ struct Shaper<L: Lane, const W: usize> {
 }
 
 impl<L: Lane, const W: usize> Shaper<L, W> {
+    /// A shaper keeping, of `metadata`, only the values its own code reads.
     fn new(
-        metadata: PreparedEffectMetadata,
+        metadata: &PreparedEffectMetadata,
         row: [f32; 4],
         left: [[f32; PARAMETER_COUNT]; W],
         right: [[f32; PARAMETER_COUNT]; W],
@@ -467,7 +490,10 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             right_env: Env::default(),
             left: Ramps::new(left),
             right: Ramps::new(right),
-            metadata,
+            bypass: metadata.bypass,
+            link_mode: metadata.link_mode,
+            automation_capacity: metadata.automation_capacity,
+            state_sizes: metadata.state_sizes,
             nonfinite: NonFiniteReport::new(),
             active: (1 << W) - 1,
         }
@@ -491,7 +517,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// Renders one block in place and applies the master plan §4.4 boundary check.
     fn process_block(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         debug_assert_eq!(W, L::WIDTH);
-        match self.metadata.link_mode {
+        match self.link_mode {
             LinkMode::DualMono => self.run::<LINK_DUAL_MONO>(left, right, frames),
             LinkMode::Maximum => self.run::<LINK_MAXIMUM>(left, right, frames),
             LinkMode::Average => self.run::<LINK_AVERAGE>(left, right, frames),
@@ -539,7 +565,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
 
     #[inline(always)]
     fn run<const LINK: u8>(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
-        let bypass = L::splat(if self.metadata.bypass { 1.0 } else { 0.0 }).gt(L::zero());
+        let bypass = L::splat(if self.bypass { 1.0 } else { 0.0 }).gt(L::zero());
         let prefix = frames.min(self.left.prefix().max(self.right.prefix()));
         let split = prefix * L::WIDTH;
         let (head_left, tail_left) = left.split_at_mut(split);
@@ -594,7 +620,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             output.common.len(),
             output.left.len(),
             output.right.len(),
-            self.metadata.state_sizes,
+            self.state_sizes,
         )?;
         write_lane(output.left, &self.left_env, &self.left, lane);
         write_lane(output.right, &self.right_env, &self.right, lane);
@@ -614,7 +640,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             input.common.len(),
             input.left.len(),
             input.right.len(),
-            self.metadata.state_sizes,
+            self.state_sizes,
         )?;
         let left = read_lane(input.left)?;
         let right = read_lane(input.right)?;
@@ -656,9 +682,10 @@ struct LaneWords {
 /// Validates and decodes one lane's fourteen state words, reading the payload bytes in place.
 ///
 /// Each ramp is read whole, its step included (#1278 D2a), and its every remaining value is
-/// checked against the parameter's domain (`ramp_path_within`, with a 64-ulp rounding budget for
-/// the iterated `current + step`), so a carried step cannot walk a ramp out of its domain. The
-/// returned value is a few words on the stack: nothing here allocates.
+/// checked against the parameter's strict domain (`ramp_path_inside`): the clamped law keeps every
+/// word between the ramp's start and its target (issue #1409 D2), so a word past the domain is one
+/// the engine never holds (issue #1411 D1). The returned value is a few words on the stack:
+/// nothing here allocates.
 fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     let fast = read_f32(bytes, 0);
     let slow = read_f32(bytes, 1);
@@ -673,14 +700,10 @@ fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
             .minimum
             .zip(parameter.maximum)
             .ok_or(state_error("effect.state.parameter"))?;
-        let slack = 64.0 * f32::EPSILON * low.abs().max(high.abs());
-        // As in the compressor: a ramping `current` is an iterated sum that may round a few ulps
-        // past a domain edge, and the effect's own snapshot must restore, so it is held to the
-        // path's rounding budget; the target and a settled current are held to the domain.
-        let current_valid = read.remaining != 0 || value_valid(parameter, read.current);
-        if !current_valid
+        // The target and the current, moving or settled, are held to the strict domain.
+        if !value_valid(parameter, read.current)
             || !value_valid(parameter, read.target)
-            || !ramp_path_within(read, (low, high), slack, RAMP_SAMPLES)
+            || !ramp_path_inside(read, (low, high), RAMP_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
         }
@@ -742,7 +765,7 @@ fn initial_defaults(
 /// counted as invalid and dropped. Retargeting is the D11 `set_target`: one division, at event time.
 fn apply_automation<const W: usize>(
     spans: &[PreparedAutomationSpan],
-    metadata: PreparedEffectMetadata,
+    automation_capacity: u32,
     first_sample: u64,
     lane: usize,
     left: &mut Ramps<W>,
@@ -769,7 +792,7 @@ fn apply_automation<const W: usize>(
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         };
-        let valid = span_index < metadata.automation_capacity as usize
+        let valid = span_index < automation_capacity as usize
             && parameter_index < PARAMETER_COUNT
             && span.kind == AutomationSpanKind::Point
             && span.start_sample == first_sample
@@ -835,9 +858,15 @@ fn replace_lane<L: Lane>(value: L, lane: usize, replacement: f32) -> L {
 struct PreparedTransientShaper(Shaper<f32, 1>);
 
 /// A bank of `W` tracks rendered as one vector.
+///
+/// Its `PreparedBankMetadata` is returned beside it (issue #1461); it keeps only the two bank
+/// values `process_bank` reads.
 struct PreparedTransientShaperBank<L: Lane, const W: usize> {
     shaper: Shaper<L, W>,
-    metadata: PreparedBankMetadata,
+    /// The bound bank width, read by `process_bank`'s block check and report.
+    width: BankWidth,
+    /// The prepared quantum, read by `process_bank`'s block check.
+    quantum: u32,
 }
 
 impl NativeEffectFactory for TransientShaperFactory {
@@ -848,24 +877,27 @@ impl NativeEffectFactory for TransientShaperFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let row = coefficient_row(metadata.sample_rate).ok_or(EffectPrepareError {
             code: "effect.quality.unsupported",
         })?;
         let (left, right) = initial_defaults(request.initial_values)?;
-        Ok(Box::new(PreparedTransientShaper(Shaper::new(
+        Ok(PreparedEffect {
+            processor: Box::new(PreparedTransientShaper(Shaper::new(
+                &metadata,
+                row,
+                [left],
+                [right],
+            ))),
             metadata,
-            row,
-            [left],
-            [right],
-        ))))
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         bind_bank::<true>(self, request)
     }
 }
@@ -876,7 +908,7 @@ impl NativeEffectFactory for TransientShaperFactory {
 fn bind_bank<const NATIVE_ONLY: bool>(
     factory: &TransientShaperFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     request.validate_shape()?;
     Ok(effect_contract::match_bank_width!(request.width, |L, W| {
         boxed::<L, W, NATIVE_ONLY>(bind::<_, W, NATIVE_ONLY>(factory, request)?)
@@ -890,15 +922,18 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 /// width it does not execute. `bind` cannot promise that alone: it returns the bank by value, and
 /// the eight-lane shaper would otherwise stay in the four-lane browser artifact.
 fn boxed<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
-    bank: Option<PreparedTransientShaperBank<L, W>>,
-) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    bank: Option<(PreparedTransientShaperBank<L, W>, PreparedBankMetadata)>,
+) -> Option<PreparedEffectBank> {
     if NATIVE_ONLY && W != Backend::current().width() {
         return None;
     }
-    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
+    bank.map(|(bank, metadata)| PreparedEffectBank {
+        processor: Box::new(bank) as Box<dyn PreparedNativeEffectBank>,
+        metadata,
+    })
 }
 
-/// Binds one bank of `W` lanes.
+/// Binds one bank of `W` lanes, returned beside its `PreparedBankMetadata`.
 ///
 /// # Padding (issue #1092; decision 12)
 ///
@@ -912,7 +947,7 @@ fn boxed<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
 fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
     factory: &TransientShaperFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<PreparedTransientShaperBank<L, W>>, EffectPrepareError> {
+) -> Result<Option<(PreparedTransientShaperBank<L, W>, PreparedBankMetadata)>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -944,27 +979,27 @@ fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
     if !same_program || (NATIVE_ONLY && W != Backend::current().width()) {
         return Ok(None);
     }
-    let mut shaper = Shaper::new(metadata, row, left, right);
+    let mut shaper = Shaper::new(&metadata, row, left, right);
     shaper.active = request
         .active_mask
         .iter()
         .enumerate()
         .filter(|(_, active)| **active)
         .fold(0, |bits, (lane, _)| bits | (1 << lane));
-    Ok(Some(PreparedTransientShaperBank::<L, W> {
-        metadata: PreparedBankMetadata {
+    Ok(Some((
+        PreparedTransientShaperBank::<L, W> {
+            shaper,
+            width: request.width,
+            quantum: metadata.quantum,
+        },
+        PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
         },
-        shaper,
-    }))
+    )))
 }
 
 impl PreparedNativeEffect for PreparedTransientShaper {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.0.metadata
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         self.0.reset(kind);
     }
@@ -973,7 +1008,7 @@ impl PreparedNativeEffect for PreparedTransientShaper {
         let mut report = ProcessReport::default();
         apply_automation(
             block.automation,
-            self.0.metadata,
+            self.0.automation_capacity,
             block.first_sample,
             0,
             &mut self.0.left,
@@ -1004,20 +1039,13 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         self.shaper.reset(kind);
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.metadata.width);
-        if block.width != self.metadata.width
-            || block.frames > self.shaper.metadata.quantum
-            || block.sidechain.is_some()
-        {
+        let mut report = BankProcessReport::empty(self.width);
+        if block.width != self.width || block.frames > self.quantum || block.sidechain.is_some() {
             return report;
         }
         for track in 0..W {
@@ -1029,7 +1057,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
             let end = block.automation_offsets[track + 1] as usize;
             apply_automation(
                 &block.automation[start..end],
-                self.shaper.metadata,
+                self.shaper.automation_capacity,
                 block.first_sample,
                 track,
                 &mut self.shaper.left,

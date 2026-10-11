@@ -25,14 +25,14 @@ use std::any::Any;
 
 use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
-    BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, FaderMuteBuiltins,
-    FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator, MeterConfig,
-    MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap,
-    PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    BuiltinParameterError, BuiltinParameters, ChannelParameters, FaderMuteBuiltins,
+    FaderMuteRampBuiltins, InputBoundCache, InputBuiltins, Matrix2x2, MatrixBuiltins,
+    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
+    MeterTap, PreparedInputFilterTarget, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
-    BankWidth, ChannelSymmetryWitness, LiveControlRecord, ResponseAnalysisError,
-    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent,
+    BankWidth, ChannelSymmetryWitness, LiveControlRecord, NodeTailBound, ResponseAnalysisError,
+    ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent, TailSamples,
 };
 use engine::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
@@ -383,7 +383,15 @@ pub struct PreparedBuiltinsSession {
     /// matrix processors. Declared after `processors` so a dropped preparation releases the
     /// producers before the consumers that own the ring storage.
     track_controls: Vec<TrackControlProducer>,
-    tails: Vec<(Box<str>, BuiltinTail)>,
+    /// Every strip's input-section bounds as reported (#1329 D7, Amendment 4 R5), sorted by track
+    /// ID: `T_decay` (the tail graph lowering reads), `T_rest` and `RestSamples` (silence skipping,
+    /// #1107). Control-side: nothing render owns carries them. A strip with a live input lane
+    /// carries the rate's live bound ([`builtins::input_section_live_bound_table`]). Any other
+    /// strip carries its own design's bound while the preparation's budget covers its design, and
+    /// the live bound once it does not (#1457 D3, `builtins::INPUT_BOUND_BUDGET_FRAMES`, charged
+    /// in strip order): a non-live strip's bound is certified for its design either way, but it
+    /// is not always the design's own.
+    tails: Vec<(Box<str>, NodeTailBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
 }
@@ -1562,7 +1570,10 @@ struct BuiltinSessionSeal {
     quantum: u32,
     tracks: Vec<Box<str>>,
     processors: Vec<(Box<str>, TrackStage)>,
-    tails: Vec<(Box<str>, BuiltinTail)>,
+    tails: Vec<(Box<str>, NodeTailBound)>,
+    /// The live input bound, computed once per preparation when any strip's input lane is live
+    /// (#1329 Amendment 4, R7); the seal check reuses it.
+    live_bound: Option<NodeTailBound>,
     requests: Vec<MeterRequestSeal>,
     observers: Vec<(Box<str>, TrackStage, u64)>,
     consumers: Vec<(u64, Box<str>, MeterTap)>,
@@ -2147,11 +2158,20 @@ impl PreparedBuiltinsSession {
         self.track_controls.len()
     }
 
-    /// Read-only builtin tails used by graph lowering.
-    pub fn tails(&self) -> impl Iterator<Item = (&str, BuiltinTail)> {
+    /// Read-only builtin tails used by graph lowering: each strip's `T_decay` (#1329 G1).
+    pub fn tails(&self) -> impl Iterator<Item = (&str, TailSamples)> {
         self.tails
             .iter()
-            .map(|(track, tail)| (track.as_ref(), *tail))
+            .map(|(track, bound)| (track.as_ref(), bound.tail))
+    }
+
+    /// Every strip's input-section bounds as reported, by track ID (#1329 D7, Amendment 4 R5):
+    /// `T_decay`, the tail over every peak `T_rest`, and D2's exact-rest bound, which silence
+    /// skipping reads (#1107). Computed once per preparation on the control thread.
+    pub fn input_bounds(&self) -> impl Iterator<Item = (&str, NodeTailBound)> {
+        self.tails
+            .iter()
+            .map(|(track, bound)| (track.as_ref(), *bound))
     }
 
     /// Validate the immutable payload against the exact effect-prepared session.
@@ -2203,7 +2223,12 @@ impl PreparedBuiltinsSession {
             })
             .collect();
         actual_controls.sort_unstable();
-        let expected_tails = match expected_tails(session, &actual_controls) {
+        let expected_tails = match expected_tails(
+            session,
+            &actual_controls,
+            &self.seal.tails,
+            self.seal.live_bound,
+        ) {
             Ok(value) => value,
             Err(()) => {
                 diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
@@ -2790,12 +2815,12 @@ impl PreparedBuiltinsSession {
             PreparedBuiltinsCorruptionCase::TailExtra => self
                 .seal
                 .tails
-                .push(("forged-tail".into(), BuiltinTail::FiniteZero)),
+                .push(("forged-tail".into(), NodeTailBound::ZERO)),
             PreparedBuiltinsCorruptionCase::TailChanged => {
-                if let Some((_, tail)) = self.tails.first_mut() {
-                    *tail = match *tail {
-                        BuiltinTail::FiniteZero => BuiltinTail::Infinite,
-                        BuiltinTail::Infinite => BuiltinTail::FiniteZero,
+                if let Some((_, bound)) = self.tails.first_mut() {
+                    bound.tail = match bound.tail {
+                        TailSamples::Finite(samples) => TailSamples::Finite(samples + 1),
+                        TailSamples::Infinite => TailSamples::Finite(0),
                     };
                 }
             }
@@ -3246,27 +3271,43 @@ fn processors_match(
     bindings == processors.len() && actual == expected
 }
 
+/// The bound a session with a live input lane gives each of its live strips (#1329 D5, D7): the
+/// live bound, which holds for every history of live trim, polarity and filter targets, read from
+/// its per-rate table (#1457 D2). Off the launch rates no bound is stated (no rate there has a
+/// cutoff domain, and preparation refuses the session before this is reached).
+fn live_input_bound(sample_rate: u32) -> NodeTailBound {
+    builtins::input_section_live_bound_table(sample_rate).unwrap_or(NodeTailBound::UNBOUNDED)
+}
+
+/// The strip bounds the seal check expects, sorted by track ID: the sealed live bound for a strip
+/// whose input lane is live, and the strip's own sealed design bound otherwise.
+///
+/// The bounds are the preparation's own, computed once per distinct design and sealed with the
+/// session's identity (#1329 Amendment 4, R7): the check reuses them rather than computing every
+/// design again, and checks the rule that chooses between them, the track set, and that the
+/// payload's copy agrees with the seal's.
 fn expected_tails(
     session: &CompiledSession,
     sorted_controls: &[(&str, usize, bool)],
-) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
+    sealed: &[(Box<str>, NodeTailBound)],
+    live_bound: Option<NodeTailBound>,
+) -> Result<Vec<(Box<str>, NodeTailBound)>, ()> {
     let model = session.normalized_model();
-    let mut values: Vec<(Box<str>, BuiltinTail)> = Vec::with_capacity(model.strips().count());
-    for (strip, fader) in model.strips().zip(model.effective_strip_faders()) {
-        let parameters =
-            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).map_err(|_| ())?;
-        let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
-        // #1254 D1: only a live input lane makes the tail infinite (a live filter target can
-        // enable a filter); a fader-and-matrix channel keeps the chain's own tail.
-        let tail = if sorted_controls
-            .binary_search_by(|(control, _, _)| control.cmp(&strip.id.as_str()))
-            .is_ok_and(|index| sorted_controls[index].2)
-        {
-            BuiltinTail::Infinite
+    let mut values: Vec<(Box<str>, NodeTailBound)> = Vec::with_capacity(model.strips().count());
+    for strip in model.strips() {
+        let id = strip.id.as_str();
+        let live = sorted_controls
+            .binary_search_by(|(control, _, _)| control.cmp(&id))
+            .is_ok_and(|index| sorted_controls[index].2);
+        let bound = if live {
+            live_bound.ok_or(())?
         } else {
-            chain.tail()
+            sealed
+                .binary_search_by(|(track, _)| track.as_ref().cmp(id))
+                .map(|index| sealed[index].1)
+                .map_err(|_| ())?
         };
-        values.push((strip.id.as_str().into(), tail));
+        values.push((id.into(), bound));
     }
     values.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(values)
@@ -3300,7 +3341,7 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    prepare_session_builtins_with_live_controls(session, requests, &[], caps)
+    prepare_session_builtins_with_live_controls(session, requests, &[], caps, None)
 }
 
 /// Prepare builtins with live-control channels attached (issue #137 D1).
@@ -3313,11 +3354,18 @@ pub fn prepare_session_builtins(
 /// [`prepare_session_builtins`] is exactly this call with no control channels, so a host that does
 /// not want live controls pays nothing: no queue is allocated and the matrix processors carry
 /// `None`.
+///
+/// `bound_cache` (#1457 D2) is a design-bound cache the host keeps across preparations (one per
+/// engine, or one per session for its rebuilds): each distinct input design's bound is read from
+/// it when it holds the design and stored there when it is computed. The prepared session is the
+/// same, bit for bit, with `None`, an empty cache or a warm one; only the control-thread cost
+/// changes.
 pub fn prepare_session_builtins_with_live_controls(
     session: &CompiledSession,
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     prepare_session_builtins_with_live_controls_and_policy(
         session,
@@ -3326,6 +3374,7 @@ pub fn prepare_session_builtins_with_live_controls(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
+        bound_cache,
     )
 }
 
@@ -3347,6 +3396,7 @@ pub fn prepare_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
+        None,
     )
 }
 
@@ -3366,6 +3416,7 @@ pub fn prepare_selected_session_builtins_with_live_controls(
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
+        None,
     )
 }
 
@@ -3387,6 +3438,7 @@ pub fn prepare_selected_session_builtins_between_render_calls(
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
+        None,
     )
 }
 
@@ -3409,6 +3461,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
@@ -3528,6 +3581,46 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             (control.queue_capacity, control.input_lane),
         );
     }
+    // #1329 D7, Amendment 4 R7: each distinct input design's certified tail and rest bound is
+    // computed here, at most once per preparation, before the phase-two observation: the
+    // computation allocates transient storage, which phase two's retained-allocation account must
+    // not see. A live input lane's bound depends only on the rate, so it is read from the table
+    // (#1457 D2) and computed nowhere.
+    // Amendment 5 (MJ1): a strip whose input lane is live reports the live bound, so no design
+    // bound is computed for it, so a browser boot with live controls computes none. An audio-only
+    // browser boot (the SDK default) and the C ABI attach no input lane and bound every distinct
+    // design (#1329 follow-up C). #1457: within the preparation budget
+    // `builtins::INPUT_BOUND_BUDGET_FRAMES`, charged in strip order; a design past it reports the
+    // live bound (D3). `bound_cache`, when the host keeps one, serves designs it already holds with
+    // the same charge, so the prepared values are the same with or without it (D2).
+    let input_lane_live = |track_id: &str| {
+        control_capacity
+            .get(track_id)
+            .is_some_and(|(_, input_lane)| *input_lane)
+    };
+    let design_bounds = builtins::input_section_bounds(
+        session.sample_rate().0,
+        session
+            .normalized_model()
+            .strips()
+            .zip(&effective_faders)
+            .filter(|(strip, _)| !input_lane_live(strip.id.as_str()))
+            .map(|(strip, fader)| {
+                strip_parameters(
+                    &strip,
+                    (fader.db, fader.mute),
+                    caps.maximum_smoothing_samples,
+                )
+                .expect("preflighted parameters")
+            }),
+        bound_cache,
+    )
+    .expect("preflighted coefficients");
+    let mut design_bounds = design_bounds.into_iter();
+    let live_bound = control_capacity
+        .values()
+        .any(|(_, input_lane)| *input_lane)
+        .then(|| live_input_bound(session.sample_rate().0));
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
     let track_count = session.normalized_model().strips().count();
@@ -3551,7 +3644,6 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         .expect("preflighted parameters");
         let chain = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted coefficients");
-        let tail = chain.tail();
         let (input, fader, matrix) = chain.into_sections();
         // The bank candidate is prepared independently from the scalar fallback.  The selected
         // full-bank artifact consumes this copy and removes the corresponding scalar binding;
@@ -3559,15 +3651,16 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         let bank_input = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted bank coefficients")
             .into_input_builtins();
-        let tail = if control_capacity
-            .get(strip.id.as_str())
-            .is_some_and(|(_, input_lane)| *input_lane)
-        {
-            BuiltinTail::Infinite
+        // #1329 D7: the same rule as the seal check's `expected_tails`. The design bounds are the
+        // non-live strips' own, in strip order.
+        let bound = if input_lane_live(strip.id.as_str()) {
+            live_bound.expect("a live input lane computed the live bound")
         } else {
-            tail
+            design_bounds
+                .next()
+                .expect("one design bound per non-live strip")
         };
-        tails.push((Box::<str>::from(strip.id.as_str()), tail));
+        tails.push((Box::<str>::from(strip.id.as_str()), bound));
         bank_inputs.push((Box::<str>::from(strip.id.as_str()), bank_input));
         let graph_id = StableGraphId::parse(strip.id.as_str()).expect("preflighted stable ID");
         let control_failure = || {
@@ -3691,6 +3784,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             tracks,
             processors: processor_seal,
             tails: tails.clone(),
+            live_bound,
             requests: request_seals.clone(),
             observers: observer_seal,
             consumers: consumer_seal,
@@ -3735,10 +3829,10 @@ fn resource_plan(
     // this one.
     add_vector_layout::<StripPreparation>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, InputBuiltins)>(&mut processor, track_count)?;
-    add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    add_vector_layout::<(Box<str>, NodeTailBound)>(&mut processor, track_count)?;
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, sealed_stage_count)?;
-    add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
+    add_vector_layout::<(Box<str>, NodeTailBound)>(&mut processor, track_count)?;
     for strip in session.normalized_model().strips() {
         let bytes = strip.id.as_str().len();
         // Nine independently retained copies of the track's ID: the strip's own ID and its graph
@@ -6027,15 +6121,19 @@ mod tests {
         parameters: &[],
         ports: &SIDECHAIN_SUM_PORTS,
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+        },
         observations: &[],
     };
 
-    struct SidechainSum(PreparedEffectMetadata);
+    /// Reads no prepared value, so holds none (issue #1461).
+    struct SidechainSum;
 
     impl PreparedNativeEffect for SidechainSum {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            self.0
-        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let (side_left, side_right) = block.sidechain.expect("connected sidechain");
@@ -6062,8 +6160,9 @@ mod tests {
 
     /// Builds the five-level graph the harness renders: one level per track stage.
     ///
-    /// `Output` is fed by track 0's `PostMatrix` only: `GraphEdgeId::TrackMain { target }` is not
-    /// unique for fan-in, and a reduction is not what this harness measures.
+    /// `Output` is fed by one track's `PostMatrix` only (track 0's, or the last track's for
+    /// `NonadjacentOutputConflict`): `GraphEdgeId::TrackMain { target }` is not unique for fan-in,
+    /// and a reduction is not what this harness measures.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum BoundaryVariant {
         Plain,
@@ -6169,12 +6268,17 @@ mod tests {
         } else {
             output.clone()
         };
-        let output_track = match variant {
-            BoundaryVariant::NonadjacentTrackA => n - 1,
-            #[cfg(all(test, feature = "test-support"))]
-            BoundaryVariant::NonadjacentOutputConflict => n - 1,
-            _ => 0,
+        // Issue #1420: only `NonadjacentOutputConflict` moves the output track, and the #916 test
+        // reads that edge. `NonadjacentTrackA` used to give `n - 1` too, but since #916 the
+        // `Output` is dedicated storage and no outcome read it, so it takes track 0.
+        #[cfg(all(test, feature = "test-support"))]
+        let output_track = if variant == BoundaryVariant::NonadjacentOutputConflict {
+            n - 1
+        } else {
+            0
         };
+        #[cfg(not(all(test, feature = "test-support")))]
+        let output_track = 0;
         edges.push(GraphEdge {
             id: GraphEdgeId::TrackMain {
                 target: main_target.clone(),
@@ -6427,6 +6531,9 @@ mod tests {
                     },
                     latency: effect_contract::LatencySamples(0),
                     tail: effect_contract::TailSamples::Finite(0),
+                    tail_every_peak: effect_contract::TailSamples::Infinite,
+                    rest: effect_contract::RestBound::Unstated,
+                    composition: effect_contract::CompositionBound::Unstated,
                     state_sizes: StatePayloadSizes {
                         common_bytes: 0,
                         left_bytes: 0,
@@ -6438,7 +6545,7 @@ mod tests {
                 vec![GraphPreparedEffect {
                     id: sidechain_effect_id,
                     metadata,
-                    processor: Box::new(SidechainSum(metadata)),
+                    processor: Box::new(SidechainSum),
                     response_snapshot_declared: false,
                     native_id: "miso.test.sidechain-sum",
                 }]
@@ -6928,9 +7035,16 @@ mod tests {
                 meter.as_slice(),
                 &controls,
                 caps(),
+                None,
             )
         }
         .expect("prepared builtins");
+        let nonadjacent = match variant {
+            BoundaryVariant::NonadjacentTrackA => true,
+            #[cfg(all(test, feature = "test-support"))]
+            BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
+            _ => false,
+        };
         let (mut graph, mut levels) = track_graph_variant(n, variant);
         if backend == Backend::Scalar && n >= 2 {
             let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
@@ -6938,12 +7052,7 @@ mod tests {
                 stage,
             };
             let mut schedule = Vec::new();
-            if match variant {
-                BoundaryVariant::NonadjacentTrackA => true,
-                #[cfg(all(test, feature = "test-support"))]
-                BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
-                _ => false,
-            } {
+            if nonadjacent {
                 for stage_kind in [
                     TrackStage::Input,
                     TrackStage::PostInputBuiltins,
@@ -6994,21 +7103,13 @@ mod tests {
             graph.sequential_schedule = schedule;
             graph.dependency_levels = levels.clone();
         }
-        if backend == Backend::Scalar && n >= 2 {
-            let selected_index = match variant {
-                BoundaryVariant::NonadjacentTrackA => 0,
-                #[cfg(all(test, feature = "test-support"))]
-                BoundaryVariant::NonadjacentOutputConflict => 0,
-                _ => n - 1,
-            };
+        if backend == Backend::Scalar && n >= 2 && !nonadjacent {
             let fader = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(selected_index))
-                    .expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(n - 1)).expect("last scalar track"),
                 stage: TrackStage::PostFader,
             };
             let matrix = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(selected_index))
-                    .expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(n - 1)).expect("last scalar track"),
                 stage: TrackStage::PostMatrix,
             };
             let slot = graph
@@ -7016,63 +7117,11 @@ mod tests {
                 .iter()
                 .position(|node| node == &fader)
                 .expect("scheduled scalar fader");
-            if match variant {
-                BoundaryVariant::NonadjacentTrackA => true,
-                #[cfg(all(test, feature = "test-support"))]
-                BoundaryVariant::Nonadjacent | BoundaryVariant::NonadjacentOutputConflict => true,
-                _ => false,
-            } {
-                let other_index = if selected_index == 0 { n - 1 } else { 0 };
-                let other_fader = GraphNodeId::TrackStage {
-                    track_id: StableGraphId::parse(&track_name(other_index))
-                        .expect("other scalar track"),
-                    stage: TrackStage::PostFader,
-                };
-                let other_matrix = GraphNodeId::TrackStage {
-                    track_id: StableGraphId::parse(&track_name(other_index))
-                        .expect("other scalar track"),
-                    stage: TrackStage::PostMatrix,
-                };
-                if selected_index == 0 {
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 1),
-                        Some(&other_fader),
-                        "production scalar schedule places F_B between A's pair owners"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 2),
-                        Some(&matrix),
-                        "production scalar schedule retains A's matrix boundary"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 3),
-                        Some(&other_matrix),
-                        "production scalar schedule retains B's matrix after A's pair"
-                    );
-                } else {
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 1),
-                        Some(&other_matrix),
-                        "production scalar schedule places the other matrix between pair owners"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot + 2),
-                        Some(&matrix),
-                        "production scalar schedule retains the selected matrix boundary"
-                    );
-                    assert_eq!(
-                        graph.sequential_schedule.get(slot - 1),
-                        Some(&other_fader),
-                        "production scalar schedule retains both fader boundaries"
-                    );
-                }
-            } else {
-                assert_eq!(
-                    graph.sequential_schedule.get(slot + 1),
-                    Some(&matrix),
-                    "the actually prepared scalar ops are adjacent"
-                );
-            }
+            assert_eq!(
+                graph.sequential_schedule.get(slot + 1),
+                Some(&matrix),
+                "the actually prepared scalar ops are adjacent"
+            );
         }
         let classes = SessionPoolClasses::from_session(&compiled);
         let scalar_resource = builtins
@@ -7422,7 +7471,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let builtins =
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
                 .expect("prepared builtins");
         assert!(builtins.validate_for_session(&compiled).0.is_empty());
         let (mut graph, levels) = track_graph(n);
@@ -8007,6 +8056,34 @@ mod tests {
         let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        // Issue #1420: the premise. The first fixture's output track is t00 and the second's is
+        // t01, named by literal ID so this does not restate the harness.
+        let output_source = |variant| {
+            let (graph, _) = track_graph_variant(2, variant);
+            let sources = graph
+                .spec
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.destination.node, GraphNodeId::Output { .. }))
+                .map(|edge| edge.source.node.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(sources.len(), 1, "one edge feeds the Output");
+            sources[0].clone()
+        };
+        for (variant, track) in [
+            (BoundaryVariant::Nonadjacent, "t00"),
+            (BoundaryVariant::NonadjacentOutputConflict, "t01"),
+        ] {
+            assert_eq!(
+                output_source(variant),
+                GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse(track).expect("track"),
+                    stage: TrackStage::PostMatrix,
+                },
+                "{variant:?} feeds the Output from {track}'s post-matrix"
+            );
+        }
+
         // With t00 observed, the t01 interval is the only remaining candidate when the output is
         // t00. It is selected.
         test_only_reset_fader_matrix_witness();
@@ -8515,8 +8592,8 @@ mod tests {
         };
 
         // The selected production fixture is t00's genuinely nonadjacent F_A -> F_B -> M_A ->
-        // M_B interval. Keep t00's post-matrix capture separate from the output track so this
-        // assertion observes the paired owner itself as well as the graph's final PCM.
+        // M_B interval. t00's post-matrix capture observes the paired owner itself, beside the
+        // graph's final PCM.
         let make_pair = || {
             let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
             let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -11271,7 +11348,7 @@ mod tests {
         };
         let default = collect(prepare_session_builtins(&compiled, &[], caps()).expect("default"));
         let raw = collect(
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
                 .expect("raw"),
         );
         let between = collect(
@@ -11432,7 +11509,7 @@ mod tests {
         );
 
         let concurrent =
-            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps(), None)
                 .expect("concurrent owners")
                 .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
                 .expect("checked scalar estimate");
@@ -11878,14 +11955,32 @@ mod tests {
             prepared.resources.maximum_single_allocation_bytes
                 >= 5 * core::mem::size_of::<MeterSnapshot>() as u64
         );
+        // #1329 D4, D7: a strip without a live input lane reports its prepared design's own
+        // certified tail; the fixture's input HPF makes it finite and non-zero.
+        let session = session();
+        let model = session.normalized_model();
+        let (strip, fader) = model
+            .strips()
+            .zip(model.effective_strip_faders())
+            .next()
+            .expect("one strip");
+        let parameters =
+            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).expect("parameters");
+        let own =
+            builtins::input_section_bound(session.sample_rate().0, parameters).expect("bound");
+        assert!(matches!(own.tail, TailSamples::Finite(samples) if samples > 0));
         assert_eq!(
             prepared.tails().collect::<Vec<_>>(),
-            vec![("vocal", BuiltinTail::Infinite)]
+            vec![("vocal", own.tail)]
+        );
+        assert_eq!(
+            prepared.input_bounds().collect::<Vec<_>>(),
+            vec![("vocal", own)]
         );
     }
 
     #[test]
-    fn disabled_live_control_input_has_infinite_tail_but_plain_input_does_not() {
+    fn live_input_lane_reports_the_live_bound_and_plain_input_its_own() {
         let mut model =
             parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("parse");
@@ -11907,10 +12002,28 @@ mod tests {
             },
         )
         .expect("compile");
+        // Disabled filters: trim and polarity are memoryless (#1329 D4). The strip reports its
+        // own bound: a zero tail with its trim-only composition stated (#1465, root's named
+        // exception of 2026-10-08).
         let plain = prepare_session_builtins(&compiled, &[], caps()).expect("plain");
         assert_eq!(
             plain.tails().collect::<Vec<_>>(),
-            vec![("vocal", BuiltinTail::FiniteZero)]
+            vec![("vocal", TailSamples::Finite(0))]
+        );
+        let normalized = compiled.normalized_model();
+        let (strip, fader) = normalized
+            .strips()
+            .zip(normalized.effective_strip_faders())
+            .next()
+            .expect("one strip");
+        let parameters =
+            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).expect("parameters");
+        let own =
+            builtins::input_section_bound(compiled.sample_rate().0, parameters).expect("bound");
+        assert_eq!(own.tail, TailSamples::Finite(0));
+        assert_eq!(
+            plain.input_bounds().collect::<Vec<_>>(),
+            vec![("vocal", own)]
         );
 
         let live = prepare_session_builtins_with_live_controls(
@@ -11922,12 +12035,274 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
+            None,
         )
         .expect("live");
+        // A live input lane can enable either filter anywhere in the domain, so the strip reports
+        // the live bound (#1329 D5, D7), whatever its prepared design.
+        let live_bound =
+            builtins::input_section_live_bound(compiled.sample_rate().0).expect("launch rate");
+        assert!(matches!(live_bound.tail, TailSamples::Finite(samples) if samples > 0));
         assert_eq!(
             live.tails().collect::<Vec<_>>(),
-            vec![("vocal", BuiltinTail::Infinite)]
+            vec![("vocal", live_bound.tail)]
         );
+        assert_eq!(
+            live.input_bounds().collect::<Vec<_>>(),
+            vec![("vocal", live_bound)]
+        );
+        assert!(live.validate_for_session(&compiled).0.is_empty());
+        // #1329 Amendment 5 (m1): the seal check's live rule. A live strip that carries its own
+        // design bound (here `ZERO`: both filters disabled) in the payload and in the seal alike
+        // agrees with itself, so only the rule that a live strip reports the live bound refuses it.
+        let mut forged = live;
+        forged.tails[0].1 = NodeTailBound::ZERO;
+        forged.seal.tails[0].1 = NodeTailBound::ZERO;
+        let diagnostics = forged.validate_for_session(&compiled);
+        assert!(
+            diagnostics
+                .0
+                .iter()
+                .any(|diagnostic| diagnostic.code == "builtin.prepared.tail_set"),
+            "a live strip carrying its design bound passed the seal check: {diagnostics:?}"
+        );
+    }
+
+    /// #1329 Amendment 5 (MJ1): preparation computes a design bound only for a strip without a
+    /// live input lane, once per distinct design.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn design_bounds_are_computed_only_for_strips_without_a_live_input_lane() {
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("parse");
+        // Six distinct designs over nine strips: eq0-eq2 keep the fixture's 20 Hz / 20 kHz pair,
+        // eq3 moves its HPF, eq4 its LPF, eq5 its trim, eq6 only its right channel's HPF, and
+        // eq7-eq8 disable both filters. The last is memoryless: its zero bound walks nothing and
+        // is not computed (#1457), so five designs are bounded.
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            let builtins = &mut track.builtins;
+            match index {
+                3 => {
+                    builtins.left.hpf_hz = 40.0;
+                    builtins.right.hpf_hz = 40.0;
+                }
+                4 => {
+                    builtins.left.lpf_hz = 10_000.0;
+                    builtins.right.lpf_hz = 10_000.0;
+                }
+                5 => {
+                    builtins.left.trim_db = 6.0;
+                    builtins.right.trim_db = 6.0;
+                }
+                6 => builtins.right.hpf_hz = 80.0,
+                7 | 8 => {
+                    for channel in [&mut builtins.left, &mut builtins.right] {
+                        channel.hpf_hz = 0.0;
+                        channel.lpf_hz = 0.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compile");
+        let ids: Vec<String> = model
+            .tracks
+            .iter()
+            .map(|track| track.id.to_string())
+            .collect();
+        let controls = |live: &[usize]| -> Vec<TrackControlRequest> {
+            ids.iter()
+                .enumerate()
+                .map(|(index, id)| TrackControlRequest {
+                    track_id: id.clone(),
+                    queue_capacity: NonZeroUsize::new(1).expect("queue"),
+                    input_lane: live.contains(&index),
+                })
+                .collect()
+        };
+        let computed = |live: &[usize]| {
+            let before = builtins::test_support::fixed_input_bounds_computed();
+            let prepared = prepare_session_builtins_with_live_controls(
+                &compiled,
+                &[],
+                &controls(live),
+                caps(),
+                None,
+            )
+            .expect("prepare");
+            let after = builtins::test_support::fixed_input_bounds_computed();
+            assert!(prepared.validate_for_session(&compiled).0.is_empty());
+            after - before
+        };
+        assert_eq!(
+            computed(&[]),
+            5,
+            "no strip live: one bound per distinct design with an enabled filter"
+        );
+        assert_eq!(
+            computed(&(0..9).collect::<Vec<_>>()),
+            0,
+            "every strip live (the browser): no design bound is computed"
+        );
+        // eq3 and eq4 are the only strips of their designs.
+        assert_eq!(computed(&[3, 4]), 3, "a live strip's design is not bounded");
+    }
+
+    /// #1457 D1's purpose: typical sessions bound every distinct design exactly. Each 64-track
+    /// console document (`console-sixty-four-track.json`, `-app`, `-intended`, `-mono` and
+    /// `-sends`, 64 distinct input designs each) prepares with no strip on the live bound at every
+    /// launch rate, its charge (frames walked plus the fixed charges) inside the budget.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn every_sixty_four_track_console_document_is_bounded_exactly_at_every_launch_rate() {
+        let documents = [
+            (
+                "console-sixty-four-track.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track.json"),
+            ),
+            (
+                "console-sixty-four-track-app.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-app.json"),
+            ),
+            (
+                "console-sixty-four-track-intended.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json"),
+            ),
+            (
+                "console-sixty-four-track-mono.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json"),
+            ),
+            (
+                "console-sixty-four-track-sends.json",
+                include_str!("../../../fixtures/session/v1/console-sixty-four-track-sends.json"),
+            ),
+        ];
+        for (name, document) in documents {
+            let model = parse_session_json(document).expect("parse");
+            for rate in [44_100, 48_000, 88_200, 96_000] {
+                let mut model = model.clone();
+                model.sample_rate_hz = rate;
+                let compiled = compile_session(
+                    &model,
+                    CompileCaps {
+                        max_compiled_model_bytes: u64::MAX,
+                        max_requested_runtime_bytes: u64::MAX,
+                        max_single_allocation_bytes: u64::MAX,
+                        max_queue_items: u64::MAX,
+                        max_source_ring_frames: u64::MAX,
+                        max_source_ring_bytes: u64::MAX,
+                    },
+                )
+                .expect("compile");
+                let frames = builtins::test_support::fixed_input_frames_walked();
+                let charged = builtins::test_support::fixed_input_charged();
+                let prepared =
+                    prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), None)
+                        .expect("prepare");
+                let walked = builtins::test_support::fixed_input_frames_walked() - frames;
+                let charged = builtins::test_support::fixed_input_charged() - charged;
+                let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
+                let on_live: Vec<&str> = prepared
+                    .input_bounds()
+                    .filter(|(_, bound)| *bound == live)
+                    .map(|(id, _)| id)
+                    .collect();
+                assert!(
+                    on_live.is_empty() && charged <= builtins::INPUT_BOUND_BUDGET_FRAMES,
+                    "{name} at {rate} Hz: charged {charged} ({walked} frames walked) of a budget \
+                     of {}, on the live bound: {on_live:?}",
+                    builtins::INPUT_BOUND_BUDGET_FRAMES
+                );
+                println!(
+                    "{name} at {rate} Hz: charged {charged} ({walked} frames walked), margin {}",
+                    builtins::INPUT_BOUND_BUDGET_FRAMES - charged
+                );
+            }
+        }
+    }
+
+    /// #1457 D1, D2: a preparation walks at most the budget, and a warm cache walks nothing. The
+    /// first three strips carry distinct near-top designs, more than the budget covers: a cold
+    /// preparation walks exactly the budget less the three designs' section charges (the design that
+    /// crosses it is stopped there, and every later one walks nothing), and a second preparation
+    /// with the same cache computes no bound and walks no frame, the stopped design included, with
+    /// the same prepared bounds.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_preparation_walks_at_most_the_budget_and_a_warm_cache_walks_nothing() {
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("parse");
+        let rate = model.sample_rate_hz;
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch rate");
+        let below = |steps: u32| f32::from_bits(maximum.to_bits() - steps);
+        let designs = [
+            (below(1), maximum),
+            (below(2), maximum),
+            (below(3), maximum),
+        ];
+        for (track, &(hpf, lpf)) in model.tracks.iter_mut().zip(&designs) {
+            for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+                channel.hpf_hz = hpf;
+                channel.lpf_hz = lpf;
+                channel.trim_db = 24.0;
+            }
+        }
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compile");
+        let prepare = |cache: Option<&mut InputBoundCache>| {
+            let bounds = builtins::test_support::fixed_input_bounds_computed();
+            let frames = builtins::test_support::fixed_input_frames_walked();
+            let prepared =
+                prepare_session_builtins_with_live_controls(&compiled, &[], &[], caps(), cache)
+                    .expect("prepare");
+            assert!(prepared.validate_for_session(&compiled).0.is_empty());
+            let values: Vec<(String, NodeTailBound)> = prepared
+                .input_bounds()
+                .map(|(id, bound)| (id.to_owned(), bound))
+                .collect();
+            (
+                values,
+                builtins::test_support::fixed_input_bounds_computed() - bounds,
+                builtins::test_support::fixed_input_frames_walked() - frames,
+            )
+        };
+        // Each design reserves its sections' charge before it walks: two sections on one cascade.
+        let fixed = 3 * 2 * builtins::INPUT_BOUND_SECTION_CHARGE;
+        let spent = builtins::INPUT_BOUND_BUDGET_FRAMES - fixed;
+        let (none, _, walked) = prepare(None);
+        assert_eq!(walked, spent, "no cache");
+        let live = builtins::input_section_live_bound_table(rate).expect("launch rate");
+        assert!(none.iter().any(|(_, bound)| *bound == live), "{none:?}");
+        let mut cache = InputBoundCache::new();
+        let (cold, _, walked) = prepare(Some(&mut cache));
+        assert_eq!((&cold, walked), (&none, spent));
+        let (warm, computed, walked) = prepare(Some(&mut cache));
+        assert_eq!((&warm, computed, walked), (&none, 0, 0), "warm cache");
     }
 
     #[test]
@@ -12873,6 +13248,7 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
+            None,
         )
         .expect("attached live controls");
         assert_eq!(baseline.track_control_count(), 0);
@@ -12912,6 +13288,7 @@ mod tests {
                 },
             ],
             caps(),
+            None,
         )
         .map(|_| ())
         .expect_err("a track may hold one control channel");
@@ -12932,6 +13309,7 @@ mod tests {
                 input_lane: true,
             }],
             caps(),
+            None,
         )
         .map(|_| ())
         .expect_err("an undeclared track has no channel");

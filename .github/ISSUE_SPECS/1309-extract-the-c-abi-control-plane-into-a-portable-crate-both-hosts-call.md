@@ -401,3 +401,21 @@ literal of the `test-debug-a` `--features` at `qualification.yml:619`), and the
 `check-test-support-ci.py`, `check-workspace-policy.sh`, `check-realtime-policy.sh` (93 regions in
 26 files, equal to the floors), `test-realtime-policy.sh`, `check-ci-path-routing.py` and
 `cargo fmt --all -- --check` pass.
+
+### Merge of origin/main (root decision D1.1)
+
+Main's #1422 added a doctest step to `test-debug-a` (and one to `test-debug-b`). The merge keeps
+`control-plane/test-support` in both `test-debug-a` steps, so the doctest step's `--features` list
+equals its sibling test step's list. `scripts/check-test-support-ci.py` ignored `--doc` steps (they
+are not whole-package runs), so a feature dropped from the doctest step alone passed. It now
+requires each job's `--doc` step to enable the same packages and features as a whole-package step of
+the same job. `scripts/test-test-support-ci.py` gains `in_a_doc` and `in_b_doc` (the `in_step`
+scoping, keyed on the `--doc` command) and four cases: `control-plane/test-support` removed from the
+`test-debug-a` doctest step only, `builtins/test-support` removed from the `test-debug-b` doctest
+step only, `host-web` excluded from the `test-debug-a` doctest step only, and a package dropped from
+the `test-debug-b` doctest step only. Mutation evidence: with main's unchanged checker the first case
+is accepted ("mutation not refused", empty stderr); with the rule it is refused. On the real workflow,
+deleting `control-plane/test-support` from the doctest step's `--features` makes
+`check-test-support-ci.py` exit 1 with "the doctest step must enable the same packages and
+features", and restoring it passes (12 packages). The self-test's two removed-feature cases expect
+both `control-plane` and main's `effect-contract`.

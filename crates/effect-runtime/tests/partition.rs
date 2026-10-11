@@ -13,7 +13,7 @@
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, gain_from_db, level_db};
 use effect_runtime::envelope::{peak_follow, retention_coefficient};
 use effect_runtime::ramp::LinearRamp;
-use lane::kernels::RampSegment;
+use lane::kernels::{RampSegment, ramp_toward};
 use lane::{Lane, Simd4, flush};
 
 /// The block sizes every block API in the workspace is gated on.
@@ -43,7 +43,8 @@ impl<L: Lane> Processor<L> {
 
     /// One block: ramp the makeup gain, follow the peak, ride the static curve.
     ///
-    /// The makeup gain is applied with the same iterated addition and the same snap that
+    /// The makeup gain is applied with the same iterated clamped update (`ramp_toward`, issue
+    /// #1409) and the same snap that
     /// `lane::kernels::ramp_block` uses, which is why the whole composition is
     /// partition-invariant and not merely each piece of it.
     fn process_block(&mut self, io: &mut [f32], frames: usize) {
@@ -62,7 +63,7 @@ impl<L: Lane> Processor<L> {
                 segment.target
             };
             compressed.mul(makeup).store(frame);
-            gain = gain.add(segment.step);
+            gain = ramp_toward(gain, segment.step, segment.target);
         }
         self.envelope = envelope;
     }

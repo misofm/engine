@@ -61,7 +61,6 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(7),
-        tail: TailSamples::Finite(7),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: 0,
@@ -87,6 +86,12 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest: |_, _| NodeTailBound {
+        tail: TailSamples::Finite(7),
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
+    },
     observations: &[],
 };
 
@@ -114,25 +119,22 @@ impl NativeEffectFactory for Factory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-        Ok(Box::new(Processor {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
+        Ok(PreparedEffect {
+            processor: Box::new(Processor),
             metadata: expected_prepared_metadata(self.0, request)?,
-        }))
+        })
     }
     fn bind_homogeneous_bank(
         &self,
         _: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         Ok(None)
     }
 }
-struct Processor {
-    metadata: PreparedEffectMetadata,
-}
+/// The double's processor reads no prepared value, so it holds none (issue #1461).
+struct Processor;
 impl PreparedNativeEffect for Processor {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.metadata
-    }
     fn reset(&mut self, _: ResetKind) {}
     fn process(&mut self, _: EffectProcessBlock<'_>) -> ProcessReport {
         ProcessReport::default()
@@ -202,7 +204,7 @@ fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
     assert!(registry.get_ascii("miso.soft-clip").is_some());
     assert!(registry.get_ascii("miso.transient-shaper").is_some());
     assert!(registry.get_ascii("miso.delay").is_some());
-    let prepared = prepare_native_session_effects(&session, &registry, caps()).expect("prepared");
+    let prepared = prepare_native_session_effects(&session, registry, caps()).expect("prepared");
     assert_eq!(prepared.entries.len(), 9);
 }
 
@@ -286,7 +288,7 @@ fn retired_gate_parameter_id_eight_rejects_before_native_publication() {
     });
     let compiled = compile_model(&model).expect("session model remains structurally compilable");
     let registry = launch_native_effect_registry().expect("launch registry");
-    let diagnostics = match prepare_native_session_effects(&compiled, &registry, caps()) {
+    let diagnostics = match prepare_native_session_effects(&compiled, registry, caps()) {
         Ok(_) => panic!("retired gate parameter must prevent prepared publication"),
         Err(diagnostics) => diagnostics,
     };
@@ -309,7 +311,7 @@ fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
     });
     let compiled = compile_model(&model).expect("session model remains structurally compilable");
     let registry = launch_native_effect_registry().expect("launch registry");
-    let diagnostics = match prepare_native_session_effects(&compiled, &registry, caps()) {
+    let diagnostics = match prepare_native_session_effects(&compiled, registry, caps()) {
         Ok(_) => panic!("retired parameter must prevent prepared publication"),
         Err(diagnostics) => diagnostics,
     };
@@ -340,7 +342,7 @@ fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
     let valid_session =
         compile_model(&model).expect("multiband session remains structurally compilable");
     let registry = launch_native_effect_registry().expect("launch registry");
-    let prepared = prepare_native_session_effects(&valid_session, &registry, caps())
+    let prepared = prepare_native_session_effects(&valid_session, registry, caps())
         .expect("current multiband parameter set prepares");
     assert_eq!(prepared.entries.len(), 1);
 
@@ -352,7 +354,7 @@ fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
     });
     let rejected_session =
         compile_model(&model).expect("retired ID does not change session structure");
-    let diagnostics = match prepare_native_session_effects(&rejected_session, &registry, caps()) {
+    let diagnostics = match prepare_native_session_effects(&rejected_session, registry, caps()) {
         Ok(_) => panic!("retired multiband parameter must prevent prepared publication"),
         Err(diagnostics) => diagnostics,
     };
@@ -403,7 +405,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
     };
     for (index, effect_id) in effect_compiler::CONSOLE_ELIGIBLE_EFFECTS.iter().enumerate() {
         let session = compiled(effect_id, index % 2 == 1);
-        let prepared = prepare_native_session_effects(&session, &registry, generous)
+        let prepared = prepare_native_session_effects(&session, registry, generous)
             .unwrap_or_else(|diagnostics| panic!("{effect_id}: {:?}", diagnostics.0));
         assert_eq!(prepared.entries.len(), 1, "{effect_id} prepares one slot");
     }
@@ -413,7 +415,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
         ("parametric-eq", false, "pre_insert"),
     ] {
         let session = compiled(effect_id, post);
-        let diagnostics = match prepare_native_session_effects(&session, &registry, generous) {
+        let diagnostics = match prepare_native_session_effects(&session, registry, generous) {
             Ok(_) => panic!("{effect_id} must not prepare as a console slot"),
             Err(diagnostics) => diagnostics,
         };
@@ -436,7 +438,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
     };
     model.tracks[0].inserts.effects[0].params.clear();
     let session = compile_model(&model).expect("the insert session compiles");
-    prepare_native_session_effects(&session, &registry, generous)
+    prepare_native_session_effects(&session, registry, generous)
         .unwrap_or_else(|diagnostics| panic!("a delay insert prepares: {:?}", diagnostics.0));
 }
 
@@ -507,7 +509,7 @@ fn entry<'a>(
 fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let prepared =
-        prepare_native_session_effects(&bypassed_console(), &registry, caps()).expect("prepared");
+        prepare_native_session_effects(&bypassed_console(), registry, caps()).expect("prepared");
     for effect in ["eq", "limiter"] {
         let bypassed = entry(&prepared, "ch00", effect);
         let enabled = entry(&prepared, "ch01", effect);
@@ -577,7 +579,7 @@ fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
 fn a_live_control_lane_starts_from_the_session_bypass() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut prepared =
-        prepare_native_session_effects(&bypassed_console(), &registry, caps()).expect("prepared");
+        prepare_native_session_effects(&bypassed_console(), registry, caps()).expect("prepared");
     let producers = effect_compiler::attach_effect_live_controls(
         &mut prepared,
         core::num::NonZeroUsize::new(8).expect("depth"),
@@ -639,7 +641,7 @@ fn automation(
 fn launch_diagnostics(model: &session::SessionModel) -> Vec<effect_compiler::EffectDiagnostic> {
     let compiled = compile_model(model).expect("the session compiles: only preparation refuses");
     let registry = launch_native_effect_registry().expect("launch registry");
-    match prepare_native_session_effects(&compiled, &registry, caps()) {
+    match prepare_native_session_effects(&compiled, registry, caps()) {
         Ok(_) => Vec::new(),
         Err(diagnostics) => diagnostics.0,
     }

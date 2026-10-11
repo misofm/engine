@@ -781,9 +781,11 @@ impl RouteGate {
 /// and the bits a live change sends cannot differ. A silencing gate returns `[+0.0; 4]`; otherwise
 /// each product is `gain * coefficient` in that operand order, unfused, with the column of a
 /// follow-zeroed source lane replaced by `+0.0`. A product that is subnormal, of either sign, is
-/// flushed to `+0.0` (issue #1237 D3): inside the route domain (`[-144, 24]` dB, coefficients in
-/// `[-1, 1]`) a coefficient below about `1.9e-31` at -144 dB folds to one, and a subnormal
-/// constant would only cost the render multiply its slow path for an inaudible contribution.
+/// flushed to `+0.0` (issue #1237 D3): inside the route domain (the session model's
+/// `ROUTE_GAIN_DB_MINIMUM`, `ROUTE_GAIN_DB_MAXIMUM` and `ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`,
+/// which this crate cannot link) a coefficient below about `1.9e-31` at today's minimum gain folds
+/// to one, and a subnormal constant would only cost the render multiply its slow path for an
+/// inaudible contribution.
 #[must_use]
 pub const fn gated_route_coefficients(transform: &RouteTransform, gate: RouteGate) -> [f32; 4] {
     /// `gain * coefficient`, a subnormal result flushed to `+0.0`.
@@ -886,6 +888,14 @@ pub struct PreparedGraphPlan {
     observers: Vec<GraphNodeObserverBinding>,
     _not_sync: Cell<()>,
 }
+/// One prepared per-node effect in the plan's control-side effect table, keyed by its node `id`.
+///
+/// This record itself never enters render-owned memory. Bind reads its metadata and response
+/// facts on the control thread and moves only what render reads -- the processor and the
+/// metadata's block quantum -- into the render node (`runtime::EffectNode`). Control-only data,
+/// such as the rest of [`PreparedEffectMetadata`], therefore stays here and costs the render node
+/// table nothing. The `processor` does enter render-owned memory, and each effect's processor
+/// still holds its own `PreparedEffectMetadata` copy; #1461 removes that copy.
 pub struct GraphPreparedEffect {
     pub id: EffectNodeId,
     pub metadata: PreparedEffectMetadata,
@@ -897,15 +907,20 @@ pub struct GraphPreparedEffect {
     pub native_id: &'static str,
 }
 
+/// Bytes of the render node a per-node prepared effect binds to (`runtime::EffectNode`): the
+/// processor and the block quantum, and nothing else. A live-control-driven effect's boxed owner
+/// holds one, so `graph-compiler`'s resource estimate charges this size for it.
+pub const EFFECT_RENDER_NODE_BYTES: usize = core::mem::size_of::<runtime::EffectNode>();
+
 /// One prepared effect's live-control channel, carried **beside** the prepared effects
 /// rather than inside them (issue #140 A).
 ///
 /// # Why beside, and not a field of [`GraphPreparedEffect`]
 ///
-/// `GraphPreparedEffect` is the payload of `runtime::NodeKind::Effect`. Runtime op/unit layout
-/// changes are admitted separately by the derived runtime metadata reservation, while this
-/// channel remains in its own vector so `NodeKind`'s largest variant stays unchanged. A
-/// live-control-free plan therefore retains no control-channel payload.
+/// A `GraphPreparedEffect`'s render-read fields become the payload of `runtime::NodeKind::Effect`.
+/// Runtime op/unit layout changes are admitted separately by the derived runtime metadata
+/// reservation, while this channel remains in its own vector, so a live-control-free plan retains
+/// no control-channel payload.
 pub struct GraphEffectControlBinding {
     /// The effect node this channel drives.
     pub node: EffectNodeId,
@@ -1149,6 +1164,12 @@ pub struct GraphPreparedEffectBank {
     /// asks for padding (`graph_compiler`'s padding policy).
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
+    /// The bank's width and shared program key, from its bind result (issue #1461).
+    ///
+    /// Like [`GraphPreparedEffect::metadata`], it stays on the control side: bind reads it while it
+    /// builds the bank's stage (`rack::EffectBankStage` or `rack::LiveControlEffectBankStage`), and
+    /// the stage keeps only the scalars its render path reads. The processor holds no copy.
+    pub metadata: effect_contract::PreparedBankMetadata,
     /// Factory-declared response capability shared by this homogeneous bank.
     pub response_snapshot_declared: bool,
     /// Static descriptor identity shared by this homogeneous bank.
@@ -3613,16 +3634,18 @@ mod tests {
         parameters: &[],
         ports: &SUM_PORTS,
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+        },
         observations: &[],
     };
 
-    struct SidechainSum {
-        metadata: PreparedEffectMetadata,
-    }
+    /// Reads no prepared value, so holds none (issue #1461).
+    struct SidechainSum;
     impl PreparedNativeEffect for SidechainSum {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            self.metadata
-        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let (side_left, side_right) = block.sidechain.expect("fixture sidechain");
@@ -5028,13 +5051,9 @@ mod tests {
 
     /// Adds its sidechain when one is connected, and otherwise trims: the random corpus needs an
     /// effect that is legal both with and without a sidechain edge.
-    struct OptionalSidechainSum {
-        metadata: PreparedEffectMetadata,
-    }
+    /// Reads no prepared value, so holds none (issue #1461).
+    struct OptionalSidechainSum;
     impl PreparedNativeEffect for OptionalSidechainSum {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            self.metadata
-        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             match block.sidechain {
@@ -5180,6 +5199,9 @@ mod tests {
             },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -5263,9 +5285,7 @@ mod tests {
                     effects.push(GraphPreparedEffect {
                         id: id.clone(),
                         metadata: effect_metadata,
-                        processor: Box::new(OptionalSidechainSum {
-                            metadata: effect_metadata,
-                        }),
+                        processor: Box::new(OptionalSidechainSum),
                         response_snapshot_declared: false,
                         native_id: "miso.test.optional-sidechain-sum",
                     });
@@ -6598,12 +6618,19 @@ mod tests {
         parameters: &GAIN_PARAMETERS,
         ports: &SUM_PORTS,
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+        },
         observations: &[],
     };
 
     /// A per-channel gain with a real, declared latency, so bypass has something to preserve.
     struct LiveGain {
-        metadata: PreparedEffectMetadata,
+        /// The one prepared value `process` reads (issue #1461).
+        automation_capacity: u32,
         gain: [f32; 2],
         line: Vec<[f32; 2]>,
         latency: usize,
@@ -6613,7 +6640,7 @@ mod tests {
         fn new(metadata: PreparedEffectMetadata) -> Self {
             let latency = metadata.latency.0 as usize;
             Self {
-                metadata,
+                automation_capacity: metadata.automation_capacity,
                 gain: [1.0, 1.0],
                 line: vec![[0.0; 2]; latency],
                 latency,
@@ -6622,9 +6649,6 @@ mod tests {
         }
     }
     impl PreparedNativeEffect for LiveGain {
-        fn metadata(&self) -> PreparedEffectMetadata {
-            self.metadata
-        }
         fn reset(&mut self, _kind: ResetKind) {}
         fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
             let mut report = ProcessReport::default();
@@ -6639,7 +6663,7 @@ mod tests {
                         continue;
                     }
                 };
-                let valid = index < self.metadata.automation_capacity as usize
+                let valid = index < self.automation_capacity as usize
                     && span.parameter_index == 0
                     && span.kind == effect_contract::AutomationSpanKind::Point
                     && span.start_sample == block.first_sample
@@ -6724,6 +6748,9 @@ mod tests {
             },
             latency: LatencySamples(latency),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -7139,6 +7166,9 @@ mod tests {
             },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
             state_sizes: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -7219,7 +7249,7 @@ mod tests {
             effects: vec![GraphPreparedEffect {
                 id: effect_id,
                 metadata,
-                processor: Box::new(SidechainSum { metadata }),
+                processor: Box::new(SidechainSum),
                 response_snapshot_declared: false,
                 native_id: "miso.test.sidechain-sum",
             }],
@@ -7323,7 +7353,10 @@ mod tests {
                 value: 1.0,
             },
         ];
-        let processor = factory
+        let effect_contract::PreparedEffect {
+            processor,
+            metadata,
+        } = factory
             .prepare(PrepareEffectRequest {
                 sample_rate: rate,
                 quantum,
@@ -7342,9 +7375,13 @@ mod tests {
                     maximum_scratch_bytes: 1_000,
                     maximum_automation_spans_per_block: 1,
                 },
+                tail_bound: conformance::tail_bound_of(
+                    Box::new(DualAccumulatorDelayFactory::correct()),
+                    rate,
+                    EffectQuality::Normal,
+                ),
             })
             .expect("effect");
-        let metadata = processor.metadata();
         let direct_destination = GraphEdgeId::RouteDestination {
             route_id: StableGraphId::parse("direct-route").expect("ID"),
         };

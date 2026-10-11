@@ -176,6 +176,57 @@ pub use wide::f32x8 as Simd8;
 /// subnormal range in the first place.
 pub const FLUSH_EPS: f32 = 1.0e-20;
 
+/// Magnitude below which *both* words of a two-word recursive state are flushed together by
+/// [`flush_pair`], on a frame whose effect input has been exactly zero for at least
+/// [`silence_frames`] frames (issue #1328, decision 15 D15-4(a), amendment A9).
+///
+/// The per-word law alone perturbs each word by at most [`FLUSH_EPS`] per step, and that is enough
+/// to stall a decaying second-order state short of rest: a period-2 limit cycle where the input
+/// filter's `c1` rounds to `1.0`, or a fixed point where `2 * d2` is below half an ulp of `ic2`
+/// (an EQ low shelf). Such a trajectory can only stall inside a ball of radius
+/// `κ·√2·FLUSH_EPS / (1 - ρ - 6·2^-24·κ)` around the origin (κ the eigenvector condition number
+/// of the step matrix, ρ its spectral radius). Over the designable sections the largest radius is
+/// the EQ's (about `3.4e-15`), so `1.0e-14` clears every domain by about 3x; the derivation and the
+/// recomputed per-domain radii are in `dsp-research/filters.md`.
+pub const REST_EPS: f32 = 1.0e-14;
+
+/// How long an effect input must have been exactly zero, on a lane, before [`flush_pair`]'s joint
+/// rule may fire on that lane (issue #1328, amendment A9): `N_SILENCE`, stated in time as the exact
+/// ratio [`SILENCE_TIME_FRAMES`]` / `[`SILENCE_TIME_RATE`] seconds, `4096 / 48000` s (85 1/3 ms).
+///
+/// Silence is a time property. No rule that looks at one sample can tell "a tiny sample, then a
+/// zero, then a tiny sample" from "a tiny sample, then silence", and a joint flush that fires on
+/// the first kind erases the state a sparse signal is building (amendment A8's sparse-input dead
+/// zone). So each effect input channel keeps one counter word per lane, [`silence_step`], and the
+/// joint rule is armed only on a lane whose input has been `+0.0` or `-0.0` for this long: a signal
+/// whose non-zero samples are closer together than this never reaches the rule at all, at any
+/// level, and gets the effect's whole response.
+///
+/// A time, not one frame count, because the measurement said so: at the ruling's first choice,
+/// 1,024 frames at every rate, a sparse signal whose gaps just exceed the window loses more than
+/// one tail's worth (four +24 dB 10 Hz shelves: 1.1e-9 to 1.7e-9 at the four rates, against the
+/// 3.48e-10 one tail can lose), and the window needed to bring it back to one tail is a time
+/// (about 85 ms at every rate), not a count. [`silence_frames`] derives each rate's frames; the
+/// measurement and the residual at each launch rate are in `dsp-research/filters.md` (numerical
+/// limits).
+pub const SILENCE_TIME_FRAMES: u32 = 4_096;
+
+/// The rate [`SILENCE_TIME_FRAMES`] is counted at: the silence time is `4096 / 48000` seconds.
+pub const SILENCE_TIME_RATE: u32 = 48_000;
+
+/// `N_SILENCE` at `sample_rate_hz`: the silence time ([`SILENCE_TIME_FRAMES`]` / `
+/// [`SILENCE_TIME_RATE`] seconds) in frames, rounded up -- 3,764 at 44.1 kHz, 4,096 at 48 kHz,
+/// 7,527 at 88.2 kHz and 8,192 at 96 kHz.
+///
+/// Exact integer arithmetic. Every result up to the largest `u32` rate is far below the counter's
+/// `2^24` saturation, so the comparison in [`silence_step`] is exact, and a value of `1` or more
+/// for every rate above zero.
+#[must_use]
+pub const fn silence_frames(sample_rate_hz: u32) -> u32 {
+    let numerator = sample_rate_hz as u64 * SILENCE_TIME_FRAMES as u64;
+    numerator.div_ceil(SILENCE_TIME_RATE as u64) as u32
+}
+
 /// Flushes lanes whose magnitude is below [`FLUSH_EPS`] to exactly `+0.0`.
 ///
 /// `flush(x) = andnot(abs(x) < FLUSH_EPS, x)` (D7): three operations, applied to each recursive
@@ -185,6 +236,129 @@ pub const FLUSH_EPS: f32 = 1.0e-20;
 #[inline(always)]
 pub fn flush<L: Lane>(x: L) -> L {
     x.andnot(x.abs().lt(L::splat(FLUSH_EPS)))
+}
+
+/// One frame of an effect input's silence counter (issue #1328, amendment A9): advances the
+/// counter on the frame's input `x` and returns the frame's **rest threshold** for
+/// [`flush_pair`].
+///
+/// ```text
+/// run  = (x == 0) ? run + 1 : 0
+/// rest = (run < armed_after) ? +0.0 : REST_EPS
+/// ```
+///
+/// `armed_after` is `N_SILENCE` for the effect's rate, [`silence_frames`], splatted once per block
+/// by the caller.
+///
+/// One counter word per lane per effect input channel: the builtin input stage's input, the
+/// parametric EQ's input and the multiband compressor's input each own one per channel, and every
+/// SVF section of that effect channel reads the threshold of the effect's own input for the same
+/// frame. `x == 0` is the IEEE ordered equality, so `+0.0` and `-0.0` count and a NaN, an infinity
+/// or a subnormal resets the run. `run + 1` is an `f32` addition: it is exact up to `2^24` and
+/// rounds `2^24 + 1` to `2^24` (ties to even), so the counter saturates by itself and never wraps.
+/// Five operations (`eq`, `add`, `select`, `lt`, `andnot`), once per frame per channel whatever
+/// the number of sections.
+///
+/// The threshold is a lane word, not a mask, so that [`flush_pair`] spends one compare on it: a
+/// lane whose input is live carries `+0.0`, below which no magnitude lies.
+#[inline(always)]
+pub fn silence_step<L: Lane>(x: L, run: &mut L, armed_after: L) -> L {
+    let counted = L::select(x.eq(L::zero()), run.add(L::splat(1.0)), L::zero());
+    *run = counted;
+    L::splat(REST_EPS).andnot(counted.lt(armed_after))
+}
+
+/// `true` when some lane's silence counter `run` can reach `armed_after` ([`silence_frames`])
+/// within a block of `frames` frames, so that some frame of the block may carry an armed rest
+/// threshold; `false` guarantees every threshold of the block is `+0.0` whatever the input
+/// (issue #1328, amendment A9).
+///
+/// A frame `f` (from `0`) counts at most `run + f + 1`, so the block can arm only if
+/// `run + frames >= armed_after`, tested as `run >= armed_after - frames` (both sides exact
+/// integers). One compare and one `mask_any`, once per block per channel: the kernels then run the
+/// joint rule's arithmetic only on a block it can act on (the builtin input chain through
+/// [`kernels::svf_step_when`]; the parametric EQ writes a rest plane only for such a block and
+/// loads the shared all-`+0.0` plane for every other).
+#[inline(always)]
+pub fn silence_armable<L: Lane>(run: L, frames: usize, armed_after: L) -> bool {
+    L::mask_any(run.ge(armed_after.sub(L::splat(frames as f32))))
+}
+
+/// [`silence_armable`] refined by the effect channel's state (issue #1328, the root's cost ruling
+/// after attempt 5): `true` when some lane whose counter can arm within the block also **holds**
+/// state -- `holding`, a lane with a recursive state word other than `+0.0` or `-0.0` (a NaN
+/// counts) at block start ([`kernels::svf_state_held`]) -- or when the block is longer than
+/// `armed_after`. `false` guarantees that the armed and the unarmed forms of every SVF section of
+/// the channel give the same bits over the block, so a caller may run the unarmed one.
+///
+/// Exact. A lane can carry an armed threshold on frame `f` only if its input was exactly zero on
+/// the `armed_after` frames ending at `f`. When the block is at most `armed_after` frames long,
+/// those frames reach back to the block's first frame, so a lane that starts the block at rest sees
+/// only zero input up to any armed frame. An SVF step from a `±0.0` state on a `±0.0` input
+/// computes `±0.0` words, which both flush laws write as `+0.0`; so such a lane is still at rest on
+/// its first armed frame, where the joint rule has nothing to zero, and the two forms agree on it.
+/// A non-zero input after an armed frame resets the counter, which cannot reach `armed_after` again
+/// within the block. A lane whose counter cannot arm in the block carries only `+0.0` thresholds
+/// ([`silence_armable`]). A padding lane, or a track that has been silent since its tail rested,
+/// therefore keeps its bank on the unarmed form.
+///
+/// One compare against the block length and three mask operations beside [`silence_armable`]'s,
+/// once per block per channel.
+#[inline(always)]
+pub fn silence_armable_holding<L: Lane>(
+    run: L,
+    frames: usize,
+    armed_after: L,
+    holding: L::Mask,
+) -> bool {
+    let frames = L::splat(frames as f32);
+    let armable = run.ge(armed_after.sub(frames));
+    let long = frames.gt(armed_after);
+    L::mask_any(L::mask_and(armable, L::mask_or(holding, long)))
+}
+
+/// The joint flush of a two-word recursive state `(n1, n2)` (issue #1328), armed by the rest
+/// threshold `rest` that [`silence_step`] gave the effect input's frame (amendment A9).
+///
+/// Each word follows [`flush`]'s per-word law and, in addition, when both magnitudes are below the
+/// lane's threshold the pair is zeroed together:
+///
+/// ```text
+/// a1, a2 = |n1|, |n2|
+/// joint  = max_u32(a1, a2) < rest
+/// ic1    = andnot(n1, (a1 < FLUSH_EPS) | joint)
+/// ic2    = andnot(n2, (a2 < FLUSH_EPS) | joint)
+/// ```
+///
+/// `rest` is [`REST_EPS`] on a lane whose effect input has been exactly zero for at least
+/// `N_SILENCE` frames ([`silence_frames`]), and `+0.0` on every other lane, where `joint` is false
+/// for every pair: no magnitude, and no NaN, compares below `+0.0`. So while the effect's input is
+/// live -- any non-zero sample within the last `N_SILENCE` frames, however small -- each word
+/// follows the per-word law bit for bit, a section applies its whole response to whatever it is
+/// given, and a chain of boosting sections applies every boost. Only silence that has lasted
+/// `N_SILENCE` frames lets the pair rule end a decay.
+///
+/// `max_u32` of the two magnitudes is their larger one, bit for bit: the magnitude bits of a
+/// non-negative `f32` order like the values, and every NaN's magnitude bits sort above `+inf`'s.
+/// So `joint` is "both below `rest`" with one compare, and a NaN in either word makes `max_u32` a
+/// NaN, which fails the ordered compare: a NaN passes through both rules and reaches the
+/// once-per-block boundary check, and one word at or above the threshold keeps the pair on the
+/// per-word law, so an audible partner word is never zeroed. `-0.0` becomes `+0.0`. Never
+/// [`Lane::max`], which is `select(gt)` and would drop a NaN.
+///
+/// Ten operations for the two words (two `abs`, one `max_u32`, three compares, two mask `or`, two
+/// `andnot`), against six for two [`flush`] calls; the threshold's five are paid once per frame
+/// per channel by [`silence_step`]. Branch-free, one generic body at every width.
+#[inline(always)]
+pub fn flush_pair<L: Lane>(n1: L, n2: L, rest: L) -> (L, L) {
+    let flush_eps = L::splat(FLUSH_EPS);
+    let a1 = n1.abs();
+    let a2 = n2.abs();
+    let joint = a1.max_u32(a2).lt(rest);
+    (
+        n1.andnot(L::mask_or(a1.lt(flush_eps), joint)),
+        n2.andnot(L::mask_or(a2.lt(flush_eps), joint)),
+    )
 }
 
 /// One width of `f32` lanes with pinned IEEE-754 semantics.
@@ -239,7 +413,10 @@ pub trait Lane: Copy + Send + Sync + 'static {
     const SVF_CASCADE_DEPTH: usize;
 
     /// Result of a comparison: per lane either all zero bits or all one bits.
-    type Mask: Copy;
+    ///
+    /// `Send`, like the lane itself, so a derived mask can be held in an effect's state (the EQ's
+    /// per-section dry masks, issue #1328).
+    type Mask: Copy + Send;
 
     /// Broadcasts one value to every lane.
     fn splat(x: f32) -> Self;
@@ -344,6 +521,16 @@ pub trait Lane: Copy + Send + Sync + 'static {
 
     /// Clears every lane of `self` whose mask lane is set, making it exactly `+0.0`.
     fn andnot(self, m: Self::Mask) -> Self;
+
+    /// Per-lane maximum of the two lanes' raw bit patterns read as **unsigned** 32-bit integers.
+    ///
+    /// Each result lane is one input lane's bits, unchanged: no float arithmetic, no NaN
+    /// quieting, no signed-zero rule. One instruction on every target: `vpmaxud` (AVX2),
+    /// `i32x4.max_u` (wasm `simd128`) and `umax` (NEON). On two non-negative floats -- magnitudes,
+    /// the one use (`flush_pair`, issue #1328 amendment A9) -- it is the larger value, and a NaN
+    /// magnitude wins over every number, `+inf` included, because NaN magnitude bits sort above
+    /// `0x7f80_0000`. Gate G1 holds every width to the scalar oracle over the directed edge pool.
+    fn max_u32(self, b: Self) -> Self;
 
     /// `select(self > b, self, b)`: returns `b` on equal lanes and on unordered lanes (D8).
     ///

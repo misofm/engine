@@ -46,7 +46,7 @@ cargo test --locked -p parametric-eq --test <test binary>
 | 16 | a settled band accepts stored words that disagree with its stored parameters | `src/lib.rs` | `contract` | RED |
 | 17 | the payload header stamps invalid version 0 | `src/lib.rs` | `contract` | RED |
 | 23 | the descriptor advertises `common_bytes = 0` while the codec stamps a header | `src/lib.rs` | `contract` | RED |
-| 18 | `word_spectral_norm` drops the off-diagonal term of `M^T M` | `src/lib.rs` | `analytic` | RED |
+| 18 | `word_spectral_norm` drops the off-diagonal term of `M^T M` | `src/lib.rs` (historical: the body is now `effect_runtime::svf::transition_norm`, `crates/effect-runtime/src/svf.rs`, #1366) | `analytic` | RED |
 | 19 | the corpus reads a lane back from the mirrored AoSoA offset | `src/corpus.rs` | `determinism` | RED |
 | 20 | the bypass path renders instead of copying the dry block | `src/lib.rs` | `contract` | RED |
 | 21 | the corpus stops staggering its per-lane ramp ends | `src/corpus.rs` | `determinism` | RED |
@@ -438,3 +438,30 @@ drives EQ ramps through prepared targets. Debug profile, AVX2 host (the EQ binds
 | 1278-M1 | `Channel::commit_track` stores a moving band's step as `(target - current) / remaining` instead of the carried step | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (342 of 390 scalar and bank comparisons diverge, on all three ramps); the differential (`the instance restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered 0xbeb91440`) | RED |
 | 1278-M2 | the remaining-path walk held to the design's `NORM_TOLERANCE` instead of `RAMP_PATH_NORM_TOLERANCE` | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (the 10 kHz bell refused at samples 0-63); the differential (`lane 1's snapshot refused by a fresh instance (effect.state.payload)`) | RED |
 | 1278-M3 | `PreparedParametricEq::restore_track` commits the left channel before decoding the right | `a_restore_refused_on_one_channel_moves_neither` (`the scalar instance moved`) | RED |
+
+## #1328: exact rest, the input-gated joint flush and the desymmetrize caches
+
+Host: AMD EPYC 7313P (x86-64-v3, AVX2), `rustc 1.97.1`. Each mutation was applied, the named test
+run, and the edit reverted (#1328 attempt 4; the attempt records are in the issue spec).
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1328-M1 | `lane::flush_pair` without its input term (attempt 3's law: `rest = abs(n1) < REST_EPS && abs(n2) < REST_EPS`) | `exact_rest::a_tiny_input_through_four_boosting_shelves_gets_every_boost` (`10 Hz, input 2.7939677e-11 … misses the ordinary run by 1.5091782e3`), dev and release; `the_low_shelf_fixed_point_reaches_exact_rest` stays green | RED |
+| 1328-M2 | `self.right.identity = self.left.identity;` dropped from `desymmetrize` | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks`: dev through `identity_flags_agree` (`lib.rs`), release on the right plane at block 27 after the left-only retarget | RED |
+| 1328-M3 | `self.right.dry = self.left.dry;` dropped from `desymmetrize` | the same test, dev only (`identity_flags_agree`); release renders the same bits (a stale dry lane runs the identity section wet, which moves at most `-0.0` to `+0.0`, and this input moves none) | RED (dev) |
+
+### #1328 amendment A9: the silence counter
+
+Host and method as above (#1328 attempt 5, release). Each row's mutant was applied in the source
+it names, the named tests run, and the source restored.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1328-M4 | the rest threshold always armed (attempt 3's law: `silence_step` returns `REST_EPS`, `silence_armable` always true) | `exact_rest::a_sparse_input_through_four_boosting_shelves_gets_every_boost_at_every_rate` (`44100 Hz, 10 Hz shelves, period 2 … misses the ordinary run by 1.102885e3`), `a_tiny_input_through_four_boosting_shelves_gets_every_boost`, `an_exact_zero_inside_the_cascade_moves_nothing_while_the_input_is_live` | RED |
+| 1328-M5 | A8's law: armed by a zero *section* input (thresholds from `v0 == 0` in `svf_step_when`, every block armable) | the sparse gate (`… misses the ordinary run by 1.0375549e3`) and the cancellation gate (`DC at 1e-6 … misses the ordinary run by 6.996817e-5 … (peak 7.826055e3)`); the chain gate stays green | RED |
+| 1328-M6 | `Channel::commit_track` drops the restored silence word | `carry::a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame`, `carry::a_malformed_silence_word_is_refused` | RED |
+| 1328-M7 | `desymmetrize` drops `self.right.silence = self.left.silence` | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter` | RED |
+| 1328-M8 | the silent fast path earned without every lane armed (`quiet && (armed \|\| true)`) | `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
+| 1328-M9 | the silent fast path skips without `silence_advance` | the same test (`the silence counter after 68 silent blocks`) | RED |
+| 1328-M10 | `rest_plane`'s unarmed branch returns the last written plane instead of the unarmed one | the sparse gate (its train starts after armed silence) | RED |
+| 1328-M11 | `lane_is_inert` without its pair term | `elision::a_non_inert_state_in_a_dead_section_refuses_elision`, `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |

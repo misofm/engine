@@ -128,6 +128,11 @@ fn request(values: &Values, link: LinkMode) -> PrepareEffectRequest<'_> {
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(true_peak_limiter::TruePeakLimiterFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -328,7 +333,8 @@ fn per_node(scenario: &Scenario) -> Planes {
         .map(|(member, values)| {
             let mut effect = TruePeakLimiterFactory
                 .prepare(request(values, scenario.link))
-                .expect("prepare");
+                .expect("prepare")
+                .processor;
             let mut left = scenario.left[member].clone();
             let mut right = scenario.right[member].clone();
             for block in 0..scenario.blocks {
@@ -379,7 +385,8 @@ fn banked(
             active_mask: &mask,
         })
         .expect("a padded request is well formed")
-        .expect("a padded limiter bank binds");
+        .expect("a padded limiter bank binds")
+        .processor;
     let mut left = vec![0.0_f32; FRAMES * lanes];
     let mut right = vec![0.0_f32; FRAMES * lanes];
     let mut output: Planes = scenario

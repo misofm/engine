@@ -3,9 +3,9 @@ name: nightly
 # Everything here used to be a job on `ci`, running on every push to main and every pull request.
 # None of it gates a merge:
 #
-#   * `native production-kernel release-probe report (non-blocking)` carries
-#     `continue-on-error: true` on its only assertive step and is not a required check -- it cannot
-#     fail a build by construction. It produces a report.
+#   * `native production-kernel release-probe report (non-blocking)` is not a required check -- it
+#     cannot fail a build. It produces a report; a red report fails the job, which `failure-notice`
+#     then reports (issue #1481).
 #   * the two bounded fuzz jobs stayed per-PR, behind a `paths:` filter, in `fuzz.yml`. What moved
 #     here is DEPTH: 10,000 executions per target is a smoke test, and running it on every pull
 #     request buys breadth over diffs that mostly cannot affect a decoder. This job trades that for
@@ -60,10 +60,10 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           sudo apt-get update
           sudo apt-get install -y llvm
-      # Issue #144 item 3 starts as evidence, not a merge gate. Both the live report and its red
-      # mutations are allowed to fail this step while the uploaded receipt remains inspectable.
+      # Issue #144 item 3 is evidence, not a merge gate: the nightly gates no merge. A red report or
+      # red mutation run fails this job, so failure-notice reports it (issue #1481); the upload
+      # step below still runs, so the receipt stays inspectable.
       - name: Generate report and run red mutations
-        continue-on-error: true
         run: |
           bash scripts/run-native-vectorization-report.sh
           bash scripts/test-native-vectorization-report.sh \

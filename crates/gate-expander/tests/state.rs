@@ -78,7 +78,7 @@ fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
     let mut left = vec![0.01; 17];
     let mut right = vec![0.01; 17];
     render_scalar_sidechain(
-        effect.as_mut(),
+        &mut effect,
         &mut left,
         &mut right,
         None,
@@ -86,7 +86,7 @@ fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
         &retarget_spans(0),
         0,
     );
-    let (_, before_left, before_right) = snapshot(effect.as_ref());
+    let (_, before_left, before_right) = snapshot(&effect);
     assert_ne!(
         word(&before_left, 0),
         0,
@@ -105,8 +105,10 @@ fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
             );
         }
     }
-    effect.reset(ResetKind::DiscontinuityKeepParameters);
-    let (_, discontinuity_left, discontinuity_right) = snapshot(effect.as_ref());
+    effect
+        .processor
+        .reset(ResetKind::DiscontinuityKeepParameters);
+    let (_, discontinuity_left, discontinuity_right) = snapshot(&effect);
     for (label, before, after) in [
         ("left", &before_left, &discontinuity_left),
         ("right", &before_right, &discontinuity_right),
@@ -136,12 +138,12 @@ fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
             assert_eq!(word(after, slot + 3), 0, "{label}: ramp {ramp} remaining");
         }
     }
-    effect.reset(ResetKind::FullToDefaults);
-    let full = snapshot(effect.as_ref());
+    effect.processor.reset(ResetKind::FullToDefaults);
+    let full = snapshot(&effect);
     let fresh = prepare(request(&values));
     assert_eq!(
         full,
-        snapshot(fresh.as_ref()),
+        snapshot(&fresh),
         "full reset restores every common, left, and right payload value"
     );
 }
@@ -156,7 +158,7 @@ fn active_state_restore_continues_an_uninterrupted_donor() {
     let mut warm_left = source_left[..17].to_vec();
     let mut warm_right = source_right[..17].to_vec();
     render_scalar_sidechain(
-        donor.as_mut(),
+        &mut donor,
         &mut warm_left,
         &mut warm_right,
         None,
@@ -164,14 +166,14 @@ fn active_state_restore_continues_an_uninterrupted_donor() {
         &spans,
         0,
     );
-    let payload = snapshot(donor.as_ref());
+    let payload = snapshot(&donor);
     assert_eq!(word(&payload.1, 6 + 3), 47.0_f32.to_bits());
 
     let mut uninterrupted = donor;
     let mut expected_left = source_left[17..].to_vec();
     let mut expected_right = source_right[17..].to_vec();
     render_scalar_sidechain(
-        uninterrupted.as_mut(),
+        &mut uninterrupted,
         &mut expected_left,
         &mut expected_right,
         None,
@@ -181,8 +183,9 @@ fn active_state_restore_continues_an_uninterrupted_donor() {
     );
 
     let mut restored = prepare(request(&values));
-    let sizes = restored.metadata().state_sizes;
+    let sizes = restored.metadata.state_sizes;
     restored
+        .processor
         .restore_state_payload(
             STATE_LAYOUT_VERSION,
             StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).unwrap(),
@@ -191,7 +194,7 @@ fn active_state_restore_continues_an_uninterrupted_donor() {
     let mut actual_left = source_left[17..].to_vec();
     let mut actual_right = source_right[17..].to_vec();
     render_scalar_sidechain(
-        restored.as_mut(),
+        &mut restored,
         &mut actual_left,
         &mut actual_right,
         None,
@@ -201,10 +204,7 @@ fn active_state_restore_continues_an_uninterrupted_donor() {
     );
     assert_bits_eq(&actual_left, &expected_left, "restored left");
     assert_bits_eq(&actual_right, &expected_right, "restored right");
-    assert_eq!(
-        snapshot(restored.as_ref()),
-        snapshot(uninterrupted.as_ref())
-    );
+    assert_eq!(snapshot(&restored), snapshot(&uninterrupted));
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
     for rate in [44_100, 48_000, 88_200, 96_000] {
         let values = initial_values();
         let mut scalar = prepare(support::request_at_rate(&values, rate));
-        let sizes = scalar.metadata().state_sizes;
+        let sizes = scalar.metadata.state_sizes;
         let common = vec![0; sizes.common_bytes as usize];
         let old_bytes = match rate {
             44_100 => 3_620,
@@ -224,6 +224,7 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
         let old_lane = vec![0; old_bytes];
         assert!(
             scalar
+                .processor
                 .restore_state_payload(
                     STATE_LAYOUT_VERSION,
                     StatePayloadInput {
@@ -243,18 +244,19 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
             128,
             rate,
         ) {
-            let sizes = bank.metadata().program_key.state_sizes;
+            let sizes = bank.metadata.program_key.state_sizes;
             assert!(
-                bank.restore_track_state_payload(
-                    0,
-                    STATE_LAYOUT_VERSION,
-                    StatePayloadInput {
-                        common: &common,
-                        left: &old_lane,
-                        right: &old_lane
-                    },
-                )
-                .is_err(),
+                bank.processor
+                    .restore_track_state_payload(
+                        0,
+                        STATE_LAYOUT_VERSION,
+                        StatePayloadInput {
+                            common: &common,
+                            left: &old_lane,
+                            right: &old_lane
+                        },
+                    )
+                    .is_err(),
                 "old raw bank payload at {rate} Hz"
             );
             assert_eq!(sizes.left_bytes, 88);
@@ -280,7 +282,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let mut warm_left = vec![0.01_f32; 17];
     let mut warm_right = warm_left.clone();
     render_scalar_sidechain(
-        effect.as_mut(),
+        &mut effect,
         &mut warm_left,
         &mut warm_right,
         None,
@@ -288,18 +290,19 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
         &[],
         0,
     );
-    let before = snapshot(effect.as_ref());
+    let before = snapshot(&effect);
     assert_ne!(word(&before.1, 0), 0, "rollback witness has live gain");
     let mut right = before.2.clone();
     right[87] = 0xff;
-    let sizes = effect.metadata().state_sizes;
+    let sizes = effect.metadata.state_sizes;
     let input = StatePayloadInput::new(&before.0, &before.1, &right, sizes).unwrap();
     assert!(
         effect
+            .processor
             .restore_state_payload(STATE_LAYOUT_VERSION, input)
             .is_err()
     );
-    assert_eq!(snapshot(effect.as_ref()), before);
+    assert_eq!(snapshot(&effect), before);
 
     let values: [Values; 8] = core::array::from_fn(|track| {
         let mut values = active_values();
@@ -315,7 +318,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let mut control_prefix_left = prefix_left.clone();
     let mut control_prefix_right = prefix_right.clone();
     render_bank(
-        &mut *control,
+        control.processor.as_mut(),
         &mut control_prefix_left,
         &mut control_prefix_right,
         17,
@@ -323,20 +326,21 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let mut target_prefix_left = prefix_left;
     let mut target_prefix_right = prefix_right;
     render_bank(
-        &mut *target,
+        target.processor.as_mut(),
         &mut target_prefix_left,
         &mut target_prefix_right,
         17,
     );
     let state_before: Vec<_> = (0..NATIVE_LANES as u32)
-        .map(|track| snapshot_bank(&*target, track))
+        .map(|track| snapshot_bank(&target, track))
         .collect();
     assert!(state_before.iter().any(|payload| word(&payload.1, 0) != 0));
     let mut malformed_right = state_before[3].2.clone();
     malformed_right[87] = 0xff;
-    let sizes = target.metadata().program_key.state_sizes;
+    let sizes = target.metadata.program_key.state_sizes;
     assert!(
         target
+            .processor
             .restore_track_state_payload(
                 3,
                 STATE_LAYOUT_VERSION,
@@ -352,7 +356,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     );
     for track in 0..NATIVE_LANES as u32 {
         assert_eq!(
-            snapshot_bank(&*target, track),
+            snapshot_bank(&target, track),
             state_before[track as usize],
             "bank lane {track} survives malformed right restore"
         );
@@ -362,8 +366,18 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let mut control_right = continuation.clone();
     let mut target_left = continuation.clone();
     let mut target_right = continuation;
-    render_bank(&mut *control, &mut control_left, &mut control_right, 17);
-    render_bank(&mut *target, &mut target_left, &mut target_right, 17);
+    render_bank(
+        control.processor.as_mut(),
+        &mut control_left,
+        &mut control_right,
+        17,
+    );
+    render_bank(
+        target.processor.as_mut(),
+        &mut target_left,
+        &mut target_right,
+        17,
+    );
     for track in 0..NATIVE_LANES {
         assert_bits_eq(
             &track_of(&target_left, track, NATIVE_LANES),
@@ -389,7 +403,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut control_warm_left = warm_left.clone();
     let mut control_warm_right = warm_right.clone();
     render_scalar_sidechain(
-        scalar.as_mut(),
+        &mut scalar,
         &mut warm_left,
         &mut warm_right,
         None,
@@ -398,7 +412,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         0,
     );
     render_scalar_sidechain(
-        scalar_control.as_mut(),
+        &mut scalar_control,
         &mut control_warm_left,
         &mut control_warm_right,
         None,
@@ -406,7 +420,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         &retarget_spans(0),
         0,
     );
-    let before = snapshot(scalar.as_ref());
+    let before = snapshot(&scalar);
     assert_ne!(word(&before.1, 0), 0, "scalar fault witness has live gain");
     assert_ne!(word(&before.2, 0), 0, "scalar peer witness has live gain");
     for (label, payload) in [("left", &before.1), ("right", &before.2)] {
@@ -423,15 +437,14 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut left = vec![0.2; 128];
     let mut right = vec![0.2; 128];
     left[0] = f32::NAN;
-    let report =
-        render_scalar_sidechain(scalar.as_mut(), &mut left, &mut right, None, 128, &[], 17);
+    let report = render_scalar_sidechain(&mut scalar, &mut left, &mut right, None, 128, &[], 17);
     assert_eq!(report.nonfinite_left_blocks, 128);
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
     assert!(right.iter().all(|sample| sample.is_finite()));
     let mut control_left = vec![0.2; 128];
     let mut control_right = vec![0.2; 128];
     render_scalar_sidechain(
-        scalar_control.as_mut(),
+        &mut scalar_control,
         &mut control_left,
         &mut control_right,
         None,
@@ -440,9 +453,9 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         17,
     );
     let fresh = prepare(request(&values));
-    let after = snapshot(scalar.as_ref());
-    let control = snapshot(scalar_control.as_ref());
-    let fresh_state = snapshot(fresh.as_ref());
+    let after = snapshot(&scalar);
+    let control = snapshot(&scalar_control);
+    let fresh_state = snapshot(&fresh);
     assert_eq!(after.1, fresh_state.1, "faulted scalar channel full-resets");
     assert_eq!(
         after.2, control.2,
@@ -475,7 +488,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let bank_automation_offsets: [u32; NATIVE_LANES + 1] =
         core::array::from_fn(|index| (index * bank_automation_one.len()) as u32);
     render_bank_with_automation(
-        &mut *control,
+        control.processor.as_mut(),
         &mut control_warm_left,
         &mut control_warm_right,
         17,
@@ -483,7 +496,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         &bank_automation_offsets,
     );
     render_bank_with_automation(
-        &mut *bank,
+        bank.processor.as_mut(),
         &mut bank_warm_left,
         &mut bank_warm_right,
         17,
@@ -491,7 +504,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         &bank_automation_offsets,
     );
     let before_bank: Vec<_> = (0..NATIVE_LANES as u32)
-        .map(|track| snapshot_bank(&*bank, track))
+        .map(|track| snapshot_bank(&bank, track))
         .collect();
     assert!(before_bank.iter().all(|payload| word(&payload.1, 0) != 0));
     for (track, payload) in before_bank.iter().enumerate() {
@@ -525,7 +538,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut control_left = packed(&[&[0.2; 128]; NATIVE_LANES]);
     let mut control_right = control_left.clone();
     let offsets = [0_u32; NATIVE_LANES + 1];
-    let control_report = control.process_bank(
+    let control_report = control.processor.process_bank(
         EffectBankProcessBlock::new(
             &mut control_left,
             &mut control_right,
@@ -539,7 +552,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         )
         .unwrap(),
     );
-    let report = bank.process_bank(
+    let report = bank.processor.process_bank(
         EffectBankProcessBlock::new(
             &mut packed_left,
             &mut packed_right,
@@ -562,8 +575,8 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
                 &format!("peer track {track} left PCM"),
             );
             assert_eq!(
-                snapshot_bank(&*bank, track as u32),
-                snapshot_bank(&*control, track as u32),
+                snapshot_bank(&bank, track as u32),
+                snapshot_bank(&control, track as u32),
                 "peer track {track} state"
             );
         }
@@ -571,8 +584,8 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     assert_eq!(report.reports[3].nonfinite_right_blocks, 0);
     assert_eq!(control_report.reports[3].nonfinite_right_blocks, 0);
     assert_eq!(
-        snapshot_bank(&*bank, 3).2,
-        snapshot_bank(&*control, 3).2,
+        snapshot_bank(&bank, 3).2,
+        snapshot_bank(&control, 3).2,
         "fault lane right serialized state remains equal to no-fault control"
     );
     assert_bits_eq(
@@ -583,8 +596,8 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let fresh_bank =
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     assert_eq!(
-        snapshot_bank(&*bank, 3).1,
-        snapshot_bank(&*fresh_bank, 3).1,
+        snapshot_bank(&bank, 3).1,
+        snapshot_bank(&fresh_bank, 3).1,
         "fault lane left full-resets to prepared defaults"
     );
 }
@@ -601,7 +614,7 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let mut scalar_prefix_left = source_left[..17].to_vec();
     let mut scalar_prefix_right = source_right[..17].to_vec();
     render_scalar_sidechain(
-        scalar.as_mut(),
+        &mut scalar,
         &mut scalar_prefix_left,
         &mut scalar_prefix_right,
         None,
@@ -609,11 +622,11 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
         &[],
         0,
     );
-    let scalar_payload = snapshot(scalar.as_ref());
+    let scalar_payload = snapshot(&scalar);
     let mut scalar_expected_left = source_left[17..].to_vec();
     let mut scalar_expected_right = source_right[17..].to_vec();
     render_scalar_sidechain(
-        scalar.as_mut(),
+        &mut scalar,
         &mut scalar_expected_left,
         &mut scalar_expected_right,
         None,
@@ -625,8 +638,9 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let bank_values = [values; 8];
     let mut scalar_to_bank =
         prepare_bank_native(&bank_values, LinkMode::DualMono).expect("the build's own width binds");
-    let sizes = scalar_to_bank.metadata().program_key.state_sizes;
+    let sizes = scalar_to_bank.metadata.program_key.state_sizes;
     scalar_to_bank
+        .processor
         .restore_track_state_payload(
             3,
             STATE_LAYOUT_VERSION,
@@ -641,7 +655,12 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
         .unwrap();
     let mut bank_left = packed(&[&source_left[17..]; NATIVE_LANES]);
     let mut bank_right = packed(&[&source_right[17..]; NATIVE_LANES]);
-    render_bank(&mut *scalar_to_bank, &mut bank_left, &mut bank_right, 128);
+    render_bank(
+        scalar_to_bank.processor.as_mut(),
+        &mut bank_left,
+        &mut bank_right,
+        128,
+    );
     assert_bits_eq(
         &track_of(&bank_left, 3, NATIVE_LANES),
         &scalar_expected_left,
@@ -659,15 +678,16 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let mut bank_prefix_left = packed(&[&source_left[..17]; NATIVE_LANES]);
     let mut bank_prefix_right = packed(&[&source_right[..17]; NATIVE_LANES]);
     render_bank(
-        &mut *bank,
+        bank.processor.as_mut(),
         &mut bank_prefix_left,
         &mut bank_prefix_right,
         17,
     );
-    let bank_payload = snapshot_bank(&*bank, 3);
+    let bank_payload = snapshot_bank(&bank, 3);
     let mut bank_to_scalar = prepare(request(&values));
-    let sizes = bank_to_scalar.metadata().state_sizes;
+    let sizes = bank_to_scalar.metadata.state_sizes;
     bank_to_scalar
+        .processor
         .restore_state_payload(
             STATE_LAYOUT_VERSION,
             StatePayloadInput::new(&bank_payload.0, &bank_payload.1, &bank_payload.2, sizes)
@@ -677,7 +697,7 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let mut scalar_left = source_left[17..].to_vec();
     let mut scalar_right = source_right[17..].to_vec();
     render_scalar_sidechain(
-        bank_to_scalar.as_mut(),
+        &mut bank_to_scalar,
         &mut scalar_left,
         &mut scalar_right,
         None,
@@ -688,7 +708,7 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let mut bank_continuation_left = packed(&[&source_left[17..]; NATIVE_LANES]);
     let mut bank_continuation_right = packed(&[&source_right[17..]; NATIVE_LANES]);
     render_bank(
-        &mut *bank,
+        bank.processor.as_mut(),
         &mut bank_continuation_left,
         &mut bank_continuation_right,
         128,
@@ -714,18 +734,137 @@ fn bank_restore_of_one_track_does_not_mutate_peers() {
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut left = packed(&[&[0.1; 128]; NATIVE_LANES]);
     let mut right = left.clone();
-    render_bank(&mut *donor_bank, &mut left, &mut right, 128);
-    let donor = snapshot_bank(&*donor_bank, 3);
+    render_bank(donor_bank.processor.as_mut(), &mut left, &mut right, 128);
+    let donor = snapshot_bank(&donor_bank, 3);
     // Track 4 in the 8-lane (AVX2) build, track 0 in a 4-lane (NEON/simd128) one (#1112).
     let peer = 4 % NATIVE_LANES as u32;
-    let peer_before = snapshot_bank(&*target_bank, peer);
-    let sizes = target_bank.metadata().program_key.state_sizes;
+    let peer_before = snapshot_bank(&target_bank, peer);
+    let sizes = target_bank.metadata.program_key.state_sizes;
     target_bank
+        .processor
         .restore_track_state_payload(
             3,
             STATE_LAYOUT_VERSION,
             StatePayloadInput::new(&donor.0, &donor.1, &donor.2, sizes).unwrap(),
         )
         .unwrap();
-    assert_eq!(snapshot_bank(&*target_bank, peer), peer_before);
+    assert_eq!(snapshot_bank(&target_bank, peer), peer_before);
+}
+
+/// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp moves.
+///
+/// From the effect's own snapshot with all four ramps in flight (threshold, ratio, range and
+/// hysteresis on both channels), each left ramp's `current` in turn is written one ulp outside
+/// each edge of its parameter's domain. The restore refuses it with `effect.state.parameter` and
+/// leaves the scalar instance and a bank track unchanged; the same payload with `current` on the
+/// edge restores. Red when `parse_lane` exempts a moving `current` from the domain or keeps a
+/// rounding budget for it.
+#[test]
+fn a_moving_ramp_word_past_its_domain_is_refused() {
+    const RAMPS: usize = 4;
+    let values = active_values();
+    let mut effect = prepare(request(&values));
+    let mut left = noise(301, 9, 0.4);
+    let mut right = noise(302, 9, 0.4);
+    render_scalar_sidechain(
+        &mut effect,
+        &mut left,
+        &mut right,
+        None,
+        9,
+        &retarget_spans(0),
+        0,
+    );
+    let saved = snapshot(&effect);
+    let sizes = effect.metadata.state_sizes;
+    let ramp_word = |index: usize| 6 + index * 4;
+    for index in 0..RAMPS {
+        assert_ne!(
+            f32::from_bits(word(&saved.1, ramp_word(index) + 3)),
+            0.0,
+            "ramp {index} is in flight"
+        );
+    }
+    let with_current = |index: usize, current: f32| {
+        let mut section = saved.1.clone();
+        let at = ramp_word(index) * 4;
+        section[at..at + 4].copy_from_slice(&current.to_le_bytes());
+        section
+    };
+
+    fn input<'a>(saved: &'a (Vec<u8>, Vec<u8>, Vec<u8>), left: &'a [u8]) -> StatePayloadInput<'a> {
+        StatePayloadInput {
+            common: &saved.0,
+            left,
+            right: &saved.2,
+        }
+    }
+    let bank_values: [Values; 8] = core::array::from_fn(|_| active_values());
+    let mut bank = prepare_bank_native(&bank_values, LinkMode::DualMono);
+    if let Some(bank) = bank.as_mut() {
+        bank.processor
+            .restore_track_state_payload(
+                0,
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes).expect("sizes"),
+            )
+            .expect("the scalar snapshot restores into a bank track");
+    }
+    let bank_saved = bank.as_ref().map(|bank| snapshot_bank(bank, 0));
+
+    for index in 0..RAMPS {
+        let row = &gate_expander::GATE_EXPANDER_PARAMETERS[index];
+        let (low, high) = (row.minimum.expect("min"), row.maximum.expect("max"));
+        for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
+            let case = format!(
+                "ramp {index}: current {outside:e} ({:#010x})",
+                outside.to_bits()
+            );
+            let section = with_current(index, outside);
+            assert_eq!(
+                effect
+                    .processor
+                    .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, &section))
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "{case}"
+            );
+            assert_eq!(snapshot(&effect), saved, "{case}");
+            if let (Some(bank), Some(bank_saved)) = (bank.as_mut(), bank_saved.as_ref()) {
+                assert_eq!(
+                    bank.processor
+                        .restore_track_state_payload(
+                            0,
+                            STATE_LAYOUT_VERSION,
+                            input(&saved, &section)
+                        )
+                        .expect_err(&case)
+                        .code,
+                    "effect.state.parameter",
+                    "bank {case}"
+                );
+                assert_eq!(&snapshot_bank(bank, 0), bank_saved, "bank {case}");
+            }
+            let section = with_current(index, edge);
+            effect
+                .processor
+                .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, &section))
+                .unwrap_or_else(|error| panic!("ramp {index}: current {edge:e}: {}", error.code));
+            effect
+                .processor
+                .restore_state_payload(STATE_LAYOUT_VERSION, input(&saved, &saved.1))
+                .expect("own snapshot");
+            if let Some(bank) = bank.as_mut() {
+                bank.processor
+                    .restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, &section))
+                    .unwrap_or_else(|error| {
+                        panic!("bank ramp {index}: current {edge:e}: {}", error.code)
+                    });
+                bank.processor
+                    .restore_track_state_payload(0, STATE_LAYOUT_VERSION, input(&saved, &saved.1))
+                    .expect("own snapshot");
+            }
+        }
+    }
 }

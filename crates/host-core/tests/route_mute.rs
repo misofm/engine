@@ -798,7 +798,7 @@ fn graph_artifact(document: &str) -> PreparedGraphBuiltinsArtifact {
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = effect_compiler::prepare_native_session_effects(
         &compiled,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: u64::MAX,
             maximum_scratch_bytes: u64::MAX,

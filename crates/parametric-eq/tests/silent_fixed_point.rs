@@ -131,10 +131,16 @@ fn render(lanes: usize, restate: bool) -> Vec<u32> {
                 let target_values = configured(track);
                 let mut changed = vec![false; target_values.len()];
                 changed[3 * 2] = true;
-                apply_prepared_targets_lane(&mut *bank, track, 48_000, &target_values, &changed);
+                apply_prepared_targets_lane(
+                    &mut *bank.processor,
+                    track,
+                    48_000,
+                    &target_values,
+                    &changed,
+                );
             }
         }
-        bank.process_bank(
+        bank.processor.process_bank(
             EffectBankProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -273,7 +279,7 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
                     let mut changed = vec![false; target_values.len()];
                     changed[3 * 2] = true;
                     apply_prepared_targets_lane(
-                        &mut *bank,
+                        &mut *bank.processor,
                         track,
                         48_000,
                         &target_values,
@@ -281,7 +287,7 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
                     );
                 }
             }
-            bank.process_bank(
+            bank.processor.process_bank(
                 EffectBankProcessBlock::new(
                     &mut left,
                     &mut right,
@@ -303,21 +309,22 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
                 let mut common = [0_u8; COMMON_BYTES];
                 let mut lane_left = [0_u8; LANE_BYTES];
                 let mut lane_right = [0_u8; LANE_BYTES];
-                bank.snapshot_track_state_payload(
-                    track as u32,
-                    StatePayloadOutput::new(
-                        &mut common,
-                        &mut lane_left,
-                        &mut lane_right,
-                        StatePayloadSizes {
-                            common_bytes: COMMON_BYTES as u32,
-                            left_bytes: LANE_BYTES as u32,
-                            right_bytes: LANE_BYTES as u32,
-                        },
+                bank.processor
+                    .snapshot_track_state_payload(
+                        track as u32,
+                        StatePayloadOutput::new(
+                            &mut common,
+                            &mut lane_left,
+                            &mut lane_right,
+                            StatePayloadSizes {
+                                common_bytes: COMMON_BYTES as u32,
+                                left_bytes: LANE_BYTES as u32,
+                                right_bytes: LANE_BYTES as u32,
+                            },
+                        )
+                        .expect("state output"),
                     )
-                    .expect("state output"),
-                )
-                .expect("snapshot");
+                    .expect("snapshot");
                 lane_left
             })
             .collect();

@@ -633,16 +633,19 @@ fn bind_group_banks(
         };
         // Equal program key implies the same registry factory: the registry maps one
         // `EffectId` to one `Arc` (#96 F12), so a per-chunk `Arc::ptr_eq` scan proved nothing.
-        let Some(processor) = entries[0]
+        let Some(effect_contract::PreparedEffectBank {
+            processor,
+            metadata,
+        }) = entries[0]
             .factory
             .bind_homogeneous_bank(request)
             .map_err(|error| diag(error.code, "$.effects"))?
         else {
             continue;
         };
-        if processor.metadata().width != width
-            || processor.metadata().program_key != group.program[slot]
-        {
+        // Issue #1461: the bind result carries the bank's metadata beside the processor, which
+        // holds no copy of it.
+        if metadata.width != width || metadata.program_key != group.program[slot] {
             return Err(diag("graph.effect.bank_metadata", "$.effects"));
         }
         let scratch = rack::AoSoaScratch::new(width, effects.session.quantum().0)
@@ -651,6 +654,7 @@ fn bind_group_banks(
             members: members.clone().into_boxed_slice(),
             active_mask: group.active_mask.clone(),
             processor,
+            metadata,
             response_snapshot_declared: entries[0].factory.response_analysis().is_some(),
             native_id: entries[0].factory.descriptor().id.as_str(),
             scratch,
@@ -795,7 +799,7 @@ pub(crate) fn effect_bank_resource(
                 .iter()
                 .enumerate()
                 .any(|(lane, active)| *active != (lane < bank.members.len()))
-            || bank.processor.metadata().width != bank.scratch.width()
+            || bank.metadata.width != bank.scratch.width()
         {
             return None;
         }

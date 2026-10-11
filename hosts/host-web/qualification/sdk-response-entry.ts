@@ -54,6 +54,178 @@ const SPECTRUM_COLLECTION = {
   maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes * 2,
 };
 
+/**
+ * Issue #1476 D1-D3: every SDK engine this entry creates, and its render-locked allocator count.
+ *
+ * `createSdkEngine` is the only place this file calls `createEngine`, and `closeSdkEngine` the
+ * only way it closes an engine: it reads `browser.host.renderAllocationCount()` and then closes.
+ * The rows are in read order; `instances` counts every engine that booted, so an instance closed
+ * without its read leaves the two lengths unequal.
+ */
+type SdkEngine = Awaited<ReturnType<typeof createEngine>>;
+type SdkEngineOptions = Parameters<typeof createEngine>[0];
+const sdkRenderAllocations = {
+  instances: 0,
+  rows: [] as { readonly workload: string; readonly count: number }[],
+  open: new Map<SdkEngine, { readonly workload: string; failure?: object }>(),
+  /** The first error each instance's body threw, kept after the instance leaves `open`. */
+  failures: new WeakMap<SdkEngine, object>(),
+};
+
+/**
+ * Create, record and connect one SDK engine (D1). A failed connect still reads and closes the
+ * instance before its error propagates (D3).
+ */
+async function createSdkEngine(workload: string, options: SdkEngineOptions): Promise<SdkEngine> {
+  const browser = await createEngine(options);
+  sdkRenderAllocations.instances += 1;
+  sdkRenderAllocations.open.set(browser, { workload });
+  try {
+    browser.host.node.connect(browser.context.destination);
+  } catch (error) {
+    const failure = sdkEngineFailed(browser, error);
+    await closeSdkEngine(browser);
+    throw failure;
+  }
+  return browser;
+}
+
+/** A thrown value as an object, so a later read or cleanup failure can be attached to it (D3). */
+function sdkFailureObject(error: unknown): object {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    ? error
+    : new Error(`non-object error: ${String(error)}`, { cause: error });
+}
+
+function attachSdkFailure(failure: object, key: "renderAllocationReadFailures" | "sdkCleanupFailures", message: string) {
+  const record = failure as Record<string, unknown>;
+  const list = Array.isArray(record[key]) ? record[key] as string[] : (record[key] = []) as string[];
+  list.push(message);
+}
+
+function sdkErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Record the first error an instance's body threw, so its close cannot mask it (D3), and return
+ * the value to throw: the error itself, or an `Error` that wraps a non-object throw.
+ */
+function sdkEngineFailed(browser: SdkEngine, error: unknown): object {
+  const failure = sdkFailureObject(error);
+  if (!sdkRenderAllocations.failures.has(browser)) sdkRenderAllocations.failures.set(browser, failure);
+  const instance = sdkRenderAllocations.open.get(browser);
+  if (instance !== undefined && instance.failure === undefined) instance.failure = failure;
+  return failure;
+}
+
+/** The bound on the `suspend()` before a read, the same 10 s as this file's `resume()` bounds. */
+const sdkSuspendTimeoutMs = 10_000;
+
+/**
+ * Read the instance's count after its last render and before its close, then close it (D2).
+ * A running `AudioContext` is suspended first, so no render follows the read; an offline
+ * context has finished rendering. A second call for an instance this helper already closed
+ * does nothing. After a recorded body error, a failed read or close is attached to that error
+ * instead of thrown, so the body's error stays the one that propagates. A `suspend()` that does
+ * not settle within `sdkSuspendTimeoutMs` is a failed read that names the workload: no read, no
+ * row, no retry.
+ */
+async function closeSdkEngine(browser: SdkEngine): Promise<void> {
+  const instance = sdkRenderAllocations.open.get(browser);
+  if (instance === undefined) return;
+  sdkRenderAllocations.open.delete(browser);
+  let readFailure: Error | undefined;
+  try {
+    const context = browser.context as unknown as BaseAudioContext;
+    if (typeof AudioContext !== "undefined" && context instanceof AudioContext && context.state === "running") {
+      let suspendTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          suspendTimer = setTimeout(() => reject(new Error(
+            `audio suspend timed out after ${sdkSuspendTimeoutMs} ms (state=${context.state})`,
+          )), sdkSuspendTimeoutMs);
+          context.suspend().then(resolve, reject);
+        });
+      } finally {
+        if (suspendTimer !== undefined) clearTimeout(suspendTimer);
+      }
+    }
+    const reply = await browser.host.renderAllocationCount();
+    if (reply.result !== 0) {
+      readFailure = new Error(`${instance.workload}: render allocation count refused: ${reply.result}`);
+    } else {
+      sdkRenderAllocations.rows.push({ workload: instance.workload, count: reply.count });
+    }
+  } catch (error) {
+    readFailure = new Error(`${instance.workload}: render allocation count failed: ${sdkErrorMessage(error)}`,
+      { cause: error });
+  }
+  let closeFailure: Error | undefined;
+  try {
+    await browser.close();
+  } catch (error) {
+    closeFailure = new Error(`${instance.workload}: close failed: ${sdkErrorMessage(error)}`, { cause: error });
+  }
+  if (instance.failure !== undefined) {
+    if (readFailure !== undefined) attachSdkFailure(instance.failure, "renderAllocationReadFailures", readFailure.message);
+    if (closeFailure !== undefined) attachSdkFailure(instance.failure, "sdkCleanupFailures", closeFailure.message);
+    return;
+  }
+  if (readFailure !== undefined) {
+    if (closeFailure !== undefined) attachSdkFailure(readFailure, "sdkCleanupFailures", closeFailure.message);
+    throw readFailure;
+  }
+  if (closeFailure !== undefined) throw closeFailure;
+}
+
+/**
+ * The `finally` of an instance's body: run its other cleanups (subscription and stream closes),
+ * then read and close the instance whatever they did (D3). The first cleanup error becomes the
+ * instance's failure when its body did not throw, and is thrown after the close. When the body
+ * threw, every cleanup error is attached to the body's error, also when the instance has already
+ * left `open`, so a cleanup error never replaces the body's error.
+ */
+async function finishSdkEngine(browser: SdkEngine, ...cleanups: Array<() => unknown>): Promise<void> {
+  const recordedFailure = () =>
+    sdkRenderAllocations.open.get(browser)?.failure ?? sdkRenderAllocations.failures.get(browser);
+  const bodyFailed = recordedFailure() !== undefined;
+  let cleanupFailure: object | undefined;
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      const failure = recordedFailure();
+      if (failure === undefined) {
+        cleanupFailure = sdkEngineFailed(browser, error);
+      } else {
+        attachSdkFailure(failure, "sdkCleanupFailures", sdkErrorMessage(error));
+      }
+    }
+  }
+  await closeSdkEngine(browser);
+  if (!bodyFailed && cleanupFailure !== undefined) throw cleanupFailure;
+}
+
+/**
+ * The run's backstop (D3): read and close every instance still open when the run ends, whatever
+ * path it took. On the error path, `failure` is the run's error and every read or close failure
+ * is attached to it; on the success path an instance left open here has no row in the returned
+ * rows, so the gate's length check is red.
+ */
+async function closeOpenSdkEngines(failure: object | undefined): Promise<void> {
+  let firstError: unknown;
+  for (const [browser, instance] of [...sdkRenderAllocations.open]) {
+    if (failure !== undefined && instance.failure === undefined) instance.failure = failure;
+    try {
+      await closeSdkEngine(browser);
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
+}
+
 function observationSelection(effectSlotId: string, channels: "left" | "right" | "both" = "both") {
   return { trackId: "track", rack: "inserts" as const, effectSlotId, tapId: 1, channels };
 }
@@ -236,11 +408,14 @@ function spectrumTargetKey(target: typeof SPECTRUM_QUERIES[number]["target"]): s
     : `${target.kind}:${target.trackId}`;
 }
 
-async function createSpectrumBrowser(query: typeof SPECTRUM_QUERIES[number]) {
+async function createSpectrumBrowser(
+  query: typeof SPECTRUM_QUERIES[number],
+  workload = `spectrum-query:${spectrumTargetKey(query.target)}`,
+) {
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createEngine({
+  const browser = await createSdkEngine(workload, {
     document,
     spectrum: query,
     policy: { sourceRingFrames: SPECTRUM_FRAMES },
@@ -266,7 +441,6 @@ async function createSpectrumBrowser(query: typeof SPECTRUM_QUERIES[number]) {
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   return browser;
 }
 
@@ -354,7 +528,8 @@ async function createContinuousSpectrumBrowser(
 ) {
   const raw = await (await fetch("/qualification/observation-session.json")).text();
   const document = spectrumDocument(raw, frames, peak);
-  const browser = await createEngine({
+  const workload = `spectrum-continuous-hop-${spectrumHopFrames ?? "default"}`;
+  const browser = await createSdkEngine(workload, {
     document,
     spectrum: query,
     policy: {
@@ -390,7 +565,6 @@ async function createContinuousSpectrumBrowser(
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   return browser;
 }
 
@@ -414,7 +588,7 @@ async function createSpectrumCollectionBrowser() {
   const raw = await (await fetch("/qualification/observation-session.json")).text();
   const frames = 16 * SPECTRUM_FRAMES;
   const document = spectrumCollectionDocument(raw, frames);
-  const browser = await createEngine({
+  const browser = await createSdkEngine("spectrum-collection", {
     document,
     spectrumCollection: SPECTRUM_COLLECTION,
     policy: { sourceRingFrames: frames },
@@ -441,7 +615,6 @@ async function createSpectrumCollectionBrowser() {
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   return browser;
 }
 
@@ -498,11 +671,30 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     nativeStarts.push(reply.metadata);
     return reply;
   };
+  // Issue #1480 D2: the capture loss is made certain by construction, not by a race. While the
+  // offline context renders, no native read runs: a read the SDK starts then waits on
+  // `readsHeld` (a promise, not a sleep), and every read already dispatched has settled before
+  // `startRendering` is called. The render therefore completes all
+  // (CONTINUOUS_FRAMES - 2,048) / 256 + 1 = 17 hop-256 windows into the native stream's one-record
+  // queue with no pop between them: the first is queued and the other 16 are dropped. The first
+  // read after the render must report that gap (`renderLoss`), and the SDK's first ready
+  // notification must carry it. A read that popped mid-render (the race #1480 D1 found) leaves
+  // fewer than 16 drops and the `renderLoss` predicate red.
+  const inFlightReads = new Set<Promise<unknown>>();
+  let readsHeld: Promise<void> | undefined;
+  let releaseReads = () => {};
   const nativeReadSpectrumStream = browser.host.readSpectrumStream.bind(browser.host);
   browser.host.readSpectrumStream = async (...args) => {
-    const reply = await nativeReadSpectrumStream(...args);
-    nativeReads.push(reply.metadata);
-    return reply;
+    if (readsHeld !== undefined) await readsHeld;
+    const read = nativeReadSpectrumStream(...args);
+    inFlightReads.add(read);
+    try {
+      const reply = await read;
+      nativeReads.push(reply.metadata);
+      return reply;
+    } finally {
+      inFlightReads.delete(read);
+    }
   };
   const meterFrames: Array<{ readonly peaks: Float32Array; readonly firstSample: bigint; readonly endSample: bigint }> = [];
   const automaticNotifications = [];
@@ -554,7 +746,15 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     const sharedJob = shared.job === subscription.job
       && shared.owner === subscription.owner && shared.epoch === subscription.epoch;
     await submitSpectrumSource(browser, CONTINUOUS_FRAMES, toneSpectrumPlanes);
-    const rendered = await browser.context.startRendering();
+    readsHeld = new Promise<void>((resolve) => { releaseReads = resolve; });
+    await Promise.allSettled([...inFlightReads]);
+    const readsBeforeRender = nativeReads.length;
+    let rendered: AudioBuffer;
+    try {
+      rendered = await browser.context.startRendering();
+    } finally {
+      releaseReads();
+    }
     const firstPcmPeak = Math.max(
       ...[rendered.getChannelData(0), rendered.getChannelData(1)].map((plane) => {
         let peak = 0;
@@ -606,6 +806,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       || secondNotification?.skippedPublications > 0n
       || callbackGap;
     const readyNotification = notifications.find((notification) => notification.available);
+    const firstReadAfterRender = nativeReads[readsBeforeRender];
     const sharedAfterFirstClose = (await subscription.close(), shared.readLatest() !== undefined);
     await shared.close();
     let staleReadRefused = false;
@@ -629,6 +830,10 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       publicationHopFrames: notifications.map((notification) => notification.metadata.hopFrames),
       publicationSmoothingMs: notifications.map((notification) => notification.metadata.smoothingMs),
       gap,
+      renderLoss: firstReadAfterRender === undefined ? undefined : {
+        status: firstReadAfterRender.status,
+        droppedCaptures: firstReadAfterRender.droppedCaptures.toString(),
+      },
       recoveryDelivery,
       ownedArrays,
       sharedAfterFirstClose,
@@ -658,10 +863,10 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
         meterSpan: meter === undefined ? [] : [meter.firstSample.toString(), meter.endSample.toString()],
       },
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    await shared?.close();
-    await subscription?.close();
-    await browser.close();
+    await finishSdkEngine(browser, () => shared?.close(), () => subscription?.close());
   }
 }
 
@@ -786,9 +991,10 @@ async function runConfiguredSpectrumHopQualification(): Promise<Record<string, u
       resultSmoothingMs: first.metadata.smoothingMs,
       ownedArrays,
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    await subscription?.close();
-    await browser.close();
+    await finishSdkEngine(browser, () => subscription?.close());
   }
 }
 
@@ -861,7 +1067,7 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
       const left = result.leftDb?.slice();
       const right = result.rightDb?.slice();
       const row = { ...serializeSpectrum(result, query), ownedAfterClose: false };
-      await browser.close();
+      await closeSdkEngine(browser);
       row.ownedAfterClose = frequencies.every(
         (value, index) => value === row.frequencies[index],
       ) && (left === undefined || left.every(
@@ -870,12 +1076,14 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
         (value, index) => value === row.right[index],
       ));
       rows.push(row);
+    } catch (error) {
+      throw sdkEngineFailed(browser, error);
     } finally {
-      await browser.close();
+      await closeSdkEngine(browser);
     }
   }
 
-  const closedBrowser = await createSpectrumBrowser(SPECTRUM_QUERIES[0]);
+  const closedBrowser = await createSpectrumBrowser(SPECTRUM_QUERIES[0], "spectrum-query-closed");
   let closedRefused = false;
   try {
     await submitSpectrumSource(closedBrowser);
@@ -889,14 +1097,16 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     };
     const pending = closedBrowser.querySpectrum(SPECTRUM_QUERIES[0]);
     await armed;
-    await closedBrowser.close();
+    await closeSdkEngine(closedBrowser);
     try {
       await pending;
     } catch {
       closedRefused = true;
     }
+  } catch (error) {
+    throw sdkEngineFailed(closedBrowser, error);
   } finally {
-    await closedBrowser.close();
+    await closeSdkEngine(closedBrowser);
   }
 
   return {
@@ -916,9 +1126,9 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
 }
 
 async function runSpectrumCollectionQualification(): Promise<Record<string, unknown>> {
-  const browser = await createSpectrumCollectionBrowser();
   const [entryA, entryB] = SPECTRUM_COLLECTION_ENTRIES;
   if (entryA === undefined || entryB === undefined) throw new Error("spectrum collection fixture is incomplete");
+  const browser = await createSpectrumCollectionBrowser();
   const query = (entry: typeof entryA) => ({
     ...entry,
     spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
@@ -1071,8 +1281,10 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
       audioContinued,
       switchedWithoutRestart: true,
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    await browser.close();
+    await closeSdkEngine(browser);
   }
 }
 
@@ -1080,7 +1292,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createEngine({
+  const browser = await createSdkEngine("track-response-subscription", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
@@ -1108,7 +1320,6 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   return browser;
 }
 
@@ -1343,17 +1554,18 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
       snapshotToken: initial.snapshotToken.toString(),
       bounds: subscription.bounds,
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    headless.dispose();
-    await browser.close();
+    await finishSdkEngine(browser, () => headless.dispose());
   }
 }
 
-async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<typeof createEngine>>> {
+async function createResidentObservationBrowser(): Promise<SdkEngine> {
   const document = observationDocumentWithGate(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createEngine({
+  const browser = await createSdkEngine("resident-observation", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
@@ -1380,7 +1592,6 @@ async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<ty
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   return browser;
 }
 
@@ -1516,8 +1727,10 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
       firstSnapshotRetained,
       staleReadRefused,
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    await browser.close();
+    await closeSdkEngine(browser);
   }
 }
 
@@ -1526,7 +1739,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createEngine({
+  const browser = await createSdkEngine("sdk-observation", {
     document,
     policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
@@ -1555,7 +1768,6 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   try {
     const selections = [observationSelection("comp")];
     const map = await browser.observationMap();
@@ -1623,7 +1835,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       enabledRight: member.enabledRight.length,
     }));
     const managedResponse = await runTrackResponseSubscriptionQualification(live);
-    await browser.close();
+    await closeSdkEngine(browser);
     let liveClosedRefused = false;
     try {
       await browser.queryTrackResponse(liveRequest);
@@ -1682,8 +1894,10 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       resident,
       managedResponse,
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    await browser.close();
+    await closeSdkEngine(browser);
   }
 }
 
@@ -1743,6 +1957,17 @@ async function sha256Hex(planes: readonly Float32Array[]): Promise<string> {
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** This render's stable workload label: its authored bypass and, when present, its live edit. */
+function liveBypassWorkload(
+  bypassed: "desk-hi" | "ins-mid" | undefined,
+  live?: { readonly target: "desk-hi" | "ins-mid"; readonly bypass: boolean },
+): string {
+  const authored = `live-bypass:authored-${bypassed ?? "none"}`;
+  return live === undefined
+    ? authored
+    : `${authored}:live-${live.target}-${live.bypass ? "bypass" : "lift"}`;
+}
+
 /**
  * Render the fixture once in an OfflineAudioContext, after an optional live bypass edit.
  *
@@ -1754,7 +1979,7 @@ async function renderLiveBypass(
   bypassed: "desk-hi" | "ins-mid" | undefined,
   live?: { readonly target: "desk-hi" | "ins-mid"; readonly bypass: boolean },
 ): Promise<{ digest: string; energy: number; address?: readonly number[]; appliedAtSample?: string }> {
-  const browser = await createEngine({
+  const browser = await createSdkEngine(liveBypassWorkload(bypassed, live), {
     document: liveBypassSession(bypassed),
     policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: { commandQueueRecords: 16 } },
     scratchBoot: async () => ({
@@ -1779,7 +2004,6 @@ async function renderLiveBypass(
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  browser.host.node.connect(browser.context.destination);
   try {
     let address: readonly number[] | undefined;
     let appliedAtSample: string | undefined;
@@ -1818,8 +2042,10 @@ async function renderLiveBypass(
       ...(address === undefined ? {} : { address }),
       ...(appliedAtSample === undefined ? {} : { appliedAtSample }),
     };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
   } finally {
-    await browser.close();
+    await closeSdkEngine(browser);
   }
 }
 
@@ -1856,6 +2082,9 @@ async function runSdkLiveBypassQualification(): Promise<Record<string, unknown>>
 }
 
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
+  sdkRenderAllocations.instances = 0;
+  sdkRenderAllocations.rows.length = 0;
+  sdkRenderAllocations.open.clear();
   const bytes = new Uint8Array(await (await fetch("/artifacts/miso-engine-v1-audio-worklet.simd128.wasm")).arrayBuffer());
   const asset = await MisoEngineAsset.load(bytes);
   const preview = await createResponsePreview({
@@ -1863,6 +2092,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
     responseWorkerModuleUrl: "/sdk/response-worker.js",
     responseLimits: { requestDeadlineMs: 5_000 },
   });
+  let runFailure: object | undefined;
   try {
     const eq = await preview.query({
       configurationId: EQ_CONFIGURATION_ID,
@@ -1915,8 +2145,18 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
       observations: await runSdkObservationQualification(),
       spectrum: await runSdkSpectrumQualification(),
       liveBypass: await runSdkLiveBypassQualification(),
+      // Issue #1476 D2: read last, after every instance above has closed through closeSdkEngine.
+      renderAllocations: sdkRenderAllocations.rows.slice(),
+      renderAllocationInstances: sdkRenderAllocations.instances,
     };
+  } catch (error) {
+    runFailure = sdkFailureObject(error);
+    throw runFailure;
   } finally {
-    await preview.close();
+    try {
+      await closeOpenSdkEngines(runFailure);
+    } finally {
+      await preview.close();
+    }
   }
 }

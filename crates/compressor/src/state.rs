@@ -22,7 +22,7 @@
 use effect_contract::{StatePayloadError, StatePayloadOutput, StatePayloadSizes};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_inside, ramp_path_within, read_f32, read_ramp, write_f32, write_ramp,
+    RAMP_WORDS, ramp_path_inside, read_f32, read_ramp, write_f32, write_ramp,
 };
 use lane::Lane;
 
@@ -115,39 +115,30 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<(), StatePayloadError> {
     }
     for (index, spec) in PARAMETER_SPECS.iter().enumerate() {
         let ramp = read_ramp(bytes, PARAMETER_RAMP_WORD + index * RAMP_WORDS);
-        let slack = 64.0 * f32::EPSILON * spec.minimum.abs().max(spec.maximum.abs());
-        // The target is a designed value and lies in the domain exactly. A ramping `current` is
-        // an iterated `current + step`, which may round a few ulps past a domain edge on its way
-        // (a ramp to `mix = 0` can pass a negative subnormal), and the effect's own snapshot must
-        // restore: it is held to the path's rounding budget. A settled one is held to the domain.
-        let current_valid = if ramp.remaining == 0 {
-            parameter_state_valid(index, ramp.current)
-        } else {
-            !is_negative_zero(ramp.current)
-        };
-        if !current_valid
+        // The target is a designed value and lies in the domain exactly. A `current`, moving or
+        // settled, is held to the strict domain too: the clamped law keeps every word the
+        // effect's own ramps produce between its start and its target, both in the domain
+        // (issue #1409 D2), so a word outside it is one the engine never holds (issue #1411 D1).
+        if !parameter_state_valid(index, ramp.current)
             || !parameter_state_valid(index, ramp.target)
-            || !ramp_path_within(ramp, (spec.minimum, spec.maximum), slack, SMOOTHING_SAMPLES)
+            || !ramp_path_inside(ramp, (spec.minimum, spec.maximum), SMOOTHING_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
         }
     }
     // `design::rate_coefficient` designs every coefficient of a legal time in `(0, 1]`: it gives
     // exactly `0.0` only for an infinite time, which the domains exclude, and its smallest legal
-    // coefficient (5 s at 96 kHz) is about 2.1e-6. A target or a settled coefficient is a designed
-    // value, held there exactly; a settled `0.0` would freeze the smoother until the next retarget.
-    // A moving path keeps the closed lower bound below: it lands on its target's exact word. A
-    // moving coefficient is an iterated `current + step` between two designed values, so it may
-    // round a few ulps past either one: its path is held to `[0, 1 + 64 ulps]`. The budget is
-    // one-sided: the smoother `y += c (x - y)` has its pole at `1 - c`, so it diverges for every
-    // `c < 0` (and for `c > 2`), and no rounding of the effect's own walk reaches below zero (its
-    // smallest coefficient, 5 s at 96 kHz, is about 2.1e-6, far above the walk's rounding).
+    // coefficient (5 s at 96 kHz) is about 2.1e-6. A target is a designed value, held there
+    // exactly; a settled `0.0` would freeze the smoother until the next retarget, and the smoother
+    // `y += c (x - y)` diverges for every `c < 0` (and for `c > 2`). A `current`, moving or
+    // settled, lies between two designed values under the clamped law (issue #1409 D2), so it is
+    // held to the same designed range, with no rounding budget (issue #1411 D1).
     for index in 0..RATE_RAMPS {
         let ramp = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
         let designed = |value: f32| value > 0.0 && value <= 1.0;
         if !designed(ramp.target)
-            || (ramp.remaining == 0 && !designed(ramp.current))
-            || !ramp_path_inside(ramp, (0.0, 1.0 + 64.0 * f32::EPSILON), SMOOTHING_SAMPLES)
+            || !designed(ramp.current)
+            || !ramp_path_inside(ramp, (0.0, 1.0), SMOOTHING_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
         }

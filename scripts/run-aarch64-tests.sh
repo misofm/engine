@@ -142,6 +142,9 @@ if [[ "$mode" == debug ]]; then
     features+=,engine/realtime-audit,math/lane,parametric-eq/test-support,builtins/test-support
     check_skip_names --locked --all-targets "${packages[@]}" --features "$features"
     cargo test --locked --all-targets "${packages[@]}" --features "$features" -- "${skips[@]}"
+    # --all-targets runs no doctest (#1422); lane's CanonicalFpEnv guarantee is target-specific,
+    # so AArch64 runs the same packages' doctests with the same features.
+    cargo test --locked --doc "${packages[@]}" --features "$features"
     # The reference session's retained rows at four lanes (#1304): libtest captures a passing
     # test's output, so the main run never shows them. Run the budget test alone, uncaptured, with
     # the main run's packages and features so nothing rebuilds; its four-lane ceilings are set from

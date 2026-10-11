@@ -53,7 +53,6 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Finite(0),
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: 0,
@@ -69,6 +68,14 @@ const QUALITIES: [QualityDescriptor; 4] = [
     quality(88_200),
     quality(96_000),
 ];
+fn tail_and_rest(_: u32, _: EffectQuality) -> NodeTailBound {
+    NodeTailBound {
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
+    }
+}
 static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: EFFECT_ID,
     display_name: "Response Test",
@@ -79,6 +86,7 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 
@@ -174,7 +182,7 @@ impl NativeEffectFactory for BadResponseFactory {
     fn prepare(
         &self,
         _request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         Err(EffectPrepareError {
             code: "fixture.prepare.unsupported",
         })
@@ -183,7 +191,7 @@ impl NativeEffectFactory for BadResponseFactory {
     fn bind_homogeneous_bank(
         &self,
         _request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         Ok(None)
     }
 

@@ -101,6 +101,9 @@ fn chain_coef<L: Lane>(sections: &[[[Design; MAX_WIDTH]; 2]; 2]) -> InputChainCo
             [coef::<L>(&sections[0][0]), coef::<L>(&sections[0][1])],
             [coef::<L>(&sections[1][0]), coef::<L>(&sections[1][1])],
         ],
+        // A short silence window (issue #1328, amendment A9), so the corpus's zero runs arm the
+        // joint flush inside a block and every body's threshold is compared, armed and not.
+        silence: L::splat(3.0),
     }
 }
 
@@ -216,6 +219,11 @@ fn run_reference<L: Lane>(
                 state.extend(bits::<L>(section.ic1));
                 state.extend(bits::<L>(section.ic2));
             }
+        }
+        // The input's silence counters (issue #1328, amendment A9): every body advances them,
+        // whatever the plan elides.
+        for run in io.2.silence {
+            state.extend(bits::<L>(run));
         }
         let mut counters = Vec::new();
         for channel in 0..2 {
@@ -474,7 +482,9 @@ fn negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate() {
 
 // Frozen from 413767be8f3a54d47b33296bdf767772aca7da60 for #710. These are the actual
 // pre-change mixed dual/mono bodies, including runtime plan lookups and identity-run tracking.
-// Only their names changed; neither reference calls the specialized production helper.
+// Only their names changed; neither reference calls the specialized production helper. Issue
+// #1328 (amendment A9) added the input's silence counter and its rest threshold to both, as it
+// added them to every production body.
 fn frozen_mixed_chain_block<L: Lane>(
     left: &mut [f32],
     right: &mut [f32],
@@ -492,6 +502,7 @@ fn frozen_mixed_chain_block<L: Lane>(
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
     let mut state = s.section;
+    let mut silence = s.silence;
     let mut nc1 = [[zero; 2]; 2];
     for (channel, coefficients) in c.section.iter().enumerate() {
         for (section, coefficient) in coefficients.iter().enumerate() {
@@ -505,6 +516,7 @@ fn frozen_mixed_chain_block<L: Lane>(
     {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
+            let rest = lane::silence_step(x, &mut silence[channel], c.silence);
             let bad = L::mask_not(x.abs().lt(limit));
             count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let mut v = x.andnot(bad).mul(c.trim[channel]);
@@ -525,6 +537,7 @@ fn frozen_mixed_chain_block<L: Lane>(
                     nc1[channel][section],
                     coefficient.a2,
                     coefficient.a3,
+                    rest,
                     &mut state[channel][section],
                 );
                 v = coefficient
@@ -540,6 +553,7 @@ fn frozen_mixed_chain_block<L: Lane>(
     }
 
     s.section = state;
+    s.silence = silence;
     InputChainReport {
         sanitized: count,
         nonfinite,
@@ -561,6 +575,7 @@ fn frozen_mixed_chain_block_mono<L: Lane>(
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
     let mut state = s.section[0];
+    let mut silence = s.silence[0];
     let mut nc1 = [zero; 2];
     for (section, coefficient) in c.section[0].iter().enumerate() {
         nc1[section] = coefficient.c1.neg();
@@ -568,6 +583,7 @@ fn frozen_mixed_chain_block_mono<L: Lane>(
 
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let x = L::load(frame);
+        let rest = lane::silence_step(x, &mut silence, c.silence);
         let bad = L::mask_not(x.abs().lt(limit));
         count = count.add(one.andnot(L::mask_not(bad)));
         let mut v = x.andnot(bad).mul(c.trim[0]);
@@ -588,6 +604,7 @@ fn frozen_mixed_chain_block_mono<L: Lane>(
                 nc1[section],
                 coefficient.a2,
                 coefficient.a3,
+                rest,
                 &mut state[section],
             );
             v = coefficient
@@ -602,6 +619,7 @@ fn frozen_mixed_chain_block_mono<L: Lane>(
     }
 
     s.section[0] = state;
+    s.silence[0] = silence;
     InputChainReport {
         sanitized: [count; 2],
         nonfinite: [nonfinite; 2],
@@ -710,6 +728,7 @@ fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
         let c = InputChainCoef {
             trim: [L::splat(1.0); 2],
             section: [[identity; 2]; 2],
+            silence: L::splat(3.0),
         };
         let plan = InputChainPlan {
             elided: [[true, true], [true, true]],

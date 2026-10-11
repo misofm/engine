@@ -7,12 +7,15 @@
 //! that does not. This gate asserts that on the flushed quantities, and asserts the opposite on an
 //! *unflushed* arithmetic arm so that the gate cannot pass vacuously by failing to enable FTZ.
 //!
-//! The control word is reached through `lane::fpenv` (MXCSR on x86, FPCR on AArch64), whose
-//! `unsafe` is allowlisted inside `lane`; the workspace forbids it everywhere else.
+//! The control word is reached through `lane::fpenv` (MXCSR on x86, FPCR on AArch64). Its writer is
+//! an `unsafe fn` (issue #1494), so this file carries the two calls as its only unsafe code, and is
+//! named in the realtime policy's unsafe allowlist.
 //!
 //! Red-mutation proven for this gate (see `tests/MUTATIONS.md`): raise `FLUSH_EPS` below the
 //! subnormal boundary (`1e-40`), which lets subnormal state words survive the flush and makes the
 //! FTZ-on and FTZ-off digests differ.
+
+#![allow(unsafe_code)]
 
 mod support;
 
@@ -112,9 +115,14 @@ fn g6_flush_makes_hardware_ftz_inert() {
     );
 
     let without = all_arms();
-    write_fp_control_word(saved | FLUSH_BITS);
+    // SAFETY: `FLUSH_BITS` is FTZ|DAZ (MXCSR bits 15 and 6) or FPCR.FZ (bit 24), set on a word read
+    // from this thread, so no reserved or `RES0` bit. The gate measures `all_arms` under it, and the
+    // write-back below restores `saved`.
+    unsafe { write_fp_control_word(saved | FLUSH_BITS) };
     let with = all_arms();
-    write_fp_control_word(saved);
+    // SAFETY: `saved` was read from this thread above, so it sets no reserved bit; this hands the
+    // thread its own word back.
+    unsafe { write_fp_control_word(saved) };
     assert_eq!(
         read_fp_control_word(),
         saved,

@@ -1,4 +1,4 @@
-//! The MXCSR helpers gate G6 needs.
+//! The `x86_64` MXCSR helpers of [`crate::fpenv`], and the unfused multiply-add oracle.
 //!
 //! # Why this file kept its name
 //!
@@ -23,10 +23,11 @@
 //!
 //! # Why this file carries `unsafe`
 //!
-//! The `x86` MXCSR helpers below are used by gate G6 to prove that hardware flush-to-zero is inert
-//! under the D7 flush law. The workspace denies `unsafe` outside an enumerated allowlist and
-//! forbids inline assembly, so the helpers live here, in one of the two lane files
-//! `scripts/check-realtime-policy.sh` allows to carry `unsafe`, and use the deprecated
+//! The `x86_64` MXCSR helpers below read and write the control word for [`crate::fpenv`], which
+//! pins the canonical floating-point environment at every native `x86_64` render entry; it is
+//! their only non-test caller. Gate G6 reaches the word through `lane::fpenv`. The workspace
+//! denies `unsafe` outside an enumerated allowlist, so the helpers live here, in one of the two
+//! lane files `scripts/check-realtime-policy.sh` allows to carry `unsafe`, and use the deprecated
 //! `_mm_getcsr`/`_mm_setcsr` intrinsics rather than the inline assembly their deprecation note
 //! recommends.
 
@@ -79,7 +80,7 @@ pub const MXCSR_DAZ: u32 = 0x0040;
 
 /// Reads the current thread's MXCSR control word.
 ///
-/// Gate G6 support, never called from a render path.
+/// Called by [`crate::fpenv`] at every native `x86_64` render entry, and by tests.
 #[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
 #[must_use]
@@ -92,15 +93,56 @@ pub fn read_mxcsr() -> u32 {
 
 /// Writes the current thread's MXCSR control word.
 ///
-/// Gate G6 support, never called from a render path: FTZ and DAZ are *observed*, never relied on
-/// (D7). The write affects only the calling thread, so a test must restore the previous value
-/// before it returns.
+/// Called by [`crate::fpenv`] at every native `x86_64` render entry, and by tests. Gate G6 shows
+/// that the D7 state flush does not depend on FTZ or DAZ, but the full render does, so `fpenv`
+/// installs a word with both clear. The write affects only the calling thread, and this function
+/// does not restore the previous word. [`crate::fpenv::CanonicalFpEnv`] is the safe way to change
+/// the word: it installs `CANONICAL_MXCSR` and writes the caller's own word back on drop.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit (16-31). `LDMXCSR` raises #GP on one (Intel SDM Vol. 1, "MXCSR
+///   Control and Status Register").
+/// - Rust assumes the floating-point environment of `CANONICAL_MXCSR` (0x1F80, the architectural
+///   default): the `core::arch` documentation of `_mm_setcsr` says Rust assumes the default
+///   exception masks, rounding and DAZ. Only `CANONICAL_MXCSR`, or a word that differs from it
+///   only in the status flags (bits 0-5), is inside that environment; the caller treats every
+///   other word as outside it. A word read from this thread and handed back can be outside it too,
+///   because a host can run with FTZ or DAZ set. The caller lets no compiled floating-point code
+///   run under a word outside the environment except the code it deliberately measures. A
+///   hand-back write meets this when it returns the thread to the word its caller already ran
+///   under and the writer runs no floating-point code after it.
+/// - Unless the write installs a word inside the environment or hands back a word read from this
+///   thread, the caller restores the previous word before it returns, itself or through a guard
+///   that does (`CanonicalFpEnv`'s `Drop`). A hand-back write is itself that restore. A word inside
+///   the environment needs no restore, because compiled code may run under it.
+///
+/// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
+/// the first fence; the fence carries no code because stable rustdoc does not check one (issue
+/// #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::softfma::read_mxcsr();
+/// lane::softfma::write_mxcsr(word);
+/// ```
+///
+/// The twin differs from it only in the `unsafe` block and its `SAFETY` comment, so a renamed item
+/// turns it red:
+///
+/// ```
+/// let word = lane::softfma::read_mxcsr();
+/// // SAFETY: `word` was just read from this thread, so it sets no reserved bit, and writing it
+/// // back leaves the thread's word unchanged.
+/// unsafe { lane::softfma::write_mxcsr(word) };
+/// ```
 #[cfg(target_arch = "x86_64")]
 #[allow(deprecated)]
-pub fn write_mxcsr(value: u32) {
+pub unsafe fn write_mxcsr(value: u32) {
     use core::arch::x86_64::_mm_setcsr;
-    // SAFETY: `_mm_setcsr` writes a control register and is sound on any SSE host. The value is a
-    // control word previously read by `read_mxcsr` with at most the FTZ and DAZ bits changed, so no
-    // rounding mode or exception mask is disturbed.
+    // SAFETY: `_mm_setcsr` writes a control register and needs SSE, which every x86_64 host has
+    // (and the crate's x86-64-v3 compile guard requires). The caller upholds this function's
+    // `# Safety` contract: `value` sets no reserved bit, so the write cannot raise #GP, and the
+    // caller confines a word outside Rust's floating-point model and restores the previous word
+    // where the contract requires it.
     unsafe { _mm_setcsr(value) }
 }

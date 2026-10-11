@@ -170,6 +170,12 @@ fn prepare_delay(cross: f32) -> Box<dyn PreparedNativeEffect> {
                 maximum_scratch_bytes: 36,
                 maximum_automation_spans_per_block: 16,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(DelayFactory),
+                SAMPLE_RATE,
+                EffectQuality::Normal,
+            ),
         })
         .expect("prepared two-second delay")
+        .processor
 }

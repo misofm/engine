@@ -57,6 +57,11 @@ nothing can bring them back.
    `docs/C_ABI_V1_QUALIFICATION.md` (`:253`, `:332` mention `tail_kind`: say it is reserved and
    always `MISO_ENGINE_V1_TAIL_FINITE`).
 
+Root note (2026-10-06, after #1377's verdict): this spec's path list predates #1377. When this
+slice starts, refresh its anchors by re-grep: `hosts/host-web/src/tests.rs`,
+`crates/effect-contract/tests/registry.rs` and the new test doubles now name `RestBound` and
+`TailSamples`, and #1462 moves `tail_and_rest`'s callers to the registry table.
+
 ## Authorized paths
 
 - `crates/effect-contract/src/lib.rs`, `crates/effect-compiler/src/prepare.rs`
@@ -111,6 +116,8 @@ nothing can bring them back.
 
 ## Dependencies
 
+- *Build the launch effect registry once per process and share it* (#1469): the shared registry
+  the tail derivations run behind, once per process
 - *State the parametric EQ's bounded tail and exact-rest bound* (#1372)
 - *State the multiband compressor's bounded tail and exact-rest bound* (#1373)
 - *State the delay's bounded tail and exact-rest bound* (#1374)

@@ -150,11 +150,14 @@ in crates/lane/src/wide_impl.rs is not D8 on this target
 {"schema_version":1,"kind":"wasm_gates","leg":"wasm","backend":1,"minmax_lowering_mismatches":144,"mismatches":[]}
 ```
 
-The line that matters is the one that stayed green: **all 331 corpus digest comparisons still
-matched their pins under the mutation, on every leg.** The swapped lowering differs from D8 only on
-ties and unordered pairs, and rule 2 of the corpus is that no NaN reaches a digest, so the frozen
-corpus cannot see this defect. That is the whole reason the count exists beside the digests rather
-than as another case in them.
+The line that mattered then was the one that stayed green: **all 331 corpus digest comparisons
+still matched their pins under the mutation, on every leg.** The swapped lowering differs from D8
+only on ties and unordered pairs, and at that time no NaN reached a digest, so the frozen corpus
+could not see this defect. That is why the count exists beside the digests rather than as another
+case in them. Since issue #1473 the delegated `runtime/ramp_toward` case (98) hashes NaN as one
+fixed token and moves under a swapped lowering too (its verifier: wasm `Lane::min` arm swapped,
+`minmax_lowering_mismatches: 36` and case 98 red at simd4), but only at its own points; the count
+remains the check over every ordered pair of the pool.
 
 ## `f64` lanes (issue #949): the exactness count and the lowering pin
 
@@ -229,18 +232,21 @@ flag unless `artifact-gates` runs the gate after its pin check.
 
 The pinned Node (`v22.23.2`, V8 `12.4.254.21-node.56`, Linux x64, an x86-64-v3 host) compiles the
 parametric EQ's `f32x4` `process_bank` and `process_bank_mono` with TurboFan (`--no-liftoff
---no-wasm-lazy-compilation`). The gate fails when an innermost loop of the stationary, select-free
-cascade carries a value from one iteration to the next through a stack slot. There are two rules:
+--no-wasm-lazy-compilation`). The gate fails when a held innermost loop of the stationary cascade
+carries a value from one iteration to the next through a stack slot. There are two rules:
 
 - **Live across the back edge.** The slot is read from the header before it is written.
 - **On a recurrence.** A value loaded from the slot reaches a store to it along a path that crosses
   the header. A path inside one iteration is slot reuse, which V8 does freely, and is allowed
   (#1009).
 
-It holds the dual depth-one tail and the mono pair and tail, and reports the dual pair without
+It holds four rows: the select-free dual depth-one tail, mono depth-two pair and mono depth-one
+tail, and the masked mono depth-two pair (held since #1328). It reports the dual pair without
 holding it. The functions are found by symbol. The loops are found by what they compute: SVF steps
-per iteration, streams, select-free, and for a tail, reachable from a pair loop. They are never
-found by offset. A held row that matches no loop, or more than one, fails closed.
+per iteration, streams, select-free or masked, and for a tail, reachable from a pair loop. They are
+never found by offset. A held row that matches no loop, or more than one, fails closed. A blend is
+a select; an `or` is one unless both its inputs are lane masks the loop computed, so the joint
+flush's mask `or`s (#1328) leave a loop select-free and a dry-mask bitselect does not.
 
 **Re-pinning Node.** Build the red arms below and the current head, run the gate on the new V8, and
 record what each gives. Keep the rule whatever they show: if a red arm turns green on the new V8,
@@ -254,11 +260,27 @@ says nothing else about speed. Node's V8 is not a given browser's, and eager Tur
 page's tier-up, so green is not "the browser EQ is as fast as before"; red is "this build brings
 back the #977 mechanism".
 
-**Red mutations, applied and reverted on the delivery host.** The one-token edit #977's attempt-2
-verifier recorded, in `interleave`'s depth-one tail, `if !admitted && (L::mask_any(…) ||
-L::mask_any(…))`, and #977 attempt 1 itself (`codex/977-eq-elision-and-passes-attempt1`), each
-red on the dual tail row, ten runs in ten with the same output; with the tail edit applied in the
-tree, `run-wasm-gates.sh` exits 1 there. The tail edit:
+**Red arms (issue #1328, attempt 3).** Two builds are the gate's current red witnesses, each built
+and run on the delivery host (AMD EPYC 7313P) by #1328 attempt 2's verifier:
+
+- **#977 attempt 1** (`codex/977-eq-elision-and-passes-attempt1`, module `0db9b2f5…`): red on the
+  dual tail row at `[rbp-0xa0]`.
+- **#1328 attempt 1's code**: today's EQ with `Channel::dry` reverted to dry masks built in place
+  (`dry_mask(at)`). Red on the dual tail row at `[rbp-0xc8]` (a general-purpose slot, `movq
+  [rbp-0xc8],r14`) and on the masked mono pair row at `[rbp-0x220]`. Reverting only the tail's
+  mask build is enough for the dual tail (`[rbp-0xc8]`); reverting only the dual masked pair's
+  leaves the tail clean. The mono masked pair reading `channel.dry_mask(at[k])` again fails its
+  row alone, at `[rbp-0x180]`.
+
+**The retired one-token arm.** #977's attempt-2 verifier recorded a one-token edit in `interleave`'s
+depth-one tail, `if !admitted && (L::mask_any(…) || L::mask_any(…))`, red on the dual tail row ten
+runs in ten (`[rbp-0xc0]`, 84 instructions). Bisected with today's gate script, the edit is red at
+`6f4c0379e` (#1009, the listing below) and at `d09d50248` (the first parent of the #999 merge), and
+green from the #999 merge `27cf24132` on, which replaced the tail with the bounded-verdict kernel
+(84 to 112 instructions). It is green at `a9414c0c6`, the first `main` commit that carries #1009, so
+it was never red on `main`; it is green at `0e3e21b68` and since. The rule did not change, and the
+two arms above are still red, so the gate has not lost discrimination: the edit no longer
+perturbs V8's allocation. The listing it gave at #1009:
 
 ```
 FAIL dual depth-1 tail, select-free: V8 carries [rbp-0xc0] from one iteration to the next (84 instructions in 4 blocks, 2 SVF steps, 2 streams, select-free, vmulps=14 vaddps=18 vsubps=4). Listing, carried slots marked:

@@ -11,6 +11,7 @@ use effect_contract::{
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
     PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes,
 };
 use lane::Backend;
 use soft_clip::{SOFT_CLIP_DESCRIPTOR, SOFT_CLIP_PARAMETERS, SoftClipFactory};
@@ -69,12 +70,31 @@ pub fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(soft_clip::SoftClipFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 
 /// A prepared scalar instance.
 pub fn prepare(values: &[InitialParameterValue]) -> Box<dyn PreparedNativeEffect> {
-    SoftClipFactory.prepare(request(values)).expect("prepare")
+    SoftClipFactory
+        .prepare(request(values))
+        .expect("prepare")
+        .processor
+}
+
+/// The state payload sizes the fixture request's prepare result reports (issue #1461: the
+/// processor does not report them). Every fixture instance, scalar or bank lane, has these sizes;
+/// a snapshot of an instance with any other sizes is refused, so a drift goes red.
+pub fn state_sizes() -> StatePayloadSizes {
+    SoftClipFactory
+        .prepare(request(&initial_values()))
+        .expect("prepare")
+        .metadata
+        .state_sizes
 }
 
 /// Renders one planar block through a scalar instance.
@@ -117,6 +137,7 @@ pub fn prepare_bank(
             active_mask: width.full_mask(),
         })
         .expect("bind")
+        .map(|bank| bank.processor)
 }
 
 /// Renders one AoSoA block through a bank.
@@ -149,7 +170,7 @@ pub fn process_bank(
 
 /// The three payload sections of a scalar snapshot.
 pub fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let sizes = effect.metadata().state_sizes;
+    let sizes = state_sizes();
     let mut common = vec![0; sizes.common_bytes as usize];
     let mut left = vec![0; sizes.left_bytes as usize];
     let mut right = vec![0; sizes.right_bytes as usize];
@@ -166,7 +187,7 @@ pub fn snapshot_bank(
     bank: &dyn PreparedNativeEffectBank,
     track: u32,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let sizes = bank.metadata().program_key.state_sizes;
+    let sizes = state_sizes();
     let mut common = vec![0; sizes.common_bytes as usize];
     let mut left = vec![0; sizes.left_bytes as usize];
     let mut right = vec![0; sizes.right_bytes as usize];

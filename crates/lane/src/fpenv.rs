@@ -13,8 +13,8 @@
 //! the feed-forward lane, scalar math and the effect/builtin chains, none of which is a *state*
 //! word the D7 flush can reach. Browser Wasm is unaffected -- the core specification mandates
 //! denormal correctness and forbids a flush-to-zero mode, confirmed by the three-browser digest
-//! parity -- so the exposure is exactly the native hosts, and every DAW audio callback arrives with
-//! FTZ and DAZ already set.
+//! parity -- so the exposure is exactly the native hosts, whose audio thread may run with FTZ and
+//! DAZ set (a host can set them to avoid denormal stalls; the C ABI contract does not forbid it).
 //!
 //! # The decision
 //!
@@ -68,12 +68,16 @@
 //!    through the already-approved `_mm_getcsr`/`_mm_setcsr` helpers of [`crate::softfma`].
 //! 2. An empty `asm!` on both, as the guard's scheduling barrier. See `scheduling_barrier`.
 //!
+//! Since issue #1494 the raw writer [`write_fp_control_word`] is also an `unsafe fn`, because its
+//! soundness depends on the word its caller passes; [`CanonicalFpEnv`] calls it in `unsafe` blocks
+//! that state why each word it writes meets the contract.
+//!
 //! # Realtime properties
 //!
-//! Entering and leaving the guard is a register read, two register writes and two empty assembly
-//! blocks that emit nothing. No allocation, no lock, no syscall, no call at all: the bodies are
-//! `#[inline]` and the `Drop` is a barrier and a single store. Measured cost over a real 128-frame
-//! render, both arms on one plan: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
+//! No allocation, lock or syscall; the barriers emit nothing. Shipped `x86_64` cdylib: `enter`
+//! calls `softfma::read_mxcsr` then `write_mxcsr` out of line, and `Drop` calls `write_mxcsr` on
+//! each exit path; each helper is a stack-slot `STMXCSR`/`LDMXCSR`. AArch64 (Android object):
+//! inline `mrs`/`msr`, no call. Cost: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
 
 #![allow(unsafe_code)]
 
@@ -142,10 +146,53 @@ pub fn read_fp_control_word() -> FpControlWord {
 }
 
 /// Writes this thread's floating-point control word.
+///
+/// [`CanonicalFpEnv`] is the safe way to change the word: it installs the canonical word and writes
+/// the caller's own word back on drop. This raw writer is for that guard and for tests that install
+/// other words on purpose. The write affects only the calling thread.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit: on `x86_64` none of MXCSR bits 16-31, where `LDMXCSR` raises
+///   #GP; on AArch64 no `RES0` bit of FPCR.
+/// - Rust assumes the floating-point environment of [`canonical_fp_control_word`] (on `x86_64`,
+///   the `core::arch` documentation of `_mm_setcsr` names the default exception masks, rounding and
+///   DAZ). Only the canonical word, or on `x86_64` a word that differs from it only in the MXCSR
+///   status flags (bits 0-5), is inside that environment; the caller treats every other word as
+///   outside it. A word read from this thread and handed back can be outside it too, because a host
+///   can run with FTZ/DAZ (AArch64: `FZ`) set. The caller lets no compiled floating-point code run
+///   under a word outside the environment except the code it deliberately measures. A hand-back
+///   write meets this when it returns the thread to the word its caller already ran under and the
+///   writer runs no floating-point code after it.
+/// - Unless the write installs a word inside the environment or hands back a word read from this
+///   thread, the caller restores the previous word before it returns, itself or through a guard
+///   that does ([`CanonicalFpEnv`]'s `Drop`). A hand-back write is itself that restore. A word
+///   inside the environment needs no restore, because compiled code may run under it; this is why
+///   [`CanonicalFpEnv::enter`] stays sound when safe code passes the guard to `mem::forget`.
+///
+/// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
+/// the first fence; the fence carries no code because stable rustdoc does not check one (issue
+/// #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::fpenv::read_fp_control_word();
+/// lane::fpenv::write_fp_control_word(word);
+/// ```
+///
+/// The twin differs from it only in the `unsafe` block and its `SAFETY` comment, so a renamed item
+/// turns it red:
+///
+/// ```
+/// let word = lane::fpenv::read_fp_control_word();
+/// // SAFETY: `word` was just read from this thread, so it sets no reserved bit, and writing it
+/// // back leaves the thread's word unchanged.
+/// unsafe { lane::fpenv::write_fp_control_word(word) };
+/// ```
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub fn write_fp_control_word(value: FpControlWord) {
-    crate::softfma::write_mxcsr(value);
+pub unsafe fn write_fp_control_word(value: FpControlWord) {
+    // SAFETY: this function's `# Safety` contract is `write_mxcsr`'s, and the caller upholds it.
+    unsafe { crate::softfma::write_mxcsr(value) };
 }
 
 /// Reads this thread's floating-point control word.
@@ -170,14 +217,57 @@ pub fn read_fp_control_word() -> FpControlWord {
 }
 
 /// Writes this thread's floating-point control word.
+///
+/// [`CanonicalFpEnv`] is the safe way to change the word: it installs the canonical word and writes
+/// the caller's own word back on drop. This raw writer is for that guard and for tests that install
+/// other words on purpose. The write affects only the calling thread.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit: on `x86_64` none of MXCSR bits 16-31, where `LDMXCSR` raises
+///   #GP; on AArch64 no `RES0` bit of FPCR.
+/// - Rust assumes the floating-point environment of [`canonical_fp_control_word`] (on `x86_64`,
+///   the `core::arch` documentation of `_mm_setcsr` names the default exception masks, rounding and
+///   DAZ). Only the canonical word, or on `x86_64` a word that differs from it only in the MXCSR
+///   status flags (bits 0-5), is inside that environment; the caller treats every other word as
+///   outside it. A word read from this thread and handed back can be outside it too, because a host
+///   can run with FTZ/DAZ (AArch64: `FZ`) set. The caller lets no compiled floating-point code run
+///   under a word outside the environment except the code it deliberately measures. A hand-back
+///   write meets this when it returns the thread to the word its caller already ran under and the
+///   writer runs no floating-point code after it.
+/// - Unless the write installs a word inside the environment or hands back a word read from this
+///   thread, the caller restores the previous word before it returns, itself or through a guard
+///   that does ([`CanonicalFpEnv`]'s `Drop`). A hand-back write is itself that restore. A word
+///   inside the environment needs no restore, because compiled code may run under it; this is why
+///   [`CanonicalFpEnv::enter`] stays sound when safe code passes the guard to `mem::forget`.
+///
+/// Calling it from safe code does not compile. rustc reports E0133 (call to unsafe function) for
+/// the first fence; the fence carries no code because stable rustdoc does not check one (issue
+/// #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::fpenv::read_fp_control_word();
+/// lane::fpenv::write_fp_control_word(word);
+/// ```
+///
+/// The twin differs from it only in the `unsafe` block and its `SAFETY` comment, so a renamed item
+/// turns it red:
+///
+/// ```
+/// let word = lane::fpenv::read_fp_control_word();
+/// // SAFETY: `word` was just read from this thread, so it sets no reserved bit, and writing it
+/// // back leaves the thread's word unchanged.
+/// unsafe { lane::fpenv::write_fp_control_word(word) };
+/// ```
 #[cfg(target_arch = "aarch64")]
 #[inline]
-pub fn write_fp_control_word(value: FpControlWord) {
+pub unsafe fn write_fp_control_word(value: FpControlWord) {
     // SAFETY: `MSR FPCR, Xt` writes an unprivileged, always-accessible system register on every
-    // AArch64 profile the engine targets. The value written is either `CANONICAL_FPCR` or a word
-    // previously read from this same thread's FPCR, so no reserved encoding is introduced, and the
-    // write affects only the calling thread. It cannot trap at EL0. `nomem` is omitted for the
-    // reason given on the read.
+    // AArch64 profile the engine targets, affects only the calling thread, and cannot trap at EL0.
+    // The caller upholds this function's `# Safety` contract: `value` sets no `RES0` bit, and the
+    // caller confines a word outside Rust's floating-point model and restores the previous word
+    // where the contract requires it.
+    // `nomem` is omitted for the reason given on the read.
     unsafe {
         core::arch::asm!("msr fpcr, {value}", value = in(reg) value, options(nostack));
     }
@@ -189,10 +279,54 @@ pub fn write_fp_control_word(value: FpControlWord) {
 #[must_use]
 pub fn read_fp_control_word() -> FpControlWord {}
 
-/// Writes this thread's floating-point control word; there is none on this target.
+/// Writes this thread's floating-point control word; there is none on this target, so the write
+/// does nothing.
+///
+/// It is `unsafe` all the same, so the API has one shape on every target and code written against
+/// it here keeps compiling where the word exists.
+///
+/// [`CanonicalFpEnv`] is the safe way to change the word: it installs the canonical word and writes
+/// the caller's own word back on drop. This raw writer is for that guard and for tests that install
+/// other words on purpose. The write affects only the calling thread.
+///
+/// # Safety
+///
+/// - `value` sets no reserved bit: on `x86_64` none of MXCSR bits 16-31, where `LDMXCSR` raises
+///   #GP; on AArch64 no `RES0` bit of FPCR.
+/// - Rust assumes the floating-point environment of [`canonical_fp_control_word`] (on `x86_64`,
+///   the `core::arch` documentation of `_mm_setcsr` names the default exception masks, rounding and
+///   DAZ). Only the canonical word, or on `x86_64` a word that differs from it only in the MXCSR
+///   status flags (bits 0-5), is inside that environment; the caller treats every other word as
+///   outside it. A word read from this thread and handed back can be outside it too, because a host
+///   can run with FTZ/DAZ (AArch64: `FZ`) set. The caller lets no compiled floating-point code run
+///   under a word outside the environment except the code it deliberately measures. A hand-back
+///   write meets this when it returns the thread to the word its caller already ran under and the
+///   writer runs no floating-point code after it.
+/// - Unless the write installs a word inside the environment or hands back a word read from this
+///   thread, the caller restores the previous word before it returns, itself or through a guard
+///   that does ([`CanonicalFpEnv`]'s `Drop`). A hand-back write is itself that restore. A word
+///   inside the environment needs no restore, because compiled code may run under it; this is why
+///   [`CanonicalFpEnv::enter`] stays sound when safe code passes the guard to `mem::forget`.
+///
+/// The two fences below are documentation only: this variant exists only on targets without a
+/// control word (wasm32 here), rustdoc does not run doctests for `wasm32-unknown-unknown` in this
+/// repository, and a native doctest run never compiles them. rustc reports E0133 (call to unsafe
+/// function) for the first; the fence carries no code because stable rustdoc does not check one
+/// (issue #1422 D2).
+///
+/// ```compile_fail
+/// let word = lane::fpenv::read_fp_control_word();
+/// lane::fpenv::write_fp_control_word(word);
+/// ```
+///
+/// ```
+/// let word = lane::fpenv::read_fp_control_word();
+/// // SAFETY: there is no control word on this target, so the write does nothing.
+/// unsafe { lane::fpenv::write_fp_control_word(word) };
+/// ```
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
-pub fn write_fp_control_word(value: FpControlWord) {
+pub unsafe fn write_fp_control_word(value: FpControlWord) {
     let () = value;
 }
 
@@ -274,15 +408,25 @@ pub fn canonical_fp_control_word() -> FpControlWord {
 ///
 /// The guard is neither `Send` nor `Sync`: a control word belongs to one thread, so a guard that
 /// could be moved or shared across threads could restore one thread's word onto another's.
+/// rustc reports E0277 for each (`Send`, then `Sync`, is not implemented); the fences carry no
+/// code because stable rustdoc does not check one.
 ///
 /// ```compile_fail
-/// fn requires_send<T: Send>() {}
-/// requires_send::<lane::fpenv::CanonicalFpEnv>();
+/// fn requires<T: Send>() {}
+/// requires::<lane::fpenv::CanonicalFpEnv>();
 /// ```
 ///
 /// ```compile_fail
-/// fn requires_sync<T: Sync>() {}
-/// requires_sync::<lane::fpenv::CanonicalFpEnv>();
+/// fn requires<T: Sync>() {}
+/// requires::<lane::fpenv::CanonicalFpEnv>();
+/// ```
+///
+/// The twin of both: each doctest above differs from it in its one bound only, so a renamed type
+/// turns it red (issue #1422 D2).
+///
+/// ```
+/// fn requires<T>() {}
+/// requires::<lane::fpenv::CanonicalFpEnv>();
 /// ```
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub struct CanonicalFpEnv {
@@ -325,7 +469,12 @@ impl CanonicalFpEnv {
     #[must_use]
     pub fn enter() -> Self {
         let saved = read_fp_control_word();
-        write_fp_control_word(canonical_fp_control_word());
+        // SAFETY: the canonical word sets no reserved bit and is the environment Rust assumes, so
+        // compiled code may run under it and the contract asks for no restore. Soundness therefore
+        // does not depend on `Drop` running: a guard passed to `mem::forget` leaves the canonical
+        // word installed, which loses the caller's word but leaves no code outside Rust's model.
+        // This guard's `Drop` writes `saved` back so that the caller gets its own word again.
+        unsafe { write_fp_control_word(canonical_fp_control_word()) };
         scheduling_barrier();
         Self {
             saved,
@@ -346,7 +495,11 @@ impl Drop for CanonicalFpEnv {
     #[inline]
     fn drop(&mut self) {
         scheduling_barrier();
-        write_fp_control_word(self.saved);
+        // SAFETY: `enter` read `self.saved` from this thread (the guard is `!Send`, so this is the
+        // same thread), so it sets no reserved bit. Writing it hands the caller's own word back,
+        // which is the restore: it returns the thread to the word the caller already ran under,
+        // and the guard runs no floating-point code after this write (its barrier is above).
+        unsafe { write_fp_control_word(self.saved) };
     }
 }
 
@@ -356,6 +509,10 @@ impl Drop for CanonicalFpEnv {
 /// implementation, so a render entry that constructs one emits no code for it at all. It is still
 /// neither `Send` nor `Sync`, so a host cannot write code against the portable guard that would
 /// stop compiling on a target that does pin.
+///
+/// The two fences below are documentation only: this type exists only on targets without a
+/// control word (wasm32 here), rustdoc does not run doctests for `wasm32-unknown-unknown` in this
+/// repository, and a native doctest run never compiles them (issue #1422 non-goal).
 ///
 /// ```compile_fail
 /// fn requires_send<T: Send>() {}

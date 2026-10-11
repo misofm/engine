@@ -3453,7 +3453,12 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
                 core::mem::size_of_val(owner.committed()),
                 core::mem::size_of_val(owner.candidate()),
                 core::mem::size_of_val(owner.dirty()),
-                factory_layout.pad_to_align().size(),
+                // #1469 Amendment 1: a factory the launch registry owns is charged to no plan.
+                if host_core::launch_registry_owns_factory(owner.factory()) {
+                    0
+                } else {
+                    factory_layout.pad_to_align().size()
+                },
             ];
             owner_payload += allocations.iter().sum::<usize>() as u64;
             owner_largest = owner_largest.max(*allocations.iter().max().unwrap() as u64);
@@ -5696,6 +5701,17 @@ fn a_bus_session_admits_and_renders_without_allocating() {
 /// both buses feed the output; without, every track feeds the output directly (the `S = 0` twin
 /// whose track and master words are today's computation).
 fn bus_meter_host(quantum: u32, buses: bool) -> AudioWorkletEngineHost {
+    bus_meter_host_with(quantum, buses, 2, 64)
+}
+
+/// [`bus_meter_host`] with its meter period (`meter_blocks` render quanta per window) and its
+/// source length (`source_quanta` render quanta) chosen by the caller (issue #1448 D6).
+fn bus_meter_host_with(
+    quantum: u32,
+    buses: bool,
+    meter_blocks: u64,
+    source_quanta: u64,
+) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
@@ -5731,12 +5747,12 @@ fn bus_meter_host(quantum: u32, buses: bool) -> AudioWorkletEngineHost {
         }
     }
     model.quantum_frames = quantum;
-    model.sources[0].frames = u64::from(quantum) * 64;
+    model.sources[0].frames = u64::from(quantum) * source_quanta;
     let document = canonical_session_json(&model).expect("canonical bus meter session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         live_control_command_queue_records: 64,
-        live_control_meter_blocks: 2,
+        live_control_meter_blocks: meter_blocks,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
@@ -5745,6 +5761,62 @@ fn bus_meter_host(quantum: u32, buses: bool) -> AudioWorkletEngineHost {
             String::from_utf8_lossy(failure.diagnostic())
         )
     })
+}
+
+/// Issue #1448 D6: after a window is lost on one or two meters, the poll that recovers publishes
+/// the window just rendered and leaves no complete window queued, at one block per window. A poll
+/// whose passes were bounded by the minimum over the queues would run out of passes before it
+/// could publish, and lag one window behind render for as long as the stream runs.
+#[test]
+fn meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows() {
+    let mut host = bus_meter_host_with(128, true, 1, 64);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let backlog = |host: &AudioWorkletEngineHost| -> usize {
+        let ready = host.ready.as_ref().expect("ready");
+        ready
+            .meters
+            .iter()
+            .zip(ready.meter_pending.iter())
+            .map(|(meter, pending)| {
+                meter.consumer.available_at_entry() + usize::from(pending.is_some())
+            })
+            .min()
+            .expect("meters")
+    };
+    assert_eq!(host.ready.as_ref().expect("ready").meters.len(), 5);
+    for block in 0..40_u64 {
+        feed_and_render_channels(&mut host, block, 0.5, 0.25);
+        let dropped: &[usize] = match block {
+            10 => &[2],
+            20 => &[0],
+            30 => &[1, 3],
+            _ => &[],
+        };
+        let ready = host.ready.as_mut().expect("ready");
+        for &meter in dropped {
+            assert!(
+                ready.meters[meter].consumer.try_pop().is_ok(),
+                "block {block}: meter {meter} holds the window just rendered"
+            );
+        }
+        let published = host.poll_meters();
+        if matches!(block, 11..=19 | 21..=29 | 31..=39) {
+            assert_eq!(published, 1, "block {block}: one window published");
+            assert_eq!(
+                host.meter_header().first_sample,
+                block * 128,
+                "block {block}: the window just rendered"
+            );
+            assert_eq!(backlog(&host), 0, "block {block}: no window left queued");
+        }
+        if matches!(block, 11 | 21 | 31) {
+            assert_ne!(
+                host.meter_header().reserved[1] & METER_VALID_LOSS,
+                0,
+                "block {block}: the loss is reported"
+            );
+        }
+    }
 }
 
 /// Render `blocks` quanta of the constant `(0.5, 0.25)` source pair and poll once.
@@ -6867,6 +6939,12 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         parameters: &[],
         ports: &[],
         qualities: &[],
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+        },
         observations: &MENU,
     };
 
@@ -8724,7 +8802,7 @@ fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
     )
     .expect("collection explicit-hop boot");
     assert_eq!(
-        collection.select_spectrum(&target, SpectrumChannels::Stereo),
+        collection.select_spectrum(target.as_ref(), SpectrumChannels::Stereo),
         RESULT_OK
     );
     assert_eq!(collection.spectrum_hop, Some(collection_hop));

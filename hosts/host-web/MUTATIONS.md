@@ -543,3 +543,56 @@ module; E1 rebuilt the module with the mutation.
 | `live-controls-types.ts` | `VcaEdits` gains `solo` | `_VcaSurface` fails |
 | `live-controls-types.ts` | `VcaEdits.faderDb` accepts a `gainDb` option | `Unused '@ts-expect-error'` |
 | `live-controls-types.ts` | `VcaEdits.mute` accepts a number | `Unused '@ts-expect-error'` |
+
+## Issue #1333 — the render-locked allocation counter and the render-thread static rules
+
+Each row was applied, its test run red, and the tree restored. Rust rows ran on `x86_64`, debug
+profile; browser rows rebuilt the module with `scripts/build-web-audioworklet.sh` and ran the
+Chromium leg of `qualification/run.mjs`.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `render_lock::tests::render_lock_counts_each_entry_point_only_inside_its_own_window` | `count_if_locked` tests `!locked()` | `an unlocked thread counts nothing` fails |
+| same | `count_if_locked` never does its `fetch_add` | the in-window count of 5 fails |
+| same | `dealloc` (or `realloc`) skips `count_if_locked` | the in-window count of 5 fails |
+| same | `render_locked` never clears the flag | `the window clears the flag when it returns` |
+| `const _: () = assert!(!needs_drop::<..>())` in `ffi.rs` | add a `Vec<u8>` field to `BootStaging` | `error[E0080]`: `assertion failed: !needs_drop::<RefCell<BootStaging>>()` |
+| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
+| same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
+| same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
+| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1; mutation rewritten by #1479, which removed `selected_entry`) | `PreparedSpectrumCapture::channels`'s collection arm runs `let _ = capture.selected_target().cloned();` before `capture.selected_channels()` | `a collection capture's spectrum read allocated`: 6 (re-measured by #1492: #1488 wrapped `spectrum_stream_start`, which also reads the channel mask, so its 2 calls now count too) |
+| `tests/render_locked_staging.rs` phase 2 select legs (#1492) | `SpectrumCaptureCollection::select` runs `let _ = self.entry(index).map(\|(t, c)\| (t.clone(), c));` after it finds the entry | `the first select allocated`: 2 |
+| same | `select_spectrum_with_smoothing` runs `let _ = spectrum_target(target, id);` before it borrows the target | `the first select allocated`: 2 |
+| same, control | the first mutation kept, and both select exports unwrapped from `render_locked` | green: the count sees a select's allocation only through the wrap |
+| same, smoothing-only stream select leg (#1492 attempt 1 follow-ups) | `select_spectrum_with_smoothing`'s smoothing-only restart branch (before `restart_spectrum_stream`) runs `std::hint::black_box(vec![0_u8; 16]);` | `the smoothing-only stream select allocated`: 2 |
+| `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
+| `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
+| same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |
+| same, (h1)/(h1a)/(h1b) | the `INDIRECT_SITES` comparison is skipped | (h1) new site, (h1a) removed site, (h1b) changed count |
+| same, (h1d) | `unhashed` keeps the mangling hash | both (h1d) schemes |
+| same, (h4) | `closure` takes no exact-name root | (h4): `miso_engine_web_v1_render` is ambiguous with `_render_allocation_count` |
+| `qualification/run.mjs` `render-allocations` | a `Vec::with_capacity(1)` planted in `render_next` (rebuilt module) | every instance reads more than 0 (corpus 2 and 4, live control 260, stall 80, ...) and the gate fails |
+| same | `PreparedSpectrumCapture::channels` back to the clone (rebuilt module, no `--sdk-root`) | `staging-reads-one-shot` reads 4 and `staging-reads-stream` reads 2; every other instance reads 0 |
+| `qualification/run.mjs --self-test-mutations` `render-allocations` | one instance's count set to 1 | `<browser>: render-allocations` fails |
+| `qualification/run.mjs --self-test-mutations` `staging-reads` | the one-shot spectrum read's result set to backpressure (6) | `<browser>: staging-reads` fails |
+| `qualification/run.mjs` `sdk-render-allocations` (#1476) | `drop(Vec::<u8>::with_capacity(1))` planted in `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (rebuilt module); no raw workload submits a bypass record | the four live-bypass SDK instances that submit one read 2 each and the gate fails naming them; `render-allocations` stays green (all ten raw rows 0) |
+| same | one SDK instance (`spectrum-query-closed`) closed with `browser.close()` instead of `closeSdkEngine` | `<browser>: sdk-render-allocations` fails: 16 rows for 17 instances |
+| `qualification/run.mjs --self-test-mutations` `sdk-render-allocations` (#1476) | one SDK instance's count set to 1 | `<browser>: sdk-render-allocations` fails naming `resident-observation=1` |
+| `qualification/run.mjs --self-test-mutations` `sdk-render-allocations-missing` (#1476) | one SDK row removed | `<browser>: sdk-render-allocations` fails on the length check (16 rows for 17 instances) |
+| `qualification/run.mjs` `sdk-spectrum-continuous` `gap` (#1480) | `nativeMissedWindows: 0n` and `skippedPublications: 0n` in the spectrum notification (`sdk/src/core/observation-subscriptions.ts`, `#notifySpectrum`) | `<browser>: sdk-spectrum-continuous` fails with `false: gap` on 5 of 5 runs in each of Chromium, Firefox and WebKit; `renderLoss` stays true (the native loss happened, the SDK hid it) |
+| `qualification/run.mjs` `sdk-spectrum-continuous` `renderLoss` (#1480 D2) | delete the read hold in `runContinuousSpectrumQualification` (the `await readsHeld` and the `Promise.allSettled` of the in-flight reads), so reads race the offline render as before | Firefox: red on 23 of 25 runs, 22 naming `renderLoss` (a mid-render read left 0-8 drops instead of 16) and 1 naming `gap, renderLoss` (the #1480 D1 race); the 2 green runs had no read execute during the render |
+| `test-web-audioworklet.mjs` qualification boot contract, staging-read caller (#1477 D1) | remove `runStagingReadRun` from `qualificationBootContract` | the suite fails at the caller (`hooks.runStagingReadRun is not a function`) before its witness counts |
+| `test-web-audioworklet.mjs` qualification boot contract, staging-read shape (#1477 D2) | boot `runStagingReadRun`'s `spectrumCollection` with only the `output` entry | `staging-read spectrum collection changed`: one entry where two are held |
+| `test-web-audioworklet.mjs` qualification boot contract, staged collection (#1491 D1/D2) | replace the collection branch of `spectrumResult` in the worklet's boot with `this.stageSpectrumRequest(init.options.spectrum)` (verifier probe p7) | `staging-read staged collection differs from its options`: the staging witness is `null` where the two-entry collection is held; green on the suite before #1491 |
+| same | the worklet's collection channel map writes `SPECTRUM_CHANNEL_LEFT` for `both` | the same assertion: channel code 1 where 3 is held, in both entries; green on the suite before #1491 |
+| same | `request.setBigUint64(16, BigInt(options.maximumCaptureBytes / 2), true)` in `stageSpectrumCollectionRequest` | the same assertion: `maximumCaptureBytes` 1048576 where 2097152 is held; green on the suite before #1491 |
+| same | `request.setUint32(28, 1, true)` in `stageSpectrumCollectionRequest` (a nonzero reserved word, which the bridge refuses) | the same assertion: the request's `reserved` reads `[0, 1]` where `[0, 0]` is held; green on the suite before #1491 |
+| same, generated-layout drift (#1491 attempt 2) | in `sdk/assets/miso-engine-v1-abi-layout.json`, `spectrumChannels` `both` = 4 (the worklet keeps 3) | the same assertion: channel code 3 where 4 is held; green on #1491 attempt 1's hand-typed suite |
+| same | in the generated layout, the request's `maximumCaptureBytes` at offset 24 and `reserved` at 16 | the same assertion: `maximumCaptureBytes` reads 0 where 2097152 is held; green on #1491 attempt 1's suite |
+| same | in the generated layout, a 28-byte collection entry (`reserved` `u32[4]`) | the worklet's entry-size check refuses the fake's 28: `runStagingReadRun real host guard rejected (miso.error.v1 result=255)`; green on #1491 attempt 1's suite |
+| `test-web-audioworklet.mjs` qualification boot contract, other callers stage none (#1491 D3) | in `qualification.js` `bootOptions`, add `spectrum: null` and a one-entry `spectrumCollection` (`output`/`main-out`/`both`, 1048576 bytes) | `renderCorpusSegment stages a spectrum collection; only runStagingReadRun boots one`; green on the suite before #1491 |
+| `test-web-audioworklet.mjs` render allocation reply check (#1477 D3) | drop `message.result === RESULT_OK` from `validRenderAllocations` | the host accepts `result 6` |
+| same | `validU32(message.count)` -> `Number.isInteger(message.count)` | the host accepts `count -1` and `count 4294967296` |
+| same | drop `validU32(message.count)` | the host accepts `count -1`, `4294967296`, `1.5`, `"0"` and `0n` |
+| same | add `"extra"` to the `renderAllocations` reply field list | the host accepts the extra-field reply |
+| same | change the `renderAllocations` expected tag to `miso.status.v1` | the host accepts the wrong-tag reply |

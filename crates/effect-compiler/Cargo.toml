@@ -31,7 +31,7 @@ builtins.workspace = true
 
 [features]
 default = []
-test-support = ["parametric-eq/test-support"]
+test-support = ["parametric-eq/test-support", "effect-contract/test-support"]
 
 [lints]
 workspace = true

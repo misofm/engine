@@ -20,7 +20,7 @@ gate_scan_forbidden 'wire/hash/persistence identity leaked into runtime API' 'de
 [[ ! -e include/miso_engine_effect_contract_v1.h ]] || fail 'orphan contract header is back (issue #95 F6)'
 [[ ! -d include ]] || fail 'root include/ is the deleted orphan header directory (issue #95 F6)'
 gate_scan_forbidden 'the contract crate has no C ABI' 'repr\(C\)' '' crates/effect-contract/src || exit 1
-for required in effect.native.unavailable effect.descriptor.invalid effect.quality.unsupported effect.link_mode.unsupported effect.parameter.unknown effect.parameter.unit_mismatch effect.parameter.domain effect.parameter.channel effect.parameter.duplicate_channel effect.sidechain.missing effect.sidechain.unknown_port effect.sidechain.unexpected effect.resource.limit effect.prepare.failed effect.metadata.mismatch effect.state.invalid effect.third_party.unavailable_at_launch; do
+for required in effect.native.unavailable effect.descriptor.invalid effect.quality.unsupported effect.link_mode.unsupported effect.parameter.unknown effect.parameter.unit_mismatch effect.parameter.domain effect.parameter.channel effect.parameter.duplicate_channel effect.sidechain.missing effect.sidechain.unknown_port effect.sidechain.unexpected effect.resource.limit effect.prepare.failed effect.metadata.mismatch effect.state.invalid effect.third_party.unavailable_at_launch effect.tail_bound.inconsistent effect.automation.rate; do
     gate_scan_required "missing diagnostic $required" "$required" '' crates/effect-{contract,compiler} docs/EFFECT_CONTRACT_V1.md >/dev/null || exit 1
 done
 # ---------------------------------------------------------------------------------------------

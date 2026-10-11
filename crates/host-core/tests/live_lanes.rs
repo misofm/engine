@@ -200,7 +200,7 @@ fn render(host: &mut PreparedHost, planes: &[Vec<f32>; 2]) -> Vec<u32> {
 #[test]
 fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
     // The precondition the tail half rests on: the plain session's lanes-free tail is finite,
-    // and the EQ fixture's is not.
+    // and the EQ fixture's is not (the EQ's own bound is #1372's slice).
     assert!(matches!(
         lanes_free(&plain_fixture()).report.output_tail,
         TailSamples::Finite(_)
@@ -248,8 +248,10 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         );
         assert_eq!(render(&mut live, &planes), render(&mut reference, &planes));
     }
-    // The tail rule is what the selection changes: the same plain session under every lane is
-    // infinite, because its strips then carry the input lane.
+    // The tail rule is what the selection changes: under every lane the same plain session's
+    // strips carry the input lane, so each reports the live bound at the session's rate (#1329
+    // D5, D7) instead of its disabled filters' zero. The deepest path crosses two strips, the
+    // last track and the unity bus, and PDC adds node tails along a path (D8).
     let (all, handles) = with_lanes(&plain_fixture(), HostLiveLanes::ALL);
     assert!(
         handles
@@ -262,7 +264,14 @@ fn fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits() {
         1,
         "the route into the bus is live under ALL"
     );
-    assert_eq!(all.report.output_tail, TailSamples::Infinite);
+    let live = match builtins::input_section_live_bound(all.report.sample_rate_hz)
+        .expect("launch rate")
+        .tail
+    {
+        TailSamples::Finite(samples) => samples,
+        TailSamples::Infinite => panic!("the live bound is finite at a launch rate"),
+    };
+    assert_eq!(all.report.output_tail, TailSamples::Finite(2 * live));
 }
 
 /// Gate 1(b). Red if the lanes are attached but no longer drained by the banks.

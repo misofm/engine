@@ -5,6 +5,7 @@
 //! `Lane` keeps the scalar, four-lane and eight-lane paths on one arithmetic body.
 
 use effect_runtime::envelope::HysteresisState;
+use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
@@ -105,7 +106,9 @@ pub struct GateArgs<'a, L: Lane> {
 
 /// Runs one causal gate block.
 ///
-/// `RAMPING` selects the block-constant parameter update prologue. At each frame both original
+/// `RAMPING` selects the block-constant parameter update prologue, which advances each moving
+/// parameter word by `ramp_toward(current, step, target)` (never past its target, issue #1409)
+/// and assigns the target on its final sample. At each frame both original
 /// main words are loaded before either channel writes its output, preserving current-sample
 /// causality and signed-zero identity in bypass and zero-gain paths.
 #[inline(always)]
@@ -184,7 +187,9 @@ fn channel_step<L: Lane, const RAMPING: bool>(
         for ramp in &mut state.ramps {
             let moving = ramp.remaining.gt(zero);
             let final_sample = ramp.remaining.eq(one);
-            let stepped = ramp.current.add(ramp.step);
+            // Issue #1409: the step added, held inside `[min(current, target), max(current,
+            // target)]`, so no parameter word passes its target before the snap.
+            let stepped = ramp_toward(ramp.current, ramp.step, ramp.target);
             ramp.current = L::select(
                 moving,
                 L::select(final_sample, ramp.target, stepped),

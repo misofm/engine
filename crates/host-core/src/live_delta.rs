@@ -24,8 +24,8 @@ use effect_compiler::{
     lowers_session_bypass, resolve_initial_values,
 };
 use effect_contract::{
-    AutomationRate, EffectControlRecord, NativeEffectFactory, NativeEffectRegistry,
-    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget,
+    AutomationRate, EffectControlRecord, NativeEffectFactory, PREPARED_EFFECT_TARGET_WORDS,
+    ParameterChannel, PreparedEffectTarget,
 };
 use session::{
     DualMonoFader, Effect, EffectIdentity, EffectParam, RouteSource, SessionModel, Track,
@@ -212,11 +212,12 @@ pub enum LiveRebuild {
 /// # Allocation
 ///
 /// Control thread only. The masked clone, the two canonical JSON strings, when the automation
-/// changes the launch registry and the automation diagnostics, and, when an effect's `params`
-/// differ, the lowered racks, the launch registry, the resolved values and an EQ's target
-/// designer are allocated and freed on every call, on the control-plane precedent of #369 (the
-/// protocol already compiles a whole session per edit). Nothing it allocates is retained apart
-/// from the returned entries.
+/// changes the automation diagnostics, and, when an effect's `params` differ, the lowered racks,
+/// the resolved values and an EQ's target designer are allocated and freed on every call, on the
+/// control-plane precedent of #369 (the protocol already compiles a whole session per edit).
+/// Nothing it allocates is retained apart from the returned entries. The launch registry is the
+/// process's shared one (#1469): the first call of the process that needs it builds it, and
+/// every later call reads it.
 ///
 /// # Errors
 ///
@@ -276,9 +277,8 @@ pub fn classify_live_delta<'a>(
     }
     drop(masked);
 
-    let mut registry = None;
     if current.automation != next.automation {
-        let registry = load_registry(&mut registry)?;
+        let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
         if !effect_automation_diagnostics(next, registry).is_empty() {
             return Err(LiveRebuild::AutomationTarget);
         }
@@ -338,12 +338,7 @@ pub fn classify_live_delta<'a>(
                 matrix,
             });
         }
-        effect_records(
-            (current, before),
-            (next, after),
-            &mut registry,
-            &mut delta.effects,
-        )?;
+        effect_records((current, before), (next, after), &mut delta.effects)?;
     }
     Ok(delta)
 }
@@ -354,7 +349,6 @@ pub fn classify_live_delta<'a>(
 fn effect_records<'a>(
     (current, before): (&SessionModel, &Track),
     (next, after): (&'a SessionModel, &'a Track),
-    registry: &mut Option<NativeEffectRegistry>,
     output: &mut Vec<LiveEffectRecords<'a>>,
 ) -> Result<(), LiveRebuild> {
     let racks_before = current.lower_track(before);
@@ -404,7 +398,7 @@ fn effect_records<'a>(
             }
         }
         let (mut records, targets) = if params_differ {
-            parameter_records(effect_before, effect_after, next.sample_rate_hz, registry)?
+            parameter_records(effect_before, effect_after, next.sample_rate_hz)?
         } else {
             (Vec::new(), None)
         };
@@ -432,13 +426,12 @@ fn parameter_records(
     before: &Effect,
     after: &Effect,
     sample_rate_hz: u32,
-    registry: &mut Option<NativeEffectRegistry>,
 ) -> Result<InstanceRecords, LiveRebuild> {
     // A third-party or unknown identity never prepared; the rebuild reports it.
     let EffectIdentity::Native { effect_id } = &after.identity else {
         return Err(LiveRebuild::Structure);
     };
-    let registry = load_registry(registry)?;
+    let registry = launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?;
     let factory = registry
         .get_shared_ascii(effect_id.as_str())
         .ok_or(LiveRebuild::Structure)?;
@@ -471,19 +464,6 @@ fn parameter_records(
     let seeds: Vec<f32> = values_before.iter().map(|value| value.value).collect();
     let targets = design_targets(factory, sample_rate_hz, &seeds, &records)?;
     Ok((records, Some(targets)))
-}
-
-/// The launch registry, loaded on first use and reused for the rest of the call.
-fn load_registry(
-    registry: &mut Option<NativeEffectRegistry>,
-) -> Result<&NativeEffectRegistry, LiveRebuild> {
-    match registry {
-        Some(registry) => Ok(registry),
-        None => {
-            Ok(registry
-                .insert(launch_native_effect_registry().map_err(|_| LiveRebuild::Structure)?))
-        }
-    }
 }
 
 /// Designs a target-capable instance's targets with [`EqTargetPreparer`], from its pre-commit

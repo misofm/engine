@@ -18,6 +18,8 @@
 //! `StartedRenderSession::render_planar`. The guarded arm then equals the unguarded control
 //! arm and differs from the canonical pin.
 
+#![allow(unsafe_code)]
+
 use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo};
 use host_core::{
     HostPrepareCaps, HostShapePolicy, SourceControlSet, SourceSubmission, StartedRenderSession,
@@ -191,7 +193,9 @@ mod pinned {
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            write_word(self.0);
+            // SAFETY: `self.0` is the word the test read from this thread before it changed it, so
+            // it sets no reserved or `RES0` bit, and writing it hands the thread its own word back.
+            unsafe { write_word(self.0) };
         }
     }
 
@@ -203,7 +207,11 @@ mod pinned {
         } else {
             word::clear(saved)
         };
-        write_word(caller);
+        // SAFETY: `word::flushing` and `word::clear` set or clear only FTZ, DAZ and RC (MXCSR bits
+        // 15, 6, 13-14) or FZ and RMode (FPCR bits 24, 22-23) on a word read from this thread, so
+        // no reserved or `RES0` bit. The arm measures its render under it, and `_restore` writes
+        // `saved` back.
+        unsafe { write_word(caller) };
         assert_eq!(read_word(), caller, "the arm's caller word must install");
 
         let (plan, mut sources) = prepare();
@@ -275,7 +283,11 @@ mod pinned {
         let saved = read_word();
         let _restore = Restore(saved);
         let caller = word::hostile(saved);
-        write_word(caller);
+        // SAFETY: `word::hostile` sets FTZ, DAZ, RC and a status flag (MXCSR, all below bit 16) or
+        // FZ and RMode (FPCR, defined fields) on a word read from this thread, so no reserved or
+        // `RES0` bit. The test measures the session's renders under it, and `_restore` writes
+        // `saved` back.
+        unsafe { write_word(caller) };
 
         let (plan, mut sources) = prepare();
         let mut session = StartedRenderSession::start(plan)

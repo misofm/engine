@@ -11,14 +11,23 @@
 //! Every mask is enumerated at both bank widths, so the oracle is the definition itself (a
 //! population count) rather than a sample of it.
 
+mod support;
+
 use effect_contract::{
-    BankWidth, EffectQuality, LinkMode, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
+    BankWidth, EffectDescriptor, EffectQuality, LinkMode, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
 };
 use lane::Backend;
 
-/// `validate_shape` never reads a member, so any well-typed request stands in for one.
+static DESCRIPTOR: EffectDescriptor = support::descriptor(1, support::unstated);
+
+/// `validate_shape` never reads a member, so any well-typed request stands in for one; its tail
+/// bound is a registry entry, the only kind there is (issue #1462).
 fn member() -> PrepareEffectRequest<'static> {
+    let tail_bound = support::registry(&DESCRIPTOR)
+        .expect("admitted")
+        .tail_bound(support::EFFECT_ID, 48_000, EffectQuality::Normal)
+        .expect("a declared row");
     PrepareEffectRequest {
         sample_rate: 48_000,
         quantum: 128,
@@ -34,6 +43,7 @@ fn member() -> PrepareEffectRequest<'static> {
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         },
+        tail_bound,
     }
 }
 

@@ -79,6 +79,11 @@ fn request(values: &[InitialParameterValue], link_mode: LinkMode) -> PrepareEffe
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(true_peak_limiter::TruePeakLimiterFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -206,7 +211,8 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body) -> Witness {
             active_mask: width.full_mask(),
         })
         .expect("valid bank request")
-        .expect("the width must bind");
+        .expect("the width must bind")
+        .processor;
     if let Body::Collapsed = body {
         assert!(bank.supports_mono_collapse(), "the limiter collapses");
     }
@@ -266,7 +272,8 @@ fn scalar_run(track: usize, link_mode: LinkMode) -> Witness {
     let table = values(track);
     let mut effect: Box<dyn PreparedNativeEffect> = TruePeakLimiterFactory
         .prepare(request(&table, link_mode))
-        .expect("prepare");
+        .expect("prepare")
+        .processor;
     let mut witness = Witness::default();
     for block in 0..BLOCKS {
         let mut left: Vec<f32> = (0..FRAMES)

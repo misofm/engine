@@ -624,7 +624,7 @@ fn a_bus_renders_the_bits_of_a_track_fed_its_sum() {
     let mut audible = 0;
     let ran = run_seeds(TEST, REPLAY, 32, |seed| {
         let mut draw = Draw::new(seed);
-        let (bus, feeds, oracle, sum) = gate_one_sessions(&mut draw, &registry);
+        let (bus, feeds, oracle, sum) = gate_one_sessions(&mut draw, registry);
         let feeds: Vec<(&str, &[Vec<f32>; 2])> = feeds
             .iter()
             .map(|(id, planes)| (id.as_str(), planes))
@@ -743,8 +743,8 @@ fn a_bus_into_a_bus_renders_the_bits_of_two_tracks_fed_their_sums() {
     let ran = run_seeds(NESTED_TEST, NESTED_REPLAY, 16, |seed| {
         let mut draw = Draw::new(seed);
         let rate = draw.pick(&LAUNCH_RATES);
-        let s1 = drawn_strip(&mut draw, &registry, &no_console());
-        let s2 = drawn_strip(&mut draw, &registry, &no_console());
+        let s1 = drawn_strip(&mut draw, registry, &no_console());
+        let s2 = drawn_strip(&mut draw, registry, &no_console());
         let mut names = vec!["route-a", "route-b", "route-c"];
         let first: Vec<(String, Route, [Vec<f32>; 2])> = (0..3)
             .map(|index| {
@@ -821,7 +821,7 @@ fn a_bus_insert_is_charged_once_in_the_session_estimate() {
     let mut processed = bare.clone();
     let insert = drawn_effect(
         &mut draw,
-        &registry,
+        registry,
         "miso.compressor",
         "glue",
         LinkMode::Maximum,
@@ -947,7 +947,7 @@ fn graph_artifact(document: &str, plan_id: u64) -> PreparedGraphBuiltinsArtifact
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = effect_compiler::prepare_native_session_effects(
         &compiled,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: u64::MAX,
             maximum_scratch_bytes: u64::MAX,
@@ -1180,7 +1180,7 @@ fn a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent() {
 fn a_processed_bus_renders_without_allocating() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut draw = Draw::new(8);
-    let (bus, feeds, _, _) = gate_one_sessions(&mut draw, &registry);
+    let (bus, feeds, _, _) = gate_one_sessions(&mut draw, registry);
     assert_renders_without_allocating(&bus, &feeds);
 }
 

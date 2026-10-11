@@ -55,7 +55,7 @@ const REFUSED_RANGE: u64 = BLOCKS - 4;
 /// B renders block 1, the refused range, and the block after C's withdrawal.
 const B_RENDERS: u64 = REFUSED_RANGE + 2;
 const ACCEPTED_MANIFEST_SHA256: &str =
-    "09f675d1cc3e87374c9daac12ab7471be57a73247874c5a8b62b992e7787b6dd";
+    "d0bf619820c5c474c6f7475556cfbd5ea20ca9d69bab6fd41cf08d27962deff9";
 const ACCEPTED_GRAPH_PCM_SHA256: &str =
     "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const ACCEPTED_GRAPH_METERS_SHA256: &str =

@@ -10,13 +10,14 @@
 use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality as Quality, InitialParameterValue,
     LinkMode, NativeEffectFactory, NativeEffectTargetPreparation, ParameterChannel,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectTarget,
-    PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
+    PreparedEffectTarget, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
 };
 use parametric_eq::{EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
 
-/// Bytes in each channel section of the current payload (114 section words plus two cut enables).
-pub const LANE_BYTES: usize = 464;
+/// Bytes in each channel section of the current payload (114 section words, two cut enables and
+/// the input's silence counter, issue #1328 amendment A9).
+pub const LANE_BYTES: usize = 468;
 /// Bytes in the common section: the shared codec's two-word header (version, data word count).
 /// The two channels share no state, so the effect adds no common words of its own.
 pub const COMMON_BYTES: usize = 8;
@@ -217,14 +218,20 @@ pub fn request_at_rate<'a>(
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
-        // The current layout is 936 bytes; production admits megabytes (`maximum_effect_state_bytes` is
+        // The current layout is 944 bytes; production admits megabytes (`maximum_effect_state_bytes` is
         // 100 MB over the C ABI and 16 MB in the web host), so 1,024 is a test-side headroom
         // number and not a contract change.
         limits: PrepareEffectLimits {
             maximum_total_state_bytes: 1_024,
-            maximum_scratch_bytes: 1,
+            // The two rest planes' declared scratch at this quantum (issue #1328).
+            maximum_scratch_bytes: 128 * parametric_eq::REST_PLANE_BYTES_PER_FRAME,
             maximum_automation_spans_per_block: 48,
         },
+        tail_bound: conformance::tail_bound_for_request(
+            Box::new(parametric_eq::ParametricEqFactory),
+            sample_rate,
+            Quality::Normal,
+        ),
     }
 }
 
@@ -250,19 +257,36 @@ pub fn point(
 /// A whole payload: common header, left lane, right lane.
 pub type Payload = ([u8; COMMON_BYTES], [u8; LANE_BYTES], [u8; LANE_BYTES]);
 
-/// Snapshots a prepared scalar effect.
+/// The lane section word that carries the channel input's silence counter (issue #1328, A9): the
+/// last one, after the six bands and the two cut enables.
+pub const SILENCE_WORD: usize = LANE_BYTES / 4 - 1;
+
+/// `payload` with both channels' silence counters cleared.
+///
+/// A padded lane is fed `+0.0`, so its input's run of zero frames grows with every block, as a
+/// member's does on silence: the word counts the input, it is not audio state the render moves.
 #[must_use]
-pub fn snapshot(effect: &dyn PreparedNativeEffect) -> Payload {
+pub fn without_silence(payload: &Payload) -> Payload {
+    let mut words = *payload;
+    words.1[SILENCE_WORD * 4..].fill(0);
+    words.2[SILENCE_WORD * 4..].fill(0);
+    words
+}
+
+/// Snapshots a prepared scalar effect, sized by its prepare result's metadata.
+#[must_use]
+pub fn snapshot(effect: &PreparedEffect) -> Payload {
     let mut common = [0_u8; COMMON_BYTES];
     let mut left = [0_u8; LANE_BYTES];
     let mut right = [0_u8; LANE_BYTES];
     effect
+        .processor
         .snapshot_state_payload(
             StatePayloadOutput::new(
                 &mut common,
                 &mut left,
                 &mut right,
-                effect.metadata().state_sizes,
+                effect.metadata.state_sizes,
             )
             .expect("state output"),
         )
@@ -293,16 +317,16 @@ pub fn band_word(payload: &[u8], band: usize, word_index: usize) -> u32 {
     word(payload, physical * WORDS_PER_BAND + word_index)
 }
 
-/// Renders `frames` frames of silence with the given automation.
+/// Renders `frames` frames of silence with the given automation, at the prepared quantum.
 pub fn process_zeros(
-    effect: &mut dyn PreparedNativeEffect,
+    effect: &mut PreparedEffect,
     first_sample: u64,
     frames: usize,
     automation: &[PreparedAutomationSpan],
 ) -> ProcessReport {
     let mut left = vec![0.0; frames];
     let mut right = vec![0.0; frames];
-    let quantum = effect.metadata().quantum;
+    let quantum = effect.metadata.quantum;
     let block = EffectProcessBlock::new(
         &mut left,
         &mut right,
@@ -312,7 +336,7 @@ pub fn process_zeros(
         quantum,
     )
     .expect("block");
-    effect.process(block)
+    effect.processor.process(block)
 }
 
 /// Designs and applies the final candidate through the real off-render preparation capability.
@@ -321,13 +345,14 @@ pub fn process_zeros(
 /// the touched mask are complete before the target words reach the prepared effect, and processing
 /// receives an empty raw-span slice.
 pub fn apply_prepared_targets(
-    effect: &mut dyn PreparedNativeEffect,
+    effect: &mut PreparedEffect,
     values: &[InitialParameterValue],
     changed: &[bool],
 ) -> usize {
-    let (targets, count) = prepare_targets(effect.metadata().sample_rate, values, changed);
+    let (targets, count) = prepare_targets(effect.metadata.sample_rate, values, changed);
     for target in &targets[..count] {
         effect
+            .processor
             .apply_prepared_target(target)
             .expect("prepared target application");
     }
@@ -399,7 +424,7 @@ pub fn one_second_impulse(
     let mut recovered_right = 0_u64;
     for first in (0..left.len()).step_by(128) {
         let end = (first + 128).min(left.len());
-        let report = effect.process(
+        let report = effect.processor.process(
             EffectProcessBlock::new(
                 &mut left[first..end],
                 &mut right[first..end],

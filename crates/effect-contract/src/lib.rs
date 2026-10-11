@@ -127,10 +127,280 @@ impl ParameterId {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LatencySamples(pub u64);
+/// How long a node's output stays audible after its input stops (decision 15 D15-4(b), #1329).
+///
+/// `Finite(T)` means: for every input of peak `P >= P*` that is zero from sample `N` on, under
+/// any control history the node admits before `N` (a ramp may be in flight at `N`), and with no
+/// control event at or after `N`, `|y[n]| < P * 10^(-144/20)` for every
+/// `n >= N + latency + T`. `T` is counted beyond the node's latency, as PDC composes it.
+///
+/// `P*` is the node's **flush floor**: below it the `f32` output near the per-word state flush
+/// (`lane::FLUSH_EPS`) is no longer relative to `P`. The node states a second value of this type,
+/// its **tail over every peak** (`tail_every_peak`, `T_rest = max(T, R(P*))` with `R(P*)` the
+/// exact rest at `P*`): from `N + latency + T_rest` on the output is below `P * 10^(-144/20)` for
+/// `P >= P*` and exactly `+0.0` or `-0.0` for `P < P*`. Tail reporting (PDC, the C ABI and browser
+/// reports) uses `T`; silence skipping uses [`RestSamples`], which holds for every input up to its
+/// stated peak. Every value is a certified upper bound computed on the control thread at
+/// preparation, never a pinned number.
+///
+/// `Infinite` states no bound: it is kept for nodes whose bound has not been derived yet.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum TailSamples {
     Finite(u64),
     Infinite,
+}
+
+/// How long after its input stops a node reaches exact rest (decision 15 D15-4(b), #1329 D2).
+///
+/// Under [`TailSamples`]' conditions, with input peak at most +24 dBFS (`peak_plus_24_dbfs`) or
+/// any input the input sanitizer passes, every magnitude below `1e30` (`any_sanitized_input`),
+/// from `N + latency + R` on:
+///
+/// * every output sample is `+0.0` or `-0.0` (a polarity-inverted zero is `-0.0`), and
+/// * every **signal-state word** equals, under `f32` `==`, the same word of the node's **rest
+///   state** `Z`.
+///
+/// Signal-state words are the words an input sample can reach: filter integrators, envelopes,
+/// gain smoothers, hold counters, rings and their running sums. Parameter words, ramp words,
+/// payload headers and ring cursors are not. `Z` is the state a freshly reset instance with the
+/// same parameters and settled ramps reaches after `R` zero input samples, and it is a fixed point
+/// of the node's zero-input step. `Z` need not be zero: a gate rests closed, and the true-peak
+/// limiter's rings rest at `1.0`. For the builtin input section `Z` is the reset state, every SVF
+/// integrator `+0.0`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RestSamples {
+    /// `R` for an input peak at most +24 dBFS.
+    pub peak_plus_24_dbfs: u64,
+    /// `R` for any input the input sanitizer passes (every magnitude below `1e30`).
+    pub any_sanitized_input: u64,
+}
+
+impl RestSamples {
+    /// A memoryless node: exact rest from the first sample after its latency.
+    pub const ZERO: Self = Self {
+        peak_plus_24_dbfs: 0,
+        any_sanitized_input: 0,
+    };
+}
+
+/// A native effect's exact-rest bound, as its [`EffectDescriptor::tail_and_rest`] states it
+/// (decision 15 D15-4(b), #1377 D2).
+///
+/// `Bounded(R)` states the [`RestSamples`] contract. `Unstated` states no bound: it is the
+/// effect-side counterpart of [`TailSamples::Infinite`], and it exists only while the per-effect
+/// slices (#1372-#1376) land one at a time. *Retire the Infinite tail* (#1378) depends on every one
+/// of them and removes `Unstated` together with `Infinite` in both tail fields
+/// ([`NodeTailBound::tail`] and [`NodeTailBound::tail_every_peak`]), so the end state of the
+/// sequence contains neither.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RestBound {
+    Bounded(RestSamples),
+    Unstated,
+}
+
+/// Every node's tail bound, one struct for a native effect and a builtin input section alike
+/// (decision 15 D15-4(b); #1377 D1, #1379 Amendment 1 H2, issue #1464).
+///
+/// The first three values are #1329's. `composition` carries the five values #1379 composes
+/// through gain (H1); it is [`CompositionBound::Unstated`] until the node's own slice derives them.
+///
+/// An effect's is computed by [`EffectDescriptor::tail_and_rest`] on the control thread, once per
+/// launch rate and quality when [`NativeEffectRegistry::new`] builds its table (issue #1462), and
+/// copied from that table into the prepared metadata by [`expected_prepared_metadata`]. The
+/// builtin input section's is computed by `builtins` at preparation. Render never computes one.
+///
+/// It derives no `Ord`: a lexicographic order is a bound of neither channel, so the only "max" is
+/// the componentwise [`NodeTailBound::max`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodeTailBound {
+    /// `T_decay`: the tail every report and PDC use ([`TailSamples`]).
+    pub tail: TailSamples,
+    /// `T_rest = max(T_decay, R(P*))`, the tail over every peak. It is `Infinite` while `rest` is
+    /// [`RestBound::Unstated`], because no `R(P*)` is derived.
+    pub tail_every_peak: TailSamples,
+    /// The exact-rest bound silence skipping uses.
+    pub rest: RestBound,
+    /// The four composition values (#1379 Amendment 1 H1); `Unstated` until the node's slice
+    /// derives them.
+    pub composition: CompositionBound,
+}
+
+impl NodeTailBound {
+    /// A memoryless node: exact rest from the first sample after its latency, its composition not
+    /// stated.
+    pub const ZERO: Self = Self {
+        tail: TailSamples::Finite(0),
+        tail_every_peak: TailSamples::Finite(0),
+        rest: RestBound::Bounded(RestSamples::ZERO),
+        composition: CompositionBound::Unstated,
+    };
+
+    /// No bound stated: what a node reports when its derivation cannot bound it.
+    pub const UNBOUNDED: Self = Self {
+        tail: TailSamples::Infinite,
+        tail_every_peak: TailSamples::Infinite,
+        rest: RestBound::Unstated,
+        composition: CompositionBound::Unstated,
+    };
+
+    /// The componentwise maximum: the bound of a node whose two channels are bounded by `self` and
+    /// `other` (#1329 D4, #1379 Amendment 1 H1: a stereo node states the maximum over its
+    /// channels).
+    ///
+    /// A tail is `Infinite` if either side's is; a rest is `Unstated` if either side's is, and
+    /// otherwise each peak's bound is the larger; the composition is `Unstated` if either side's
+    /// is, and otherwise each of its five values is the larger, each stall by its own maximum and
+    /// never from the other stall ([`PeakGain::Zero`] and [`FlushStall::Zero`] below every level).
+    #[must_use]
+    pub fn max(self, other: Self) -> Self {
+        let tail = |left: TailSamples, right: TailSamples| match (left, right) {
+            (TailSamples::Finite(left), TailSamples::Finite(right)) => {
+                TailSamples::Finite(left.max(right))
+            }
+            _ => TailSamples::Infinite,
+        };
+        Self {
+            tail: tail(self.tail, other.tail),
+            tail_every_peak: tail(self.tail_every_peak, other.tail_every_peak),
+            rest: match (self.rest, other.rest) {
+                (RestBound::Bounded(left), RestBound::Bounded(right)) => {
+                    RestBound::Bounded(RestSamples {
+                        peak_plus_24_dbfs: left.peak_plus_24_dbfs.max(right.peak_plus_24_dbfs),
+                        any_sanitized_input: left
+                            .any_sanitized_input
+                            .max(right.any_sanitized_input),
+                    })
+                }
+                _ => RestBound::Unstated,
+            },
+            composition: match (self.composition, other.composition) {
+                (
+                    CompositionBound::Stated {
+                        decay: left_decay,
+                        peak_gain: left_peak,
+                        tail_gain: left_tail,
+                        peak_stall: left_peak_stall,
+                        tail_stall: left_tail_stall,
+                    },
+                    CompositionBound::Stated {
+                        decay: right_decay,
+                        peak_gain: right_peak,
+                        tail_gain: right_tail,
+                        peak_stall: right_peak_stall,
+                        tail_stall: right_tail_stall,
+                    },
+                ) => CompositionBound::Stated {
+                    decay: left_decay.max(right_decay),
+                    peak_gain: left_peak.max(right_peak),
+                    tail_gain: left_tail.max(right_tail),
+                    peak_stall: left_peak_stall.max(right_peak_stall),
+                    tail_stall: left_tail_stall.max(right_tail_stall),
+                },
+                _ => CompositionBound::Unstated,
+            },
+        }
+    }
+}
+
+/// The five values a node states so that #1379 can compose its tail through gain (#1379
+/// Amendment 1 H1 as amended by issue #1484, H2).
+///
+/// Notation: `eps = 10^(-144/20)`; a node with latency `L`, tail `T`, input `x` and output `y`;
+/// `N` the first sample of silence; `g_p = 10^(G_p/2000)` and `g_t = 10^(G_t/2000)` the linear
+/// gains, `0` for a `Zero` gain; `sigma_p` and `sigma_t` the two stalls' linear levels, `0` for
+/// `Zero`. Each value is a certified upper bound at the node's rate, over its parameter domain or
+/// its prepared design, computed on the control thread; a stereo node states the maximum over its
+/// two channels, and a node with a sidechain states each value for every sidechain input.
+///
+/// * **(N1) Peak.** If `|x[n]| <= X` for all `n`, under any admitted control history:
+///   `|y[n]| <= g_p X + sigma_p` for every `n`.
+/// * **(N2) Tail at every decade.** With no control event at or after `N`: if `|x[n]| <= X` for
+///   all `n` and `|x[n]| <= epsilon` for every `n >= M` (some `M >= N`), then for every integer
+///   `k >= 0` and every `n >= M + L + T + k D`:
+///   `|y[n]| <= (3/4) eps 10^(-k) X + g_t epsilon + sigma_t`.
+/// * **(N3) Rest.** [`RestSamples`], read with "zero from `M`" (`M >= N`).
+///
+/// (N2)'s frames are a subset of (N1)'s, so `sigma_t <= sigma_p`: a node whose flush part is
+/// smaller from its tail on (a live input section, whose pre-`N` analysis amplifies the flush
+/// floor) states the smaller value for (N2) and keeps the every-frame value for (N1). A later
+/// slice reads the stalls only through [`Self::peak_clause`] and [`Self::tail_clause`], which pair
+/// each stall with its clause.
+///
+/// The five values are stated together or not at all: there is no partial statement.
+/// [`NativeEffectRegistry::new`] refuses a `Stated` composition beside an `Infinite` tail, a
+/// `tail_gain` above the `peak_gain`, and a `tail_stall` above the `peak_stall`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompositionBound {
+    Stated {
+        /// `D`, samples per further 20 dB (N2).
+        decay: TailDecay,
+        /// `G_p`, the peak gain (N1).
+        peak_gain: PeakGain,
+        /// `G_t <= G_p`, the gain to an input that arrives at or after `N` (N2).
+        tail_gain: PeakGain,
+        /// `sigma_p`, the absolute flush stall at the output at every frame (N1).
+        peak_stall: FlushStall,
+        /// `sigma_t <= sigma_p`, the absolute flush stall at the output from the node's tail on
+        /// (N2).
+        tail_stall: FlushStall,
+    },
+    /// The node's slice has not derived the five values yet (the counterpart of
+    /// [`RestBound::Unstated`]).
+    Unstated,
+}
+impl CompositionBound {
+    /// (N1)'s pair `(G_p, sigma_p)`: the gain and the stall that bound the output at every
+    /// frame; `None` for `Unstated`. Every use that bounds a signal at every frame (#1379 H4's
+    /// `S_out`, `X*`) reads this.
+    #[must_use]
+    pub const fn peak_clause(self) -> Option<(PeakGain, FlushStall)> {
+        match self {
+            Self::Stated {
+                peak_gain,
+                peak_stall,
+                ..
+            } => Some((peak_gain, peak_stall)),
+            Self::Unstated => None,
+        }
+    }
+    /// (N2)'s triple `(D, G_t, sigma_t)`: the decay, the gain and the stall that bound the
+    /// output from the node's tail on; `None` for `Unstated`. Every use from the node's tail on
+    /// (#1379 H4's `Sigma`, `P^ = 4 sigma_t / eps`) reads this.
+    #[must_use]
+    pub const fn tail_clause(self) -> Option<(TailDecay, PeakGain, FlushStall)> {
+        match self {
+            Self::Stated {
+                decay,
+                tail_gain,
+                tail_stall,
+                ..
+            } => Some((decay, tail_gain, tail_stall)),
+            Self::Unstated => None,
+        }
+    }
+}
+
+/// `D`: the samples per further 20 dB of a node's tail ((N2) of [`CompositionBound`]). `0` means
+/// the input-relative part of the output is exactly zero from `M + L + T` on for every decade.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TailDecay(pub u64);
+
+/// A node's gain bound, in millibels rounded up; a negative value is an attenuation.
+///
+/// `Zero` is a node whose output is exactly `+-0.0` for every input (the linear gain `0`); it
+/// orders below every `Millibels`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PeakGain {
+    Zero,
+    Millibels(i32),
+}
+
+/// `sigma_p` or `sigma_t`: a node's absolute flush stall at its output, in millibels re 1.0
+/// rounded up, or `Zero`; `Zero` orders below every `Level`.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FlushStall {
+    Zero,
+    Level(i32),
 }
 macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$($n=>Some(Self::$v),)+_=>None}}}}; }
 scalar_enum!(ParameterUnit {Db=1,Hz=2,Milliseconds=3,Samples=4,Linear=5,Ratio=6});
@@ -514,7 +784,6 @@ pub struct QualityDescriptor {
     pub quality: EffectQuality,
     pub sample_rate: u32,
     pub latency: LatencySamples,
-    pub tail: TailSamples,
     pub maximum_state: StatePayloadSizes,
     pub scratch_fixed_bytes: u64,
     pub scratch_bytes_per_frame: u64,
@@ -530,6 +799,17 @@ pub struct EffectDescriptor {
     pub parameters: &'static [ParameterDescriptor],
     pub ports: &'static [PortDescriptor],
     pub qualities: &'static [QualityDescriptor],
+    /// The effect's tail, tail over every peak, exact-rest bound and composition values at one
+    /// rate and quality (decision 15 D15-4(b), #1377 D1, #1464): the one place they are computed.
+    ///
+    /// Control plane only, and evaluated once per launch rate and declared quality, by
+    /// [`NativeEffectRegistry::new`] alone (issue #1462 D1 and D3): the registry checks the
+    /// bound's consistency there and keeps them in its table, and every preparation reads the
+    /// table entry ([`NativeEffectRegistry::tail_bound`], carried by
+    /// [`PrepareEffectRequest::tail_bound`]) instead of calling this. Render never calls it. It
+    /// takes no parameter values, because every bound holds over the effect's whole parameter
+    /// domain at that rate (#1377 D5).
+    pub tail_and_rest: fn(sample_rate: u32, quality: EffectQuality) -> NodeTailBound,
     /// The declared observation menu (issue #143 D1). Last, and empty for every effect that
     /// declares no tap, so a zero-tap descriptor encodes byte-identically to the pre-#143 wire.
     pub observations: &'static [ObservationDescriptor],
@@ -966,6 +1246,11 @@ pub struct PrepareEffectRequest<'a> {
     pub ports: PreparedPorts,
     pub initial_values: &'a [InitialParameterValue],
     pub limits: PrepareEffectLimits,
+    /// The effect's tail bound at this request's rate and quality, read from the
+    /// [`NativeEffectRegistry`]'s table (issue #1462 D1). [`expected_prepared_metadata`] copies it
+    /// into the metadata and refuses a request whose entry belongs to another effect, rate or
+    /// quality; it never calls [`EffectDescriptor::tail_and_rest`].
+    pub tail_bound: RegisteredTailBound,
 }
 /// One homogeneous bank's preparation: a request per lane, and which lanes carry a member.
 ///
@@ -1119,6 +1404,12 @@ pub struct PreparedEffectMetadata {
     pub ports: PreparedPorts,
     pub latency: LatencySamples,
     pub tail: TailSamples,
+    /// `T_rest`, the tail over every peak ([`NodeTailBound::tail_every_peak`]).
+    pub tail_every_peak: TailSamples,
+    /// The exact-rest bound ([`NodeTailBound::rest`]).
+    pub rest: RestBound,
+    /// The composition values ([`NodeTailBound::composition`]).
+    pub composition: CompositionBound,
     pub state_sizes: StatePayloadSizes,
     pub scratch_bytes: u64,
     pub automation_capacity: u32,
@@ -1180,6 +1471,12 @@ pub struct EffectProgramKey {
     pub ports: PreparedPorts,
     pub latency: LatencySamples,
     pub tail: TailSamples,
+    /// `T_rest`, the tail over every peak ([`NodeTailBound::tail_every_peak`]).
+    pub tail_every_peak: TailSamples,
+    /// The exact-rest bound ([`NodeTailBound::rest`]).
+    pub rest: RestBound,
+    /// The composition values ([`NodeTailBound::composition`]).
+    pub composition: CompositionBound,
     pub state_sizes: StatePayloadSizes,
     pub scratch_bytes: u64,
     pub automation_capacity: u32,
@@ -1198,6 +1495,9 @@ impl PreparedEffectMetadata {
             ports: self.ports,
             latency: self.latency,
             tail: self.tail,
+            tail_every_peak: self.tail_every_peak,
+            rest: self.rest,
+            composition: self.composition,
             state_sizes: self.state_sizes,
             scratch_bytes: self.scratch_bytes,
             automation_capacity: self.automation_capacity,
@@ -1208,6 +1508,34 @@ impl PreparedEffectMetadata {
 pub struct PreparedBankMetadata {
     pub width: BankWidth,
     pub program_key: EffectProgramKey,
+}
+/// What [`NativeEffectFactory::prepare`] returns: the processor render owns, and the metadata its
+/// preparation derived, side by side (issue #1461).
+///
+/// # Why the metadata is beside the processor and not inside it
+///
+/// Render-owned memory carries no control-only data (#1329 R5). The processor moves into render
+/// memory; the metadata never does. Every reader of the metadata -- the effect compiler's
+/// `effect.metadata.mismatch` check, the graph compiler's cohort planner and resource estimate,
+/// the prepared plan's control-side effect table -- reads this field, on the control thread. A
+/// processor keeps, as plain fields, exactly the scalars its own render path reads (sample rate,
+/// automation capacity, bypass, link mode and the like), and no copy of this record. So there is
+/// no `metadata()` method on [`PreparedNativeEffect`]: every reader sees the one value the
+/// factory returned here, which the effect compiler compares with [`expected_prepared_metadata`].
+pub struct PreparedEffect {
+    /// The prepared instance; it is what render owns.
+    pub processor: Box<dyn PreparedNativeEffect>,
+    /// The immutable prepared metadata; it stays on the control side.
+    pub metadata: PreparedEffectMetadata,
+}
+/// What [`NativeEffectFactory::bind_homogeneous_bank`] returns when it binds: the bank processor
+/// render owns, and its [`PreparedBankMetadata`] beside it, on the same terms as
+/// [`PreparedEffect`] (issue #1461).
+pub struct PreparedEffectBank {
+    /// The bound bank; it is what render owns.
+    pub processor: Box<dyn PreparedNativeEffectBank>,
+    /// The bank's width and shared program key; they stay on the control side.
+    pub metadata: PreparedBankMetadata,
 }
 /// What one `process` call observed. Every counter here counts **blocks**, never samples
 /// (decision D7): an effect classifies no individual sample, so a per-sample count would have no
@@ -1417,13 +1745,19 @@ impl<'a> EffectBankProcessBlock<'a> {
         check_window(window.len(), metadata.program_key.automation_capacity)
     }
 }
+/// Whether one span is valid on its own for a block of `frames` samples from `first`, against the
+/// effect's descriptor.
+///
+/// It takes the descriptor, not the prepared metadata, because the descriptor is all it reads and
+/// a processor holds no copy of its metadata (issue #1461): an effect calls it with its own static
+/// descriptor.
 pub fn valid_runtime_span(
     s: &PreparedAutomationSpan,
-    m: PreparedEffectMetadata,
+    descriptor: &EffectDescriptor,
     first: u64,
     frames: u32,
 ) -> bool {
-    let Some(p) = m.descriptor.parameters.get(s.parameter_index as usize) else {
+    let Some(p) = descriptor.parameters.get(s.parameter_index as usize) else {
         return false;
     };
     if !s.start_value.is_finite()
@@ -1478,7 +1812,7 @@ pub fn validate_automation_block(
     }
     let mut prior_sort_key = None;
     for (span_index, span) in spans.iter().enumerate() {
-        if !valid_runtime_span(span, metadata, first_sample, frames) {
+        if !valid_runtime_span(span, metadata.descriptor, first_sample, frames) {
             return Err(ProcessBlockError::Automation);
         }
         let sort_key = (span.start_sample, span.parameter_index, span.channel);
@@ -1521,7 +1855,9 @@ pub fn validate_automation_block(
 /// # D11
 ///
 /// One division, at the moment the target changes: `step = (target - current) / N`. Then
-/// `current += step` per sample, and an exact assignment of `target` on update `N`. The audited
+/// `current = ramp_toward(current, step, target)` per sample (`current + step` held inside
+/// `[min(current, target), max(current, target)]`, issue #1409), and an exact assignment of
+/// `target` on update `N`. The audited
 /// form divided by `remaining` on **every** sample (issue #95 finding F2); that is deleted here.
 /// [`SmoothingRule::OnePole99`] likewise precomputes `a` and `1 - a` once, at construction.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1591,7 +1927,8 @@ impl ParameterSmoother {
     ///
     /// * `remaining == 0` — at rest: returns `current` unchanged.
     /// * `remaining == 1` — the final update: assigns `target` exactly (the D11 snap).
-    /// * otherwise — `current += step` for [`SmoothingRule::Linear`], one precomputed-coefficient
+    /// * otherwise — `current = ramp_toward(current, step, target)` for [`SmoothingRule::Linear`]
+    ///   (the word never passes its target, issue #1409), one precomputed-coefficient
     ///   product for [`SmoothingRule::OnePole99`]. No division on either path.
     pub fn next_value(&mut self) -> f32 {
         match self.remaining {
@@ -1605,7 +1942,11 @@ impl ParameterSmoother {
             _ => {
                 self.current = match self.rule {
                     SmoothingRule::None => self.target,
-                    SmoothingRule::Linear => self.current + self.step,
+                    // Issue #1409: the one D11 update, `current + step` held inside
+                    // `[min(current, target), max(current, target)]`, as `LinearRamp` does.
+                    SmoothingRule::Linear => {
+                        lane::kernels::ramp_toward(self.current, self.step, self.target)
+                    }
                     SmoothingRule::OnePole99 => {
                         self.one_pole_a * self.current + self.one_pole_k * self.target
                     }
@@ -1696,10 +2037,14 @@ impl<'a> StatePayloadInput<'a> {
 }
 pub trait NativeEffectFactory: Send + Sync {
     fn descriptor(&self) -> &'static EffectDescriptor;
+    /// Prepares one instance, off the render thread.
+    ///
+    /// The result carries the processor and its [`PreparedEffectMetadata`] side by side
+    /// ([`PreparedEffect`]); the processor holds no copy of the metadata (issue #1461).
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError>;
+    ) -> Result<PreparedEffect, EffectPrepareError>;
 
     /// Returns this owner's optional native requested-configuration response capability.
     ///
@@ -1769,7 +2114,7 @@ pub trait NativeEffectFactory: Send + Sync {
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>;
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError>;
 }
 /// One observation reading, in the tap's declared [`unit`](ObservationDescriptor::unit).
 ///
@@ -1819,8 +2164,11 @@ pub enum ParameterAccessError {
     InvalidValue,
 }
 
+/// A prepared native effect instance: the part of a prepared effect that render owns.
+///
+/// It has no `metadata()` method. Preparation hands the metadata out beside the processor, in
+/// [`PreparedEffect`], and every reader reads it there, on the control side (issue #1461).
 pub trait PreparedNativeEffect: Send {
-    fn metadata(&self) -> PreparedEffectMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
 
@@ -1988,8 +2336,11 @@ pub trait PreparedNativeEffect: Send {
         false
     }
 }
+/// A bound homogeneous bank: the part of a bound bank that render owns.
+///
+/// Like [`PreparedNativeEffect`], it has no `metadata()` method; its [`PreparedBankMetadata`]
+/// rides beside it in [`PreparedEffectBank`] (issue #1461).
 pub trait PreparedNativeEffectBank: Send {
-    fn metadata(&self) -> PreparedBankMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
 
@@ -2272,9 +2623,141 @@ pub trait PreparedNativeEffectBank: Send {
         false
     }
 }
+/// One entry of a [`NativeEffectRegistry`]'s tail-bound table: the [`NodeTailBound`] an effect's
+/// [`EffectDescriptor::tail_and_rest`] stated at one launch rate and one declared quality
+/// (issue #1462 D1).
+///
+/// Only the registry builds one, so a [`PrepareEffectRequest`] can carry no bound that the
+/// registry did not compute and check (D2). The entry names the effect, rate and quality it
+/// belongs to, and [`expected_prepared_metadata`] refuses it on any other request with
+/// `effect.tail_bound.mismatch`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisteredTailBound {
+    effect_id: EffectId,
+    sample_rate: u32,
+    quality: EffectQuality,
+    bound: NodeTailBound,
+}
+impl RegisteredTailBound {
+    /// The effect this entry belongs to.
+    #[must_use]
+    pub const fn effect_id(&self) -> EffectId {
+        self.effect_id
+    }
+    /// The launch rate this entry belongs to.
+    #[must_use]
+    pub const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+    /// The quality this entry belongs to.
+    #[must_use]
+    pub const fn quality(&self) -> EffectQuality {
+        self.quality
+    }
+    /// The four values, as the registry computed and checked them.
+    #[must_use]
+    pub const fn bound(&self) -> NodeTailBound {
+        self.bound
+    }
+}
+
+/// Whether one (rate, quality) row of an effect's [`NodeTailBound`] is consistent (issue #1462
+/// D2). Each rule is one check, so each has its own red mutant:
+///
+/// * (a) `tail_every_peak >= tail`, with [`TailSamples::Infinite`] the largest
+///   (`T_rest = max(T_decay, R(P*))` cannot be shorter than `T_decay`);
+/// * (b) [`RestBound::Unstated`] only with an infinite `tail_every_peak` (no `R(P*)` is derived,
+///   so no `T_rest` is);
+/// * (c) [`RestBound::Bounded`] only with a finite `tail_every_peak` (a derived `R(P*)` gives a
+///   finite `T_rest`);
+/// * (d) in a [`RestBound::Bounded`], `peak_plus_24_dbfs <= any_sanitized_input` (the bound for
+///   every sanitized input covers the inputs whose peak is at most +24 dBFS, so it cannot be the
+///   smaller of the two).
+///
+/// `RestBound` and `TailSamples` each have exactly two variants, so "`rest` is `Unstated` if and
+/// only if `tail_every_peak` is `Infinite`" and "`rest` is `Bounded` if and only if
+/// `tail_every_peak` is finite" are one statement. (b) and (c) are its two directions, the two
+/// ways it can fail independently, and together they are the whole equivalence.
+///
+/// A [`CompositionBound::Stated`] composition adds three rules (#1379 Amendment 1 H2, issues #1464
+/// and #1484):
+///
+/// * (e) `tail` is finite (the decade law (N2) counts from `T`, so an `Infinite` tail states
+///   nothing for the five values to compose);
+/// * (f) `tail_gain <= peak_gain`, with [`PeakGain::Zero`] below every `Millibels` (an input that
+///   arrives after `N` meets at most the gain any input meets);
+/// * (g) `tail_stall <= peak_stall`, with [`FlushStall::Zero`] below every `Level` ((N2)'s frames
+///   are a subset of (N1)'s, so a larger tail stall states a value no derivation needs).
+const fn tail_bound_consistent(bound: NodeTailBound) -> bool {
+    let ordered = match (bound.tail, bound.tail_every_peak) {
+        (_, TailSamples::Infinite) => true,
+        (TailSamples::Infinite, TailSamples::Finite(_)) => false,
+        (TailSamples::Finite(tail), TailSamples::Finite(every_peak)) => every_peak >= tail,
+    };
+    let unstated_is_infinite = !matches!(bound.rest, RestBound::Unstated)
+        || matches!(bound.tail_every_peak, TailSamples::Infinite);
+    let bounded_is_finite = !matches!(bound.rest, RestBound::Bounded(_))
+        || matches!(bound.tail_every_peak, TailSamples::Finite(_));
+    let rest_ordered = match bound.rest {
+        RestBound::Bounded(rest) => rest.peak_plus_24_dbfs <= rest.any_sanitized_input,
+        RestBound::Unstated => true,
+    };
+    let composition_consistent = match bound.composition {
+        CompositionBound::Stated {
+            peak_gain,
+            tail_gain,
+            peak_stall,
+            tail_stall,
+            ..
+        } => {
+            let finite_tail = matches!(bound.tail, TailSamples::Finite(_));
+            let gains_ordered = match (tail_gain, peak_gain) {
+                (PeakGain::Zero, _) => true,
+                (PeakGain::Millibels(_), PeakGain::Zero) => false,
+                (PeakGain::Millibels(tail), PeakGain::Millibels(peak)) => tail <= peak,
+            };
+            let stalls_ordered = match (tail_stall, peak_stall) {
+                (FlushStall::Zero, _) => true,
+                (FlushStall::Level(_), FlushStall::Zero) => false,
+                (FlushStall::Level(tail), FlushStall::Level(peak)) => tail <= peak,
+            };
+            finite_tail && gains_ordered && stalls_ordered
+        }
+        CompositionBound::Unstated => true,
+    };
+    ordered && unstated_is_infinite && bounded_is_finite && rest_ordered && composition_consistent
+}
+
+/// One admitted effect: its factory and its tail-bound table, one entry per declared quality row
+/// (every launch rate of every declared quality, as [`validate_descriptor`] requires).
+struct RegistryEntry {
+    factory: Arc<dyn NativeEffectFactory>,
+    tail_bounds: Box<[RegisteredTailBound]>,
+}
+
+/// The process-wide count of `tail_and_rest` evaluations made by [`NativeEffectRegistry::new`]
+/// (issue #1469 D6). Test support only: it lets a test prove that the launch registry is built
+/// once per process.
+#[cfg(feature = "test-support")]
+static TAIL_BOUND_EVALUATIONS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// How many `tail_and_rest` evaluations [`NativeEffectRegistry::new`] has made in this process
+/// (issue #1469 D6). Test support only.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn tail_bound_evaluations() -> u64 {
+    TAIL_BOUND_EVALUATIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The native effects a host can prepare, each admitted once (issue #1330) with its tail-bound
+/// table computed and checked once (issue #1462).
+///
+/// The table is control-side memory: its entries reach a [`PreparedEffectMetadata`], never a
+/// processor.
 #[derive(Default)]
 pub struct NativeEffectRegistry {
-    factories: BTreeMap<&'static str, Arc<dyn NativeEffectFactory>>,
+    entries: BTreeMap<&'static str, RegistryEntry>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryError {
@@ -2302,30 +2785,83 @@ impl NativeEffectRegistry {
                     id: Some(d.id),
                 });
             }
-            if m.insert(d.id.as_str(), Arc::from(x)).is_some() {
+            // Issue #1462 D1/D2: the descriptor's statement is evaluated here, once per declared
+            // quality row (every launch rate of every declared quality), checked, and kept.
+            let mut tail_bounds = Vec::with_capacity(d.qualities.len());
+            for row in d.qualities {
+                let bound = (d.tail_and_rest)(row.sample_rate, row.quality);
+                #[cfg(feature = "test-support")]
+                TAIL_BOUND_EVALUATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if !tail_bound_consistent(bound) {
+                    return Err(RegistryError {
+                        code: "effect.tail_bound.inconsistent",
+                        id: Some(d.id),
+                    });
+                }
+                tail_bounds.push(RegisteredTailBound {
+                    effect_id: d.id,
+                    sample_rate: row.sample_rate,
+                    quality: row.quality,
+                    bound,
+                });
+            }
+            let entry = RegistryEntry {
+                factory: Arc::from(x),
+                tail_bounds: tail_bounds.into_boxed_slice(),
+            };
+            if m.insert(d.id.as_str(), entry).is_some() {
                 return Err(RegistryError {
                     code: "effect.registry.duplicate",
                     id: Some(d.id),
                 });
             }
         }
-        Ok(Self { factories: m })
+        Ok(Self { entries: m })
     }
     pub fn get(&self, id: EffectId) -> Option<&dyn NativeEffectFactory> {
-        self.factories.get(id.as_str()).map(Arc::as_ref)
+        self.get_ascii(id.as_str())
     }
     pub fn get_ascii(&self, id: &str) -> Option<&dyn NativeEffectFactory> {
-        self.factories.get(id).map(Arc::as_ref)
+        self.entries.get(id).map(|entry| entry.factory.as_ref())
     }
     /// Clone the immutable factory handle for an off-render prepared plan.
     pub fn get_shared_ascii(&self, id: &str) -> Option<Arc<dyn NativeEffectFactory>> {
-        self.factories.get(id).map(Arc::clone)
+        self.entries.get(id).map(|entry| Arc::clone(&entry.factory))
+    }
+    /// The table entry for `id` at `sample_rate` and `quality` (issue #1462 D1): the value every
+    /// [`PrepareEffectRequest::tail_bound`] carries.
+    ///
+    /// # Errors
+    ///
+    /// `effect.native.unavailable` when no admitted effect has `id`;
+    /// `effect.quality.unsupported` when the effect declares no quality row at `sample_rate` and
+    /// `quality` (a rate outside the launch set never has one). The lookup never falls back to
+    /// [`EffectDescriptor::tail_and_rest`].
+    pub fn tail_bound(
+        &self,
+        id: EffectId,
+        sample_rate: u32,
+        quality: EffectQuality,
+    ) -> Result<RegisteredTailBound, RegistryError> {
+        let entry = self.entries.get(id.as_str()).ok_or(RegistryError {
+            code: "effect.native.unavailable",
+            id: Some(id),
+        })?;
+        entry
+            .tail_bounds
+            .iter()
+            .find(|row| row.sample_rate == sample_rate && row.quality == quality)
+            .copied()
+            .ok_or(RegistryError {
+                code: "effect.quality.unsupported",
+                id: Some(id),
+            })
     }
     pub fn len(&self) -> usize {
-        self.factories.len()
+        self.entries.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.factories.is_empty()
+        self.entries.is_empty()
     }
     /// Every registered descriptor, in stable [`EffectId`] order (issue #137 D4).
     ///
@@ -2333,7 +2869,9 @@ impl NativeEffectRegistry {
     /// registry is missing from the emitted metadata" is not a rule anyone has to remember to
     /// check: there is no other list to fall out of step with.
     pub fn descriptors(&self) -> impl Iterator<Item = &'static EffectDescriptor> + '_ {
-        self.factories.values().map(|factory| factory.descriptor())
+        self.entries
+            .values()
+            .map(|entry| entry.factory.descriptor())
     }
 }
 /// The exact `(parameter_index, channel)` sequence a prepare request must carry, in order.
@@ -2562,6 +3100,14 @@ pub fn validate_prepare_request(
 }
 
 /// Derive the sole conforming immutable metadata value for a validated prepare request.
+///
+/// The tail bound comes from the request's [`RegisteredTailBound`], the registry's table entry
+/// (issue #1462 D1): this never calls [`EffectDescriptor::tail_and_rest`].
+///
+/// # Errors
+///
+/// Every [`validate_prepare_request`] error, then `effect.tail_bound.mismatch` when the request's
+/// [`PrepareEffectRequest::tail_bound`] is the entry of another effect, rate or quality.
 pub fn expected_prepared_metadata(
     descriptor: &'static EffectDescriptor,
     request: PrepareEffectRequest<'_>,
@@ -2570,6 +3116,16 @@ pub fn expected_prepared_metadata(
         quality,
         scratch_bytes,
     } = validate_prepare_request(descriptor, request)?;
+    let entry = request.tail_bound;
+    if entry.effect_id != descriptor.id
+        || entry.sample_rate != request.sample_rate
+        || entry.quality != request.quality
+    {
+        return Err(EffectPrepareError {
+            code: "effect.tail_bound.mismatch",
+        });
+    }
+    let bound = entry.bound;
     Ok(PreparedEffectMetadata {
         descriptor,
         sample_rate: request.sample_rate,
@@ -2579,7 +3135,10 @@ pub fn expected_prepared_metadata(
         link_mode: request.link_mode,
         ports: request.ports,
         latency: quality.latency,
-        tail: quality.tail,
+        tail: bound.tail,
+        tail_every_peak: bound.tail_every_peak,
+        rest: bound.rest,
+        composition: bound.composition,
         state_sizes: quality.maximum_state,
         scratch_bytes,
         automation_capacity: request.limits.maximum_automation_spans_per_block,
@@ -2668,19 +3227,27 @@ mod automation_smoothing_validity_tests {
 #[cfg(test)]
 mod continuous_mapping_validity_tests {
     use super::{
-        AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectId, EffectQuality,
-        LatencySamples, LinkModeSet, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
-        ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
-        QualityDescriptor, SmoothingRule, StatePayloadSizes, TailSamples,
-        default_parameter_lattice, validate_descriptor,
+        AutomationRate, CompositionBound, DescriptorDiagnosticCode, EffectDescriptor, EffectId,
+        EffectQuality, LatencySamples, LinkModeSet, NodeTailBound, ParameterChannelPolicy,
+        ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+        PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor, RestBound, SmoothingRule,
+        StatePayloadSizes, TailSamples, default_parameter_lattice, validate_descriptor,
     };
+
+    fn tail_and_rest(_: u32, _: EffectQuality) -> NodeTailBound {
+        NodeTailBound {
+            tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: RestBound::Unstated,
+            composition: CompositionBound::Unstated,
+        }
+    }
 
     const fn quality(sample_rate: u32) -> QualityDescriptor {
         QualityDescriptor {
             quality: EffectQuality::Normal,
             sample_rate,
             latency: LatencySamples(0),
-            tail: TailSamples::Finite(0),
             maximum_state: StatePayloadSizes {
                 common_bytes: 0,
                 left_bytes: 0,
@@ -2791,6 +3358,7 @@ mod continuous_mapping_validity_tests {
             parameters,
             ports: &PORTS,
             qualities: &QUALITIES,
+            tail_and_rest,
             observations: &[],
         }));
         validate_descriptor(descriptor).map_err(|errors| {

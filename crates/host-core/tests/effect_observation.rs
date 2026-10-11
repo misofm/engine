@@ -226,10 +226,19 @@ fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSample {
             maximum_scratch_bytes: 1 << 12,
             maximum_automation_spans_per_block: 128,
         },
+        tail_bound: effect_compiler::launch_native_effect_registry()
+            .expect("launch registry")
+            .tail_bound(
+                compressor::COMPRESSOR_DESCRIPTOR.id,
+                48_000,
+                EffectQuality::Normal,
+            )
+            .expect("a declared row"),
     };
     let mut effect: Box<dyn PreparedNativeEffect> = compressor::CompressorFactory
         .prepare(request)
-        .expect("scalar prepare");
+        .expect("scalar prepare")
+        .processor;
     let mut peak = ObservationSample::default();
     for block in 0..blocks {
         let mut left = [LEVEL; QUANTUM];
@@ -574,10 +583,19 @@ fn scalar_reference_windows(
             maximum_scratch_bytes: 1 << 12,
             maximum_automation_spans_per_block: 128,
         },
+        tail_bound: effect_compiler::launch_native_effect_registry()
+            .expect("launch registry")
+            .tail_bound(
+                compressor::COMPRESSOR_DESCRIPTOR.id,
+                48_000,
+                EffectQuality::Normal,
+            )
+            .expect("a declared row"),
     };
     let mut effect: Box<dyn PreparedNativeEffect> = compressor::CompressorFactory
         .prepare(request)
-        .expect("scalar prepare");
+        .expect("scalar prepare")
+        .processor;
     let mut windows = Vec::new();
     let mut peak = ObservationSample::default();
     for block in 0..blocks {

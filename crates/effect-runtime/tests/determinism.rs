@@ -1,4 +1,5 @@
-//! Gate D1's corpus can fail: every case is NaN-free and has a wide output spread.
+//! Gate D1's corpus can fail: no case hashes a NaN payload (`ramp_toward` carries NaN only as the
+//! canonical token) and every case has a wide output spread.
 //!
 //! The corpus's cross-target claim -- the effect runtime's lane functions compute the same bits at
 //! `f32`, `Simd4` and `Simd8`, natively and under wasmtime -- has one owner, gate G5 (issue #1048):
@@ -10,22 +11,32 @@
 //! A digest is not an oracle. `tests/dynamics.rs` is what says the curve is Giannoulis, Massberg
 //! and Reiss equation 4, and `tests/envelope.rs` is what says the followers round once.
 
-use effect_runtime::corpus::{CASE_NAMES, POINTS, run_case};
+use effect_runtime::corpus::{CASE_NAMES, NAN_TOKEN, POINTS, run_case};
 
-/// The corpus is NaN-free, so the pins survive wasm's NaN canonicalisation (D5).
+/// No case carries a NaN payload into a digest, so the pins survive wasm's NaN canonicalisation
+/// (D5): every case but `ramp_toward` is NaN-free, and `ramp_toward` emits NaN only as
+/// [`NAN_TOKEN`], and does emit it, because its NaN `next` passing through is what it pins.
 ///
-/// Claim: a corpus change that makes a case emit NaN turns this red; G5 would otherwise compare a
-/// payload wasm canonicalises.
+/// Claim: a corpus change that makes a case emit NaN, or makes `ramp_toward` hash a NaN payload
+/// instead of the token, turns this red; G5 would otherwise compare a payload wasm canonicalises.
 #[test]
 fn the_corpus_is_nan_free() {
     let mut out = vec![0u32; POINTS];
     for (case, name) in CASE_NAMES.iter().enumerate() {
         run_case::<f32>(case, &mut out);
+        let mut tokens = 0usize;
         for (point, word) in out.iter().enumerate() {
+            if *name == "ramp_toward" && *word == NAN_TOKEN {
+                tokens += 1;
+                continue;
+            }
             assert!(
                 !f32::from_bits(*word).is_nan(),
-                "{name} point {point} is NaN"
+                "{name} point {point} is a NaN payload"
             );
+        }
+        if *name == "ramp_toward" {
+            assert!(tokens > 0, "{name} never reaches its NaN arm");
         }
     }
 }

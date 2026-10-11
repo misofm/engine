@@ -39,6 +39,8 @@ const CONTINUOUS_CAPTURING: u8 = 1;
 const CONTINUOUS_WAITING: u8 = 2;
 const ONE_SHOT_MODE: u8 = 0;
 const CONTINUOUS_MODE: u8 = 1;
+/// Slots in each capture's result queue. Every drain caps its count at entry with it.
+const SPECTRUM_RESULT_SLOTS: usize = 1;
 
 const PROBE_VALIDATION_SAMPLES: usize = 0;
 const PROBE_STORAGE_WRITES: usize = 1;
@@ -197,6 +199,33 @@ impl SpectrumTarget {
             | Self::Output(track_id) => track_id,
         }
     }
+
+    /// Borrow this target as a [`SpectrumTargetRef`], without cloning its identity.
+    #[must_use]
+    pub fn as_ref(&self) -> SpectrumTargetRef<'_> {
+        match self {
+            Self::TrackPostInputBuiltins(track_id) => {
+                SpectrumTargetRef::TrackPostInputBuiltins(track_id)
+            }
+            Self::TrackPostMatrix(track_id) => SpectrumTargetRef::TrackPostMatrix(track_id),
+            Self::Output(output_id) => SpectrumTargetRef::Output(output_id),
+        }
+    }
+}
+
+/// A borrowed [`SpectrumTarget`]: the same three kinds over a borrowed identity.
+///
+/// Selection takes this form so that a caller can name a prepared entry from bytes it already
+/// holds, without building an owned target. The browser selects on its audio thread, where an
+/// allocation is not permitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpectrumTargetRef<'a> {
+    /// The selected track immediately after its input builtins.
+    TrackPostInputBuiltins(&'a str),
+    /// The selected track immediately after its fader/matrix stage.
+    TrackPostMatrix(&'a str),
+    /// The designated final output node.
+    Output(&'a str),
 }
 
 /// Preparation-time request for one fixed, bounded spectrum capture.
@@ -329,7 +358,7 @@ pub fn spectrum_capture_collection_resources(
 
 fn spectrum_capture_resources_for_id_bytes(id_bytes: usize) -> SpectrumCaptureResources {
     let queue = bounded_spsc_retained_payload::<SpectrumCapturedRecord>(
-        NonZeroUsize::new(1).expect("one queue slot"),
+        NonZeroUsize::new(SPECTRUM_RESULT_SLOTS).expect("one queue slot"),
     )
     .expect("fixed spectrum queue layout");
     let observer_bytes = core::mem::size_of::<SpectrumCaptureObserver>();
@@ -507,7 +536,23 @@ impl SpectrumCapture {
 
     /// Cancel the current capture, discarding any completed window.
     pub fn cancel(&mut self) {
-        while self.consumer.try_pop().is_ok() {}
+        let available = self
+            .consumer
+            .available_at_entry()
+            .min(SPECTRUM_RESULT_SLOTS);
+        for _ in 0..available {
+            if self.consumer.try_pop().is_err() {
+                break;
+            }
+        }
+        self.reset_after_cancel();
+    }
+
+    /// Return the capture to idle one-shot mode after its queue was drained.
+    ///
+    /// This holds no pop: [`Self::cancel`] and the collection's `cancel_except` drain first and
+    /// call it second.
+    fn reset_after_cancel(&mut self) {
         if self.mode.load(Ordering::Acquire) == CONTINUOUS_MODE {
             self.shared.active.store(0, Ordering::Release);
             self.shared
@@ -634,7 +679,15 @@ impl SpectrumCapture {
     }
 
     fn commit_continuous(&mut self, cadence: SpectrumCadence, epoch: u64) {
-        while self.consumer.try_pop().is_ok() {}
+        let available = self
+            .consumer
+            .available_at_entry()
+            .min(SPECTRUM_RESULT_SLOTS);
+        for _ in 0..available {
+            if self.consumer.try_pop().is_err() {
+                break;
+            }
+        }
         self.state.store(IDLE, Ordering::Release);
         self.shared.epoch.store(epoch, Ordering::Release);
         self.shared
@@ -668,7 +721,15 @@ impl SpectrumCapture {
                 .phase
                 .store(CONTINUOUS_WAITING, Ordering::Release);
             self.mode.store(ONE_SHOT_MODE, Ordering::Release);
-            while self.consumer.try_pop().is_ok() {}
+            let available = self
+                .consumer
+                .available_at_entry()
+                .min(SPECTRUM_RESULT_SLOTS);
+            for _ in 0..available {
+                if self.consumer.try_pop().is_err() {
+                    break;
+                }
+            }
             self.state.store(IDLE, Ordering::Release);
             self.seen_failures = 0;
             self.seen_drops = 0;
@@ -723,7 +784,10 @@ impl SpectrumCapture {
         // Freeze the queue population before inspecting status or entering the pop loop. A
         // producer publication after this point belongs to a later read, even if this call has
         // not yet consumed its first record.
-        let available = self.continuous_available_at_entry();
+        let available = self
+            .consumer
+            .available_at_entry()
+            .min(SPECTRUM_RESULT_SLOTS);
         let failures = self.shared.failures.load(Ordering::Acquire);
         if failures != self.seen_failures {
             self.seen_failures = failures;
@@ -746,18 +810,7 @@ impl SpectrumCapture {
         // entry. A later producer publication belongs to a later read and cannot extend this
         // budget.
         self.recovery_pending = false;
-        let mut remaining_pops = available;
-        loop {
-            if remaining_pops == 0 {
-                return Err(
-                    if self.shared.phase.load(Ordering::Acquire) == CONTINUOUS_WARMING {
-                        SpectrumContinuousReadError::Warming
-                    } else {
-                        SpectrumContinuousReadError::Pending
-                    },
-                );
-            }
-            remaining_pops -= 1;
+        for _ in 0..available {
             match self.consumer.try_pop() {
                 Ok(record)
                     if self.shared.invalidated.load(Ordering::Acquire) != 0
@@ -775,11 +828,13 @@ impl SpectrumCapture {
                 Err(_) => return Err(SpectrumContinuousReadError::Pending),
             }
         }
-    }
-
-    /// Freeze the number of queue records visible at a continuous read's entry.
-    pub(crate) fn continuous_available_at_entry(&self) -> usize {
-        self.consumer.available_at_entry().min(1)
+        Err(
+            if self.shared.phase.load(Ordering::Acquire) == CONTINUOUS_WARMING {
+                SpectrumContinuousReadError::Warming
+            } else {
+                SpectrumContinuousReadError::Pending
+            },
+        )
     }
 
     /// The selected graph boundary for this capture.
@@ -827,27 +882,37 @@ impl SpectrumCaptureCollection {
         self.captures.is_empty()
     }
 
-    /// Return the accepted entry at `index`, including its stable target identity and mask.
+    /// Return the accepted entry at `index`: its stable target identity and its mask.
+    ///
+    /// The target is borrowed, so this accessor clones and allocates nothing. The browser calls
+    /// selection on its audio thread, so an owned [`SpectrumCaptureCollectionEntry`] is never built
+    /// here: a caller that needs one clones the borrowed target off that thread.
     #[must_use]
-    pub fn entry(&self, index: usize) -> Option<SpectrumCaptureCollectionEntry> {
+    pub fn entry(&self, index: usize) -> Option<(&SpectrumTarget, SpectrumChannels)> {
         self.captures
             .get(index)
-            .map(|capture| SpectrumCaptureCollectionEntry {
-                target: capture.target.clone(),
-                channels: capture.channels,
-            })
+            .map(|capture| (capture.target(), capture.channels()))
     }
 
-    /// Return the currently selected entry, if any.
-    #[must_use]
-    pub fn selected_entry(&self) -> Option<SpectrumCaptureCollectionEntry> {
-        self.selected.and_then(|index| self.entry(index))
+    /// Index of the prepared entry that matches `target` and `channels` exactly.
+    fn position(&self, target: SpectrumTargetRef<'_>, channels: SpectrumChannels) -> Option<usize> {
+        self.captures
+            .iter()
+            .position(|capture| capture.target.as_ref() == target && capture.channels == channels)
     }
 
     /// Return the selected target identity without cloning it.
     #[must_use]
     pub fn selected_target(&self) -> Option<&SpectrumTarget> {
         self.selected.map(|index| self.captures[index].target())
+    }
+
+    /// Return the selected entry's channel mask without cloning its target.
+    ///
+    /// The browser's audio thread reads this on every spectrum read, so it must not allocate.
+    #[must_use]
+    pub fn selected_channels(&self) -> Option<SpectrumChannels> {
+        self.selected.map(|index| self.captures[index].channels())
     }
 
     /// Return the selected entry index in preparation order.
@@ -872,8 +937,33 @@ impl SpectrumCaptureCollection {
 
     /// Cancel every capture and leave the collection unarmed.
     pub fn cancel(&mut self) {
-        for capture in &mut self.captures {
-            capture.cancel();
+        self.cancel_except(None);
+    }
+
+    /// Drain and then reset every capture except `keep`.
+    ///
+    /// Every capture is drained before any is reset. The drain loop pops each capture's queue at
+    /// most its count at entry; the reset loop holds no pop.
+    fn cancel_except(&mut self, keep: Option<usize>) {
+        for (index, capture) in self.captures.iter_mut().enumerate() {
+            if keep == Some(index) {
+                continue;
+            }
+            let available = capture
+                .consumer
+                .available_at_entry()
+                .min(SPECTRUM_RESULT_SLOTS);
+            for _ in 0..available {
+                if capture.consumer.try_pop().is_err() {
+                    break;
+                }
+            }
+        }
+        for (index, capture) in self.captures.iter_mut().enumerate() {
+            if keep == Some(index) {
+                continue;
+            }
+            capture.reset_after_cancel();
         }
     }
 
@@ -882,22 +972,20 @@ impl SpectrumCaptureCollection {
     /// The target and mask are validated before touching the current capture. A successful
     /// replacement clears every old partial or queued result and arms the new entry. If the old
     /// entry was running continuously, the same cadence is restarted for the new entry.
+    ///
+    /// Returns the selected entry's index in preparation order; [`Self::entry`] borrows it. The
+    /// browser calls this on its audio thread (from the worklet's message handler, between render
+    /// quanta), so it takes a borrowed target and allocates nothing.
     pub fn select(
         &mut self,
-        target: &SpectrumTarget,
+        target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
-    ) -> Result<SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionSelectionError> {
-        let Some(index) = self
-            .captures
-            .iter()
-            .position(|capture| capture.target == *target && capture.channels == channels)
-        else {
+    ) -> Result<usize, SpectrumCaptureCollectionSelectionError> {
+        let Some(index) = self.position(target, channels) else {
             return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
         };
         if self.selected == Some(index) {
-            return self
-                .entry(index)
-                .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry);
+            return Ok(index);
         }
 
         let next_selection_epoch = self
@@ -925,28 +1013,19 @@ impl SpectrumCaptureCollection {
                 .arm()
                 .map_err(|_| SpectrumCaptureCollectionSelectionError::Busy)?;
         }
-        for (capture_index, capture) in self.captures.iter_mut().enumerate() {
-            if capture_index != index {
-                capture.cancel();
-            }
-        }
+        self.cancel_except(Some(index));
         self.selected = Some(index);
         self.selection_epoch = next_selection_epoch;
-        self.entry(index)
-            .ok_or(SpectrumCaptureCollectionSelectionError::UnknownEntry)
+        Ok(index)
     }
 
     /// Validate a selection and report whether it would replace the current entry.
     pub fn selection_would_change(
         &self,
-        target: &SpectrumTarget,
+        target: SpectrumTargetRef<'_>,
         channels: SpectrumChannels,
     ) -> Result<bool, SpectrumCaptureCollectionSelectionError> {
-        let Some(index) = self
-            .captures
-            .iter()
-            .position(|capture| capture.target == *target && capture.channels == channels)
-        else {
+        let Some(index) = self.position(target, channels) else {
             return Err(SpectrumCaptureCollectionSelectionError::UnknownEntry);
         };
         if self.selected == Some(index) {
@@ -1350,7 +1429,7 @@ fn prepare_capture_with_handle(
     let (node, _resources) =
         validate_capture_request(request, graph_nodes, maximum_named_allocation_bytes)?;
     let (producer, consumer) = bounded_spsc(
-        NonZeroUsize::new(1).ok_or(SpectrumPrepareError::QueueCapacity)?,
+        NonZeroUsize::new(SPECTRUM_RESULT_SLOTS).ok_or(SpectrumPrepareError::QueueCapacity)?,
         QueueGeneration(0x5350_4543),
     )
     .map_err(|_| SpectrumPrepareError::QueueCapacity)?;
@@ -3137,6 +3216,268 @@ mod tests {
         assert_eq!(capture.consumer.available_at_entry(), 0);
     }
 
+    /// A capture around a `slots`-slot queue whose producer the test holds, built as
+    /// `continuous_pair` builds its pair, and a record to push into it.
+    fn capture_with_held_producer(
+        slots: usize,
+    ) -> (
+        engine::realtime::Producer<super::SpectrumCapturedRecord>,
+        SpectrumCapture,
+        super::SpectrumCapturedRecord,
+    ) {
+        let (producer, consumer) = bounded_spsc(
+            core::num::NonZeroUsize::new(slots).expect("at least one capture slot"),
+            QueueGeneration(0x4353_5052),
+        )
+        .expect("capture queue");
+        let capture = SpectrumCapture {
+            consumer,
+            state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::IDLE)),
+            mode: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(super::ONE_SHOT_MODE)),
+            shared: super::SpectrumContinuousShared::new(),
+            seen_failures: 0,
+            seen_drops: 0,
+            recovery_pending: false,
+            target: SpectrumTarget::Output("main-out".into()),
+            channels: SpectrumChannels::Stereo,
+        };
+        let record = super::SpectrumCapturedRecord {
+            window: window(0.25),
+            stream_epoch: 0,
+            sequence: 0,
+            dropped_captures: 0,
+        };
+        (producer, capture, record)
+    }
+
+    /// The one-slot capture the concurrency tests race a producer against.
+    fn racing_capture() -> (
+        engine::realtime::Producer<super::SpectrumCapturedRecord>,
+        SpectrumCapture,
+        super::SpectrumCapturedRecord,
+    ) {
+        capture_with_held_producer(1)
+    }
+
+    /// Each control-side drain pops exactly `min(available at entry, SPECTRUM_RESULT_SLOTS)`
+    /// records: one of two queued records in a two-slot queue. A `while` drain empties the queue;
+    /// a missing drain leaves both records.
+    #[test]
+    fn each_drain_pops_exactly_one_record_of_two_queued() {
+        fn queued_pair() -> (
+            engine::realtime::Producer<super::SpectrumCapturedRecord>,
+            SpectrumCapture,
+        ) {
+            let (mut producer, capture, record) = capture_with_held_producer(2);
+            assert!(producer.try_push(record).is_ok());
+            assert!(producer.try_push(record).is_ok());
+            assert_eq!(capture.consumer.available_at_entry(), 2);
+            (producer, capture)
+        }
+
+        let (_producer, mut capture) = queued_pair();
+        capture
+            .state
+            .store(ARMED, std::sync::atomic::Ordering::Release);
+        capture.cancel();
+        assert_eq!(capture.consumer.available_at_entry(), 1, "cancel");
+
+        // `start_continuous` reaches `commit_continuous` from an idle one-shot capture.
+        let (_producer, mut capture) = queued_pair();
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        assert_eq!(
+            capture.consumer.available_at_entry(),
+            1,
+            "commit_continuous"
+        );
+
+        // `stop_continuous` drains only an active continuous capture.
+        let (_producer, mut capture) = queued_pair();
+        capture
+            .mode
+            .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
+        capture
+            .shared
+            .active
+            .store(1, std::sync::atomic::Ordering::Release);
+        capture.stop_continuous();
+        assert_eq!(capture.consumer.available_at_entry(), 1, "stop_continuous");
+    }
+
+    /// Runs `drain` once per block while another thread refills the one-slot queue, and asserts
+    /// that each call pops at most the one record it saw at entry.
+    ///
+    /// `o0 + (p1 - p0) - o1` counts the pops between the two occupancy reads. The bound is exact
+    /// only under three conditions:
+    /// 1. `produce` adds one to `pushes` with `Release`, and only after its push returned `Ok`,
+    ///    so the push's own release store has published the record first;
+    /// 2. this thread loads `pushes` with `Acquire` (`p0` and `p1`), so a counted push is visible
+    ///    to the next occupancy read;
+    /// 3. no push is in flight at `o0`: `render_while_producing` calls the block only after
+    ///    `queued` saw the slot full under the producers' lock, `produce` pushes only into an
+    ///    empty slot, and only the drain pops, so the slot stays full until the drain's first pop.
+    ///
+    /// A push that lands between `p1` and `o1` is not counted but raises `o1`, so the value may be
+    /// negative; it is computed in `i64`.
+    fn assert_drain_pops_at_most_its_entry_count(
+        mut capture: SpectrumCapture,
+        producer: engine::realtime::Producer<super::SpectrumCapturedRecord>,
+        record: super::SpectrumCapturedRecord,
+        prepare: impl Fn(&SpectrumCapture),
+        mut drain: impl FnMut(&mut SpectrumCapture),
+    ) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const BLOCKS: usize = 20_000;
+        let pushes = AtomicU64::new(0);
+        bench_support::producer::render_while_producing(
+            BLOCKS,
+            producer,
+            |producer| {
+                if producer.available_capacity() > 0 && producer.try_push(record).is_ok() {
+                    // Condition 1: count the push only after it published, with `Release`.
+                    pushes.fetch_add(1, Ordering::Release);
+                }
+            },
+            |producer| producer.available_capacity() == 0,
+            |block| {
+                prepare(&capture);
+                let o0 = capture.consumer.available_at_entry();
+                // Condition 2: both push-count loads use `Acquire`.
+                let p0 = pushes.load(Ordering::Acquire);
+                drain(&mut capture);
+                let p1 = pushes.load(Ordering::Acquire);
+                let o1 = capture.consumer.available_at_entry();
+                let pops = i64::try_from(o0).expect("one-slot occupancy")
+                    + i64::try_from(p1 - p0).expect("push count")
+                    - i64::try_from(o1).expect("one-slot occupancy");
+                assert!(
+                    pops <= 1,
+                    "block {block}: the drain popped {pops} records; it saw {o0} at entry"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn collection_cancel_except_drains_every_capture_but_the_kept_one() {
+        let (mut first_producer, first, record) = capture_with_held_producer(1);
+        let (mut second_producer, mut second, _) = capture_with_held_producer(1);
+        second.target = SpectrumTarget::Output("alt-out".into());
+        let second_target = second.target.clone();
+        let second_channels = second.channels;
+        assert!(first_producer.try_push(record).is_ok());
+        assert!(second_producer.try_push(record).is_ok());
+        let mut collection = SpectrumCaptureCollection::new(vec![first, second]);
+        assert_eq!(collection.selected_index(), None);
+
+        // With nothing selected, `select` arms capture 1, which is one-shot and idle, so it
+        // reaches `cancel_except(Some(1))` instead of returning `Busy`.
+        assert!(
+            collection
+                .select(second_target.as_ref(), second_channels)
+                .is_ok()
+        );
+        assert_eq!(collection.captures[0].consumer.available_at_entry(), 0);
+        assert_eq!(collection.captures[1].consumer.available_at_entry(), 1);
+
+        collection.cancel();
+        assert_eq!(collection.captures[0].consumer.available_at_entry(), 0);
+        assert_eq!(collection.captures[1].consumer.available_at_entry(), 0);
+    }
+
+    #[test]
+    fn selected_channels_reports_the_selected_entrys_mask() {
+        let (_first_producer, mut first, _) = capture_with_held_producer(1);
+        let (_second_producer, mut second, _) = capture_with_held_producer(1);
+        first.channels = SpectrumChannels::Left;
+        second.target = SpectrumTarget::Output("alt-out".into());
+        second.channels = SpectrumChannels::Right;
+        let second_target = second.target.clone();
+        let mut collection = SpectrumCaptureCollection::new(vec![first, second]);
+        assert_eq!(collection.selected_channels(), None);
+
+        assert!(
+            collection
+                .select(second_target.as_ref(), SpectrumChannels::Right)
+                .is_ok()
+        );
+        assert_eq!(
+            collection.selected_channels(),
+            Some(SpectrumChannels::Right)
+        );
+    }
+
+    #[test]
+    fn cancel_pops_at_most_its_entry_count_while_a_producer_refills() {
+        let (producer, capture, record) = racing_capture();
+        assert_drain_pops_at_most_its_entry_count(
+            capture,
+            producer,
+            record,
+            |capture| {
+                // An armed one-shot capture, which `cancel` returns to idle.
+                capture
+                    .state
+                    .store(ARMED, std::sync::atomic::Ordering::Release);
+            },
+            SpectrumCapture::cancel,
+        );
+    }
+
+    #[test]
+    fn continuous_restart_pops_at_most_its_entry_count_while_a_producer_refills() {
+        let (producer, mut capture, record) = racing_capture();
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        assert_drain_pops_at_most_its_entry_count(
+            capture,
+            producer,
+            record,
+            |capture| {
+                // `restart_continuous` needs an active continuous stream; it leaves one.
+                capture
+                    .mode
+                    .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
+                capture
+                    .shared
+                    .active
+                    .store(1, std::sync::atomic::Ordering::Release);
+            },
+            |capture| {
+                capture
+                    .restart_continuous()
+                    .expect("active continuous restart");
+            },
+        );
+    }
+
+    #[test]
+    fn continuous_stop_pops_at_most_its_entry_count_while_a_producer_refills() {
+        let (producer, mut capture, record) = racing_capture();
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        assert_drain_pops_at_most_its_entry_count(
+            capture,
+            producer,
+            record,
+            |capture| {
+                // `stop_continuous` drains only in continuous mode, and leaves one-shot mode.
+                capture
+                    .mode
+                    .store(super::CONTINUOUS_MODE, std::sync::atomic::Ordering::Release);
+                capture
+                    .shared
+                    .active
+                    .store(1, std::sync::atomic::Ordering::Release);
+            },
+            SpectrumCapture::stop_continuous,
+        );
+    }
+
     #[test]
     fn spectrum_operation_probes_match_a_large_planar_quantum() {
         super::test_only_reset_spectrum_operation_counts();
@@ -3349,7 +3690,7 @@ mod tests {
             let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
             let mut collection = SpectrumCaptureCollection::new(vec![capture]);
             collection
-                .select(&target, SpectrumChannels::Stereo)
+                .select(target.as_ref(), SpectrumChannels::Stereo)
                 .expect("prepared collection selection");
             let cadence = collection
                 .start_continuous_with_hop(
@@ -3365,7 +3706,7 @@ mod tests {
         let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
         let mut legacy = SpectrumCaptureCollection::new(vec![capture]);
         legacy
-            .select(&target, SpectrumChannels::Stereo)
+            .select(target.as_ref(), SpectrumChannels::Stereo)
             .expect("prepared legacy collection selection");
         let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
         assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));

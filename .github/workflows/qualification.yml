@@ -345,8 +345,23 @@ jobs:
       # contain it (owner ruling 2026-09-28, decision 3). Read from the named twin (#1109).
       - name: Shipped AudioWorklet module contains no whole-plan scalar path
         run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
+      # Issue #1429: the suite runs with a fresh, private TMPDIR, so anything it or a process it
+      # starts leaves there fails the step (the runner's shared temporary directory hid #1421's
+      # leak). The script's own failure still fails the step first; the trap removes the directory.
       - name: Hermetic browser host and worklet tests
-        run: bash scripts/test-web-audioworklet.sh
+        run: |
+          # pipefail: GitHub's default shell is `bash -e {0}`, so without it a `find` failure in the
+          # emptiness check would leave `leftover` empty and the check would pass.
+          set -o pipefail
+          scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          bash scripts/test-web-audioworklet.sh
+          leftover="$(find "$scratch" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          if [[ -n "$leftover" ]]; then
+            printf 'scripts/test-web-audioworklet.sh left these entries in its TMPDIR:\n%s\n' "$leftover" >&2
+            exit 1
+          fi
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
       # the downloaded, digest-verified named twin of the artifact (#1109; run-wasm-gates.sh
       # --without-v8-spill leaves it to this job). Register allocation belongs to one V8, so the Node version is exact and the
@@ -617,6 +632,19 @@ jobs:
             --exclude wasm-gates --exclude wasm-gate-guest \
             --exclude wasm-gate-corpus \
             --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,control-plane/test-support,engine/realtime-audit
+      # --all-targets runs no doctest, and most doctests here are compile_fail type-level
+      # guarantees, each beside a plain twin (#1422). Same packages and features as the step above.
+      - name: Workspace doctests (same packages and features as the debug tests)
+        run: |
+          cargo test --locked --workspace --doc \
+            --exclude lane --exclude math --exclude effect-runtime --exclude delay \
+            --exclude compressor --exclude multiband-compressor --exclude gate-expander \
+            --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
+            --exclude parametric-eq --exclude builtins --exclude dsp-reference \
+            --exclude conformance --exclude audit --exclude bench --exclude console-workload \
+            --exclude wasm-gates --exclude wasm-gate-guest \
+            --exclude wasm-gate-corpus \
+            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,control-plane/test-support,engine/realtime-audit
 
   test-debug-b:
     name: DSP crates debug tests
@@ -644,6 +672,14 @@ jobs:
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
             --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
+      # --all-targets runs no doctest (#1422). Same packages and features as the step above.
+      - name: DSP crates doctests (same packages and features as the debug tests)
+        run: |
+          cargo test --locked --doc \
+            -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
+            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
+            -p parametric-eq -p builtins -p dsp-reference -p conformance \
+            --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
       - name: Conformance research-fixture completeness
         run: cargo run --locked -p conformance --example conformance_fixtures -- --check
 
@@ -665,11 +701,34 @@ jobs:
       # cross-target digest corpus (#1048); wasm-guests leaves the script's native leg to it.
       - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
         run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
-      # #1044: the step above runs M3 (`m3_determinism`) with FMA on, because `.cargo/config.toml`
-      # builds every x86-64 target with +avx2,+fma and `lane` refuses to compile without both. The
-      # retired "Math M3 digests on an FMA-enabled build" step replaced those flags with +fma alone,
-      # a build that ships nowhere. This prints the cfg cargo gives that step's `math` (no
-      # dependency is built: `math` has none without `lane`), and fails without FMA.
+      # #1407 gate 4: the release scale of the reachable-word sweep (every launch rate, quanta
+      # 1-63, 22 histories x 512 blocks). test-debug-b runs only its debug subset (48 kHz, quanta
+      # {1, 2, 7, 63}).
+      - name: Live input filter reachable-word sweep (filter_liveness) in release
+        run: cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness
+      # #1329 Amendment 4 (R6): the input section's tail and exact-rest gates at release scale
+      # (every launch rate; gate 2's real-kernel run at the domain extreme, which debug ignores).
+      # test-debug-b runs only the debug subset (48 kHz, a tenth of gate 1(b)'s scan).
+      - name: Input section tail and exact-rest gates (tail_contract) in release
+        run: cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract
+      # #1409 gate 1 at release scale (root ruling, 2026-10-06): effect-runtime's ramp-endpoint
+      # gate draws 100,000 random ramps in release (debug draws fewer), and the seven effect crates'
+      # ramp_endpoint targets run beside it in the shipping profile.
+      - name: Effect ramp endpoint gates (ramp_endpoint) in release
+        run: >-
+          cargo test --locked --release -p compressor -p delay -p gate-expander
+          -p multiband-compressor -p soft-clip -p transient-shaper -p true-peak-limiter
+          -p effect-runtime --test ramp_endpoint
+      # #1366 (root ruling, 2026-10-06): the exhaustive crossover designer sweep over every f32 in
+      # the domain; the per-PR debug test checks every 1024th f32 only.
+      - name: Multiband crossover designer exhaustive sweep (designer_total) in release
+        run: cargo test --locked --release -p multiband-compressor --test designer_total -- --ignored
+      # #1044: the "Lane and math gates ... in release" step runs M3 (`m3_determinism`) with FMA on,
+      # because `.cargo/config.toml` builds every x86-64 target with +avx2,+fma and `lane` refuses to
+      # compile without both. The retired "Math M3 digests on an FMA-enabled build" step replaced
+      # those flags with +fma alone, a build that ships nowhere. This prints the cfg cargo gives the
+      # lane-and-math step's `math` (no dependency is built: `math` has none without `lane`), and
+      # fails without FMA.
       - name: M3's leg is built with FMA (cargo's cfg for math)
         run: cargo rustc --locked --release -p math --lib -- --print cfg | grep -x 'target_feature="fma"'
       # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not

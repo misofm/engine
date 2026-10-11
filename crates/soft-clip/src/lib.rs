@@ -28,9 +28,9 @@ use effect_contract::{
     LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
@@ -176,7 +176,6 @@ const fn quality(rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate: rate,
         latency: LatencySamples(31),
-        tail: TailSamples::Finite(29),
         maximum_state: StatePayloadSizes {
             common_bytes: STATE_SIZES.common as u32,
             left_bytes: STATE_SIZES.left as u32,
@@ -184,6 +183,18 @@ const fn quality(rate: u32) -> effect_contract::QualityDescriptor {
         },
         scratch_fixed_bytes: 24,
         scratch_bytes_per_frame: 0,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1376 derives the bounds from the designer.
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    effect_contract::NodeTailBound {
+        tail: TailSamples::Finite(29),
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
+        composition: effect_contract::CompositionBound::Unstated,
     }
 }
 
@@ -205,6 +216,7 @@ pub const SOFT_CLIP_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &SOFT_CLIP_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &[],
 };
 
@@ -255,8 +267,11 @@ fn converted_domain(index: usize) -> Option<(f32, f32)> {
 /// gains' converted ranges start at `-24 dB`, a normal gain), and a subnormal mix is a legal value
 /// the effect holds and renders with, so its own snapshot must restore it (#1071).
 ///
-/// This is the rule for every value at rest and for every ramp target. An in-flight ramp's
-/// `current` may leave the range by a rounding margin; [`ramp_current_valid`] owns that case.
+/// This is the rule for every ramp word: the target, and the current whether the ramp is at rest
+/// or in flight. The clamped law keeps every word the effect's own ramps produce between the
+/// ramp's start and its target (issue #1409 D2), both inside the range, so an in-flight current
+/// outside it is one the effect never holds and is refused with no rounding margin (issue #1411
+/// D1).
 ///
 /// This is control-plane validation of a restored or prepared coefficient, not a render-path
 /// check: the render path has none (D7).
@@ -265,60 +280,6 @@ fn converted_value_valid(index: usize, value: f32) -> bool {
         return false;
     }
     converted_domain(index).is_some_and(|(low, high)| value >= low && value <= high)
-}
-
-/// The spacing of the `f32` grid just above a positive finite `value`.
-fn ulp_at(value: f32) -> f32 {
-    f32::from_bits(value.to_bits() + 1) - value
-}
-
-/// `true` if `current` is a value parameter `index`'s ramp can hold with `target`, `step` and
-/// `remaining` (#1071 attempt 2).
-///
-/// Every current inside the converted range is accepted, as it always was. Outside it, only an
-/// in-flight ramp's rounding overshoot is: D11 rounds the step once and then adds it, so a ramp
-/// toward a range edge can cross that edge before its final sample assigns the target. A mix
-/// ramped from 40 subnormal units to `0.0` steps by `-1` unit (`-40/64` rounded up in magnitude)
-/// and holds negative subnormals for its last 24 samples; a gain ramped to `+36 dB` from a few
-/// dozen ulps below it ends a few ulps above it. Those are the effect's own words, so the restore
-/// must accept them.
-///
-/// The bound. Let the ramp start at `s` (any value the effect held, itself possibly an
-/// overshoot) toward a target `t` in the range `[low, high]`, with `step = fl(fl(t - s) / 64)`,
-/// and let it have added `step` `k = 64 - remaining` times (the snap leaves `remaining >= 1`
-/// while a ramp is in flight). Then
-/// `current = t - remaining * step + a + 64 * b + c`, where `a` is the rounding of `t - s` (at
-/// most half an ulp of `2 * high`, since `|t - s| < 2 * high`), `b` the rounding of the division
-/// (zero unless the quotient is subnormal, and then at most `2^-150`), and `c` the `k <= 63`
-/// rounded additions (each at most half an ulp of `2 * high`, since every running value is below
-/// `2 * high`). So the current lies within `32 * ulp(2 * high) + 2^-144` of the ramp's line
-/// `t - remaining * step`, and the check accepts `64 * ulp(2 * high)`. It runs in `f64`, whose
-/// rounding of these operands (below `2^-50` of an `f32` ulp of `2 * high` here) is far inside the
-/// spare `32` ulps.
-///
-/// Hostile words are refused as before but for that rounding margin: `-0.0`, non-finite values,
-/// a ramp at rest outside its range, and an in-flight current outside its range and off its own
-/// ramp's line.
-///
-/// The accepted set is not closed under render once a crafted word is in. A crafted in-flight
-/// ramp may hold a current near the tolerance's edge, far further off its line than any ramp of
-/// the effect's own drifts, and its later rounded additions can carry it past the tolerance, so
-/// the effect's own snapshot of it, some samples on, is refused. Only a crafted restore reaches this;
-/// every state the effect produces from its own automation stays restorable, and the plan-swap
-/// carry (#1278) moves only such states. Do not assume that a lane accepted from an arbitrary
-/// payload snapshots into one this check accepts.
-fn ramp_current_valid(index: usize, current: f32, target: f32, step: f32, remaining: u32) -> bool {
-    if converted_value_valid(index, current) {
-        return true;
-    }
-    if remaining == 0 || is_negative_zero(current) || !current.is_finite() || !step.is_finite() {
-        return false;
-    }
-    converted_domain(index).is_some_and(|(_, high)| {
-        let tolerance = f64::from(RAMP_SAMPLES) * f64::from(ulp_at(2.0 * high));
-        let line = f64::from(target) - f64::from(remaining) * f64::from(step);
-        (f64::from(current) - line).abs() <= tolerance
-    })
 }
 
 /// `true` if `step` is an increment parameter `index`'s ramp can hold.
@@ -515,6 +476,9 @@ impl<L: Lane> Channel<L> {
                 drive_step: self.step_vector(0),
                 output_step: self.step_vector(1),
                 mix_step: self.step_vector(2),
+                drive_target: self.target_vector(0),
+                output_target: self.target_vector(1),
+                mix_target: self.target_vector(2),
                 bypass: bypass_mask,
             };
             soft_clip_block::<L>(
@@ -542,6 +506,17 @@ impl<L: Lane> Channel<L> {
         for (lane, slot) in words[..L::WIDTH].iter_mut().enumerate() {
             let ramp = &self.ramps[lane][parameter];
             *slot = if ramp.remaining > 0 { ramp.step } else { 0.0 };
+        }
+        L::load(&words[..L::WIDTH])
+    }
+
+    /// The per-lane target vector of one parameter, which no iterated word passes (issue #1409
+    /// D4). A lane that is not ramping has a zero step, which the clamp leaves unchanged whatever
+    /// the target.
+    fn target_vector(&self, parameter: usize) -> L {
+        let mut words: LaneWords = [0.0; 8];
+        for (lane, slot) in words[..L::WIDTH].iter_mut().enumerate() {
+            *slot = self.ramps[lane][parameter].target;
         }
         L::load(&words[..L::WIDTH])
     }
@@ -590,7 +565,7 @@ impl<L: Lane> SoftClipState<L> {
 /// once per event (D11).
 fn apply_automation<L: Lane>(
     spans: &[PreparedAutomationSpan],
-    metadata: PreparedEffectMetadata,
+    automation_capacity: u32,
     first_sample: u64,
     lane: usize,
     left: &mut Channel<L>,
@@ -617,7 +592,7 @@ fn apply_automation<L: Lane>(
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         };
-        let valid = span_index < metadata.automation_capacity as usize
+        let valid = span_index < automation_capacity as usize
             && parameter < PARAMETER_COUNT
             && span.kind == AutomationSpanKind::Point
             && span.start_sample == first_sample
@@ -706,13 +681,12 @@ struct LaneRestore {
 ///
 /// The rule is "accept every word the effect itself can hold, refuse the rest" (#1071), so a
 /// snapshot of a lane that only ever held its own words always survives its own restore and a
-/// restored lane continues bit for bit (a lane restored from a crafted payload need not; see
-/// [`ramp_current_valid`]):
+/// restored lane continues bit for bit:
 ///
-/// * ramp targets, and the currents of ramps at rest, must be inside the *converted* domain (a
-///   linear gain, not decibels) and must not be `-0.0`; a subnormal is in domain only for the mix;
-/// * an in-flight ramp's current may leave that domain only by the rounding overshoot the ramp
-///   itself produces, within a few ulps of its own line ([`ramp_current_valid`]);
+/// * ramp targets and currents, at rest or in flight, must be inside the *converted* domain (a
+///   linear gain, not decibels) and must not be `-0.0`; a subnormal is in domain only for the mix
+///   ([`converted_value_valid`]; the clamped law keeps every in-flight current between its start
+///   and its target, issue #1409 D2, so no rounding margin is admitted, issue #1411 D1);
 /// * `step` must be finite, and for the gains zero or normal ([`ramp_step_valid`]);
 /// * `remaining` must not exceed the smoothing window;
 /// * each history admits every word the kernel can write into it (#1300):
@@ -754,7 +728,7 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         if remaining > RAMP_SAMPLES
             || !converted_value_valid(parameter, target)
             || !ramp_step_valid(parameter, step)
-            || !ramp_current_valid(parameter, current, target, step, remaining)
+            || !converted_value_valid(parameter, current)
         {
             return Err(StatePayloadError {
                 code: STATE_PARAMETER_CODE,
@@ -937,8 +911,14 @@ fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
 ///
 /// `WIDTH = 1` is the scalar instance the contract's `PreparedNativeEffect` uses, and 4 and 8 are
 /// the banks; the type, the driver and the kernel are the same in all three cases.
+///
+/// It keeps no copy of its `PreparedEffectMetadata` (issue #1461): the prepare result carries that
+/// record on the control side, and the cohort keeps only the prepared values its own code reads.
 struct SoftClip<L: Lane> {
-    metadata: PreparedEffectMetadata,
+    /// The session's bypass, read by `process` and `process_bank`.
+    bypass: bool,
+    /// The prepared automation span capacity, read by `apply_automation`.
+    automation_capacity: u32,
     left_defaults: Box<[[f32; PARAMETER_COUNT]]>,
     right_defaults: Box<[[f32; PARAMETER_COUNT]]>,
     left: Channel<L>,
@@ -952,14 +932,16 @@ struct SoftClip<L: Lane> {
 
 impl<L: Lane> SoftClip<L> {
     fn new(
-        metadata: PreparedEffectMetadata,
+        bypass: bool,
+        automation_capacity: u32,
         left_defaults: Box<[[f32; PARAMETER_COUNT]]>,
         right_defaults: Box<[[f32; PARAMETER_COUNT]]>,
     ) -> Self {
         let left = Channel::new(&left_defaults);
         let right = Channel::new(&right_defaults);
         Self {
-            metadata,
+            bypass,
+            automation_capacity,
             left_defaults,
             right_defaults,
             left,
@@ -1038,8 +1020,14 @@ struct PreparedSoftClip {
 }
 
 /// A prepared homogeneous soft-clip cohort.
+///
+/// Its `PreparedBankMetadata` is returned beside it (issue #1461); it keeps only the two bank
+/// values `process_bank` reads.
 struct PreparedSoftClipBank<L: Lane> {
-    metadata: PreparedBankMetadata,
+    /// The bound bank width, read by `process_bank`'s block check and report.
+    width: BankWidth,
+    /// The prepared quantum, read by `process_bank`'s block check.
+    quantum: u32,
     inner: SoftClip<L>,
 }
 
@@ -1051,22 +1039,26 @@ impl NativeEffectFactory for SoftClipFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let (left, right) = initial_defaults(request.initial_values)?;
-        Ok(Box::new(PreparedSoftClip {
-            inner: SoftClip::new(
-                metadata,
-                vec![left].into_boxed_slice(),
-                vec![right].into_boxed_slice(),
-            ),
-        }))
+        Ok(PreparedEffect {
+            processor: Box::new(PreparedSoftClip {
+                inner: SoftClip::new(
+                    metadata.bypass,
+                    metadata.automation_capacity,
+                    vec![left].into_boxed_slice(),
+                    vec![right].into_boxed_slice(),
+                ),
+            }),
+            metadata,
+        })
     }
 
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         bind_bank::<true>(self, request)
     }
 }
@@ -1077,7 +1069,7 @@ impl NativeEffectFactory for SoftClipFactory {
 fn bind_bank<const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     request.validate_shape()?;
     Ok(effect_contract::match_bank_width!(request.width, |L| {
         boxed::<L, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
@@ -1091,15 +1083,18 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 /// a width it does not execute. `prepare_bank` cannot promise that alone: it returns the bank by
 /// value, and the eight-lane soft clip would otherwise stay in the four-lane browser artifact.
 fn boxed<L: Lane, const NATIVE_ONLY: bool>(
-    bank: Option<PreparedSoftClipBank<L>>,
-) -> Option<Box<dyn PreparedNativeEffectBank>>
+    bank: Option<(PreparedSoftClipBank<L>, PreparedBankMetadata)>,
+) -> Option<PreparedEffectBank>
 where
     PreparedSoftClipBank<L>: PreparedNativeEffectBank,
 {
     if NATIVE_ONLY && !executes(L::WIDTH) {
         return None;
     }
-    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
+    bank.map(|(bank, metadata)| PreparedEffectBank {
+        processor: Box::new(bank) as Box<dyn PreparedNativeEffectBank>,
+        metadata,
+    })
 }
 
 /// `true` if this artifact executes banks of `lanes` lanes natively.
@@ -1111,7 +1106,7 @@ const fn executes(lanes: usize) -> bool {
     lanes == Backend::current().width()
 }
 
-/// Binds one bank of `L::WIDTH` lanes.
+/// Binds one bank of `L::WIDTH` lanes, returned beside its `PreparedBankMetadata`.
 ///
 /// # Padding (issue #1092; decision 12)
 ///
@@ -1126,7 +1121,7 @@ const fn executes(lanes: usize) -> bool {
 fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<PreparedSoftClipBank<L>>, EffectPrepareError> {
+) -> Result<Option<(PreparedSoftClipBank<L>, PreparedBankMetadata)>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -1153,7 +1148,8 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
         return Ok(None);
     }
     let mut inner = SoftClip::new(
-        metadata,
+        metadata.bypass,
+        metadata.automation_capacity,
         left_defaults.into_boxed_slice(),
         right_defaults.into_boxed_slice(),
     );
@@ -1163,20 +1159,20 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
         .enumerate()
         .filter(|(_, active)| **active)
         .fold(0, |bits, (lane, _)| bits | (1 << lane));
-    Ok(Some(PreparedSoftClipBank::<L> {
-        metadata: PreparedBankMetadata {
+    Ok(Some((
+        PreparedSoftClipBank::<L> {
+            width: request.width,
+            quantum: metadata.quantum,
+            inner,
+        },
+        PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
         },
-        inner,
-    }))
+    )))
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.inner.metadata
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
@@ -1186,14 +1182,14 @@ impl PreparedNativeEffect for PreparedSoftClip {
         let frames = block.frames();
         apply_automation(
             block.automation,
-            self.inner.metadata,
+            self.inner.automation_capacity,
             block.first_sample,
             0,
             &mut self.inner.left,
             &mut self.inner.right,
             &mut report,
         );
-        let bypass = self.inner.metadata.bypass;
+        let bypass = self.inner.bypass;
         if self.inner.process(block.left, block.right, frames, bypass) != 0 {
             let count = frames as u64;
             report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(count);
@@ -1227,18 +1223,14 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
-
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.metadata.width);
-        if !bank_block_matches(&block, self.metadata.width, self.inner.metadata.quantum)
-            || L::WIDTH != self.metadata.width.lanes() as usize
+        let mut report = BankProcessReport::empty(self.width);
+        if !bank_block_matches(&block, self.width, self.quantum)
+            || L::WIDTH != self.width.lanes() as usize
         {
             return report;
         }
@@ -1251,7 +1243,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             let end = block.automation_offsets[lane + 1] as usize;
             apply_automation(
                 &block.automation[start..end],
-                self.inner.metadata,
+                self.inner.automation_capacity,
                 block.first_sample,
                 lane,
                 &mut self.inner.left,
@@ -1260,7 +1252,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             );
         }
         let frames = block.frames as usize;
-        let bypass = self.inner.metadata.bypass;
+        let bypass = self.inner.bypass;
         // Only the lanes that failed are charged, never a bank-mate or a padded lane (issue
         // #1092). Each is charged as its scalar instance charges itself: the block's frames, on
         // both channels (#1073 owns that unit).

@@ -1,0 +1,15 @@
+gate-current-harness exit 0 []
+gate-full-suite exit 101 ['test result: FAILED. 6 passed; 2 failed']
+   FAIL reset_seeds_gain_open_hold_and_preserves_or_restores_parameters assertion `left != right` failed: left: ramp 0 step
+   FAIL scalar_and_bank_recovery_is_channel_and_lane_local assertion `left != right` failed: left: ramp 0 step
+gate-g5 exit 101 ['test result: FAILED. 6 passed; 1 failed']
+   FAIL g5_native_digests_match_pins native corpus digests differ from the pins:
+    case 124 (effect/gate_expander/dual_mono/clamped_ramp)
+gate-tight-harness exit 101 ['test result: FAILED. 1 passed; 1 failed']
+   FAIL every_ramped_word_stays_inside_its_endpoints threshold from -7.999975e1 (0xc29fffdf) to -80, sidechain connected false: frame 4, `threshold` (section 0) went from (-79.99978, -80.0, -3.9339066e-6, 1114636288) to (-80.0, -80.0, 0.0, 1114374144), not one clamped D11 
+limiter-current-harness exit 0 []
+limiter-full-suite exit 101 ['test result: FAILED. 46 passed; 1 failed']
+   FAIL tests::the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit assertion `left == right` failed: width 1 lane 0 update 23
+limiter-g5 exit 0 []
+limiter-tight-harness exit 101 ['test result: FAILED. 1 passed; 1 failed']
+   FAIL every_ramped_word_stays_inside_its_endpoints limit coefficient from -2.399998e1 (0xc1bffff6) to -24, sidechain connected false: frame 23, `limit coefficient` (section 0) went from (0.05623417, 0.056234132, -1.9208528e-9, 41) to (0.056234132, 0.056234132, 0.0, 40), 

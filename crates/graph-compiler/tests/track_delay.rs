@@ -163,7 +163,7 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
     .expect("the fixture's builtins prepare");
     let effects = prepare_native_session_effects(
         &session,
-        &registry,
+        registry,
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 24,
             maximum_scratch_bytes: 1 << 24,
@@ -246,6 +246,28 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// nodes, eighteen tokens, and no other byte -- gives the hash below; the builtins-less compile
 /// hashed the unchanged text to `eb3ca776...cb18e0ea10`. The #964 spec records the diff.
 ///
+/// Issue #1328 amendment A9 carries each channel input's silence counter in the EQ's state
+/// payload: one word per channel, so each EQ's serialized state grows from 936 to 944 bytes and
+/// nine instances add exactly 72. Applying only that change to the #964 canonical text --
+/// `declared_effect_bytes` 8,424 -> 8,496 and both plan-byte totals 150,559 -> 150,631, three
+/// tokens of the `estimate` row and no other byte -- reproduces the compiler's new hash below;
+/// reversing the three tokens in the compiled text hashes back to the #964 pin `957e97ca...7640e42`.
+///
+/// Issue #1328's follow-up declares the EQ's two rest planes as scratch (8 bytes per frame per
+/// prepared lane, `parametric_eq::REST_PLANE_BYTES_PER_FRAME`), which the estimate charges in
+/// `declared_effect_bytes`: nine instances at a 128-frame quantum add exactly 9,216 bytes.
+/// `declared_effect_bytes` 8,496 -> 17,712 and both plan-byte totals 150,631 -> 159,847, the same
+/// three tokens of the `estimate` row and no other byte; reversing them in the compiled text hashes
+/// back to the A9 pin `bb250287...ffbfc40bf` (verified on the dumped canonical text).
+///
+/// Issue #1329 states a certified finite tail for every builtin input section (D1, D4, D7): the
+/// fixture's 20 Hz high-pass into 20 kHz low-pass at 48 kHz now reports `finite:10048` where it
+/// reported `infinite`. Exactly the eighteen tokens #964 introduced move -- the nine `node` rows
+/// and the nine `tail` rows of the `post-input-builtins` nodes -- and no other byte (diffed on the
+/// dumped canonical text against the follow-up pin `bf2dfd6c...ad7b10d8b3`, which the unchanged
+/// tree reproduces). The value is the preparation's computed bound, not a pinned figure: a change
+/// to the bound's derivation moves this digest, which is the point of pinning the plan.
+///
 /// The structural off-delay gate above still proves that no zero-length delay node or ring was
 /// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
 /// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
@@ -262,7 +284,7 @@ fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
 /// the numbered #805 and #807 specs preserve their subsequent state-size derivations, and the
 /// #964 spec the builtin-tail re-pin.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "957e97ca86f8af87ff8c0ea6adc35ec26b903046c73541613f6abb8ce7640e42";
+    "60cae21e7692ccbdf17440c7c84f15bd1bb29c3bb2369a0d1b52a5a56fc6c362";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]

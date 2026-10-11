@@ -112,6 +112,8 @@ damping state reach exact rest. Today it declares `Infinite`.
 ## Dependencies
 
 - *Carry each effect's tail and exact-rest bound in its prepared metadata* (#1377)
+- *Build the launch effect registry once per process and share it* (#1469): the shared registry
+  the tail derivations run behind, once per process
 - *Define how node tails compose through gain in the graph extent* (#1379)
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   one-pole helper

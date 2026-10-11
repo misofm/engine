@@ -1,0 +1,3 @@
+delay-suite exit 101 ['test result: FAILED. 0 passed; 1 failed']
+   FAIL every_ramped_word_stays_inside_its_endpoints assertion `left == right` failed: mix from 9.999942e-1 (0x3f7fff9f) to 1, sidechain connected false: left output
+g5 exit 0 []

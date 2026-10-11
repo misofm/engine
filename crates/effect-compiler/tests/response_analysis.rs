@@ -49,6 +49,9 @@ fn launch_registry_discovers_eq_response_without_effect_crate_import() {
             maximum_scratch_bytes: u64::MAX,
             maximum_automation_spans_per_block: u32::MAX,
         },
+        tail_bound: registry
+            .tail_bound(factory.descriptor().id, 48_000, EffectQuality::Normal)
+            .expect("a declared row"),
     };
     let prepared = response
         .prepare_response(

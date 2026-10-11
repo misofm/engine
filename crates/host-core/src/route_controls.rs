@@ -12,6 +12,11 @@
 //! mute with. Nothing here re-derives a coefficient or a domain rule, so a settled live send and a
 //! freshly prepared one carry the same bits.
 //!
+//! [`RouteControlProducer::record`] is the only builder of a [`RouteControlRecord`], and
+//! [`RouteControlProducer::push`] accepts nothing else (issue #1416). The record is host-core's
+//! own type, not a re-export of `graph::RouteControlRecord`, whose public constructor does not check
+//! the route domain; so a host cannot queue a target that `route_coefficients` would refuse.
+//!
 //! # No ack precedes a drop
 //!
 //! Every refusal is decided before the queue is touched: [`RouteControlProducer::record`] is pure,
@@ -22,7 +27,97 @@
 use graph::{GraphRouteControlProducer, ROUTE_RAMP_LENGTH_MAXIMUM, RouteGate};
 use graph_compiler::route_coefficients;
 
-pub use graph::{RouteControlRecord, RouteControlResources};
+pub use graph::RouteControlResources;
+
+/// One validated live send record, built only by [`RouteControlProducer::record`] (issue #1416).
+///
+/// It wraps `graph::RouteControlRecord`, whose public constructor checks the ramp length and the
+/// mute rule but not the route domain. This type has a private field and no public constructor, so
+/// every record a host can push has passed `route_coefficients`.
+///
+/// The fences below check three doors, each beside a plain twin that differs only in the one
+/// forbidden construct. A public non-generic associated `new` (or a re-export of graph's record,
+/// which has one) turns the first red; rustc reports E0599 today (no function `new`). The fences
+/// carry no code because stable rustdoc does not check one (issue #1422 D2):
+///
+/// ```compile_fail
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let _ = host_core::RouteControlRecord::new;
+///     let record: host_core::RouteControlRecord =
+///         producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap();
+///     producer.push(record)
+/// }
+/// ```
+///
+/// A host cannot wrap graph's record with the tuple constructor. rustc reports E0423 (the
+/// constructor is private):
+///
+/// ```compile_fail
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord = host_core::RouteControlRecord(inner);
+///     producer.push(record)
+/// }
+/// ```
+///
+/// Nor can it convert graph's record with `From`, `Into` or `TryFrom`: through the standard blanket
+/// impls, `try_into` exists if any of the three does. rustc reports E0277 (no
+/// `TryFrom<graph::RouteControlRecord>`):
+///
+/// ```compile_fail
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord = inner.try_into().ok().unwrap();
+///     producer.push(record)
+/// }
+/// ```
+///
+/// The twin of all three: it differs from fence 1 only by fence 1's extra `let _ = ..::new;`
+/// statement, and from fences 2 and 3 only in that the producer builds the record. So a renamed
+/// item in the shared code turns it red:
+///
+/// ```
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord =
+///         producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap();
+///     producer.push(record)
+/// }
+/// ```
+///
+/// No fence can see a generic public `new`; a public constructor, conversion or mutator under
+/// another name (such as `from_graph`, `DerefMut` or `AsMut` to graph's record, a `&mut self`
+/// setter, or a manual `Default` built from graph's `new`); or a named public field. Privacy and
+/// review hold those doors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteControlRecord(graph::RouteControlRecord);
+
+impl RouteControlRecord {
+    /// The coefficients `[ll, lr, rl, rr]` the ramp ends on.
+    #[must_use]
+    pub const fn target(&self) -> [f32; 4] {
+        self.0.target()
+    }
+    /// Whether the route is silenced once the ramp ends.
+    #[must_use]
+    pub const fn mute(&self) -> bool {
+        self.0.mute()
+    }
+    /// The ramp's length in samples; `0` is a step.
+    #[must_use]
+    pub const fn length(&self) -> u32 {
+        self.0.length()
+    }
+}
 
 /// Why a live send record was refused. Every refusal leaves the queue unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,7 +193,9 @@ impl RouteControlProducer {
         .silences();
         // A silencing gate's coefficients are the four `+0.0` the record requires, so with the
         // length in bounds `new` cannot refuse; the arm is the domain rule's, never a drop.
-        RouteControlRecord::new(target, silenced, length).ok_or(RouteControlError::Domain)
+        graph::RouteControlRecord::new(target, silenced, length)
+            .map(RouteControlRecord)
+            .ok_or(RouteControlError::Domain)
     }
 
     /// Pushes a record [`Self::record`] built. A full queue refuses with
@@ -108,7 +205,7 @@ impl RouteControlProducer {
             return Err(RouteControlError::Full);
         }
         self.producer
-            .try_push(record)
+            .try_push(record.0)
             .map_err(|_| RouteControlError::Full)
     }
 

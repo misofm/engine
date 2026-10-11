@@ -35,11 +35,11 @@ use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, ChannelSymmetryWitness,
     EffectBankProcessBlock, EffectControlLane, EffectControlRecord, EffectDescriptor,
-    EffectProcessBlock, EffectQuality, EffectTargetError, EffectTargetRequest,
+    EffectProcessBlock, EffectProgramKey, EffectQuality, EffectTargetError, EffectTargetRequest,
     InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedBankMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedEffect, PreparedEffectBank, PreparedEffectTarget, PreparedNativeEffectBank,
     PreparedPorts, PreparedSidechainPort, ProcessBlockError, ResetKind, ResponseAnalysisError,
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, StatePayloadError,
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, default_initial_values,
@@ -138,7 +138,7 @@ impl Fx {
     }
 }
 
-fn registry() -> effect_contract::NativeEffectRegistry {
+fn registry() -> &'static effect_contract::NativeEffectRegistry {
     launch_native_effect_registry().expect("launch effect registry")
 }
 
@@ -210,12 +210,16 @@ fn prepare_request<'a>(
             maximum_scratch_bytes: 1 << 28,
             maximum_automation_spans_per_block: QUEUE as u32,
         },
+        tail_bound: launch_native_effect_registry()
+            .expect("launch registry")
+            .tail_bound(descriptor.id, RATE, quality(descriptor))
+            .expect("a declared row"),
     })
 }
 
 /// Binds `fx` as a homogeneous bank at `width`, or `None` where this build cannot (decision D4:
 /// an x86-64-v3 build binds no four-lane EQ or compressor bank).
-fn bind(fx: Fx, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
+fn bind(fx: Fx, width: BankWidth) -> Option<PreparedEffectBank> {
     let factory = factory(fx.id());
     let values = initial_values(fx);
     let request =
@@ -253,9 +257,9 @@ impl SharedBank {
         self.lock().report.take()
     }
 
-    fn snapshot(&self, track: u32) -> Payload {
+    fn snapshot(&self, track: u32, key: &EffectProgramKey) -> Payload {
         let shared = self.lock();
-        let sizes = shared.bank.metadata().program_key.state_sizes;
+        let sizes = key.state_sizes;
         let mut common = vec![0_u8; sizes.common_bytes as usize];
         let mut left = vec![0_u8; sizes.left_bytes as usize];
         let mut right = vec![0_u8; sizes.right_bytes as usize];
@@ -270,9 +274,8 @@ impl SharedBank {
         (common, left, right)
     }
 
-    fn restore(&self, track: u32, payload: &Payload) {
+    fn restore(&self, track: u32, payload: &Payload, metadata: &EffectProgramKey) {
         let mut shared = self.lock();
-        let metadata = shared.bank.metadata().program_key;
         let (common, left, right) = payload;
         shared
             .bank
@@ -287,9 +290,6 @@ impl SharedBank {
 }
 
 impl PreparedNativeEffectBank for SharedBank {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.lock().bank.metadata()
-    }
     fn reset(&mut self, kind: ResetKind) {
         self.lock().bank.reset(kind);
     }
@@ -444,6 +444,8 @@ fn input(lanes: usize, block: u64, hostile: bool) -> Planes {
 struct Slot {
     fx: Fx,
     bank: SharedBank,
+    /// The bank's program key, from its bind result: the bank holds no metadata (issue #1461).
+    key: EffectProgramKey,
     producers: Vec<Producer<EffectControlRecord>>,
 }
 
@@ -460,8 +462,12 @@ impl Rig {
         let mut slots = Vec::new();
         let mut stages = Vec::new();
         for fx in fxs {
-            let bank = bind(*fx, width)?;
-            let metadata = bank.metadata().program_key;
+            let PreparedEffectBank {
+                processor: bank,
+                metadata,
+            } = bind(*fx, width)?;
+            let bound = metadata.clone();
+            let metadata = metadata.program_key;
             assert!(
                 metadata.automation_capacity as usize >= QUEUE,
                 "{}: the staging window must hold the whole queue",
@@ -486,7 +492,10 @@ impl Rig {
                 })
                 .collect();
             let stage = LiveControlEffectBankStage::new(
-                Box::new(shared.clone()),
+                PreparedEffectBank {
+                    processor: Box::new(shared.clone()),
+                    metadata: bound,
+                },
                 width,
                 FRAMES,
                 control,
@@ -498,6 +507,7 @@ impl Rig {
             slots.push(Slot {
                 fx: *fx,
                 bank: shared,
+                key: metadata,
                 producers,
             });
         }
@@ -1235,7 +1245,10 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
                 }
                 Write::Capture { slot } => {
                     let payloads = (0..lanes)
-                        .map(|lane| reference.slots[slot].bank.snapshot(lane as u32))
+                        .map(|lane| {
+                            let slot = &reference.slots[slot];
+                            slot.bank.snapshot(lane as u32, &slot.key)
+                        })
                         .collect::<Vec<_>>();
                     for (lane, (_, left, right)) in payloads.iter().enumerate() {
                         assert_eq!(
@@ -1250,7 +1263,8 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
                     let payloads = captured.get(&slot).expect("captured before restore");
                     for rig in [&collapsing, &reference] {
                         for (lane, payload) in payloads.iter().enumerate() {
-                            rig.slots[slot].bank.restore(lane as u32, payload);
+                            let slot = &rig.slots[slot];
+                            slot.bank.restore(lane as u32, payload, &slot.key);
                         }
                     }
                 }
@@ -1330,8 +1344,9 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
             // frozen by contract, so on a collapsed block the claim is that the dual reference's
             // two channels agree and its left is ours.
             for lane in 0..lanes {
-                let (common, left, right) = ours.bank.snapshot(lane as u32);
-                let (dual_common, dual_left, dual_right) = theirs.bank.snapshot(lane as u32);
+                let (common, left, right) = ours.bank.snapshot(lane as u32, &ours.key);
+                let (dual_common, dual_left, dual_right) =
+                    theirs.bank.snapshot(lane as u32, &theirs.key);
                 let label = format!(
                     "{}: {width:?}: block {block} slot {slot} ({}) lane {lane}",
                     scenario.name,
@@ -1608,7 +1623,7 @@ fn every_collapse_capable_launch_effect_is_one_of_these() {
         }) else {
             continue;
         };
-        if bank.supports_mono_collapse() {
+        if bank.processor.supports_mono_collapse() {
             capable.push(descriptor.id.as_str().to_owned());
             assert!(
                 descriptor
@@ -1635,22 +1650,22 @@ fn every_collapse_capable_launch_effect_is_one_of_these() {
 /// A prepared effect under the twin test: a bank at the native width, or the scalar instance a
 /// session renders per node where the effect binds no bank here.
 enum Subject {
-    Bank(Box<dyn PreparedNativeEffectBank>, BankWidth),
-    Scalar(Box<dyn PreparedNativeEffect>),
+    Bank(PreparedEffectBank),
+    Scalar(PreparedEffect),
 }
 
 impl Subject {
     fn lanes(&self) -> usize {
         match self {
-            Self::Bank(_, width) => width.lanes() as usize,
+            Self::Bank(bank) => bank.metadata.width.lanes() as usize,
             Self::Scalar(_) => 1,
         }
     }
 
     fn sizes(&self) -> StatePayloadSizes {
         match self {
-            Self::Bank(bank, _) => bank.metadata().program_key.state_sizes,
-            Self::Scalar(effect) => effect.metadata().state_sizes,
+            Self::Bank(bank) => bank.metadata.program_key.state_sizes,
+            Self::Scalar(effect) => effect.metadata.state_sizes,
         }
     }
 
@@ -1660,7 +1675,8 @@ impl Subject {
         let planes = input(lanes, block, false);
         let first_sample = block * u64::from(FRAMES);
         match self {
-            Self::Bank(bank, width) => {
+            Self::Bank(bank) => {
+                let width = bank.metadata.width;
                 let mut left = vec![0.0_f32; FRAMES as usize * lanes];
                 for (lane, plane) in planes.left.iter().enumerate() {
                     for (frame, sample) in plane.iter().enumerate() {
@@ -1670,13 +1686,13 @@ impl Subject {
                 let mut right = left.clone();
                 let mut offsets = vec![spans.len() as u32; lanes + 1];
                 offsets[0] = 0;
-                let report = bank.process_bank(
+                let report = bank.processor.process_bank(
                     EffectBankProcessBlock::new(
                         &mut left,
                         &mut right,
                         None,
                         FRAMES,
-                        *width,
+                        width,
                         first_sample,
                         spans,
                         &offsets,
@@ -1690,6 +1706,7 @@ impl Subject {
                 let mut left = planes.left.into_iter().next().expect("scalar left plane");
                 let mut right = planes.right.into_iter().next().expect("scalar right plane");
                 effect
+                    .processor
                     .process(
                         EffectProcessBlock::new(
                             &mut left,
@@ -1716,8 +1733,10 @@ impl Subject {
                 let output = StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
                     .expect("payload sizes");
                 match self {
-                    Self::Bank(bank, _) => bank.snapshot_track_state_payload(lane as u32, output),
-                    Self::Scalar(effect) => effect.snapshot_state_payload(output),
+                    Self::Bank(bank) => bank
+                        .processor
+                        .snapshot_track_state_payload(lane as u32, output),
+                    Self::Scalar(effect) => effect.processor.snapshot_state_payload(output),
                 }
                 .expect("snapshot");
                 left == right
@@ -1810,12 +1829,12 @@ fn every_launch_effect_applies_a_twin_pair_with_channel_symmetric_validity() {
                 requests: &requests,
                 active_mask: width.full_mask(),
             }) {
-                Ok(Some(bank)) => Subject::Bank(bank, width),
+                Ok(Some(bank)) => Subject::Bank(bank),
                 _ => Subject::Scalar(factory.prepare(request).expect("scalar prepare")),
             };
             let kind = match subject {
-                Subject::Bank(ref bank, _) => {
-                    if bank.supports_mono_collapse() {
+                Subject::Bank(ref bank) => {
+                    if bank.processor.supports_mono_collapse() {
                         "bank, collapse-capable"
                     } else {
                         "bank"
@@ -1958,7 +1977,7 @@ fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
         let Some(request) = prepare_request(descriptor, &values, mode) else {
             continue;
         };
-        let scalar = factory.prepare(request).expect("scalar prepare").metadata();
+        let scalar = factory.prepare(request).expect("scalar prepare").metadata;
         let capacity = scalar.automation_capacity as usize;
         assert!(
             capacity > 0,
@@ -1985,7 +2004,7 @@ fn every_launch_effect_refuses_a_staging_window_that_is_not_its_capacity() {
             active_mask: width.full_mask(),
         }) {
             Ok(Some(bank)) => {
-                let metadata = bank.metadata();
+                let metadata = bank.metadata;
                 let capacity = metadata.program_key.automation_capacity as usize;
                 assert_eq!(
                     EffectBankProcessBlock::check_automation_window(&window(capacity), &metadata),

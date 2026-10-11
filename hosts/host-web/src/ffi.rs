@@ -10,9 +10,37 @@
 //! `abort` -- into the render export's call graph. `process()` in the worklet converts a throw from
 //! the render export into sticky `RESULT_INTERNAL` and positive-zero output; that is where trap
 //! containment lives, in JavaScript, where it is actually observable.
+//!
+//! # Render-locked exports
+//!
+//! "Boot" is the engine worklet's whole construction path through its `initialize`
+//! (`web/miso-engine-v1-audio-worklet.js`) up to the `miso.ready.v1` post, not only the `boot`
+//! export. Issue #1333 D2 and issue #1488: every export that either AudioWorklet calls on its
+//! render thread after boot wraps its body in `render_locked`, and
+//! `miso_engine_web_v1_render_allocation_count` reports the allocator calls made inside those
+//! windows. "Either AudioWorklet" is the engine worklet (`process()` and its port handlers) and the
+//! SDK's PCM-feed worklet, whose `process()` drains its shared rings before it renders. The set:
+//!
+//! - the three exports the static gate checks: `render`, `command_submit`, `meter_poll`;
+//! - the staging reads: `observation_read`, `track_response_capture`, `spectrum_read`,
+//!   `spectrum_stream_read`;
+//! - the pointer, capacity and byte-count accessors of the three stagings that the worklet calls
+//!   after boot;
+//! - source control: `source_submit` and `source_seek` (the feed's `process()` and its attach
+//!   node's `prepare-seek` handler, and the engine worklet's source and seek handlers);
+//! - live control: `prepared_command_submit`, `meter_lease`, `eq_target_config_copy`,
+//!   `eq_target_config_ptr` and `input_filters_config_copy`;
+//! - the spectrum observer: `spectrum_arm`, `spectrum_cancel`, `spectrum_stream_start`,
+//!   `spectrum_stream_stop`, `spectrum_select` and `spectrum_stream_select` (issue #1492).
+//!
+//! Two post-boot calls are named exceptions: `dispose`, teardown, which frees the host by design
+//! and is also the boot-failure path; and `render_allocation_count`, the reader of the count. Boot
+//! is outside the rule. The `render_lock` module header names the exports it calls, wrapped or
+//! not, among them the 28 unwrapped ones it calls after the `boot` export returns a handle.
 
 #![allow(unsafe_code)]
 
+use crate::render_lock::{render_allocation_count, render_locked};
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,
@@ -44,7 +72,7 @@ use crate::{
 };
 use core::{
     cell::{Cell, RefCell},
-    mem::{MaybeUninit, size_of},
+    mem::{ManuallyDrop, MaybeUninit, needs_drop, size_of},
     ptr, slice,
 };
 use effect_contract::{EffectQuality, LinkMode, ParameterChannel};
@@ -58,8 +86,8 @@ use host_core::{
     ResponseSnapshotQueryError, SpectrumAnalysisHistory, SpectrumAnalyzer, SpectrumCadence,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest, SpectrumCaptureRequest,
     SpectrumChannels, SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop,
-    SpectrumSmoothingConfig, SpectrumTarget, SpectrumWindow, prepare_response_preview,
-    query_response_snapshot_into,
+    SpectrumSmoothingConfig, SpectrumTarget, SpectrumTargetRef, SpectrumWindow,
+    prepare_response_preview, query_response_snapshot_into,
 };
 
 struct LiveHost {
@@ -67,9 +95,12 @@ struct LiveHost {
     host: Box<AudioWorkletEngineHost>,
 }
 
+/// Boot staging is a const-initialised, destructor-free thread local (issue #1333 D5): `options`
+/// is inline, and `document` is freed only by assignment, at a staged replacement or after
+/// dispose, never by a thread-local destructor.
 struct BootStaging {
-    options: Box<WebBootOptions>,
-    document: Vec<u8>,
+    options: WebBootOptions,
+    document: ManuallyDrop<Vec<u8>>,
     result: u32,
     diagnostic_bytes: u32,
     document_valid: bool,
@@ -472,11 +503,27 @@ impl ResponseStaging {
     }
 }
 
+/// The all-zero boot options, which select engine defaults; `WebBootOptions::default()` in a
+/// `const` context.
+const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
+    struct_size: 0,
+    abi_version: 0,
+    require_sample_rate_hz: 0,
+    require_quantum_frames: 0,
+    source_ring_frames: 0,
+    reserved0: 0,
+    maximum_memory_bytes: 0,
+    live_control_command_queue_records: 0,
+    live_control_meter_blocks: 0,
+    live_control_observation_taps: 0,
+    live_control_master_track_plus_one: 0,
+};
+
 impl BootStaging {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
-            options: Box::new(WebBootOptions::default()),
-            document: Vec::new(),
+            options: ZERO_BOOT_OPTIONS,
+            document: ManuallyDrop::new(Vec::new()),
             result: RESULT_OK,
             diagnostic_bytes: 0,
             document_valid: false,
@@ -492,24 +539,90 @@ impl BootStaging {
     }
 
     fn reset_after_dispose(&mut self) {
-        *self.options = WebBootOptions::default();
-        self.document = Vec::new();
+        self.options = WebBootOptions::default();
+        // Assignment through `DerefMut` frees the staged bytes; the `ManuallyDrop` only keeps a
+        // thread-local destructor from ever being registered for them.
+        *self.document = Vec::new();
         self.result = RESULT_OK;
         self.diagnostic_bytes = 0;
         self.document_valid = false;
     }
 }
 
+// Issue #1333 D5: every thread local here is const-initialised and needs no drop. With `+atomics`
+// std registers a destructor, lazily and by allocating, for a thread local that needs drop, and a
+// lazily initialised one allocates on first touch; either would put an allocation inside the
+// worklet's render-locked window. `LIVE_HOST` is dropped explicitly by dispose's `take()`, and
+// the stagings live for their instance's whole life, as lazily initialised statics always did.
+type LiveHostSlot = RefCell<ManuallyDrop<Option<LiveHost>>>;
+type StagingSlot<T> = Cell<Option<&'static RefCell<T>>>;
+
 thread_local! {
-    static LIVE_HOST: RefCell<Option<LiveHost>> = const { RefCell::new(None) };
+    static LIVE_HOST: LiveHostSlot = const { RefCell::new(ManuallyDrop::new(None)) };
     // Zero is the never-issued sentinel. `next_handle` preserves the established nonzero
     // handle contract when the first owner is published, while cold invalid lookups can avoid
-    // constructing the allocating observation staging TLS entirely.
+    // constructing the allocating observation staging entirely.
     static NEXT_HANDLE: Cell<u32> = const { Cell::new(0) };
-    static BOOT_STAGING: RefCell<BootStaging> = RefCell::new(BootStaging::new());
-    static RESPONSE_STAGING: RefCell<ResponseStaging> = RefCell::new(ResponseStaging::new());
-    static SPECTRUM_STAGING: RefCell<SpectrumStaging> = RefCell::new(SpectrumStaging::new());
-    static OBSERVATION_STAGING: RefCell<ObservationStaging> = RefCell::new(ObservationStaging::new());
+    static BOOT_STAGING: RefCell<BootStaging> = const { RefCell::new(BootStaging::new()) };
+    static RESPONSE_STAGING: StagingSlot<ResponseStaging> = const { Cell::new(None) };
+    static SPECTRUM_STAGING: StagingSlot<SpectrumStaging> = const { Cell::new(None) };
+    static OBSERVATION_STAGING: StagingSlot<ObservationStaging> = const { Cell::new(None) };
+}
+
+const _: () = assert!(!needs_drop::<LiveHostSlot>());
+const _: () = assert!(!needs_drop::<RefCell<BootStaging>>());
+const _: () = assert!(!needs_drop::<StagingSlot<ResponseStaging>>());
+const _: () = assert!(!needs_drop::<StagingSlot<SpectrumStaging>>());
+const _: () = assert!(!needs_drop::<StagingSlot<ObservationStaging>>());
+
+/// The staging in `slot`, allocated once on first touch and never freed.
+fn leaked_staging<T: 'static>(
+    slot: &'static std::thread::LocalKey<StagingSlot<T>>,
+    new: fn() -> T,
+) -> &'static RefCell<T> {
+    slot.with(|slot| {
+        if let Some(staging) = slot.get() {
+            return staging;
+        }
+        let staging: &'static RefCell<T> = Box::leak(Box::new(RefCell::new(new())));
+        slot.set(Some(staging));
+        staging
+    })
+}
+
+fn response_staging() -> &'static RefCell<ResponseStaging> {
+    leaked_staging(&RESPONSE_STAGING, ResponseStaging::new)
+}
+
+fn spectrum_staging() -> &'static RefCell<SpectrumStaging> {
+    leaked_staging(&SPECTRUM_STAGING, SpectrumStaging::new)
+}
+
+fn observation_staging() -> &'static RefCell<ObservationStaging> {
+    leaked_staging(&OBSERVATION_STAGING, ObservationStaging::new)
+}
+
+fn with_response_staging<R>(operation: impl FnOnce(&RefCell<ResponseStaging>) -> R) -> R {
+    operation(response_staging())
+}
+
+fn with_spectrum_staging<R>(operation: impl FnOnce(&RefCell<SpectrumStaging>) -> R) -> R {
+    operation(spectrum_staging())
+}
+
+fn with_observation_staging<R>(operation: impl FnOnce(&RefCell<ObservationStaging>) -> R) -> R {
+    operation(observation_staging())
+}
+
+/// Allocate all three stagings once a boot has published its handle. `boot_staged` calls this
+/// on its one success path, which both boot exports share, so a booted instance never allocates
+/// a staging later, inside or outside a render-locked window (issue #1333 D5). A refused boot
+/// allocates none of them, so a typed refusal stays within its memory bound, and an instance that
+/// never boots allocates each on first touch, outside any window.
+fn reserve_stagings() {
+    let _ = response_staging();
+    let _ = spectrum_staging();
+    let _ = observation_staging();
 }
 
 #[cfg(test)]
@@ -819,17 +932,29 @@ fn spectrum_channels(raw: u32) -> Result<SpectrumChannels, u32> {
     }
 }
 
-fn spectrum_target(raw: u32, id: &str) -> Result<SpectrumTarget, u32> {
+/// Validate a raw target kind and identity and borrow them as a target. Allocates nothing, so the
+/// select path calls it on the browser's audio thread.
+fn spectrum_target_ref(raw: u32, id: &str) -> Result<SpectrumTargetRef<'_>, u32> {
     if id.is_empty() || id.len() > SPECTRUM_MAXIMUM_ID_BYTES {
         return Err(RESULT_INVALID_ARGUMENT);
     }
-    let id: Box<str> = id.into();
     match raw {
-        SPECTRUM_TARGET_TRACK_POST_INPUT => Ok(SpectrumTarget::TrackPostInputBuiltins(id)),
-        SPECTRUM_TARGET_TRACK_POST_PAN => Ok(SpectrumTarget::TrackPostMatrix(id)),
-        SPECTRUM_TARGET_OUTPUT => Ok(SpectrumTarget::Output(id)),
+        SPECTRUM_TARGET_TRACK_POST_INPUT => Ok(SpectrumTargetRef::TrackPostInputBuiltins(id)),
+        SPECTRUM_TARGET_TRACK_POST_PAN => Ok(SpectrumTargetRef::TrackPostMatrix(id)),
+        SPECTRUM_TARGET_OUTPUT => Ok(SpectrumTargetRef::Output(id)),
         _ => Err(RESULT_INVALID_ARGUMENT),
     }
+}
+
+/// Build an owned target for preparation, before boot.
+fn spectrum_target(raw: u32, id: &str) -> Result<SpectrumTarget, u32> {
+    Ok(match spectrum_target_ref(raw, id)? {
+        SpectrumTargetRef::TrackPostInputBuiltins(id) => {
+            SpectrumTarget::TrackPostInputBuiltins(id.into())
+        }
+        SpectrumTargetRef::TrackPostMatrix(id) => SpectrumTarget::TrackPostMatrix(id.into()),
+        SpectrumTargetRef::Output(id) => SpectrumTarget::Output(id.into()),
+    })
 }
 
 fn spectrum_configured(staging: &SpectrumStaging) -> bool {
@@ -2280,7 +2405,7 @@ fn run_response_query(staging: &mut ResponseStaging) -> u32 {
 /// Return a writable request header for one analysis-only response query.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_request_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2300,7 +2425,7 @@ pub extern "C" fn miso_engine_web_v1_response_request_bytes() -> u32 {
 /// Return a writable effect-ID staging address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_effect_id_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2317,7 +2442,7 @@ pub extern "C" fn miso_engine_web_v1_response_effect_id_capacity() -> u32 {
 /// Return a writable numeric-override staging address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_parameter_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2340,7 +2465,7 @@ pub extern "C" fn miso_engine_web_v1_response_parameter_capacity() -> u32 {
 /// Prepare and query one explicit response without booting the audio host.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_query() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -2351,7 +2476,7 @@ pub extern "C" fn miso_engine_web_v1_response_query() -> u32 {
 /// Return the result-header-plus-vectors address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_result_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(staging) = slot.try_borrow() else {
             return 0;
         };
@@ -2362,7 +2487,7 @@ pub extern "C" fn miso_engine_web_v1_response_result_ptr() -> u32 {
 /// Return the current result-header-plus-vectors byte length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_result_bytes() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         slot.try_borrow()
             .ok()
             .and_then(|staging| u32::try_from(staging.result.len()).ok())
@@ -2373,7 +2498,7 @@ pub extern "C" fn miso_engine_web_v1_response_result_bytes() -> u32 {
 /// Close and release the one analysis-only response workspace.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_response_close() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -2385,7 +2510,7 @@ pub extern "C" fn miso_engine_web_v1_response_close() -> u32 {
 /// Return the writable pre-boot spectrum request header.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_request_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2409,7 +2534,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_request_bytes() -> u32 {
 /// Return the writable pre-boot spectrum collection request header.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_collection_request_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2435,7 +2560,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_collection_request_bytes() -> u32 
 /// Return writable staging for the caller-sized spectrum collection entries.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_collection_entry_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2475,7 +2600,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_collection_entry_ptr() -> u32 {
 /// Return the number of collection entries staged by the caller.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_collection_entry_capacity() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(staging) = slot.try_borrow() else {
             return 0;
         };
@@ -2492,7 +2617,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_collection_entry_bytes() -> u32 {
 /// Return writable staging for the collection's packed target identities.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_collection_target_ids_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2538,7 +2663,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_collection_target_ids_ptr() -> u32
 /// Return the packed collection target-identity staging capacity in bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_collection_target_ids_capacity() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(staging) = slot.try_borrow() else {
             return 0;
         };
@@ -2549,50 +2674,56 @@ pub extern "C" fn miso_engine_web_v1_spectrum_collection_target_ids_capacity() -
 /// Return writable staging for the selected spectrum target identity.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_target_id_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        pointer_u32(staging.target_id.as_mut_ptr())
+    render_locked(|| {
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            pointer_u32(staging.target_id.as_mut_ptr())
+        })
     })
 }
 
 /// Return the maximum spectrum target identity byte length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_target_id_capacity() -> u32 {
-    SPECTRUM_MAXIMUM_ID_BYTES as u32
+    render_locked(|| SPECTRUM_MAXIMUM_ID_BYTES as u32)
 }
 
 /// Return the fixed raw spectrum-window staging address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_capture_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        if staging.capture.is_none()
-            && spectrum_configured(&staging)
-            && staging.configure_capture().is_err()
-        {
-            return 0;
-        }
-        staging
-            .capture
-            .as_ref()
-            .map_or(0, |capture| pointer_u32(capture.as_ptr()))
+    render_locked(|| {
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            if staging.capture.is_none()
+                && spectrum_configured(&staging)
+                && staging.configure_capture().is_err()
+            {
+                return 0;
+            }
+            staging
+                .capture
+                .as_ref()
+                .map_or(0, |capture| pointer_u32(capture.as_ptr()))
+        })
     })
 }
 
 /// Return the maximum raw spectrum-window staging capacity.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_capture_capacity() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
-        slot.try_borrow().ok().map_or(0, |staging| {
-            staging
-                .capture
-                .as_ref()
-                .and_then(|capture| u32::try_from(capture.len()).ok())
-                .unwrap_or(0)
+    render_locked(|| {
+        with_spectrum_staging(|slot| {
+            slot.try_borrow().ok().map_or(0, |staging| {
+                staging
+                    .capture
+                    .as_ref()
+                    .and_then(|capture| u32::try_from(capture.len()).ok())
+                    .unwrap_or(0)
+            })
         })
     })
 }
@@ -2600,18 +2731,20 @@ pub extern "C" fn miso_engine_web_v1_spectrum_capture_capacity() -> u32 {
 /// Return the byte length of the most recent raw spectrum window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_capture_bytes() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .and_then(|staging| u32::try_from(staging.capture_len).ok())
-            .unwrap_or(0)
+    render_locked(|| {
+        with_spectrum_staging(|slot| {
+            slot.try_borrow()
+                .ok()
+                .and_then(|staging| u32::try_from(staging.capture_len).ok())
+                .unwrap_or(0)
+        })
     })
 }
 
 /// Set the byte length of raw spectrum capture bytes copied into the fixed staging area.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_capture_set_bytes(bytes: u32) -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -2638,7 +2771,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_capture_set_bytes(bytes: u32) -> u
 /// Analyze one staged raw spectrum window using the native off-render analyzer.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_analysis() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -2649,7 +2782,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_analysis() -> u32 {
 /// Release the one-shot spectrum staging payload lengths.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_close() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -2662,7 +2795,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_close() -> u32 {
 /// Return the fixed analyzed spectrum-result staging address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_result_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -2682,7 +2815,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_result_ptr() -> u32 {
 /// Return the byte length of the most recent analyzed spectrum result.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_result_bytes() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         slot.try_borrow()
             .ok()
             .and_then(|staging| u32::try_from(staging.result_len).ok())
@@ -2693,11 +2826,13 @@ pub extern "C" fn miso_engine_web_v1_spectrum_result_bytes() -> u32 {
 /// Arm the prepared spectrum observer for its next complete window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_arm(handle: u32) -> u32 {
-    with_host_mut(
-        handle,
-        RESULT_INVALID_ARGUMENT,
-        AudioWorkletEngineHost::arm_spectrum,
-    )
+    render_locked(|| {
+        with_host_mut(
+            handle,
+            RESULT_INVALID_ARGUMENT,
+            AudioWorkletEngineHost::arm_spectrum,
+        )
+    })
 }
 
 fn select_spectrum_internal(handle: u32, target: u32, channels: u32, target_id_bytes: u32) -> u32 {
@@ -2714,7 +2849,7 @@ fn select_spectrum_with_smoothing(
     if let Err(result) = verify_live_host(handle) {
         return result;
     }
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -2729,7 +2864,7 @@ fn select_spectrum_with_smoothing(
             Ok(value) => value,
             Err(_) => return RESULT_INVALID_ARGUMENT,
         };
-        let target = match spectrum_target(target, id) {
+        let target = match spectrum_target_ref(target, id) {
             Ok(value) => value,
             Err(result) => return result,
         };
@@ -2739,7 +2874,7 @@ fn select_spectrum_with_smoothing(
         };
         let smoothing_changed = smoothing.is_some() && staging.stream_smoothing != smoothing;
         let selection_would_change = match with_host(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
-            host.spectrum_selection_would_change(&target, channels)
+            host.spectrum_selection_would_change(target, channels)
         }) {
             Ok(value) => value,
             Err(result) => return result,
@@ -2756,7 +2891,7 @@ fn select_spectrum_with_smoothing(
         let selection_epoch_before =
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
         let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            host.select_spectrum(&target, channels)
+            host.select_spectrum(target, channels)
         });
         let selection_epoch_after =
             with_host(handle, 0, AudioWorkletEngineHost::spectrum_selection_epoch);
@@ -2836,7 +2971,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_select(
     channels: u32,
     target_id_bytes: u32,
 ) -> u32 {
-    select_spectrum_internal(handle, target, channels, target_id_bytes)
+    render_locked(|| select_spectrum_internal(handle, target, channels, target_id_bytes))
 }
 
 /// Atomically select one prepared stream entry and commit its smoothing configuration.
@@ -2852,14 +2987,16 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_select(
     target_id_bytes: u32,
     smoothing_ms: f64,
 ) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
-        Ok(value) => value,
-        Err(_) => return RESULT_INVALID_ARGUMENT,
-    };
-    select_spectrum_with_smoothing(handle, target, channels, target_id_bytes, Some(smoothing))
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
+        }
+        let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
+            Ok(value) => value,
+            Err(_) => return RESULT_INVALID_ARGUMENT,
+        };
+        select_spectrum_with_smoothing(handle, target, channels, target_id_bytes, Some(smoothing))
+    })
 }
 
 /// Return the monotonic identity of the currently committed collection selection.
@@ -2871,40 +3008,42 @@ pub extern "C" fn miso_engine_web_v1_spectrum_selection_epoch(handle: u32) -> u6
 /// Read a completed spectrum window into fixed staging; returns backpressure while pending.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        staging.capture_len = 0;
-        let requested = match spectrum_channels(channels) {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
-        let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
-        let sample_rate_hz = with_host(handle, 0, |host| host.status().sample_rate_hz);
-        if sample_rate_hz == 0 {
-            return RESULT_INVALID_ARGUMENT;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        let available = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
-        if available == 0 || (channels & !available) != 0 {
-            return RESULT_INVALID_ARGUMENT;
-        }
-        let read = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
-            host.read_spectrum()
-        });
-        let (mut window, token) = match read {
-            Ok(Some(value)) => value,
-            Ok(None) => return RESULT_BACKPRESSURE,
-            Err(result) => return result,
-        };
-        if (requested as u32) & !(window.channels as u32) != 0 {
-            return RESULT_INVALID_ARGUMENT;
-        }
-        window.channels = requested;
-        write_spectrum_window(&mut staging, &window, target, sample_rate_hz, token)
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            staging.capture_len = 0;
+            let requested = match spectrum_channels(channels) {
+                Ok(value) => value,
+                Err(result) => return result,
+            };
+            let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+            let sample_rate_hz = with_host(handle, 0, |host| host.status().sample_rate_hz);
+            if sample_rate_hz == 0 {
+                return RESULT_INVALID_ARGUMENT;
+            }
+            let available = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+            if available == 0 || (channels & !available) != 0 {
+                return RESULT_INVALID_ARGUMENT;
+            }
+            let read = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
+                host.read_spectrum()
+            });
+            let (mut window, token) = match read {
+                Ok(Some(value)) => value,
+                Ok(None) => return RESULT_BACKPRESSURE,
+                Err(result) => return result,
+            };
+            if (requested as u32) & !(window.channels as u32) != 0 {
+                return RESULT_INVALID_ARGUMENT;
+            }
+            window.channels = requested;
+            write_spectrum_window(&mut staging, &window, target, sample_rate_hz, token)
+        })
     })
 }
 
@@ -2914,237 +3053,241 @@ pub extern "C" fn miso_engine_web_v1_spectrum_read(handle: u32, channels: u32) -
 /// duration is validated before the prepared capture changes state.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_start(handle: u32, smoothing_ms: f64) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
-        Ok(value) => value,
-        Err(_) => return RESULT_INVALID_ARGUMENT,
-    };
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        // An existing history is reset at this control boundary. The analysis owner initializes a
-        // missing history when it first evaluates a window, so stream start itself never creates a
-        // second host-side analyzer allocation.
-        if staging
-            .stream_history
-            .as_ref()
-            .is_some_and(|history| history.analysis_epoch() == u64::MAX)
-        {
-            staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
-            return RESULT_REFUSED_BUDGET;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        let cadence = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
-            host.start_spectrum_stream()
-        });
-        let cadence = match cadence {
+        let smoothing = match SpectrumSmoothingConfig::new(smoothing_ms) {
             Ok(value) => value,
-            Err(result) => {
-                staging.stream_metadata.result = result;
-                return result;
+            Err(_) => return RESULT_INVALID_ARGUMENT,
+        };
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            // An existing history is reset at this control boundary. The analysis owner
+            // initializes a missing history when it first evaluates a window, so stream start
+            // itself never creates a second host-side analyzer allocation.
+            if staging
+                .stream_history
+                .as_ref()
+                .is_some_and(|history| history.analysis_epoch() == u64::MAX)
+            {
+                staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
+                return RESULT_REFUSED_BUDGET;
             }
-        };
-        if staging.reset_stream_analysis().is_err() {
-            let _ = with_host_mut(
-                handle,
-                RESULT_INTERNAL,
-                AudioWorkletEngineHost::stop_spectrum_stream,
+            let cadence = with_host_mut(handle, Err(RESULT_INVALID_ARGUMENT), |host| {
+                host.start_spectrum_stream()
+            });
+            let cadence = match cadence {
+                Ok(value) => value,
+                Err(result) => {
+                    staging.stream_metadata.result = result;
+                    return result;
+                }
+            };
+            if staging.reset_stream_analysis().is_err() {
+                let _ = with_host_mut(
+                    handle,
+                    RESULT_INTERNAL,
+                    AudioWorkletEngineHost::stop_spectrum_stream,
+                );
+                staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
+                return RESULT_REFUSED_BUDGET;
+            }
+            let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+            let channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+            let epoch = with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
+            staging.stream_active = true;
+            staging.stream_cadence = Some(cadence);
+            staging.stream_smoothing = Some(smoothing);
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            staging.stream_window = None;
+            let analysis_epoch = staging
+                .stream_history
+                .as_ref()
+                .map_or(0, |history| history.analysis_epoch());
+            staging.stream_metadata = WebSpectrumStreamMetadata::default();
+            stream_metadata_profile(
+                &mut staging,
+                target,
+                channels,
+                cadence,
+                SPECTRUM_STREAM_STATUS_WARMING,
+                RESULT_OK,
             );
-            staging.stream_metadata.result = RESULT_REFUSED_BUDGET;
-            return RESULT_REFUSED_BUDGET;
-        }
-        let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
-        let channels = with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
-        let epoch = with_host(handle, 0, |host| host.spectrum_stream_epoch().unwrap_or(0));
-        staging.stream_active = true;
-        staging.stream_cadence = Some(cadence);
-        staging.stream_smoothing = Some(smoothing);
-        staging.capture_len = 0;
-        staging.result_len = 0;
-        staging.stream_window = None;
-        let analysis_epoch = staging
-            .stream_history
-            .as_ref()
-            .map_or(0, |history| history.analysis_epoch());
-        staging.stream_metadata = WebSpectrumStreamMetadata::default();
-        stream_metadata_profile(
-            &mut staging,
-            target,
-            channels,
-            cadence,
-            SPECTRUM_STREAM_STATUS_WARMING,
-            RESULT_OK,
-        );
-        staging.stream_metadata = WebSpectrumStreamMetadata {
-            struct_size: SPECTRUM_STREAM_METADATA_BYTES,
-            abi_version: ABI_VERSION,
-            result: RESULT_OK,
-            capture_epoch: epoch,
-            analysis_epoch,
-            smoothing_ms: smoothing.smoothing_ms(),
-            ..staging.stream_metadata
-        };
-        RESULT_OK
+            staging.stream_metadata = WebSpectrumStreamMetadata {
+                struct_size: SPECTRUM_STREAM_METADATA_BYTES,
+                abi_version: ABI_VERSION,
+                result: RESULT_OK,
+                capture_epoch: epoch,
+                analysis_epoch,
+                smoothing_ms: smoothing.smoothing_ms(),
+                ..staging.stream_metadata
+            };
+            RESULT_OK
+        })
     })
 }
 
 /// Read one independently scheduled stream window into the existing fixed capture staging.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_read(handle: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        staging.capture_len = 0;
-        staging.result_len = 0;
-        // A collection selection can occur between reads. Read the host's committed entry on
-        // every path, including warming/pending, so metadata cannot retain the previous target.
-        staging.stream_metadata.target =
-            with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
-        staging.stream_metadata.channels =
-            with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
-        let read = with_host_mut(
-            handle,
-            Err(SpectrumContinuousReadError::NotActive),
-            |host| host.read_spectrum_stream(),
-        );
-        let window = match read {
-            Ok(window) => window,
-            Err(error) => {
-                let (status, result, epoch, drops) = match error {
-                    SpectrumContinuousReadError::NotActive => (
-                        SPECTRUM_STREAM_STATUS_INACTIVE,
-                        RESULT_WRONG_STATE,
-                        None,
-                        None,
-                    ),
-                    SpectrumContinuousReadError::Warming => (
-                        SPECTRUM_STREAM_STATUS_WARMING,
-                        RESULT_BACKPRESSURE,
-                        None,
-                        None,
-                    ),
-                    SpectrumContinuousReadError::Pending => (
-                        SPECTRUM_STREAM_STATUS_PENDING,
-                        RESULT_BACKPRESSURE,
-                        None,
-                        None,
-                    ),
-                    SpectrumContinuousReadError::Gap {
-                        stream_epoch,
-                        dropped_captures,
-                    } => (
-                        SPECTRUM_STREAM_STATUS_GAP,
-                        RESULT_OK,
-                        Some(stream_epoch),
-                        Some(dropped_captures),
-                    ),
-                    SpectrumContinuousReadError::Failed { stream_epoch } => (
-                        SPECTRUM_STREAM_STATUS_FAILED,
-                        RESULT_RENDER_REJECTED,
-                        Some(stream_epoch),
-                        None,
-                    ),
-                };
-                if matches!(
-                    error,
-                    SpectrumContinuousReadError::Gap { .. }
-                        | SpectrumContinuousReadError::Failed { .. }
-                ) && staging.reset_stream_analysis().is_err()
-                {
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
+        }
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            // A collection selection can occur between reads. Read the host's committed entry on
+            // every path, including warming/pending, so metadata cannot retain the previous target.
+            staging.stream_metadata.target =
+                with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+            staging.stream_metadata.channels =
+                with_host(handle, 0, AudioWorkletEngineHost::spectrum_channels);
+            let read = with_host_mut(
+                handle,
+                Err(SpectrumContinuousReadError::NotActive),
+                |host| host.read_spectrum_stream(),
+            );
+            let window = match read {
+                Ok(window) => window,
+                Err(error) => {
+                    let (status, result, epoch, drops) = match error {
+                        SpectrumContinuousReadError::NotActive => (
+                            SPECTRUM_STREAM_STATUS_INACTIVE,
+                            RESULT_WRONG_STATE,
+                            None,
+                            None,
+                        ),
+                        SpectrumContinuousReadError::Warming => (
+                            SPECTRUM_STREAM_STATUS_WARMING,
+                            RESULT_BACKPRESSURE,
+                            None,
+                            None,
+                        ),
+                        SpectrumContinuousReadError::Pending => (
+                            SPECTRUM_STREAM_STATUS_PENDING,
+                            RESULT_BACKPRESSURE,
+                            None,
+                            None,
+                        ),
+                        SpectrumContinuousReadError::Gap {
+                            stream_epoch,
+                            dropped_captures,
+                        } => (
+                            SPECTRUM_STREAM_STATUS_GAP,
+                            RESULT_OK,
+                            Some(stream_epoch),
+                            Some(dropped_captures),
+                        ),
+                        SpectrumContinuousReadError::Failed { stream_epoch } => (
+                            SPECTRUM_STREAM_STATUS_FAILED,
+                            RESULT_RENDER_REJECTED,
+                            Some(stream_epoch),
+                            None,
+                        ),
+                    };
+                    if matches!(
+                        error,
+                        SpectrumContinuousReadError::Gap { .. }
+                            | SpectrumContinuousReadError::Failed { .. }
+                    ) && staging.reset_stream_analysis().is_err()
+                    {
+                        stream_metadata_error(
+                            &mut staging,
+                            SPECTRUM_STREAM_STATUS_FAILED,
+                            RESULT_REFUSED_BUDGET,
+                            epoch,
+                            drops,
+                        );
+                        return RESULT_REFUSED_BUDGET;
+                    }
+                    stream_metadata_error(&mut staging, status, result, epoch, drops);
+                    return result;
+                }
+            };
+            let Some(cadence) = staging.stream_cadence else {
+                stream_metadata_error(
+                    &mut staging,
+                    SPECTRUM_STREAM_STATUS_FAILED,
+                    RESULT_WRONG_STATE,
+                    Some(window.stream_epoch),
+                    Some(window.dropped_captures),
+                );
+                return RESULT_WRONG_STATE;
+            };
+            let windows = match window.sequence.checked_add(1) {
+                Some(value) => value,
+                None => {
                     stream_metadata_error(
                         &mut staging,
                         SPECTRUM_STREAM_STATUS_FAILED,
                         RESULT_REFUSED_BUDGET,
-                        epoch,
-                        drops,
+                        Some(window.stream_epoch),
+                        Some(window.dropped_captures),
                     );
                     return RESULT_REFUSED_BUDGET;
                 }
-                stream_metadata_error(&mut staging, status, result, epoch, drops);
-                return result;
-            }
-        };
-        let Some(cadence) = staging.stream_cadence else {
-            stream_metadata_error(
-                &mut staging,
-                SPECTRUM_STREAM_STATUS_FAILED,
-                RESULT_WRONG_STATE,
-                Some(window.stream_epoch),
-                Some(window.dropped_captures),
-            );
-            return RESULT_WRONG_STATE;
-        };
-        let windows = match window.sequence.checked_add(1) {
-            Some(value) => value,
-            None => {
+            };
+            let Some(end_sample) = window.end_sample() else {
                 stream_metadata_error(
                     &mut staging,
                     SPECTRUM_STREAM_STATUS_FAILED,
-                    RESULT_REFUSED_BUDGET,
+                    RESULT_INVALID_ARGUMENT,
                     Some(window.stream_epoch),
                     Some(window.dropped_captures),
                 );
-                return RESULT_REFUSED_BUDGET;
-            }
-        };
-        let Some(end_sample) = window.end_sample() else {
-            stream_metadata_error(
+                return RESULT_INVALID_ARGUMENT;
+            };
+            staging.stream_window = Some(SpectrumStreamWindowFacts {
+                stream_epoch: window.stream_epoch,
+                sequence: window.sequence,
+                dropped_captures: window.dropped_captures,
+            });
+            staging.stream_metadata.result = RESULT_OK;
+            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
+            staging.stream_metadata.capture_epoch = window.stream_epoch;
+            staging.stream_metadata.sequence = window.sequence;
+            staging.stream_metadata.dropped_captures = window.dropped_captures;
+            staging.stream_metadata.windows = windows;
+            staging.stream_metadata.captured_sample = window.first_sample;
+            staging.stream_metadata.end_sample = end_sample;
+            staging.stream_metadata.source_underrun = u32::from(window.source_underrun);
+            let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
+            let token = match window.sequence.checked_add(1) {
+                Some(value) => value,
+                None => {
+                    stream_metadata_error(
+                        &mut staging,
+                        SPECTRUM_STREAM_STATUS_FAILED,
+                        RESULT_REFUSED_BUDGET,
+                        Some(window.stream_epoch),
+                        Some(window.dropped_captures),
+                    );
+                    return RESULT_REFUSED_BUDGET;
+                }
+            };
+            write_spectrum_window(
                 &mut staging,
-                SPECTRUM_STREAM_STATUS_FAILED,
-                RESULT_INVALID_ARGUMENT,
-                Some(window.stream_epoch),
-                Some(window.dropped_captures),
-            );
-            return RESULT_INVALID_ARGUMENT;
-        };
-        staging.stream_window = Some(SpectrumStreamWindowFacts {
-            stream_epoch: window.stream_epoch,
-            sequence: window.sequence,
-            dropped_captures: window.dropped_captures,
-        });
-        staging.stream_metadata.result = RESULT_OK;
-        staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_READY;
-        staging.stream_metadata.capture_epoch = window.stream_epoch;
-        staging.stream_metadata.sequence = window.sequence;
-        staging.stream_metadata.dropped_captures = window.dropped_captures;
-        staging.stream_metadata.windows = windows;
-        staging.stream_metadata.captured_sample = window.first_sample;
-        staging.stream_metadata.end_sample = end_sample;
-        staging.stream_metadata.source_underrun = u32::from(window.source_underrun);
-        let target = with_host(handle, 0, AudioWorkletEngineHost::spectrum_target);
-        let token = match window.sequence.checked_add(1) {
-            Some(value) => value,
-            None => {
-                stream_metadata_error(
-                    &mut staging,
-                    SPECTRUM_STREAM_STATUS_FAILED,
-                    RESULT_REFUSED_BUDGET,
-                    Some(window.stream_epoch),
-                    Some(window.dropped_captures),
-                );
-                return RESULT_REFUSED_BUDGET;
-            }
-        };
-        write_spectrum_window(
-            &mut staging,
-            &window.as_window(),
-            target,
-            cadence.sample_rate_hz(),
-            token,
-        )
+                &window.as_window(),
+                target,
+                cadence.sample_rate_hz(),
+                token,
+            )
+        })
     })
 }
 
 /// Analyze the most recently read managed stream window using the worker-side smoothing history.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -3162,7 +3305,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis() -> u32 {
 /// this export before [`miso_engine_web_v1_spectrum_stream_analysis`].
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis_configure() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -3188,7 +3331,7 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_analysis_configure() -> u32
 /// Reset managed spectrum analysis history without stopping the native capture stream.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
+    with_spectrum_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -3204,110 +3347,120 @@ pub extern "C" fn miso_engine_web_v1_spectrum_stream_reset() -> u32 {
 /// Stop the managed native stream and retain its final normalized profile in metadata.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_stop(handle: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        let result = with_host_mut(
-            handle,
-            RESULT_INVALID_ARGUMENT,
-            AudioWorkletEngineHost::stop_spectrum_stream,
-        );
-        if result == RESULT_OK {
-            staging.stream_active = false;
-            staging.stream_cadence = None;
-            staging.stream_smoothing = None;
-            staging.capture_len = 0;
-            staging.result_len = 0;
-            staging.stream_window = None;
-            staging.stream_metadata.result = RESULT_OK;
-            staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
-        } else {
-            staging.stream_metadata.result = result;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        result
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            let result = with_host_mut(
+                handle,
+                RESULT_INVALID_ARGUMENT,
+                AudioWorkletEngineHost::stop_spectrum_stream,
+            );
+            if result == RESULT_OK {
+                staging.stream_active = false;
+                staging.stream_cadence = None;
+                staging.stream_smoothing = None;
+                staging.capture_len = 0;
+                staging.result_len = 0;
+                staging.stream_window = None;
+                staging.stream_metadata.result = RESULT_OK;
+                staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_STOPPED;
+            } else {
+                staging.stream_metadata.result = result;
+            }
+            result
+        })
     })
 }
 
 /// Return the fixed managed-stream metadata record address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_ptr() -> u32 {
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        staging.stream_metadata.struct_size = SPECTRUM_STREAM_METADATA_BYTES;
-        staging.stream_metadata.abi_version = ABI_VERSION;
-        pointer_u32(ptr::from_mut(&mut staging.stream_metadata))
+    render_locked(|| {
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            staging.stream_metadata.struct_size = SPECTRUM_STREAM_METADATA_BYTES;
+            staging.stream_metadata.abi_version = ABI_VERSION;
+            pointer_u32(ptr::from_mut(&mut staging.stream_metadata))
+        })
     })
 }
 
 /// Return the fixed managed-stream metadata record byte size.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_stream_metadata_bytes() -> u32 {
-    SPECTRUM_STREAM_METADATA_BYTES
+    render_locked(|| SPECTRUM_STREAM_METADATA_BYTES)
 }
 
 /// Cancel the prepared spectrum observer and discard any completed window.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_spectrum_cancel(handle: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    SPECTRUM_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        if staging.stream_active {
-            staging.stream_metadata.result = RESULT_WRONG_STATE;
-            return RESULT_WRONG_STATE;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        staging.capture_len = 0;
-        with_host_mut(
-            handle,
-            RESULT_INVALID_ARGUMENT,
-            AudioWorkletEngineHost::cancel_spectrum,
-        )
+        with_spectrum_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            if staging.stream_active {
+                staging.stream_metadata.result = RESULT_WRONG_STATE;
+                return RESULT_WRONG_STATE;
+            }
+            staging.capture_len = 0;
+            with_host_mut(
+                handle,
+                RESULT_INVALID_ARGUMENT,
+                AudioWorkletEngineHost::cancel_spectrum,
+            )
+        })
     })
 }
 
 /// Return a writable request header for one live selected-track response query.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_request_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        staging.live_result_len = 0;
-        staging.live_request.struct_size = LIVE_RESPONSE_REQUEST_BYTES;
-        staging.live_request.abi_version = ABI_VERSION;
-        pointer_u32(ptr::from_mut(&mut *staging.live_request))
+    render_locked(|| {
+        with_response_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            staging.live_result_len = 0;
+            staging.live_request.struct_size = LIVE_RESPONSE_REQUEST_BYTES;
+            staging.live_request.abi_version = ABI_VERSION;
+            pointer_u32(ptr::from_mut(&mut *staging.live_request))
+        })
     })
 }
 
 /// Return the fixed live response request-header byte size.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_request_bytes() -> u32 {
-    LIVE_RESPONSE_REQUEST_BYTES
+    render_locked(|| LIVE_RESPONSE_REQUEST_BYTES)
 }
 
 /// Return the fixed raw snapshot staging address used by capture and analysis.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_snapshot_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .map_or(0, |staging| pointer_u32(staging.live_result.as_ptr()))
+    render_locked(|| {
+        with_response_staging(|slot| {
+            slot.try_borrow()
+                .ok()
+                .map_or(0, |staging| pointer_u32(staging.live_result.as_ptr()))
+        })
     })
 }
 
 /// Return the maximum byte length of the fixed raw snapshot staging area.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_snapshot_capacity() -> u32 {
-    u32::try_from(LIVE_RESPONSE_CAPTURE_BYTES).unwrap_or(0)
+    render_locked(|| u32::try_from(LIVE_RESPONSE_CAPTURE_BYTES).unwrap_or(0))
 }
 
 /// Set the byte length of a raw snapshot copied into the fixed staging area.
@@ -3317,7 +3470,7 @@ pub extern "C" fn miso_engine_web_v1_track_response_snapshot_capacity() -> u32 {
 /// or truncated replies are rejected by the Rust decoder rather than inferred from stale bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_snapshot_set_bytes(bytes: u32) -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -3335,35 +3488,39 @@ pub extern "C" fn miso_engine_web_v1_track_response_snapshot_set_bytes(bytes: u3
 /// Return writable staging for the selected track's UTF-8 identity.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_track_id_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        pointer_u32(staging.live_track_id.as_mut_ptr())
+    render_locked(|| {
+        with_response_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            pointer_u32(staging.live_track_id.as_mut_ptr())
+        })
     })
 }
 
 /// Return the maximum selected-track identity byte length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_track_id_capacity() -> u32 {
-    LIVE_RESPONSE_MAXIMUM_ID_BYTES as u32
+    render_locked(|| LIVE_RESPONSE_MAXIMUM_ID_BYTES as u32)
 }
 
 /// Capture one selected track's live response at the current boundary into raw staging.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_capture(handle: u32) -> u32 {
-    LIVE_HOST.with(|host_slot| {
-        let Ok(mut live) = host_slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        let Some(live) = live.as_mut().filter(|value| value.handle == handle) else {
-            return RESULT_WRONG_STATE;
-        };
-        RESPONSE_STAGING.with(|staging_slot| {
-            let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+    render_locked(|| {
+        LIVE_HOST.with(|host_slot| {
+            let Ok(mut live) = host_slot.try_borrow_mut() else {
                 return RESULT_INTERNAL;
             };
-            run_live_response_capture(&mut live.host, &mut staging)
+            let Some(live) = live.as_mut().filter(|value| value.handle == handle) else {
+                return RESULT_WRONG_STATE;
+            };
+            with_response_staging(|staging_slot| {
+                let Ok(mut staging) = staging_slot.try_borrow_mut() else {
+                    return RESULT_INTERNAL;
+                };
+                run_live_response_capture(&mut live.host, &mut staging)
+            })
         })
     })
 }
@@ -3371,7 +3528,7 @@ pub extern "C" fn miso_engine_web_v1_track_response_capture(handle: u32) -> u32 
 /// Analyze one staged raw live-response snapshot using the native Rust response composer.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_analysis() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -3382,28 +3539,32 @@ pub extern "C" fn miso_engine_web_v1_track_response_analysis() -> u32 {
 /// Return the live response result payload address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_result_ptr() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .map_or(0, |staging| pointer_u32(staging.live_result.as_ptr()))
+    render_locked(|| {
+        with_response_staging(|slot| {
+            slot.try_borrow()
+                .ok()
+                .map_or(0, |staging| pointer_u32(staging.live_result.as_ptr()))
+        })
     })
 }
 
 /// Return the live response result payload byte length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_result_bytes() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .and_then(|staging| u32::try_from(staging.live_result_len).ok())
-            .unwrap_or(0)
+    render_locked(|| {
+        with_response_staging(|slot| {
+            slot.try_borrow()
+                .ok()
+                .and_then(|staging| u32::try_from(staging.live_result_len).ok())
+                .unwrap_or(0)
+        })
     })
 }
 
 /// Release the live response staging payload.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_track_response_close() -> u32 {
-    RESPONSE_STAGING.with(|slot| {
+    with_response_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return RESULT_INTERNAL;
         };
@@ -3484,6 +3645,14 @@ pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
     ABI_VERSION
 }
 
+/// Return how many allocator calls this instance made inside render-locked windows (issue #1333
+/// D3). Every export the AudioWorklet calls on its render thread after boot runs in such a
+/// window, so browser qualification asserts this is exactly zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_render_allocation_count() -> u32 {
+    render_allocation_count()
+}
+
 /// Return the module-owned, zero-default boot-options address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
@@ -3491,7 +3660,7 @@ pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
         let Ok(mut staging) = staging.try_borrow_mut() else {
             return 0;
         };
-        pointer_u32(ptr::from_mut(&mut *staging.options))
+        pointer_u32(ptr::from_mut(&mut staging.options))
     })
 }
 
@@ -3524,7 +3693,7 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
             return 0;
         }
         document.resize(count, 0);
-        staging.document = document;
+        *staging.document = document;
         staging.result = RESULT_OK;
         staging.diagnostic_bytes = 0;
         staging.document_valid = true;
@@ -3567,7 +3736,7 @@ fn boot_staged(len: u32, spectrum_hop: Option<SpectrumHop>) -> u32 {
             return None;
         }
 
-        let spectrum_request = SPECTRUM_STAGING.with(|spectrum| {
+        let spectrum_request = with_spectrum_staging(|spectrum| {
             let Ok(mut spectrum) = spectrum.try_borrow_mut() else {
                 return Err(BootFailure::fixed(RESULT_INTERNAL, "web.spectrum.staging"));
             };
@@ -3585,7 +3754,7 @@ fn boot_staged(len: u32, spectrum_hop: Option<SpectrumHop>) -> u32 {
         let result = spectrum_request.and_then(|request| {
             AudioWorkletEngineHost::boot_with_spectrum_config(
                 &staging.document,
-                *staging.options,
+                staging.options,
                 request,
                 spectrum_hop,
             )
@@ -3605,7 +3774,7 @@ fn boot_staged(len: u32, spectrum_hop: Option<SpectrumHop>) -> u32 {
         }
     });
     let Some(host) = booted else {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             if let Ok(mut staging) = slot.try_borrow_mut() {
                 staging.release_capture();
             }
@@ -3623,7 +3792,7 @@ fn boot_staged(len: u32, spectrum_hop: Option<SpectrumHop>) -> u32 {
             return None;
         }
         let handle = next_handle();
-        *live_slot = Some(LiveHost {
+        **live_slot = Some(LiveHost {
             handle,
             host: Box::new(
                 host.take()
@@ -3641,13 +3810,14 @@ fn boot_staged(len: u32, spectrum_hop: Option<SpectrumHop>) -> u32 {
                 staging.record_failure(BootFailure::fixed(RESULT_INTERNAL, "web.host.publication"));
             }
         });
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             if let Ok(mut staging) = slot.try_borrow_mut() {
                 staging.release_capture();
             }
         });
         return 0;
     };
+    reserve_stagings();
     handle
 }
 
@@ -3719,68 +3889,70 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
     frames: u32,
     end_of_region: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if end_of_region > 1 || host.status().state != STATE_READY {
-            return if end_of_region > 1 {
-                host.record_boundary_result(RESULT_INVALID_ARGUMENT)
-            } else {
-                host.submit_source(&[], 0, 0, 0, &[], 0, false)
-            };
-        }
-        let quantum = host.status().quantum_frames as usize;
-        let channel_count = channels as usize;
-        let frame_count = frames as usize;
-        let id_count = source_id_bytes as usize;
-        let sample_rate = host.status().sample_rate_hz;
-        let Some((pcm, plane_slots, ids)) = host.ffi_source_staging_mut() else {
-            return host.record_boundary_result(RESULT_INTERNAL);
-        };
-        if channel_count == 0
-            || channel_count > plane_slots.len()
-            || frame_count > quantum
-            || id_count > ids.len()
-        {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        }
-        let Some(required_samples) = channel_count.checked_mul(quantum) else {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        };
-        if required_samples > pcm.len() {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        }
-        let pcm_pointer = pcm.as_ptr();
-        let id_pointer = ids.as_ptr();
-        for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
-            let offset = channel * quantum;
-            // SAFETY: Preparation allocated `maximum_source_channels * quantum` stable PCM
-            // samples. The checked channel bound/product and `frames <= quantum` prove this
-            // exact plane prefix is readable for the synchronous source submission below.
-            let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };
-            slot.write(plane);
-        }
-        let plane_pointer = plane_slots.as_ptr().cast::<&[f32]>();
-        // SAFETY: Every element in this exact prefix was initialized above with a valid slice
-        // into stable PCM staging. `MaybeUninit<T>` has the same layout as `T`; the borrow ends
-        // before this function returns and the host does not mutate staging during submission.
-        let planes = unsafe { slice::from_raw_parts(plane_pointer, channel_count) };
-        // SAFETY: The checked ID prefix lies in stable source-ID staging. It is read only for
-        // the synchronous lookup and is not retained by the safe host.
-        let source_id = unsafe { slice::from_raw_parts(id_pointer, id_count) };
-        let result = host.submit_source(
-            source_id,
-            generation,
-            start_frame,
-            sample_rate,
-            planes,
-            frames,
-            end_of_region == 1,
-        );
-        if let Some((_, slots, _)) = host.ffi_source_staging_mut() {
-            for slot in &mut slots[..channel_count] {
-                *slot = MaybeUninit::uninit();
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if end_of_region > 1 || host.status().state != STATE_READY {
+                return if end_of_region > 1 {
+                    host.record_boundary_result(RESULT_INVALID_ARGUMENT)
+                } else {
+                    host.submit_source(&[], 0, 0, 0, &[], 0, false)
+                };
             }
-        }
-        result
+            let quantum = host.status().quantum_frames as usize;
+            let channel_count = channels as usize;
+            let frame_count = frames as usize;
+            let id_count = source_id_bytes as usize;
+            let sample_rate = host.status().sample_rate_hz;
+            let Some((pcm, plane_slots, ids)) = host.ffi_source_staging_mut() else {
+                return host.record_boundary_result(RESULT_INTERNAL);
+            };
+            if channel_count == 0
+                || channel_count > plane_slots.len()
+                || frame_count > quantum
+                || id_count > ids.len()
+            {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            let Some(required_samples) = channel_count.checked_mul(quantum) else {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            };
+            if required_samples > pcm.len() {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            let pcm_pointer = pcm.as_ptr();
+            let id_pointer = ids.as_ptr();
+            for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
+                let offset = channel * quantum;
+                // SAFETY: Preparation allocated `maximum_source_channels * quantum` stable PCM
+                // samples. The checked channel bound/product and `frames <= quantum` prove this
+                // exact plane prefix is readable for the synchronous source submission below.
+                let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };
+                slot.write(plane);
+            }
+            let plane_pointer = plane_slots.as_ptr().cast::<&[f32]>();
+            // SAFETY: Every element in this exact prefix was initialized above with a valid slice
+            // into stable PCM staging. `MaybeUninit<T>` has the same layout as `T`; the borrow ends
+            // before this function returns and the host does not mutate staging during submission.
+            let planes = unsafe { slice::from_raw_parts(plane_pointer, channel_count) };
+            // SAFETY: The checked ID prefix lies in stable source-ID staging. It is read only for
+            // the synchronous lookup and is not retained by the safe host.
+            let source_id = unsafe { slice::from_raw_parts(id_pointer, id_count) };
+            let result = host.submit_source(
+                source_id,
+                generation,
+                start_frame,
+                sample_rate,
+                planes,
+                frames,
+                end_of_region == 1,
+            );
+            if let Some((_, slots, _)) = host.ffi_source_staging_mut() {
+                for slot in &mut slots[..channel_count] {
+                    *slot = MaybeUninit::uninit();
+                }
+            }
+            result
+        })
     })
 }
 
@@ -3792,33 +3964,37 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
     generation: u64,
     source_frame: u64,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if host.status().state != STATE_READY {
-            return host.seek_source(&[], 0, 0);
-        }
-        let id_count = source_id_bytes as usize;
-        let Some(ids) = host.source_id_mut() else {
-            return host.record_boundary_result(RESULT_INTERNAL);
-        };
-        let Some(source_id) = ids.get(..id_count) else {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
-        };
-        let source_id_pointer = source_id.as_ptr();
-        // SAFETY: The checked ID prefix lies in stable staging and is only read during the
-        // synchronous safe-host lookup; the seek operation does not mutate staging.
-        let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
-        host.seek_source(source_id, generation, source_frame)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if host.status().state != STATE_READY {
+                return host.seek_source(&[], 0, 0);
+            }
+            let id_count = source_id_bytes as usize;
+            let Some(ids) = host.source_id_mut() else {
+                return host.record_boundary_result(RESULT_INTERNAL);
+            };
+            let Some(source_id) = ids.get(..id_count) else {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            };
+            let source_id_pointer = source_id.as_ptr();
+            // SAFETY: The checked ID prefix lies in stable staging and is only read during the
+            // synchronous safe-host lookup; the seek operation does not mutate staging.
+            let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
+            host.seek_source(source_id, generation, source_frame)
+        })
     })
 }
 
 /// Render one exact prepared quantum after validating the browser's actual frame count.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if host.status().state == STATE_READY && host.status().quantum_frames != actual_frames {
-            return host.reject_output_quantum(actual_frames);
-        }
-        host.render_next()
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if host.status().state == STATE_READY && host.status().quantum_frames != actual_frames {
+                return host.reject_output_quantum(actual_frames);
+            }
+            host.render_next()
+        })
     })
 }
 
@@ -3837,8 +4013,10 @@ pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
 /// [`miso_engine_web_v1_command_report_ptr`] names the first refused record and why.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_command_submit(handle: u32, count: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.submit_commands(count)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.submit_commands(count)
+        })
     })
 }
 
@@ -3849,8 +4027,10 @@ pub extern "C" fn miso_engine_web_v1_prepared_command_submit(
     count: u32,
     companion_bytes: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.submit_prepared_commands(count, companion_bytes)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.submit_prepared_commands(count, companion_bytes)
+        })
     })
 }
 
@@ -3881,17 +4061,21 @@ pub extern "C" fn miso_engine_web_v1_eq_target_config_copy(
     rack: u32,
     effect_index: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.copy_eq_target_config(track_index, rack, effect_index)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.copy_eq_target_config(track_index, rack, effect_index)
+        })
     })
 }
 
 /// Return the fixed addressed EQ configuration workspace.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_eq_target_config_ptr(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.eq_target_config()
-            .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.eq_target_config()
+                .map_or(0, |bytes| pointer_u32(bytes.as_ptr()))
+        })
     })
 }
 
@@ -3901,8 +4085,10 @@ pub extern "C" fn miso_engine_web_v1_input_filters_config_copy(
     handle: u32,
     track_index: u32,
 ) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.copy_input_filter_config(track_index)
+    render_locked(|| {
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            host.copy_input_filter_config(track_index)
+        })
     })
 }
 
@@ -3917,14 +4103,16 @@ pub extern "C" fn miso_engine_web_v1_command_report_ptr(handle: u32) -> u32 {
 /// Take (`1`) or release (`0`) the decimated meter lease (issue #137 D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if enabled > 1 {
-            return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
         }
-        host.set_meter_lease(enabled == 1)
+        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+            if enabled > 1 {
+                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+            }
+            host.set_meter_lease(enabled == 1)
+        })
     })
 }
 
@@ -3934,7 +4122,7 @@ pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u
 /// `Copy` snapshots out of queues sized at compilation into a buffer sized at compilation.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
-    with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters)
+    render_locked(|| with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters))
 }
 
 /// Return the stable meter-header address, or zero for an invalid handle (issue #143 D5).
@@ -4045,22 +4233,24 @@ pub extern "C" fn miso_engine_web_v1_observation_count(handle: u32) -> u32 {
 /// Return the stable observation-ID staging address used by binding introspection.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_id_ptr() -> u32 {
-    OBSERVATION_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        pointer_u32(staging.id.as_mut_ptr())
+    render_locked(|| {
+        with_observation_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            pointer_u32(staging.id.as_mut_ptr())
+        })
     })
 }
 
 /// Return the maximum stable observation-ID staging length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_id_capacity() -> u32 {
-    RESPONSE_MAXIMUM_EFFECT_ID_BYTES
+    render_locked(|| RESPONSE_MAXIMUM_EFFECT_ID_BYTES)
 }
 
 fn copy_observation_id(handle: u32, index: u32, native: bool) -> u32 {
-    OBSERVATION_STAGING.with(|slot| {
+    with_observation_staging(|slot| {
         let Ok(mut staging) = slot.try_borrow_mut() else {
             return 0;
         };
@@ -4150,86 +4340,103 @@ pub extern "C" fn miso_engine_web_v1_observation_tap_id(
 /// Return a writable bounded selected-observation input staging address.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_selection_ptr() -> u32 {
-    OBSERVATION_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        pointer_u32(staging.selections.as_mut_ptr())
+    render_locked(|| {
+        with_observation_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return 0;
+            };
+            pointer_u32(staging.selections.as_mut_ptr())
+        })
     })
 }
 
 /// Return the fixed selected-observation input record size.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_selection_bytes() -> u32 {
-    OBSERVATION_SELECTION_BYTES
+    render_locked(|| OBSERVATION_SELECTION_BYTES)
 }
 
 /// Return the maximum selected-observation input record count.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
-    MAXIMUM_OBSERVATION_READS as u32
+    render_locked(|| MAXIMUM_OBSERVATION_READS as u32)
 }
 
 /// Read one complete bounded batch of selected resident observations.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
-    if let Err(result) = verify_live_host(handle) {
-        return result;
-    }
-    OBSERVATION_STAGING.with(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return RESULT_INTERNAL;
-        };
-        staging.reset_results();
-        let count = match usize::try_from(count) {
-            Ok(count) if count <= MAXIMUM_OBSERVATION_READS => count,
-            _ => return RESULT_BUFFER_TOO_SMALL,
-        };
-        for index in 0..count {
-            let selection = staging.selections[index];
-            if selection.struct_size != OBSERVATION_SELECTION_BYTES
-                || selection.abi_version != ABI_VERSION
-                || selection.reserved != 0
-            {
-                return RESULT_INVALID_ARGUMENT;
+    render_locked(|| {
+        if let Err(result) = verify_live_host(handle) {
+            return result;
+        }
+        with_observation_staging(|slot| {
+            let Ok(mut staging) = slot.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            staging.reset_results();
+            let count = match usize::try_from(count) {
+                Ok(count) if count <= MAXIMUM_OBSERVATION_READS => count,
+                _ => return RESULT_BUFFER_TOO_SMALL,
+            };
+            for index in 0..count {
+                let selection = staging.selections[index];
+                if selection.struct_size != OBSERVATION_SELECTION_BYTES
+                    || selection.abi_version != ABI_VERSION
+                    || selection.reserved != 0
+                {
+                    return RESULT_INVALID_ARGUMENT;
+                }
+                let rack = match observation_rack(selection.rack) {
+                    Ok(value) => value,
+                    Err(result) => return result,
+                };
+                let channels = match observation_channels(selection.channels) {
+                    Ok(value) => value,
+                    Err(result) => return result,
+                };
+                staging.addresses.push(ObservationAddress {
+                    track_index: selection.track_index,
+                    rack,
+                    effect_index: selection.effect_index,
+                    tap_id: selection.tap_id,
+                    channels,
+                });
             }
-            let rack = match observation_rack(selection.rack) {
-                Ok(value) => value,
-                Err(result) => return result,
+            let read = {
+                let ObservationStaging {
+                    addresses, rows, ..
+                } = &mut *staging;
+                with_host(
+                    handle,
+                    Err(ObservationReadError::InvalidSelection),
+                    |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
+                )
             };
-            let channels = match observation_channels(selection.channels) {
-                Ok(value) => value,
-                Err(result) => return result,
-            };
-            staging.addresses.push(ObservationAddress {
-                track_index: selection.track_index,
-                rack,
-                effect_index: selection.effect_index,
-                tap_id: selection.tap_id,
-                channels,
-            });
-        }
-        let read = {
+            if let Err(error) = read {
+                return observation_error_code(error);
+            }
             let ObservationStaging {
-                addresses, rows, ..
+                addresses,
+                rows,
+                results,
+                ..
             } = &mut *staging;
-            with_host(
-                handle,
-                Err(ObservationReadError::InvalidSelection),
-                |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
-            )
-        };
-        if let Err(error) = read {
-            return observation_error_code(error);
-        }
-        let ObservationStaging {
-            addresses,
-            rows,
-            results,
-            ..
-        } = &mut *staging;
-        for (address, row) in addresses.iter().zip(rows.iter()).take(count) {
-            let Some(window) = row.window else {
+            for (address, row) in addresses.iter().zip(rows.iter()).take(count) {
+                let Some(window) = row.window else {
+                    results.push(WebObservationResult {
+                        struct_size: OBSERVATION_RESULT_BYTES,
+                        abi_version: ABI_VERSION,
+                        status: observation_status_raw(row.status),
+                        track_index: address.track_index,
+                        rack: observation_rack_raw(address.rack),
+                        effect_index: address.effect_index,
+                        tap_id: address.tap_id,
+                        channels: selection_channels_raw(address.channels),
+                        sample_rate_hz: row.sample_rate_hz,
+                        ..WebObservationResult::default()
+                    });
+                    continue;
+                };
                 results.push(WebObservationResult {
                     struct_size: OBSERVATION_RESULT_BYTES,
                     abi_version: ABI_VERSION,
@@ -4240,32 +4447,19 @@ pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -
                     tap_id: address.tap_id,
                     channels: selection_channels_raw(address.channels),
                     sample_rate_hz: row.sample_rate_hz,
+                    first_sample: window.first_sample,
+                    end_sample: window.end_sample,
+                    sequence: window.sequence,
+                    blocks: window.blocks,
+                    left_present: u32::from(row.left.is_some()),
+                    right_present: u32::from(row.right.is_some()),
+                    left: row.left.unwrap_or(0.0),
+                    right: row.right.unwrap_or(0.0),
                     ..WebObservationResult::default()
                 });
-                continue;
-            };
-            results.push(WebObservationResult {
-                struct_size: OBSERVATION_RESULT_BYTES,
-                abi_version: ABI_VERSION,
-                status: observation_status_raw(row.status),
-                track_index: address.track_index,
-                rack: observation_rack_raw(address.rack),
-                effect_index: address.effect_index,
-                tap_id: address.tap_id,
-                channels: selection_channels_raw(address.channels),
-                sample_rate_hz: row.sample_rate_hz,
-                first_sample: window.first_sample,
-                end_sample: window.end_sample,
-                sequence: window.sequence,
-                blocks: window.blocks,
-                left_present: u32::from(row.left.is_some()),
-                right_present: u32::from(row.right.is_some()),
-                left: row.left.unwrap_or(0.0),
-                right: row.right.unwrap_or(0.0),
-                ..WebObservationResult::default()
-            });
-        }
-        RESULT_OK
+            }
+            RESULT_OK
+        })
     })
 }
 
@@ -4280,28 +4474,32 @@ fn selection_channels_raw(channels: ObservationReadChannels) -> u32 {
 /// Return the selected-observation result-record address, or zero before a successful read.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_result_ptr() -> u32 {
-    OBSERVATION_STAGING.with(|slot| {
-        let Ok(staging) = slot.try_borrow() else {
-            return 0;
-        };
-        pointer_u32(staging.results.as_ptr())
+    render_locked(|| {
+        with_observation_staging(|slot| {
+            let Ok(staging) = slot.try_borrow() else {
+                return 0;
+            };
+            pointer_u32(staging.results.as_ptr())
+        })
     })
 }
 
 /// Return the selected-observation result byte length.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_result_bytes() -> u32 {
-    OBSERVATION_STAGING.with(|slot| {
-        slot.try_borrow()
-            .ok()
-            .and_then(|staging| {
-                staging
-                    .results
-                    .len()
-                    .checked_mul(OBSERVATION_RESULT_BYTES as usize)
-                    .and_then(|bytes| u32::try_from(bytes).ok())
-            })
-            .unwrap_or(0)
+    render_locked(|| {
+        with_observation_staging(|slot| {
+            slot.try_borrow()
+                .ok()
+                .and_then(|staging| {
+                    staging
+                        .results
+                        .len()
+                        .checked_mul(OBSERVATION_RESULT_BYTES as usize)
+                        .and_then(|bytes| u32::try_from(bytes).ok())
+                })
+                .unwrap_or(0)
+        })
     })
 }
 
@@ -4376,7 +4574,7 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
 
     // Acquire every staging owner first. A borrow refusal therefore leaves LIVE_HOST untouched,
     // including its native ownership.
-    SPECTRUM_STAGING.with(|spectrum_slot| {
+    with_spectrum_staging(|spectrum_slot| {
         let Ok(mut spectrum) = spectrum_slot.try_borrow_mut() else {
             return RESULT_INVALID_ARGUMENT;
         };
@@ -4405,6 +4603,164 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
     })
 }
 
+/// Native writers for the staging the `u32` pointer exports address on `wasm32`.
+///
+/// On a 64-bit host a staging address does not fit the exports' `u32`, so the pointer exports
+/// return zero there. host-web's own integration binaries (issue #1333 gate 8) drive the boundary
+/// through the exports and stage requests through these writers, which store exactly what the
+/// worklet writes through the exports' addresses. None of them is render-locked: the worklet never
+/// calls them. Not built for wasm.
+#[cfg(not(target_family = "wasm"))]
+#[doc(hidden)]
+pub mod native_staging {
+    use super::{
+        WebBootOptions, WebLiveResponseRequest, WebObservationSelection,
+        WebSpectrumCollectionEntry, WebSpectrumCollectionRequest, WebSpectrumRequest,
+    };
+
+    /// Stage the boot options and the exact document, as `miso_engine_web_v1_boot_options_ptr`
+    /// and `miso_engine_web_v1_document_ptr` let the worklet do. Returns the staged length for the
+    /// boot export, or `None` when the document was refused.
+    pub fn boot(options: WebBootOptions, document: &[u8]) -> Option<u32> {
+        let length = u32::try_from(document.len()).ok()?;
+        super::BOOT_STAGING.with(|staging| staging.borrow_mut().options = options);
+        let _ = super::miso_engine_web_v1_document_ptr(length);
+        super::BOOT_STAGING.with(|staging| {
+            let mut staging = staging.borrow_mut();
+            if !staging.document_valid || staging.document.len() != document.len() {
+                return None;
+            }
+            staging.document.copy_from_slice(document);
+            Some(length)
+        })
+    }
+
+    /// Stage the pre-boot spectrum request and its target identity.
+    pub fn spectrum_request(request: WebSpectrumRequest, target_id: &[u8]) {
+        super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.target_id.fill(0);
+            staging.target_id[..target_id.len()].copy_from_slice(target_id);
+            *staging.request = request;
+        });
+    }
+
+    /// Stage a pre-boot spectrum collection: its header, entries and packed target identities,
+    /// in the order the worklet's `stageSpectrumCollectionRequest` writes them. Each pointer
+    /// export sizes its staging as it does for the worklet (its returned address does not fit a
+    /// native `u32`); this writer then stores what the worklet would write through that address.
+    /// Returns `false` when an export did not size its staging to the request.
+    pub fn spectrum_collection(
+        request: WebSpectrumCollectionRequest,
+        entries: &[WebSpectrumCollectionEntry],
+        target_ids: &[u8],
+    ) -> bool {
+        let _ = super::miso_engine_web_v1_spectrum_collection_request_ptr();
+        super::with_spectrum_staging(|slot| *slot.borrow_mut().collection_request = request);
+        let _ = super::miso_engine_web_v1_spectrum_collection_entry_ptr();
+        let staged = super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            if staging.collection_entries.len() != entries.len() {
+                return false;
+            }
+            staging.collection_entries.copy_from_slice(entries);
+            true
+        });
+        if !staged {
+            return false;
+        }
+        let _ = super::miso_engine_web_v1_spectrum_collection_target_ids_ptr();
+        super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            if staging.collection_target_ids.len() != target_ids.len() {
+                return false;
+            }
+            staging.collection_target_ids.copy_from_slice(target_ids);
+            true
+        })
+    }
+
+    /// Stage the target identity a post-boot `spectrum_select` reads, as the worklet writes it
+    /// through `miso_engine_web_v1_spectrum_target_id_ptr`.
+    pub fn spectrum_target_id(target_id: &[u8]) {
+        super::with_spectrum_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.target_id.fill(0);
+            staging.target_id[..target_id.len()].copy_from_slice(target_id);
+        });
+    }
+
+    /// Stage the selected-observation records an `observation_read` will read.
+    pub fn observation_selections(selections: &[WebObservationSelection]) {
+        super::with_observation_staging(|slot| {
+            slot.borrow_mut().selections[..selections.len()].copy_from_slice(selections);
+        });
+    }
+
+    /// Stage the live track-response request and its track identity.
+    pub fn track_response_request(request: WebLiveResponseRequest, track_id: &[u8]) {
+        super::with_response_staging(|slot| {
+            let mut staging = slot.borrow_mut();
+            staging.live_track_id.fill(0);
+            staging.live_track_id[..track_id.len()].copy_from_slice(track_id);
+            *staging.live_request = request;
+        });
+    }
+
+    /// Stage a source identity, as the worklet writes it through
+    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID)` before `source_submit` or
+    /// `source_seek`. Returns `false` when the handle owns no staging that fits it.
+    pub fn source_id(handle: u32, id: &[u8]) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.source_id_mut()
+                .and_then(|staging| staging.get_mut(..id.len()))
+                .map(|staging| staging.copy_from_slice(id))
+                .is_some()
+        })
+    }
+
+    /// Fill the planar source-PCM staging with `value`, as the worklet copies a chunk's planes
+    /// through `miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM)`.
+    pub fn source_pcm(handle: u32, value: f32) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.source_pcm_mut().map(|pcm| pcm.fill(value)).is_some()
+        })
+    }
+
+    /// Stage live-control command records, as the worklet writes them through
+    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`.
+    pub fn command_records(handle: u32, records: &[u8]) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.command_staging_mut()
+                .and_then(|staging| staging.get_mut(..records.len()))
+                .map(|staging| staging.copy_from_slice(records))
+                .is_some()
+        })
+    }
+
+    /// Stage a prepared-command companion, as the worklet writes it through
+    /// `miso_engine_web_v1_prepared_companion_ptr`.
+    pub fn prepared_companion(handle: u32, companion: &[u8]) -> bool {
+        super::with_host_mut(handle, false, |host| {
+            host.prepared_companion_mut()
+                .and_then(|staging| staging.get_mut(..companion.len()))
+                .map(|staging| staging.copy_from_slice(companion))
+                .is_some()
+        })
+    }
+
+    /// Copy out the addressed configuration workspace's prefix, as the worklet reads it through
+    /// `miso_engine_web_v1_eq_target_config_ptr` after a copy export succeeds.
+    pub fn eq_target_config(handle: u32, output: &mut [u8]) -> bool {
+        super::with_host(handle, false, |host| {
+            host.eq_target_config()
+                .and_then(|config| config.get(..output.len()))
+                .map(|config| output.copy_from_slice(config))
+                .is_some()
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_stage_document(bytes: &[u8]) {
     BOOT_STAGING.with(|staging| {
@@ -4419,14 +4775,14 @@ pub(crate) fn test_stage_document(bytes: &[u8]) {
 
 #[cfg(test)]
 pub(crate) fn test_boot(bytes: &[u8], options: WebBootOptions) -> u32 {
-    BOOT_STAGING.with(|staging| *staging.borrow_mut().options = options);
+    BOOT_STAGING.with(|staging| staging.borrow_mut().options = options);
     test_stage_document(bytes);
     miso_engine_web_v1_boot(bytes.len() as u32)
 }
 
 #[cfg(test)]
 pub(crate) fn test_staged_document() -> Vec<u8> {
-    BOOT_STAGING.with(|staging| staging.borrow().document.clone())
+    BOOT_STAGING.with(|staging| Vec::clone(&staging.borrow().document))
 }
 
 #[cfg(test)]
@@ -4609,7 +4965,7 @@ pub(crate) mod live_response_ffi_tests {
     }
 
     fn stage_request_with_limit(track_id: &[u8], maximum_result_bytes: u32) {
-        RESPONSE_STAGING.with(|slot| {
+        with_response_staging(|slot| {
             let mut staging = slot.borrow_mut();
             assert!(track_id.len() <= staging.live_track_id.len());
             staging.live_track_id.fill(0);
@@ -4631,7 +4987,7 @@ pub(crate) mod live_response_ffi_tests {
     }
 
     fn captured_header() -> WebLiveResponseResult {
-        RESPONSE_STAGING.with(|slot| slot.borrow().live_result_header)
+        with_response_staging(|slot| slot.borrow().live_result_header)
     }
 
     #[test]
@@ -4665,7 +5021,7 @@ pub(crate) mod live_response_ffi_tests {
         assert_eq!(deallocations, 0, "an undersized capture refusal freed");
         assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
         assert_eq!(
-            RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
+            with_response_staging(|slot| slot.borrow().live_token),
             0,
             "an undersized capture refusal advanced the snapshot token"
         );
@@ -4694,7 +5050,7 @@ pub(crate) mod live_response_ffi_tests {
         );
         assert!(capture_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
 
-        let expected_result_bytes = RESPONSE_STAGING.with(|slot| {
+        let expected_result_bytes = with_response_staging(|slot| {
             let staging = slot.borrow();
             let bytes = &staging.live_result[..staging.live_result_len];
             let header: WebLiveResponseResult = read_live_record(bytes, 0).expect("capture header");
@@ -4729,8 +5085,9 @@ pub(crate) mod live_response_ffi_tests {
         });
         assert_eq!(expected_result_bytes, capture_header.result_bytes as usize);
 
-        let (snapshot, token) = RESPONSE_STAGING
-            .with(|slot| parse_live_snapshot(&slot.borrow()).expect("captured mixed snapshot"));
+        let (snapshot, token) = with_response_staging(|slot| {
+            parse_live_snapshot(&slot.borrow()).expect("captured mixed snapshot")
+        });
         assert_eq!(token, 1);
         assert!(
             snapshot
@@ -4759,7 +5116,7 @@ pub(crate) mod live_response_ffi_tests {
         assert_eq!(input_filter_owner.left.len(), 2);
         assert_eq!(input_filter_owner.right.len(), 2);
 
-        RESPONSE_STAGING.with(|slot| {
+        with_response_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let result_len = staging.live_result_len;
             let eq_left_count = {
@@ -4806,7 +5163,7 @@ pub(crate) mod live_response_ffi_tests {
                     .copy_from_slice(&original_count.to_le_bytes());
             }
         });
-        RESPONSE_STAGING.with(|slot| {
+        with_response_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let original_len = staging.live_result_len;
             let original_result_bytes = {
@@ -4844,7 +5201,7 @@ pub(crate) mod live_response_ffi_tests {
         assert!(analysis_header.result_bytes > u64::from(LIVE_RESPONSE_RESULT_BYTES));
         let result_len = miso_engine_web_v1_track_response_result_bytes();
         assert_eq!(analysis_header.result_bytes, u64::from(result_len));
-        RESPONSE_STAGING.with(|slot| {
+        with_response_staging(|slot| {
             let staging = slot.borrow();
             let bytes = &staging.live_result[..staging.live_result_len];
             let values = bytes
@@ -4858,7 +5215,7 @@ pub(crate) mod live_response_ffi_tests {
         let undersized_analysis_bytes =
             u32::try_from(size_of::<WebLiveResponseResult>() + 5 * size_of::<f32>() * 3 - 1)
                 .expect("small live response bound");
-        RESPONSE_STAGING.with(|slot| {
+        with_response_staging(|slot| {
             slot.borrow_mut().live_request.maximum_result_bytes = undersized_analysis_bytes;
         });
         let (refused_analysis, allocations, deallocations) =
@@ -4878,7 +5235,7 @@ pub(crate) mod live_response_ffi_tests {
         assert_eq!(deallocations, 0);
         assert_eq!(captured_header().snapshot_token, 2);
 
-        RESPONSE_STAGING.with(|slot| slot.borrow_mut().live_token = u64::MAX);
+        with_response_staging(|slot| slot.borrow_mut().live_token = u64::MAX);
         stage_request(b"eq0");
         let (exhausted_result, allocations, deallocations) =
             measured(|| miso_engine_web_v1_track_response_capture(handle));
@@ -4887,7 +5244,7 @@ pub(crate) mod live_response_ffi_tests {
         assert_eq!(deallocations, 0, "token exhaustion refusal freed");
         assert_eq!(captured_header().result, RESULT_REFUSED_BUDGET);
         assert_eq!(
-            RESPONSE_STAGING.with(|slot| slot.borrow().live_token),
+            with_response_staging(|slot| slot.borrow().live_token),
             u64::MAX,
             "exhaustion must not wrap or reuse a snapshot token"
         );
@@ -4897,7 +5254,7 @@ pub(crate) mod live_response_ffi_tests {
     /// Byte offset of each owner record's `rack` word in the captured payload, in record order,
     /// with the owner's stable identity.
     fn owner_racks() -> Vec<(String, usize, u32)> {
-        RESPONSE_STAGING.with(|slot| {
+        with_response_staging(|slot| {
             let staging = slot.borrow();
             let bytes = &staging.live_result[..staging.live_result_len];
             let header: WebLiveResponseResult = read_live_record(bytes, 0).expect("header");
@@ -4976,7 +5333,7 @@ pub(crate) mod live_response_ffi_tests {
             stage_request(b"eq0");
             assert_eq!(miso_engine_web_v1_track_response_capture(handle), RESULT_OK);
             let (_, at, _) = owner_racks()[1].clone();
-            RESPONSE_STAGING.with(|slot| {
+            with_response_staging(|slot| {
                 slot.borrow_mut().live_result[at..at + 4].copy_from_slice(&refused.to_le_bytes());
             });
             assert_eq!(
@@ -4996,12 +5353,12 @@ mod spectrum_ffi_tests {
 
     #[test]
     fn cold_spectrum_capture_configuration_is_idempotent() {
-        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        with_spectrum_staging(|slot| slot.borrow_mut().release_capture());
         SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
 
-        let first_result = SPECTRUM_STAGING.with(|slot| slot.borrow_mut().configure_capture());
+        let first_result = with_spectrum_staging(|slot| slot.borrow_mut().configure_capture());
         let first_entry_count = SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get());
-        let capacities = SPECTRUM_STAGING.with(|slot| {
+        let capacities = with_spectrum_staging(|slot| {
             let staging = slot.borrow();
             staging.capture.as_ref().map(|capture| {
                 (
@@ -5013,13 +5370,15 @@ mod spectrum_ffi_tests {
             })
         });
         let second_result = if first_result.is_ok() {
-            Some(SPECTRUM_STAGING.with(|slot| slot.borrow_mut().configure_capture()))
+            Some(with_spectrum_staging(|slot| {
+                slot.borrow_mut().configure_capture()
+            }))
         } else {
             None
         };
         let second_entry_count = SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.get());
 
-        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        with_spectrum_staging(|slot| slot.borrow_mut().release_capture());
         SPECTRUM_CAPTURE_CONFIGURE_ENTRIES.with(|entries| entries.set(0));
 
         match first_result {
@@ -5073,7 +5432,7 @@ mod spectrum_ffi_tests {
         let document = include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
         stage_left_output_request();
         BOOT_STAGING.with(|slot| {
-            *slot.borrow_mut().options = WebBootOptions {
+            slot.borrow_mut().options = WebBootOptions {
                 require_sample_rate_hz: 48_000,
                 require_quantum_frames: 128,
                 ..WebBootOptions::explicit_defaults()
@@ -5084,7 +5443,7 @@ mod spectrum_ffi_tests {
     }
 
     fn stream_hop_metadata() -> WebSpectrumStreamMetadata {
-        SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata)
+        with_spectrum_staging(|slot| slot.borrow().stream_metadata)
     }
 
     #[test]
@@ -5183,7 +5542,7 @@ mod spectrum_ffi_tests {
     }
 
     fn stage_left_output_request() {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             staging.release_collection_staging();
@@ -5205,7 +5564,7 @@ mod spectrum_ffi_tests {
     }
 
     fn stage_collection_request() {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             staging.release_collection_staging();
@@ -5255,7 +5614,7 @@ mod spectrum_ffi_tests {
 
     #[test]
     fn collection_staging_uses_caller_count_and_packed_identity_bytes() {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             staging.release_collection_staging();
@@ -5264,7 +5623,7 @@ mod spectrum_ffi_tests {
         });
         let _ = miso_engine_web_v1_spectrum_collection_entry_ptr();
         assert_eq!(miso_engine_web_v1_spectrum_collection_entry_capacity(), 257);
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             for entry in &mut staging.collection_entries {
                 entry.target_id_bytes = 1;
@@ -5275,12 +5634,12 @@ mod spectrum_ffi_tests {
             miso_engine_web_v1_spectrum_collection_target_ids_capacity(),
             257
         );
-        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_collection_staging());
+        with_spectrum_staging(|slot| slot.borrow_mut().release_collection_staging());
     }
 
     #[test]
     fn failed_stream_metadata_starts_new_epoch_drop_count_at_zero() {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.stream_metadata = WebSpectrumStreamMetadata {
                 capture_epoch: 7,
@@ -5310,7 +5669,7 @@ mod spectrum_ffi_tests {
 
     #[test]
     fn invalid_spectrum_cancel_refuses_before_touching_managed_stream() {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             staging.stream_active = true;
@@ -5321,13 +5680,13 @@ mod spectrum_ffi_tests {
             miso_engine_web_v1_spectrum_cancel(0),
             RESULT_INVALID_ARGUMENT
         );
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let staging = slot.borrow();
             assert!(staging.stream_active);
             assert_eq!(staging.capture_len, 32);
             assert_eq!(staging.stream_metadata.result, RESULT_OK);
         });
-        SPECTRUM_STAGING.with(|slot| slot.borrow_mut().release_capture());
+        with_spectrum_staging(|slot| slot.borrow_mut().release_capture());
     }
 
     #[test]
@@ -5397,7 +5756,7 @@ mod spectrum_ffi_tests {
             RESULT_OK
         );
         assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let id = b"main-out";
             staging.target_id.fill(0);
@@ -5428,7 +5787,7 @@ mod spectrum_ffi_tests {
         }
 
         // An unprepared identity is rejected before the old partial capture is touched.
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let id = b"missing";
             staging.target_id.fill(0);
@@ -5466,7 +5825,7 @@ mod spectrum_ffi_tests {
             RESULT_OK
         );
 
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let id = b"eq0";
             staging.target_id.fill(0);
@@ -5498,10 +5857,13 @@ mod spectrum_ffi_tests {
             RESULT_OK
         );
         assert_eq!(
-            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
+            with_spectrum_staging(|slot| slot.borrow().stream_metadata.target),
             SPECTRUM_TARGET_TRACK_POST_PAN
         );
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
+        assert!(with_spectrum_staging(|slot| slot
+            .borrow()
+            .stream_history
+            .is_none()));
         for block in 16..32_u64 {
             assert_eq!(
                 miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
@@ -5512,19 +5874,19 @@ mod spectrum_ffi_tests {
         }
         assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
         assert_eq!(
-            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.target),
+            with_spectrum_staging(|slot| slot.borrow().stream_metadata.target),
             SPECTRUM_TARGET_TRACK_POST_PAN
         );
 
         // Repeating the exact prepared selection is an idempotent no-op. It must preserve the
         // ready window and its sequence instead of spuriously resetting the live stream.
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let id = b"eq0";
             staging.target_id.fill(0);
             staging.target_id[..id.len()].copy_from_slice(id);
         });
-        let before_noop = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let before_noop = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(
             miso_engine_web_v1_spectrum_select(
                 handle,
@@ -5534,14 +5896,17 @@ mod spectrum_ffi_tests {
             ),
             RESULT_OK
         );
-        let after_noop = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let after_noop = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(miso_engine_web_v1_spectrum_selection_epoch(handle), 2);
         assert_eq!(after_noop.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(after_noop.target, before_noop.target);
         assert_eq!(after_noop.channels, before_noop.channels);
         assert_eq!(after_noop.sequence, before_noop.sequence);
         assert_eq!(after_noop.windows, before_noop.windows);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
+        assert!(with_spectrum_staging(|slot| slot
+            .borrow()
+            .stream_history
+            .is_none()));
 
         // Smoothing is part of the same transaction. An invalid configuration must leave both
         // the selected entry and the ready stream untouched.
@@ -5555,7 +5920,7 @@ mod spectrum_ffi_tests {
             ),
             RESULT_INVALID_ARGUMENT
         );
-        let after_refusal = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let after_refusal = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(after_refusal.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(after_refusal.target, SPECTRUM_TARGET_TRACK_POST_PAN);
         assert_eq!(after_refusal.channels, SPECTRUM_CHANNEL_BOTH);
@@ -5565,7 +5930,7 @@ mod spectrum_ffi_tests {
             SPECTRUM_TARGET_TRACK_POST_PAN
         );
 
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let id = b"main-out";
             staging.target_id.fill(0);
@@ -5581,12 +5946,15 @@ mod spectrum_ffi_tests {
             ),
             RESULT_OK
         );
-        let selected = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let selected = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(selected.status, SPECTRUM_STREAM_STATUS_WARMING);
         assert_eq!(selected.target, SPECTRUM_TARGET_OUTPUT);
         assert_eq!(selected.channels, SPECTRUM_CHANNEL_LEFT);
         assert_eq!(selected.smoothing_ms, 250.5);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_none()));
+        assert!(with_spectrum_staging(|slot| slot
+            .borrow()
+            .stream_history
+            .is_none()));
         for block in 32..48_u64 {
             assert_eq!(
                 miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
@@ -5596,7 +5964,7 @@ mod spectrum_ffi_tests {
             assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
         }
         assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
-        let switched = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let switched = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(switched.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(switched.target, SPECTRUM_TARGET_OUTPUT);
         assert_eq!(switched.channels, SPECTRUM_CHANNEL_LEFT);
@@ -5605,9 +5973,12 @@ mod spectrum_ffi_tests {
         // must restart the native window and clear a queued old result while retaining the new
         // history epoch; it must not allocate another analyzer on the host side.
         assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let analyzed = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let analyzed = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(analyzed.analysis_epoch, 0);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_some()));
+        assert!(with_spectrum_staging(|slot| slot
+            .borrow()
+            .stream_history
+            .is_some()));
         for block in 48..64_u64 {
             assert_eq!(
                 miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
@@ -5616,7 +5987,7 @@ mod spectrum_ffi_tests {
             );
             assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
         }
-        let before_smoothing_restart = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let before_smoothing_restart = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(
             miso_engine_web_v1_spectrum_stream_select(
                 handle,
@@ -5627,7 +5998,7 @@ mod spectrum_ffi_tests {
             ),
             RESULT_OK
         );
-        let after_smoothing_restart = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let after_smoothing_restart = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(
             after_smoothing_restart.status,
             SPECTRUM_STREAM_STATUS_WARMING
@@ -5648,10 +6019,10 @@ mod spectrum_ffi_tests {
             RESULT_BACKPRESSURE
         );
         assert_eq!(
-            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.status),
+            with_spectrum_staging(|slot| slot.borrow().stream_metadata.status),
             SPECTRUM_STREAM_STATUS_WARMING
         );
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let id = b"eq0";
             staging.target_id.fill(0);
@@ -5666,13 +6037,16 @@ mod spectrum_ffi_tests {
             ),
             RESULT_OK
         );
-        let after_target_restart = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let after_target_restart = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(after_target_restart.status, SPECTRUM_STREAM_STATUS_WARMING);
         assert_eq!(miso_engine_web_v1_spectrum_selection_epoch(handle), 4);
         assert_eq!(after_target_restart.analysis_epoch, 2);
         assert_eq!(after_target_restart.target, SPECTRUM_TARGET_TRACK_POST_PAN);
         assert_eq!(after_target_restart.channels, SPECTRUM_CHANNEL_BOTH);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().stream_history.is_some()));
+        assert!(with_spectrum_staging(|slot| slot
+            .borrow()
+            .stream_history
+            .is_some()));
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     }
@@ -5694,7 +6068,7 @@ mod spectrum_ffi_tests {
             miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
             RESULT_OK
         );
-        let started = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let started = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(started.status, SPECTRUM_STREAM_STATUS_WARMING);
         assert_eq!(started.sample_rate_hz, 48_000);
         assert_eq!(started.quantum_frames, 128);
@@ -5716,7 +6090,7 @@ mod spectrum_ffi_tests {
             assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
         }
         assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
-        let captured = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let captured = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(captured.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(captured.capture_epoch, 1);
         assert_eq!(captured.sequence, 0);
@@ -5724,15 +6098,15 @@ mod spectrum_ffi_tests {
         assert_eq!(captured.captured_sample, 0);
         assert_eq!(captured.end_sample, 2_048);
         assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let analyzed = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let analyzed = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(analyzed.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(analyzed.analysis_epoch, 0);
         assert_eq!(analyzed.history_start_sample, 0);
         assert_eq!(analyzed.smoothing_ms, 0.0);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+        assert!(with_spectrum_staging(|slot| slot.borrow().result_len > 0));
         assert_eq!(miso_engine_web_v1_spectrum_stream_stop(handle), RESULT_OK);
         assert_eq!(
-            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata.status),
+            with_spectrum_staging(|slot| slot.borrow().stream_metadata.status),
             SPECTRUM_STREAM_STATUS_STOPPED
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
@@ -5741,7 +6115,7 @@ mod spectrum_ffi_tests {
     #[test]
     fn continuous_spectrum_ffi_imports_metadata_without_a_host_handle() {
         stage_left_output_request();
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.configure_capture().expect("fixed spectrum staging");
             let mut cursor = SPECTRUM_WINDOW_HEADER_BYTES as usize;
@@ -5788,14 +6162,14 @@ mod spectrum_ffi_tests {
             RESULT_OK
         );
         assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let metadata = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(metadata.capture_epoch, 1);
         assert_eq!(metadata.sequence, 0);
         assert_eq!(metadata.analysis_epoch, 0);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+        assert!(with_spectrum_staging(|slot| slot.borrow().result_len > 0));
 
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let mut header: WebSpectrumWindow =
                 read_live_record(staging.capture.as_ref().expect("capture staging"), 0)
@@ -5815,7 +6189,7 @@ mod spectrum_ffi_tests {
     }
 
     fn stage_imported_left_window(first_sample: u64, sample_rate_hz: u32, token: u64, value: f32) {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.configure_capture().expect("fixed spectrum staging");
             let window = SpectrumWindow {
@@ -5860,7 +6234,7 @@ mod spectrum_ffi_tests {
         smoothing_ms: f64,
         hop_frames: u32,
     ) {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             let end_sample = first_sample
                 .checked_add(u64::from(SPECTRUM_WINDOW_FRAMES))
@@ -5899,7 +6273,7 @@ mod spectrum_ffi_tests {
                 "H{hop_frames} import configuration",
             );
             assert_eq!(
-                SPECTRUM_STAGING.with(|slot| {
+                with_spectrum_staging(|slot| {
                     slot.borrow()
                         .stream_cadence
                         .expect("configured stream cadence")
@@ -5912,10 +6286,10 @@ mod spectrum_ffi_tests {
                 RESULT_OK,
                 "H{hop_frames} imported window analysis",
             );
-            let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+            let metadata = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
             assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
             assert_eq!(metadata.hop_frames, hop_frames);
-            assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+            assert!(with_spectrum_staging(|slot| slot.borrow().result_len > 0));
         }
         stage_left_output_request();
     }
@@ -5933,7 +6307,7 @@ mod spectrum_ffi_tests {
             RESULT_OK,
         );
         assert_eq!(
-            SPECTRUM_STAGING.with(|slot| {
+            with_spectrum_staging(|slot| {
                 slot.borrow()
                     .stream_cadence
                     .expect("configured stream cadence")
@@ -5942,10 +6316,10 @@ mod spectrum_ffi_tests {
             3_200,
         );
         assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let metadata = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let metadata = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(metadata.hop_frames, 3_200);
-        assert!(SPECTRUM_STAGING.with(|slot| slot.borrow().result_len > 0));
+        assert!(with_spectrum_staging(|slot| slot.borrow().result_len > 0));
         stage_left_output_request();
     }
 
@@ -5955,7 +6329,7 @@ mod spectrum_ffi_tests {
             stage_left_output_request();
             stage_imported_left_window(0, sample_rate_hz, 1, 0.25);
             stage_imported_stream_metadata_with_hop(0, 0, sample_rate_hz, 0.0, hop_frames);
-            let before = SPECTRUM_STAGING.with(|slot| {
+            let before = with_spectrum_staging(|slot| {
                 let staging = slot.borrow();
                 (
                     staging.capture_len,
@@ -5975,7 +6349,7 @@ mod spectrum_ffi_tests {
                 RESULT_INVALID_ARGUMENT,
                 "unsupported H{hop_frames} import",
             );
-            let after = SPECTRUM_STAGING.with(|slot| {
+            let after = with_spectrum_staging(|slot| {
                 let staging = slot.borrow();
                 (
                     staging.capture_len,
@@ -5998,7 +6372,7 @@ mod spectrum_ffi_tests {
     }
 
     fn spectrum_result_header() -> WebSpectrumResult {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let staging = slot.borrow();
             read_live_record(staging.result.as_ref().expect("spectrum result staging"), 0)
                 .expect("spectrum result header")
@@ -6018,7 +6392,7 @@ mod spectrum_ffi_tests {
             RESULT_OK
         );
         assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let first_stream = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let first_stream = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(first_stream.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(first_stream.analysis_epoch, 0);
         assert_eq!(first_stream.history_start_sample, 0);
@@ -6034,7 +6408,7 @@ mod spectrum_ffi_tests {
         assert_eq!(one_shot.captured_sample, 8_192);
         assert_eq!(one_shot.snapshot_token, 9);
         assert_eq!(
-            SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata),
+            with_spectrum_staging(|slot| slot.borrow().stream_metadata),
             first_stream,
             "one-shot analysis must not consume continuous history"
         );
@@ -6048,7 +6422,7 @@ mod spectrum_ffi_tests {
             RESULT_OK
         );
         assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let second_stream = SPECTRUM_STAGING.with(|slot| slot.borrow().stream_metadata);
+        let second_stream = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
         assert_eq!(second_stream.status, SPECTRUM_STREAM_STATUS_READY);
         assert_eq!(second_stream.sequence, 1);
         assert_eq!(second_stream.captured_sample, 2_048);
@@ -6074,7 +6448,7 @@ mod observation_alias_tests {
 
     fn boot_ordinary() -> u32 {
         no_live_host();
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.release_capture();
             let target_id = b"main-out";
@@ -6102,7 +6476,7 @@ mod observation_alias_tests {
     }
 
     fn stage_spectrum_markers() -> (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>) {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.capture_len = 17;
             staging.result_len = 19;
@@ -6127,7 +6501,7 @@ mod observation_alias_tests {
     fn assert_spectrum_markers(
         markers: (usize, usize, WebSpectrumStreamMetadata, bool, Option<f64>),
     ) {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let staging = slot.borrow();
             assert_eq!(staging.capture_len, markers.0);
             assert_eq!(staging.result_len, markers.1);
@@ -6143,7 +6517,7 @@ mod observation_alias_tests {
     }
 
     fn stage_resident_markers() -> Vec<WebObservationResult> {
-        OBSERVATION_STAGING.with(|slot| {
+        with_observation_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.addresses.clear();
             staging.results.clear();
@@ -6166,7 +6540,7 @@ mod observation_alias_tests {
     }
 
     fn assert_resident_markers(markers: &[WebObservationResult]) {
-        OBSERVATION_STAGING.with(|slot| {
+        with_observation_staging(|slot| {
             let staging = slot.borrow();
             assert_eq!(staging.results.as_slice(), markers);
         });
@@ -6232,7 +6606,7 @@ mod observation_alias_tests {
             reserved0: 0,
         };
 
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let mut staging = slot.borrow_mut();
             staging.configure_capture().expect("fixed spectrum staging");
             let capture = staging.capture.as_mut().expect("capture bytes");
@@ -6283,7 +6657,7 @@ mod observation_alias_tests {
                 smoothing_ms: smoothing.smoothing_ms(),
             };
         });
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let staging = slot.borrow();
             CommittedMarkers {
                 capture: staging.capture.as_ref().expect("capture bytes")[..staging.capture_len]
@@ -6310,7 +6684,7 @@ mod observation_alias_tests {
     }
 
     fn assert_staged_markers(markers: &CommittedMarkers) {
-        SPECTRUM_STAGING.with(|slot| {
+        with_spectrum_staging(|slot| {
             let staging = slot.borrow();
             assert_eq!(staging.capture_len, markers.capture_len);
             assert_eq!(staging.result_len, markers.result_len);
@@ -6393,7 +6767,7 @@ mod observation_alias_tests {
             let track_index = miso_engine_web_v1_observation_track_index(handle, 3);
             let tap_id = miso_engine_web_v1_observation_tap_id(handle, 3, 0);
             let read = |selection_rack: u32| {
-                OBSERVATION_STAGING.with(|slot| {
+                with_observation_staging(|slot| {
                     slot.borrow_mut().selections[0] = WebObservationSelection {
                         struct_size: OBSERVATION_SELECTION_BYTES,
                         abi_version: ABI_VERSION,
@@ -6408,7 +6782,7 @@ mod observation_alias_tests {
                 miso_engine_web_v1_observation_read(handle, 1)
             };
             assert_eq!(read(u32::from(rack)), RESULT_OK);
-            let row = OBSERVATION_STAGING.with(|slot| slot.borrow().results[0]);
+            let row = with_observation_staging(|slot| slot.borrow().results[0]);
             assert_eq!(
                 (row.track_index, row.rack, row.effect_index),
                 (track_index, u32::from(rack), 0)
@@ -6491,7 +6865,7 @@ mod observation_alias_tests {
         let track_index = miso_engine_web_v1_observation_track_index(handle, 5);
         let tap_id = miso_engine_web_v1_observation_tap_id(handle, 5, 0);
         let read = |rack: u32, effect_index: u32| {
-            OBSERVATION_STAGING.with(|slot| {
+            with_observation_staging(|slot| {
                 slot.borrow_mut().selections[0] = WebObservationSelection {
                     struct_size: OBSERVATION_SELECTION_BYTES,
                     abi_version: ABI_VERSION,
@@ -6511,7 +6885,7 @@ mod observation_alias_tests {
             RESULT_OK,
             "the numeric read of the post_insert slot"
         );
-        let row = OBSERVATION_STAGING.with(|slot| slot.borrow().results[0]);
+        let row = with_observation_staging(|slot| slot.borrow().results[0]);
         assert_eq!(
             (row.track_index, row.rack, row.effect_index, row.tap_id),
             (track_index, console, 1, tap_id)

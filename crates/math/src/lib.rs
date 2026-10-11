@@ -53,6 +53,7 @@ extern crate std;
 mod vendored;
 
 pub mod corpus;
+pub mod tail;
 
 #[cfg(feature = "lane")]
 mod lane_math;

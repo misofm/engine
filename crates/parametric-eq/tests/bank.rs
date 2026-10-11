@@ -15,7 +15,7 @@ mod support;
 use dsp_reference::class_a;
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedEffectTarget, PreparedNativeEffectBank, StatePayloadInput,
+    PrepareEffectBankRequest, PreparedEffectBank, PreparedEffectTarget, StatePayloadInput,
     StatePayloadOutput, TailSamples,
 };
 use lane::Backend;
@@ -100,12 +100,13 @@ fn bank_prepared_target_updates_only_the_selected_lane() {
         .expect("bank request")
         .expect("native bank");
     let target = hpf_target();
-    bank.apply_prepared_target_lane(0, &target)
+    bank.processor
+        .apply_prepared_target_lane(0, &target)
         .expect("bank target");
-    let (_, selected_left, _) = snapshot_bank(&*bank, 0);
+    let (_, selected_left, _) = snapshot_bank(&bank, 0);
     assert_eq!(state_word(&selected_left, 114), 1);
     if lanes > 1 {
-        let (_, untouched_left, _) = snapshot_bank(&*bank, 1);
+        let (_, untouched_left, _) = snapshot_bank(&bank, 1);
         assert_eq!(state_word(&untouched_left, 114), 0);
     }
 }
@@ -163,17 +164,19 @@ fn configured_values(track: usize) -> Vec<effect_contract::InitialParameterValue
     values
 }
 
-fn snapshot_bank(bank: &dyn PreparedNativeEffectBank, track: u32) -> Payload {
+/// Snapshots one track of a bound bank, sized by its bind result's metadata.
+fn snapshot_bank(bank: &PreparedEffectBank, track: u32) -> Payload {
     let mut common = [0_u8; COMMON_BYTES];
     let mut left = [0_u8; LANE_BYTES];
     let mut right = [0_u8; LANE_BYTES];
-    let sizes = bank.metadata().program_key.state_sizes;
-    bank.snapshot_track_state_payload(
-        track,
-        StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
-            .expect("bank state output"),
-    )
-    .expect("bank snapshot");
+    let sizes = bank.metadata.program_key.state_sizes;
+    bank.processor
+        .snapshot_track_state_payload(
+            track,
+            StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes)
+                .expect("bank state output"),
+        )
+        .expect("bank snapshot");
     (common, left, right)
 }
 
@@ -199,8 +202,8 @@ fn every_width_matches_the_scalar_instantiation() {
         })
         .expect("valid bank request")
         .expect("the native width must bind");
-    assert_eq!(bank.metadata().width, width);
-    assert_eq!(bank.metadata().program_key.tail, TailSamples::Infinite);
+    assert_eq!(bank.metadata.width, width);
+    assert_eq!(bank.metadata.program_key.tail, TailSamples::Infinite);
 
     let mut scalar: Vec<_> = values_by_track
         .iter()
@@ -233,8 +236,14 @@ fn every_width_matches_the_scalar_instantiation() {
                 let mut changed = vec![false; target_values.len()];
                 changed[3 * 2] = true;
                 changed[4 * 2 + 1] = true;
-                apply_prepared_targets(scalar[track].as_mut(), &target_values, &changed);
-                apply_prepared_targets_lane(&mut *bank, track, 48_000, &target_values, &changed);
+                apply_prepared_targets(&mut scalar[track], &target_values, &changed);
+                apply_prepared_targets_lane(
+                    &mut *bank.processor,
+                    track,
+                    48_000,
+                    &target_values,
+                    &changed,
+                );
             }
         }
 
@@ -257,7 +266,7 @@ fn every_width_matches_the_scalar_instantiation() {
         let mut scalar_reports = Vec::with_capacity(lanes);
         for track in 0..lanes {
             scalar_reports.push(
-                scalar[track].process(
+                scalar[track].processor.process(
                     EffectProcessBlock::new(
                         &mut scalar_left[track],
                         &mut scalar_right[track],
@@ -270,7 +279,7 @@ fn every_width_matches_the_scalar_instantiation() {
                 ),
             );
         }
-        let bank_report = bank.process_bank(
+        let bank_report = bank.processor.process_bank(
             EffectBankProcessBlock::new(
                 &mut bank_left,
                 &mut bank_right,
@@ -304,23 +313,24 @@ fn every_width_matches_the_scalar_instantiation() {
                 );
             }
             assert_eq!(
-                snapshot_bank(bank.as_ref(), track as u32),
-                snapshot(scalar[track].as_ref()),
+                snapshot_bank(&bank, track as u32),
+                snapshot(&scalar[track]),
                 "block {index} track {track} state"
             );
         }
         position += frames as u64;
     }
 
-    let saved = snapshot_bank(bank.as_ref(), 0);
-    let sizes = bank.metadata().program_key.state_sizes;
-    bank.restore_track_state_payload(
-        0,
-        1,
-        StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes).expect("state input"),
-    )
-    .expect("state restore");
-    assert_eq!(snapshot_bank(bank.as_ref(), 0), saved);
+    let saved = snapshot_bank(&bank, 0);
+    let sizes = bank.metadata.program_key.state_sizes;
+    bank.processor
+        .restore_track_state_payload(
+            0,
+            1,
+            StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes).expect("state input"),
+        )
+        .expect("state restore");
+    assert_eq!(snapshot_bank(&bank, 0), saved);
 }
 
 /// E8 for the bank: a bank block may be cut anywhere without moving a bit.
@@ -377,11 +387,23 @@ fn bank_rendering_is_partition_invariant() {
         let mut changed = vec![false; target_values.len()];
         changed[3 * 2] = true;
         changed[4 * 2 + 1] = true;
-        apply_prepared_targets_lane(&mut *whole, track, 48_000, &target_values, &changed);
-        apply_prepared_targets_lane(&mut *split, track, 48_000, &target_values, &changed);
+        apply_prepared_targets_lane(
+            &mut *whole.processor,
+            track,
+            48_000,
+            &target_values,
+            &changed,
+        );
+        apply_prepared_targets_lane(
+            &mut *split.processor,
+            track,
+            48_000,
+            &target_values,
+            &changed,
+        );
     }
 
-    whole.process_bank(
+    whole.processor.process_bank(
         EffectBankProcessBlock::new(
             &mut whole_left,
             &mut whole_right,
@@ -398,7 +420,7 @@ fn bank_rendering_is_partition_invariant() {
 
     let mut first = 0_usize;
     for chunk in [1_usize, 7, 64, 56] {
-        split.process_bank(
+        split.processor.process_bank(
             EffectBankProcessBlock::new(
                 &mut split_left[first * lanes..(first + chunk) * lanes],
                 &mut split_right[first * lanes..(first + chunk) * lanes],
@@ -426,8 +448,8 @@ fn bank_rendering_is_partition_invariant() {
     );
     for track in 0..lanes {
         assert_eq!(
-            snapshot_bank(whole.as_ref(), track as u32),
-            snapshot_bank(split.as_ref(), track as u32),
+            snapshot_bank(&whole, track as u32),
+            snapshot_bank(&split, track as u32),
             "track {track}"
         );
     }
@@ -556,7 +578,7 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
         let bank = bind(&requests, &mask)
             .expect("a padded request is well formed")
             .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the EQ must bind"));
-        assert_eq!(bank.metadata().width, width);
+        assert_eq!(bank.metadata.width, width);
         if members >= 2 {
             let last = members - 1;
             let mut limits = requests.clone();
@@ -631,7 +653,7 @@ fn bank_lane_and_track_changes_do_not_leak() {
         (&mut baseline, &mut baseline_left, &mut baseline_right),
         (&mut changed, &mut changed_left, &mut changed_right),
     ] {
-        bank.process_bank(
+        bank.processor.process_bank(
             EffectBankProcessBlock::new(
                 left,
                 right,
@@ -662,8 +684,8 @@ fn bank_lane_and_track_changes_do_not_leak() {
     for track in 0..lanes {
         if track != 3 {
             assert_eq!(
-                snapshot_bank(baseline.as_ref(), track as u32),
-                snapshot_bank(changed.as_ref(), track as u32)
+                snapshot_bank(&baseline, track as u32),
+                snapshot_bank(&changed, track as u32)
             );
         }
     }
@@ -1011,7 +1033,7 @@ impl Layout {
     fn bind<'a>(
         self,
         request: impl Fn(usize) -> effect_contract::PrepareEffectRequest<'a>,
-    ) -> Vec<Box<dyn PreparedNativeEffectBank>> {
+    ) -> Vec<PreparedEffectBank> {
         (0..self.banks())
             .map(|bank| {
                 let requests: Vec<_> = (0..self.lanes)
@@ -1034,12 +1056,12 @@ impl Layout {
     }
 
     /// Every lane's state payload, bank by bank: what a padded lane must still hold later.
-    fn at_bind(self, banks: &[Box<dyn PreparedNativeEffectBank>]) -> Vec<Vec<Payload>> {
+    fn at_bind(self, banks: &[PreparedEffectBank]) -> Vec<Vec<Payload>> {
         banks
             .iter()
             .map(|bank| {
                 (0..self.lanes)
-                    .map(|lane| snapshot_bank(bank.as_ref(), lane as u32))
+                    .map(|lane| snapshot_bank(bank, lane as u32))
                     .collect()
             })
             .collect()
@@ -1067,7 +1089,7 @@ impl Layout {
         self,
         transcript: &mut Vec<u8>,
         bank: usize,
-        processor: &dyn PreparedNativeEffectBank,
+        processor: &PreparedEffectBank,
         at_bind: &[Payload],
         frames: usize,
         left: &[f32],
@@ -1102,7 +1124,8 @@ impl Layout {
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) was reported"
             );
             assert!(
-                &snapshot_bank(processor, lane as u32) == bound_payload,
+                support::without_silence(&snapshot_bank(processor, lane as u32))
+                    == support::without_silence(bound_payload),
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) moved its state"
             );
         }
@@ -1153,7 +1176,7 @@ fn odd_scalar_transcript() -> OddLeg {
             for (track, effect) in effects.iter_mut().enumerate() {
                 for (at, target, changed) in &configurations[track].1 {
                     if *at == block {
-                        apply_prepared_targets(effect.as_mut(), target, changed);
+                        apply_prepared_targets(effect, target, changed);
                     }
                 }
                 let mut left: Vec<f32> = (0..frames)
@@ -1162,13 +1185,13 @@ fn odd_scalar_transcript() -> OddLeg {
                 let mut right: Vec<f32> = (0..frames)
                     .map(|frame| odd_word(block, frame, track, 1))
                     .collect();
-                let report = effect.process(
+                let report = effect.processor.process(
                     EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
                         .expect("scalar block"),
                 );
                 fold_words(&mut transcript, left.into_iter().chain(right));
                 fold_report(&mut transcript, &report);
-                fold_payload(&mut transcript, &snapshot(effect.as_ref()));
+                fold_payload(&mut transcript, &snapshot(effect));
             }
             position += frames as u64;
         }
@@ -1198,12 +1221,12 @@ fn odd_bank_transcript(width: BankWidth, backend: Backend, members: usize, mono:
         for block in 0..ODD_BLOCKS {
             let frames = odd_frames(block);
             for (group, bank) in banks.iter_mut().enumerate() {
-                assert!(!mono || bank.supports_mono_collapse());
+                assert!(!mono || bank.processor.supports_mono_collapse());
                 for (lane, track) in layout.members_of(group) {
                     for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
-                                bank.as_mut(),
+                                bank.processor.as_mut(),
                                 lane,
                                 48_000,
                                 target,
@@ -1236,14 +1259,14 @@ fn odd_bank_transcript(width: BankWidth, backend: Backend, members: usize, mono:
                 )
                 .expect("bank block");
                 let report = if mono {
-                    bank.process_bank_mono(process)
+                    bank.processor.process_bank_mono(process)
                 } else {
-                    bank.process_bank(process)
+                    bank.processor.process_bank(process)
                 };
                 layout.fold(
                     &mut transcript,
                     group,
-                    bank.as_ref(),
+                    bank,
                     &at_bind[group],
                     frames,
                     &left,
@@ -1599,20 +1622,21 @@ fn select_scalar_transcript() -> SelectLeg {
             for (track, effect) in effects.iter_mut().enumerate() {
                 for (at, target, changed) in &configurations[track].1 {
                     if *at == block {
-                        apply_prepared_targets(effect.as_mut(), target, changed);
+                        apply_prepared_targets(effect, target, changed);
                     }
                 }
                 if shape == SelectShape::PoisonedDryHpf && track == 0 && block % 16 == 0 {
-                    let mut payload = snapshot(effect.as_ref());
+                    let mut payload = snapshot(effect);
                     plant_left_ic2(&mut payload, 0, -f32::MAX);
                     effect
+                        .processor
                         .restore_state_payload(
                             PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                             StatePayloadInput::new(
                                 &payload.0,
                                 &payload.1,
                                 &payload.2,
-                                effect.metadata().state_sizes,
+                                effect.metadata.state_sizes,
                             )
                             .expect("state input"),
                         )
@@ -1627,7 +1651,7 @@ fn select_scalar_transcript() -> SelectLeg {
                 let admitted =
                     select_stationary(block) && plane_admits(&left) && plane_admits(&right);
                 let before = masked_passes();
-                let report = effect.process(
+                let report = effect.processor.process(
                     EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
                         .expect("scalar block"),
                 );
@@ -1641,11 +1665,11 @@ fn select_scalar_transcript() -> SelectLeg {
                     }
                 }
                 if shape == SelectShape::PoisonedDryHpf && track == 0 {
-                    poisoned &= poisoned_as_intended(block, &snapshot(effect.as_ref()), &report);
+                    poisoned &= poisoned_as_intended(block, &snapshot(effect), &report);
                 }
                 fold_words(&mut transcript, left.into_iter().chain(right));
                 fold_report(&mut transcript, &report);
-                fold_payload(&mut transcript, &snapshot(effect.as_ref()));
+                fold_payload(&mut transcript, &snapshot(effect));
             }
             position += frames as u64;
         }
@@ -1686,7 +1710,7 @@ fn select_bank_transcript(
                     for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
-                                bank.as_mut(),
+                                bank.processor.as_mut(),
                                 lane,
                                 48_000,
                                 target,
@@ -1697,16 +1721,17 @@ fn select_bank_transcript(
                 }
                 // Track 0 is lane 0 of bank 0 in every layout.
                 if shape == SelectShape::PoisonedDryHpf && group == 0 && block % 16 == 0 {
-                    let mut payload = snapshot_bank(bank.as_ref(), 0);
+                    let mut payload = snapshot_bank(bank, 0);
                     plant_left_ic2(&mut payload, 0, -f32::MAX);
-                    let sizes = bank.metadata().program_key.state_sizes;
-                    bank.restore_track_state_payload(
-                        0,
-                        PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
-                        StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
-                            .expect("state input"),
-                    )
-                    .expect("a finite integrator restores");
+                    let sizes = bank.metadata.program_key.state_sizes;
+                    bank.processor
+                        .restore_track_state_payload(
+                            0,
+                            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                                .expect("state input"),
+                        )
+                        .expect("a finite integrator restores");
                 }
                 let plane = |channel: usize| -> Vec<f32> {
                     layout.plane(group, frames, |frame, track| {
@@ -1736,9 +1761,9 @@ fn select_bank_transcript(
                 )
                 .expect("bank block");
                 let report = if mono {
-                    bank.process_bank_mono(process)
+                    bank.processor.process_bank_mono(process)
                 } else {
-                    bank.process_bank(process)
+                    bank.processor.process_bank(process)
                 };
                 if let (Some(before), Some(after)) = (before, masked_passes())
                     && select_stationary(block)
@@ -1750,16 +1775,13 @@ fn select_bank_transcript(
                     }
                 }
                 if shape == SelectShape::PoisonedDryHpf && group == 0 {
-                    poisoned &= poisoned_as_intended(
-                        block,
-                        &snapshot_bank(bank.as_ref(), 0),
-                        &report.reports[0],
-                    );
+                    poisoned &=
+                        poisoned_as_intended(block, &snapshot_bank(bank, 0), &report.reports[0]);
                 }
                 layout.fold(
                     &mut transcript,
                     group,
-                    bank.as_ref(),
+                    bank,
                     &at_bind[group],
                     frames,
                     &left,
@@ -1989,13 +2011,13 @@ fn skew_scalar_transcript() -> Vec<u8> {
                 let mut right: Vec<f32> = (0..frames)
                     .map(|frame| skew_word(block, frame, track, 1))
                     .collect();
-                let report = effect.process(
+                let report = effect.processor.process(
                     EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
                         .expect("scalar block"),
                 );
                 fold_words(&mut transcript, left.into_iter().chain(right));
                 fold_report(&mut transcript, &report);
-                fold_payload(&mut transcript, &snapshot(effect.as_ref()));
+                fold_payload(&mut transcript, &snapshot(effect));
             }
             position += frames as u64;
         }
@@ -2045,14 +2067,14 @@ fn skew_bank_transcript(width: BankWidth, backend: Backend, members: usize, mono
                 )
                 .expect("bank block");
                 let report = if mono {
-                    bank.process_bank_mono(process)
+                    bank.processor.process_bank_mono(process)
                 } else {
-                    bank.process_bank(process)
+                    bank.processor.process_bank(process)
                 };
                 layout.fold(
                     &mut transcript,
                     group,
-                    bank.as_ref(),
+                    bank,
                     &at_bind[group],
                     frames,
                     &left,
@@ -2224,7 +2246,7 @@ fn cliff_scalar_transcript(overflow_tracks: usize) -> (Vec<u8>, u64) {
             for (track, effect) in effects.iter_mut().enumerate() {
                 for (at, target, changed) in &configurations[track].1 {
                     if *at == block {
-                        apply_prepared_targets(effect.as_mut(), target, changed);
+                        apply_prepared_targets(effect, target, changed);
                     }
                 }
                 let mut left: Vec<f32> = (0..128)
@@ -2233,7 +2255,7 @@ fn cliff_scalar_transcript(overflow_tracks: usize) -> (Vec<u8>, u64) {
                 let mut right: Vec<f32> = (0..128)
                     .map(|frame| cliff_word(block, frame, track, 1))
                     .collect();
-                let report = effect.process(
+                let report = effect.processor.process(
                     EffectProcessBlock::new(
                         &mut left,
                         &mut right,
@@ -2246,7 +2268,7 @@ fn cliff_scalar_transcript(overflow_tracks: usize) -> (Vec<u8>, u64) {
                 );
                 fold_words(&mut transcript, left.into_iter().chain(right));
                 fold_report(&mut transcript, &report);
-                fold_payload(&mut transcript, &snapshot(effect.as_ref()));
+                fold_payload(&mut transcript, &snapshot(effect));
             }
         }
     }
@@ -2257,16 +2279,17 @@ fn cliff_scalar_transcript(overflow_tracks: usize) -> (Vec<u8>, u64) {
                 .prepare(request(&values, false))
                 .expect("scalar prepare");
             if track.is_multiple_of(4) {
-                let mut payload = snapshot(effect.as_ref());
+                let mut payload = snapshot(&effect);
                 plant_left_ic2(&mut payload, 2, -f32::MAX);
                 effect
+                    .processor
                     .restore_state_payload(
                         PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                         StatePayloadInput::new(
                             &payload.0,
                             &payload.1,
                             &payload.2,
-                            effect.metadata().state_sizes,
+                            effect.metadata.state_sizes,
                         )
                         .expect("state input"),
                     )
@@ -2280,7 +2303,7 @@ fn cliff_scalar_transcript(overflow_tracks: usize) -> (Vec<u8>, u64) {
         for effect in &mut effects {
             let mut left: Vec<f32> = (0..128).map(overflow_word).collect();
             let mut right = left.clone();
-            let report = effect.process(
+            let report = effect.processor.process(
                 EffectProcessBlock::new(
                     &mut left,
                     &mut right,
@@ -2294,7 +2317,7 @@ fn cliff_scalar_transcript(overflow_tracks: usize) -> (Vec<u8>, u64) {
             faults += report.nonfinite_left_blocks;
             fold_words(&mut transcript, left.into_iter().chain(right));
             fold_report(&mut transcript, &report);
-            fold_payload(&mut transcript, &snapshot(effect.as_ref()));
+            fold_payload(&mut transcript, &snapshot(effect));
         }
     }
     (transcript, faults)
@@ -2314,7 +2337,7 @@ fn cliff_bank_transcript(
     let lanes = layout.lanes;
     let mut transcript = Vec::new();
     let offsets = vec![0_u32; lanes + 1];
-    let render = |bank: &mut Box<dyn PreparedNativeEffectBank>,
+    let render = |bank: &mut PreparedEffectBank,
                   at_bind: &[Payload],
                   transcript: &mut Vec<u8>,
                   group: usize,
@@ -2343,14 +2366,14 @@ fn cliff_bank_transcript(
         )
         .expect("bank block");
         let report = if mono {
-            bank.process_bank_mono(process)
+            bank.processor.process_bank_mono(process)
         } else {
-            bank.process_bank(process)
+            bank.processor.process_bank(process)
         };
         layout.fold(
             transcript,
             group,
-            bank.as_ref(),
+            bank,
             at_bind,
             128,
             &left,
@@ -2371,7 +2394,7 @@ fn cliff_bank_transcript(
                     for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
-                                bank.as_mut(),
+                                bank.processor.as_mut(),
                                 lane,
                                 48_000,
                                 target,
@@ -2398,16 +2421,17 @@ fn cliff_bank_transcript(
             if !track.is_multiple_of(4) {
                 continue;
             }
-            let mut payload = snapshot_bank(bank.as_ref(), lane as u32);
+            let mut payload = snapshot_bank(bank, lane as u32);
             plant_left_ic2(&mut payload, 2, -f32::MAX);
-            let sizes = bank.metadata().program_key.state_sizes;
-            bank.restore_track_state_payload(
-                lane as u32,
-                PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
-                StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
-                    .expect("state input"),
-            )
-            .expect("a finite integrator restores");
+            let sizes = bank.metadata.program_key.state_sizes;
+            bank.processor
+                .restore_track_state_payload(
+                    lane as u32,
+                    PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                        .expect("state input"),
+                )
+                .expect("a finite integrator restores");
         }
     }
     let at_bind = layout.at_bind(&banks);
@@ -2718,22 +2742,23 @@ fn limit_scalar_transcript() -> LimitLeg {
                 let voice = track % LIMIT_VOICES;
                 for (at, target, changed) in &configurations[track].1 {
                     if *at == block {
-                        apply_prepared_targets(effect.as_mut(), target, changed);
+                        apply_prepared_targets(effect, target, changed);
                     }
                 }
                 if let Some(right) = limit_restore(shape, block)
                     && voice == 0
                 {
-                    let mut payload = snapshot(effect.as_ref());
+                    let mut payload = snapshot(effect);
                     plant_integrators(&mut payload, right, 1, f32::MAX, -f32::MAX);
                     effect
+                        .processor
                         .restore_state_payload(
                             PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
                             StatePayloadInput::new(
                                 &payload.0,
                                 &payload.1,
                                 &payload.2,
-                                effect.metadata().state_sizes,
+                                effect.metadata.state_sizes,
                             )
                             .expect("state input"),
                         )
@@ -2745,7 +2770,7 @@ fn limit_scalar_transcript() -> LimitLeg {
                 let mut right: Vec<f32> = (0..frames)
                     .map(|frame| limit_word(block, frame, voice, 1))
                     .collect();
-                let report = effect.process(
+                let report = effect.processor.process(
                     EffectProcessBlock::new(&mut left, &mut right, None, position, &[], 128)
                         .expect("scalar block"),
                 );
@@ -2756,7 +2781,7 @@ fn limit_scalar_transcript() -> LimitLeg {
                 );
                 fold_words(&mut transcript, left.into_iter().chain(right));
                 fold_report(&mut transcript, &report);
-                fold_payload(&mut transcript, &snapshot(effect.as_ref()));
+                fold_payload(&mut transcript, &snapshot(effect));
             }
             position += frames as u64;
         }
@@ -2789,12 +2814,12 @@ fn limit_bank_transcript(
         for block in 0..LIMIT_BLOCKS {
             let frames = limit_frames(block);
             for (group, bank) in banks.iter_mut().enumerate() {
-                assert!(!mono || bank.supports_mono_collapse());
+                assert!(!mono || bank.processor.supports_mono_collapse());
                 for (lane, track) in layout.members_of(group) {
                     for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
-                                bank.as_mut(),
+                                bank.processor.as_mut(),
                                 lane,
                                 48_000,
                                 target,
@@ -2805,16 +2830,17 @@ fn limit_bank_transcript(
                     if let Some(right) = limit_restore(shape, block)
                         && track.is_multiple_of(LIMIT_VOICES)
                     {
-                        let mut payload = snapshot_bank(bank.as_ref(), lane as u32);
+                        let mut payload = snapshot_bank(bank, lane as u32);
                         plant_integrators(&mut payload, right, 1, f32::MAX, -f32::MAX);
-                        let sizes = bank.metadata().program_key.state_sizes;
-                        bank.restore_track_state_payload(
-                            lane as u32,
-                            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
-                            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
-                                .expect("state input"),
-                        )
-                        .expect("finite integrators restore");
+                        let sizes = bank.metadata.program_key.state_sizes;
+                        bank.processor
+                            .restore_track_state_payload(
+                                lane as u32,
+                                PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                                StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                                    .expect("state input"),
+                            )
+                            .expect("finite integrators restore");
                     }
                 }
                 let plane = |channel: usize| -> Vec<f32> {
@@ -2841,9 +2867,9 @@ fn limit_bank_transcript(
                 )
                 .expect("bank block");
                 let report = if mono {
-                    bank.process_bank_mono(process)
+                    bank.processor.process_bank_mono(process)
                 } else {
-                    bank.process_bank(process)
+                    bank.processor.process_bank(process)
                 };
                 for (lane, _) in layout.members_of(group) {
                     let entry = &report.reports[lane];
@@ -2857,7 +2883,7 @@ fn limit_bank_transcript(
                 layout.fold(
                     &mut transcript,
                     group,
-                    bank.as_ref(),
+                    bank,
                     &at_bind[group],
                     frames,
                     &left,

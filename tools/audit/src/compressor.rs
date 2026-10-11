@@ -252,6 +252,11 @@ fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRe
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(CompressorFactory),
+            48_000,
+            EffectQuality::Normal,
+        ),
     }
 }
 
@@ -260,6 +265,7 @@ fn prepare_scalar() -> Box<dyn PreparedNativeEffect> {
     CompressorFactory
         .prepare(request(&values, true))
         .expect("prepared connected-sidechain compressor")
+        .processor
 }
 
 fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
@@ -275,4 +281,5 @@ fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativ
             active_mask: width.full_mask(),
         })
         .expect("bank binding must not fail")
+        .map(|bank| bank.processor)
 }

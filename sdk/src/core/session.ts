@@ -321,9 +321,15 @@ function f32(value: unknown, path: string): number {
   return rounded;
 }
 
-/** A route's gain domain in dB, inclusive: the engine's `validate_routes` bound (issue #1237 D1). */
+/**
+ * A route's gain domain in dB, inclusive: a copy of the engine's `session::ROUTE_GAIN_DB_MINIMUM`
+ * and `ROUTE_GAIN_DB_MAXIMUM` (issue #1237 D1), held to the engine by `sdk/test/builder-evals.mjs`.
+ */
 const ROUTE_GAIN_DB_DOMAIN = Object.freeze([-144, 24] as const);
-/** A route's `channel_matrix` coefficient domain, inclusive (issue #1237 D1). */
+/**
+ * A route's `channel_matrix` coefficient domain, inclusive: a copy of the engine's
+ * `session::ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM` (issue #1237 D1), held as the gain domain is.
+ */
 const ROUTE_COEFFICIENT_DOMAIN = Object.freeze([-1, 1] as const);
 
 /**

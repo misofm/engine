@@ -73,6 +73,10 @@ No rendered bit and no EQ refusal moves.
 - `crates/effect-runtime/src/lib.rs` (the module line), `crates/effect-runtime/src/svf.rs` (new)
 - `crates/parametric-eq/src/lib.rs` (`word_spectral_norm`, the two constants and their uses only;
   #1337 edits other parts of this file, so rebase on whichever lands first)
+- Root-authorized batch follow-up (2026-10-06, attempt 1 verdict MINOR2):
+  `.github/workflows/qualification.yml`, one step in the required `test-release` job only
+- Batch follow-up part B (2026-10-06, attempt 1 verdict NIT4, assigned by the stream G
+  coordinator): `crates/parametric-eq/tests/MUTATIONS.md`, row 18's location cell only
 
 ## Non-goals
 
@@ -109,3 +113,94 @@ No rendered bit and no EQ refusal moves.
 ## Dependencies
 
 - none
+
+## Attempt record
+
+### Attempt 1 (Terra, on `codex/d15-stream-g` over `8439972be`)
+
+**Implementation.**
+- D1: `design_lr4_words` is the bare design; `design_lr4` keeps its signature and behaviour (domain
+  test, `design_lr4_words`, unchanged check-back). Both are now `pub` (the gate-1 integration test
+  must call them; `design_lr4` was private). Every existing caller still calls `design_lr4`.
+- D2: `crates/effect-runtime/src/svf.rs` holds `transition_norm` (operation for operation, both
+  square roots through `math::sqrt`), `NORM_TOLERANCE` and `RAMP_PATH_NORM_TOLERANCE`, with the
+  derivation comment moved verbatim except one token: the intra-doc link `` [`RAMP_SAMPLES`] ``
+  became a plain code span, because it names a private constant of `parametric-eq` that rustdoc
+  cannot resolve from `effect-runtime`.
+- D3: `parametric_eq::word_spectral_norm` is one call to `transition_norm`; the EQ's two constants
+  are deleted and its two uses import the shared ones. Re-located anchors after #1328: the norm at
+  `lib.rs:796`, constants `:810`/`:835`, uses `:899` and `:2779`.
+
+**Gate 1.** `tests/designer_total.rs`. Exhaustive (`--release --ignored`): 224,919,556 designs
+(56,229,889 `f32` crossovers in `[80, 8000]` x 4 rates), all `Some`, all bit-equal to
+`design_lr4_words`, all within `NORM_TOLERANCE`; 5.9 s. **Largest norm excess `5.40e-8` at
+7943.455 Hz, 44.1 kHz** (tolerance excess `2.38e-7`, margin 4.4x); the triples are not all
+strictly contractive, so the one-rounding tolerance is load-bearing. Per-PR stride 1024: 219,652
+designs, largest excess `5.29e-8` (7984 Hz, 44.1 kHz), 0.04 s in debug.
+
+**Mutation evidence** (each applied alone to the per-PR test, red, reverted, green):
+- domain tightened in `design_lr4` (`crossover_hz > 7_999.0` refused): red, "design_lr4 refused
+  7999.5 Hz at 44100 Hz";
+- `c1` perturbed by `1.000_01` in `design_lr4_words`: red, norm `1.00000024` exceeds at 2981 Hz;
+- `design_lr4` returning a word one ulp off `design_lr4_words`: red, "checked and infallible designs
+  differ at 80.0 Hz";
+- `NORM_TOLERANCE = 1.0`: red, norm `1.000000000008` at 80.0625 Hz;
+- `transition_norm` `a11 = 1 - 1.9 a3`: red here and in four `parametric-eq/tests/analytic.rs`
+  tests (so the EQ's norm tests guard D3's delegation, as the spec says).
+
+**Gate 2 (no bit moves).** The three suites pass unchanged; `corpus_digests.in` and the EQ render
+contract untouched. One-time PR evidence: the shipped AudioWorklet module built at `8439972be` and
+with this change differ in sha256 (`89a909d0...` vs `748efd3d...`), but `wasm-objdump -d` of the two
+named twins is identical and every function size matches; the only difference is in the data
+segment, the panic-location line numbers of the two edited source files. No code byte moved.
+
+**Gate 3 commands.** All pass: the `cargo test --all-targets` line; the release `--ignored` sweep;
+`check-parametric-eq-render-contract.sh`; `check-effect-runtime-policy.sh`;
+`check-cross-targets.sh` (PASS; its note "parametric-eq 128 calls, down from 132: lower its row"
+is identical at `8439972be`, not from this change); `cargo clippy --workspace --all-targets
+--all-features -D warnings`; `cargo fmt --check`; `check-workspace-policy.sh`. Worklet chain
+(browser-compiled code changed): `build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py`,
+`test-web-audioworklet.sh`: all pass. The V8 spill gate (`run-wasm-gates.sh`) was not run; it is
+#1328's known red and not a gate of this issue, and no code byte of the module moved.
+
+**Test value.** The per-PR and exhaustive sweeps turn red on a crossover the checked designer
+refuses, a checked design that diverges from the infallible one, or a design outside the
+contractive set; no existing test sweeps the domain.
+
+## Follow-up record
+
+### Batch follow-up (2026-10-06, stream G part A; root ruling on attempt 1 verdict MINOR2)
+
+- **The exhaustive designer sweep runs in required CI.** Made by the decision-15 root coordinator
+  under the owner's no-shortcuts delegation (2026-10-06). The `#[ignore]` sweep
+  `designer_is_total_on_every_f32_in_the_domain` (`crates/multiband-compressor/tests/designer_total.rs`)
+  ran in no CI job. `qualification.yml`'s required `test-release` job has a new step,
+  `Multiband crossover designer exhaustive sweep (designer_total) in release`:
+  `cargo test --locked --release -p multiband-compressor --test designer_total -- --ignored`.
+  No job added, so the router and the verdict's expectation table are unchanged. If
+  `test-release` then exceeds every other required job, #1428's amended D2 moves the release
+  sweeps into their own parallel required job.
+- **Local measurement** (x86-64, 32 hardware threads, release dependencies already built,
+  worktree `codex/d15-stream-g`): 13.1 s wall including the test crate's build; the sweep itself
+  4.16 s (1 passed, the per-PR test filtered out by `--ignored`). The CI step time is pending-CI
+  until the batch push. `check-ci-path-routing.py`, `test-ci-path-routing.py`,
+  `check-test-support-ci.py`, `test-test-support-ci.py` and `check-workspace-policy.sh` exit 0.
+
+### Batch follow-up part B (2026-10-06, stream G; attempt 1 verdict MINOR1, NIT3, NIT4)
+
+Documentation only; no code, test or bit changes.
+- **MINOR1.** `crates/effect-runtime/src/svf.rs`'s module doc no longer says both effects meet
+  "the same preconditions" without qualification: `transition_norm` and `NORM_TOLERANCE` need only
+  `c1, a2, a3 < 1`, while `RAMP_PATH_NORM_TOLERANCE` also needs a ramp of at most 64 samples and a
+  step that is the remaining distance times an exact power of two (the EQ's `2^-6`), and a consumer
+  with another ramp re-derives the bound. The constant's doc gains the same preconditions, with
+  the `N`-sample condition `2^-22 + (N + 1) * 2^-23 <= 2^-12` (holds to about 2,000 samples) and
+  the note that the 30-fold margin and the `(1 + 2^-12)^64` growth figure are for 64 samples;
+  the unexplained `RAMP_SAMPLES` code span became "64 samples".
+- **NIT3.** The carry citation names `crates/parametric-eq/tests/carry.rs`.
+- **NIT4.** `crates/parametric-eq/tests/MUTATIONS.md` row 18 keeps its historical location and
+  notes that the body is now `effect_runtime::svf::transition_norm`.
+- Gates: `cargo fmt --all -- --check`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+  --no-deps` (part-B batch gates).

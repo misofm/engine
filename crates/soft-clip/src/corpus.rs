@@ -98,6 +98,20 @@ struct LaneCoefficients {
     step: [f32; 3],
 }
 
+impl LaneCoefficients {
+    /// The ramp targets (issue #1409 D4): each ramp of case 4 is in flight for the whole case and
+    /// heads for the value [`TARGET_FRAMES`] steps from its start, past the case's last frame by
+    /// far more than the iterated additions' rounding, so the endpoint clamp never acts and the
+    /// case pins in-flight ramp words. A lane that does not ramp targets its start.
+    fn target(&self) -> [f32; 3] {
+        core::array::from_fn(|index| self.start[index] + TARGET_FRAMES * self.step[index])
+    }
+}
+
+/// Distance, in samples, from a ramp's start to its target in [`LaneCoefficients::target`]: twice
+/// [`FRAMES`].
+const TARGET_FRAMES: f32 = (2 * FRAMES) as f32;
+
 /// The three gains one lane of a case runs under, and its per-sample increments.
 fn coefficients(case: usize, lane: usize) -> LaneCoefficients {
     let lane = lane as f32;
@@ -158,23 +172,24 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 block[frame * width + offset] = lanes[group * width + offset][frame];
             }
         }
-        let load = |ramping: bool, index: usize| {
+        let load = |word: fn(&LaneCoefficients) -> [f32; 3], index: usize| {
             let mut values = [0.0_f32; LANES];
             for (offset, slot) in values[..width].iter_mut().enumerate() {
-                let lane = coefficients(case, group * width + offset);
-                *slot = if ramping {
-                    lane.step[index]
-                } else {
-                    lane.start[index]
-                };
+                *slot = word(&coefficients(case, group * width + offset))[index];
             }
             L::load(&values[..width])
         };
-        let mut state = SoftClipState::from_lanes(load(false, 0), load(false, 1), load(false, 2));
+        let start = |lane: &LaneCoefficients| lane.start;
+        let step = |lane: &LaneCoefficients| lane.step;
+        let target = |lane: &LaneCoefficients| lane.target();
+        let mut state = SoftClipState::from_lanes(load(start, 0), load(start, 1), load(start, 2));
         let coef = SoftClipCoef {
-            drive_step: load(true, 0),
-            output_step: load(true, 1),
-            mix_step: load(true, 2),
+            drive_step: load(step, 0),
+            output_step: load(step, 1),
+            mix_step: load(step, 2),
+            drive_target: load(target, 0),
+            output_target: load(target, 1),
+            mix_target: load(target, 2),
             bypass: no_bypass,
         };
         let mut history = SoftClipHistory::new(width);

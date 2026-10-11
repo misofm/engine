@@ -30,6 +30,7 @@ use engine::{
 pub mod corpus;
 pub mod filter_control;
 mod filter_response;
+mod tail;
 pub use filter_control::{
     INPUT_FILTER_RAMP_SAMPLES, InputFilterPair, PreparedInputFilterPair, PreparedInputFilterTarget,
     prepare_input_filter_pair, validate_input_filter_pair, validate_prepared_input_filter_target,
@@ -40,9 +41,16 @@ pub use filter_response::{
     prepare_input_filter_response, query_input_filter_response_into,
     query_input_filter_snapshot_magnitudes_into,
 };
+use tail::CachedDesign;
+pub use tail::{
+    ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES,
+    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, input_section_flush_law, input_section_live_bound,
+    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
+    input_section_worst_case_pair,
+};
 
 use effect_contract::{
-    BankWidth, ChannelSymmetryWitness, EffectPrepareError, ResponseAnalysisError,
+    BankWidth, ChannelSymmetryWitness, EffectPrepareError, NodeTailBound, ResponseAnalysisError,
     ResponseSnapshotKind, ResponseSnapshotRequest, ResponseSnapshotSection,
     ResponseSnapshotSummary,
 };
@@ -58,10 +66,17 @@ use lane::{
             input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
             input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
             matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
-            plan_is_channel_symmetric, zero_lanes_block,
+            plan_is_channel_symmetric, section_is_identity, zero_lanes_block,
         },
     },
 };
+
+// The filter-ramp bodies find a ramp's leading updates from its countdown, exactly only for a
+// countdown of at most `lane`'s ramp length (#1452 undo 1); a retarget writes this crate's.
+const _: () = assert!(
+    INPUT_FILTER_RAMP_SAMPLES == lane::kernels::builtins::INPUT_FILTER_RAMP_UPDATES,
+    "the builtins' filter ramp length is the lane filter-ramp bodies' ramp length"
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinResetKind {
@@ -218,12 +233,6 @@ impl Default for BuiltinParameters {
             smoothing_samples: 0,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BuiltinTail {
-    FiniteZero,
-    Infinite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -792,6 +801,9 @@ pub(crate) struct PreparedInputTrack {
     pub left: InputLane,
     /// Right channel.
     pub right: InputLane,
+    /// `N_SILENCE` at the track's rate, `lane::silence_frames` (issue #1328, amendment A9): the
+    /// input's run of zero frames that arms the joint flush. One rate per bank, so one value.
+    pub silence_frames: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -958,6 +970,28 @@ pub(crate) struct InputStage<L: Lane> {
     /// feature existed. The cost of the feature to such a session is this one `bool` test per bank
     /// per block, and the `false` arm is byte-identical work.
     ramping: bool,
+    /// Whether the last block this stage rendered was collapsed ([`InputStage::process_mono`])
+    /// and no disengage ([`InputStage::desymmetrize`]) has run since.
+    ///
+    /// # The collapsed-stage invariant (#1407)
+    ///
+    /// While a stage is collapsed, channel `0` is the only live state: the one-plane body advances
+    /// channel `0`'s integrators and leaves channel `1`'s frozen at the values they held when the
+    /// collapse engaged, and only the disengage copy repairs them. So no decision may read
+    /// channel `1`'s state while this is set, and every `Both` record applies channel `0`'s
+    /// decision to both channels. The reads that would otherwise see the frozen words go through
+    /// [`InputStage::live_state_channel`]: the live filter retarget's rule-3 predicate and the
+    /// elision plan. The lane export and `channels_agree` also read channel `1`'s integrators, and
+    /// neither is reached collapsed: a carry disengages first (`disengage_for_carry`), and the M3
+    /// proof is asked only of a chain rendering dual. A dual block after a collapsed one without
+    /// the disengage copy is a debug assertion in [`InputStage::process`]. The coefficient,
+    /// target, step and countdown records need no such redirection, because `process_mono`
+    /// mirrors them onto channel `1` at the bottom of every collapsed block, so at a drain they
+    /// are what the dual run would hold.
+    ///
+    /// One byte beside `ramping` and `symmetry`, in padding the struct already had: no sealed
+    /// size moves.
+    collapsed: bool,
     /// One flag per lane: [`InputStage::compute_lane_channel_symmetry`]'s verdict, held rather
     /// than re-derived.
     ///
@@ -1029,12 +1063,19 @@ impl<L: Lane> InputStage<L> {
                 sections[channel * 2 + 1][lane] = input.lpf;
             }
         }
+        debug_assert!(
+            tracks
+                .iter()
+                .all(|track| track.silence_frames == tracks[0].silence_frames),
+            "a bank runs at one rate"
+        );
         let coef = InputChainCoef {
             trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
             section: [
                 [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
                 [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
             ],
+            silence: L::splat(tracks[0].silence_frames as f32),
         };
         let state = InputChainState::default();
         // `InputChainState::default()` is `+0.0` in every word, so a bank whose designs are all
@@ -1065,6 +1106,7 @@ impl<L: Lane> InputStage<L> {
             ramp,
             remaining: [[0; MAX_BANK_LANES]; 2],
             ramping: false,
+            collapsed: false,
             symmetry: 0,
             lifetime_recovered: [0; 2],
         };
@@ -1263,8 +1305,21 @@ impl<L: Lane> InputStage<L> {
     /// Recompute the elision plan while a filter target is in flight.  An in-flight section is
     /// conservative even when its current words still happen to be identity words: the target
     /// is already accepted and the ramp body must execute it.
+    ///
+    /// While the stage is collapsed, channel `1`'s sections are decided over channel `0`'s
+    /// integrators (the collapsed-stage invariant, [`InputStage::collapsed`]): a disable that
+    /// completes collapsed clears channel `0`'s integrators only, and deciding channel `1` over
+    /// its frozen words would split the plan between the channels.
     fn refresh_filter_plan(&mut self) {
         let mut plan = input_chain_plan::<L>(&self.coef, &self.state);
+        if self.collapsed {
+            for section in 0..2 {
+                plan.elided[1][section] = section_is_identity::<L>(
+                    &self.coef.section[1][section],
+                    &self.state.section[0][section],
+                );
+            }
+        }
         for channel in 0..2 {
             for section in 0..2 {
                 if self.filter_remaining[channel][section]
@@ -1279,10 +1334,25 @@ impl<L: Lane> InputStage<L> {
         self.plan = plan;
     }
 
+    /// The channel whose integrators stand for `channel`'s: channel `0` while the stage is
+    /// collapsed, `channel` itself otherwise. See [`InputStage::collapsed`].
+    const fn live_state_channel(&self, channel: usize) -> usize {
+        if self.collapsed { 0 } else { channel }
+    }
+
     fn load_filter_countdown(&self) -> [[L; 2]; 2] {
         let mut words = [[[0.0_f32; MAX_BANK_LANES]; 2]; 2];
         for (channel, channel_words) in words.iter_mut().enumerate() {
             for (section, section_words) in channel_words.iter_mut().enumerate() {
+                // A retarget writes `INPUT_FILTER_RAMP_SAMPLES` or zero, a settle only lowers the
+                // countdown and a lane import takes what an export produced, so no countdown
+                // exceeds the ramp length, which the bodies' leading window relies on (#1452).
+                debug_assert!(
+                    self.filter_remaining[channel][section]
+                        .iter()
+                        .all(|&remaining| remaining <= INPUT_FILTER_RAMP_SAMPLES),
+                    "a filter countdown exceeds the ramp length"
+                );
                 for (lane, word) in section_words.iter_mut().enumerate() {
                     *word = self.filter_remaining[channel][section][lane]
                         .min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;
@@ -1349,19 +1419,48 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Apply one already-validated fixed-size target to one section and one or both channels.
+    ///
+    /// The live retarget law (#1407, decision 15 D15-4(b)) keeps every recursion word
+    /// `[c1, a2, a3]` the kernel can load a designed filter, the disabled identity at rest, or a
+    /// linear mixture of designs. Each covered channel decides its rule from its own words, so a
+    /// lane whose channels hold equal words keeps equal words, steps included:
+    ///
+    /// 1. **In-flight re-send.** A target whose six words equal, bit for bit, the channel's
+    ///    in-flight target on a lane whose countdown is non-zero leaves the lane untouched:
+    ///    current, target, step and countdown keep their bits. A settled lane (countdown zero)
+    ///    never takes this rule.
+    /// 2. **Disable.** The identity target `[0, 0, 0, 1, 0, 0]` on a lane whose current words are
+    ///    not already the identity freezes `c1`, `a2`, `a3` (step `+0.0`), ramps only `m0`, `m1`,
+    ///    `m2` toward the identity mix and starts the 64-update countdown: a crossfade from the
+    ///    filtered output, the filter at its own words, to the dry input. The kernel's completion
+    ///    snap then writes the identity recursion and clears the integrators in the same step.
+    /// 3. **Enable from rest.** A design target on a *settled disabled* lane -- countdown zero,
+    ///    all six current words bitwise the identity and both integrators `+0.0` -- first writes
+    ///    the target's `c1`, `a2`, `a3` into the current words and then ramps only the mix: the
+    ///    reverse crossfade. An identity section holding restored non-zero integrators takes
+    ///    rule 4, so that state is never released through a jumped recursion.
+    /// 4. Every other retarget ramps all six words from the current words to the target over 64
+    ///    updates, as before.
+    ///
+    /// Under any re-send history, the first sample uses the current words and sample A+64 uses
+    /// the exact target. See `docs/rulings/builtins-input-liveness-d2.md`.
     fn apply_prepared_filter(&mut self, lane: usize, target: PreparedInputFilterTarget) {
+        const IDENTITY: [f32; 6] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         debug_assert!(target.section < 2);
         debug_assert!(lane < self.members);
         let section = target.section as usize;
         let target_words = target.coefficients;
+        let bit_equal = |left: &[f32; 6], right: &[f32; 6]| {
+            left.iter()
+                .zip(right)
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        };
+        let target_is_identity = bit_equal(&target_words, &IDENTITY);
         for channel in 0..2 {
             if !target.lanes.covers(channel) {
                 continue;
             }
-            let current = self.coef.section[channel][section];
-            let current_values = [
-                current.c1, current.a2, current.a3, current.m0, current.m1, current.m2,
-            ];
+            let mut current = self.coef.section[channel][section];
             let mut target_values = [
                 lane_read::<L>(self.filter_target[channel][section].c1),
                 lane_read::<L>(self.filter_target[channel][section].a2),
@@ -1370,6 +1469,42 @@ impl<L: Lane> InputStage<L> {
                 lane_read::<L>(self.filter_target[channel][section].m1),
                 lane_read::<L>(self.filter_target[channel][section].m2),
             ];
+            let mut remaining = self.filter_remaining[channel][section];
+            let in_flight_target: [f32; 6] =
+                core::array::from_fn(|index| target_values[index][lane]);
+            // Rule 1: an identical re-send never restarts a ramp in flight.
+            if remaining[lane] != 0 && bit_equal(&in_flight_target, &target_words) {
+                continue;
+            }
+            let mut current_values = [
+                lane_read::<L>(current.c1),
+                lane_read::<L>(current.a2),
+                lane_read::<L>(current.a3),
+                lane_read::<L>(current.m0),
+                lane_read::<L>(current.m1),
+                lane_read::<L>(current.m2),
+            ];
+            let current_words: [f32; 6] = core::array::from_fn(|index| current_values[index][lane]);
+            let current_is_identity = bit_equal(&current_words, &IDENTITY);
+            // The collapsed-stage invariant: while collapsed, channel `1`'s integrators are frozen
+            // and channel `0`'s stand for both, so both channels decide over channel `0`'s.
+            let state = self.state.section[self.live_state_channel(channel)][section];
+            let settled_disabled = remaining[lane] == 0
+                && current_is_identity
+                && lane_read::<L>(state.ic1)[lane].to_bits() == 0
+                && lane_read::<L>(state.ic2)[lane].to_bits() == 0;
+            // Rule 3: an enable from rest jumps the recursion; only the mix ramps.
+            if !target_is_identity && settled_disabled {
+                for index in 0..3 {
+                    current_values[index][lane] = target_words[index];
+                }
+                current.c1 = lane_words::<L>(&current_values[0]);
+                current.a2 = lane_words::<L>(&current_values[1]);
+                current.a3 = lane_words::<L>(&current_values[2]);
+                self.coef.section[channel][section] = current;
+            }
+            // Rule 2: a disable freezes the recursion; only the mix ramps.
+            let freeze_recursion = target_is_identity && !current_is_identity;
             let mut step_values = [
                 lane_read::<L>(self.filter_step[channel][section].c1),
                 lane_read::<L>(self.filter_step[channel][section].a2),
@@ -1378,12 +1513,13 @@ impl<L: Lane> InputStage<L> {
                 lane_read::<L>(self.filter_step[channel][section].m1),
                 lane_read::<L>(self.filter_step[channel][section].m2),
             ];
-            let mut remaining = self.filter_remaining[channel][section];
-            let mut changed = false;
+            let mut changed = freeze_recursion;
             for index in 0..6 {
-                let current_word = lane_read::<L>(current_values[index])[lane];
+                let current_word = current_values[index][lane];
                 target_values[index][lane] = target_words[index];
-                if current_word.to_bits() != target_words[index].to_bits() {
+                if index < 3 && freeze_recursion {
+                    step_values[index][lane] = 0.0;
+                } else if current_word.to_bits() != target_words[index].to_bits() {
                     step_values[index][lane] = (target_words[index] - current_word) * (1.0 / 64.0);
                     changed = true;
                 } else {
@@ -1632,6 +1768,10 @@ impl<L: Lane> InputStage<L> {
         // The feature's off gate, and the whole of its steady-state cost: one `bool`. The `false`
         // arm is the call this function has always made, on the prepared coefficient words, with
         // the elision plan Job 1 decided -- byte-identical work.
+        debug_assert!(
+            !self.collapsed,
+            "a dual block after a collapsed one needs the disengage copy first (desymmetrize)"
+        );
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..2);
             if self.ramping {
@@ -1775,6 +1915,8 @@ impl<L: Lane> InputStage<L> {
         // holds: by the time `desymmetrize` runs, this block's drain may legitimately have moved
         // one channel's words and not the other's.
         debug_assert!(self.trim_ramp_channels_agree());
+        // From here until the disengage copy, channel `0` is the only live state.
+        self.collapsed = true;
         let report = if self.filter_ramping {
             let prefix = self.filter_prefix_frames(frames, 0..1);
             if self.ramping {
@@ -1930,6 +2072,10 @@ impl<L: Lane> InputStage<L> {
     /// froze.** `process_mono` froze the integrators. It did not freeze the ramp; it mirrored it.
     fn desymmetrize(&mut self) {
         self.state.section[1] = self.state.section[0];
+        // The input's silence counter is per-channel state the one-plane body froze with the
+        // integrators (issue #1328, amendment A9): channel `0`'s is the live one.
+        self.state.silence[1] = self.state.silence[0];
+        self.collapsed = false;
         self.refresh_filter_plan();
     }
 
@@ -1986,8 +2132,9 @@ impl<L: Lane> InputStage<L> {
     /// Whether this stage can **prove**, right now, that its two channels' state is bit-equal.
     ///
     /// The mono collapse's way back (M3). The proof is a walk over exactly the words
-    /// [`InputStage::desymmetrize`] copies -- the four integrators per channel and the trim ramp
-    /// record -- because those are the whole of this kernel's per-channel state, and a `true` that
+    /// [`InputStage::desymmetrize`] copies -- the four integrators per channel, the input's silence
+    /// counter (issue #1328, amendment A9) and the trim ramp record -- because those are the whole
+    /// of this kernel's per-channel state, and a `true` that
     /// covered less would re-engage a collapse onto a right channel that is not the left one.
     ///
     /// It is asked only inside a recovery window (`rack::BankChain::run`), so a
@@ -2008,6 +2155,17 @@ impl<L: Lane> InputStage<L> {
         }
         if !self.trim_ramp_channels_agree() {
             return false;
+        }
+        // The input's silence counters (issue #1328, amendment A9): a collapsed block advances
+        // channel `0`'s for both, so the two must already be equal.
+        let (left_run, right_run) = (
+            lane_read::<L>(self.state.silence[0]),
+            lane_read::<L>(self.state.silence[1]),
+        );
+        for lane in 0..L::WIDTH {
+            if left_run[lane].to_bits() != right_run[lane].to_bits() {
+                return false;
+            }
         }
         for section in 0..2 {
             for (left_word, right_word) in [
@@ -2200,6 +2358,7 @@ impl<L: Lane> InputStage<L> {
                 hpf: section(1, 0),
                 lpf: section(1, 1),
             },
+            silence_frames: lane_read::<L>(self.coef.silence)[lane] as u32,
         }
     }
 
@@ -2460,6 +2619,7 @@ impl<L: Lane> InputStage<L> {
                     read(self.ramp.remaining[channel]),
                 ],
                 remaining: self.remaining[channel][lane],
+                silence: read(self.state.silence[channel]),
                 sections: core::array::from_fn(|section| InputSectionState {
                     coef: words(&self.coef.section[channel][section]),
                     target: words(&self.filter_target[channel][section]),
@@ -2502,6 +2662,7 @@ impl<L: Lane> InputStage<L> {
             put(&mut self.ramp.step[channel], lane, carried.ramp[2]);
             put(&mut self.ramp.remaining[channel], lane, carried.ramp[3]);
             self.remaining[channel][lane] = carried.remaining;
+            put(&mut self.state.silence[channel], lane, carried.silence);
             for (section, words) in carried.sections.iter().enumerate() {
                 put_coef(&mut self.coef.section[channel][section], lane, &words.coef);
                 put_coef(
@@ -2544,8 +2705,9 @@ impl<L: Lane> InputStage<L> {
 /// predecessor's lane to the successor's (issue #1276 D2).
 ///
 /// Plain data, fixed size, no heap: the filter integrators, the coefficients in use, any
-/// coefficient ramp in flight (target, per-sample step and countdown), and the trim ramp
-/// (current, target, step, the kernel's countdown word and the authoritative countdown). The
+/// coefficient ramp in flight (target, per-sample step and countdown), the trim ramp
+/// (current, target, step, the kernel's countdown word and the authoritative countdown), and the
+/// input's silence counter (issue #1328, amendment A9). The
 /// polarity is the trim's sign. In-memory state handed across a plan replacement, never persisted
 /// (AGENTS.md, R6b).
 #[derive(Clone, Copy, Debug)]
@@ -2561,6 +2723,9 @@ struct InputChannelState {
     ramp: [f32; 4],
     /// The authoritative trim countdown.
     remaining: u32,
+    /// `state.silence`: the input's run of exactly-zero frames (issue #1328, amendment A9), so the
+    /// successor arms the joint flush on the frame the predecessor would have.
+    silence: f32,
     /// High-pass, then low-pass.
     sections: [InputSectionState; 2],
 }
@@ -3259,9 +3424,6 @@ impl BuiltinChain {
             self.fader_mute.reset();
         }
     }
-    pub fn tail(&self) -> BuiltinTail {
-        self.input.tail()
-    }
     pub fn into_sections(self) -> (InputBuiltins, FaderMuteBuiltins, MatrixBuiltins) {
         (self.input, self.fader_mute, self.matrix)
     }
@@ -3271,14 +3433,15 @@ impl BuiltinChain {
     }
 }
 
-fn prepare_sections(
+/// Validates one strip's parameters and designs its input section (trim, polarity, HPF, LPF).
+fn prepare_input_track(
     sample_rate: u32,
-    parameters: BuiltinParameters,
-) -> Result<(InputBuiltins, FaderMuteBuiltins, MatrixBuiltins), BuiltinParameterError> {
+    parameters: &BuiltinParameters,
+) -> Result<PreparedInputTrack, BuiltinParameterError> {
     if sample_rate == 0 {
         return Err(BuiltinParameterError::FilterCutoff);
     }
-    let matrix = parameters.matrix.checked()?;
+    parameters.matrix.checked()?;
     for lane in [parameters.left, parameters.right] {
         if !lane.trim_db.is_finite()
             || !(-144.0..=24.0).contains(&lane.trim_db)
@@ -3301,15 +3464,159 @@ fn prepare_sections(
             lpf: SvfSection::design(sample_rate, zero(params.lpf_hz), false)?,
         })
     };
+    Ok(PreparedInputTrack {
+        left: lane(parameters.left)?,
+        right: lane(parameters.right)?,
+        silence_frames: lane::silence_frames(sample_rate),
+    })
+}
+
+/// The certified tail and exact-rest bounds (#1329 D1, D2, D4) of the input section one strip's
+/// parameters prepare: its trim, polarity, HPF and LPF as designed, with no live input lane (a
+/// strip whose input lane is live reports [`input_section_live_bound`] instead, D5). The fader
+/// and the matrix are gain-only and add nothing (D6).
+///
+/// Control plane only: the computation allocates and runs in `f64`, at preparation, and nothing
+/// render owns stores its result (#1329 Amendment 4, R5). `builtins-compiler` keeps it per strip
+/// in its prepared session, beside the strip's tail.
+///
+/// # Errors
+///
+/// The same as [`BuiltinChain::new`] for the same parameters.
+pub fn input_section_bound(
+    sample_rate: u32,
+    parameters: BuiltinParameters,
+) -> Result<NodeTailBound, BuiltinParameterError> {
+    Ok(input_section_bound_charged(sample_rate, parameters)?.bound)
+}
+
+/// [`input_section_bound`] with its charge: the frames its computation walks and the
+/// frame-equivalents it charges a preparation's budget (#1457 D1, D3, Amendment 3).
+///
+/// # Errors
+///
+/// The same as [`input_section_bound`].
+pub fn input_section_bound_charged(
+    sample_rate: u32,
+    parameters: BuiltinParameters,
+) -> Result<ChargedInputBound, BuiltinParameterError> {
+    let track = prepare_input_track(sample_rate, &parameters)?;
+    Ok(
+        tail::fixed_input_bound(sample_rate, [&track.left, &track.right], u64::MAX)
+            .expect("no walk reaches u64::MAX frames"),
+    )
+}
+
+/// The input-section bound every strip of a session reports, in order, computing each distinct
+/// design's bound at most once (#1329 Amendment 4, R7) and within the preparation budget
+/// [`INPUT_BOUND_BUDGET_FRAMES`] (#1457 D1, D3).
+///
+/// Each distinct design, at its first strip in strip order, charges the budget its charge
+/// ([`input_section_bound_charged`]); a later strip with the same design reports the same value
+/// and charges nothing. While the remaining budget covers a design's charge, the design reports its
+/// own bound. A design whose charge passes the remaining budget reports the rate's live bound
+/// ([`input_section_live_bound_table`]), which is certified for every history of trim, polarity and
+/// filter targets and so for every fixed design, and the remaining budget is then spent: every
+/// later design with an enabled section reports the live bound without a walk. A memoryless design
+/// (both filters disabled on both channels) reports its own bound, as [`input_section_bound`] does
+/// (a zero tail and its trim-only composition, #1465), whatever the remaining budget, and charges
+/// nothing. The result
+/// is a function of the session only.
+///
+/// `cache` (#1457 D2) keeps bounds across calls. A design it holds charges its stored charge
+/// without computing anything, so the result is the same with and without it, cold or warm.
+///
+/// # Errors
+///
+/// The first strip's error, as [`input_section_bound`] reports it.
+pub fn input_section_bounds(
+    sample_rate: u32,
+    strips: impl IntoIterator<Item = BuiltinParameters>,
+    cache: Option<&mut InputBoundCache>,
+) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
+    input_section_bounds_within(sample_rate, strips, INPUT_BOUND_BUDGET_FRAMES, cache)
+}
+
+/// [`input_section_bounds`] under a budget of `budget` frame-equivalents. Only the gates choose
+/// another budget, through `test_support::input_section_bounds_within` (#1457 ruling (i)).
+fn input_section_bounds_within(
+    sample_rate: u32,
+    strips: impl IntoIterator<Item = BuiltinParameters>,
+    budget: u64,
+    mut cache: Option<&mut InputBoundCache>,
+) -> Result<Vec<NodeTailBound>, BuiltinParameterError> {
+    let fallback = input_section_live_bound_table(sample_rate).unwrap_or(NodeTailBound::UNBOUNDED);
+    let mut remaining = budget;
+    let mut designs = std::collections::BTreeMap::new();
+    strips
+        .into_iter()
+        .map(|parameters| {
+            let track = prepare_input_track(sample_rate, &parameters)?;
+            let lanes = [&track.left, &track.right];
+            let key = tail::input_bound_key(sample_rate, lanes);
+            if let Some(bound) = designs.get(&key) {
+                return Ok(*bound);
+            }
+            // A memoryless design (both filters disabled on both channels) has no tail and walks
+            // nothing, so it is neither computed, charged nor cached; it states its gain-only
+            // composition (#1465), as `input_section_bound` does.
+            if lanes
+                .iter()
+                .all(|lane| !lane.hpf.enabled && !lane.lpf.enabled)
+            {
+                let bound = tail::memoryless_input_bound(lanes);
+                designs.insert(key, bound);
+                return Ok(bound);
+            }
+            // A spent budget walks nothing more: every other design reports the live bound
+            // without a walk.
+            let cached = if remaining == 0 {
+                Some(CachedDesign::ChargeAbove(0))
+            } else {
+                cache.as_deref().and_then(|cache| cache.get(&key))
+            };
+            let charged = match cached {
+                Some(CachedDesign::Bound(hit)) => (hit.charge <= remaining).then_some(hit),
+                // The walk passed `above` frames: under no more budget than that it stops again.
+                Some(CachedDesign::ChargeAbove(above)) if remaining <= above => None,
+                Some(CachedDesign::ChargeAbove(_)) | None => {
+                    let computed = tail::fixed_input_bound(sample_rate, lanes, remaining);
+                    if let Some(cache) = cache.as_deref_mut() {
+                        match computed {
+                            Some(bound) => cache.insert(key, CachedDesign::Bound(bound)),
+                            None if remaining > 0 => {
+                                cache.insert(key, CachedDesign::ChargeAbove(remaining));
+                            }
+                            None => {}
+                        }
+                    }
+                    computed
+                }
+            };
+            let bound = if let Some(charged) = charged {
+                remaining -= charged.charge;
+                charged.bound
+            } else {
+                remaining = 0;
+                fallback
+            };
+            designs.insert(key, bound);
+            Ok(bound)
+        })
+        .collect()
+}
+
+fn prepare_sections(
+    sample_rate: u32,
+    parameters: BuiltinParameters,
+) -> Result<(InputBuiltins, FaderMuteBuiltins, MatrixBuiltins), BuiltinParameterError> {
+    let track = prepare_input_track(sample_rate, &parameters)?;
+    let matrix = parameters.matrix.checked()?;
     let fader = |params: ChannelParameters| -> Result<FaderLane, BuiltinParameterError> {
         Ok(FaderLane {
             gain: db_gain(params.fader_db)?,
             muted: params.muted,
         })
-    };
-    let track = PreparedInputTrack {
-        left: lane(parameters.left)?,
-        right: lane(parameters.right)?,
     };
     let faders = [(fader(parameters.left)?, fader(parameters.right)?)];
     Ok((
@@ -3429,19 +3736,6 @@ impl InputBuiltins {
 
     pub fn reset_with_kind(&mut self, kind: BuiltinResetKind) {
         self.stage.reset_with_kind(kind);
-    }
-    pub fn tail(&self) -> BuiltinTail {
-        let track = self.stage.lane_track(0);
-        if self.stage.filter_ramping
-            || track.left.hpf.enabled
-            || track.left.lpf.enabled
-            || track.right.hpf.enabled
-            || track.right.lpf.enabled
-        {
-            BuiltinTail::Infinite
-        } else {
-            BuiltinTail::FiniteZero
-        }
     }
     pub fn lifetime_recovered_state(&self) -> (u64, u64) {
         (
@@ -3644,7 +3938,7 @@ impl BuiltinInputBank {
     }
 
     /// Copies every lane's left-channel per-channel state onto the right channel (the disengage
-    /// copy): the integrators and the trim ramp record.
+    /// copy): the integrators, the input's silence counter and the trim ramp record.
     pub fn desymmetrize(&mut self) {
         per_width!(InputStageKernel(stage) in &mut self.stage => stage.desymmetrize())
     }
@@ -4157,9 +4451,10 @@ impl BuiltinLaneSelector {
 ///
 /// # D11, once per retarget
 ///
-/// `step = (target - current) / N` at the moment the target changes, then `current += step` per
-/// sample and an exact assignment of `target` on update `N` (master plan D11). There is no
-/// division per sample and no allocation anywhere on this path.
+/// `step = (target - current) / N` at the moment the target changes, then
+/// `current = ramp_toward(current, step, target)` per sample (`current + step` held inside its
+/// endpoints, #1408) and an exact assignment of `target` on update `N` (master plan D11). There is
+/// no division per sample and no allocation anywhere on this path.
 pub struct FaderMuteRampBuiltins {
     /// The one ramped-fader body, at width one. `lane` is always `0`; the two dual-mono sides are
     /// the stage's two channels.
@@ -5391,8 +5686,52 @@ pub mod test_support {
     use super::{
         BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
         FaderMuteRampBuiltins, FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2,
-        MatrixBuiltins, MatrixStageKernel, SvfSection,
+        MatrixBuiltins, MatrixStageKernel, SvfSection, lane_read,
     };
+
+    /// How many design bounds (#1329 D4) preparation has computed on the calling thread: one
+    /// per distinct design it bounded (#1329 Amendment 5, MJ1). Thread-scoped, so a test reads
+    /// the difference across its own preparation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn fixed_input_bounds_computed() -> u64 {
+        crate::tail::FIXED_INPUT_BOUNDS.with(core::cell::Cell::get)
+    }
+
+    /// How many frames this thread's design-bound walks have taken, stopped walks included, as
+    /// counted frame by frame by the walk itself (#1457 D1, attempt 1 MJ2). Read the difference
+    /// across one preparation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn fixed_input_frames_walked() -> u64 {
+        crate::tail::FIXED_INPUT_FRAMES.with(core::cell::Cell::get)
+    }
+
+    /// The charges, in frame-equivalents, of the design bounds this thread computed (#1457
+    /// Amendment 3): what a preparation that computes every design it bounds spends of its budget.
+    /// Read the difference across one preparation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn fixed_input_charged() -> u64 {
+        crate::tail::FIXED_INPUT_CHARGED.with(core::cell::Cell::get)
+    }
+
+    /// [`crate::input_section_bounds`] under a budget of `budget` frame-equivalents instead of
+    /// [`crate::INPUT_BOUND_BUDGET_FRAMES`]: for the gates only (#1457 ruling (i): production has
+    /// no entry point that takes a budget).
+    ///
+    /// # Errors
+    ///
+    /// The first strip's error, as [`crate::input_section_bound`] reports it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn input_section_bounds_within(
+        sample_rate: u32,
+        strips: impl IntoIterator<Item = crate::BuiltinParameters>,
+        budget: u64,
+        cache: Option<&mut crate::InputBoundCache>,
+    ) -> Result<Vec<effect_contract::NodeTailBound>, BuiltinParameterError> {
+        super::input_section_bounds_within(sample_rate, strips, budget, cache)
+    }
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
     ///
@@ -5412,6 +5751,18 @@ pub mod test_support {
     #[must_use]
     pub fn input_section_words(input: &InputBuiltins) -> [[u32; 7]; 4] {
         let track = input.stage.lane_track(0);
+        [
+            track.left.hpf.words(),
+            track.left.lpf.words(),
+            track.right.hpf.words(),
+            track.right.lpf.words(),
+        ]
+    }
+
+    /// [`input_section_words`] for one lane of a bank.
+    #[must_use]
+    pub fn bank_section_words(bank: &BuiltinInputBank, lane: usize) -> [[u32; 7]; 4] {
+        let track = per_width!(InputStageKernel(stage) in &bank.stage => stage.lane_track(lane));
         [
             track.left.hpf.words(),
             track.left.lpf.words(),
@@ -5487,6 +5838,18 @@ pub mod test_support {
     #[must_use]
     pub fn bank_lifetime_recovered(bank: &BuiltinInputBank) -> [u64; 2] {
         per_width!(InputStageKernel(stage) in &bank.stage => stage.lifetime_recovered)
+    }
+
+    /// The input's silence counter of one bank lane, `[left, right]`, as `f32` bits (issue #1328,
+    /// amendment A9).
+    #[must_use]
+    pub fn bank_lane_silence_words(bank: &BuiltinInputBank, lane: usize) -> [u32; 2] {
+        per_width!(InputStageKernel(stage) in &bank.stage => {
+            stage
+                .state
+                .silence
+                .map(|run| lane_read(run)[lane].to_bits())
+        })
     }
 
     /// Overwrites the retained state words of one bank lane.

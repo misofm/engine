@@ -41,14 +41,15 @@ pub mod corpus;
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
-    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
-    ObservationTapId, ParameterAccessError, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedParameterState, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterAccessError, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect,
+    PreparedEffectBank, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedParameterState, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
@@ -293,7 +294,6 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
-        tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
             left_bytes: (state::STATE_HEADER_WORDS * 4) as u32,
@@ -301,6 +301,18 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         },
         scratch_fixed_bytes: 64,
         scratch_bytes_per_frame: 0,
+    }
+}
+
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
+/// finite tail over every peak (#1377 D4); #1375 derives the bounds from the designer.
+fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    effect_contract::NodeTailBound {
+        tail: TailSamples::Infinite,
+        tail_every_peak: TailSamples::Infinite,
+        rest: effect_contract::RestBound::Unstated,
+        composition: effect_contract::CompositionBound::Unstated,
     }
 }
 
@@ -349,6 +361,7 @@ pub const COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    tail_and_rest,
     observations: &COMPRESSOR_OBSERVATIONS,
 };
 
@@ -402,13 +415,14 @@ fn initial_defaults(
 /// `invalid_spans` and ignored — never applied partially.
 fn apply_automation<L: Lane>(
     spans: &[PreparedAutomationSpan],
-    metadata: PreparedEffectMetadata,
     first_sample: u64,
     lane: usize,
-    left: &mut Channel<L>,
-    right: &mut Channel<L>,
+    instance: &mut Instance<L>,
     report: &mut ProcessReport,
 ) {
+    let automation_capacity = instance.automation_capacity;
+    let sample_rate = instance.sample_rate;
+    let (left, right) = (&mut instance.left, &mut instance.right);
     let mut pending = [[None; RAMP_COUNT]; 2];
     let mut last_order = None;
     for (span_index, span) in spans.iter().enumerate() {
@@ -429,7 +443,7 @@ fn apply_automation<L: Lane>(
             report.invalid_spans = report.invalid_spans.saturating_add(1);
             continue;
         };
-        let valid = span_index < metadata.automation_capacity as usize
+        let valid = span_index < automation_capacity as usize
             && parameter_index < RAMP_COUNT
             && span.kind == AutomationSpanKind::Point
             && span.start_sample == first_sample
@@ -449,23 +463,23 @@ fn apply_automation<L: Lane>(
         pending[0].iter().zip(pending[1].iter()).enumerate()
     {
         if let Some(value) = *left_value {
-            left.set_parameter_target(parameter_index, lane, value, metadata.sample_rate);
+            left.set_parameter_target(parameter_index, lane, value, sample_rate);
         }
         if let Some(value) = *right_value {
-            right.set_parameter_target(parameter_index, lane, value, metadata.sample_rate);
+            right.set_parameter_target(parameter_index, lane, value, sample_rate);
         }
     }
 }
 
 /// Which detector source a prepared configuration and a block imply.
+///
+/// `sidechain_connected` is whether the prepared sidechain port is
+/// [`effect_contract::PreparedSidechainPort::Connected`].
 fn detector_source<'a>(
-    metadata: PreparedEffectMetadata,
+    sidechain_connected: bool,
     sidechain: Option<(&'a [f32], &'a [f32])>,
 ) -> Detector<'a> {
-    if !matches!(
-        metadata.ports.sidechain,
-        effect_contract::PreparedSidechainPort::Connected { .. }
-    ) {
+    if !sidechain_connected {
         return Detector::Main;
     }
     match sidechain {
@@ -497,8 +511,20 @@ fn checked_track(track_index: u32, width: usize, active: u32) -> Result<usize, S
 /// reports into a `ProcessReport`, the other addresses a track and reports into an array of them —
 /// so the traits are thin wrappers and there is exactly one body per operation. A second copy of
 /// `restore` is precisely the divergence the audit found in six other crates.
+///
+/// It keeps only the prepared values its own methods read (issue #1461): the whole
+/// `PreparedEffectMetadata` stays on the control side, in the prepare result.
 struct Instance<L: Lane> {
-    metadata: PreparedEffectMetadata,
+    /// The prepared sample rate: ramp lengths, reset and restore.
+    sample_rate: u32,
+    /// The prepared bypass flag, which selects the kernel's dry path.
+    bypass: bool,
+    /// The prepared detector link mode.
+    link_mode: LinkMode,
+    /// The prepared automation capacity: a span at or past it is invalid.
+    automation_capacity: u32,
+    /// The prepared state payload sizes a snapshot or restore must match.
+    state_sizes: StatePayloadSizes,
     left: Channel<L>,
     right: Channel<L>,
     /// Issue #163 phase 4 item 1: the previous block proved this instance is at a silent fixed
@@ -513,12 +539,16 @@ struct Instance<L: Lane> {
 impl<L: Lane> Instance<L> {
     /// Allocates both channels from per-lane preparation values.
     fn new(
-        metadata: PreparedEffectMetadata,
+        metadata: &PreparedEffectMetadata,
         left_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
         right_defaults: &[[f32; PARAMETER_COUNT]; MAX_WIDTH],
     ) -> Self {
         Self {
-            metadata,
+            sample_rate: metadata.sample_rate,
+            bypass: metadata.bypass,
+            link_mode: metadata.link_mode,
+            automation_capacity: metadata.automation_capacity,
+            state_sizes: metadata.state_sizes,
             left: Channel::new(left_defaults, metadata.sample_rate),
             right: Channel::new(right_defaults, metadata.sample_rate),
             silent_fixed_point: false,
@@ -529,7 +559,7 @@ impl<L: Lane> Instance<L> {
     fn reset(&mut self, kind: ResetKind) {
         // A reset changes the recursive word and ramps, so any silent fixed-point claim goes.
         self.silent_fixed_point = false;
-        let rate = self.metadata.sample_rate;
+        let rate = self.sample_rate;
         match kind {
             ResetKind::FullToDefaults => {
                 self.left.full_reset(rate);
@@ -568,7 +598,7 @@ impl<L: Lane> Instance<L> {
         let quiet = self.left.max_remaining() == 0
             && self.right.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
-            && self.silent_bypass == self.metadata.bypass
+            && self.silent_bypass == self.bypass
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
@@ -585,9 +615,9 @@ impl<L: Lane> Instance<L> {
             right,
             detector,
             frames,
-            self.metadata.link_mode,
-            self.metadata.bypass,
-            self.metadata.sample_rate,
+            self.link_mode,
+            self.bypass,
+            self.sample_rate,
             (&mut self.left, &mut self.right),
         );
         // Earn or lose the claim from what this block actually did: the recursive gain-reduction
@@ -601,7 +631,7 @@ impl<L: Lane> Instance<L> {
             }
             None => false,
         };
-        self.silent_bypass = self.metadata.bypass;
+        self.silent_bypass = self.bypass;
         let left_mask = finish_lanes::<L>(left, &mut self.left);
         let right_mask = finish_lanes::<L>(right, &mut self.right);
         if left_mask | right_mask == 0 {
@@ -633,7 +663,7 @@ impl<L: Lane> Instance<L> {
         let words = frames * L::WIDTH;
         let quiet = self.left.max_remaining() == 0
             && matches!(detector, Detector::Main | Detector::Silent)
-            && self.silent_bypass == self.metadata.bypass
+            && self.silent_bypass == self.bypass
             && block_is_positive_zero(&left[..words]);
         if quiet && self.silent_fixed_point {
             #[cfg(test)]
@@ -645,9 +675,9 @@ impl<L: Lane> Instance<L> {
             left,
             detector,
             frames,
-            self.metadata.link_mode,
-            self.metadata.bypass,
-            self.metadata.sample_rate,
+            self.link_mode,
+            self.bypass,
+            self.sample_rate,
             &mut self.left,
         );
         self.silent_fixed_point = match before {
@@ -656,7 +686,7 @@ impl<L: Lane> Instance<L> {
             }
             None => false,
         };
-        self.silent_bypass = self.metadata.bypass;
+        self.silent_bypass = self.bypass;
         let left_mask = finish_lanes::<L>(left, &mut self.left);
         if left_mask == 0 {
             return;
@@ -685,7 +715,7 @@ impl<L: Lane> Instance<L> {
             output.common.len(),
             output.left.len(),
             output.right.len(),
-            self.metadata.state_sizes,
+            self.state_sizes,
         )?;
         state::snapshot_lane(&mut output, &self.left, &self.right, lane);
         Ok(())
@@ -711,11 +741,11 @@ impl<L: Lane> Instance<L> {
             input.common.len(),
             input.left.len(),
             input.right.len(),
-            self.metadata.state_sizes,
+            self.state_sizes,
         )?;
         state::validate_channel(input.left)?;
         state::validate_channel(input.right)?;
-        let rate = self.metadata.sample_rate;
+        let rate = self.sample_rate;
         state::commit_channel(input.left, &mut self.left, lane, rate);
         state::commit_channel(input.right, &mut self.right, lane, rate);
         Ok(())
@@ -747,7 +777,7 @@ impl<L: Lane> Instance<L> {
 /// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
 ///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
 ///   immediately, which is where the witness sees it.
-/// * `metadata.link_mode`, `metadata.bypass`, `metadata.sample_rate`, `silent_fixed_point`,
+/// * `link_mode`, `bypass`, `sample_rate`, `silent_fixed_point`,
 ///   `silent_bypass` -- whole-instance or per-channel-shared, so they cannot be
 ///   asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
 ///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
@@ -790,6 +820,29 @@ impl<L: Lane> Instance<L> {
 /// A prepared, allocation-free scalar compressor instance: the `L = f32` instantiation.
 pub struct PreparedCompressor {
     instance: Instance<f32>,
+    /// Whether the prepared sidechain port is connected, which picks the detector source.
+    sidechain_connected: bool,
+}
+
+impl PreparedCompressor {
+    /// The scalar instance a prepared metadata and its per-channel defaults describe.
+    fn new(
+        metadata: &PreparedEffectMetadata,
+        left_defaults: [f32; PARAMETER_COUNT],
+        right_defaults: [f32; PARAMETER_COUNT],
+    ) -> Self {
+        Self {
+            instance: Instance::new(
+                metadata,
+                &[left_defaults; MAX_WIDTH],
+                &[right_defaults; MAX_WIDTH],
+            ),
+            sidechain_connected: matches!(
+                metadata.ports.sidechain,
+                effect_contract::PreparedSidechainPort::Connected { .. }
+            ),
+        }
+    }
 }
 
 /// A prepared homogeneous bank: `L::WIDTH` lanes as one vector, same kernel body.
@@ -829,7 +882,10 @@ pub struct PreparedCompressor {
 ///   only in a quieted signalling NaN, which fails that lane's own D7 check either way;
 /// * the **link** combines the two channels of one lane, lane-wise, never two lanes.
 struct PreparedCompressorBank<L: Lane> {
-    metadata: PreparedBankMetadata,
+    /// The bound width, which the block shape guard checks.
+    width: BankWidth,
+    /// The prepared render quantum, which bounds a block's frames.
+    quantum: u32,
     instance: Instance<L>,
     /// Bit `l` is set when lane `l` carries a member; clear for a padded lane. All `L::WIDTH` bits
     /// are set for a full bank.
@@ -888,12 +944,18 @@ impl BankParts {
     fn bank<L: Lane>(&self) -> PreparedCompressorBank<L> {
         debug_assert_eq!(L::WIDTH, self.width.lanes() as usize);
         PreparedCompressorBank {
-            metadata: PreparedBankMetadata {
-                width: self.width,
-                program_key: self.metadata.program_key(),
-            },
-            instance: Instance::new(self.metadata, &self.left_defaults, &self.right_defaults),
+            width: self.width,
+            quantum: self.metadata.quantum,
+            instance: Instance::new(&self.metadata, &self.left_defaults, &self.right_defaults),
             active: self.active,
+        }
+    }
+
+    /// The metadata the binding derived, which stays on the control side (issue #1461).
+    fn bank_metadata(&self) -> PreparedBankMetadata {
+        PreparedBankMetadata {
+            width: self.width,
+            program_key: self.metadata.program_key(),
         }
     }
 }
@@ -906,16 +968,17 @@ impl NativeEffectFactory for CompressorFactory {
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
-    ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
+    ) -> Result<PreparedEffect, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let (left_defaults, right_defaults) = initial_defaults(request.initial_values)?;
-        Ok(Box::new(PreparedCompressor {
-            instance: Instance::new(
-                metadata,
-                &[left_defaults; MAX_WIDTH],
-                &[right_defaults; MAX_WIDTH],
-            ),
-        }))
+        Ok(PreparedEffect {
+            processor: Box::new(PreparedCompressor::new(
+                &metadata,
+                left_defaults,
+                right_defaults,
+            )),
+            metadata,
+        })
     }
 
     /// Binds a full or a padded bank (issue #1090: the compressor accepts the padding contract on
@@ -923,7 +986,7 @@ impl NativeEffectFactory for CompressorFactory {
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
-    ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
         let parts = BankParts::validate(request)?;
         if !parts.same_program {
             return Ok(None);
@@ -950,19 +1013,18 @@ impl NativeEffectFactory for CompressorFactory {
         // by `Backend` variant, because `Backend::Scalar` is test-only (#1059).
         const NATIVE: Option<BankWidth> = BankWidth::for_backend(Backend::current());
         Ok(Some(match NATIVE {
-            Some(width) => effect_contract::match_bank_width!(width, |L| {
-                Box::new(parts.bank::<L>()) as Box<dyn PreparedNativeEffectBank>
-            }),
+            Some(width) => PreparedEffectBank {
+                processor: effect_contract::match_bank_width!(width, |L| {
+                    Box::new(parts.bank::<L>()) as Box<dyn PreparedNativeEffectBank>
+                }),
+                metadata: parts.bank_metadata(),
+            },
             None => return Ok(None),
         }))
     }
 }
 
 impl PreparedNativeEffect for PreparedCompressor {
-    fn metadata(&self) -> PreparedEffectMetadata {
-        self.instance.metadata
-    }
-
     fn channel_symmetry(&self) -> bool {
         self.instance.designed_channel_symmetry(0)
     }
@@ -1006,7 +1068,7 @@ impl PreparedNativeEffect for PreparedCompressor {
         } else {
             &mut self.instance.right
         };
-        channel.set_parameter_target(index, 0, value, self.instance.metadata.sample_rate);
+        channel.set_parameter_target(index, 0, value, self.instance.sample_rate);
         Ok(())
     }
 
@@ -1052,21 +1114,18 @@ impl PreparedNativeEffect for PreparedCompressor {
             self.instance.silent_fixed_point = false;
         }
         let mut report = ProcessReport::default();
-        let metadata = self.instance.metadata;
         apply_automation(
             block.automation,
-            metadata,
             block.first_sample,
             0,
-            &mut self.instance.left,
-            &mut self.instance.right,
+            &mut self.instance,
             &mut report,
         );
         let frames = block.left.len();
         self.instance.render(
             block.left,
             block.right,
-            detector_source(metadata, block.sidechain),
+            detector_source(self.sidechain_connected, block.sidechain),
             frames,
             |_, left_failed, right_failed| {
                 if left_failed {
@@ -1115,10 +1174,6 @@ impl PreparedNativeEffect for PreparedCompressor {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
-    fn metadata(&self) -> PreparedBankMetadata {
-        self.metadata.clone()
-    }
-
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
     }
@@ -1203,7 +1258,7 @@ impl<L: Lane> PreparedCompressorBank<L> {
         &mut self,
         block: EffectBankProcessBlock<'_>,
     ) -> BankProcessReport {
-        let mut report = BankProcessReport::empty(self.metadata.width);
+        let mut report = BankProcessReport::empty(self.width);
         let lanes = L::WIDTH;
         let frames = block.frames as usize;
         // The pre-audit guard was four inline conditions that indexed the automation offsets
@@ -1225,10 +1280,10 @@ impl<L: Lane> PreparedCompressorBank<L> {
         //    shared validator admits Step/Linear/Exponential and *requires* `Both` for
         //    `ParameterChannelPolicy::Shared`. Adopting it would change both rendered PCM and
         //    the reported `invalid_spans` for any block mixing valid and invalid spans.
-        if block.width != self.metadata.width
-            || lanes != self.metadata.width.lanes() as usize
+        if block.width != self.width
+            || lanes != self.width.lanes() as usize
             || frames == 0
-            || block.frames > self.instance.metadata.quantum
+            || block.frames > self.quantum
             || block.sidechain.is_some()
             || block.left.len() != frames * lanes
             || block.right.len() != frames * lanes
@@ -1244,7 +1299,6 @@ impl<L: Lane> PreparedCompressorBank<L> {
         if !block.automation.is_empty() {
             self.instance.silent_fixed_point = false;
         }
-        let metadata = self.instance.metadata;
         let active = self.active;
         for track in 0..lanes {
             // A padded lane carries no track, so nothing is automated on it and nothing is
@@ -1256,11 +1310,9 @@ impl<L: Lane> PreparedCompressorBank<L> {
             let end = block.automation_offsets[track + 1] as usize;
             apply_automation(
                 &block.automation[start..end],
-                metadata,
                 block.first_sample,
                 track,
-                &mut self.instance.left,
-                &mut self.instance.right,
+                &mut self.instance,
                 &mut report.reports[track],
             );
         }
@@ -1433,12 +1485,17 @@ mod witness_tests {
                 maximum_scratch_bytes: 64,
                 maximum_automation_spans_per_block: 16,
             },
+            tail_bound: conformance::tail_bound_of(
+                Box::new(crate::CompressorFactory),
+                48_000,
+                EffectQuality::Normal,
+            ),
         };
         let metadata =
             expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request).expect("a legal request");
         let defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH] =
             [core::array::from_fn(|index| PARAMETER_SPECS[index].default); MAX_WIDTH];
-        Instance::new(metadata, &defaults, &defaults)
+        Instance::new(&metadata, &defaults, &defaults)
     }
 
     fn ramp(draw: &mut Draw) -> LinearRamp {

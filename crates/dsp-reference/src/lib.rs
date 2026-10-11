@@ -59,8 +59,9 @@ pub use svf::{
     ReferenceSvfStateSpace, shelf_slope_to_q,
 };
 pub use tpt::{
-    FLUSH_EPS, ReferenceRetainedTptF32, ReferenceTptOutput, ReferenceTptRetainedAction,
-    ReferenceTptRetainedStep, ReferenceTptStateSpace,
+    FLUSH_EPS, ReferenceRetainedTptF32, ReferenceSilenceRun, ReferenceTptOutput,
+    ReferenceTptRetainedAction, ReferenceTptRetainedStep, ReferenceTptStateSpace,
+    reference_silence_frames,
 };
 pub use transient_shaper::{
     ReferenceTransientShaper, ReferenceTransientShaperError, ReferenceTransientShaperParameters,

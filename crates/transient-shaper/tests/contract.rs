@@ -32,7 +32,16 @@ fn descriptor_resources_and_transactional_caps_are_frozen() {
     assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.state_layout_version, 1);
     for quality in TRANSIENT_SHAPER_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(0));
-        assert_eq!(quality.tail, TailSamples::Finite(0));
+        assert_eq!(
+            conformance::tail_bound_of(
+                Box::new(transient_shaper::TransientShaperFactory),
+                quality.sample_rate,
+                quality.quality
+            )
+            .bound()
+            .tail,
+            TailSamples::Finite(0)
+        );
         assert_eq!(quality.maximum_state.total(), Some(112));
         assert_eq!(quality.maximum_state.common_bytes, 0);
         assert_eq!(quality.maximum_state.left_bytes, LANE_STATE_BYTES as u32);
@@ -202,11 +211,13 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
     assert_eq!(state_u32(&active.0, 5), 63);
     assert_eq!(active.1, initial_right);
 
-    let mut restored = prepare(&values);
+    let restored_prepared = prepared(&values);
+    let restored_sizes = restored_prepared.metadata.state_sizes;
+    let mut restored = restored_prepared.processor;
     restored
         .restore_state_payload(
             1,
-            StatePayloadInput::new(&[], &active.0, &active.1, restored.metadata().state_sizes)
+            StatePayloadInput::new(&[], &active.0, &active.1, restored_sizes)
                 .expect("active state"),
         )
         .expect("active restore");
@@ -391,8 +402,9 @@ fn link_modes_drive_the_detector_as_specified() {
 #[test]
 fn state_restore_validates_version_length_envelope_and_parameters() {
     let values = initial_values();
-    let mut effect = prepare(&values);
-    let sizes = effect.metadata().state_sizes;
+    let effect_prepared = prepared(&values);
+    let sizes = effect_prepared.metadata.state_sizes;
+    let mut effect = effect_prepared.processor;
     let good = snapshot(effect.as_ref());
 
     for version in [0, 2] {
@@ -522,4 +534,120 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
         .code,
         "effect.bank.requests"
     );
+}
+
+/// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp moves.
+///
+/// From the effect's own snapshot with all three ramps in flight (attack amount, sustain amount
+/// and mix, on both channels), each left ramp's `current` in turn is written one ulp outside each
+/// edge of its parameter's domain. The restore refuses it with `effect.state.parameter` and leaves
+/// the scalar instance and a bank track unchanged; the same payload with `current` on the edge
+/// restores. Red when `read_lane` domain-checks `current` only at rest or keeps a rounding budget
+/// for a moving one.
+#[test]
+fn a_moving_ramp_word_past_its_domain_is_refused() {
+    let values = initial_values();
+    let effect_prepared = prepared(&values);
+    let sizes = effect_prepared.metadata.state_sizes;
+    let mut effect = effect_prepared.processor;
+    let parameters = TRANSIENT_SHAPER_DESCRIPTOR.parameters;
+    let spans: Vec<_> = parameters
+        .iter()
+        .enumerate()
+        .flat_map(|(index, row)| {
+            let (low, high) = (row.minimum.expect("min"), row.maximum.expect("max"));
+            let value = low + 0.37 * (high - low);
+            assert_ne!(value, row.default_value, "{}", row.display_name);
+            [ParameterChannel::Left, ParameterChannel::Right]
+                .map(|channel| point(channel, index as u32, 0, value))
+        })
+        .collect();
+    let mut left = [0.25_f32; 8];
+    let mut right = [-0.125_f32; 8];
+    effect.process(
+        effect_contract::EffectProcessBlock::new(&mut left, &mut right, None, 0, &spans, 128)
+            .expect("block"),
+    );
+    let saved = snapshot(effect.as_ref());
+    let ramp_word = |index: usize| 2 + index * 4;
+    for index in 0..parameters.len() {
+        assert_ne!(
+            state_u32(&saved.0, ramp_word(index) + 3),
+            0,
+            "ramp {index} is in flight"
+        );
+    }
+    let with_current = |index: usize, current: f32| {
+        let mut section = saved.0.clone();
+        let at = ramp_word(index) * 4;
+        section[at..at + 4].copy_from_slice(&current.to_le_bytes());
+        section
+    };
+
+    let mut bank = native_bank().map(|(_, width)| {
+        let members = vec![initial_values(); width.lanes() as usize];
+        let mut bank = bind_native_bank(&members, LinkMode::DualMono).expect("bank");
+        bank.restore_track_state_payload(
+            0,
+            1,
+            StatePayloadInput::new(&[], &saved.0, &saved.1, sizes).expect("input"),
+        )
+        .expect("the scalar snapshot restores into a bank track");
+        bank
+    });
+    let bank_saved = bank
+        .as_ref()
+        .map(|bank| bank_snapshot(bank.as_ref(), 0, sizes));
+
+    for (index, row) in parameters.iter().enumerate() {
+        let (low, high) = (row.minimum.expect("min"), row.maximum.expect("max"));
+        for (outside, edge) in [(low.next_down(), low), (high.next_up(), high)] {
+            let case = format!(
+                "ramp {index}: current {outside:e} ({:#010x})",
+                outside.to_bits()
+            );
+            let section = with_current(index, outside);
+            let input = || StatePayloadInput::new(&[], &section, &saved.1, sizes).expect("input");
+            assert_eq!(
+                effect
+                    .restore_state_payload(1, input())
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "{case}"
+            );
+            assert_eq!(snapshot(effect.as_ref()), saved, "{case}");
+            if let (Some(bank), Some(bank_saved)) = (bank.as_mut(), bank_saved.as_ref()) {
+                assert_eq!(
+                    bank.restore_track_state_payload(0, 1, input())
+                        .expect_err(&case)
+                        .code,
+                    "effect.state.parameter",
+                    "bank {case}"
+                );
+                assert_eq!(
+                    &bank_snapshot(bank.as_ref(), 0, sizes),
+                    bank_saved,
+                    "bank {case}"
+                );
+            }
+            let section = with_current(index, edge);
+            let input = || StatePayloadInput::new(&[], &section, &saved.1, sizes).expect("input");
+            let own = || StatePayloadInput::new(&[], &saved.0, &saved.1, sizes).expect("input");
+            effect
+                .restore_state_payload(1, input())
+                .unwrap_or_else(|error| panic!("ramp {index}: current {edge:e}: {}", error.code));
+            effect
+                .restore_state_payload(1, own())
+                .expect("own snapshot");
+            if let Some(bank) = bank.as_mut() {
+                bank.restore_track_state_payload(0, 1, input())
+                    .unwrap_or_else(|error| {
+                        panic!("bank ramp {index}: current {edge:e}: {}", error.code)
+                    });
+                bank.restore_track_state_payload(0, 1, own())
+                    .expect("own snapshot");
+            }
+        }
+    }
 }

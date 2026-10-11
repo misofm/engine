@@ -222,12 +222,13 @@ def cargo_test_invocations(line: str) -> list[list[str]]:
 
 class Invocation:
     def __init__(self, job: str, step: str, packages: set[str], enabled: set[tuple[str, str]],
-                 whole: bool):
+                 whole: bool, doctest: bool = False):
         self.job = job
         self.step = step
         self.packages = packages
         self.enabled = enabled
         self.whole = whole
+        self.doctest = doctest
 
 
 def parse_invocation(job: str, step: str, arguments: list[str],
@@ -243,6 +244,7 @@ def parse_invocation(job: str, step: str, arguments: list[str],
     all_features = False
     no_default = False
     whole = True
+    doctest = False
     iterator = iter(cargo_arguments)
     for argument in iterator:
         option, equals, inline = argument.partition("=")
@@ -270,6 +272,7 @@ def parse_invocation(job: str, step: str, arguments: list[str],
             whole = False
         elif argument in NARROWING_TARGET_FLAGS:
             whole = False
+            doctest = doctest or argument == "--doc"
         elif option in NARROWING_TARGET_OPTIONS:
             whole = False
             if not equals:
@@ -306,7 +309,7 @@ def parse_invocation(job: str, step: str, arguments: list[str],
             enabled.update((name, feature) for feature in packages[name].features)
         elif not no_default and "default" in packages[name].features:
             enabled.add((name, "default"))
-    return Invocation(job, step, chosen, forwarded(packages, enabled), whole)
+    return Invocation(job, step, chosen, forwarded(packages, enabled), whole, doctest)
 
 
 def invocations(root: pathlib.Path, packages: dict[str, Package]) -> list[Invocation]:
@@ -346,6 +349,17 @@ def check(root: pathlib.Path) -> list[str]:
     require(not missing, "no unconditional whole-package cargo test step in "
             f"{WORKFLOW} tests these packages with their {FEATURE} feature enabled, so their "
             f"gated tests never run in CI: {', '.join(missing)}")
+    # `--all-targets` runs no doctest (#1422), so each job's `--doc` step must cover exactly the
+    # packages and test-support features of a whole-package step of the same job; a feature
+    # dropped from the doctest step alone would otherwise pass unseen.
+    for run in runs:
+        if run.doctest:
+            siblings = [other for other in runs if other.whole and other.job == run.job]
+            require(any(other.packages == run.packages and other.enabled == run.enabled
+                        for other in siblings),
+                    f"{WORKFLOW}: job {run.job!r}, step {run.step!r}: the doctest step must "
+                    "enable the same packages and features as a whole-package cargo test step of "
+                    "the same job, so its doctests are not built against a different feature set")
     return report
 
 

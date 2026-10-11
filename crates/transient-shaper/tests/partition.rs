@@ -62,7 +62,8 @@ fn the_scalar_product_is_partition_invariant() {
                 false,
                 LinkMode::DualMono,
             ))
-            .expect("prepare");
+            .expect("prepare")
+            .processor;
         let mut out_left = left.clone();
         let mut out_right = right.clone();
         let mut start = 0;

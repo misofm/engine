@@ -235,6 +235,10 @@ fn request<'a>(
             maximum_scratch_bytes: 1 << 28,
             maximum_automation_spans_per_block: 32,
         },
+        tail_bound: launch_native_effect_registry()
+            .expect("launch registry")
+            .tail_bound(descriptor.id, RATE, case.quality)
+            .expect("a declared row"),
     }
 }
 
@@ -426,7 +430,7 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                 };
                 bound = true;
                 let latency =
-                    usize::try_from(bank.metadata().program_key.latency.0).expect("latency fits");
+                    usize::try_from(bank.metadata.program_key.latency.0).expect("latency fits");
                 let controls: Vec<Option<EffectControlLane>> = bypassed
                     .iter()
                     .map(|bypassed| bypassed.then(|| EffectControlLane::without_channel(true)))
@@ -451,6 +455,7 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                             factory
                                 .prepare(request(descriptor, case, prepared, values))
                                 .expect("scalar oracle")
+                                .processor
                         })
                     })
                     .collect();
@@ -549,16 +554,21 @@ fn a_shunt_bypassed_per_node_instance_is_bit_identical_to_prepared_bypass() {
                 let seed = (effect_index * 1_000 + case_index * 10) as u64 + 500 + trial * 31;
                 let mut rng = Rng::new(seed);
                 let values = initial_values(descriptor, &mut rng);
-                let mut wet = factory
+                let effect_contract::PreparedEffect {
+                    processor: mut wet,
+                    metadata: wet_metadata,
+                } = factory
                     .prepare(request(descriptor, case, false, &values))
                     .expect("lowered instance");
                 let mut oracle = factory
                     .prepare(request(descriptor, case, true, &values))
-                    .expect("prepared-bypass oracle");
+                    .expect("prepared-bypass oracle")
+                    .processor;
                 let mut enabled = factory
                     .prepare(request(descriptor, case, false, &values))
-                    .expect("enabled instance");
-                let latency = usize::try_from(wet.metadata().latency.0).expect("latency fits");
+                    .expect("enabled instance")
+                    .processor;
+                let latency = usize::try_from(wet_metadata.latency.0).expect("latency fits");
                 let mut shunt = effect_contract::BypassShunt::new(QUANTUM as usize, latency);
                 let mut signal = Rng::new(seed ^ 0x5eed);
                 for block in 0..BLOCKS {
@@ -636,7 +646,7 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
             })
             .expect("a well-formed bank request")
             .expect("a bankable effect binds at the host width");
-        let latency = usize::try_from(bank.metadata().program_key.latency.0).expect("latency fits");
+        let latency = usize::try_from(bank.metadata.program_key.latency.0).expect("latency fits");
         // Lane 1 is session-bypassed with a live channel; lane 2 is session-bypassed without one.
         let (mut producer, consumer) = bounded_spsc::<EffectControlRecord>(
             core::num::NonZeroUsize::new(4).expect("depth"),
@@ -669,7 +679,8 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
         // the prepared flag.
         let mut live_wet = factory
             .prepare(request(descriptor, case, false, &values[1]))
-            .expect("live reference");
+            .expect("live reference")
+            .processor;
         let mut live_shunt = effect_contract::BypassShunt::new(QUANTUM as usize, latency);
         let mut oracles: Vec<Box<dyn PreparedNativeEffect>> = values
             .iter()
@@ -678,6 +689,7 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
                 factory
                     .prepare(request(descriptor, case, lane == 2, values))
                     .expect("scalar oracle")
+                    .processor
             })
             .collect();
         let mut signal = Rng::new(0x1087 ^ 0x5eed);
@@ -828,10 +840,12 @@ fn the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit() {
     }
     let mut prepared = factory
         .prepare(request(descriptor, case, true, &values))
-        .expect("prepared bypass");
+        .expect("prepared bypass")
+        .processor;
     let mut wet = factory
         .prepare(request(descriptor, case, false, &values))
-        .expect("prepared enabled");
+        .expect("prepared enabled")
+        .processor;
     let mut shunt = effect_contract::BypassShunt::new(QUANTUM as usize, 0);
     let mut moved = false;
     for block in 0..4 {

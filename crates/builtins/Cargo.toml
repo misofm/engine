@@ -9,6 +9,11 @@ publish.workspace = true
 [lib]
 name = "builtins"
 
+# #1457 gate 2: reads the test-support walk counters.
+[[example]]
+name = "input_bound_budget"
+required-features = ["test-support"]
+
 [features]
 test-support = []
 

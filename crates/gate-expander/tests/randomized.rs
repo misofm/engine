@@ -21,14 +21,20 @@ conformance::randomized_effect_test!(
 #[test]
 #[ignore = "#1073: the D7 recovery's report breaks the contract; see the test's documentation"]
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
-    conformance::assert_d7_reports(&gate_expander::GateExpanderFactory);
+    conformance::assert_d7_reports(Box::new(gate_expander::GateExpanderFactory));
 }
 
 /// #1278: the plan-swap carry restores every lane it carries, so a restore must accept every state
-/// the effect itself reaches -- including a smoothed ramp to a domain edge whose iterated
-/// `current + step` has rounded past the edge, at every launch rate. Red on a restore that holds a
-/// moving ramp's `current` (or a subnormal step) to the strict domain.
+/// the effect itself reaches -- here each sampled state of a smoothed ramp to a domain edge, at
+/// every launch rate.
+/// Since #1409 every ramp word stays between its start and its target, so the strict restore
+/// (#1411) admits each snapshot. Red when the render site whose word the snapshot holds leaves a
+/// ramp word outside its endpoints at render (a missing or reverted #1409 clamp), or when the
+/// restore refuses a valid in-range snapshot. The fix is that clamp or that validation, never a
+/// restore slack.
 #[test]
 fn the_effects_own_edge_ramp_snapshots_restore() {
-    conformance::EffectDifferential::assert_edge_ramps_restore(&gate_expander::GateExpanderFactory);
+    conformance::EffectDifferential::assert_edge_ramps_restore(Box::new(
+        gate_expander::GateExpanderFactory,
+    ));
 }

@@ -187,7 +187,7 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
         request.link_mode = link;
         let mut effect = prepare(request);
         let (mut left, mut right) = (source_left.clone(), source_right.clone());
-        render_scalar(effect.as_mut(), &mut left, &mut right, 128);
+        render_scalar(&mut effect, &mut left, &mut right, 128);
         let trace = reference(link, &source_left, &source_right);
         let worst_left = compare(
             &left,
@@ -248,7 +248,7 @@ fn oracle_pcm_within_derived_tolerance_native_bank() {
         while start < FRAMES {
             let end = (start + 128).min(FRAMES);
             let frames = (end - start) as u32;
-            bank.process_bank(
+            bank.processor.process_bank(
                 effect_contract::EffectBankProcessBlock::new(
                     &mut left[start * NATIVE_LANES..end * NATIVE_LANES],
                     &mut right[start * NATIVE_LANES..end * NATIVE_LANES],

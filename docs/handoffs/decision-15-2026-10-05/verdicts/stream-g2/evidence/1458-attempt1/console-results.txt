@@ -1,0 +1,28 @@
+Results printed to the console only (scripts in this directory; tree = git archive 88c62e7f5).
+
+old.py (the 8fc41c5b0 copies of delay and soft-clip tests/ramp_endpoint.rs swapped into the 88c62e7f5 export;
+src of delay, soft-clip, effect-runtime, lane identical between 8fc41c5b0 and 88c62e7f5):
+  delay-old-real                     exit 0   ok 1/1
+  delay-old-advance_block            exit 0   ok 1/1   (row green on the old copy: correction accurate)
+  delay-old-250ms-advance_block      exit 101 FAILED: mix from 0x3f7fffa0 to 1 ... left output
+                                              (DELAY_TIME_MS set back to 250: the pre-f6f599d84 shape is red)
+  delay-old-250ms-real               exit 0   ok 1/1
+  softclip-old-real                  exit 0   ok 2/2
+  softclip-old-d5                    exit 0   ok 2/2   (row green on the old copy: correction accurate)
+
+wide.py ab  (advance_block first word -> current + step; effect-runtime all targets):
+  exit 101; every_statement_of_the_law_stays_inside_its_endpoints_and_agrees red
+  ("ramp_block at f32 differs from LinearRamp at sample 2534")  -> gate 1 catches the shared-kernel form.
+
+wide.py d5  (soft clip D5 inverted; soft-clip --all-targets):
+  exit 101; red: ramp_endpoint every_ramped_word_stays_inside_its_endpoints (frame 1, follows_law)
+  and tests/ramp_law.rs: the_driver_reproduces_the_runtime_ramp_law_bit_for_bit,
+  the_ramp_divides_once_and_snaps_exactly_whatever_the_block_size, a_new_point_restarts_from_the_current_value.
+
+LinearRamp early snap (`1 | 2 =>`), effect-runtime all targets: exit 101, five tests red
+  (linear_smoother_is_bit_identical_to_the_linear_ramp, the_step_is_computed_once,
+   block_driving_matches_the_scalar_sequence, every_statement_of_the_law_stays_inside_its_endpoints_and_agrees,
+   negative_zero_remains_armed_and_snaps_back_to_its_sign).
+
+g5_native_corpus (release, --features math/lane) on the real 88c62e7f5 code: 7 passed.
+g5 under the gate frozen mutant (site 5 `stepped = ramp.current`): case 124 (gate_expander/dual_mono/clamped_ramp) moved.

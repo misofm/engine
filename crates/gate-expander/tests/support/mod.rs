@@ -5,9 +5,8 @@ use lane::Backend;
 use effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
-    StatePayloadOutput,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
+    PreparedEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
 };
 use gate_expander::{GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory};
 
@@ -36,7 +35,7 @@ pub fn native_width() -> BankWidth {
 pub fn prepare_bank_native(
     values: &[Values; 8],
     link_mode: LinkMode,
-) -> Option<Box<dyn PreparedNativeEffectBank>> {
+) -> Option<PreparedEffectBank> {
     prepare_bank(values, link_mode, native_width(), Backend::current(), 128)
 }
 
@@ -47,7 +46,7 @@ pub fn prepare_bank(
     width: BankWidth,
     backend: Backend,
     quantum: u32,
-) -> Option<Box<dyn PreparedNativeEffectBank>> {
+) -> Option<PreparedEffectBank> {
     prepare_bank_at_rate(values, link_mode, width, backend, quantum, 48_000)
 }
 
@@ -59,7 +58,7 @@ pub fn prepare_bank_at_rate(
     backend: Backend,
     quantum: u32,
     sample_rate: u32,
-) -> Option<Box<dyn PreparedNativeEffectBank>> {
+) -> Option<PreparedEffectBank> {
     let requests: Vec<PrepareEffectRequest<'_>> = values[..width.lanes() as usize]
         .iter()
         .map(|set| {
@@ -152,17 +151,22 @@ pub fn request_at(
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
+        tail_bound: conformance::tail_bound_of(
+            Box::new(gate_expander::GateExpanderFactory),
+            sample_rate,
+            EffectQuality::Normal,
+        ),
     }
 }
 
-/// Prepares one scalar instance.
-pub fn prepare(request: PrepareEffectRequest<'_>) -> Box<dyn PreparedNativeEffect> {
+/// Prepares one scalar instance: its processor and the metadata its preparation derived.
+pub fn prepare(request: PrepareEffectRequest<'_>) -> PreparedEffect {
     GateExpanderFactory.prepare(request).expect("prepared gate")
 }
 
 /// Renders `left`/`right` in place through a scalar instance in `block`-sized chunks.
 pub fn render_scalar(
-    effect: &mut dyn PreparedNativeEffect,
+    effect: &mut PreparedEffect,
     left: &mut [f32],
     right: &mut [f32],
     block: usize,
@@ -172,8 +176,10 @@ pub fn render_scalar(
 
 /// As [`render_scalar`], with an optional sidechain and an automation batch delivered in the block
 /// that starts at `first_sample` — the timeline position the whole render begins at.
+///
+/// The block quantum is the prepare result's.
 pub fn render_scalar_sidechain(
-    effect: &mut dyn PreparedNativeEffect,
+    prepared: &mut PreparedEffect,
     left: &mut [f32],
     right: &mut [f32],
     sidechain: Option<(&[f32], &[f32])>,
@@ -182,7 +188,8 @@ pub fn render_scalar_sidechain(
     first_sample: u64,
 ) -> ProcessReport {
     let frames = left.len();
-    let quantum = effect.metadata().quantum;
+    let quantum = prepared.metadata.quantum;
+    let effect = prepared.processor.as_mut();
     let mut total = ProcessReport::default();
     let mut start = 0;
     while start < frames {
@@ -225,9 +232,9 @@ pub fn add_report(total: &mut ProcessReport, report: ProcessReport) {
         .saturating_add(report.nonfinite_right_blocks);
 }
 
-/// Snapshots one scalar instance's state payload.
-pub fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let sizes = effect.metadata().state_sizes;
+/// Snapshots one scalar instance's state payload, sized by its prepare result's metadata.
+pub fn snapshot(prepared: &PreparedEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (effect, sizes) = (prepared.processor.as_ref(), prepared.metadata.state_sizes);
     let mut common = vec![0; sizes.common_bytes as usize];
     let mut left = vec![0; sizes.left_bytes as usize];
     let mut right = vec![0; sizes.right_bytes as usize];
@@ -240,11 +247,13 @@ pub fn snapshot(effect: &dyn PreparedNativeEffect) -> (Vec<u8>, Vec<u8>, Vec<u8>
 }
 
 /// Snapshots one track of a bank.
-pub fn snapshot_bank(
-    effect: &dyn PreparedNativeEffectBank,
-    track: u32,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let sizes = effect.metadata().program_key.state_sizes;
+///
+/// The sizes are the bind result's program key's.
+pub fn snapshot_bank(bank: &PreparedEffectBank, track: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (effect, sizes) = (
+        bank.processor.as_ref(),
+        bank.metadata.program_key.state_sizes,
+    );
     let mut common = vec![0; sizes.common_bytes as usize];
     let mut left = vec![0; sizes.left_bytes as usize];
     let mut right = vec![0; sizes.right_bytes as usize];
