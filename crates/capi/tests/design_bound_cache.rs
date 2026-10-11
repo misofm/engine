@@ -11,7 +11,7 @@ use builtins::test_support::{fixed_input_bounds_computed, fixed_input_frames_wal
 use capi::*;
 use protocol::{
     CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
-    TypedCommandFrame,
+    StatusCode, TypedCommandFrame,
 };
 use session::{SessionModel, StableId};
 
@@ -53,7 +53,7 @@ fn limits() -> CompileLimits {
 }
 
 /// What a call computed on this thread: designs bounded and frames walked.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Work {
     designs: u64,
     frames: u64,
@@ -152,6 +152,30 @@ impl Compiled {
         pcm.iter().map(|sample| sample.to_bits()).collect()
     }
 
+    /// Renders one block at `at` so a pending plan swaps in, then drains both event lanes: a
+    /// committed rebuild queues reliable events, and the queue holds two.
+    fn settle(&self, at: u64) {
+        self.render(at);
+        let mut storage = [0_u8; 4_096];
+        for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+            loop {
+                let mut event = BytesOut {
+                    struct_size: BYTES_OUT_SIZE,
+                    reserved0: 0,
+                    data: storage.as_mut_ptr(),
+                    capacity_bytes: storage.len() as u64,
+                    required_bytes: 0,
+                };
+                // SAFETY: `session` is live and used by this thread alone.
+                let code = unsafe { miso_engine_v1_dequeue_event(self.session, lane, &mut event) };
+                assert_eq!(code, RESULT_OK);
+                if event.required_bytes == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
     /// One structural transaction that renders identically: the source's content identity becomes
     /// `tag`'s. Returns the work its rebuild did. `revision` is the session's current revision.
     fn rebuild(&self, document: &str, revision: u64, tag: u8) -> Work {
@@ -164,13 +188,30 @@ impl Compiled {
             bit_depth: source.bit_depth,
             frames: source.frames,
         };
+        let (code, status, work) = self.submit(&edit, revision, tag);
+        assert_eq!(
+            (code, status),
+            (RESULT_OK, Some(StatusCode::Ok)),
+            "the rebuild commits"
+        );
+        work
+    }
+
+    /// Submits `edit` as the transaction `request_id` at `revision`, and returns the call's
+    /// result code, the status of its response when it has one, and the work it did.
+    fn submit(
+        &self,
+        edit: &SessionEdit,
+        revision: u64,
+        request_id: u8,
+    ) -> (u32, Option<StatusCode>, Work) {
         let mut request = vec![0_u8; 4_096];
         let len = ProtocolCodec::default()
             .encode_command_frame_into(
                 &TypedCommandFrame {
-                    request_id: RequestId::new(u64::from(tag)).expect("nonzero request"),
+                    request_id: RequestId::new(u64::from(request_id)).expect("nonzero request"),
                     expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
-                    payload: CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+                    payload: CommandPayload::SessionTransactionApply(core::slice::from_ref(edit)),
                 },
                 &mut request,
             )
@@ -195,8 +236,34 @@ impl Compiled {
                 )
             }
         });
-        assert_eq!(code, RESULT_OK, "the rebuild is admitted");
-        work
+        if code != RESULT_OK {
+            return (code, None, work);
+        }
+        let mut fields = [0_u16; 64];
+        let (protocol::DecodedTypedResponseFrame::Success { header, .. }
+        | protocol::DecodedTypedResponseFrame::NonOk { header, .. }) = ProtocolCodec::default()
+            .decode_typed_response(
+                &response[..output.required_bytes as usize],
+                &mut protocol::DecodeScratch::new(&mut fields),
+            )
+            .expect("a decodable response");
+        (code, Some(header.status), work)
+    }
+}
+
+/// The edit that sets track `index`'s builtins to `document`'s own, with both HPF cutoffs at
+/// `hpf_hz` when given.
+fn builtins_edit(document: &str, index: usize, hpf_hz: Option<f32>) -> SessionEdit {
+    let model = session::parse_session_json(document).expect("the document");
+    let track = &model.tracks[index];
+    let mut builtins = track.builtins.clone();
+    if let Some(hpf_hz) = hpf_hz {
+        builtins.left.hpf_hz = hpf_hz;
+        builtins.right.hpf_hz = hpf_hz;
+    }
+    SessionEdit::SetTrackBuiltins {
+        track_id: track.id.clone(),
+        builtins,
     }
 }
 
@@ -298,8 +365,9 @@ fn a_rebuild_and_a_recompile_compute_no_design_bound() {
 
 /// Gate 1 near the cap (#1457 Amendment 3, m3): the engine's cache holds 8,160 other designs, so
 /// the 64-track document's insertions pass `INPUT_BOUND_CACHE_ENTRIES` (8,192) and clear it
-/// midway. The session's first rebuild still computes no design bound, because its cache is
-/// seeded from the designs the compile used and not from the engine's cache after it.
+/// midway. The session's first rebuild still computes no design bound, because its first epoch
+/// owns the designs the compile used (journaled at the time of use) and not the engine's cache
+/// after it.
 #[test]
 fn a_compile_that_clears_the_engine_cache_still_seeds_its_session() {
     const CAP: u64 = 8_192;
@@ -337,7 +405,7 @@ fn a_compile_that_clears_the_engine_cache_still_seeds_its_session() {
             designs: 0,
             frames: 0
         },
-        "the session's cache lacks designs the compile used"
+        "the session's seed lacks designs the compile used"
     );
 }
 
@@ -375,5 +443,77 @@ fn a_session_past_the_budget_rebuilds_without_walking() {
             frames: 0
         },
         "the rebuild"
+    );
+}
+
+/// Amendment 2 D1: a session keeps the designs its newest plan used and no others. On the 64-track
+/// document, a rebuild that changes one strip's HPF computes exactly that strip's design; an
+/// unchanged rebuild then computes none; and reverting the strip computes exactly one again,
+/// because the seed followed the newest plan and no longer holds the original design.
+#[test]
+fn a_rebuild_keeps_only_the_designs_its_plan_uses() {
+    let engine = Engine::new();
+    let (session, cold) = engine.compile(SIXTY_FOUR_TRACK);
+    assert_eq!(cold.designs, 64);
+    let revision = revision(SIXTY_FOUR_TRACK);
+    let commits = (RESULT_OK, Some(StatusCode::Ok));
+
+    // A strip's HPF changes: its new design is the only one computed.
+    let (code, status, changed) = session.submit(
+        &builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0)),
+        revision,
+        0x51,
+    );
+    assert_eq!((code, status), commits, "the HPF edit");
+    assert_eq!(changed.designs, 1, "the changed strip's design only");
+    assert!(changed.frames > 0);
+    session.settle(0);
+
+    // Nothing changes: the seed is the newest plan's 64 designs, and all are held.
+    let unchanged = session.rebuild(SIXTY_FOUR_TRACK, revision + 1, 0x52);
+    assert_eq!(unchanged, Work::default(), "the unchanged rebuild");
+    session.settle(128);
+
+    // The strip goes back: the original design left the seed with the plan that used it.
+    let (code, status, reverted) = session.submit(
+        &builtins_edit(SIXTY_FOUR_TRACK, 7, None),
+        revision + 2,
+        0x53,
+    );
+    assert_eq!((code, status), commits, "the revert");
+    assert_eq!(reverted.designs, 1, "the original design is computed again");
+}
+
+/// Amendment 2 D1: a rebuild that is prepared and then refused leaves every seed as it was. The
+/// HPF edit is prepared while the previous rebuild's plan is still pending, computes its one new
+/// design, and is refused with backpressure after admission (one replacement at a time); after the
+/// swap the same edit commits and computes that design again. A rebuild that wrote its designs
+/// into the newest seed before its commit would find the design held and compute none.
+#[test]
+fn a_refused_rebuild_leaves_the_seed_as_it_was() {
+    let engine = Engine::new();
+    let (session, _cold) = engine.compile(SIXTY_FOUR_TRACK);
+    let revision = revision(SIXTY_FOUR_TRACK);
+    let first = session.rebuild(SIXTY_FOUR_TRACK, revision, 0x61);
+    assert_eq!(first, Work::default());
+
+    let edit = builtins_edit(SIXTY_FOUR_TRACK, 7, Some(55.0));
+    let (code, _, refused) = session.submit(&edit, revision + 1, 0x62);
+    assert_eq!(code, RESULT_BACKPRESSURE, "the first plan is still pending");
+    assert_eq!(
+        refused.designs, 1,
+        "vacuous: the refused rebuild did not prepare its design"
+    );
+
+    session.settle(0);
+    let (code, status, committed) = session.submit(&edit, revision + 1, 0x63);
+    assert_eq!(
+        (code, status),
+        (RESULT_OK, Some(StatusCode::Ok)),
+        "after the swap"
+    );
+    assert_eq!(
+        committed.designs, 1,
+        "the refused rebuild left its design in the newest seed"
     );
 }

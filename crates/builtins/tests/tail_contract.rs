@@ -611,15 +611,15 @@ fn a_journal_holds_every_design_a_preparation_used_through_a_clear() {
     let bounds = input_section_bounds(rate, designs, Some(&mut cache)).expect("bounds");
     assert_eq!(bounds, expected);
     assert!(cache.len() < designs.len(), "the cache cleared");
-    let mut seed = cache.take_journal();
-    assert_eq!(seed.len(), designs.len(), "the journal lost a design");
-    assert_eq!(seed.capacity(), cache.capacity());
+    let record = cache.take_journal();
+    assert_eq!(record.len(), designs.len(), "the journal lost a design");
+    let mut seeded = InputBoundCache::with_seed(&record);
     let (computed, walked) = (fixed_input_bounds_computed(), fixed_input_frames_walked());
-    let rebuilt = input_section_bounds(rate, designs, Some(&mut seed)).expect("bounds");
+    let rebuilt = input_section_bounds(rate, designs, Some(&mut seeded)).expect("bounds");
     assert_eq!(rebuilt, expected);
     assert_eq!(fixed_input_bounds_computed(), computed, "computed a design");
     assert_eq!(fixed_input_frames_walked(), walked, "walked a frame");
-    // A closed journal records nothing more, and none open returns an empty cache.
+    // A closed journal records nothing more, and none open returns an empty record.
     input_section_bounds(rate, designs, Some(&mut cache)).expect("bounds");
     assert!(cache.take_journal().is_empty());
 }
@@ -652,11 +652,12 @@ fn a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used() {
     warm.begin_journal();
     let hits = input_section_bounds_within(rate, designs, budget, Some(&mut warm)).expect("bounds");
     assert_eq!(hits, expected);
-    let mut seed = warm.take_journal();
-    assert_eq!(seed.len(), 2, "the journal lost a hit or a stopped walk");
+    let record = warm.take_journal();
+    assert_eq!(record.len(), 2, "the journal lost a hit or a stopped walk");
+    let mut seeded = InputBoundCache::with_seed(&record);
     let before = fixed_input_frames_walked();
     let rebuilt =
-        input_section_bounds_within(rate, designs, budget, Some(&mut seed)).expect("bounds");
+        input_section_bounds_within(rate, designs, budget, Some(&mut seeded)).expect("bounds");
     assert_eq!(rebuilt, expected);
     assert_eq!(fixed_input_frames_walked(), before, "walked a frame");
     // Without the stopped entry the same preparation does walk (the entry earns its place).
@@ -668,6 +669,46 @@ fn a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used() {
         fixed_input_frames_walked() > before,
         "the stopped walk walks"
     );
+}
+
+/// #1471 Amendment 2 (D1, D3): a cache that reads a record finds every design in it (the record
+/// is sorted and searched by key, so a wrong order loses designs from the middle), computes only
+/// the design the record lacks, and its own journal holds the designs this preparation used, not
+/// the record's other designs: a session's seed follows its newest plan, never grows by union.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_cache_over_a_record_finds_every_design_and_journals_only_what_it_used() {
+    use builtins::test_support::fixed_input_bounds_computed;
+    let rate = 48_000;
+    let design = |step: u32| parameters(100.0 + 37.0 * step as f32, 0.0, 0.0, false);
+    let recorded: Vec<_> = (0..40).map(design).collect();
+    let mut engine = InputBoundCache::new();
+    engine.begin_journal();
+    input_section_bounds(rate, recorded.clone(), Some(&mut engine)).expect("bounds");
+    let record = engine.take_journal();
+    assert_eq!(record.len(), 40);
+
+    // Nine of the forty, spread across the record's order, and one design it lacks.
+    let used: Vec<_> = (0..40)
+        .step_by(5)
+        .chain([1, 38])
+        .map(design)
+        .chain([design(40)])
+        .collect();
+    let expected = input_section_bounds(rate, used.clone(), None).expect("bounds");
+    let mut cache = InputBoundCache::with_seed(&record);
+    cache.begin_journal();
+    let before = fixed_input_bounds_computed();
+    let bounds = input_section_bounds(rate, used.clone(), Some(&mut cache)).expect("bounds");
+    assert_eq!(bounds, expected);
+    assert_eq!(
+        fixed_input_bounds_computed() - before,
+        1,
+        "only the design the record lacks is computed"
+    );
+    let journal = cache.take_journal();
+    assert_eq!(journal.len(), used.len(), "the journal holds what was used");
+    assert_eq!(record.len(), 40, "a preparation never changes its record");
 }
 
 /// #1457 gate 6 (D2): the live-bound table preparation reads is the computed live bound at every

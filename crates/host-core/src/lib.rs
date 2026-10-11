@@ -232,8 +232,9 @@ pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 /// `builtins-compiler` or `builtins`.
 pub use builtins::BuiltinLaneSelector;
 /// The design-bound cache `prepare_host_runtime_with_live_lanes{,_successor}` take (issue #1471),
-/// re-exported so a host that keeps one names it without depending on `builtins`.
-pub use builtins::InputBoundCache;
+/// re-exported so a host that keeps one names it without depending on `builtins`, with the
+/// read-only record of the designs one preparation used, which another cache can read.
+pub use builtins::{InputBoundCache, InputBoundRecord};
 /// One strip's live-control producers (`HostLiveControlHandles::strip_controls`), re-exported so a
 /// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
 /// depending on `builtins-compiler`.

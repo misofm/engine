@@ -42,6 +42,11 @@ pub struct ProviderEpoch {
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
+    /// The design bounds the preparation that made this epoch's plan used, each with its stored
+    /// charge or stopped-walk horizon (#1471 Amendment 2 D1). A structural rebuild reads the
+    /// newest epoch's seed and journals its own, which its candidate epoch then owns; it drops
+    /// with this epoch. Control thread only: render never reads it and no plan holds it.
+    pub(crate) bound_seed: InputBoundRecord,
 }
 
 impl ProviderEpoch {
@@ -75,12 +80,19 @@ impl ProviderEpoch {
         &self.effects
     }
 
+    /// The design bounds the preparation that made this epoch's plan used (#1471).
+    #[cfg(feature = "test-support")]
+    pub fn test_bound_seed(&self) -> &InputBoundRecord {
+        &self.bound_seed
+    }
+
     pub(crate) fn current(
         sources: SourceControlSet,
         inventory: PlanStateInventory,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
+        bound_seed: InputBoundRecord,
     ) -> Self {
         let owner = Self {
             epoch: 0,
@@ -89,6 +101,7 @@ impl ProviderEpoch {
             strips,
             effects,
             capi,
+            bound_seed,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
@@ -101,6 +114,7 @@ impl ProviderEpoch {
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
+        bound_seed: InputBoundRecord,
     ) -> Self {
         let owner = Self {
             epoch: u64::MAX,
@@ -109,6 +123,7 @@ impl ProviderEpoch {
             strips,
             effects,
             capi,
+            bound_seed,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -340,10 +355,6 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) render_diagnostic_head: usize,
     pub(crate) render_diagnostic_len: usize,
     pub(crate) protocol_reliable_pending: bool,
-    /// This session's design-bound cache (#1471): seeded at compile from the designs that compile
-    /// used, read and filled by every structural rebuild. Control thread only; render never reads
-    /// it and no plan holds it.
-    pub(crate) bound_cache: InputBoundCache,
 }
 
 pub(crate) struct ObservedController {
@@ -1103,10 +1114,9 @@ where
                 }
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
                 // transaction leaves unchanged is prepared to carry that plan's ring.
-                // The session's cache moves out for the preparation (an empty cache is a const
-                // value; nothing allocates) and back before the result is looked at, so the
-                // rebuild fills it whether or not it is admitted.
-                let mut bound_cache = core::mem::take(&mut self.bound_cache);
+                // #1471 Amendment 2: the preparation reads the newest epoch's design-bound seed
+                // and journals its own, which the candidate epoch owns. Nothing is written to the
+                // newest seed, so a refused or abandoned rebuild leaves every seed as it was.
                 let prepared_runtime = prepare_runtime::<A>(
                     prepared.get().prospective_session().compiled(),
                     self.limits,
@@ -1114,10 +1124,9 @@ where
                         inventory: &self.newest_providers().inventory,
                         committed: self.controller.session().compiled().normalized_model(),
                     }),
-                    Some(&mut bound_cache),
-                );
-                self.bound_cache = bound_cache;
-                let prepared_runtime = prepared_runtime.map_err(CommandError::CompileRejected)?;
+                    &mut InputBoundCache::with_seed(&self.newest_providers().bound_seed),
+                )
+                .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
                     sources,
                     strips,
@@ -1128,9 +1137,16 @@ where
                     inventory,
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
+                    bound_seed,
                 } = prepared_runtime;
-                let mut candidate_provider =
-                    ProviderEpoch::candidate(sources, inventory, strips, effects, prospective_capi);
+                let mut candidate_provider = ProviderEpoch::candidate(
+                    sources,
+                    inventory,
+                    strips,
+                    effects,
+                    prospective_capi,
+                    bound_seed,
+                );
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(feature = "test-support")]
                 {

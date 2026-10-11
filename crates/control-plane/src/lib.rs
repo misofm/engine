@@ -61,10 +61,11 @@ pub use adapter::{ControlAdapter, ControlLimits, PlanResources};
 pub use compile::{CompiledChildren, compile_children};
 pub use control::{CommandError, EventError, EventLane, SessionState, SourceFailure};
 pub use error::{CompileFailure, ResourceFault};
-/// The design-bound cache a host keeps and passes to [`compile_children`] (issue #1471).
-pub use host_core::InputBoundCache;
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).
 pub use host_core::SourceSubmission;
+/// The design-bound cache a host keeps and passes to [`compile_children`], and the record a
+/// plan's preparation leaves for its successor's (issue #1471).
+pub use host_core::{InputBoundCache, InputBoundRecord};
 pub use plan::{PlanQueries, PlanState};
 
 #[cfg(feature = "test-support")]

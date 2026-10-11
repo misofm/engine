@@ -520,6 +520,30 @@ fn scratch_session() -> String {
     session::canonical_session_json(&model).expect("oracle canonical fixture")
 }
 
+/// The nine-track fixture with three distinct enabled input designs: the tracks take three HPF
+/// cutoffs in turn, so a plan's design-bound seed (#1471) holds more than one entry.
+fn three_design_session() -> String {
+    let mut model = session::parse_session_json(SESSION).expect("oracle fixture");
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.hpf_hz = 40.0 + 30.0 * (index % 3) as f32;
+        }
+    }
+    let document = session::canonical_session_json(&model).expect("three-design canonical fixture");
+    // One entry is the same size whatever its design, so the seed's bytes count the designs.
+    let one = host_half(SESSION, &limits()).bound_seed_bytes(&limits());
+    assert!(
+        one > 0,
+        "vacuous: the nine-track fixture enables no input section"
+    );
+    assert_eq!(
+        host_half(&document, &limits()).bound_seed_bytes(&limits()),
+        3 * one,
+        "vacuous: the document does not use three designs"
+    );
+    document
+}
+
 // --- #1060: budgets plus one allocator-observed completeness oracle ----------------------------
 //
 // Owner decision 4 (`docs/rulings/engine-footprint-2026-09-28.md`): memory tests assert budgets
@@ -655,14 +679,40 @@ impl HostHalf {
 }
 
 impl HostHalf {
+    /// The bytes of the design-bound seed an epoch of this session's plan keeps (#1471
+    /// Amendment 2): the designs a preparation of this session uses, journaled as capi's
+    /// preparation journals them, in an exact-size record. Prepared again here, apart from the
+    /// observed windows, so this half's own owners stay what they were.
+    fn bound_seed_bytes(&self, compile_limits: &CompileLimits) -> u64 {
+        let mut cache = host_core::InputBoundCache::new();
+        cache.begin_journal();
+        host_core::prepare_host_runtime_with_live_lanes(
+            self.store.compiled(),
+            &host_caps(compile_limits),
+            &host_core::HostLiveControlRequest {
+                control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+                ..host_core::HostLiveControlRequest::default()
+            },
+            host_core::HostLiveLanes {
+                strip_input: false,
+                effects: true,
+                routes: false,
+            },
+            Some(&mut cache),
+        )
+        .unwrap_or_else(|_| panic!("the session prepares again"));
+        cache.take_journal().retained_bytes()
+    }
+
     /// The two capi terms an epoch adds to a replacement's or a live edit's peak, each from its
     /// owning crate's report: `epoch_retained` and `prepared_protocol_retained`.
     ///
     /// The session's canonical JSON is charged once, with its model in the graph row. The epoch
     /// term is the source producers' control table and ID arena, the strip producers' table
     /// and track IDs (#1256), measured from the kept slice, and the effect producers' table and
-    /// owned payload (#1263), from host-core's walk over them, and the plan state inventory the
-    /// epoch keeps for its successor (#1273 D5). The prepared-protocol term is the
+    /// owned payload (#1263), from host-core's walk over them, the plan state inventory the
+    /// epoch keeps for its successor (#1273 D5), and the design-bound seed (#1471,
+    /// [`Self::bound_seed_bytes`]). The prepared-protocol term is the
     /// response buffer, the affine token, the replay cache and the parameter catalog.
     fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
         let replay =
@@ -691,7 +741,8 @@ impl HostHalf {
         let epoch = self.prepared.report.control_retained_bytes
             + strips
             + effects
-            + self.prepared.report.inventory_retained_bytes;
+            + self.prepared.report.inventory_retained_bytes
+            + self.bound_seed_bytes(compile_limits);
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
             + size_of::<protocol::PreparedStructuralCommand>() as u64
             + replay.retained_payload_bytes
@@ -948,6 +999,9 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         // #1256 MINOR-1, folded into #1258: submix strips and a route into a submix, so the strip
         // table's submix entries and the C ABI's lane selection (no route lanes) are observed.
         ("routed submix", two_track_routed_submix_session()),
+        // #1471 Amendment 2: three distinct enabled input designs, so the design-bound seed is
+        // charged per design and not at one design's size.
+        ("three input designs", three_design_session()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
@@ -1328,6 +1382,157 @@ fn reference_session_retained_rows_stay_within_their_budgets() {
     }
 }
 
+/// The engine's design-bound cache ceiling (#1471 Amendment 2 D5), as `miso_engine_v1.h` and
+/// `docs/C_ABI_V1_QUALIFICATION.md` state it: at most 4,300,720 bytes of heap on a 64-bit target,
+/// derived (not measured) from `INPUT_BOUND_CACHE_ENTRIES` = 8,192 entries of 236 bytes (a 124-byte
+/// key and a 112-byte value) in the map's nodes. A node of the standard `BTreeMap` holds 5 to 11
+/// entries, so 8,192 entries need at most 1,639 nodes; a leaf is 2,608 bytes and an internal node
+/// 2,704, and at most 273 of the 1,639 are internal. A literal on purpose: it is the figure the
+/// header gives app developers, so a change to the entry, the cap or the journal must move it
+/// there too.
+const ENGINE_CACHE_CEILING_BYTES: u64 = 4_300_720;
+
+/// A session of `count` tracks whose enabled input designs all differ from each other and from
+/// every other `offset`'s (each track's cutoffs come from its global index), built from the
+/// nine-track fixture's track, route and source, with cutoffs quick to bound: 800 of them fit one
+/// preparation's design-bound budget, so each is computed and cached.
+fn distinct_design_session(offset: usize, count: usize) -> String {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    let track = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    model.tracks.clear();
+    model.routes.clear();
+    for index in offset..offset + count {
+        let mut track = track.clone();
+        let id = format!("f{index}");
+        track.id = StableId::parse(&id).expect("track ID");
+        let hpf = 1_500.0 + 0.173 * index as f32;
+        let lpf = 4_000.0 + 0.311 * index as f32;
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.hpf_hz = hpf;
+            lane.lpf_hz = lpf;
+        }
+        let mut route = route.clone();
+        route.id = StableId::parse(&format!("{id}-main")).expect("route ID");
+        if let session::RouteSource::Track { track_id, .. } = &mut route.source {
+            *track_id = track.id.clone();
+        }
+        model.tracks.push(track);
+        model.routes.push(route);
+    }
+    session::canonical_session_json(&model).expect("canonical document")
+}
+
+/// The bytes `miso_engine_v1_engine_destroy` frees for `engine`, observed by this file's allocator.
+///
+/// # Safety
+///
+/// `engine` must be a live engine handle; it is destroyed.
+unsafe fn engine_destroy_freed(engine: *mut Engine) -> u64 {
+    begin();
+    // SAFETY: The caller passes a live engine, destroyed exactly once, here.
+    unsafe { miso_engine_v1_engine_destroy(engine) };
+    let window = finish();
+    assert_eq!(window.allocated_bytes, 0, "destroy allocates nothing");
+    window.deallocated_bytes
+}
+
+/// Amendment 2 D5 (gate 6): one engine's design-bound cache, filled past its cap, frees at engine
+/// destroy no more than the ceiling the header states, over an empty engine's. Twice the cap's
+/// distinct designs are compiled, so the cache fills, clears at the 8,193rd and fills again.
+/// Defects it turns red: an entry that grew past the ceiling's headroom, a cap that no longer
+/// applies (16,384 entries are held), and a journal left open on the engine's cache (it keeps
+/// every design used, uncapped).
+#[test]
+fn the_engine_cache_stays_within_its_stated_ceiling() {
+    use builtins::INPUT_BOUND_CACHE_ENTRIES;
+    use builtins::test_support::fixed_input_bounds_computed;
+
+    let roomy = CompileLimits {
+        maximum_document_bytes: 1 << 30,
+        maximum_tracks: 4_096,
+        maximum_sources: 4_096,
+        maximum_routes: 8_192,
+        maximum_effects: 8_192,
+        maximum_graph_session_plus_plan_bytes: 1 << 32,
+        maximum_source_total_bytes: 1 << 30,
+        maximum_source_overhead_bytes: 1 << 30,
+        maximum_effect_state_bytes: 1 << 32,
+        maximum_effect_scratch_bytes: 1 << 32,
+        maximum_builtin_retained_bytes: 1 << 32,
+        maximum_capi_retained_bytes: 1 << 30,
+        maximum_named_allocation_bytes: 1 << 32,
+        ..limits()
+    };
+    let config = EngineConfig {
+        struct_size: ENGINE_CONFIG_SIZE,
+        abi_version: ABI_VERSION,
+        reserved: [0; 4],
+    };
+    let create = || {
+        let mut engine = ptr::null_mut();
+        // SAFETY: A valid config and output pointer.
+        let code = unsafe { miso_engine_v1_engine_create(&config, &mut engine) };
+        assert_eq!(code, RESULT_OK);
+        engine
+    };
+    // SAFETY: The engine is live and destroyed once.
+    let empty = unsafe { engine_destroy_freed(create()) };
+
+    let engine = create();
+    let designs = 2 * INPUT_BOUND_CACHE_ENTRIES;
+    let mut offset = 0;
+    while offset < designs {
+        let count = (designs - offset).min(800);
+        let document = distinct_design_session(offset, count);
+        let computed = fixed_input_bounds_computed();
+        let mut diagnostics = [0_u8; 4_096];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: diagnostics.as_mut_ptr(),
+            capacity_bytes: diagnostics.len() as u64,
+            required_bytes: 0,
+        };
+        let (mut session, mut plan) = (ptr::null_mut(), ptr::null_mut());
+        // SAFETY: Every descriptor and output location is live for the call; the children are
+        // destroyed once below.
+        unsafe {
+            assert_eq!(
+                miso_engine_v1_compile_session(
+                    engine,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &roomy,
+                    &mut out,
+                    &mut session,
+                    &mut plan,
+                ),
+                RESULT_OK
+            );
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
+        }
+        assert_eq!(
+            fixed_input_bounds_computed() - computed,
+            count as u64,
+            "vacuous: the designs at {offset} were not all new to the cache"
+        );
+        offset += count;
+    }
+    // SAFETY: The engine is live and destroyed once.
+    let cache = unsafe { engine_destroy_freed(engine) } - empty;
+    println!("the full engine cache frees {cache} bytes (ceiling {ENGINE_CACHE_CEILING_BYTES})");
+    assert!(
+        cache > ENGINE_CACHE_CEILING_BYTES / 4,
+        "vacuous: the cache is not full ({cache} bytes)"
+    );
+    assert!(
+        cache <= ENGINE_CACHE_CEILING_BYTES,
+        "the engine's cache frees {cache} bytes, above its stated ceiling"
+    );
+}
+
 unsafe fn compile_c(
     session_document: &str,
     compile_limits: &CompileLimits,
@@ -1664,6 +1869,12 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     // capi's epoch row is the prospective epoch's producers and the plan state inventory it keeps
     // (#1273 D5), and the prepared-protocol term is unchanged (`capi_epoch_terms`).
     let (prospective_epoch, prepared_protocol) = prospective_host.capi_epoch_terms(&limits());
+    // The prospective epoch keeps the design bounds its preparation used (#1471 Amendment 2 D4),
+    // so the term above is not the seedless one: the oracle's replacement peak charges it.
+    assert!(
+        prospective_host.bound_seed_bytes(&limits()) > 0,
+        "vacuous: the prospective plan's preparation used no design"
+    );
 
     let rows: [(&str, u64); 8] = [
         (

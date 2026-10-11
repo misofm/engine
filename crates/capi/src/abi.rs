@@ -422,9 +422,10 @@ pub struct Engine {
     pub(crate) last_error: RefCell<[u8; 256]>,
     pub(crate) last_error_len: core::cell::Cell<usize>,
     /// The design-bound cache every compile on this engine reads and fills (#1471). Control
-    /// thread only; render never reads it, and a session copies none of it (its own cache is
-    /// seeded from the compile's journal).
-    pub(crate) bound_cache: RefCell<control_plane::InputBoundCache>,
+    /// thread only; render never reads it, and a session copies none of it (its first epoch owns
+    /// the designs that compile used, journaled at the time of use). It lives as long as the
+    /// engine, outside every compile limit; `miso_engine_v1_engine_destroy` frees it.
+    pub(crate) bound_cache: RefCell<control_plane::InputBoundCache<'static>>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
