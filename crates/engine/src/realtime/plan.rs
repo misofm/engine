@@ -643,7 +643,7 @@ struct SharedGateAllocation {
 }
 
 /// Exact engine-owned bytes one plan's revision gate retains: the gate word with the shared-owner
-/// header, one allocation (#1502 D1). The control plane charges it to each prepared plan.
+/// header, one allocation (#1502 D1). The host-core preparation charges it to each prepared plan.
 #[must_use]
 pub fn plan_revision_gate_retained_bytes() -> u64 {
     u64::try_from(Layout::new::<SharedGateAllocation>().size())

@@ -10,7 +10,8 @@ pub struct CompiledChildren<A: ControlAdapter> {
     pub plan: PlanState<A>,
 }
 
-/// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
+/// Every live queue's depth: each strip's input queue and each effect's queue hold 16 records
+/// (#1053 D4). The fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
@@ -212,7 +213,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // (`validate_replacement_peak`); charging it here too counted one allocation twice (#1060).
     //
     // The strip producer table (#1256 D3) is the epoch's too, through host-core's mirror. Its
-    // rings are builtins' rows, charged in `builtin_retained_payload_bytes`. Builtins' processor
+    // queues and cells are builtins' rows, charged in `builtin_retained_payload_bytes`. Builtins' processor
     // accumulator also charges the producer vector itself (`add_vector_layout::<
     // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
     // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing

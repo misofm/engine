@@ -55,23 +55,28 @@
 //
 // ## One batch is one transaction
 //
-// The worklet validates a whole submission -- shape, addressing, domain, and free queue room --
-// before it pushes a single record. A refused batch admits nothing, so a half-applied fader move
-// cannot exist, and a flood is refused before it reaches a queue. `RESULT_BACKPRESSURE` (6) is
-// returned by the main-realm host locally when its own in-flight bound is reached, and by the
-// engine when a bounded per-track control queue has no room.
+// The worklet validates a whole submission -- shape, addressing, domain, and free queue room on the
+// lanes that keep a queue -- before it pushes or writes a single record. A refused batch admits
+// nothing, so a half-applied fader move cannot exist. A strip's fader, mute and pan or matrix
+// values are held in latest-target cells, not queues (issue 1312): a flood of those edits is never
+// refused for room, and a later value for the same cell replaces the earlier one. Effect, input
+// trim/polarity and live-send records keep bounded per-destination queues, and a flood of those is
+// refused before it reaches a queue. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host
+// locally when its own in-flight bound is reached, and by the engine when one of those queues has
+// no room.
 //
 // ## Application timing is exact
 //
-// Every live-control stage -- matrix/pan, fader/mute, and each driven effect -- drains its control
-// queue at the top of the block, before it touches a sample. `appliedAtSample` on the
+// Every live-control stage -- matrix/pan, fader/mute, and each driven effect -- takes its pending
+// control at the top of the block, before it touches a sample: the fader, mute and pan or matrix
+// stages read their cells, and the other stages drain their queue. `appliedAtSample` on the
 // acknowledgement is the first sample of the next rendered block, when the target is applied.
 // Smoothing follows each descriptor's law. EQ uses the current words at sample A and the exact
 // target at A+64; a response captured after A reports the accepted target, not an in-ramp curve.
 //
 // A batch may address several kinds at once. It is still one transaction: the free-room check is
 // per destination queue, and one full queue refuses the whole batch, including the records bound
-// for queues that had room.
+// for queues that had room and the cell values it carries.
 //
 // ## What metering costs
 //
@@ -334,7 +339,8 @@ export const enum MisoCommandReason {
   Domain = 6,
   /// Well formed and correctly addressed; this ABI version cannot apply that kind.
   UnsupportedKind = 7,
-  /// A bounded control queue had no room; nothing was admitted.
+  /// A bounded control queue (an effect, input trim/polarity or live-send lane) had no room;
+  /// nothing was admitted. Fader, mute and pan or matrix values are cells and never return it.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,

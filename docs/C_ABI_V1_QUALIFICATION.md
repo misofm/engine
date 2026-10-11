@@ -146,7 +146,8 @@ before it pushes a record, so the watermark never reads a revision the gate cann
 `struct_size` or a nonzero reserved word is `RESULT_INVALID_ARGUMENT`; a copy that keeps landing
 inside render's publication (bounded at 64 attempts) is `RESULT_BACKPRESSURE` with `out`
 untouched, and the host retries. In this slice every revision completes as `exact`; the
-`superseded` and `transition_fallback` producers are #1310, #1397 and #1358. The frozen exported set is now 16 `miso_engine_v1_*` definitions;
+`superseded` and `transition_fallback` producers are #1310, #1397 and #1358. The frozen exported
+set is now 16 `miso_engine_v1_*` definitions;
 `abi_smoke.c` checks the bit against the queried mask and queries a compiled plan with a valid
 and a wrong-size struct, `header_smoke.cpp` pins the size and every field offset, and
 `./target/release/audit capi` stays at 0 allocations, 0 deallocations, 0 syscalls and

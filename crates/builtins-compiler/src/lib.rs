@@ -265,14 +265,6 @@ pub struct TrackControlRequest {
 #[derive(Clone, Debug, Default)]
 pub struct LiveValuesSuperseded(Arc<AtomicU64>);
 
-/// The shared-owner allocation behind one [`LiveValuesSuperseded`]: `Arc`'s header and the word.
-#[repr(C)]
-struct SupersededAllocation {
-    strong: AtomicUsize,
-    weak: AtomicUsize,
-    count: AtomicU64,
-}
-
 impl LiveValuesSuperseded {
     /// A count at zero.
     #[must_use]
@@ -285,7 +277,7 @@ impl LiveValuesSuperseded {
     /// session charges it once (#1312 D2).
     #[must_use]
     pub fn retained_bytes() -> u64 {
-        u64::try_from(core::alloc::Layout::new::<SupersededAllocation>().size())
+        u64::try_from(core::alloc::Layout::new::<SharedAllocation<AtomicU64>>().size())
             .expect("a count allocation's size fits u64")
     }
 

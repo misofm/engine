@@ -1226,9 +1226,9 @@ pub struct WebBootOptions {
     /// Per-track live-control queue depth in records, or `0` to accept no live command and
     /// allocate no command staging (issue #137 D1).
     ///
-    /// Zero still leaves every strip's fader/mute and matrix/pan lanes on the plan, at the engine's
-    /// own depth ([`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a strip's mute for its
-    /// own transitions, and no command can reach them (issue #1326).
+    /// Zero still leaves every strip's fader/mute and matrix/pan cells on the plan (and its queues
+    /// at the engine's own depth, [`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a
+    /// strip's mute for its own transitions, and no command can reach them (issues #1326, #1312).
     pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -1758,8 +1758,8 @@ impl ReadyOwnership {
     ///
     /// | range | queue |
     /// |---|---|
-    /// | `0 .. strips` | strip `s`'s matrix/pan queue |
-    /// | `strips .. 2 * strips` | strip `s`'s fader/mute queue |
+    /// | `0 .. strips` | strip `s`'s matrix/pan cell (#1312: no queue, no room) |
+    /// | `strips .. 2 * strips` | strip `s`'s fader/mute cells (#1312: no queue, no room) |
     /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity queue (#210 phase 3) |
     /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
     /// | `3 * strips + E ..` | live send `r`'s queue, by live-route index (issue #1222 D4) |
@@ -3338,17 +3338,18 @@ impl AudioWorkletEngineHost {
     /// # The two-pass shape is the contract, not an optimisation
     ///
     /// Pass one validates every record -- shape, addressing, domain, and free queue room -- and
-    /// pushes nothing. Pass two pushes. A submission is therefore all-or-nothing: eval E4's
-    /// "engine state untouched" is a property of the code, not of a lucky ordering, and eval E3's
-    /// flood is refused before a single record reaches a queue.
+    /// pushes nothing. Pass two pushes (and writes the strip cells, which have no room to check,
+    /// #1312). A submission is therefore all-or-nothing: eval E4's "engine state untouched" is a
+    /// property of the code, not of a lucky ordering, and eval E3's flood of queued records is
+    /// refused before a single one reaches a queue.
     ///
     /// # Why this is not on the render thread's critical path
     ///
     /// This runs from `port.onmessage`, which the user agent dispatches between render quanta on
     /// the same thread as `process()`. It performs no allocation, no compilation and no plan
     /// replacement: both staging arrays were allocated at compilation, and the call moves at most
-    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues. The block that
-    /// follows drains them.
+    /// [`MAXIMUM_COMMAND_RECORDS`] `Copy` records into bounded per-track queues and strip cells.
+    /// The block that follows drains the queues and reads the cells.
     pub fn submit_commands(&mut self, count: u32) -> u32 {
         self.submit_commands_inner(count, None)
     }

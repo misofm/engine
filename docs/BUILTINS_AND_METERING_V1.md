@@ -204,9 +204,8 @@ emits nothing. Precedence is fixed:
 - **Mute wins.** Solo never clears a user or VCA mute: a soloed member of a muted VCA stays muted,
   and so do its following sends. An explicit unmute of a VCA-muted member records the intent but
   stages the lane still muted. A both-lanes kind 4 on a strip whose VCA mutes one lane composes to
-  two lane values, so it stages one `Left` and one `Right` record and needs two slots in that
-  strip's fader queue: at a queue depth of 1 it is refused whole as typed backpressure (a caller
-  can send the lanes separately), as the other two-record lowerings are.
+  two lane values, so it stages one `Left` and one `Right` record. They are writes to the strip's
+  fader cells (#1312), which have no room to fill, so the lowering is never refused for room.
 - **Solo-safe is not VCA-safe.** A submix is never solo-muted, but a VCA that reaches it mutes it.
 - **A VCA has no solo.** A VCA mute neither engages a solo nor counts toward `any_solo`.
 
