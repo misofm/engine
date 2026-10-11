@@ -286,7 +286,7 @@ pub struct HostPrepareReport {
     pub control_retained_bytes: u64,
     /// Native effect-control table and transferred owner payload allocations.
     pub effect_control_resources: EffectControlResources,
-    /// The live send lanes' queues, owners, producer table, route IDs and any route-activity table
+    /// The live send lanes' cells, owners, producer table, route IDs and any route-activity table
     /// they add (issue #1221 D4): `graph::route_control_resources` of the attached producers.
     /// Charged with the effect channels against `maximum_graph_session_plus_plan_bytes` and the
     /// named-allocation cap. All zero when no control channel was requested.
@@ -307,10 +307,11 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
-/// The depth of every effect's queue and every route's queue when the caller names no depth of its
-/// own: 16 records (#1053 D4). The C ABI always uses it; the browser uses it for a session that
-/// did not opt in to live commands (#1326 D2), so both hosts read one number. The strip's input,
-/// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312, #1346).
+/// The depth of every effect's queue when the caller names no depth of its own: 16 records
+/// (#1053 D4). The C ABI always uses it; the browser uses it for a session that did not opt in to
+/// live commands (#1326 D2), so both hosts read one number. The strip's input, fader/mute and
+/// matrix/pan lanes and every route's lane are latest-target cells with no depth (#1312, #1346,
+/// #1347).
 pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
 
 /// What live controls ask preparation to attach (issue #137 D1/D2).
@@ -328,7 +329,7 @@ pub struct HostLiveControlRequest {
     /// whenever this is `Some`, except that the input cells need [`HostLiveLanes::strip_input`].
     /// Which of the others are attached is the caller's [`HostLiveLanes`] (issue #1254 D2): the
     /// input cells when [`HostLiveLanes::strip_input`] is set, the effect queues when
-    /// [`HostLiveLanes::effects`] is set, and the route queues when [`HostLiveLanes::routes`] is
+    /// [`HostLiveLanes::effects`] is set, and the route cells when [`HostLiveLanes::routes`] is
     /// set. Every entry takes the selection from its caller, except the ones with no `lanes`
     /// argument, which attach [`HostLiveLanes::ALL`]. Each
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
@@ -484,7 +485,7 @@ pub struct HostLiveControlHandles {
     /// The designated master strip index, echoed back after validation against `strips.len()`
     /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
     pub master_track: Option<u32>,
-    /// The `live_values_superseded` count this plan's fader and matrix cell readers add to
+    /// The `live_values_superseded` count this plan's strip and route cell readers add to
     /// (#1312 D2): the session's own count when the host passed one to
     /// [`prepare_host_runtime_with_live_lanes`], else a fresh count this preparation made. Read
     /// it with [`LiveValuesSuperseded::get`].
@@ -1830,12 +1831,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let graph_route_controls = match live_controls.control_queue_depth {
         None => Vec::new(),
         Some(_) if !lanes.routes => Vec::new(),
-        Some(depth) => artifact
-            .attach_route_live_controls(depth)
+        // A route's lane is a latest-target cell with no depth (#1347); the request's depth sizes
+        // the effect queues only.
+        Some(_) => artifact
+            .attach_route_live_controls(&live_superseded)
             .map_err(|error| match error {
-                graph::GraphRouteControlError::QueueCapacity => {
-                    resource("host.resource.allocation")
-                }
                 graph::GraphRouteControlError::AlreadyAttached
                 | graph::GraphRouteControlError::BoundRoute => {
                     graph_failure("host.route_control.attach")
@@ -1848,10 +1848,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut graph_resources = artifact.graph_resource_estimate().clone();
     // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1)
     // and, when this preparation made its own `live_values_superseded` count rather than taking the
-    // session's, and strips hold a clone of it in their cell readers, that count (#1312 D2; a
-    // session's count is the host's to charge once). A preparation with no strip controls keeps no
-    // reader of the count, so the plan retains none and charges none. Charged here so every host,
-    // the C ABI and the browser, counts them in the one row.
+    // session's, and strips and routes hold a clone of it in their cell readers, that count (#1312
+    // D2; a session's count is the host's to charge once). A preparation with no strip controls
+    // keeps no reader of the count (a route lane exists only beside strips), so the plan retains
+    // none and charges none. Charged here so every host, the C ABI and the browser, counts them in
+    // the one row.
     graph_resources.session_plus_plan_bytes = graph_resources
         .session_plus_plan_bytes
         .checked_add(engine::realtime::plan_revision_gate_retained_bytes())

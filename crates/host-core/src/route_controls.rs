@@ -2,7 +2,7 @@
 //!
 //! One [`RouteControlProducer`] per route into a submix, in canonical route-ID order
 //! ([`crate::HostLiveControlHandles::route_controls`]). A producer turns a send's gain, matrix,
-//! mute and source-lane mutes into one ramp record, or refuses with nothing pushed.
+//! mute and source-lane mutes into one ramp record, or refuses with nothing written.
 //!
 //! # One authority
 //!
@@ -13,17 +13,19 @@
 //! freshly prepared one carry the same bits.
 //!
 //! [`RouteControlProducer::record`] is the only builder of a [`RouteControlRecord`], and
-//! [`RouteControlProducer::push`] accepts nothing else (issue #1416). The record is host-core's
+//! [`RouteControlProducer::write`] accepts nothing else (issue #1416). The record is host-core's
 //! own type, not a re-export of `graph::RouteControlRecord`, whose public constructor does not check
-//! the route domain; so a host cannot queue a target that `route_coefficients` would refuse.
+//! the route domain; so a host cannot write a target that `route_coefficients` would refuse.
 //!
 //! # No ack precedes a drop
 //!
-//! Every refusal is decided before the queue is touched: [`RouteControlProducer::record`] is pure,
-//! and [`RouteControlProducer::push`] decides [`RouteControlError::Full`] from
-//! [`RouteControlProducer::free`] before it pushes. A host admitting several routes at once builds
-//! every record and checks every queue's room first, and only then pushes.
+//! A send's lane is one latest-target cell (#1347), so [`RouteControlProducer::write`] cannot
+//! fail and never waits: any number of writes may precede one render call. Every refusal is
+//! decided before the first write: [`RouteControlProducer::record`] is pure, and a host admitting
+//! several routes at once builds every record first, and only then writes. A write replaced by a
+//! later one is in the host's committed model, and render counts it in `live_values_superseded`.
 
+use engine::realtime::LiveStamp;
 use graph::{GraphRouteControlProducer, ROUTE_RAMP_LENGTH_MAXIMUM, RouteGate};
 use graph_compiler::route_coefficients;
 
@@ -33,7 +35,7 @@ pub use graph::RouteControlResources;
 ///
 /// It wraps `graph::RouteControlRecord`, whose public constructor checks the ramp length and the
 /// mute rule but not the route domain. This type has a private field and no public constructor, so
-/// every record a host can push has passed `route_coefficients`.
+/// every record a host can write has passed `route_coefficients`.
 ///
 /// The fences below check three doors, each beside a plain twin that differs only in the one
 /// forbidden construct. A public non-generic associated `new` (or a re-export of graph's record,
@@ -43,12 +45,14 @@ pub use graph::RouteControlResources;
 /// ```compile_fail
 /// fn send(
 ///     producer: &mut host_core::RouteControlProducer,
+///     stamp: engine::realtime::LiveStamp<'_>,
 ///     inner: graph::RouteControlRecord,
 /// ) -> Result<(), host_core::RouteControlError> {
 ///     let _ = host_core::RouteControlRecord::new;
 ///     let record: host_core::RouteControlRecord =
 ///         producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap();
-///     producer.push(record)
+///     producer.write(stamp, record);
+///     Ok(())
 /// }
 /// ```
 ///
@@ -58,10 +62,12 @@ pub use graph::RouteControlResources;
 /// ```compile_fail
 /// fn send(
 ///     producer: &mut host_core::RouteControlProducer,
+///     stamp: engine::realtime::LiveStamp<'_>,
 ///     inner: graph::RouteControlRecord,
 /// ) -> Result<(), host_core::RouteControlError> {
 ///     let record: host_core::RouteControlRecord = host_core::RouteControlRecord(inner);
-///     producer.push(record)
+///     producer.write(stamp, record);
+///     Ok(())
 /// }
 /// ```
 ///
@@ -72,10 +78,12 @@ pub use graph::RouteControlResources;
 /// ```compile_fail
 /// fn send(
 ///     producer: &mut host_core::RouteControlProducer,
+///     stamp: engine::realtime::LiveStamp<'_>,
 ///     inner: graph::RouteControlRecord,
 /// ) -> Result<(), host_core::RouteControlError> {
 ///     let record: host_core::RouteControlRecord = inner.try_into().ok().unwrap();
-///     producer.push(record)
+///     producer.write(stamp, record);
+///     Ok(())
 /// }
 /// ```
 ///
@@ -86,11 +94,13 @@ pub use graph::RouteControlResources;
 /// ```
 /// fn send(
 ///     producer: &mut host_core::RouteControlProducer,
+///     stamp: engine::realtime::LiveStamp<'_>,
 ///     inner: graph::RouteControlRecord,
 /// ) -> Result<(), host_core::RouteControlError> {
 ///     let record: host_core::RouteControlRecord =
 ///         producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap();
-///     producer.push(record)
+///     producer.write(stamp, record);
+///     Ok(())
 /// }
 /// ```
 ///
@@ -119,18 +129,16 @@ impl RouteControlRecord {
     }
 }
 
-/// Why a live send record was refused. Every refusal leaves the queue unchanged.
+/// Why a live send record was refused. Every refusal writes nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteControlError {
     /// `graph_compiler::route_coefficients` refused the gain or matrix.
     Domain,
     /// The ramp is longer than `graph::ROUTE_RAMP_LENGTH_MAXIMUM` (`1 << 22`) samples.
     Length,
-    /// The route's queue has no room; nothing was pushed.
-    Full,
 }
 
-/// The control-plane half of one live send's record queue.
+/// The control-plane half of one live send's latest-target cell.
 ///
 /// A transparent wrapper over the graph's producer, so the producer table host-core retains is
 /// exactly the bytes `graph::route_control_resources` charges for it: one graph producer per
@@ -138,12 +146,12 @@ pub enum RouteControlError {
 ///
 /// # Lifetime (#1221 verdict NIT-3)
 ///
-/// - A push's `Ok` means queued, not applied: the render thread applies the record at the route's
-///   op in a later block.
+/// - A write's return means written, not applied: the render thread applies the newest value
+///   whose revision its block's snapshot covers, at the route's op, in a later block.
 /// - A producer belongs to the `PreparedHost` plan it was prepared with. A host drops or replaces
-///   it together with that plan; a producer kept past its plan accepts records until its ring
-///   fills, and nothing ever drains them.
-/// - A record still queued when the plan is replaced is discarded with it, so the replacement must
+///   it together with that plan; a producer kept past its plan accepts writes, and nothing ever
+///   reads them.
+/// - A value still unread when the plan is replaced is discarded with it, so the replacement must
 ///   be prepared from the committed state that already holds every acked value.
 ///
 /// The strip and effect producers share this contract.
@@ -163,13 +171,7 @@ impl RouteControlProducer {
         &self.producer.route_id
     }
 
-    /// How many records the queue can accept now.
-    #[must_use]
-    pub fn free(&self) -> usize {
-        self.producer.free()
-    }
-
-    /// Validates the values and builds their record. Pure: pushes nothing.
+    /// Validates the values and builds their record. Pure: writes nothing.
     ///
     /// Refused with [`RouteControlError::Domain`] when `route_coefficients` refuses, then with
     /// [`RouteControlError::Length`] when `length > ROUTE_RAMP_LENGTH_MAXIMUM`.
@@ -198,20 +200,19 @@ impl RouteControlProducer {
             .ok_or(RouteControlError::Domain)
     }
 
-    /// Pushes a record [`Self::record`] built. A full queue refuses with
-    /// [`RouteControlError::Full`], decided before the push, and nothing is queued.
-    pub fn push(&mut self, record: RouteControlRecord) -> Result<(), RouteControlError> {
-        if self.producer.free() == 0 {
-            return Err(RouteControlError::Full);
-        }
-        self.producer
-            .try_push(record.0)
-            .map_err(|_| RouteControlError::Full)
+    /// Write a record [`Self::record`] built as the route's newest target, stamped with the
+    /// revision of the transaction that commits it. It cannot fail and never waits.
+    ///
+    /// The caller publishes the stamp's revision on the plan's gate after every write of the
+    /// transaction (#1312 D7).
+    pub fn write(&mut self, stamp: LiveStamp<'_>, record: RouteControlRecord) {
+        self.producer.write(stamp, record.0);
     }
 
-    /// [`Self::record`], then [`Self::push`]: either one record is queued, or nothing is.
+    /// [`Self::record`], then [`Self::write`]: either one value is written, or nothing is.
     pub fn set(
         &mut self,
+        stamp: LiveStamp<'_>,
         gain_db: f32,
         matrix: [f32; 4],
         mute: bool,
@@ -219,6 +220,18 @@ impl RouteControlProducer {
         length: u32,
     ) -> Result<(), RouteControlError> {
         let record = self.record(gain_db, matrix, mute, source_lane_muted, length)?;
-        self.push(record)
+        self.write(stamp, record);
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl RouteControlProducer {
+    /// Test-only: how many writes the route's cell has taken. Valid while no write is in flight,
+    /// which a quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_count(&self) -> u64 {
+        self.producer.test_only_write_count()
     }
 }

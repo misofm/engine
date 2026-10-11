@@ -11020,14 +11020,15 @@ fn send_mirror(host: &AudioWorkletEngineHost) -> Vec<SendValues> {
         .collect()
 }
 
-/// Every route queue's free room.
-fn send_queue_room(host: &AudioWorkletEngineHost) -> Vec<usize> {
+/// How many writes each send's cell has taken (#1347): a send edit is a cell write, never a
+/// queue slot.
+fn send_write_counts(host: &AudioWorkletEngineHost) -> Vec<u64> {
     host.ready
         .as_ref()
         .expect("ready")
         .route_controls
         .iter()
-        .map(RouteControlProducer::free)
+        .map(RouteControlProducer::test_only_write_count)
         .collect()
 }
 
@@ -11304,7 +11305,7 @@ fn seeded_send_edits_land_on_a_fresh_plan(with_inserts: bool, seed: u64) {
                 send_render(&mut live, block);
                 send_render(&mut fresh, block);
             }
-            let before = send_queue_room(&live);
+            let before = send_write_counts(&live);
             for (index, (kind, route, values)) in edits.iter().enumerate() {
                 stage_send(&mut live, index, *kind, *route as u32, smoothing, *values);
             }
@@ -11315,12 +11316,12 @@ fn seeded_send_edits_land_on_a_fresh_plan(with_inserts: bool, seed: u64) {
             );
             let mut expected = before;
             for (_, route, _) in &edits {
-                expected[*route] -= 1;
+                expected[*route] += 1;
             }
             assert_eq!(
-                send_queue_room(&live),
+                send_write_counts(&live),
                 expected,
-                "{what}: each record on its own send's queue"
+                "{what}: each record in its own send's cell"
             );
             // 480 samples settle within four 128-frame blocks of the batch.
             for block in 2..7 {
@@ -11361,13 +11362,13 @@ fn a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits() {
     seeded_send_edits_land_on_a_fresh_plan(true, 0xB0B);
 }
 
-/// Require a refused submission's typed report, an empty staging count, untouched send queues and
-/// fader cells and an unchanged, closed send mirror.
+/// Require a refused submission's typed report, an empty staging count, untouched send and fader
+/// cells and an unchanged, closed send mirror.
 fn assert_send_refusal(
     host: &AudioWorkletEngineHost,
     reason: u32,
     rejected_index: u32,
-    room: &[usize],
+    writes: &[u64],
     fader_writes: &[u64],
     what: &str,
 ) {
@@ -11375,7 +11376,7 @@ fn assert_send_refusal(
     assert_eq!(report.reason, reason, "{what}: reason");
     assert_eq!(report.rejected_index, rejected_index, "{what}: wire index");
     assert_eq!(report.admitted, 0, "{what}: admitted");
-    assert_eq!(send_queue_room(host), room, "{what}: send queues");
+    assert_eq!(send_write_counts(host), writes, "{what}: send cells");
     let ready = host.ready.as_ref().expect("ready");
     let faders: Vec<u64> = ready
         .controls
@@ -11399,7 +11400,7 @@ fn assert_send_refusal(
 #[test]
 fn a_live_send_edit_outside_the_route_domain_is_refused() {
     const DEPTH: u64 = 4;
-    let room = vec![DEPTH as usize; SEND_ROUTES.len()];
+    let room = vec![0_u64; SEND_ROUTES.len()];
     let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let gain = |value: f32| (COMMAND_ROUTE_GAIN_DB, [value, 0.0, 0.0, 0.0]);
     let matrix = |position: usize, value: f32| {
@@ -11499,30 +11500,112 @@ fn a_subnormal_route_renders_as_a_zero_coefficient() {
     assert!(nonzero > 0, "the route renders something");
 }
 
+/// Any number of send edits between two renders is accepted, the render ramps to the last, and the
+/// session count records every replaced target (#1347 gate 1).
+///
+/// 30 send-gain edits on one route, each its own admitted transaction with a 37-sample ramp, then
+/// one render. A twin that sent only the last renders the same bits, and an untouched host renders
+/// others. The route's cell takes all 30 writes and holds no queue credit; the render reads the
+/// last and adds the 29 replaced writes. The 5th edit used to meet the send queue's depth.
+///
+/// Red mutation: give the send band a ring again (a depth-4 queue) -> the 5th edit is refused.
+/// Count the replaced writes wrongly -> not 29. Apply the oldest value -> the bits differ from
+/// the twin's.
+#[test]
+fn many_send_edits_before_one_render_apply_the_last_and_are_counted() {
+    const EDITS: usize = 30;
+    const DEPTH: u64 = 4;
+    let gain = |index: usize| -1.0 - 0.5 * index as f32;
+    let mut many = send_host(&SEND_SEEDS, DEPTH);
+    let mut last_only = send_host(&SEND_SEEDS, DEPTH);
+    let mut untouched = send_host(&SEND_SEEDS, DEPTH);
+    for host in [&mut many, &mut last_only, &mut untouched] {
+        send_render(host, 0);
+    }
+    for index in 0..EDITS {
+        stage_send(
+            &mut many,
+            0,
+            COMMAND_ROUTE_GAIN_DB,
+            2,
+            37,
+            [gain(index), 0.0, 0.0, 0.0],
+        );
+        assert_eq!(many.submit_commands(1), RESULT_OK, "send edit {index}");
+    }
+    stage_send(
+        &mut last_only,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        2,
+        37,
+        [gain(EDITS - 1), 0.0, 0.0, 0.0],
+    );
+    assert_eq!(last_only.submit_commands(1), RESULT_OK);
+
+    let ready = many.ready.as_ref().expect("ready ownership");
+    assert_eq!(
+        ready.in_flight.iter().sum::<u32>(),
+        0,
+        "the send band holds no queue credit"
+    );
+    assert_eq!(
+        send_write_counts(&many),
+        [0, 0, EDITS as u64, 0, 0, 0, 0],
+        "every edit wrote its send's cell"
+    );
+    assert_eq!(
+        ready.live_values_superseded.get(),
+        0,
+        "nothing was read yet"
+    );
+
+    let bits = |pcm: Vec<f32>| -> Vec<u32> { pcm.into_iter().map(f32::to_bits).collect() };
+    let many_bits = bits(send_render(&mut many, 1));
+    let last_bits = bits(send_render(&mut last_only, 1));
+    let untouched_bits = bits(send_render(&mut untouched, 1));
+    assert_ne!(
+        last_bits, untouched_bits,
+        "the edit moves the output, or the comparison proves nothing"
+    );
+    assert_eq!(
+        many_bits, last_bits,
+        "the render applied the last value of the cell"
+    );
+    let superseded = |host: &AudioWorkletEngineHost| {
+        host.ready
+            .as_ref()
+            .expect("ready ownership")
+            .live_values_superseded
+            .get()
+    };
+    assert_eq!(superseded(&many), (EDITS - 1) as u64);
+    assert_eq!(superseded(&last_only), 0);
+    assert_eq!(superseded(&untouched), 0);
+}
+
 /// Issue #1222 gate 2: a send batch is all or nothing.
 ///
 /// * A valid `routeGainDb` and a `routeMatrix` with a coefficient outside `[-1, 1]` (finite on
 ///   the wire, so decode admits it, and refused by the route's own domain rule, issue #1237)
 ///   stage nothing and refuse `DOMAIN` at the second record.
-/// * A batch that overfills one send queue is typed backpressure at its first record on that
-///   queue, behind a valid fader record, and pushes nothing.
 /// * In a session with an insert on every track, a valid send record and a valid effect-bypass
-///   record, with that effect queue already full, push neither. (A fader record has no full queue
-///   to meet: its value is a latest-target cell, #1312.)
+///   record, with that effect queue already full, write neither. (A fader or send record has no
+///   full queue to meet: its value is a latest-target cell, #1312, #1347.)
 ///
 /// In every case the send mirror is unchanged. And a refused batch after an admitted one keeps
 /// the admitted values: the mirror holds them, and a further edit settles on a fresh plan holding
 /// them.
 ///
-/// Test value: red if admission pushes a send record, or commits the send mirror, before every
-/// record is validated and every queue -- send and effect queues included -- has room, or if a
+/// Test value: red if admission writes a send record, or commits the send mirror, before every
+/// record is validated and every effect queue has room, or if a
 /// refused batch rolls the mirror back past an admitted batch the render plane applied.
 #[test]
-fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
+fn a_refused_send_batch_writes_nothing_and_keeps_the_mirror() {
     const DEPTH: u64 = 4;
     let depth = DEPTH as usize;
     let fader_room = vec![0_u64; SEND_STRIPS as usize];
-    let room = vec![depth; SEND_ROUTES.len()];
+    let room = vec![0_u64; SEND_ROUTES.len()];
 
     // `ll = 1.5` is outside the route coefficient domain `[-1, 1]` (issue #1237; before the
     // domain this drew `3e38`, which folded past `f32::MAX` at +2 dB).
@@ -11554,40 +11637,6 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
         "domain",
     );
 
-    let mut host = send_host(&SEND_SEEDS, DEPTH);
-    send_render(&mut host, 0);
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_FADER_DB,
-        255,
-        2,
-        0,
-        0,
-        0,
-        0,
-        [-6.0, 0.0, 0.0, 0.0],
-    );
-    for index in 1..=depth + 1 {
-        stage_send(
-            &mut host,
-            index,
-            COMMAND_ROUTE_GAIN_DB,
-            2,
-            0,
-            [-1.0, 0.0, 0.0, 0.0],
-        );
-    }
-    assert_eq!(host.submit_commands(DEPTH as u32 + 2), RESULT_BACKPRESSURE);
-    assert_send_refusal(
-        &host,
-        COMMAND_REASON_BACKPRESSURE,
-        1,
-        &room,
-        &fader_room,
-        "send full",
-    );
-
     // With an insert on every track the effect band sits between the strip bands and the send
     // band: a send record beside an effect record whose queue is full pushes neither.
     let mut host = strip_boot(
@@ -11614,7 +11663,7 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
         RESULT_OK,
         "fill t0's insert queue"
     );
-    let room = send_queue_room(&host);
+    let room = send_write_counts(&host);
     let mirror = send_mirror(&host);
     stage_send(
         &mut host,
@@ -11642,9 +11691,9 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
     assert_eq!(report.rejected_index, 1, "refused at the effect record");
     assert_eq!(report.admitted, 0);
     assert_eq!(
-        send_queue_room(&host),
+        send_write_counts(&host),
         room,
-        "the send record is not pushed"
+        "the send record is not written"
     );
     assert_eq!(send_mirror(&host), mirror, "the mirror is unchanged");
     assert!(
@@ -11723,7 +11772,7 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
 /// reason.
 #[test]
 fn every_kind_is_bounded_by_the_count_it_addresses() {
-    let room = vec![16_usize; SEND_ROUTES.len()];
+    let room = vec![0_u64; SEND_ROUTES.len()];
     let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let mut host = send_host(&SEND_SEEDS, 16);
     send_render(&mut host, 0);
@@ -11797,9 +11846,9 @@ fn every_kind_is_bounded_by_the_count_it_addresses() {
         RESULT_OK,
         "send 6, past the strip count"
     );
-    let mut room = room;
-    room[6] -= 1;
-    assert_eq!(send_queue_room(&host), room, "send 6's queue holds it");
+    let mut writes = room;
+    writes[6] += 1;
+    assert_eq!(send_write_counts(&host), writes, "send 6's cell holds it");
 
     // Fewer sends than strips: three sends, four strips. Index 3 and the bus's strip index are
     // below the strip count and still not sends.
@@ -11840,7 +11889,7 @@ type SendShape = (&'static str, u32, u8, u8, u32, u32, [f32; 4]);
 fn send_records_are_shape_checked() {
     let mut host = send_host(&SEND_SEEDS, 16);
     send_render(&mut host, 0);
-    let room = vec![16_usize; SEND_ROUTES.len()];
+    let room = vec![0_u64; SEND_ROUTES.len()];
     let fader_room = vec![0_u64; SEND_STRIPS as usize];
     let gain = [-2.0, 0.0, 0.0, 0.0];
     let malformed: [SendShape; 7] = [
@@ -12043,8 +12092,8 @@ fn send_prepare_report(document: &str, queue_records: u64) -> host_core::HostPre
 /// Issue #1222, from the #1221 verdict's MINOR-1 and the #1222 verdict's MINOR-4: the browser's
 /// exact retained budget charges the route lanes it attaches and the send mirror.
 ///
-/// * Between two queue depths of one session, the host's retained bridge bytes move by exactly the
-///   lanes' depth-dependent charge.
+/// * A send's lane is a latest-target cell with no depth (#1347): between two queue depths of one
+///   session, the lanes' charge and the host's retained bridge bytes do not move.
 /// * At one depth, removing one send (`send-g`) moves them by exactly that send's whole share:
 ///   the document-dependent bridge rows (the document, the ID staging and one decoded-command
 ///   entry for the follow pass), the compiled session model, the route lanes' whole
@@ -12053,7 +12102,7 @@ fn send_prepare_report(document: &str, queue_records: u64) -> host_core::HostPre
 /// * The exact-retained budget refuses one byte below the total, and a session without sends does
 ///   not move with depth at all.
 ///
-/// Test value: red if the browser leaves any part of the route lanes (queues, render-side owners,
+/// Test value: red if the browser leaves any part of the route lanes (cells, render-side owners,
 /// producer table, IDs, activity table) or the mirror and its shadow out of its exact retained
 /// report, so a budget that cannot hold them admits.
 #[test]
@@ -12079,20 +12128,18 @@ fn the_exact_retained_budget_charges_the_send_lanes() {
         twin_deep.route_control_resources.routes,
         SEND_ROUTES.len() as u64 - 1
     );
-    assert!(
-        lanes_64.total_bytes > lanes_8.total_bytes,
-        "deeper queues cost more"
-    );
+    assert_eq!(lanes_64, lanes_8, "a send's cell has no depth");
+    assert!(lanes_64.cell_bytes > 0, "and still costs its cell");
     let at_8 = bridge(&document, 8, SEND_ROUTES.len());
     let resources = bridge(&document, 64, SEND_ROUTES.len());
     let without = bridge(&twin, 64, SEND_ROUTES.len() - 1);
     assert_eq!(
-        resources.bridge_retained_bytes - at_8.bridge_retained_bytes,
-        lanes_64.total_bytes - lanes_8.total_bytes
+        resources.bridge_retained_bytes, at_8.bridge_retained_bytes,
+        "the queue depth moves no send byte"
     );
     assert_eq!(
-        resources.bridge_metadata_bytes - at_8.bridge_metadata_bytes,
-        lanes_64.total_bytes - lanes_8.total_bytes
+        resources.bridge_metadata_bytes, at_8.bridge_metadata_bytes,
+        "the queue depth moves no send metadata byte"
     );
     assert!(resources.largest_bridge_allocation_bytes >= lanes_64.largest_allocation_bytes);
 
@@ -12494,15 +12541,14 @@ fn a_follow_never_pushes_a_redundant_send_record() {
         false,
         "warm-up",
     );
-    let full = vec![16_usize; 2];
 
     for host in [&mut live, &mut twin] {
         stage_solo(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
         assert_eq!(host.submit_commands(1), RESULT_OK, "solo drums");
-        assert_eq!(send_queue_room(host), [15, 16], "only bass-room follows");
+        assert_eq!(send_write_counts(host), [1, 0], "only bass-room follows");
         stage_solo(host, 0, SOLO_FOLLOW_VOCAL, true, 0);
         assert_eq!(host.submit_commands(1), RESULT_OK, "solo vocal too");
-        assert_eq!(send_queue_room(host), [15, 16], "no send record");
+        assert_eq!(send_write_counts(host), [1, 0], "no send record");
     }
     follow_lockstep(
         &mut [&mut live, &mut twin],
@@ -12512,16 +12558,16 @@ fn a_follow_never_pushes_a_redundant_send_record() {
         false,
         "drain",
     );
-    assert_eq!(send_queue_room(&live), full);
+    assert_eq!(send_write_counts(&live), [1, 0], "a render writes nothing");
 
     for host in [&mut live, &mut twin] {
         stage_mute(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
         assert_eq!(host.submit_commands(1), RESULT_OK, "mute drums");
-        assert_eq!(send_queue_room(host), [16, 15], "drums-verb follows");
+        assert_eq!(send_write_counts(host), [1, 1], "drums-verb follows");
         assert_eq!(follow_lanes(host), [[true; 2], [true; 2]]);
         stage_mute(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
         assert_eq!(host.submit_commands(1), RESULT_OK, "mute drums again");
-        assert_eq!(send_queue_room(host), [16, 15], "no second send record");
+        assert_eq!(send_write_counts(host), [1, 1], "no second send record");
     }
     follow_lockstep(
         &mut [&mut live, &mut twin],
@@ -12537,7 +12583,7 @@ fn a_follow_never_pushes_a_redundant_send_record() {
     stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, false, 480);
     stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, true, 480);
     assert_eq!(live.submit_commands(2), RESULT_OK, "vocal off and on");
-    assert_eq!(send_queue_room(&live), full, "no send record");
+    assert_eq!(send_write_counts(&live), [1, 1], "no send record");
     assert!(
         follow_lockstep(
             &mut [&mut live, &mut twin],
@@ -12551,88 +12597,26 @@ fn a_follow_never_pushes_a_redundant_send_record() {
     );
 }
 
-/// Issue #1224 gate 3: a submission whose follow records would overfill a send queue is typed
-/// backpressure at the strip mute that asked for them, and nothing moves: no strip mute record
-/// and no send record is pushed, and the solo state and the send mirror are unchanged and closed.
-/// Once the queue drains, a strip mute whose window is longer than any send ramp is refused
-/// `domain` the same way, and then the solo is admitted.
+/// Issue #1224 gate 3, after #1347: a strip mute whose window is longer than any send ramp
+/// (`2^22`, `ROUTE_RAMP_LENGTH_MAXIMUM`) cannot be followed at its own length, so it is refused
+/// `domain` at its wire index once a send follows it, and nothing moves: no strip mute record
+/// and no send value is written, and the solo state and the send mirror are unchanged and closed.
+/// The same solo with an ordinary window is then admitted and its follow written. A send's cell
+/// has no full queue to refuse a follow (#1347), so the former backpressure arm is gone.
 ///
-/// Test value: red if strip mutes commit while their follows do not -- a follow record pushed
-/// before the room check, a send queue left out of it, a mirror committed on refusal, or a follow
-/// ramp silently clamped away from its strip's window.
+/// Test value: red if strip mutes commit while their follows do not -- a follow record written
+/// before the refusal, a mirror committed on refusal, or a follow ramp silently clamped away from
+/// its strip's window.
 #[test]
-fn a_full_send_queue_refuses_the_strip_mutes_it_follows() {
-    const DEPTH: u64 = 4;
-    let mut host = solo_follow_host(&[], DEPTH);
+fn a_follow_ramp_past_the_send_bound_refuses_the_strip_mute_whole() {
+    let mut host = solo_follow_host(&[], 4);
     follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
-    for index in 0..DEPTH as usize {
-        stage_send(
-            &mut host,
-            index,
-            COMMAND_ROUTE_GAIN_DB,
-            1,
-            0,
-            [-1.0, 0.0, 0.0, 0.0],
-        );
-    }
-    assert_eq!(
-        host.submit_commands(DEPTH as u32),
-        RESULT_OK,
-        "fill drums-verb"
-    );
-    let room = send_queue_room(&host);
-    assert_eq!(room, [DEPTH as usize, 0]);
-    let fader_room = follow_fader_room(&host);
+    let writes = send_write_counts(&host);
+    assert_eq!(writes, [0, 0]);
+    let fader_writes = follow_fader_room(&host);
     let lanes = follow_lanes(&host);
     let mirror = send_mirror(&host);
 
-    let refused = |host: &AudioWorkletEngineHost, index: u32, what: &str| {
-        let report = *host.command_report();
-        assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE, "{what}: reason");
-        assert_eq!(report.rejected_index, index, "{what}: wire index");
-        assert_eq!(report.admitted, 0, "{what}: admitted");
-        assert_eq!(send_queue_room(host), room, "{what}: send queues");
-        assert_eq!(follow_fader_room(host), fader_room, "{what}: fader queues");
-        assert_eq!(follow_lanes(host), lanes, "{what}: follow lanes");
-        assert_eq!(send_mirror(host), mirror, "{what}: send mirror");
-        let ready = host.ready.as_ref().expect("ready");
-        assert!(
-            !ready.routes.transaction_open(),
-            "{what}: send mirror closed"
-        );
-        assert!(!ready.solo.transaction_open(), "{what}: solo state closed");
-        assert!(!ready.solo.any_solo(), "{what}: no solo engaged");
-        assert!(
-            !ready.solo.user_mute(SOLO_FOLLOW_DRUMS as usize, 0),
-            "{what}: drums"
-        );
-    };
-
-    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
-    assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE, "solo vocal");
-    refused(&host, 0, "solo");
-
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_FADER_DB,
-        255,
-        2,
-        SOLO_FOLLOW_VOCAL,
-        0,
-        0,
-        0,
-        [-3.0, 0.0, 0.0, 0.0],
-    );
-    stage_mute(&mut host, 1, SOLO_FOLLOW_DRUMS, true, 480);
-    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE, "mute drums");
-    refused(&host, 1, "kind 4");
-
-    // A strip mute whose window no send ramp can take (past `ROUTE_RAMP_LENGTH_MAXIMUM`, `2^22`)
-    // is refused `domain` at its wire index once a send follows it, rather than clamped.
-    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1, None);
-    let drained = send_queue_room(&host);
-    assert_eq!(drained, [DEPTH as usize; 2]);
     stage_mute(&mut host, 0, SOLO_FOLLOW_DRUMS, true, (1 << 22) + 1);
     assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "overlong");
     let report = *host.command_report();
@@ -12640,18 +12624,27 @@ fn a_full_send_queue_refuses_the_strip_mutes_it_follows() {
         (report.reason, report.rejected_index, report.admitted),
         (COMMAND_REASON_DOMAIN, 0, 0)
     );
-    assert_eq!(send_queue_room(&host), drained, "overlong: send queues");
+    assert_eq!(send_write_counts(&host), writes, "overlong: send cells");
     assert_eq!(
         follow_fader_room(&host),
-        fader_room,
-        "overlong: fader queues"
+        fader_writes,
+        "overlong: fader cells"
     );
     assert_eq!(follow_lanes(&host), lanes, "overlong: follow lanes");
-    assert!(!host.ready.as_ref().expect("ready").solo.user_mute(1, 0));
+    assert_eq!(send_mirror(&host), mirror, "overlong: send mirror");
+    let ready = host.ready.as_ref().expect("ready");
+    assert!(!ready.routes.transaction_open(), "send mirror closed");
+    assert!(!ready.solo.transaction_open(), "solo state closed");
+    assert!(!ready.solo.user_mute(SOLO_FOLLOW_DRUMS as usize, 0));
 
     stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
-    assert_eq!(host.submit_commands(1), RESULT_OK, "drained: admitted");
+    assert_eq!(host.submit_commands(1), RESULT_OK, "an ordinary window");
     assert_eq!(follow_lanes(&host), [[true; 2], [true; 2]]);
+    assert_eq!(
+        send_write_counts(&host),
+        [1, 1],
+        "both sends follow, one write each (vocal's solo mutes bass and drums)"
+    );
 }
 
 /// Gate 4's tracks, in feed order. Strips: `drums` 0, `vocal` 1, `verb` 2; one live send,
@@ -12909,7 +12902,7 @@ fn muting_a_bus_silences_its_followed_send() {
     follow_render(&mut host, &BUS_FOLLOW_TRACKS, 0, None);
     stage_solo(&mut host, 0, 0, true, 480);
     assert_eq!(host.submit_commands(1), RESULT_OK, "solo t0");
-    assert_eq!(send_queue_room(&host), [16; 3], "no send record");
+    assert_eq!(send_write_counts(&host), [0; 3], "no send record");
     assert_eq!(follow_lanes(&host)[0], [false; 2]);
 }
 
@@ -14056,10 +14049,10 @@ fn vca_solo_mirror(host: &AudioWorkletEngineHost) -> Vec<[bool; 4]> {
 }
 
 /// Everything a refused submission must leave as it was: every fader cell's write count, every send
-/// queue's room, the VCA state, the strip-mute owner and the send mirror.
+/// cell's write count, the VCA state, the strip-mute owner and the send mirror.
 type VcaSnapshot = (
     Vec<u64>,
-    Vec<usize>,
+    Vec<u64>,
     Vec<([u32; 2], [bool; 2])>,
     Vec<[bool; 4]>,
     Vec<SendValues>,
@@ -14069,7 +14062,7 @@ type VcaSnapshot = (
 fn vca_snapshot(host: &AudioWorkletEngineHost) -> VcaSnapshot {
     (
         follow_fader_room(host),
-        send_queue_room(host),
+        send_write_counts(host),
         vca_mirror(host),
         vca_solo_mirror(host),
         send_mirror(host),
@@ -14561,13 +14554,13 @@ fn a_vca_move_that_changes_no_effective_value_stages_nothing() {
     let mut live = vca_ride_host(&clamped, 16);
     let mut twin = vca_ride_host(&clamped, 16);
     vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
-    let rooms = (follow_fader_room(&live), send_queue_room(&live));
+    let rooms = (follow_fader_room(&live), send_write_counts(&live));
     let mut block = 1;
     for (channel, offset) in [(2, -20.0), (2, 0.0), (2, -144.0), (0, -3.0)] {
         stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, channel, offset, 480);
         assert_eq!(live.submit_commands(1), RESULT_OK, "band {offset} dB");
         assert_eq!(
-            (follow_fader_room(&live), send_queue_room(&live)),
+            (follow_fader_room(&live), send_write_counts(&live)),
             rooms,
             "band {offset} dB stages nothing"
         );
@@ -14591,7 +14584,7 @@ fn a_vca_move_that_changes_no_effective_value_stages_nothing() {
     let mut live = vca_ride_host(&muted, 16);
     let mut twin = vca_ride_host(&muted, 16);
     vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
-    let rooms = (follow_fader_room(&live), send_queue_room(&live));
+    let rooms = (follow_fader_room(&live), send_write_counts(&live));
     for (channel, on) in [(2, true), (0, false), (2, false)] {
         stage_vca(
             &mut live,
@@ -14604,7 +14597,7 @@ fn a_vca_move_that_changes_no_effective_value_stages_nothing() {
         );
         assert_eq!(live.submit_commands(1), RESULT_OK, "band mute {on}");
         assert_eq!(
-            (follow_fader_room(&live), send_queue_room(&live)),
+            (follow_fader_room(&live), send_write_counts(&live)),
             rooms,
             "a VCA mute of user-muted members stages nothing"
         );
@@ -14754,21 +14747,20 @@ fn a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone() {
     );
 }
 
-/// Issue #1245 gate 4: all or nothing, at queue depth 4.
+/// Issue #1245 gate 4, after #1347: all or nothing. A mute of VCA `band` (`bass`, `drums`) whose
+/// follow records land in `drums-verb`'s send cell, in one submission with a send edit outside
+/// the route domain, is refused `domain` at the edit's wire index: nothing is written (not even
+/// the members' mute cells or the follow send's) and the VCA, strip-mute and send mirrors are
+/// unchanged. A send's cell has no full queue to refuse the follow (#1347), and a fader value
+/// is a cell with no room to overfill (#1312), so a late domain refusal is the case left.
 ///
-/// With `drums-verb`'s send queue full, a mute of VCA `band` (`bass`, `drums`), whose follow
-/// records would land there, is typed backpressure at its wire index: nothing is pushed or
-/// written (not even the members' mute cells) and the VCA, strip-mute and send mirrors are
-/// unchanged. A ride into a member's fader is not such a case any more: a fader value is a
-/// latest-target cell with no room to overfill (#1312).
+/// The identical mute, submitted alone, is then admitted and renders bit-identically to a twin
+/// that never received the refused submission.
 ///
-/// After a render drains the queue, the identical submission is admitted and renders
-/// bit-identically to a twin that never received the refused one.
-///
-/// Test value: red if any record is pushed or cell written, or a mirror commits, before every
-/// destination's room is checked.
+/// Test value: red if any send or member cell is written, or a mirror commits, before every
+/// record of the submission is validated.
 #[test]
-fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
+fn a_vca_batch_with_a_late_refusal_is_refused_whole() {
     let model = vca_ride_model(
         &[("bass", [-2.0, -5.0], [false; 2])],
         &[("band", [-3.0; 2], [false; 2], &["bass", "drums"])],
@@ -14776,32 +14768,23 @@ fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
     let mut live = vca_ride_host(&model, 4);
     let mut twin = vca_ride_host(&model, 4);
     vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
-    for host in [&mut live, &mut twin] {
-        for index in 0..4 {
-            stage_send(
-                host,
-                index,
-                COMMAND_ROUTE_GAIN_DB,
-                1,
-                0,
-                [-1.0 - index as f32, 0.0, 0.0, 0.0],
-            );
-        }
-        assert_eq!(
-            host.submit_commands(4),
-            RESULT_OK,
-            "fill drums-verb's queue"
-        );
-    }
-    assert_eq!(send_queue_room(&live)[1], 0);
     stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 64);
-    assert_vca_refusal(
+    // `ll = 1.5` is outside the route coefficient domain `[-1, 1]` (issue #1237).
+    stage_send(
         &mut live,
         1,
-        RESULT_BACKPRESSURE,
-        COMMAND_REASON_BACKPRESSURE,
+        COMMAND_ROUTE_MATRIX,
+        1,
         0,
-        "a mute whose follow record meets a full send queue",
+        [1.5, 0.1, 0.2, 0.3],
+    );
+    assert_vca_refusal(
+        &mut live,
+        2,
+        RESULT_INVALID_ARGUMENT,
+        COMMAND_REASON_DOMAIN,
+        1,
+        "a mute whose follow record meets a later domain refusal",
     );
     vca_lockstep(
         &mut [&mut live, &mut twin],

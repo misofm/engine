@@ -649,6 +649,75 @@ impl CellReader {
 }
 // REALTIME_POLICY_END
 
+/// The layout of an `Arc<T>` allocation: the two counts, then `T` (the allocation `Arc::new`
+/// makes). A resource plan charges each shared lane or count by `Layout::new::<SharedAllocation<T>>()`.
+#[repr(C)]
+pub struct SharedAllocation<T> {
+    strong: core::sync::atomic::AtomicUsize,
+    weak: core::sync::atomic::AtomicUsize,
+    value: T,
+}
+
+/// The session's count of live values a later write replaced before render read them (D15-2,
+/// #1312 D2): `live_values_superseded`.
+///
+/// One per session, shared by every plan the session prepares and by every kind of lane that holds
+/// cells (strips #1312 and #1346, routes #1347). Render is its only writer, with a load, a
+/// saturating add and a store (never a read-modify-write: a plan swap hands render from one plan
+/// to the next on the same single render thread, so two writers never overlap); control reads it.
+/// A clone shares the count.
+#[derive(Clone, Debug, Default)]
+pub struct LiveValuesSuperseded(std::sync::Arc<core::sync::atomic::AtomicU64>);
+
+impl LiveValuesSuperseded {
+    /// A count at zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Exact bytes of the one allocation a count retains: the word with the shared-owner header.
+    /// A host that makes a count per plan charges it to that plan's row; a host that makes one per
+    /// session charges it once (#1312 D2).
+    #[must_use]
+    pub fn retained_bytes() -> u64 {
+        u64::try_from(
+            core::alloc::Layout::new::<SharedAllocation<core::sync::atomic::AtomicU64>>().size(),
+        )
+        .expect("a count allocation's size fits u64")
+    }
+
+    /// Control: the writes counted so far.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.0.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl LiveValuesSuperseded {
+    /// Render: add `count` replaced writes. Saturating. Render is the only writer, so a cell
+    /// reader calls this with what its [`CellRead::Applied`] reported and nothing else does.
+    pub fn add(&self, count: u64) {
+        if count != 0 {
+            let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
+            self.0.store(
+                now.saturating_add(count),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+}
+// REALTIME_POLICY_END
+
+impl PartialEq for LiveValuesSuperseded {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LiveValuesSuperseded {}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;

@@ -208,7 +208,6 @@ pub mod test_only_phase_profile {
 }
 
 use core::cell::Cell;
-use core::num::NonZeroUsize;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -990,12 +989,71 @@ impl RouteControlRecord {
     }
 }
 
-/// The render-side half of one live route's record queue (issue #1220 D6).
+/// Words of one route cell: the four target coefficients' bits, the mute flag and the ramp length
+/// (#1347 D1). A target and its ramp are one unit, so they share one cell.
+pub(crate) const ROUTE_CELL_WORDS: usize = 6;
+
+impl RouteControlRecord {
+    /// The cell words `[ll, lr, rl, rr, mute, length]`.
+    pub(crate) fn to_words(self) -> [u32; ROUTE_CELL_WORDS] {
+        let [ll, lr, rl, rr] = self.target;
+        [
+            ll.to_bits(),
+            lr.to_bits(),
+            rl.to_bits(),
+            rr.to_bits(),
+            u32::from(self.mute),
+            self.length,
+        ]
+    }
+
+    /// The record a cell's words hold: `None` for words no record wrote, which render skips. The
+    /// words come from [`Self::to_words`], so the check is the constructor's own.
+    pub(crate) fn from_words(words: [u32; ROUTE_CELL_WORDS]) -> Option<Self> {
+        let [ll, lr, rl, rr, mute, length] = words;
+        if mute > 1 {
+            return None;
+        }
+        Self::new(
+            [
+                f32::from_bits(ll),
+                f32::from_bits(lr),
+                f32::from_bits(rl),
+                f32::from_bits(rr),
+            ],
+            mute == 1,
+            length,
+        )
+    }
+}
+
+/// What one live route shares between its writer (control) and its reader (render): one
+/// latest-target cell and its dirty word (#1347 D1).
+pub(crate) struct RouteLane {
+    pub(crate) cell: engine::realtime::LatestCell<ROUTE_CELL_WORDS>,
+    pub(crate) dirty: engine::realtime::DirtyWord,
+}
+
+impl RouteLane {
+    fn new() -> Self {
+        Self {
+            cell: engine::realtime::LatestCell::new(),
+            dirty: engine::realtime::DirtyWord::new(),
+        }
+    }
+}
+
+/// The render-side half of one live route's latest-target cell (issue #1220 D6, #1347 D1): the
+/// shared cell, the reader's last applied sequence, the dirty reader and the session's
+/// `live_values_superseded` count.
 ///
-/// Built only by [`PreparedGraphPlan::attach_route_controls`]; its route op drains it at the start
-/// of every block.
+/// Built only by [`PreparedGraphPlan::attach_route_controls`]; its route op reads it under the
+/// block's live snapshot at the start of every block.
 pub struct RouteControlLane {
-    pub(crate) consumer: engine::realtime::Consumer<RouteControlRecord>,
+    pub(crate) lane: std::sync::Arc<RouteLane>,
+    pub(crate) reader: engine::realtime::CellReader,
+    pub(crate) dirty: engine::realtime::DirtyReader,
+    pub(crate) superseded: engine::realtime::LiveValuesSuperseded,
 }
 
 /// One live route's lane, carried **beside** the prepared routes (issue #1220 D6), as
@@ -1004,15 +1062,16 @@ pub struct RouteControlLane {
 pub struct GraphRouteControlBinding {
     /// The route node this lane drives.
     pub node: GraphNodeId,
-    /// Consumer half of the bounded queue; the producer stays on the control plane.
+    /// Reader half of the latest-target cell; the writer stays on the control plane.
     pub control: Box<RouteControlLane>,
 }
 
-/// The control-plane half of one live route's record queue (issue #1220 D7).
+/// The control-plane half of one live route's latest-target cell (issue #1220 D7, #1347 D2).
 pub struct GraphRouteControlProducer {
     /// The route's session ID.
     pub route_id: Box<str>,
-    producer: engine::realtime::Producer<RouteControlRecord>,
+    lane: std::sync::Arc<RouteLane>,
+    writer: engine::realtime::CellWriter<ROUTE_CELL_WORDS>,
     /// The bytes of the plan's route-activity table that this attach added and the compile-time
     /// estimate did not charge (D8): the same for every producer of one attach.
     activity_bytes: u64,
@@ -1020,23 +1079,35 @@ pub struct GraphRouteControlProducer {
     activity_largest: u64,
 }
 
-/// A full live-route queue: the record was not queued, and is handed back.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RouteQueueFull {
-    pub record: RouteControlRecord,
+impl GraphRouteControlProducer {
+    /// Write `record` as the route's newest target, stamped with the revision of the transaction
+    /// that commits it. A write cannot fail and never waits, however many writes render has not
+    /// read: render ramps to the newest and counts each replaced one.
+    ///
+    /// Validation is [`RouteControlRecord::new`]'s, made before any write. The caller publishes the
+    /// stamp's revision on the plan's gate after every write of the transaction; a value is not
+    /// applied before that (#1312 D7).
+    pub fn write(&mut self, stamp: engine::realtime::LiveStamp<'_>, record: RouteControlRecord) {
+        self.writer.write(
+            &self.lane.cell,
+            &self.lane.dirty,
+            0,
+            stamp,
+            record.to_words(),
+        );
+    }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl GraphRouteControlProducer {
-    /// How many records the queue can accept now.
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight, which a
+    /// quiescent test thread guarantees.
+    #[doc(hidden)]
     #[must_use]
-    pub fn free(&self) -> usize {
-        self.producer.available_capacity()
-    }
-    /// Queue one record; a full queue refuses it and hands it back. Nothing is dropped.
-    pub fn try_push(&mut self, record: RouteControlRecord) -> Result<(), RouteQueueFull> {
-        self.producer
-            .try_push(record)
-            .map_err(|full| RouteQueueFull { record: full.value })
+    pub fn test_only_write_count(&self) -> u64 {
+        engine::realtime::CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
     }
 }
 
@@ -1048,8 +1119,6 @@ pub enum GraphRouteControlError {
     /// A route into a submix is also a node the plan requires a processor for; a live route is
     /// never a [`GraphNodeBinding`] (its op would not mix).
     BoundRoute,
-    /// A queue of this depth cannot be allocated.
-    QueueCapacity,
 }
 
 /// The bytes bind allocates for one live route's render-side owner, its boxed state (issue #1220
@@ -1065,11 +1134,12 @@ pub const LIVE_ROUTE_OWNER_BYTES: usize = runtime::live_route_owner_bytes();
 /// `route_activity_bound_bytes`, an upper bound.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RouteControlResources {
-    /// Live routes: one queue, one lane, one binding, one owner and one producer each.
+    /// Live routes: one cell, one lane, one binding, one owner and one producer each.
     pub routes: u64,
-    /// Each queue's retained ring header and slots
-    /// (`engine::realtime::bounded_spsc_retained_payload::<RouteControlRecord>`).
-    pub queue_bytes: u64,
+    /// Each route's one shared allocation, the `Arc` of its latest-target cell and dirty word
+    /// (`SharedAllocation<RouteLane>`: the cell's three slots, the dirty word and the owner
+    /// header). Exact (#1347 D1).
+    pub cell_bytes: u64,
     /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
     /// (held until bind) and the boxed render-side owner bind builds.
     pub owner_bytes: u64,
@@ -1096,21 +1166,14 @@ pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> Route
         return RouteControlResources::default();
     }
     let routes = count(producers.len());
-    let mut queue_bytes = 0_u64;
+    // Every route's shared allocation is the same type, so the same bytes.
+    let cell = count(core::mem::size_of::<
+        engine::realtime::SharedAllocation<RouteLane>,
+    >());
+    let cell_bytes = routes.saturating_mul(cell);
     let mut route_id_bytes = 0_u64;
-    let mut largest = 0_u64;
+    let mut largest = cell;
     for producer in producers {
-        let payload = NonZeroUsize::new(producer.producer.capacity()).and_then(|capacity| {
-            engine::realtime::bounded_spsc_retained_payload::<RouteControlRecord>(capacity).ok()
-        });
-        let (total, single) = payload.map_or((u64::MAX, u64::MAX), |payload| {
-            (
-                count(payload.total_bytes().unwrap_or(usize::MAX)),
-                count(payload.largest_allocation_bytes()),
-            )
-        });
-        queue_bytes = queue_bytes.saturating_add(total);
-        largest = largest.max(single);
         // The producer's copy and the binding's node-ID copy.
         route_id_bytes =
             route_id_bytes.saturating_add(count(producer.route_id.len()).saturating_mul(2));
@@ -1140,12 +1203,12 @@ pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> Route
         .max(activity_largest);
     RouteControlResources {
         routes,
-        queue_bytes,
+        cell_bytes,
         owner_bytes,
         producer_table_bytes,
         route_id_bytes,
         activity_bytes,
-        total_bytes: queue_bytes
+        total_bytes: cell_bytes
             .saturating_add(owner_bytes)
             .saturating_add(producer_table_bytes)
             .saturating_add(route_id_bytes)
@@ -1796,19 +1859,21 @@ impl PreparedGraphPlan {
         self.program = self.lower_from_current_fields();
         Ok(self)
     }
-    /// Give every route into a submix input a live lane (issue #1220 D1, D7): one bounded queue of
-    /// `depth` records per route, in canonical route-ID order, whose producers are returned.
+    /// Give every route into a submix input a live lane (issue #1220 D1, D7, #1347 D1): one
+    /// latest-target cell per route, in canonical route-ID order, whose producers are returned.
+    /// Every lane adds the replaced writes it finds to `superseded`, the session's count.
     ///
     /// Runs after compile and before bind. Routes into an output keep their prepared constants,
     /// their fold and their structural edits. Bind turns each lane's route op into a live route,
-    /// which drains its queue at the start of every block and ramps by the indexed ramp; a live
-    /// route never folds (VERIFY-2 M3). Without this call the plan binds what it bound before.
+    /// which reads its cell under the block's live snapshot at the start of every block and
+    /// ramps by the indexed ramp; a live route never folds (VERIFY-2 M3). Without this call the
+    /// plan binds what it bound before.
     ///
-    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]), when a route into
-    /// a submix is a node the plan requires a processor for, or when `depth` cannot be allocated.
+    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]) or when a route into
+    /// a submix is a node the plan requires a processor for.
     pub fn attach_route_controls(
         &mut self,
-        depth: NonZeroUsize,
+        superseded: &engine::realtime::LiveValuesSuperseded,
     ) -> Result<Vec<GraphRouteControlProducer>, GraphRouteControlError> {
         if self.route_controls.is_some() {
             return Err(GraphRouteControlError::AlreadyAttached);
@@ -1865,18 +1930,20 @@ impl PreparedGraphPlan {
             let GraphNodeId::Route { route_id } = node else {
                 continue;
             };
-            let (producer, consumer) = engine::realtime::bounded_spsc::<RouteControlRecord>(
-                depth,
-                engine::realtime::QueueGeneration(0),
-            )
-            .map_err(|_| GraphRouteControlError::QueueCapacity)?;
+            let lane = std::sync::Arc::new(RouteLane::new());
             bindings.push(GraphRouteControlBinding {
                 node: node.clone(),
-                control: Box::new(RouteControlLane { consumer }),
+                control: Box::new(RouteControlLane {
+                    lane: std::sync::Arc::clone(&lane),
+                    reader: engine::realtime::CellReader::new(),
+                    dirty: engine::realtime::DirtyReader::new(),
+                    superseded: superseded.clone(),
+                }),
             });
             producers.push(GraphRouteControlProducer {
                 route_id: route_id.as_str().into(),
-                producer,
+                lane,
+                writer: engine::realtime::CellWriter::new(),
                 activity_bytes,
                 activity_largest,
             });

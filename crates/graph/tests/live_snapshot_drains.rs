@@ -305,7 +305,7 @@ fn prepared(
         observers: vec![],
     });
     let mut producers = graph
-        .attach_route_controls(NonZeroUsize::new(4).expect("depth"))
+        .attach_route_controls(&realtime::LiveValuesSuperseded::new())
         .expect("the send route into the submix is live");
     assert_eq!(producers.len(), 1);
     let mut bindings: Vec<_> = groups[0]
@@ -370,6 +370,19 @@ fn exchange(mut plan: PreparedRenderPlan) -> Exchange {
     )
     .expect("exchange");
     (gate, owner, (publisher, retirer))
+}
+
+/// One transaction: stamp the next revision on the plan's gate, write `record` to the route's
+/// cell under it, and publish the revision.
+fn write_published(
+    gate: &mut realtime::PlanRevisionGate,
+    producer: &mut GraphRouteControlProducer,
+    record: RouteControlRecord,
+) {
+    let revision = gate.last_published() + 1;
+    let stamp = gate.stamp(revision).expect("a legal revision");
+    producer.write(stamp, record);
+    gate.publish(revision);
 }
 
 /// Gate 1: every drain kind of a block receives the `S` the executor received that block, and `S`
@@ -439,12 +452,12 @@ fn every_live_drain_runs_once_in_every_block_silent_or_not() {
     const SILENT: u32 = (1 << 1) | (1 << 2) | (1 << 5);
     for &width in BankWidth::ALL {
         let (plan, recorder, mut producer) = prepared(width, SILENT);
-        let (_gate, mut owner, _exchange) = exchange(plan);
+        let (mut gate, mut owner, _exchange) = exchange(plan);
         let mute = RouteControlRecord::new([0.0; 4], true, 0).expect("a legal mute");
         let (mut drains, mut mixes) = (0, 0);
         for block in 0..BLOCKS {
             if block == 3 {
-                producer.try_push(mute).expect("room");
+                write_published(&mut gate, &mut producer, mute);
             }
             let (_, pcm) = render(&mut owner, block);
             let silent = SILENT & (1 << block) != 0;

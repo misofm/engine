@@ -2,8 +2,9 @@
 //!
 //! With a control queue depth, preparation attaches one live lane per route into a submix and
 //! hands back one [`RouteControlProducer`] per lane, in canonical route-ID order. A producer
-//! builds its record's target with `graph_compiler::route_coefficients`, refuses before it pushes,
-//! and its lanes are charged against the host's caps.
+//! builds its record's target with `graph_compiler::route_coefficients`, refuses before it writes,
+//! and its lanes are charged against the host's caps. A lane is a latest-target cell (#1347): a
+//! write cannot fail, and render ramps to the newest.
 //!
 //! Every rendered comparison has a stateless downstream: the buses are unity submixes (no console
 //! slot, no insert, HPF and LPF off), and every track reads its own non-constant two-lane noise.
@@ -14,7 +15,7 @@ use core::num::NonZeroUsize;
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use bench_support::producer::render_while_producing;
-use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
+use builtins_compiler::{BuiltinCompileCaps, TestOnlyWriteGate, prepare_session_builtins};
 use dsp_reference::randomized::{Draw, first_difference};
 use effect_compiler::{EffectCompileCaps, launch_native_effect_registry};
 use graph::GraphCompileCaps;
@@ -297,6 +298,10 @@ fn assert_planes(actual: &Planes, expected: &Planes, from: usize, what: &str) {
 struct Live {
     host: PreparedHost,
     handles: HostLiveControlHandles,
+    /// The plan's gate handle: every send write is a transaction stamped from it (#1347 D4).
+    gate: Option<engine::realtime::PlanRevisionGate>,
+    /// The snapshot revision the last rendered block applied under.
+    snapshot: u64,
     feeds: Feeds,
     block: usize,
     pcm: Vec<f32>,
@@ -308,14 +313,22 @@ impl Live {
     }
 
     fn from_document(document: &str, feeds: &Feeds, depth: Option<usize>) -> Self {
-        let (_, host, handles) =
+        let (_, mut host, handles) =
             prepare_host_session_with_live_controls(document, &caps(), &request(depth))
                 .unwrap_or_else(|failure| {
                     panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
                 });
+        let gate = host
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
+        let snapshot = gate.last_published();
+        let gate = Some(gate);
         Self {
             host,
             handles,
+            gate,
+            snapshot,
             feeds: feeds.clone(),
             block: 0,
             pcm: vec![0.0; QUANTUM * 2],
@@ -328,6 +341,46 @@ impl Live {
             .iter_mut()
             .find(|producer| producer.route_id() == route)
             .unwrap_or_else(|| panic!("route {route} is live"))
+    }
+
+    /// One transaction: write the edit to live send `index` (its place in `route_controls`) under
+    /// the next revision and publish it. A refusal writes nothing.
+    fn set(
+        &mut self,
+        index: usize,
+        values: Values,
+        lanes: [bool; 2],
+        length: u32,
+    ) -> Result<(), RouteControlError> {
+        let producer = &mut self.handles.route_controls[index];
+        let gate = self.gate.as_mut().expect("the gate stays with the host");
+        gate.write_published(|stamp| {
+            producer.set(
+                stamp,
+                values.gain_db,
+                values.matrix,
+                values.mute,
+                lanes,
+                length,
+            )
+        })
+    }
+
+    /// [`Self::set`] on the send named `route`.
+    fn set_route(
+        &mut self,
+        route: &str,
+        values: Values,
+        lanes: [bool; 2],
+        length: u32,
+    ) -> Result<(), RouteControlError> {
+        let index = self
+            .handles
+            .route_controls
+            .iter()
+            .position(|producer| producer.route_id() == route)
+            .unwrap_or_else(|| panic!("route {route} is live"));
+        self.set(index, values, lanes, length)
     }
 
     /// Submits the next block of every feed.
@@ -354,7 +407,8 @@ impl Live {
     /// Renders one block into `self.pcm`; the render itself allocates nothing here.
     fn render_block(&mut self) {
         self.pcm.fill(HOST_SENTINEL);
-        self.host
+        let report = self
+            .host
             .plan
             .render(
                 engine::realtime::RenderIo {
@@ -371,6 +425,7 @@ impl Live {
                 },
             )
             .expect("render");
+        self.snapshot = report.live_snapshot.revision();
         self.block += 1;
     }
 
@@ -465,9 +520,8 @@ fn the_live_target_is_the_prepared_constant() {
         let feeds = feeds(&mut draw, &["t", "u"], blocks * QUANTUM);
         let mut live = Live::new(&base, &feeds, Some(DEPTH));
         let mut actual = live.render(push_block);
-        live.producer("t-b")
-            .set(drawn.gain_db, drawn.matrix, drawn.mute, lanes, length)
-            .expect("queued");
+        live.set_route("t-b", drawn, lanes, length)
+            .expect("written");
         live.render_into(blocks - push_block, &mut actual);
         let fresh = Live::new(&follow_session(drawn, true, lanes, u), &feeds, None).render(blocks);
         assert_planes(
@@ -505,13 +559,13 @@ fn two_buses(rate: u32, sends: &[(&str, Values); 4]) -> SessionModel {
 
 /// Gate 2. Through `prepare_host_session_with_live_controls`, random gain, matrix and mute edits
 /// on `c-b` (delayed, into `b`) and `e-x` (undelayed, into `x`), each with `length` 0 or 480, are
-/// pushed before block 2; from the longest ramp's end plus the plan's latency, the output is
+/// written before block 2; from the longest ramp's end plus the plan's latency, the output is
 /// bit-identical to a host prepared from the edited session and fed the same sources from sample
 /// 0. At 48 kHz and 44.1 kHz.
 ///
 /// Each send is addressed as a host addresses it: by its index in `route_controls`.
 ///
-/// Test value: red if host-core attaches lanes to the wrong routes, in the wrong order, or pushes
+/// Test value: red if host-core attaches lanes to the wrong routes, in the wrong order, or writes
 /// stale values.
 #[test]
 fn a_settled_live_edit_through_host_core_equals_a_fresh_plan() {
@@ -545,16 +599,8 @@ fn a_settled_live_edit_through_host_core_equals_a_fresh_plan() {
             // A host addresses a live send by its index in `route_controls`, which is canonical
             // route-ID order: `a-b`, `c-b`, `e-x`, `f-x`, the same order `sends` is in.
             for (index, length) in [(1, lengths[0]), (2, lengths[1])] {
-                let values = sends[index].1;
-                live.handles.route_controls[index]
-                    .set(
-                        values.gain_db,
-                        values.matrix,
-                        values.mute,
-                        [false; 2],
-                        length,
-                    )
-                    .expect("queued");
+                live.set(index, sends[index].1, [false; 2], length)
+                    .expect("written");
             }
             live.render_into(blocks - push_block, &mut actual);
             let fresh = Live::new(&edit, &feeds, None).render(blocks);
@@ -593,52 +639,27 @@ fn drained() -> Vec<u64> {
 
 /// Gate 3. Nothing partial:
 ///
-/// * `depth + 1` `set` calls without a render: the last returns `Full`, and the queue held exactly
-///   `depth` records (the next block drains exactly `depth`);
 /// * a `Domain` refusal (a non-finite gain, also with a too-long ramp: `Domain` is decided first)
-///   and a `Length` refusal push nothing: `free()` is unchanged, the next block drains nothing,
-///   and the output is an unedited host's;
-/// * `record` alone pushes nothing, and `push` of its result renders, bit for bit, as `set` with
+///   and a `Length` refusal write nothing: the next block applies nothing, counts nothing, and
+///   the output is an unedited host's;
+/// * `record` alone writes nothing, and `write` of its result renders, bit for bit, as `set` with
 ///   the same arguments.
 ///
-/// Test value: red if a refused call pushes, or if `Full` is detected only after a push.
+/// Test value: red if a refused call writes a cell, or if `record` publishes a value by itself.
 #[test]
-fn a_refused_send_record_pushes_nothing() {
+fn a_refused_send_record_writes_nothing() {
     const SMALL: usize = 4;
     let mut draw = Draw::new(1_221_003);
     let r0 = values(&mut draw, false);
     let r1 = values(&mut draw, false);
     let model = two_into_bus(r0, r1);
-    let index = route_index(&model, "r0");
     let blocks = 4;
     let feeds = feeds(&mut draw, &["t0", "t1"], blocks * QUANTUM);
-    let edits: Vec<Values> = (0..=SMALL).map(|_| values(&mut draw, false)).collect();
-
-    // A full queue.
-    let mut live = Live::new(&model, &feeds, Some(SMALL));
-    let producer = live.producer("r0");
-    assert_eq!(producer.free(), SMALL);
-    for (count, edit) in edits.iter().enumerate() {
-        let result = producer.set(edit.gain_db, edit.matrix, edit.mute, [false; 2], 0);
-        if count < SMALL {
-            assert_eq!(result, Ok(()), "set {count}");
-        } else {
-            assert_eq!(result, Err(RouteControlError::Full), "set {count}");
-        }
-    }
-    assert_eq!(producer.free(), 0);
-    live.render(1);
-    assert_eq!(
-        drained()[index],
-        SMALL as u64,
-        "the queue held exactly depth records"
-    );
+    let edit = values(&mut draw, false);
 
     // Domain and Length refusals.
     let unedited = Live::new(&model, &feeds, None).render(blocks);
     let mut live = Live::new(&model, &feeds, Some(SMALL));
-    let producer = live.producer("r0");
-    let edit = edits[0];
     for (gain_db, length, error) in [
         (f32::NAN, 0, RouteControlError::Domain),
         (f32::INFINITY, 480, RouteControlError::Domain),
@@ -646,40 +667,129 @@ fn a_refused_send_record_pushes_nothing() {
         (edit.gain_db, TOO_LONG, RouteControlError::Length),
     ] {
         assert_eq!(
-            producer.record(gain_db, edit.matrix, false, [false; 2], length),
+            live.producer("r0")
+                .record(gain_db, edit.matrix, false, [false; 2], length),
             Err(error)
         );
+        let refused = Values {
+            gain_db,
+            matrix: edit.matrix,
+            mute: false,
+        };
         assert_eq!(
-            producer.set(gain_db, edit.matrix, false, [false; 2], length),
+            live.set_route("r0", refused, [false; 2], length),
             Err(error)
         );
-        assert_eq!(producer.free(), SMALL, "a refusal pushed");
     }
     let actual = live.render(blocks);
     assert!(
         drained().iter().all(|count| *count == 0),
-        "no record was applied"
+        "no value was applied"
     );
+    assert_eq!(live.handles.live_values_superseded.get(), 0);
     assert_planes(&actual, &unedited, 0, "after refusals");
 
-    // `record` then `push` is `set`.
+    // `record` then `write` is `set`.
     let mut split = Live::new(&model, &feeds, Some(SMALL));
-    let producer = split.producer("r0");
-    let record = producer
+    let record = split
+        .producer("r0")
         .record(edit.gain_db, edit.matrix, edit.mute, [true, false], 37)
         .expect("in domain");
-    assert_eq!(producer.free(), SMALL, "record pushed");
-    producer.push(record).expect("room");
-    let mut whole = Live::new(&model, &feeds, Some(SMALL));
-    whole
-        .producer("r0")
-        .set(edit.gain_db, edit.matrix, edit.mute, [true, false], 37)
-        .expect("room");
-    let split = split.render(blocks);
-    let whole = whole.render(blocks);
-    assert_planes(&split, &whole, 0, "record then push against set");
+    let rendered_before = split.render(1);
     assert!(
-        first_difference(&split[0], &unedited[0]).is_some(),
+        drained().iter().all(|count| *count == 0),
+        "a record built and not written applied"
+    );
+    {
+        let producer = split
+            .handles
+            .route_controls
+            .iter_mut()
+            .find(|producer| producer.route_id() == "r0")
+            .expect("r0 is live");
+        split
+            .gate
+            .as_mut()
+            .expect("the gate stays with the host")
+            .write_published(|stamp| producer.write(stamp, record));
+    }
+    let mut whole = Live::new(&model, &feeds, Some(SMALL));
+    let whole_before = whole.render(1);
+    whole
+        .set_route("r0", edit, [true, false], 37)
+        .expect("written");
+    assert_planes(&rendered_before, &whole_before, 0, "before the write");
+    let mut split_planes = rendered_before;
+    split.render_into(blocks - 1, &mut split_planes);
+    let mut whole_planes = whole_before;
+    whole.render_into(blocks - 1, &mut whole_planes);
+    assert_planes(
+        &split_planes,
+        &whole_planes,
+        0,
+        "record then write against set",
+    );
+    assert!(
+        first_difference(&split_planes[0], &unedited[0]).is_some(),
+        "the edit is audible"
+    );
+}
+
+/// Gate 1 of #1347, through host-core. Forty edits of one send between two render calls are each
+/// written, none refused; the next block ramps to the last, bit for bit as a twin that wrote only
+/// the last, applies one value, and adds the thirty-nine replaced writes to
+/// `live_values_superseded`.
+///
+/// Test value: a route lane left a queue (the 5th edit would refuse), a miscounted supersession,
+/// or a block that applies an earlier edit.
+#[test]
+fn many_send_edits_before_one_block_apply_the_last_and_are_counted() {
+    const EDITS: usize = 40;
+    let mut draw = Draw::new(1_347_001);
+    let model = two_into_bus(values(&mut draw, false), values(&mut draw, false));
+    let index = route_index(&model, "r0");
+    let blocks = 6;
+    let feeds = feeds(&mut draw, &["t0", "t1"], blocks * QUANTUM);
+    let edits: Vec<(Values, [bool; 2])> = (0..EDITS)
+        .map(|n| (values(&mut draw, n % 7 == 6), [n % 3 == 0, n % 5 == 0]))
+        .collect();
+    let length = 37;
+
+    let mut many = Live::new(&model, &feeds, Some(DEPTH));
+    let mut actual = many.render(1);
+    for (edit, lanes) in &edits {
+        many.set_route("r0", *edit, *lanes, length)
+            .expect("written");
+    }
+    assert_eq!(
+        many.handles.live_values_superseded.get(),
+        0,
+        "render has not read"
+    );
+    many.render_into(blocks - 1, &mut actual);
+    assert_eq!(
+        drained()[index],
+        1,
+        "the block applied one value, not {EDITS}"
+    );
+    assert_eq!(
+        many.handles.live_values_superseded.get(),
+        (EDITS - 1) as u64
+    );
+
+    let mut twin = Live::new(&model, &feeds, Some(DEPTH));
+    let mut expected = twin.render(1);
+    let (last, lanes) = edits[EDITS - 1];
+    twin.set_route("r0", last, lanes, length).expect("written");
+    twin.render_into(blocks - 1, &mut expected);
+    assert_eq!(twin.handles.live_values_superseded.get(), 0);
+    assert_planes(&actual, &expected, 0, "forty edits against the last alone");
+    assert!(
+        first_difference(
+            &actual[0],
+            &Live::new(&model, &feeds, None).render(blocks)[0]
+        )
+        .is_some(),
         "the edit is audible"
     );
 }
@@ -759,9 +869,16 @@ fn live_send_handles_are_in_canonical_route_order() {
     assert_eq!(ids, ["aa-send", "mm-send", "zz-send"]);
     for position in 0..3 {
         let id = live.handles.route_controls[position].route_id().to_owned();
-        live.handles.route_controls[position]
-            .set(-6.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0)
-            .expect("queued");
+        live.set(
+            position,
+            Values {
+                gain_db: -6.0,
+                ..Values::UNITY
+            },
+            [false; 2],
+            0,
+        )
+        .expect("written");
         // No feeds: every source underruns to zero, which the drain does not care about.
         live.submit();
         live.render_block();
@@ -800,7 +917,7 @@ fn the_session_shape_measures_every_route_id() {
 
 /// The same session attached directly through the graph compiler: the oracle for host-core's
 /// charge.
-fn graph_route_resources(document: &str, depth: usize) -> RouteControlResources {
+fn graph_route_resources(document: &str) -> RouteControlResources {
     let compiled = compile_host_session(document, &caps()).expect("compile");
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = effect_compiler::prepare_native_session_effects(
@@ -850,7 +967,7 @@ fn graph_route_resources(document: &str, depth: usize) -> RouteControlResources 
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let producers = artifact
-        .attach_route_live_controls(NonZeroUsize::new(depth).expect("depth"))
+        .attach_route_live_controls(&host_core::LiveValuesSuperseded::default())
         .expect("attach");
     graph::route_control_resources(&producers)
 }
@@ -871,7 +988,7 @@ fn admitted(host: &PreparedHost) -> u64 {
 /// same attach, and its total is admitted: at the admitted total the session prepares, and one
 /// byte below it is refused with `host.graph.resource.limit`. Without a depth the field is zero.
 ///
-/// Test value: red if the route queues or owner boxes are uncharged, or charged on a
+/// Test value: red if the route cells or owner boxes are uncharged, or charged on a
 /// live-control-free plan.
 #[test]
 fn live_send_lanes_are_charged_against_the_graph_cap() {
@@ -882,9 +999,9 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
     ));
     let live = Live::from_document(&document, &Vec::new(), Some(DEPTH));
     let charged = live.host.report.route_control_resources;
-    assert_eq!(charged, graph_route_resources(&document, DEPTH));
+    assert_eq!(charged, graph_route_resources(&document));
     assert_eq!(charged.routes, 2);
-    assert!(charged.queue_bytes > 0 && charged.owner_bytes > 0 && charged.activity_bytes > 0);
+    assert!(charged.cell_bytes > 0 && charged.owner_bytes > 0 && charged.activity_bytes > 0);
     let total = admitted(&live.host);
     drop(live);
 
@@ -923,11 +1040,11 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
 
 // ---- Gate 7 -------------------------------------------------------------------------------------
 
-/// Gate 7. A producer thread calls `set` on both live sends of gate 2's session while this thread
-/// renders, and every block applies at least one record; after the first block, every render
+/// Gate 7. A producer thread writes both live sends of gate 2's session while this thread
+/// renders, and every block applies at least one value; after the first block, every render
 /// allocates and frees nothing on the render thread (`bench_support::alloc`'s thread-scoped
-/// counters). Each block waits for a queued record, not for the producer's progress
-/// (`bench_support::producer`, issue #1250).
+/// counters). Each block waits for a transaction published past the previous block's snapshot,
+/// not for the producer's progress (`bench_support::producer`, issue #1250).
 ///
 /// Test value: red if host-core's attachment leaves any lane state to be built on the render
 /// thread.
@@ -945,6 +1062,7 @@ fn live_sends_render_without_allocating() {
     let mut live = Live::new(&two_buses(48_000, &sends), &feeds, Some(DEPTH));
     let producers = core::mem::take(&mut live.handles.route_controls);
     assert_eq!(producers.len(), 4);
+    let gate = live.gate.take().expect("the gate");
     let edits: Vec<(Values, [bool; 2], u32)> = (0..32)
         .map(|index| {
             (
@@ -955,22 +1073,27 @@ fn live_sends_render_without_allocating() {
         })
         .collect();
     let mut index = 0;
+    let snapshot = core::cell::Cell::new(live.snapshot);
     assert_installed();
     render_while_producing(
         blocks,
-        producers,
-        |producers| {
-            for producer in producers.iter_mut() {
-                let (values, lanes, length) = edits[index % edits.len()];
-                // A full queue refuses the edit, and still holds records for the next block.
-                match producer.set(values.gain_db, values.matrix, values.mute, lanes, length) {
-                    Ok(()) | Err(RouteControlError::Full) => {}
-                    Err(refused) => panic!("an in-domain edit was refused: {refused:?}"),
+        (gate, producers),
+        |(gate, producers)| {
+            // One transaction writes every send, then publishes.
+            gate.write_published(|stamp| {
+                for producer in producers.iter_mut() {
+                    let (values, lanes, length) = edits[index % edits.len()];
+                    let record = producer
+                        .record(values.gain_db, values.matrix, values.mute, lanes, length)
+                        .expect("an in-domain edit");
+                    producer.write(stamp, record);
+                    index += 1;
                 }
-                index += 1;
-            }
+            });
         },
-        |producers| producers.iter().any(|producer| producer.free() < DEPTH),
+        // A transaction is published past the last block's snapshot, so the next block's covers
+        // it and applies the values it wrote.
+        |(gate, _)| gate.last_published() > snapshot.get(),
         |block| {
             live.submit();
             let before: u64 = drained().iter().sum();
@@ -978,7 +1101,8 @@ fn live_sends_render_without_allocating() {
             live.render_block();
             let delta = current_thread_delta_since(mark);
             let after: u64 = drained().iter().sum();
-            assert!(after > before, "block {block} applied a record");
+            snapshot.set(live.snapshot);
+            assert!(after > before, "block {block} applied a value");
             if block > 0 {
                 assert_eq!(
                     (delta.allocations, delta.reallocations, delta.deallocations),

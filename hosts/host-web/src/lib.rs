@@ -1768,7 +1768,7 @@ impl ReadyOwnership {
     /// | `strips .. 2 * strips` | strip `s`'s fader/mute cells (#1312: no queue, no room) |
     /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity/filter cells (#1346: no queue, no room) |
     /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
-    /// | `3 * strips + E ..` | live send `r`'s queue, by live-route index (issue #1222 D4) |
+    /// | `3 * strips + E ..` | live send `r`'s cell, by live-route index (issue #1222 D4; #1347: no queue, no room) |
     ///
     /// One index therefore serves both the free-room pre-check and the push, and neither pass has
     /// to search. `None` means the address names no channel this session prepared.
@@ -1791,18 +1791,15 @@ impl ReadyOwnership {
         (slot < self.effect_controls.len()).then_some(slot)
     }
 
-    /// The free room of one destination queue. The matrix, fader and input bands are
-    /// latest-target cells (#1312, #1346), which have no room to want and are never asked: they
-    /// answer `None`, as an unaddressable queue does.
+    /// The free room of one destination queue. The matrix, fader, input and send bands are
+    /// latest-target cells (#1312, #1346, #1347), which have no room to want and are never asked:
+    /// they answer `None`, as an unaddressable queue does. Only the effects have queues.
     fn queue_available(&self, slot: usize) -> Option<u32> {
         let tracks = self.strip_count();
         if slot < tracks * 3 {
             return None;
         }
         let effect = slot - tracks * 3;
-        if let Some(route) = effect.checked_sub(self.effect_controls.len()) {
-            return u32::try_from(self.route_controls.get(route)?.free()).ok();
-        }
         let producer = self.effect_controls.get(effect)?.as_ref()?;
         u32::try_from(producer.producer().available_capacity()).ok()
     }
@@ -1815,7 +1812,8 @@ impl ReadyOwnership {
     }
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
-    /// free-room pass has already ruled out, or on a cell record, which is never pushed.
+    /// free-room pass has already ruled out, or on a cell record (a strip's or a send's), which is
+    /// never pushed.
     fn push(
         &mut self,
         slot: usize,
@@ -1824,18 +1822,13 @@ impl ReadyOwnership {
     ) -> Result<(), ()> {
         let tracks = self.strip_count();
         match record {
-            // The strips' fader, mute, matrix and input values are cells, written under the
-            // batch's stamp by the admission itself (`write_strip_cells`), never pushed.
-            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) | AdmittedCommand::Input(_) => {
-                Err(())
-            }
-            AdmittedCommand::Route(record) => {
-                let route = (slot - tracks * 3)
-                    .checked_sub(self.effect_controls.len())
-                    .ok_or(())?;
-                let producer = self.route_controls.get_mut(route).ok_or(())?;
-                producer.push(record).map_err(|_| ())
-            }
+            // The strips' fader, mute, matrix and input values and the sends' targets are cells,
+            // written under the batch's stamp by the admission itself (`write_strip_cells`),
+            // never pushed.
+            AdmittedCommand::Matrix(_)
+            | AdmittedCommand::Fader(_)
+            | AdmittedCommand::Input(_)
+            | AdmittedCommand::Route(_) => Err(()),
             AdmittedCommand::Effect(record) => {
                 let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
@@ -4672,12 +4665,15 @@ fn admit_commands(
     }
 }
 
-/// Whether `staged` writes a strip's cells: a fader, mute, matrix/pan, input trim or polarity
-/// record, or a prepared builtin input-filter marker with at least one target.
+/// Whether `staged` writes a cell: a fader, mute, matrix/pan, input trim or polarity record, a
+/// send's target, or a prepared builtin input-filter marker with at least one target.
 fn writes_strip_cells(staged: &StagedCommand) -> bool {
     match staged.kind {
         StagedCommandKind::Command(
-            AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) | AdmittedCommand::Input(_),
+            AdmittedCommand::Matrix(_)
+            | AdmittedCommand::Fader(_)
+            | AdmittedCommand::Input(_)
+            | AdmittedCommand::Route(_),
         ) => true,
         StagedCommandKind::PreparedOwner(marker) => {
             marker.kind == PreparedOwnerKind::BuiltinInput && marker.target_count != 0
@@ -4686,9 +4682,9 @@ fn writes_strip_cells(staged: &StagedCommand) -> bool {
     }
 }
 
-/// Write the admitted fader, mute, matrix/pan, input trim, polarity and prepared-filter values of
-/// one batch into the strips' cells as one transaction (#1312 D7, #1346 D6), then publish its
-/// revision on the plan's gate.
+/// Write the admitted fader, mute, matrix/pan, input trim, polarity, prepared-filter and send
+/// values of one batch into the strips' and sends' cells as one transaction (#1312 D7, #1346 D6,
+/// #1347 D4), then publish its revision on the plan's gate.
 ///
 /// A batch that stages none takes no stamp and no revision. The stamp is the batch's last
 /// fallible step: its refusal (a revision past the gate's ceiling) writes nothing and returns the
@@ -4741,6 +4737,17 @@ fn write_strip_cells(
                     )
                     .expect("a staged fader record addresses a strip with a cell producer")
                     .fader
+                    .write(stamp, record);
+            }
+            StagedCommandKind::Command(AdmittedCommand::Route(record)) => {
+                // The send band follows the effects; the staging pass resolved the route index.
+                ready
+                    .route_controls
+                    .get_mut(
+                        slot.checked_sub(strip_count * 3 + ready.effect_controls.len())
+                            .expect("a staged send record sits in the send band"),
+                    )
+                    .expect("a staged send record addresses a live route's cell producer")
                     .write(stamp, record);
             }
             StagedCommandKind::Command(AdmittedCommand::Input(record)) => {
@@ -5130,9 +5137,9 @@ fn admit_commands_staged(
                         command.smoothing_samples,
                     )
                     .map_err(|error| match error {
-                        RouteControlError::Domain
-                        | RouteControlError::Length
-                        | RouteControlError::Full => refuse(COMMAND_REASON_DOMAIN, index),
+                        RouteControlError::Domain | RouteControlError::Length => {
+                            refuse(COMMAND_REASON_DOMAIN, index)
+                        }
                     })?;
                 let moved = match edit {
                     RouteEdit::GainDb(gain_db) => ready.routes.set_gain_db(track, gain_db),
@@ -5445,8 +5452,9 @@ fn admit_commands_staged(
     // Every effective-mute change stages a strip mute record covering its lane, so one always
     // exists; a follow without one is refused rather than guessed.
     //
-    // Nothing is pushed here: the records join the room check below with every other staged
-    // entry (D4), and the mirror's lanes move under its shadow, after every record is built.
+    // Nothing is written here: the records join the batch's one cell write below with every
+    // other staged entry, and the mirror's lanes move under its shadow, after every record is
+    // built.
     if (solo_seen || mute_seen || vca_mute_seen) && !ready.routes.is_empty() {
         let follow_start = lowered;
         let route_base = strip_count * 3 + ready.effect_controls.len();
@@ -5502,10 +5510,6 @@ fn admit_commands_staged(
                 )
                 .map_err(|_| refuse(COMMAND_REASON_DOMAIN, wire_index as usize))?;
             let slot = route_base + route;
-            let Some(wanted) = ready.command_wanted.get_mut(slot) else {
-                return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, wire_index as usize));
-            };
-            *wanted = wanted.saturating_add(1);
             let Some(staged) = ready.command_decoded.get_mut(lowered) else {
                 return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
             };
@@ -5748,6 +5752,11 @@ fn admit_commands_staged(
             }
             continue;
         }
+        // The send band follows the effects (#1347): a send's target is a cell, which has no room
+        // to want. Its route index was resolved while staging.
+        if slot >= strip_count * 3 + ready.effect_controls.len() {
+            continue;
+        }
         let needed = ready.command_wanted[slot];
         let Some(available) = ready.queue_available(slot) else {
             return Err(refuse(
@@ -5775,7 +5784,10 @@ fn admit_commands_staged(
         match staged.kind {
             // Cells were written above.
             StagedCommandKind::Command(
-                AdmittedCommand::Matrix(_) | AdmittedCommand::Fader(_) | AdmittedCommand::Input(_),
+                AdmittedCommand::Matrix(_)
+                | AdmittedCommand::Fader(_)
+                | AdmittedCommand::Input(_)
+                | AdmittedCommand::Route(_),
             ) => {}
             StagedCommandKind::PreparedOwner(marker)
                 if marker.kind == PreparedOwnerKind::BuiltinInput => {}
@@ -7065,7 +7077,7 @@ fn compile_ready(
             .map_err(|_| fixed_diagnostic("web.resource.allocation"))?
     };
     // Retained bridge state the browser owns for its live sends (issue #1222; #1221 verdict
-    // MINOR-1): every byte the route lanes add -- queues, render-side owners, the producer table
+    // MINOR-1): every byte the route lanes add -- cells, render-side owners, the producer table
     // this host keeps as host-core built it, the route IDs and the activity table -- which the
     // compile-time graph estimate deliberately leaves out, plus the mirror and its shadow.
     let route_mirror_bytes = u64::try_from(routes.len())

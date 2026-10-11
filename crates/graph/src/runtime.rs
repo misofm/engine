@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use core::num::NonZeroUsize;
 
 use engine::realtime::{
-    ARENA_SILENCE_BUFFER, ArenaStereoPair, DisjointArena, LiveSnapshot, RenderError,
+    ARENA_SILENCE_BUFFER, ArenaStereoPair, CellRead, DisjointArena, LiveSnapshot, RenderError,
     ResponseSnapshotAvailability, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
     ResponseSnapshotSection, ResponseSnapshotSink,
 };
@@ -889,30 +889,41 @@ impl LiveRoute {
         }
     }
 
-    /// D5: apply, in order, exactly the records available at entry, each ramping from the
-    /// coefficients the route is at (D3). Later records wait for a later block; none is dropped.
-    /// Returns how many were applied.
+    /// #1347 D3: read the route's cell under the block's snapshot `S` and, if it holds a value not
+    /// applied before, retarget once from the coefficients the route is at to that value over its
+    /// ramp, exactly as one drained record did before the cells. Returns how many values were
+    /// applied: `0` or `1`.
     ///
-    /// `snapshot` is the block's live snapshot `S` (#1504): the route's queue lane ignores it until
-    /// the lane moves to a cell (#1347). The drain runs in every block, active route or not.
+    /// The cell holds the newest value whose revision is `<= S`, never a newer or torn one, and
+    /// never skips it (#1312 D1). When it applies sequence `s` after `p`, the `s - p - 1` writes
+    /// it replaced are added to the session's `live_values_superseded` (#1312 D2). The drain runs
+    /// in every block, active route or not (#1504 D3). It allocates nothing and takes no lock.
     #[inline]
     fn drain(&mut self, snapshot: LiveSnapshot) -> usize {
-        let _ = snapshot;
-        let available = self.control.consumer.available_at_entry();
+        let control = &mut *self.control;
         let mut applied = 0;
-        for _ in 0..available {
-            let Ok(record) = self.control.consumer.try_pop() else {
-                break;
-            };
-            debug_assert!(record.length() <= crate::ROUTE_RAMP_LENGTH_MAXIMUM);
-            self.ramp = IndexedRamp::new(
-                self.ramp.coefficients_at(self.position),
-                record.target(),
-                record.length(),
-            );
-            self.mute = record.mute();
-            self.position = 0;
-            applied += 1;
+        if control.dirty.pending(&control.lane.dirty) & 1 != 0
+            && let CellRead::Applied {
+                words, superseded, ..
+            } = control
+                .reader
+                .read(&control.lane.cell, snapshot, &mut control.dirty, 0)
+        {
+            control.superseded.add(superseded);
+            // Only `write` fills the cell, from a validated record, so the words decode; words no
+            // record wrote retarget nothing.
+            let record = crate::RouteControlRecord::from_words(words);
+            debug_assert!(record.is_some(), "a route cell held words no record wrote");
+            if let Some(record) = record {
+                self.ramp = IndexedRamp::new(
+                    self.ramp.coefficients_at(self.position),
+                    record.target(),
+                    record.length(),
+                );
+                self.mute = record.mute();
+                self.position = 0;
+                applied = 1;
+            }
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_route_drained(self.route as usize, applied, snapshot);

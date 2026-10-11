@@ -33,9 +33,11 @@ use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveControlRecord, NodeTailBound, ResponseAnalysisError,
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, SymmetryEvent, TailSamples,
 };
+pub use engine::realtime::LiveValuesSuperseded;
 use engine::realtime::{
     CellRead, CellReader, CellWriter, Consumer, DirtyReader, DirtyWord, LatestCell, LiveSnapshot,
-    LiveStamp, PreparedRenderPlan, RenderEnvelope, RenderError, bounded_spsc_retained_payload,
+    LiveStamp, PreparedRenderPlan, RenderEnvelope, RenderError, SharedAllocation,
+    bounded_spsc_retained_payload,
 };
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, BuiltinStripOwner,
@@ -49,7 +51,6 @@ use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
 use session::{CompiledSession, MatrixOrPan, StripRef, Track};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -250,60 +251,6 @@ pub struct TrackControlRequest {
     pub input_lane: bool,
 }
 
-/// The session's count of live values a later write replaced before render read them (D15-2,
-/// #1312 D2): `live_values_superseded`.
-///
-/// One per session, shared by every plan the session prepares. Render is its only writer, with a
-/// load, a saturating add and a store (never a read-modify-write: a plan swap hands render from
-/// one plan to the next on the same single render thread, so two writers never overlap); control
-/// reads it. A clone shares the count.
-#[derive(Clone, Debug, Default)]
-pub struct LiveValuesSuperseded(Arc<AtomicU64>);
-
-impl LiveValuesSuperseded {
-    /// A count at zero.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Exact bytes of the one allocation a count retains: the word with the shared-owner header.
-    /// A host that makes a count per plan charges it to that plan's row; a host that makes one per
-    /// session charges it once (#1312 D2).
-    #[must_use]
-    pub fn retained_bytes() -> u64 {
-        u64::try_from(core::alloc::Layout::new::<SharedAllocation<AtomicU64>>().size())
-            .expect("a count allocation's size fits u64")
-    }
-
-    /// Control: the writes counted so far.
-    #[must_use]
-    pub fn get(&self) -> u64 {
-        self.0.load(core::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Render: add `count` replaced writes. Saturating. Render is the only writer.
-    // REALTIME_POLICY_BEGIN
-    fn add(&self, count: u64) {
-        if count != 0 {
-            let now = self.0.load(core::sync::atomic::Ordering::Relaxed);
-            self.0.store(
-                now.saturating_add(count),
-                core::sync::atomic::Ordering::Relaxed,
-            );
-        }
-    }
-    // REALTIME_POLICY_END
-}
-
-impl PartialEq for LiveValuesSuperseded {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for LiveValuesSuperseded {}
-
 /// Words of one fader or mute cell: the value (`fader_db` bits, or `0`/`1`) and the ramp window.
 const FADER_CELL_WORDS: usize = 2;
 /// Words of the matrix cell: `ll`, `lr`, `rl`, `rr` bits and the ramp window.
@@ -344,15 +291,6 @@ impl MatrixLane {
             dirty: DirtyWord::new(),
         }
     }
-}
-
-/// The layout of an `Arc<T>` allocation: the two counts, then `T` (the allocation `Arc::new`
-/// makes). The resource plan charges each lane by it.
-#[repr(C)]
-struct SharedAllocation<T> {
-    strong: AtomicUsize,
-    weak: AtomicUsize,
-    value: T,
 }
 
 /// Control's write end of one strip's fader/mute cells (#1312 D5). A write cannot fail and never
@@ -4074,16 +4012,17 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         &self.graph.estimate
     }
 
-    /// Give every route into a submix input a live lane before bind (issue #1220 D7), returning
-    /// one producer per lane in canonical route-ID order. Delegates to
+    /// Give every route into a submix input a live lane before bind (issue #1220 D7, #1347),
+    /// returning one producer per lane in canonical route-ID order. Every lane adds its replaced
+    /// writes to `superseded`, the session's count. Delegates to
     /// [`PreparedGraphPlan::attach_route_controls`]: the sealed graph is attached in place and
     /// never handed out. A second call is refused
     /// ([`graph::GraphRouteControlError::AlreadyAttached`]).
     pub fn attach_route_live_controls(
         &mut self,
-        depth: core::num::NonZeroUsize,
+        superseded: &LiveValuesSuperseded,
     ) -> Result<Vec<graph::GraphRouteControlProducer>, graph::GraphRouteControlError> {
-        self.graph.attach_route_controls(depth)
+        self.graph.attach_route_controls(superseded)
     }
 
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.
