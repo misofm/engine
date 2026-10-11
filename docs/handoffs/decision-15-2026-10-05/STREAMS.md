@@ -300,6 +300,7 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 | 30 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
 | 31 | #1482 | Attribute each claim's revisions exactly in the watermark and share one seqlock | #1314 | — |
 | 32 | #1499 | Build the shipped mobile C ABI libraries with the release profile's fat LTO, and gate it | — | G #1495 |
+| 33 | #1521 | Report live_block_errors through COUNTERS_GET on the C ABI | #1351 | — |
 
 - **Batches (root, 2026-10-05).** Batch 1 is orders 1-5. Batch 2 is orders 6-10,
   #1432 → #1502 → #1503 → #1504 → #1312, the revision-bounded cells: root's binding requirement
