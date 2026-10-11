@@ -203,13 +203,11 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
      4. **A read loop:** `for <x> in <K>.iter()` or `for <x> in &<K>`, whose body names `<x>` only
         as `*<x>`, never as the left operand of an assignment or compound assignment, never under
         `&mut`, and never in a closure or a macro token tree (the pass bound `1 + Σ remaining`).
-     5. **The terminal call.** A method-call statement whose receiver is a root or a prefix of
-        `<K>` or `<Q>` (`ready.reset_meter_delivery(false);`), standing directly in a block of the
-        function body, not inside a closure, a macro token tree or a nested `fn`, where the rest
-        of that block holds no loop, no pop, no closure and no macro call, and its last statement
-        is `return ..;` or a `break` out of the form's outermost loop. The meter poll's
-        producer-reset branch has that shape (`hosts/host-web/src/lib.rs:3554-3558` on
-        `6d28a80ec`).
+     5. **The terminal call.** A statement `<receiver>.<method>(..);` whose receiver is a root or a prefix of `<K>` or `<Q>`, in a block B. Every node from the function body down to B is a block, an `if` or `else` branch, a `match` arm body or the body of a loop: no closure, no `async`, `const`, `unsafe` or labelled block, no macro and no nested item. The statements after it in B (the **tail**) are not empty. The last statement of the tail is `return;`, `return <e>;` or `break [<'label>] [<e>];`, and that `break` leaves the form's outermost loop. Each other statement is `<e>;` or `let <pat> = <e>;` with no `else`. Every expression in the tail, including the operands of its last statement, is a literal, a path, a field access, an index, a call, a method call other than a pop, an assignment, a compound assignment, a binary or unary operation, a reference, a parenthesis, a cast, or a tuple, array or struct literal. Anything else in the tail refuses the form. Among them: `continue`, any other `break` or `return`, `?`, `.await`, `if`, `match`, a block, a loop, a closure and a macro.
+        The meter poll's producer-reset branch has that shape (`hosts/host-web/src/lib.rs:3554-3558` on
+        `6d28a80ec`). (root Amendment 1, a.2: this item replaces the earlier deny-list text.)
+
+     **Macros and attributes.** From the start of the set loop to the end of the form's outermost loop, any macro invocation refuses the form: by any path, in expression, statement, item, pattern or type position, `debug_assert!` included, and a macro nested in another macro's arguments included. Any attribute, outer or inner, on any node in that span also refuses the form. (root Amendment 1, a.1)
 
      Every other mention refuses the form. Among them: the bare root as a value, `&root`,
      `&mut *root` or any reborrow into a local, a destructure (`let Ready { .. } = &mut *root`), a
@@ -218,9 +216,7 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
      other position (`&mut <Q>`, `mem::swap(&mut <Q>, ..)`, an assignment, `.get_mut(..)`,
      `.iter_mut()` outside item 2); a call that takes a root or a prefix of `<K>` or `<Q>` other
      than item 5 (a function call, an argument, a call in a closure even if a `return` follows
-     it there); and any mention in a macro token tree,
-     except inside `debug_assert!`, whose arguments are parsed as expressions and held to this
-     same list (as D7). One pass loop per set loop: a second pass loop on the same counters names
+     it there); and any mention in a macro token tree. One pass loop per set loop: a second pass loop on the same counters names
      `&mut <K>` outside item 2 and is refused.
 
   Then each queue pops at most once per decrement, and its counter starts at its own count at
@@ -233,7 +229,7 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
   `&mut ready.meter_remaining`), item 3 (`ready.meters.get(index)` in the `.all(..)` closure),
   item 4 (the `passes` loop) and item 5 (`ready.reset_meter_delivery(false);`, then
   `ready.meter_loss_count = 1;`,
-  `self.meter_activation_sample = ..;`, `return 0;`), with no macro in the window; and it names
+  `self.meter_activation_sample = ..;`, `return 0;`), with no macro and no attribute from its set loop to the end of the `passes` loop; and it names
   `meter` only in `meter.consumer.try_pop()`. The B1b-D1 finite forms must accept its pass loop
   (B1b-D1 takes one or more `.zip(..)` steps).
 - **D9. Outer loops are not judged in this slice.** Any loop around the innermost bounding loop,
@@ -335,13 +331,69 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
     - `per_queue_root_reborrowed` (condition 6): after the pass loop,
       `let me = &mut *ready; for left in me.remaining.iter_mut() { *left = 8; }` (FP-2). Defect: a
       reborrowed root not read as a mention of `<K>`;
-    - `per_queue_counters_written_by_macro` (condition 6): a local
-      `macro_rules! refill { ($r:expr) => { for left in $r.remaining.iter_mut() { *left = 8; } }; }`
-      and `refill!(ready);` after the pass loop (FP-4). Defect: macro token trees skipped by
-      condition 6;
+    - `per_queue_counters_written_by_macro_defined_before` (condition 6; root Amendment 1,
+      probe-a; it replaces `per_queue_counters_written_by_macro`, which every-macro refusal leaves
+      with nothing of its own to defend): the function's first statement is a local
+      `macro_rules! refill { () => { for left in ready.remaining.iter_mut() { *left = 8; } }; }`,
+      then a correct set loop, and `refill!();` after the pass loop in the outer loop. The call names
+      no root. Defect: a macro in the window judged only by the root mentions in its own tokens;
+    - `per_queue_debug_assert_shadowed` (condition 6; R1): the first statement is
+      `macro_rules! debug_assert { ($e:expr) => { for left in ready.remaining.iter_mut() { *left = 8; } }; }`,
+      then a correct set loop, and `debug_assert!(true);` after the pass loop in the outer loop.
+      Defect: `debug_assert!` exempt from the macro rule;
+    - `per_queue_continue_in_terminal_tail` (condition 6; probe-b): after the pass loop, in the
+      outer loop, `if ready.lost > 9 { ready.refill_counters(); if flag { continue; } return 0; }`.
+      Defect: the tail judged by a deny-list that does not refuse `if` or `continue`;
+    - `per_queue_continue_in_terminal_return` (condition 6; R3): the same position,
+      `if ready.lost > 9 { ready.refill_counters(); return { if flag { continue; } 0 }; }`.
+      Defect: the operands of the tail's last statement not held to the allow-list;
+    - `per_queue_set_loop_under_cfg` (condition 6; R5): a correct form whose set loop carries
+      `#[cfg(any())]`. Defect: the attribute span starting at the window (the end of the set loop),
+      not at the set loop;
+    - `per_queue_terminal_return_under_cfg` (condition 6; R6): after the pass loop, in the outer
+      loop, `if ready.lost > 9 { ready.refill_counters(); #[cfg(any())] return 0; }`. Defect:
+      attributes not read on nested statements;
+    - `per_queue_second_pop_in_counted_inner_drain` (condition 5; attempt-1 verdict, MINOR-1,
+      probe-c): a correct form whose pass body, after the pop, binds `let n = self.other.available_at_entry();`
+      and runs `for _ in 0..n { if let Ok(x) = self.other.try_pop() { .. } }` (a second pop of a
+      disjoint field queue in a nested counted drain; it names no `<r'>`). Defect: the pass body's
+      only-pop check dropped. `per_queue_two_pops_one_decrement` cannot defend it alone: its second
+      pop also names `<r'>`;
   - an otherwise valid counted drain inside an `async` block. It expects {forbidden-body, drain}:
     the `async` keyword is forbidden (A2-D2), and `Expr::Async` on the pop's path refuses the
     drain (D4).
+
+### Root Amendment 1 (2026-10-11): D8b conditions 5 and 6 after attempt 1
+
+Authority: root decision under the owner's delegation, after the attempt-1 verdict FAIL
+(`/home/bl/misofm/submix-verdicts/1440-attempt1.md`: MAJOR-1, MAJOR-2) and an adversarial review of
+the coordinator's three amendments (ACCEPT WITH CHANGES). Root adopted the review's texts verbatim.
+Each is placed where it belongs and marked "(root Amendment 1)":
+
+- **a.1** The "Macros and attributes" paragraph of D8b condition 6 (every macro invocation and every
+  attribute from the set loop to the end of the outermost loop refuses the form, `debug_assert!`
+  included). It replaces the `debug_assert!` exception: the exception trusted a name that a local
+  `macro_rules!` or a `use x as debug_assert` can shadow (R1), and a macro defined before the set loop
+  writes the counters with no mention in the window (MAJOR-1, probe-a). The attribute part closes
+  `#[cfg(any())]` on the set loop, the terminal `return`, the guard and the guard's `continue` (R5,
+  R6, R8b, R9). Two companion edits: the mention list's trailing clause, and the meter-poll sentence
+  ("with no macro and no attribute from its set loop to the end of the `passes` loop").
+- **a.2** Condition 6 item 5 is an allow-list ("The terminal call"). It closes `continue` or a
+  nested `break` in the tail (MAJOR-2, probe-b), `continue` in the last statement's operand (R3), and
+  a `cfg` on the last statement (R6, with a.1).
+- **a.3** The Deref/DerefMut residual, in Hazards.
+- **c** Gate 4 and D11 add `per_queue_second_pop_in_counted_inner_drain` (attempt-1 MINOR-1) and the
+  six refused cases `per_queue_counters_written_by_macro_defined_before` (probe-a),
+  `per_queue_debug_assert_shadowed` (R1), `per_queue_continue_in_terminal_tail` (probe-b),
+  `per_queue_continue_in_terminal_return` (R3), `per_queue_set_loop_under_cfg` (R5) and
+  `per_queue_terminal_return_under_cfg` (R6), each with its mutation. R8b and R9 are PR evidence.
+  The row "macro token trees not read: `per_queue_counters_written_by_macro`" is rewritten as probe-a:
+  with every macro refused, that case defended nothing of its own.
+
+Production: `poll_meters` (`hosts/host-web/src/lib.rs:3446`) stays accepted: from its set loop to the
+end of its `passes` loop it has no macro and no attribute, and its terminal call
+(`ready.reset_meter_delivery(false);`, `ready.meter_loss_count = 1;`,
+`self.meter_activation_sample = ..;`, `return 0;`) fits the allow-list.
 
 ## Authorized paths
 
@@ -370,6 +422,11 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
   and an alias made with `unsafe` cannot exist outside the unsafe allowlist's files
   (`hosts/host-web/src/lib.rs` is not on it; `ffi.rs` is). A form that reads the counters through
   a raw pointer is not D8b's form and is refused.
+- **What D8b condition 6 leaves to the type system (root Amendment 1, a.3).** The tool reads no
+  types, so a user `Deref`/`DerefMut` on a root's type that writes the counters during auto-deref
+  is outside it. The roots in the real poll are a plain `&mut Ready`. The only `Deref` impls in
+  `crates/` and `hosts/` are on `ObservedController`
+  (`crates/control-plane/src/control.rs:357,365`).
 
 ## Objective gates
 
@@ -416,7 +473,22 @@ is `:208-228`, and the file has 463 lines), and every line of `scripts/test-real
      `per_queue_counters_refilled_in_closure`;
    - D8b, condition 6: a bare or reborrowed root (`&mut *root`) not read as a mention:
      `per_queue_root_reborrowed`;
-   - D8b, condition 6: macro token trees not read: `per_queue_counters_written_by_macro`;
+   - D8b, condition 6 (root Amendment 1): a macro in the window judged only by the root mentions
+     in its own tokens: `per_queue_counters_written_by_macro_defined_before`;
+   - D8b, condition 6: `debug_assert!` exempt from the macro rule: `per_queue_debug_assert_shadowed`;
+   - D8b, condition 6: the terminal tail judged by a deny-list that does not refuse `if` or
+     `continue`: `per_queue_continue_in_terminal_tail`;
+   - D8b, condition 6: the operands of the tail's last statement not held to the allow-list:
+     `per_queue_continue_in_terminal_return`;
+   - D8b, condition 6: the attribute span starts at the window (the end of the set loop), not at
+     the set loop: `per_queue_set_loop_under_cfg`;
+   - D8b, condition 6: attributes not read on nested statements:
+     `per_queue_terminal_return_under_cfg`;
+   - D8b, condition 5: the pass body's only-pop check dropped:
+     `per_queue_second_pop_in_counted_inner_drain`;
+   - PR evidence, not committed cases (root Amendment 1): R8b (`#[cfg(any())]` on the guard
+     `if slot.is_some() || *left == 0 { continue; }`) and R9 (`if .. { #[cfg(any())] continue; }`)
+     are refused by the attribute rule. Record both as refused in the attempt record;
    - D8b, condition 6: items 1 and 3 refused inside a closure (over-refusal):
      `per_queue_meter_poll` is refused (`poll_meters` is not marked until the #1448 guard
      commit, so the real tree cannot show it here);
