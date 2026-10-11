@@ -6179,3 +6179,172 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests;
+
+/// Issue #1277 D7: a fader or matrix lane's exported state, imported into another bank's lane,
+/// renders exactly what the exported lane renders next, ramp in flight or not.
+#[cfg(test)]
+mod lane_state {
+    use super::*;
+
+    fn banks() -> impl Iterator<Item = (Backend, BankWidth)> {
+        BankWidth::ALL.iter().map(|&width| (width.backend(), width))
+    }
+
+    const FRAMES: usize = 64;
+
+    /// Process `blocks` blocks of constant input on every lane of the banks and return lane
+    /// `lane`'s left and right output words of each, as bits.
+    fn run_fader(bank: &mut BuiltinFaderBank, lane: usize, blocks: usize, input: f32) -> Vec<u32> {
+        let lanes = bank.width().lanes() as usize;
+        let mut words = Vec::new();
+        for _ in 0..blocks {
+            let mut left = vec![input; FRAMES * lanes];
+            let mut right = vec![input * 0.5; FRAMES * lanes];
+            bank.process(&mut left, &mut right, FRAMES as u32);
+            for frame in 0..FRAMES {
+                words.push(left[frame * lanes + lane].to_bits());
+                words.push(right[frame * lanes + lane].to_bits());
+            }
+        }
+        words
+    }
+
+    fn run_matrix(bank: &mut BuiltinMatrixBank, lane: usize, blocks: usize) -> Vec<u32> {
+        let lanes = bank.width().lanes() as usize;
+        let mut words = Vec::new();
+        for _ in 0..blocks {
+            let mut left = vec![-0.5_f32; FRAMES * lanes];
+            let mut right = vec![0.25_f32; FRAMES * lanes];
+            bank.process(&mut left, &mut right, FRAMES as u32);
+            for frame in 0..FRAMES {
+                words.push(left[frame * lanes + lane].to_bits());
+                words.push(right[frame * lanes + lane].to_bits());
+            }
+        }
+        words
+    }
+
+    fn fader_params(db: [f32; 2], muted: bool) -> BuiltinParameters {
+        let mut parameters = BuiltinParameters::default();
+        parameters.left.fader_db = db[0];
+        parameters.right.fader_db = db[1];
+        parameters.left.muted = muted;
+        parameters.right.muted = muted;
+        parameters
+    }
+
+    /// A lane in the middle of a mute fade-out, with a fader move remembered while it fades, is
+    /// imported into a lane of a bank prepared with other values (unmuted, another gain). Both
+    /// then render the rest of the fade, a settled mute that is exactly `+0.0` on a negative
+    /// input, and the unmute, which returns to the remembered gain. Red if the countdown, the
+    /// ramp words, the mute flag or the remembered gain is not imported.
+    #[test]
+    fn a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders() {
+        for (backend, width) in banks() {
+            let members = 3;
+            let mut source = BuiltinFaderBank::new(
+                backend,
+                width,
+                (0..members)
+                    .map(|index| fader_params([-3.0 - index as f32, -6.0], false))
+                    .collect(),
+            )
+            .expect("source bank");
+            let mut destination = BuiltinFaderBank::new(
+                backend,
+                width,
+                (0..members)
+                    .map(|_| fader_params([0.0, 0.0], false))
+                    .collect(),
+            )
+            .expect("destination bank");
+            source
+                .set_mute(0, BuiltinLaneSelector::Both, true, 150)
+                .expect("lane");
+            // A fader move on the right channel while it fades: the lane remembers -9 dB for the
+            // unmute, and the right channel's fade restarts over 40 frames; the left one's goes on.
+            source
+                .set_fader_db(0, BuiltinLaneSelector::Right, -9.0, 40)
+                .expect("lane");
+            run_fader(&mut source, 0, 1, -0.5);
+            let state = source.export_lane(0).expect("a member lane");
+            destination.import_lane(2, &state).expect("a member lane");
+            for step in 0..2 {
+                let before = run_fader(&mut source, 0, 2, -0.5);
+                let after = run_fader(&mut destination, 2, 2, -0.5);
+                assert_eq!(before, after, "{backend:?}: fade block pair {step}");
+            }
+            // The mute has settled on both. The unmute retargets to the gain the lane remembers.
+            source
+                .set_mute(0, BuiltinLaneSelector::Both, false, 20)
+                .expect("lane");
+            destination
+                .set_mute(2, BuiltinLaneSelector::Both, false, 20)
+                .expect("lane");
+            assert_eq!(
+                run_fader(&mut source, 0, 2, -0.5),
+                run_fader(&mut destination, 2, 2, -0.5),
+                "{backend:?}: the unmute returns to the remembered gain"
+            );
+            // A padding lane or one past the bank is refused.
+            assert!(destination.export_lane(members).is_none());
+            assert!(destination.import_lane(members, &state).is_err());
+        }
+    }
+
+    /// The matrix counterpart: a lane in the middle of a pan ramp is imported into a settled lane
+    /// of another bank. Red if the countdown, the ramp words or the settled flags are not
+    /// imported.
+    #[test]
+    fn a_matrix_lane_imported_mid_ramp_renders_what_the_exported_lane_renders() {
+        for (backend, width) in banks() {
+            let members = 3;
+            let target = Matrix2x2 {
+                ll: 0.3,
+                lr: 0.1,
+                rl: 0.2,
+                rr: 0.9,
+            };
+            let mut source =
+                BuiltinMatrixBank::new(backend, width, vec![(Matrix2x2::IDENTITY, 0); members])
+                    .expect("source bank");
+            let mut destination = BuiltinMatrixBank::new(
+                backend,
+                width,
+                vec![
+                    (
+                        Matrix2x2 {
+                            ll: 0.5,
+                            lr: 0.0,
+                            rl: 0.0,
+                            rr: 0.5,
+                        },
+                        0
+                    );
+                    members
+                ],
+            )
+            .expect("destination bank");
+            source.set_target_smoothed(0, target, 200).expect("lane");
+            run_matrix(&mut source, 0, 1);
+            let state = source.export_lane(0).expect("a member lane");
+            destination.import_lane(1, &state).expect("a member lane");
+            assert_eq!(
+                run_matrix(&mut source, 0, 4),
+                run_matrix(&mut destination, 1, 4),
+                "{backend:?}: the pan ramp finishes the same"
+            );
+            // A settled lane carries too: the imported matrix, not the destination's own, is the
+            // one the next settled block applies.
+            let settled = source.export_lane(0).expect("a member lane");
+            destination.import_lane(2, &settled).expect("a member lane");
+            assert_eq!(
+                run_matrix(&mut source, 0, 1),
+                run_matrix(&mut destination, 2, 1),
+                "{backend:?}: a settled lane"
+            );
+            assert!(destination.export_lane(members).is_none());
+            assert!(destination.import_lane(members, &state).is_err());
+        }
+    }
+}

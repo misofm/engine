@@ -39,6 +39,12 @@ const SOURCE: &str = "fixture-source";
 const AUX_SOURCE: &str = "aux-source";
 const MUTED_TRACK: &str = "a-muted";
 
+/// Bytes of `moves` strip-stage moves in a carry program (#1277 D8): one per carried fader or
+/// matrix stage.
+fn strip_moves(moves: u64) -> u64 {
+    moves * core::mem::size_of::<graph::GraphStripMove>() as u64
+}
+
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("stable ID")
 }
@@ -189,8 +195,10 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     assert_eq!(
         report.carry_program_retained_bytes,
         core::mem::size_of::<(u32, u32)>() as u64
-            + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
-        "one (u32, u32) source move and the two unchanged input sections (#1276)"
+            + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+            + strip_moves(4),
+        "one (u32, u32) source move, the two unchanged input sections (#1276) and the fader and \
+         matrix stage of both kept strips (#1277)"
     );
 
     // The oracle can fail: today's fresh rebuild leaves the swap block silent.
@@ -282,8 +290,9 @@ fn a_changed_source_gets_its_own_ring() {
         assert_eq!(prepared.report.carried_source_total_bytes, 0);
         assert_eq!(
             prepared.report.carry_program_retained_bytes,
-            2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
-            "no source move; only the two unchanged input sections (#1276)"
+            2 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(4),
+            "no source move; the two unchanged input sections (#1276) and the fader and matrix \
+             stage of both strips (#1277)"
         );
         assert_eq!(
             prepared.report.source_total_bytes, fresh.source_total_bytes,
@@ -918,11 +927,12 @@ fn filtered_strips_keep_their_state(backend: Backend) {
         "{backend:?}: every block equals the post-edit session rendered from frame 0"
     );
     assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
-    // Nine input sections recorded, and all nine carry: one source move and nine lane moves.
+    // Nine input sections recorded, and all nine carry: one source move and nine lane moves, and
+    // (#1277) the fader and matrix stage of each of the nine strips.
     assert_eq!(a.prepare(backend).inventory.input_section_count(), 9);
     assert_eq!(
         run.successor.carry_program_retained_bytes,
-        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(18)
     );
 }
 
@@ -1403,8 +1413,9 @@ fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoB
         assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
         assert_eq!(
             run.successor.carry_program_retained_bytes,
-            core::mem::size_of::<(u32, u32)>() as u64,
-            "{name}, {backend:?}: the source moves, the changed section does not"
+            core::mem::size_of::<(u32, u32)>() as u64 + strip_moves(2),
+            "{name}, {backend:?}: the source moves, the changed section does not; the strip's \
+             fader and matrix stage still do (#1277)"
         );
         for block in 0..BLOCKS {
             let expected = if block < SWAP_BLOCK {
@@ -1476,7 +1487,7 @@ fn a_changed_control_kind_carries_no_input_section_at(a: &Session, b: &Session, 
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
     assert_eq!(
         plain.report.carry_program_retained_bytes,
-        source_only + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+        source_only + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(18)
     );
 }
 
@@ -1531,8 +1542,9 @@ fn a_track_replaced_by_a_submix_of_its_name_does_not_carry() {
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
         assert_eq!(
             prepared.report.carry_program_retained_bytes,
-            8 + core::mem::size_of::<graph::GraphLaneMove>() as u64,
-            "{backend:?}: the source and eq1's section move, the submix's section does not"
+            8 + core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(2),
+            "{backend:?}: the source and eq1's section move, the submix's section does not; eq1's \
+             fader and matrix stage move, the submix's do not (#1277)"
         );
     }
 }
@@ -2216,4 +2228,949 @@ fn a_collapsed_chain_renders_the_forced_dual_bits_at_four_lanes() {
 #[test]
 fn a_collapsed_chain_renders_the_forced_dual_bits_at_eight_lanes() {
     a_collapsed_chain_renders_the_forced_dual_bits(Backend::Simd8);
+}
+
+// Issue #1277 (slice 8 of #1269): a strip keeps its fader, mute and pan or matrix state through a
+// plan swap, a ramp in flight at the swap block included, and a structural transaction that also
+// changes a carried strip's live values sounds like "live edit, then structural edit" (D15-7).
+//
+// The cases run on live plans: every strip has latest-target cells, written with records stamped
+// from the plan's own gate handle, as the C ABI does. A swap hands the predecessor's lane state to
+// the successor, applies the predecessor's pending cells first (D8), and the successor applies its
+// own dirty cells at its first block (D5).
+
+use builtins::BuiltinLaneSelector;
+use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
+use session::{DualMonoFader, MatrixOrPan, Vca};
+
+/// The strip the ramp and retarget cases move: the first lane of the first bank of the predecessor
+/// at either width, so a carry that exports a lane before its bank's pending cells apply loses it.
+const MOVED: &str = "eq0";
+/// The strip the mute cases fade: the only lane of the last bank at either width.
+const FADED: &str = "eq8";
+
+/// The nine-track session of gate 1 of #1276 with non-unity faders and non-centre pans, per track
+/// and per channel.
+fn strip_state_session() -> SessionModel {
+    let mut model = filtered_session(false);
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        let step = index as f32;
+        track.fader.left_db = -1.0 - 0.5 * step;
+        track.fader.right_db = -2.0 + 0.25 * step;
+        track.matrix_or_pan = MatrixOrPan::Pan {
+            left: 0.95 - 0.05 * step,
+            right: 0.5 + 0.04 * step,
+            smoothing_samples: 16,
+        };
+    }
+    model
+}
+
+fn track_mut<'a>(model: &'a mut SessionModel, track: &str) -> &'a mut session::Track {
+    model
+        .tracks
+        .iter_mut()
+        .find(|candidate| candidate.id.as_str() == track)
+        .expect("track")
+}
+
+/// `model` with `track`'s fader dB set per channel.
+fn with_fader(mut model: SessionModel, track: &str, db: [f32; 2]) -> SessionModel {
+    let fader = &mut track_mut(&mut model, track).fader;
+    fader.left_db = db[0];
+    fader.right_db = db[1];
+    model
+}
+
+/// `model` with `track`'s pan set, over `smoothing_samples`.
+fn with_pan(
+    mut model: SessionModel,
+    track: &str,
+    pan: [f32; 2],
+    smoothing_samples: u32,
+) -> SessionModel {
+    track_mut(&mut model, track).matrix_or_pan = MatrixOrPan::Pan {
+        left: pan[0],
+        right: pan[1],
+        smoothing_samples,
+    };
+    model
+}
+
+/// `model` with `track`'s mute set on both channels.
+fn with_mute(mut model: SessionModel, track: &str, muted: bool) -> SessionModel {
+    let fader = &mut track_mut(&mut model, track).fader;
+    fader.left_mute = muted;
+    fader.right_mute = muted;
+    model
+}
+
+fn fader_both(db: f32, smoothing_samples: u32) -> TrackFaderRecord {
+    TrackFaderRecord::FaderDb {
+        lanes: BuiltinLaneSelector::Both,
+        db,
+        smoothing_samples,
+    }
+}
+
+fn mute_both(muted: bool, smoothing_samples: u32) -> TrackFaderRecord {
+    TrackFaderRecord::Mute {
+        lanes: BuiltinLaneSelector::Both,
+        muted,
+        smoothing_samples,
+    }
+}
+
+/// The record that moves a strip's pan to `pan` over `smoothing_samples`, as the classifier
+/// derives it.
+fn pan_record(pan: [f32; 2], smoothing_samples: u32) -> TrackControlRecord {
+    let (matrix, _) = builtins_compiler::lower_matrix_or_pan(&MatrixOrPan::Pan {
+        left: pan[0],
+        right: pan[1],
+        smoothing_samples,
+    })
+    .expect("a pan in domain");
+    TrackControlRecord {
+        matrix,
+        smoothing_samples,
+    }
+}
+
+/// How a plan's fader and matrix banks are built: one bank each, or the fused stage the browser's
+/// plans prepared between render calls get.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Form {
+    Split,
+    Fused,
+}
+
+/// One value written to a strip's cells.
+#[derive(Clone, Copy, Debug)]
+enum CellRecord {
+    Fader(TrackFaderRecord),
+    Matrix(TrackControlRecord),
+}
+
+/// A record written to `strip`'s cells before block `block` renders.
+#[derive(Clone, Copy, Debug)]
+struct CellWrite {
+    block: usize,
+    strip: &'static str,
+    record: CellRecord,
+}
+
+/// A live plan with the handle that stamps and publishes its writes.
+struct CellPlan {
+    live: LivePlan,
+    gate: engine::realtime::PlanRevisionGate,
+    /// The next revision a transaction stamps.
+    next: u64,
+}
+
+impl CellPlan {
+    fn prepared(
+        prepared: Result<
+            (host_core::PreparedHost, host_core::HostLiveControlHandles),
+            host_core::PrepareDiagnostics,
+        >,
+    ) -> (host_core::PreparedHost, host_core::HostLiveControlHandles) {
+        prepared.unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
+    }
+
+    fn fresh(session: &Session, backend: Backend, form: Form) -> Self {
+        let (mut prepared, handles) = Self::prepared(match form {
+            Form::Split => host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                &session.compiled,
+                &caps(),
+                &LivePlan::request(),
+                backend,
+            ),
+            Form::Fused => {
+                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
+                    &session.compiled,
+                    &caps(),
+                    &LivePlan::request(),
+                    backend,
+                )
+            }
+        });
+        let gate = prepared
+            .plan
+            .take_revision_gate()
+            .expect("a fresh plan's handle");
+        Self {
+            live: LivePlan { prepared, handles },
+            gate,
+            next: 1,
+        }
+    }
+
+    /// `session` prepared as the successor of the plan `inventory` describes, committing as
+    /// `revision`, with the commit's gate steps a host takes: stamp `revision` again on the
+    /// handle, which inherits the preparation's open stamp, and publish it.
+    fn successor_at(
+        session: &Session,
+        base: host_core::SuccessorBase<'_>,
+        backend: Backend,
+        form: Form,
+    ) -> Result<Self, host_core::PrepareDiagnostics> {
+        let revision = base.revision;
+        let (mut prepared, handles) = match form {
+            Form::Split => {
+                host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                    &session.compiled,
+                    &caps(),
+                    &LivePlan::request(),
+                    base,
+                    backend,
+                )
+            }
+            Form::Fused => {
+                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_successor_on(
+                    &session.compiled,
+                    &caps(),
+                    &LivePlan::request(),
+                    base,
+                    backend,
+                )
+            }
+        }?;
+        let mut gate = prepared
+            .plan
+            .take_revision_gate()
+            .expect("the successor's handle");
+        let _ = gate
+            .stamp(revision)
+            .expect("the open revision stamps again");
+        gate.publish(revision);
+        Ok(Self {
+            live: LivePlan { prepared, handles },
+            gate,
+            next: revision + 1,
+        })
+    }
+
+    fn successor(
+        session: &Session,
+        predecessor: &host_core::PlanStateInventory,
+        committed: &SessionModel,
+        backend: Backend,
+        form: Form,
+    ) -> Self {
+        Self::successor_at(
+            session,
+            host_core::SuccessorBase {
+                inventory: predecessor,
+                committed,
+                revision: successor::SUCCESSOR_REVISION,
+            },
+            backend,
+            form,
+        )
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"))
+    }
+
+    /// One transaction: every record stamped with one revision, then published.
+    fn write_all(&mut self, writes: &[(&str, CellRecord)]) {
+        if writes.is_empty() {
+            return;
+        }
+        let revision = self.next;
+        let stamp = self.gate.stamp(revision).expect("a legal revision");
+        for (strip, record) in writes {
+            let index = self
+                .live
+                .handles
+                .strips
+                .iter()
+                .position(|candidate| &**candidate == *strip)
+                .expect("strip");
+            let producer = &mut self.live.handles.strip_controls[index];
+            match *record {
+                CellRecord::Fader(record) => producer.fader.write(stamp, record),
+                CellRecord::Matrix(record) => producer.producer.write(stamp, record),
+            }
+        }
+        self.gate.publish(revision);
+        self.next = revision + 1;
+    }
+
+    fn write_block(&mut self, writes: &[CellWrite], block: usize) {
+        let now: Vec<(&str, CellRecord)> = writes
+            .iter()
+            .filter(|write| write.block == block)
+            .map(|write| (write.strip, write.record))
+            .collect();
+        self.write_all(&now);
+    }
+}
+
+/// The successor of a [`cell_run`] swap.
+struct Swap<'a> {
+    /// The post-edit session.
+    to: &'a Session,
+    /// The predecessor's base: the model it was prepared from plus every record written to it.
+    committed: &'a SessionModel,
+    form: Form,
+    /// Records written to the successor's cells after it is prepared, before it is swapped in.
+    successor_writes: &'a [(&'static str, CellRecord)],
+}
+
+struct CellRun {
+    blocks: Vec<Vec<u32>>,
+    carry: CarryOutcome,
+    /// The successor's `restarted_strips()`.
+    restarted: Vec<Box<str>>,
+    /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
+    /// deallocations)` over the hand-over plus the successor's first block.
+    swap_allocator: ((u64, u64, u64), (u64, u64)),
+}
+
+/// Render `a` and write `writes` to the plan that renders their block next; with a `swap`, prepare
+/// its successor at [`SWAP_BLOCK`], hand over and render on. Without one this is the reference
+/// run: `a` rendered from frame 0 to [`BLOCKS`], the post-edit session fed the same records at the
+/// same blocks.
+fn cell_run(
+    a: &Session,
+    form: Form,
+    swap: Option<Swap<'_>>,
+    feed: &Feed,
+    writes: &[CellWrite],
+    backend: Backend,
+) -> CellRun {
+    use bench_support::alloc as bench_alloc;
+    let mut plan = CellPlan::fresh(a, backend, form);
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut carry = CarryOutcome::NotRequested;
+    let mut restarted = Vec::new();
+    let mut swap_allocator = ((0, 0, 0), (0, 0));
+    plan.live.submit(feed, QUANTUM, 0);
+    for block in 0..BLOCKS {
+        plan.write_block(writes, block);
+        if let (SWAP_BLOCK, Some(swap)) = (block, &swap) {
+            let mut successor = CellPlan::successor(
+                swap.to,
+                &plan.live.prepared.inventory,
+                swap.committed,
+                backend,
+                swap.form,
+            );
+            restarted = successor.live.prepared.restarted_strips().to_vec();
+            successor.write_all(swap.successor_writes);
+            assert_eq!(
+                successor
+                    .live
+                    .prepared
+                    .sources
+                    .adopt_persisting(&mut plan.live.prepared.sources),
+                1
+            );
+            if block + 1 < BLOCKS {
+                successor.live.submit(feed, QUANTUM, block + 1);
+            }
+            let mut output = vec![f32::NAN; QUANTUM * 2];
+            engine::realtime::audit::reset();
+            let mark = bench_alloc::current_thread_counters();
+            carry = successor
+                .live
+                .prepared
+                .plan
+                .adopt_predecessor_plan(&mut plan.live.prepared.plan);
+            successor.live.render_into(&mut output, QUANTUM);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            let audit = engine::realtime::audit::snapshot();
+            swap_allocator = (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            );
+            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            plan = successor;
+            continue;
+        }
+        if block + 1 < BLOCKS {
+            plan.live.submit(feed, QUANTUM, block + 1);
+        }
+        blocks.push(plan.live.render(QUANTUM));
+    }
+    CellRun {
+        blocks,
+        carry,
+        restarted,
+        swap_allocator,
+    }
+}
+
+fn first_cell_difference(left: &CellRun, right: &CellRun) -> Option<usize> {
+    assert_eq!(left.blocks.len(), right.blocks.len());
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
+}
+
+fn forms() -> Vec<Form> {
+    vec![Form::Split, Form::Fused]
+}
+
+fn assert_swapped_like(run: &CellRun, reference: &CellRun, what: &str) {
+    assert_eq!(run.carry, CarryOutcome::Carried, "{what}: the swap block");
+    assert_eq!(
+        first_cell_difference(run, reference),
+        None,
+        "{what}: every block equals the reference"
+    );
+}
+
+/// Gate 1: nine tracks with non-unity faders and non-centre pans, plus #1276's input settings; B
+/// adds a muted track whose ID sorts first. Every block of the swapped run equals a fresh B fed
+/// from frame 0, nothing restarts, and all eighteen strip stages move.
+fn strip_state_survives_a_swap(backend: Backend) {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    assert_eq!(
+        b.compiled.normalized_model().tracks[0].id.as_str(),
+        MUTED_TRACK
+    );
+    let feed = Feed::new(SOURCE, 5);
+    let reference = reference_run(&b, &[&feed], backend);
+    let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+    assert_eq!(
+        (run.blocks[SWAP_BLOCK].swap, run.blocks[SWAP_BLOCK].carry),
+        (SwapOutcome::Applied, CarryOutcome::Carried),
+        "{backend:?}: the swap block"
+    );
+    assert_eq!(
+        first_difference(&run.blocks, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session rendered from frame 0"
+    );
+    assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
+    assert!(run.restarted.is_empty(), "{backend:?}: {:?}", run.restarted);
+    // Nine strips: one source move, nine input lanes, and a fader and a matrix move each.
+    assert_eq!(a.prepare(backend).inventory.strip_stage_count(), 18);
+    assert_eq!(
+        run.successor.carry_program_retained_bytes,
+        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+            + 18 * core::mem::size_of::<graph::GraphStripMove>() as u64
+    );
+}
+
+/// Red if a stage is keyed by lane or index, not strip ID (the added track sorts first, so every
+/// kept lane moves and two cross into the next bank), if a stage is left out of the program, or
+/// if the join lists a strip that carried.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn strip_state_survives_a_swap_at_eight_lanes() {
+    strip_state_survives_a_swap(Backend::Simd8);
+}
+
+#[test]
+fn strip_state_survives_a_swap_at_four_lanes() {
+    strip_state_survives_a_swap(Backend::Simd4);
+}
+
+/// The model, the records and the sessions of gate 2: a fader ramp over `RAMP_FRAMES` frames, a
+/// pan ramp and a mute fade, all in flight across the swap.
+const RAMP_FRAMES: u32 = 400;
+
+fn ramp_writes() -> Vec<CellWrite> {
+    [
+        (MOVED, CellRecord::Fader(fader_both(-12.0, RAMP_FRAMES))),
+        (MOVED, CellRecord::Matrix(pan_record([0.2, 0.9], 300))),
+        (FADED, CellRecord::Fader(mute_both(true, 350))),
+    ]
+    .into_iter()
+    .map(|(strip, record)| CellWrite {
+        block: SWAP_BLOCK,
+        strip,
+        record,
+    })
+    .collect()
+}
+
+/// A's model after [`ramp_writes`]: the base a structural transaction commits over.
+fn ramped_model() -> SessionModel {
+    let model = with_fader(strip_state_session(), MOVED, [-12.0, -12.0]);
+    let model = with_pan(model, MOVED, [0.2, 0.9], 300);
+    with_mute(model, FADED, true)
+}
+
+fn feed_for_strips() -> Feed {
+    Feed::new(SOURCE, 7)
+}
+
+/// Gate 2/3, first case: the records are written to A's cells between blocks 5 and 6, committed in
+/// the base, and A is swapped out at block 6 before it renders again, so they are still dirty in
+/// A's cells and only the carry's `apply_pending` applies them. The reference is A plus the muted
+/// track, fed the same records at the same blocks.
+fn a_ramp_in_flight_finishes_after_the_swap(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b_after = Session::compile(with_muted_track(ramped_model()));
+    let b_before = Session::compile(with_muted_track(strip_state_session()));
+    let committed = ramped_model();
+    let feed = feed_for_strips();
+    let writes = ramp_writes();
+    let reference = cell_run(&b_before, form, None, &feed, &writes, backend);
+    let silent = cell_run(&b_before, form, None, &feed, &[], backend);
+    assert!(
+        reference.blocks[SWAP_BLOCK..SWAP_BLOCK + 3]
+            .iter()
+            .zip(&silent.blocks[SWAP_BLOCK..SWAP_BLOCK + 3])
+            .all(|(moved, rest)| moved != rest),
+        "{backend:?} {form:?}: the ramp is audible in the three blocks after the swap"
+    );
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b_after,
+            committed: &committed,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &writes,
+        backend,
+    );
+    assert_swapped_like(&run, &reference, &format!("{backend:?} {form:?}"));
+    assert!(run.restarted.is_empty(), "{:?}", run.restarted);
+}
+
+/// Gate 2/3, second case: the records are written to the pending successor's cells (a live edit
+/// committed after the structural transaction, #1053 D7), so the carry's lane state is at rest and
+/// the successor applies the records at its first block.
+fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    let committed = strip_state_session();
+    let feed = feed_for_strips();
+    let writes = ramp_writes();
+    let reference = cell_run(&b, form, None, &feed, &writes, backend);
+    let successor_writes: Vec<(&'static str, CellRecord)> = writes
+        .iter()
+        .map(|write| (write.strip, write.record))
+        .collect();
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &committed,
+            form,
+            successor_writes: &successor_writes,
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_swapped_like(&run, &reference, &format!("{backend:?} {form:?}"));
+}
+
+#[test]
+fn a_ramp_in_flight_finishes_after_the_swap_at_four_lanes() {
+    for form in forms() {
+        a_ramp_in_flight_finishes_after_the_swap(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
+    for form in forms() {
+        a_ramp_in_flight_finishes_after_the_swap(Backend::Simd8, form);
+    }
+}
+
+#[test]
+fn records_in_the_pending_successor_apply_at_its_first_block_at_four_lanes() {
+    for form in forms() {
+        records_in_the_pending_successor_apply_at_its_first_block(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn records_in_the_pending_successor_apply_at_its_first_block_at_eight_lanes() {
+    for form in forms() {
+        records_in_the_pending_successor_apply_at_its_first_block(Backend::Simd8, form);
+    }
+}
+
+/// Gate 4: B also changes strip X's fader and pan, live values. Run 1 prepares B from A's base and
+/// X's stage carries, then D5's records retarget it. Run 2 writes the same records to A just
+/// before the swap and prepares B from a base that already holds them. The runs are bit-identical
+/// in every block, and X is not in the restart set.
+fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
+    let after = |model: SessionModel| {
+        let model = with_fader(model, MOVED, [-4.0, -6.0]);
+        with_pan(model, MOVED, [0.8, 0.6], 300)
+    };
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(after(strip_state_session())));
+    let before = strip_state_session();
+    let moved = after(strip_state_session());
+    let feed = feed_for_strips();
+    let records = [
+        CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -4.0,
+            smoothing_samples: 0,
+        }),
+        CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Right,
+            db: -6.0,
+            smoothing_samples: 0,
+        }),
+        CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
+    ];
+    let writes: Vec<CellWrite> = records
+        .iter()
+        .map(|record| CellWrite {
+            block: SWAP_BLOCK,
+            strip: MOVED,
+            record: *record,
+        })
+        .collect();
+    let retargeted = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    let written = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &moved,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &writes,
+        backend,
+    );
+    assert_eq!(retargeted.carry, CarryOutcome::Carried);
+    assert_eq!(written.carry, CarryOutcome::Carried);
+    assert!(
+        retargeted.restarted.is_empty() && written.restarted.is_empty(),
+        "{backend:?} {form:?}: {:?} {:?}",
+        retargeted.restarted,
+        written.restarted
+    );
+    assert_eq!(
+        first_cell_difference(&retargeted, &written),
+        None,
+        "{backend:?} {form:?}: carry then retarget sounds like live edit then structural edit"
+    );
+    // Not vacuous: the pan ramp is audible after the swap, so a retarget that is dropped or a
+    // stage that restarts at the new values differs from the written run.
+    let unmoved = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &Session::compile(with_muted_track(strip_state_session())),
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_ne!(
+        unmoved.blocks[SWAP_BLOCK + 1],
+        retargeted.blocks[SWAP_BLOCK + 1]
+    );
+}
+
+#[test]
+fn a_live_difference_retargets_the_carried_stage_at_four_lanes() {
+    for form in forms() {
+        a_live_difference_retargets_the_carried_stage(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_live_difference_retargets_the_carried_stage_at_eight_lanes() {
+    for form in forms() {
+        a_live_difference_retargets_the_carried_stage(Backend::Simd8, form);
+    }
+}
+
+/// `model` with a VCA over `track`, offset `db` on both channels.
+fn with_vca(mut model: SessionModel, track: &str, db: f32) -> SessionModel {
+    model.vcas.push(Vca {
+        id: id("trim-group"),
+        fader: DualMonoFader {
+            left_db: db,
+            right_db: db,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: vec![id(track)],
+    });
+    model
+}
+
+/// Gate 5: B adds a VCA with a +3 dB offset over X. A VCA is a prepared difference until #1247, so
+/// X's stage starts at rest at the new effective value and `restarted_strips()` is exactly `[X]`,
+/// on a live plan, which has the cells a live difference would retarget. #1247 rewrites this gate
+/// when VCA changes become live.
+fn a_prepared_change_restarts_the_stage(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b_model = with_vca(with_muted_track(strip_state_session()), MOVED, 3.0);
+    let b = Session::compile(b_model);
+    let feed = feed_for_strips();
+    let reference = cell_run(&b, form, None, &feed, &[], backend);
+    let without = cell_run(
+        &Session::compile(with_muted_track(strip_state_session())),
+        form,
+        None,
+        &feed,
+        &[],
+        backend,
+    );
+    assert!(
+        first_cell_difference(&reference, &without).is_some(),
+        "{backend:?} {form:?}: the offset is audible"
+    );
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &a.model,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?} {form:?}: exactly X restarts"
+    );
+    // The blocks before the swap are A's, without the offset; from the swap block on, X's stage
+    // renders exactly what B's fresh plan does.
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: X's stage starts at rest at the new effective value"
+    );
+}
+
+#[test]
+fn a_prepared_change_restarts_the_stage_at_four_lanes() {
+    for form in forms() {
+        a_prepared_change_restarts_the_stage(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_prepared_change_restarts_the_stage_at_eight_lanes() {
+    for form in forms() {
+        a_prepared_change_restarts_the_stage(Backend::Simd8, form);
+    }
+}
+
+/// Gate 6: with a ramp in flight, a pending cell value in the predecessor and a retarget in the
+/// successor, the swap block makes no allocator call and no audited allocation.
+#[test]
+fn the_strip_carry_allocates_and_frees_nothing() {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let a = Session::compile(strip_state_session());
+    let committed = with_fader(strip_state_session(), MOVED, [-12.0, -12.0]);
+    let b_model = with_pan(
+        with_muted_track(with_fader(committed.clone(), MOVED, [-12.0, -12.0])),
+        FADED,
+        [0.3, 0.7],
+        200,
+    );
+    let b = Session::compile(b_model);
+    let feed = feed_for_strips();
+    let writes = [CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record: CellRecord::Fader(fader_both(-12.0, RAMP_FRAMES)),
+    }];
+    for backend in backends() {
+        for form in forms() {
+            let run = cell_run(
+                &a,
+                form,
+                Some(Swap {
+                    to: &b,
+                    committed: &committed,
+                    form,
+                    successor_writes: &[],
+                }),
+                &feed,
+                &writes,
+                backend,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried);
+            assert_eq!(
+                run.swap_allocator,
+                ((0, 0, 0), (0, 0)),
+                "{backend:?} {form:?}: allocator calls and audited allocations at the swap block"
+            );
+        }
+    }
+}
+
+/// D9: a fused stage and a split one do not pair. Every strip present in both starts at rest and
+/// is listed, the hand-over still reports `Carried`, and the successor sounds like a fresh one.
+#[test]
+fn a_cross_form_pair_does_not_carry() {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    let feed = feed_for_strips();
+    for backend in backends() {
+        for (from, to) in [(Form::Split, Form::Fused), (Form::Fused, Form::Split)] {
+            let reference = cell_run(&b, to, None, &feed, &[], backend);
+            let run = cell_run(
+                &a,
+                from,
+                Some(Swap {
+                    to: &b,
+                    committed: &a.model,
+                    form: to,
+                    successor_writes: &[],
+                }),
+                &feed,
+                &[],
+                backend,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried);
+            assert_eq!(run.restarted.len(), 9, "{backend:?} {from:?} to {to:?}");
+            assert_eq!(first_cell_difference(&run, &reference), None);
+        }
+    }
+}
+
+/// D4: a stage carries only between plans that attach the same control kind. A plan without live
+/// controls has no cells to retarget, so the successor's stages start at rest and every strip is
+/// listed.
+#[test]
+fn a_changed_control_kind_carries_no_strip_stage() {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    for backend in backends() {
+        let predecessor = a.prepare(backend);
+        let successor =
+            CellPlan::successor(&b, &predecessor.inventory, &a.model, backend, Form::Split);
+        assert_eq!(successor.live.prepared.restarted_strips().len(), 9);
+        assert_eq!(
+            successor.live.prepared.report.carry_program_retained_bytes,
+            // The source only: the control kind differs, so no input lane and no strip stage moves.
+            8,
+            "{backend:?}"
+        );
+    }
+}
+
+/// D10: a successor's revision is one its gate can stamp. Refused before anything is built.
+#[test]
+fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    let backend = Backend::current();
+    let predecessor = a.prepare(backend);
+    for revision in [0, engine::realtime::GATE_REVISION_MAX + 1, u64::MAX] {
+        let refused = CellPlan::successor_at(
+            &b,
+            host_core::SuccessorBase {
+                inventory: &predecessor.inventory,
+                committed: &a.model,
+                revision,
+            },
+            backend,
+            Form::Split,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("revision {revision} was accepted"));
+        assert_eq!(refused.kind(), PrepareRejection::Session);
+        assert_eq!(
+            refused.as_bytes(),
+            b"host.successor.revision\t$\n",
+            "revision {revision}"
+        );
+    }
+    let accepted = engine::realtime::GATE_REVISION_MAX;
+    assert!(
+        CellPlan::successor_at(
+            &b,
+            host_core::SuccessorBase {
+                inventory: &predecessor.inventory,
+                committed: &a.model,
+                revision: accepted,
+            },
+            backend,
+            Form::Split,
+        )
+        .is_ok()
+    );
+}
+
+/// The revision-gate handle of a successor of the nine-track session, prepared with live cells
+/// from `committed` to `next`.
+fn successor_handle(
+    committed: &SessionModel,
+    next: SessionModel,
+) -> engine::realtime::PlanRevisionGate {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(next);
+    let backend = Backend::current();
+    let predecessor = CellPlan::fresh(&a, backend, Form::Split);
+    let (mut prepared, _handles) =
+        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &b.compiled,
+            &caps(),
+            &LivePlan::request(),
+            host_core::SuccessorBase {
+                inventory: &predecessor.live.prepared.inventory,
+                committed,
+                revision: successor::SUCCESSOR_REVISION,
+            },
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+    prepared
+        .plan
+        .take_revision_gate()
+        .expect("the successor's handle")
+}
+
+/// D5: a preparation that writes no retarget does not stamp. Red if every successor stamps its
+/// revision: the handle would hold it open, and a debug build refuses another revision stamped
+/// before it is published.
+#[test]
+fn a_preparation_without_a_retarget_stamps_nothing() {
+    let a = strip_state_session();
+    let mut gate = successor_handle(&a, with_muted_track(strip_state_session()));
+    gate.stamp(successor::SUCCESSOR_REVISION + 5)
+        .expect("a different revision stamps on a handle with no open stamp");
 }

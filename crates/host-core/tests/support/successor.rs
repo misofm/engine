@@ -228,6 +228,8 @@ pub(crate) struct SwappedRun {
     pub(crate) successor_sources: SourceControlSet,
     /// What `adopt_persisting` returned (zero for [`Successor::Fresh`]).
     pub(crate) adopted: usize,
+    /// The successor's `restarted_strips()` (#1277 D6).
+    pub(crate) restarted: Vec<Box<str>>,
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks, prepare `b` as its successor (committed model: `a`'s),
@@ -270,6 +272,7 @@ pub(crate) fn swapped_run(
         }
         Successor::Fresh => (b.prepare(backend), 0),
     };
+    let restarted = b_prepared.restarted_strips().to_vec();
     let PreparedHost {
         mut plan,
         sources: mut b_sources,
@@ -302,6 +305,7 @@ pub(crate) fn swapped_run(
         predecessor_sources: a_sources,
         successor_sources: b_sources,
         adopted,
+        restarted,
     }
 }
 

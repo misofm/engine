@@ -1102,6 +1102,48 @@ pub fn test_only_prepare_host_runtime_with_live_controls_successor_on(
     )
 }
 
+/// Test-support width seam (issue #1277 gate 3): [`prepare_host_runtime_between_render_calls`] on
+/// an explicit bank width, the browser's form, whose fader and matrix banks fuse into one stage.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_prepare_host_runtime_between_render_calls_on(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    backend: Backend,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        true,
+        backend,
+        None,
+    )
+}
+
+/// Test-support width seam (issue #1277 gate 3): the successor of a running plan, prepared between
+/// render calls. No host prepares a successor in that form today; the seam proves the fused stage
+/// carries (D8, D9).
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_prepare_host_runtime_between_render_calls_successor_on(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    base: SuccessorBase<'_>,
+    backend: Backend,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        true,
+        backend,
+        Some(base),
+    )
+}
+
 /// Test-only preparation seam for exercising the scalar lowering against the native bank.
 /// Production callers remain pinned to [`Backend::current`].
 #[cfg(test)]
