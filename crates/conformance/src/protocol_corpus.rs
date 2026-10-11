@@ -89,7 +89,10 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetOutputProfile {
             output_profile: session.output_profile.clone(),
         },
-        SessionEdit::SetConsole { console },
+        SessionEdit::SetConsole {
+            console,
+            ramp_samples: None,
+        },
         SessionEdit::UpsertSource {
             source: source.clone(),
         },
@@ -118,6 +121,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetTrackBuiltins {
             track_id: track_id.clone(),
             builtins: track.builtins.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
@@ -163,6 +167,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             rack_name: RackName::Inserts,
             effect_id: effect_id.clone(),
             link_mode: effect.link_mode,
+            ramp_samples: None,
         },
         SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
@@ -186,14 +191,17 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: track.fader.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackMatrixOrPan {
             track_id: track_id.clone(),
             matrix_or_pan: track.matrix_or_pan.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetTrackConsole {
             track_id: track_id.clone(),
             console: track_console,
+            ramp_samples: None,
         },
         SessionEdit::UpsertSubmix { submix },
         SessionEdit::RemoveSubmix {
@@ -227,21 +235,25 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetRouteChannelMatrix {
             route_id: route.id.clone(),
             channel_matrix: route.channel_matrix.clone(),
+            ramp_samples: None,
         },
         SessionEdit::SetRouteGainDb {
             route_id: route.id.clone(),
             gain_db: route.gain_db,
+            ramp_samples: None,
         },
         // #1216: the route's on/off switch, encoded on (the upserted route carries field 6 off).
         SessionEdit::SetRouteMute {
             route_id: route.id.clone(),
             mute: true,
+            ramp_samples: None,
         },
         // #1218: the follow switch, encoded on (the upserted route carries field 7 off). A codec
         // value: a store would refuse it on this output route, and the corpus is never applied.
         SessionEdit::SetRouteFollowsMute {
             route_id: route.id.clone(),
             follows_mute: true,
+            ramp_samples: None,
         },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
@@ -283,6 +295,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
                 left_mute: true,
                 right_mute: false,
             },
+            ramp_samples: None,
         },
     ]
 }
@@ -532,6 +545,7 @@ fn rack_addressed_edits(
                 rack_name,
                 effect_id: effect_id.clone(),
                 link_mode: LinkMode::Maximum,
+                ramp_samples: None,
             },
         ),
         (

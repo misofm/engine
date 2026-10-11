@@ -3759,6 +3759,7 @@ fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
                 protocol::SessionEdit::SetTrackFader {
                     track_id: session::StableId::parse(&track_id).expect("track ID"),
                     fader: fader.clone(),
+                    ramp_samples: None,
                 },
             ]),
         )

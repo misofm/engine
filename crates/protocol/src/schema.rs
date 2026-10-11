@@ -1174,9 +1174,11 @@ pub(crate) mod session {
     pub(crate) mod set_console {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &console::SPEC);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(2, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetConsole",
-            fields: &[VALUE],
+            fields: &[VALUE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod upsert_source {
@@ -1238,9 +1240,11 @@ pub(crate) mod session {
         use super::*;
         pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const BUILTINS: FieldSpec = FieldSpec::msg(2, true, false, &builtins::SPEC);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetTrackBuiltins",
-            fields: &[TRACK_ID, BUILTINS],
+            fields: &[TRACK_ID, BUILTINS, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_track_rack {
@@ -1329,9 +1333,11 @@ pub(crate) mod session {
         pub(crate) const RACK_NAME: FieldSpec = FieldSpec::req(2, Wire::U8);
         pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
         pub(crate) const VALUE: FieldSpec = FieldSpec::req(4, Wire::U8);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(5, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetEffectLinkMode",
-            fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE],
+            fields: &[TRACK_ID, RACK_NAME, EFFECT_ID, VALUE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_effect_sidechain {
@@ -1372,27 +1378,33 @@ pub(crate) mod session {
         use super::*;
         pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &fader::SPEC);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetTrackFader",
-            fields: &[TRACK_ID, VALUE],
+            fields: &[TRACK_ID, VALUE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_track_matrix {
         use super::*;
         pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &matrix_or_pan::KNOWN);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetTrackMatrixOrPan",
-            fields: &[TRACK_ID, VALUE],
+            fields: &[TRACK_ID, VALUE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_track_console {
         use super::*;
         pub(crate) const TRACK_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const ENTRY: FieldSpec = FieldSpec::msg(2, true, true, &console_entry::SPEC);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetTrackConsole",
-            fields: &[TRACK_ID, ENTRY],
+            fields: &[TRACK_ID, ENTRY, RAMP_SAMPLES],
         };
     }
     pub(crate) mod upsert_submix {
@@ -1466,36 +1478,44 @@ pub(crate) mod session {
         use super::*;
         pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &channel_matrix::SPEC);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetRouteChannelMatrix",
-            fields: &[ROUTE_ID, VALUE],
+            fields: &[ROUTE_ID, VALUE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_route_gain {
         use super::*;
         pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const GAIN_DB: FieldSpec = FieldSpec::req(2, Wire::F32);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetRouteGainDb",
-            fields: &[ROUTE_ID, GAIN_DB],
+            fields: &[ROUTE_ID, GAIN_DB, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_route_mute {
         use super::*;
         pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const MUTE: FieldSpec = FieldSpec::req(2, Wire::Bool);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetRouteMute",
-            fields: &[ROUTE_ID, MUTE],
+            fields: &[ROUTE_ID, MUTE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod set_route_follows_mute {
         use super::*;
         pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const FOLLOWS_MUTE: FieldSpec = FieldSpec::req(2, Wire::Bool);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetRouteFollowsMute",
-            fields: &[ROUTE_ID, FOLLOWS_MUTE],
+            fields: &[ROUTE_ID, FOLLOWS_MUTE, RAMP_SAMPLES],
         };
     }
     pub(crate) mod upsert_automation {
@@ -1554,10 +1574,32 @@ pub(crate) mod session {
         use super::*;
         pub(crate) const VCA_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &fader::SPEC);
+        /// #1394: this edit's own ramp length in samples, absent for the session default.
+        pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetVcaFader",
-            fields: &[VCA_ID, VALUE],
+            fields: &[VCA_ID, VALUE, RAMP_SAMPLES],
         };
+    }
+
+    /// The optional `ramp_samples` field of a live-value edit's payload (#1394 D1), or `None` for
+    /// an opcode that does not carry one.
+    pub(crate) const fn ramp_samples_field(opcode: crate::SessionEditOpcode) -> Option<FieldSpec> {
+        use crate::SessionEditOpcode::*;
+        match opcode {
+            SetConsole => Some(set_console::RAMP_SAMPLES),
+            SetTrackBuiltins => Some(set_track_builtins::RAMP_SAMPLES),
+            SetEffectLinkMode => Some(set_effect_link::RAMP_SAMPLES),
+            SetTrackFader => Some(set_track_fader::RAMP_SAMPLES),
+            SetTrackMatrixOrPan => Some(set_track_matrix::RAMP_SAMPLES),
+            SetTrackConsole => Some(set_track_console::RAMP_SAMPLES),
+            SetRouteChannelMatrix => Some(set_route_matrix::RAMP_SAMPLES),
+            SetRouteGainDb => Some(set_route_gain::RAMP_SAMPLES),
+            SetRouteMute => Some(set_route_mute::RAMP_SAMPLES),
+            SetRouteFollowsMute => Some(set_route_follows_mute::RAMP_SAMPLES),
+            SetVcaFader => Some(set_vca_fader::RAMP_SAMPLES),
+            _ => None,
+        }
     }
 
     pub(crate) fn payload_spec(opcode: crate::SessionEditOpcode) -> &'static MessageSpec {

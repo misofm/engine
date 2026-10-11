@@ -8,10 +8,10 @@ use core::fmt;
 
 use session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
-    Console, ConsoleEntry, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
-    EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route,
-    RouteDestination, RouteSource, SessionModel, SidechainDeclaration, Source, SourceBitDepth,
-    StableId, Submix, Vca, compile_session,
+    Console, ConsoleEntry, DualMonoBuiltins, DualMonoFader, EditRampRow, EditRampTarget, EditRamps,
+    Effect, EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack,
+    RackName, RenderProfile, Route, RouteDestination, RouteSource, SessionModel,
+    SidechainDeclaration, Source, SourceBitDepth, StableId, Submix, Vca, compile_session,
 };
 
 use crate::{ExpectedRevision, SessionRevision};
@@ -201,7 +201,12 @@ pub enum SessionEdit {
     /// slot must rewrite every strip's entries in the same transaction (`SetTrackConsole`,
     /// `UpsertTrack` or `UpsertSubmix`), or the final validation refuses the whole transaction and
     /// nothing is committed.
-    SetConsole { console: Console },
+    SetConsole {
+        console: Console,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
+    },
     /// Insert or replace one source by stable ID.
     UpsertSource { source: Source },
     /// Remove one source without cascading references.
@@ -234,6 +239,9 @@ pub enum SessionEdit {
         /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         builtins: DualMonoBuiltins,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Replace a complete named effect rack.
     SetTrackRack {
@@ -312,6 +320,9 @@ pub enum SessionEdit {
         effect_id: StableId,
         /// New link mode.
         link_mode: session::LinkMode,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Set a named effect's sidechain declaration.
     SetEffectSidechain {
@@ -353,12 +364,18 @@ pub enum SessionEdit {
         /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         fader: DualMonoFader,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Set a strip's matrix or pan declaration.
     SetTrackMatrixOrPan {
         /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         matrix_or_pan: MatrixOrPan,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Replace one strip's whole console entry array (decision 12).
     ///
@@ -370,6 +387,9 @@ pub enum SessionEdit {
         track_id: StableId,
         /// The complete ordered entries, one per session console slot.
         console: Vec<ConsoleEntry>,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Insert or replace a submix.
     UpsertSubmix { submix: Submix },
@@ -397,16 +417,34 @@ pub enum SessionEdit {
     SetRouteChannelMatrix {
         route_id: StableId,
         channel_matrix: ChannelMatrix,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Set one route's gain in decibels.
-    SetRouteGainDb { route_id: StableId, gain_db: f32 },
+    SetRouteGainDb {
+        route_id: StableId,
+        gain_db: f32,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
+    },
     /// Set one route's on/off switch; a muted route stays in the graph.
-    SetRouteMute { route_id: StableId, mute: bool },
+    SetRouteMute {
+        route_id: StableId,
+        mute: bool,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
+    },
     /// Set whether one route follows its source strip's lane mutes. Validated on the final
     /// candidate: only a route into a submix may follow.
     SetRouteFollowsMute {
         route_id: StableId,
         follows_mute: bool,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
     /// Insert or replace persistent automation by stable ID.
     UpsertAutomation { automation: Automation },
@@ -434,6 +472,9 @@ pub enum SessionEdit {
     SetVcaFader {
         vca_id: StableId,
         fader: DualMonoFader,
+        /// This edit's own ramp length in samples; absent means the session's `control_smoothing`
+        /// (#1394). Transaction metadata, never model state.
+        ramp_samples: Option<u32>,
     },
 }
 
@@ -492,6 +533,103 @@ impl SessionEdit {
     }
 }
 
+impl SessionEdit {
+    /// The per-edit ramp length in samples that this edit carries (#1394), if it is one of the
+    /// live-value edits and has one. `None` for every other edit and for a live-value edit that
+    /// leaves it absent, which means the session's `control_smoothing`.
+    #[must_use]
+    pub const fn ramp_samples(&self) -> Option<u32> {
+        match self {
+            Self::SetConsole { ramp_samples, .. }
+            | Self::SetTrackBuiltins { ramp_samples, .. }
+            | Self::SetEffectLinkMode { ramp_samples, .. }
+            | Self::SetTrackFader { ramp_samples, .. }
+            | Self::SetTrackMatrixOrPan { ramp_samples, .. }
+            | Self::SetTrackConsole { ramp_samples, .. }
+            | Self::SetRouteChannelMatrix { ramp_samples, .. }
+            | Self::SetRouteGainDb { ramp_samples, .. }
+            | Self::SetRouteMute { ramp_samples, .. }
+            | Self::SetRouteFollowsMute { ramp_samples, .. }
+            | Self::SetVcaFader { ramp_samples, .. } => *ramp_samples,
+            _ => None,
+        }
+    }
+}
+
+/// Record into `ramps` the rows `edit` wrote and the length it gave them (#1394 D3): the last
+/// edit that writes a `(target, row)` decides it, so a later edit without a length removes an
+/// earlier one's. An upsert rewrites its target's rows with no length and clears them.
+fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
+    let length = edit.ramp_samples();
+    let mut write = |target: EditRampTarget, rows: &[EditRampRow]| {
+        for row in rows {
+            ramps.set(&target, *row, length);
+        }
+    };
+    match edit {
+        SessionEdit::SetTrackFader { track_id, .. } => write(
+            EditRampTarget::Strip(track_id.clone()),
+            &[EditRampRow::Fader, EditRampRow::Mute],
+        ),
+        SessionEdit::SetTrackMatrixOrPan { track_id, .. } => write(
+            EditRampTarget::Strip(track_id.clone()),
+            &[EditRampRow::Matrix],
+        ),
+        SessionEdit::SetTrackBuiltins { track_id, .. } => write(
+            EditRampTarget::Strip(track_id.clone()),
+            &[EditRampRow::Input],
+        ),
+        SessionEdit::SetTrackConsole { track_id, .. } => write(
+            EditRampTarget::Strip(track_id.clone()),
+            &[EditRampRow::Link],
+        ),
+        SessionEdit::SetEffectLinkMode {
+            track_id,
+            rack_name,
+            effect_id,
+            ..
+        } => write(
+            EditRampTarget::Effect {
+                strip: track_id.clone(),
+                rack: *rack_name,
+                effect: effect_id.clone(),
+            },
+            &[EditRampRow::Link],
+        ),
+        SessionEdit::SetConsole { .. } => write(EditRampTarget::Console, &[EditRampRow::Link]),
+        SessionEdit::SetRouteGainDb { route_id, .. } => write(
+            EditRampTarget::Route(route_id.clone()),
+            &[EditRampRow::RouteGain],
+        ),
+        SessionEdit::SetRouteMute { route_id, .. }
+        | SessionEdit::SetRouteFollowsMute { route_id, .. } => write(
+            EditRampTarget::Route(route_id.clone()),
+            &[EditRampRow::RouteMute],
+        ),
+        SessionEdit::SetRouteChannelMatrix { route_id, .. } => write(
+            EditRampTarget::Route(route_id.clone()),
+            &[EditRampRow::RouteMatrix],
+        ),
+        SessionEdit::SetVcaFader { vca_id, .. } => write(
+            EditRampTarget::Vca(vca_id.clone()),
+            &[EditRampRow::VcaFader, EditRampRow::VcaMute],
+        ),
+        SessionEdit::UpsertTrack { track } => {
+            ramps.clear_target(&EditRampTarget::Strip(track.id.clone()));
+        }
+        SessionEdit::UpsertSubmix { submix } => {
+            ramps.clear_target(&EditRampTarget::Strip(submix.id.clone()));
+        }
+        SessionEdit::UpsertRoute { route } => {
+            ramps.clear_target(&EditRampTarget::Route(route.id.clone()));
+        }
+        SessionEdit::UpsertVca { vca } => {
+            ramps.clear_target(&EditRampTarget::Vca(vca.id.clone()));
+        }
+        _ => {}
+    }
+}
+
 /// An edit-resolution failure before session compilation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEditError {
@@ -514,6 +652,10 @@ pub enum SessionEditError {
     /// `SetConsole`; a strip's knobs through `SetEffectBypass`, `UpsertEffectParam`,
     /// `RemoveEffectParam` or `SetTrackConsole`.
     ConsoleSlotFixed,
+    /// A live-value edit carried a `ramp_samples` above the session's sample rate in samples, one
+    /// second (#1394 D4, the bound of `control_smoothing`'s 1000 ms). The bound uses the rate the
+    /// transaction commits.
+    RampOutOfRange,
 }
 
 impl fmt::Display for SessionEditError {
@@ -542,7 +684,7 @@ pub fn apply_session_edit(
         SessionEdit::SetOutputProfile { output_profile } => {
             session.output_profile = output_profile.clone()
         }
-        SessionEdit::SetConsole { console } => session.console = console.clone(),
+        SessionEdit::SetConsole { console, .. } => session.console = console.clone(),
         SessionEdit::UpsertSource { source } => {
             upsert(&mut session.sources, source, |item| &item.id)
         }
@@ -577,7 +719,9 @@ pub fn apply_session_edit(
             track.left_source_channel = *left_source_channel;
             track.right_source_channel = *right_source_channel;
         }
-        SessionEdit::SetTrackBuiltins { track_id, builtins } => {
+        SessionEdit::SetTrackBuiltins {
+            track_id, builtins, ..
+        } => {
             *strip_mut(session, track_id)?.builtins = builtins.clone();
         }
         SessionEdit::SetTrackRack {
@@ -669,6 +813,7 @@ pub fn apply_session_edit(
             rack_name,
             effect_id,
             link_mode,
+            ..
         } => {
             effect_mut(session, track_id, *rack_name, effect_id)?.link_mode = *link_mode;
         }
@@ -709,16 +854,19 @@ pub fn apply_session_edit(
                 .ok_or(SessionEditError::NotFound)?;
             params.remove(index);
         }
-        SessionEdit::SetTrackFader { track_id, fader } => {
-            *strip_mut(session, track_id)?.fader = fader.clone()
-        }
+        SessionEdit::SetTrackFader {
+            track_id, fader, ..
+        } => *strip_mut(session, track_id)?.fader = fader.clone(),
         SessionEdit::SetTrackMatrixOrPan {
             track_id,
             matrix_or_pan,
+            ..
         } => {
             *strip_mut(session, track_id)?.matrix_or_pan = matrix_or_pan.clone();
         }
-        SessionEdit::SetTrackConsole { track_id, console } => {
+        SessionEdit::SetTrackConsole {
+            track_id, console, ..
+        } => {
             *strip_mut(session, track_id)?.console = console.clone();
         }
         SessionEdit::UpsertSubmix { submix } => {
@@ -749,16 +897,20 @@ pub fn apply_session_edit(
         SessionEdit::SetRouteChannelMatrix {
             route_id,
             channel_matrix,
+            ..
         } => {
             route_mut(session, route_id)?.channel_matrix = channel_matrix.clone();
         }
-        SessionEdit::SetRouteGainDb { route_id, gain_db } => {
-            route_mut(session, route_id)?.gain_db = *gain_db
+        SessionEdit::SetRouteGainDb {
+            route_id, gain_db, ..
+        } => route_mut(session, route_id)?.gain_db = *gain_db,
+        SessionEdit::SetRouteMute { route_id, mute, .. } => {
+            route_mut(session, route_id)?.mute = *mute
         }
-        SessionEdit::SetRouteMute { route_id, mute } => route_mut(session, route_id)?.mute = *mute,
         SessionEdit::SetRouteFollowsMute {
             route_id,
             follows_mute,
+            ..
         } => route_mut(session, route_id)?.follows_mute = *follows_mute,
         SessionEdit::UpsertAutomation { automation } => {
             upsert(&mut session.automation, automation, |item| &item.id);
@@ -783,7 +935,7 @@ pub fn apply_session_edit(
         }
         SessionEdit::UpsertVca { vca } => upsert(&mut session.vcas, vca, |item| &item.id),
         SessionEdit::RemoveVca { vca_id } => remove(&mut session.vcas, vca_id, |item| &item.id)?,
-        SessionEdit::SetVcaFader { vca_id, fader } => {
+        SessionEdit::SetVcaFader { vca_id, fader, .. } => {
             session
                 .vcas
                 .iter_mut()
@@ -814,6 +966,7 @@ pub struct PreparedSessionTransaction {
     base_revision: SessionRevision,
     compiled: CompiledSession,
     applied_operations: usize,
+    edit_ramps: EditRamps,
 }
 
 impl PreparedSessionTransaction {
@@ -821,6 +974,13 @@ impl PreparedSessionTransaction {
     #[must_use]
     pub const fn compiled(&self) -> &CompiledSession {
         &self.compiled
+    }
+
+    /// The per-edit ramp lengths the transaction's edits carried (#1394). Transaction metadata:
+    /// not in the compiled model, not in canonical JSON, and gone when this value is.
+    #[must_use]
+    pub const fn edit_ramps(&self) -> &EditRamps {
+        &self.edit_ramps
     }
 
     /// Revision the prospective compilation will own if committed.
@@ -939,11 +1099,13 @@ impl SessionStore {
         }
         let next_revision = current.0 + 1;
         let mut candidate = self.compiled.normalized_model().clone();
+        let mut edit_ramps = EditRamps::new();
         for (operation_index, edit) in edits.iter().enumerate() {
             apply_session_edit(&mut candidate, edit).map_err(|error| SessionStoreError::Edit {
                 operation_index,
                 error,
             })?;
+            record_edit_ramps(&mut edit_ramps, edit);
         }
         candidate.revision = next_revision;
         let compiled = compile_session(&candidate, self.caps).map_err(|diagnostics| {
@@ -952,10 +1114,23 @@ impl SessionStore {
                 diagnostics,
             }
         })?;
+        // #1394 D4: every length is bounded by one second at the rate the transaction commits,
+        // so the check follows the compile that validated that rate and precedes any commit.
+        let maximum_ramp = compiled.normalized_model().sample_rate_hz;
+        if let Some(operation_index) = edits
+            .iter()
+            .position(|edit| edit.ramp_samples().is_some_and(|ramp| ramp > maximum_ramp))
+        {
+            return Err(SessionStoreError::Edit {
+                operation_index,
+                error: SessionEditError::RampOutOfRange,
+            });
+        }
         Ok(PreparedSessionTransaction {
             base_revision: current,
             compiled,
             applied_operations: edits.len(),
+            edit_ramps,
         })
     }
 
@@ -1233,6 +1408,7 @@ mod tests {
                     &[SessionEdit::SetRouteMute {
                         route_id: id("to-main"),
                         mute,
+                        ramp_samples: None,
                     }],
                 )
                 .expect("route mute commits");
@@ -1277,6 +1453,7 @@ mod tests {
             &[SessionEdit::SetRouteGainDb {
                 route_id: id("missing"),
                 gain_db: 1.0,
+                ramp_samples: None,
             }],
         );
         assert!(matches!(

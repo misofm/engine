@@ -319,6 +319,7 @@ impl LiveEditor {
                         left_mute: self.muted,
                         right_mute: self.muted,
                     },
+                    ramp_samples: None,
                 }
             }
             1 => {
@@ -331,6 +332,7 @@ impl LiveEditor {
                         right: 1.0,
                         smoothing_samples: 16,
                     },
+                    ramp_samples: None,
                 }
             }
             2 => {

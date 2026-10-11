@@ -2192,6 +2192,7 @@ fn eq0_fader_edit(left_db: f32) -> SessionEdit {
             left_mute: false,
             right_mute: false,
         },
+        ramp_samples: None,
     }
 }
 
@@ -2893,6 +2894,7 @@ impl RaceEdits {
                 SessionEdit::SetTrackFader {
                     track_id,
                     fader: fader.clone(),
+                    ramp_samples: None,
                 }
             }
             1 => SessionEdit::SetTrackMatrixOrPan {
@@ -2902,6 +2904,7 @@ impl RaceEdits {
                     right: 1.0 - 0.0625 * ((index * 5) % 13) as f32,
                     smoothing_samples: 16 * (1 + (index % 8) as u32),
                 },
+                ramp_samples: None,
             },
             _ => {
                 let fader = &mut self.faders[track];
@@ -2914,6 +2917,7 @@ impl RaceEdits {
                 SessionEdit::SetTrackFader {
                     track_id,
                     fader: fader.clone(),
+                    ramp_samples: None,
                 }
             }
         };
@@ -3317,6 +3321,7 @@ fn paused_bursts(
         let edit = SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: edits.faders[0].clone(),
+            ramp_samples: None,
         };
         match control.submit_once(&edit, true)? {
             Submitted::Committed => {}

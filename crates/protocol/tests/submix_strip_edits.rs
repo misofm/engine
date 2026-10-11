@@ -184,6 +184,7 @@ fn cases() -> Vec<Case> {
                         delay_samples: 0,
                     },
                 },
+                ramp_samples: None,
             },
             |bus| {
                 bus.builtins.left.polarity_invert = true;
@@ -279,6 +280,7 @@ fn cases() -> Vec<Case> {
                 rack_name: RackName::Inserts,
                 effect_id: id("comp"),
                 link_mode: LinkMode::Average,
+                ramp_samples: None,
             },
             |bus| bus.inserts.effects[1].link_mode = LinkMode::Average,
         ),
@@ -336,6 +338,7 @@ fn cases() -> Vec<Case> {
             SessionEdit::SetTrackFader {
                 track_id: bus(),
                 fader: fader(-6.0),
+                ramp_samples: None,
             },
             |bus| bus.fader = fader(-6.0),
         ),
@@ -350,6 +353,7 @@ fn cases() -> Vec<Case> {
                     rr: 0.5,
                     smoothing_samples: 32,
                 },
+                ramp_samples: None,
             },
             |bus| {
                 bus.matrix_or_pan = MatrixOrPan::Matrix {
@@ -370,6 +374,7 @@ fn cases() -> Vec<Case> {
                     bypass: true,
                     params: Vec::new(),
                 }],
+                ramp_samples: None,
             },
             |bus| {
                 bus.console[0].bypass = true;
@@ -446,6 +451,7 @@ fn strip_refusals_are_the_tracks() {
             SessionEdit::SetTrackFader {
                 track_id: id("main-out"),
                 fader: fader(-6.0),
+                ramp_samples: None,
             },
             SessionEditError::NotFound,
         ),
@@ -468,6 +474,7 @@ fn strip_refusals_are_the_tracks() {
             SessionEdit::SetTrackFader {
                 track_id: id("a"),
                 fader: fader(-3.0),
+                ramp_samples: None,
             },
             refused,
         ]);
@@ -506,6 +513,7 @@ fn a_strip_id_resolves_tracks_before_submixes() {
     let set_fader = || SessionEdit::SetTrackFader {
         track_id: id("x"),
         fader: fader(-6.0),
+        ramp_samples: None,
     };
     let remove = || SessionEdit::RemoveTrack { track_id: id("x") };
     for (name, edits, expected_db) in [

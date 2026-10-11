@@ -122,6 +122,7 @@ fn the_strip_is_still_editable_through_set_track_builtins() {
             &SessionEdit::SetTrackBuiltins {
                 track_id: track_id(),
                 builtins: builtins.clone(),
+                ramp_samples: None,
             },
         ),
         Ok(()),

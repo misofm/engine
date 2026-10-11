@@ -214,6 +214,7 @@ fn vca_edits_commit_and_snapshot_canonically() {
         &[SessionEdit::SetVcaFader {
             vca_id: id("nested"),
             fader: moved.clone(),
+            ramp_samples: None,
         }],
     );
     expected.vcas[2].fader = moved;
@@ -301,6 +302,7 @@ fn vca_refusals_commit_nothing() {
     let opening = || SessionEdit::SetVcaFader {
         vca_id: id("grp"),
         fader: fader(-6.0, -6.0, false, false),
+        ramp_samples: None,
     };
     let unity = || fader(0.0, 0.0, false, false);
     let cases: Vec<(&str, Vec<SessionEdit>, Refusal)> = vec![
@@ -316,6 +318,7 @@ fn vca_refusals_commit_nothing() {
             vec![SessionEdit::SetVcaFader {
                 vca_id: id("ghost"),
                 fader: unity(),
+                ramp_samples: None,
             }],
             Refusal::Edit(1, SessionEditError::NotFound),
         ),
@@ -339,6 +342,7 @@ fn vca_refusals_commit_nothing() {
                         delay_samples: 0,
                     },
                 },
+                ramp_samples: None,
             }],
             Refusal::Edit(1, SessionEditError::NotFound),
         ),
@@ -347,6 +351,7 @@ fn vca_refusals_commit_nothing() {
             vec![SessionEdit::SetTrackFader {
                 track_id: id("grp"),
                 fader: fader(-12.0, -12.0, true, true),
+                ramp_samples: None,
             }],
             Refusal::Edit(1, SessionEditError::NotFound),
         ),
@@ -359,6 +364,7 @@ fn vca_refusals_commit_nothing() {
                     right: 0.5,
                     smoothing_samples: 16,
                 },
+                ramp_samples: None,
             }],
             Refusal::Edit(1, SessionEditError::NotFound),
         ),
@@ -367,6 +373,7 @@ fn vca_refusals_commit_nothing() {
             vec![SessionEdit::SetTrackConsole {
                 track_id: id("grp"),
                 console: Vec::new(),
+                ramp_samples: None,
             }],
             Refusal::Edit(1, SessionEditError::NotFound),
         ),
@@ -432,6 +439,7 @@ fn vca_refusals_commit_nothing() {
             vec![SessionEdit::SetVcaFader {
                 vca_id: id("grp"),
                 fader: fader(30.0, 0.0, false, false),
+                ramp_samples: None,
             }],
             Refusal::Validation(&[("numeric.out_of_schema_range", "$.vcas[0].fader.left_db")]),
         ),

@@ -1462,6 +1462,7 @@ fn validation_diagnostics_preserve_operation_paths_and_exact_omission_count() {
             edits: &[SessionEdit::SetTrackFader {
                 track_id: session::StableId::parse("vocal").expect("stable ID"),
                 fader,
+                ramp_samples: None,
             }],
         },
     };
@@ -1628,6 +1629,7 @@ fn a_slot_set_change_that_skips_a_track_is_never_acknowledged() {
     let snapshot = endpoint.session().canonical_snapshot().to_owned();
     let edits = [SessionEdit::SetConsole {
         console: console.clone(),
+        ramp_samples: None,
     }];
     let input = full_command(
         1,
@@ -1669,10 +1671,14 @@ fn a_slot_set_change_that_skips_a_track_is_never_acknowledged() {
         params: Vec::new(),
     });
     let whole = [
-        SessionEdit::SetConsole { console },
+        SessionEdit::SetConsole {
+            console,
+            ramp_samples: None,
+        },
         SessionEdit::SetTrackConsole {
             track_id: track,
             console: entries,
+            ramp_samples: None,
         },
     ];
     let response = process_full_command(
@@ -2051,6 +2057,7 @@ fn decoded_track_edit_reaches_same_atomic_session_store() {
     let edits = [SessionEdit::SetTrackFader {
         track_id: session::StableId::parse("vocal").expect("ID"),
         fader,
+        ramp_samples: None,
     }];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),
@@ -2085,6 +2092,7 @@ fn decoded_route_edit_reaches_same_atomic_session_store() {
     let edits = [SessionEdit::SetRouteGainDb {
         route_id: session::StableId::parse("to-main").expect("ID"),
         gain_db: -1.0,
+        ramp_samples: None,
     }];
     let frame = crate::SessionTransactionFrame {
         request_id: id(1),

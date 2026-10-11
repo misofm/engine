@@ -358,6 +358,7 @@ fn fader_edit(track_id: &str, fader: DualMonoFader) -> SessionEdit {
     SessionEdit::SetTrackFader {
         track_id: StableId::parse(track_id).expect("track ID"),
         fader,
+        ramp_samples: None,
     }
 }
 
@@ -505,6 +506,7 @@ fn live_pcm_shape(
                 rr: 0.5,
                 smoothing_samples: smoothing,
             },
+            ramp_samples: None,
         },
     ];
     let (revision, _, epoch, _) = rig.summary();
@@ -949,6 +951,7 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
                 right: 0.75,
                 smoothing_samples: 8,
             },
+            ramp_samples: None,
         },
     ];
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
@@ -1423,6 +1426,7 @@ fn a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone() {
                 right: 0.25,
                 smoothing_samples: 0,
             },
+            ramp_samples: None,
         },
     ];
     crate::ffi::test_set_structural_faults(
@@ -1563,6 +1567,7 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
                 right: 0.875,
                 smoothing_samples: smoothing,
             },
+            ramp_samples: None,
         },
     ];
     assert_eq!(rig.apply(&edits), crate::RESULT_OK);
@@ -1620,6 +1625,7 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_writes_n
                 right: 0.25,
                 smoothing_samples: 16,
             },
+            ramp_samples: None,
         },
     ];
     let bytes = rig.transaction(&edits);

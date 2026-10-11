@@ -305,6 +305,7 @@ fn both_hosts_drain_two_fader_and_two_pan_edits_alike() {
                 left_mute: false,
                 right_mute: false,
             },
+            ramp_samples: None,
         });
         browser_command(&mut browser, COMMAND_FADER_DB, 2, [fader_db, 0.0, 0.0, 0.0]);
         control.apply(SessionEdit::SetTrackMatrixOrPan {
@@ -314,6 +315,7 @@ fn both_hosts_drain_two_fader_and_two_pan_edits_alike() {
                 right: pan[1],
                 smoothing_samples: PAN_SMOOTHING,
             },
+            ramp_samples: None,
         });
         browser_command(&mut browser, COMMAND_PAN, 255, [pan[0], pan[1], 0.0, 0.0]);
     }
