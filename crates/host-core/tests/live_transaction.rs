@@ -9,7 +9,7 @@
 use core::num::NonZeroUsize;
 
 use builtins::BuiltinLaneSelector;
-use builtins_compiler::{TestOnlyWriteGate, TrackFaderRecord};
+use builtins_compiler::TrackFaderRecord;
 use dsp_reference::randomized::Draw;
 use engine::realtime::{
     PlanExchangeConfig, PlanarBufferMut, RealtimePlanOwner, RenderIo, RenderTime,
