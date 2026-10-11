@@ -267,3 +267,106 @@ review's models are in the handoff folder.
 
 Dependents: #1502, then #1503, *Hand each block's live snapshot to every live drain*
 (#1504) and #1312; then #1277, #1280, #1345, #1346, #1347.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b2` from `c4ca6f2dd`)
+
+**What landed.**
+
+- `crates/engine/src/realtime/latest_cell.rs` (new, safe Rust, atomics only): `RevisionGate`,
+  `GatePin`, `LiveStamp`, `LiveSnapshot` (`ALL`), `GATE_REVISION_MAX`, `LatestCell<N>`,
+  `CellWriter<N>`, `CellReader`, `CellRead<N>`, `DirtyWord`, `DirtyReader`. It follows D1-D3 and
+  the design's state machine. `mod.rs` exports them. The loom shim is local to the module
+  (`cfg(loom)` atomics); `spsc.rs` is untouched.
+- Three render-side regions carry `REALTIME_POLICY` markers (the gate snapshot, the dirty take with
+  `DirtyReader`, and `CellReader`). `scripts/check-realtime-policy.sh` floors rose to 27 files and
+  96 regions. `docs/REALTIME_DEPENDENCY_POLICY.md` gained D4's one sentence.
+- 12 unit tests (`latest_cell::tests`) and 5 loom models (`spsc_loom_cells_*`: L1, L2, L3, R2, L4).
+
+**API choices the spec left open (for review).**
+
+1. `CellReader::read(&mut self, cell, snapshot, stage: &mut DirtyReader, bit) -> CellRead<N>`.
+   The read itself sets the deferred bit when a written slot is above `S`, so a stage cannot forget
+   to defer. `DirtyReader::pending(&mut self, &DirtyWord) -> u64` is the deferred mask plus the
+   take; it must follow the block's `snapshot()` in program order, which the caller owns (it is a
+   documented rule, not a type rule).
+2. `RevisionGate::new(initial)` and `GatePin::new(initial)` are separate (the spec: "one `GatePin`
+   per gate"); `GatePin::new` must get the gate's initial revision. `LiveStamp` has private fields
+   and accessors `revision()` and `pinned()`, so only `GatePin::stamp` makes one (the review's M2
+   concern about a free `unpinned` constructor). `RevisionGate::revision()` is a masked read.
+3. `GatePin::new` and `RevisionGate::new` use a hard `assert!` on `initial <= GATE_REVISION_MAX`
+   (control-thread construction). `publish`, `stamp` and `write` debug-assert as the spec says.
+4. `DirtyWord::mark` and `take` are private to the module; only `CellWriter::write` and
+   `DirtyReader::pending` reach them.
+5. `scripts/test-realtime-policy.sh` is outside the authorized path list, but its fixture sits
+   exactly on the floors, so raising the floors made it red until the fixture gained one pad file
+   (14 pad files, 27 files and 96 regions) and its three expected-failure strings changed.
+
+**How the loom proofs avoid loom's store/read-modify-write imprecision.** Every atomic location
+in every model is in exactly one of two classes. (a) Written only by read-modify-writes, after its
+construction: the gate word (`swap`, `fetch_or`), the dirty word (`fetch_or`, `swap`) and L4's
+mailbox word (`compare_exchange`). Loom is exact there. (b) Written only by plain `Relaxed`
+stores: a slot's words, revision and sequence, which no model touches with a read-modify-write. No
+model races a plain store against a read-modify-write on one location. Gate and dirty-word
+initial values come from `AtomicU64::new`, not from a store. The module docs state the rule.
+The loom leg is the real code on loom's atomics (the local shim), not a hand model. I cite no
+mutation that depends on a plain-store gate.
+
+**Gates.**
+
+| Gate | Result |
+|---|---|
+| `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom` | 13 passed (5 new, 8 existing), 24.5 s of model time |
+| `cargo test --locked -p engine --lib latest_cell` | 12 passed (3 of them `should_panic` in debug) |
+| `bash scripts/check-realtime-policy.sh` | ok (96 marked regions in 27 files) |
+| `bash scripts/test-realtime-policy.sh` | ok |
+| `cargo test --locked -p engine --features realtime-audit` | all pass (70 lib tests, 4, 1) |
+| `bash scripts/check-cross-targets.sh` | PASS |
+| `cargo fmt --all -- --check` | ok |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | ok |
+| `bash scripts/check-workspace-policy.sh` | ok |
+| Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`) | all pass; shipped module `7cbdcff0...37e44` (the module is unreferenced from the browser host, so no pin is expected to move) |
+
+**Mutation evidence.** Each row applies one defect to the committed file (red = at least that test
+fails) and reverts it. "Unit" is `latest_cell::tests`; the loom column is `spsc_loom_cells_*`.
+
+| Mutation | Loom red | Unit red |
+|---|---|---|
+| reader ignores `S` (the triple buffer) | L1, L2, L3, R2, L4 | `a_read_applies_only_what_the_snapshot_covers_and_defers_the_rest` |
+| snapshot is a `load`, not a `fetch_or` | L2, R2, L4 | `the_pin_follows_the_announcement_and_survives_unannounced_publications` |
+| control protects only `A` | L2, R2, L4 | none |
+| control drops the pin on an unannounced swap | L2, L4 | `the_pin_follows_the_announcement_and_survives_unannounced_publications` |
+| control picks the first slot that is not `A` (ignores `B` and the free-slot rule) | L2, R2, L4 | none |
+| dirty bit set before the slot stores | L1, L2, L3, L4 | none |
+| dirty `swap(0)` is `Relaxed` | L1, L2, L3, R2, L4 | none |
+| reader never defers | L1, L2, L3, R2, L4 | `a_read_applies_only_what_the_snapshot_covers_and_defers_the_rest` |
+| gate `fetch_or` and `swap` are `Relaxed` | L1, L3, R2, L4 | none |
+| model takes the dirty bits before the snapshot | L1, L3, R2 | none |
+| two writes of one revision go to two slots (no in-place rule) | R2 only | `two_writes_in_one_revision_apply_the_second` |
+| `peek_unread` consumes (sets the last applied sequence) | none | `peek_changes_nothing_and_a_read_counts_the_replaced_writes` |
+| superseded count off by one | L1, L2, L3, R2, L4 | five tests |
+| snapshot does not mask `ANNOUNCED` | (the run aborts) | `the_announcement_never_leaks_into_a_revision` and one more |
+| `stamp`'s debug assert removed | none | `a_stamp_at_the_last_published_revision_panics` |
+| `publish`'s debug assert removed | none | `a_publication_at_the_last_published_revision_panics` |
+| `write`'s non-decreasing debug assert removed | none | `a_write_below_a_written_revision_panics` |
+| ceiling constant `2^63 - 2` | (the run aborts) | `the_ceiling_is_the_largest_revision_a_gate_holds` and five more |
+| `RevisionGate::new` accepts a revision above the ceiling | none | `a_gate_above_the_ceiling_is_refused` |
+| slot tag stored before the words (the design's "store order is free" claim) | none (green, as claimed) | none |
+
+L1 stays green under `protect_only_a`, `writer_forgets_pin` and the first-slot mutation: its
+control thread writes a cell at most twice, so it never needs `B`. L2 and L4 (three and four
+commits) are the models that reach it, which matches the design's table.
+
+**Test value, one line each.** L1: the block applies one cell of a transaction and not the other
+(red under the triple buffer, a take before the snapshot, `Relaxed` gate operations). L2/L4: control
+overwrites the slot a pinned or just-claimed reader needs (red under the no-announcement, `A`-only
+and forgot-the-pin defects). L3: a committed value lost between a take and its deferral. R2: two
+writes of one revision in two slots (the only model that catches it; the unit test catches it
+sequentially). The unit tests defend the counts, the peek's purity, the deferral order, the
+masking, the pin's survival across unannounced publications and the debug panics, each shown red
+above.
+
+**Open items.** None blocking. Not done by design: the type does not force `pending` after
+`snapshot` (a documented rule; model mutation "take before the snapshot" shows the loom catch).

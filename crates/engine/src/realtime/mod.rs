@@ -7,6 +7,7 @@
 pub mod audit;
 mod buffer;
 mod disjoint;
+mod latest_cell;
 mod observe;
 mod plan;
 mod plan_exchange;
@@ -16,6 +17,10 @@ mod watermark;
 pub use buffer::{BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferSpec};
 pub use disjoint::{
     ARENA_SILENCE_BUFFER, ArenaStereoPair, ArenaStereoPlanes, DisjointArena, DisjointArenaError,
+};
+pub use latest_cell::{
+    CellRead, CellReader, CellWriter, DirtyReader, DirtyWord, GATE_REVISION_MAX, GatePin,
+    LatestCell, LiveSnapshot, LiveStamp, RevisionGate,
 };
 pub use observe::{
     ObservationPublisher, ObservationReader, ObservationSlot, ObservationWindow, observation_slot,

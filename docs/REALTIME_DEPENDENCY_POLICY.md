@@ -402,6 +402,11 @@ read-modify-write retry. Browser launch uses `LocalRing` on its single render ag
 (`scripts/check-web-audioworklet.sh`, which took over the scalar object inspection #1062 retired),
 and makes no cross-agent shared-memory claim.
 
+The revision gate and the latest-target cells (#1432) give render one `fetch_or` per plan per
+block and one `swap` per pending dirty word; on AArch64 without LSE (ARMv8.0) a read-modify-write
+compiles to a load-linked or store-conditional loop, the same property the plan mailbox's claim
+compare-and-swap already has.
+
 ## Panic behaviour by profile
 
 Issue 083 (master plan D12) gives the workspace one release profile: `lto = "fat"`,
