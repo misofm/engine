@@ -1,7 +1,8 @@
 # Elide a builtin input filter section again after a live disable settles it to identity
 
 Stream F of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-4, D15-6).
-Code anchors verified on `main` at `6fb211594`.
+Code anchors verified on `main` at `6fb211594`; refreshed 2026-10-11 against the branch head
+`622aba3b1` (Root Amendment 1).
 
 Follow-up found while planning *Apply value-only input HPF and LPF edits to the running C ABI plan
 through prepared targets* (#1262). It concerns the builtin input bank on both hosts: the browser
@@ -10,15 +11,19 @@ already disables filters live.
 ## Product outcome
 
 After a live edit disables an input filter section, the section stops costing work once its
-coefficient ramp settles, and the strip's output is bit-identical, signed zeros included, to a
-strip whose filter was never enabled. The first deliverable measures whether `main` already does
-this; what follows depends only on that measurement.
+coefficient ramp settles: the block that completes the ramp leaves the lane's integrators exactly
+`+0.0`, and the plan elides the section again. The strip's output is bit-identical to a strip whose
+filter was never enabled, and that holds with or without the clear: a stale integrator cannot
+change an output bit, the sign of an exact zero included (the stage that follows ends in
+`v + 0.0`; see Context, "What the older tests check, and what they do not"), so the clear's only
+observable effect is the state words and the plan, that is, cost. The first deliverable measures
+whether `main` already does this; what follows depends only on that measurement.
 
 ## Context
 
 - **The elision rule.** A section is skipped only when its six coefficient words are the identity
   **and** both integrators are exactly `+0.0`, in every bank lane (`section_is_identity`,
-  `crates/lane/src/kernels/builtins.rs:1146-1163`). The state words are compared bitwise, so a
+  `crates/lane/src/kernels/builtins.rs:1590-1599`). The state words are compared bitwise, so a
   section whose integrators hold any other bits, `-0.0` included, is never elided. (Corrected
   2026-10-11, root direction, after attempt 1: the filed reason, that identity coefficients over a
   `-0.0` integrator would emit `-0.0` where the elided form gives `+0.0`, does not hold at the
@@ -26,18 +31,22 @@ this; what follows depends only on that measurement.
   never changes an output bit and only costs work; see "What no test checks".)
 - **The original premise.** The filed body (on `54b0a1bf8`) said that after a live disable the
   integrators keep their last values, because `svf_step` does not drive them to zero with identity
-  coefficients (`crates/lane/src/kernels.rs:643-652`), so the section is never elided again.
+  coefficients (`crates/lane/src/kernels.rs:1076-1077`, with the step's body in `svf_step_when` at `:1093`), so the section is never elided again.
 - **What `main` shows.** The filter ramp bodies clear a lane's integrators when its ramp completes
   onto identity coefficients: `ic1`/`ic2` `andnot(identity)` at
-  `crates/lane/src/kernels/builtins.rs:882-883` (dual body, `input_chain_ramp_block_filter`, `:801`)
-  and `:980-981` (mono body, `input_chain_ramp_block_filter_mono`, `:915`). The mask is per lane,
-  so only settled lanes are cleared. `refresh_filter_plan` (`crates/builtins/src/lib.rs:1266-1279`)
-  runs right after the ramp prefix (`:1659`) and recomputes the plan. The decision-15 review found
+  `crates/lane/src/kernels/builtins.rs:1166-1167` (dual body, `input_chain_ramp_block_filter_body`,
+  `:1071`, called from `input_chain_ramp_block_filter`, `:1017`) and `:1410-1411` (mono body,
+  `input_chain_ramp_block_filter_mono_body`, `:1328`, called from
+  `input_chain_ramp_block_filter_mono`, `:1280`). The mask is per lane,
+  so only settled lanes are cleared. `refresh_filter_plan` (`crates/builtins/src/lib.rs:1313-1335`)
+  runs right after the ramp prefix (`:1799` in `process`, `:1944` in `process_mono`) and recomputes
+  the plan. The decision-15 review found
   the premise likely stale (agreed plan, D15-4 context; round-1 review, B4 item 4).
 - **What the older tests check, and what they do not.** (Corrected 2026-10-11, root direction,
   after attempt 1.) `filter_ramp_endpoint_is_partition_invariant_and_reset_honors_kind`
-  (`crates/builtins/tests/filter_liveness.rs:223`) checks a disabled section's coefficient words,
-  and `input_tail_is_infinite_while_a_filter_target_is_ramping` (`:314`) its tail. Two older tests
+  (`crates/builtins/tests/filter_liveness.rs:223`) checks a disabled section's coefficient words.
+  (The tail test that stood beside it, `input_tail_is_infinite_while_a_filter_target_is_ramping`,
+  was replaced by #1329, `11f59fa42`.) Two older tests
   also read the integrators and the elision plan after a disable:
   `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time` (`filter_liveness.rs`) reads
   `state_words`, `current_words` and the elision plan on the scalar chain and on one bank lane
@@ -50,8 +59,8 @@ this; what follows depends only on that measurement.
   state never changes an output bit and only costs work, because the section is never elided
   again. The state and plan legs prove the clear; the output legs guard lane isolation.
 - **Readback.** `builtins::test_support::bank_lane_state_words` and `bank_elision_plan`
-  (`crates/builtins/src/lib.rs:5471-5479`, feature `test-support`). The bank renders through
-  `BuiltinInputBank::process` (`:3615`, dual body) and `process_mono` (`:3631`, mono body).
+  (`crates/builtins/src/lib.rs:5822-5830`, feature `test-support`). The bank renders through
+  `BuiltinInputBank::process` (`:3909`, dual body) and `process_mono` (`:3925`, mono body).
 
 ## Decisions frozen for this slice
 
@@ -64,9 +73,12 @@ this; what follows depends only on that measurement.
   coefficients, set that lane's two integrators of that section to `+0.0` (per lane, under the
   ramp's own `done` mask; banking must not couple lanes' bits), and leave `refresh_filter_plan` to
   elide it. Then gate 1 must be green and gate 2's mutation must turn it red.
-- **D4. Class.** Under D3, zeroing the state of an identity section changes no output sample
-  except the sign of an exact zero, and moves those bits toward the never-enabled plan's. The PR
-  says so.
+- **D4. Class.** Under D3, zeroing the state of an identity section changes no output bit, the
+  sign of an exact zero included. With identity coefficients and a stale pair `(ic1, ic2)` the
+  settled section's output is `fma(0, ic2, fma(0, ic1, 1 * x))`, and the stage that follows ends in
+  `v + 0.0`, which sends `-0.0` to `+0.0`; so a stale integrator never changes an output sample and
+  only costs work, because the section is never elided again. The clear moves the state words and
+  the plan to the never-enabled plan's and moves no output bit. The PR says so.
 - No change to the filter design, the 64-update ramp, the elision rule, or `svf_step` (the joint
   flush is *Flush the SVF jointly so builtin and EQ filters reach exact rest*, #1328).
 
@@ -91,18 +103,35 @@ this; what follows depends only on that measurement.
 
 Run every command from the repository root.
 
-1. **The D1 check.** A test in `crates/builtins/tests/filter_liveness.rs`, on a four-member bank
-   (`bank_with_members(4)`) at 48 kHz, and its never-enabled twin fed the same input:
-   - apply a prepared HPF target (120 Hz, from `prepare_input_filter_pair`) to lane 1, render
-     several blocks of negative samples, then apply the disabled pair's targets to lane 1 and
-     render past 64 updates, with exact `-0.0` samples in every block after the disable;
-   - run it once through `process` with a `Left`-addressed target (dual body) and once through
-     `process_mono` with a `Both`-addressed target (mono body);
-   - after the block in which the ramp completes:
-     - `bank_lane_state_words(&bank, 1)` is all `+0.0` bits;
-     - `bank_elision_plan(&bank)` elides the HPF section on both channels;
-     - from the next block on, lane 1's output is bit-identical to the twin's;
-   - lanes 0, 2 and 3 are bit-identical to the twin's in every block.
+1. **The D1 check.** The test `a_settled_live_disable_is_re_elided_and_bit_identical_to_never_enabled`
+   in `crates/builtins/tests/filter_liveness.rs`, on a four-member bank (`bank_with_members(4)`) at
+   48 kHz and its never-enabled twin, both fed the same input in 24-frame blocks. It runs both
+   bodies, once through `process` with a `Left`-addressed target (dual body) and once through
+   `process_mono` with a `Both`-addressed target (mono body), and two scenarios: the plain one
+   (lane 1 only) and a `neighbour` one, in which lane 3 also holds a settled HPF in the bank and in
+   the twin, so a clear that reaches a lane that never ramped shows. Each runs for every history
+   length in `6..14` blocks, which moves the sawtooth's phase, and so the integrators, at the
+   disable.
+   - History: apply a prepared HPF target (120 Hz, from `prepare_input_filter_pair`) to lane 1, then
+     render the history blocks of a signed per-lane sawtooth (about [-0.4, 0.4), a different period
+     per lane, so negative samples are included). During the history lanes 0, 2 and 3 are
+     bit-identical to the twin's; lane 1's first two state words are not zero and its HPF section is
+     not elided; in the `neighbour` scenario the twin's lane 3 holds a live state.
+   - Disable: apply the disabled pair's targets to lane 1 and render six blocks (the 64-update ramp
+     completes mid-block 2), every sample an exact `-0.0`, the twin's own input.
+   - After the ramp-completing block (blocks 2 to 5):
+     - `bank_lane_state_words(&bank, 1)` is all eight words `+0.0` bits;
+     - `bank_elision_plan(&bank)` elides the HPF section on both channels; in the `neighbour`
+       scenario the left HPF stays live (lane 3 needs it) and the right HPF is elided under the dual
+       body and live under the mono body (lane 3's `Both` target holds both).
+   - From the next block on (blocks 3 to 5), lane 1's output, left and right plane, is
+     bit-identical to the twin's.
+   - Lanes 0, 2 and 3 are bit-identical to the twin's in output, and equal in state words, in every
+     block after the disable.
+
+   The state and plan legs prove the clear. The output legs do not: no output bit depends on a stale
+   integrator (D4), so they guard lane isolation, and the bit-identity of lane 1 holds with or
+   without the clear.
 
    `cargo test --locked --all-targets -p builtins --features builtins/test-support --test filter_liveness`
 2. **The mutation.** With the integrator clear removed locally from the dual body (and, separately,
@@ -127,8 +156,8 @@ Run every command from the repository root.
   defects are also read by older tests (see Context), so they are not unique catches. The unique
   catch is the third: a one-plane (`process_mono`) ramp completion that clears the integrators of
   every lane when any lane settles wipes a neighbouring lane's live HPF state, and only this
-  test's neighbour-lane output leg turns red on it. The test makes no signed-zero claim: no output
-  bit depends on a stale integrator. Gate 2 is the evidence that the state legs turn red when a
+  test's neighbour-lane output leg turns red on it. The test claims no output difference from a stale
+  integrator: none exists (D4), so its output legs compare bits only as a lane-isolation guard. Gate 2 is the evidence that the state legs turn red when a
   clear is removed.
 
 ## Dependencies
@@ -253,3 +282,45 @@ blocks, block 2"; restored: green (`crates/lane/src/kernels/builtins.rs` byte-eq
 **Open items for root.** (1) The body's "no existing test" claim and the signed-zero output claim
 are false as written (above); the spec's Context is left as filed and corrected here. (2) The
 issue closes under D2 once verified.
+
+## Root Amendment 1 (2026-10-11): text aligned with the attempt-1 evidence; no gate weakened
+
+Root direction, after the attempt-1 verdict (`docs/handoffs/decision-15-2026-10-05/verdicts/stream-dfg/1268-attempt1.md`,
+PASS). The body made two claims the evidence refutes: that a stale integrator can change the sign of
+an exact zero at the output, and the output leg as proof of the clear. One statement now stands in
+the Product outcome, D4, gate 1 and Test value: with identity coefficients the settled section's
+output is `fma(0, ic2, fma(0, ic1, 1 * x))` and the next stage ends in `v + 0.0`, so a stale
+integrator never changes an output bit and only costs work (the section is never elided again);
+the state and plan legs prove the clear, and the output legs guard lane isolation. The verifier's
+output-only runs (state and plan assertions removed) stay green under both clear mutations, M1 and M2.
+
+Changed passages:
+
+- **Header:** anchors refreshed against branch head `622aba3b1`.
+- **Product outcome:** "signed zeros included" no longer attaches to the clear. It now says the
+  ramp-completing block leaves `+0.0` integrators and the plan elides the section, that the output
+  is bit-identical with or without the clear, and that the clear's observable effect is state and
+  plan (cost).
+- **Context, code anchors:** `section_is_identity` `:1146-1163` to `:1590-1599`; `svf_step`
+  `kernels.rs:643-652` to `:1076-1077` (and `svf_step_when` `:1093`); the clears `:882-883` and
+  `:980-981` to `:1166-1167` and `:1410-1411` (with the `_body` functions at `:1071` and `:1328`);
+  `refresh_filter_plan` `lib.rs:1266-1279` to `:1313-1335`, its calls `:1659` to `:1799` and
+  `:1944`; readback `lib.rs:5471-5479` to `:5822-5830`; `process` `:3615` to `:3909`,
+  `process_mono` `:3631` to `:3925`. Each checked against the files on the branch head. The
+  tail test `input_tail_is_infinite_while_a_filter_target_is_ramping` no longer exists (replaced by
+  #1329, `11f59fa42`); the passage says so.
+- **D4:** from "no output sample except the sign of an exact zero" to "no output bit, the sign of an
+  exact zero included", with the equation.
+- **Gate 1:** states what the PASSed test asserts: both bodies, the plain and the `neighbour`
+  scenario, history lengths `6..14`, signed sawtooth history (negative samples included), state
+  words `+0.0` and HPF elided from the ramp-completing block (with the neighbour's plan entries),
+  lane 1 bit-identical to the twin from the next block, other lanes identical in output and state
+  every block. The command is unchanged.
+- **Test value:** "The test makes no signed-zero claim" now reads that the test claims no output
+  difference from a stale integrator, because none exists.
+
+Not weakened: gate 1 asserts everything the test asserts (the earlier text asked for less: no
+`neighbour` scenario, no history lengths, no other-lane state words); gate 2 (the mutations) and the
+defect named in Test value are untouched. The Decision record and the Attempt record are history
+and stay as written, including their "left as filed" wording about the Context, which this
+amendment now supersedes.
