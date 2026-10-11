@@ -27,9 +27,9 @@ sniffing, or TOML translation. Unknown keys reject.
    cargo run -q -p parameter-metadata -- --print
    ```
 
-The fifteen root keys are `schema_version`, `session_id`, `revision`, `sample_rate_hz`,
+The sixteen root keys are `schema_version`, `session_id`, `revision`, `sample_rate_hz`,
 `quantum_frames`, `render_profile`, `output_profile`, `sources`, `console`, `tracks`, `submixes`,
-`vcas`, `outputs`, `routes`, and `automation`. Every field and empty array is explicit. Durable unsigned
+`vcas`, `control_smoothing`, `outputs`, `routes`, and `automation`. Every field and empty array is explicit. Durable unsigned
 64-bit values (`revision`, source `frames`, automation `start_sample`/`end_sample`) are canonical
 decimal JSON strings: no sign, whitespace, leading zero except `"0"`, or value above
 `18446744073709551615`.
@@ -128,6 +128,14 @@ output is never a member, VCAs nest and overlap, and a diamond is legal, but mem
 A VCA's ID is in the graph-entity namespace, yet it is never a route endpoint, a sidechain source
 or an automation target. The canonical writer sorts `vcas` and each `members` list by ID; save each
 member's own fader and each VCA's own offset, never a computed effective value.
+
+## Control smoothing
+
+`control_smoothing` is required: `{ "kind": "default" }` (the researched ramp lengths for live mute,
+fader and pan changes) or `{ "kind": "explicit", "mute_ms", "fader_ms", "pan_ms" }`, each an `f32` in
+`[0, 1000]` (`0` is the hard switch). A missing key is `schema.missing_field`; a length in `default`
+is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
+`$.control_smoothing.<key>`. `docs/SESSION_SCHEMA_V1.md` has the table of which live row uses which key.
 
 ## VCA refusals, by code
 
