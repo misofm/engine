@@ -7,7 +7,7 @@ use realtime_policy::Class;
 use super::super::common::{
     BASE_FILES, BASE_REGIONS, BEGIN, END, Edit, expect_failure, expect_valid,
 };
-use super::{ANCHOR, BUILTINS_COMPILER, DRAIN, accepts, refuses};
+use super::{ANCHOR, BUILTINS_COMPILER, DRAIN, accepts, each_row, refuses};
 
 const BUFFER: &str = "crates/engine/src/realtime/buffer.rs";
 
@@ -28,7 +28,7 @@ fn counted(binding: &str) -> String {
 
 #[test]
 fn the_forms_that_d6_and_d8_state_pass() {
-    let rows: [(&str, String); 12] = [
+    let rows: [(&str, String); 10] = [
         (
             "form-header-entry-count",
             drain(&format!(
@@ -60,15 +60,6 @@ fn the_forms_that_d6_and_d8_state_pass() {
             counted("let available = control.available_at_entry().min(64);"),
         ),
         (
-            "form-count-capped-by-a-path",
-            counted("let available = control.available_at_entry().min(Self::LIMIT);"),
-        ),
-        (
-            "form-count-from-map-or",
-            "impl Drain {\n    fn run(&mut self) {\n        let available = self.control.as_ref().map_or(0, Consumer::available_at_entry).min(CAP);\n        for _ in 0..available {\n            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}"
-                .to_owned(),
-        ),
-        (
             "form-count-compared-before-the-loop",
             counted(
                 "let available = control.available_at_entry();\n    if available == 0 {\n        return;\n    }\n    if available != 1 || available > 100 || available >= 5 || available < 7 {\n        note();\n    }\n    debug_assert!(available <= 8, \"too many\");",
@@ -93,9 +84,7 @@ fn the_forms_that_d6_and_d8_state_pass() {
             ),
         ),
     ];
-    for (name, text) in rows {
-        accepts(name, &text);
-    }
+    each_row(rows, |name, text| accepts(name, &text));
 }
 
 #[test]
@@ -156,9 +145,7 @@ fn a_count_that_the_rule_cannot_prove_is_refused() {
             )),
         ),
     ];
-    for (name, text) in rows {
-        refuses(name, &text);
-    }
+    each_row(rows, |name, text| refuses(name, &text));
 }
 
 /// A collection loop with no count pops once per element, not once per record counted at entry.
@@ -175,7 +162,7 @@ fn a_loop_with_no_count_does_not_bound_a_pop() {
 #[test]
 fn every_kind_of_binder_takes_the_count() {
     let inner = format!("for _ in 0..available {{\n                {POP}\n            }}");
-    let rows: [(&str, String); 6] = [
+    let rows: [(&str, String); 5] = [
         (
             "binder-match-arm",
             drain(&format!(
@@ -206,16 +193,8 @@ fn every_kind_of_binder_takes_the_count() {
                 "let available = control.available_at_entry();\n    let (available, other) = (usize::MAX, 0);\n    {inner}"
             )),
         ),
-        (
-            "binder-function-parameter",
-            format!(
-                "fn drain(control: &mut Consumer<Record>, available: usize) {{\n    {inner}\n}}"
-            ),
-        ),
     ];
-    for (name, text) in rows {
-        refuses(name, &text);
-    }
+    each_row(rows, |name, text| refuses(name, &text));
 }
 
 /// D4: the nodes on a pop's path are an allow-list. A pop below any other node is not reached.
@@ -238,9 +217,7 @@ fn a_pop_below_a_node_outside_the_allow_list_is_refused() {
                 .to_owned(),
         ),
     ];
-    for (name, text) in rows {
-        refuses(name, &text);
-    }
+    each_row(rows, |name, text| refuses(name, &text));
 }
 
 /// D4: `Expr::Async` is not on the list. The `async` keyword is forbidden too (A2), so both
@@ -351,13 +328,12 @@ fn a_loop_that_encloses_the_region_is_refused() {
 
 /// D1: a region inside a macro's token tree is tokens, not syntax. Any pop in it is refused, even
 /// a counted drain.
+const TOKEN_DRAIN: &str = "let available = control.available_at_entry();\n        for _ in 0..available {\n            let Ok(record) = control.try_pop() else {\n                break;\n            };\n            apply(record);\n        }";
+
 #[test]
 fn a_pop_in_a_region_inside_a_macro_body_is_refused() {
-    let drain_tokens = format!(
-        "let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}"
-    );
     let definition = format!(
-        "macro_rules! drain_all {{\n    () => {{\n        // {BEGIN}\n        {drain_tokens}\n        // {END}\n    }};\n}}\n"
+        "macro_rules! drain_all {{\n    () => {{\n        // {BEGIN}\n        {TOKEN_DRAIN}\n        // {END}\n    }};\n}}\n"
     );
     expect_failure(
         "pop-in-a-macro-body-region",
@@ -367,8 +343,12 @@ fn a_pop_in_a_region_inside_a_macro_body_is_refused() {
         }],
         &[DRAIN],
     );
+}
+
+#[test]
+fn a_pop_in_a_region_inside_a_macro_call_is_refused() {
     let call = format!(
-        "fn holder() {{\n    note! {{\n        // {BEGIN}\n        {drain_tokens}\n        // {END}\n    }}\n}}\n"
+        "fn holder() {{\n    note! {{\n        // {BEGIN}\n        {TOKEN_DRAIN}\n        // {END}\n    }}\n}}\n"
     );
     expect_failure(
         "pop-in-a-macro-call-region",

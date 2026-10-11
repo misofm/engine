@@ -106,6 +106,12 @@ fn per_queue_single_pass() {
     expect_valid("per-queue-single-pass", &edit(text));
 }
 
+/// The roots are a typed parameter, not `self`.
+#[test]
+fn per_queue_param_root() {
+    accepts("per-queue-param-root", &Poll::passing("ready"));
+}
+
 /// Condition 1: the roots are spelled alike but bound differently. Defect: the set loop's and the
 /// pass loop's roots compared by spelling.
 #[test]
@@ -203,13 +209,14 @@ fn per_queue_no_decrement() {
     refuses("per-queue-no-decrement", &poll);
 }
 
-/// Condition 5: two pops after one decrement. Defect: more than one pop per pass body accepted.
+/// Condition 5: two pops after one decrement, both in the third statement. Defect: more than one
+/// pop per pass body accepted.
 #[test]
 fn per_queue_two_pops_one_decrement() {
     let mut poll = Poll::passing("self");
     poll.pass_body = poll.pass_body.replace(
         "if let Ok(record) = lane.consumer.try_pop() {\n    *slot = Some(record);\n}",
-        "if let Ok(record) = lane.consumer.try_pop() {\n    *slot = Some(record);\n}\nif let Ok(record) = lane.consumer.try_pop() {\n    apply(record);\n}",
+        "if let Ok(record) = lane.consumer.try_pop() {\n    *slot = Some(record);\n} else if let Ok(extra) = lane.consumer.try_pop() {\n    apply(extra);\n}",
     );
     refuses("per-queue-two-pops-one-decrement", &poll);
 }

@@ -47,6 +47,22 @@ impl Ported {
     }
 }
 
+/// Run `check` on every row, then fail once naming every row that failed, so a broken rule shows
+/// every case it breaks and not only the first.
+pub(super) fn each_row<T>(
+    rows: impl IntoIterator<Item = (&'static str, T)>,
+    check: impl Fn(&'static str, T),
+) {
+    let mut failed = Vec::new();
+    for (name, row) in rows {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(name, row)));
+        if outcome.is_err() {
+            failed.push(name);
+        }
+    }
+    assert!(failed.is_empty(), "rows failed: {failed:?}");
+}
+
 /// Assert that `text` in the second region is a drain the rule refuses, and nothing else.
 fn refuses(name: &str, text: &str) {
     expect_failure(
@@ -79,13 +95,16 @@ fn accepts(name: &str, text: &str) {
 /// strings) as a regression corpus, and the count, loop and pop shapes the rule decides.
 #[test]
 fn the_ported_drain_cases_are_refused() {
-    for case in ported::PORTED {
-        let tree = case.tree();
-        let expected: &[Class] = match case.name {
-            "open-tail-last-file" => &[Class::MisorderedMarkers, FILE_FLOOR, REGION_FLOOR],
-            "region-ends-in-comment" => &[Class::MalformedMarker],
-            _ => &[DRAIN],
-        };
-        super::common::assert_classes(&tree, expected);
-    }
+    each_row(
+        ported::PORTED.iter().map(|case| (case.name, case)),
+        |_, case| {
+            let tree = case.tree();
+            let expected: &[Class] = match case.name {
+                "open-tail-last-file" => &[Class::MisorderedMarkers, FILE_FLOOR, REGION_FLOOR],
+                "region-ends-in-comment" => &[Class::MalformedMarker],
+                _ => &[DRAIN],
+            };
+            super::common::assert_classes(&tree, expected);
+        },
+    );
 }
