@@ -66,15 +66,17 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// 1,170,724 at both; source total 3,442 and overhead 2,418 at both; builtin retained 1,957 at both;
 /// graph session+plan and incremental 48,034 / 35,230; graph metadata 6,711 / 6,675.
 ///
-/// **Re-pinned: `builtin_retained_bytes` (#1326).** Every browser plan now carries each strip's
-/// fader/mute and matrix/pan lanes, whatever the app's live-control options say (the engine ramps a
-/// strip's mute for its own transitions). The lanes are two 16-record rings per strip, 1,234 bytes
-/// retained for this one-strip fixture (2,149 to 3,383) and 1,228 to 1,234 per strip across the
-/// one-, three- and nine-strip sessions measured, and no other row moves. The ceiling is the new
-/// value plus 10 %, rounded up to 64 bytes: 3,383 * 1.1 = 3,721.3, so 3,776. Both lane widths
-/// carry that ceiling, but only the eight-lane value is measured (x86-64); the four-lane one is
-/// inferred, because AArch64 runs only in CI: the rings are records, not lanes, so the figure
-/// should match, and the 10 % headroom covers a small difference.
+/// **Re-pinned: `builtin_retained_bytes` (#1326, then #1312).** Every browser plan carries each
+/// strip's fader/mute and matrix/pan lanes, whatever the app's live-control options say (the
+/// engine ramps a strip's mute for its own transitions). #1326 added them as two 16-record rings
+/// per strip, 1,234 bytes retained for this one-strip fixture (2,149 to 3,383), and re-pinned the
+/// ceiling to 3,776 (3,383 * 1.1 = 3,721.3, rounded up to 64). #1312 replaced the rings with
+/// latest-target cells and the row fell to 2,887 (x86-64; 2,723 measured on the wasm32 simd128
+/// module, `expected.json`). The ceiling is the new value plus 10 %, rounded up to 64 bytes:
+/// 2,887 * 1.1 = 3,175.7, so 3,200. A ceiling left at 3,776 would let 889 bytes of regression
+/// through unseen. Both lane widths carry that ceiling, but only the eight-lane value is measured
+/// (x86-64); the four-lane one is inferred, because AArch64 runs only in CI: the cells are words,
+/// not lanes, so the figure should match, and the 10 % headroom covers a small difference.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
@@ -103,8 +105,8 @@ const BUDGETS: [Budget; 12] = [
     Budget {
         row: "builtin_retained_bytes",
         value: |report| report.builtin_retained_bytes,
-        eight_lanes: 3_776,
-        four_lanes: 3_776,
+        eight_lanes: 3_200,
+        four_lanes: 3_200,
     },
     Budget {
         row: "graph_session_plus_plan_bytes",
