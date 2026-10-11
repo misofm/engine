@@ -272,4 +272,28 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn clearing_one_effect_leaves_its_siblings_and_its_strip() {
+        let effect = |name: &str| EditRampTarget::Effect {
+            strip: id("a"),
+            rack: RackName::Inserts,
+            effect: id(name),
+        };
+        let strip = EditRampTarget::Strip(id("a"));
+        let mut ramps = EditRamps::new();
+        ramps.set(&strip, EditRampRow::Matrix, Some(4));
+        ramps.set(&effect("comp"), EditRampRow::Link, Some(5));
+        ramps.set(&effect("eq"), EditRampRow::Link, Some(6));
+        ramps.set(&effect("limiter"), EditRampRow::Link, Some(7));
+        ramps.clear_target(&effect("eq"));
+        assert_eq!(
+            ramps.entries(),
+            vec![
+                (strip, EditRampRow::Matrix, 4),
+                (effect("comp"), EditRampRow::Link, 5),
+                (effect("limiter"), EditRampRow::Link, 7),
+            ]
+        );
+    }
 }
