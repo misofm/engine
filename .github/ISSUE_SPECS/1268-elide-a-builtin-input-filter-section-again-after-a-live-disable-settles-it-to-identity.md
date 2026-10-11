@@ -336,6 +336,10 @@ zero") is therefore restored in true form for the LPF in D4, and the Product out
 gate 1's closing note and Test value are scoped to the HPF section, with the LPF stated separately.
 The Decision record and the Attempt record state the output claim without that scope; read them with
 it.
+The Decision record's sentence "Only a `-0.0` integrator word is observable" is also false, on
+both sections: the probe (`stream-dfg-spec-check2`) measured `+0.0` out of `-0.0` integrators on
+each. On the LPF only a negative non-zero integrator can show at the output, as the sign of an
+exact zero; the filed `-0.0` reason is refuted for both sections, not only the HPF.
 
 Changed passages:
 
