@@ -277,17 +277,18 @@ plan. D1-D8 above stay the record of what this issue delivered. They describe th
 
 - The watermark is never early: it never reports a revision before that revision is in effect.
   `first_sample` is the start of the first block that begins after the commit's last write, so at
-  most one block after the submit returns. A live value of that revision can apply earlier, in
-  any block that ran while the submit pushed its records.
+  most one block after the submit returns (while a replacement plan is pending: at the first
+  block after its adoption). A live value of that revision can apply earlier, in any block that
+  ran between the submit's first push and its revision store.
   - Render loads the running plan's revision word before `render_inner` (D3), but each strip
     drains its live lane at its own node inside `render_inner`, and the control plane releases
     one record at a time and stores the revision word last.
   - So a record pushed after the load and before that strip's drain renders in this block, while
     the watermark reports it at a later block's first sample (the attempt record's batch
     follow-up, F2).
-- One transaction's values can spread across the blocks that ran while the submit pushed its
-  records, until #1502, #1503, #1504, #1312 and #1345 have all landed, which together make it
-  exact.
+- One transaction's values can spread across the blocks that ran between the submit's first
+  push and its revision store, until #1502, #1503, #1504, #1312 and #1345 have all landed, which
+  together make it exact.
 - D3's sentence "Every drain inside `render_inner` then sees every record released before that
   store" holds. Its converse does not: a drain can also see records released after the load.
 - These places state this bound: `crates/capi/include/miso_engine_v1.h` (the Completion paragraph),

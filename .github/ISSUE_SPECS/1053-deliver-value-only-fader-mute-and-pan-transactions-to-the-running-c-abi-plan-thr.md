@@ -247,8 +247,8 @@ Every open slice in the table is closed with a Sol PASS and its evidence is upst
 - **Q2** (`BACKPRESSURE` on a paused transport after 16 edits): D15-2. Live values are
   latest-target cells, so a paused host is never refused for one (#1312).
 - **Q3** (tell the host which path ran?): D15-3 and D15-17 reverse the earlier "not now". The
-  response carries the path (#1313), and the applied-revision watermark reports the
-  block from which a revision is in effect, and how (#1314).
+  response carries the path (#1313), and the applied-revision watermark reports a
+  block by which a revision is in effect, and how (#1314).
 - **Q4** (an infinite tail for live input filters?): D15-4. No; the SVF reaches exact rest (#1328),
   every node states a bounded tail (#1329), and #1261 and #1262 report it.
 - **Q5** (#1306, formerly "size effect span windows by lane depth"): D15-5. The window is sized once from the

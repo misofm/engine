@@ -79,9 +79,10 @@ when a dependency forces the order, and then sequence the correct solution.
   2. a value is superseded only by a later commit before the same block's live snapshot, and every
      live value of one committed transaction takes effect in the same block. (Amended 2026-10-11,
      root; these two clauses become exact once #1502, #1503, #1504, #1312 and #1345 have all
-     landed. Until then a live value can apply in any block that ran while the submit pushed its
-     records, so one transaction's values can spread across those blocks. The watermark is never
-     early, and its `first_sample` is at most one block after the submit returns.)
+     landed. Until then a live value can apply in any block that ran between the submit's first
+     push and its revision store, so one transaction's values can spread across those blocks. The
+     watermark is never early, and its `first_sample` is at most one block after the submit
+     returns (while a replacement plan is pending: at the first block after its adoption).)
   3. every fallible check runs before the first cell write;
   4. an exact `live_values_superseded` counter.
 - Automation, Observe records, structural edits and every time-stamped record stay FIFO.

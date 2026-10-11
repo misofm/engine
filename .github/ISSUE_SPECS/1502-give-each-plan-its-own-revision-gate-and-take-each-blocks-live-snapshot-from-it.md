@@ -132,9 +132,10 @@ This slice changes no rendered bit. It provides the snapshot.
   - Until #1504 hands `S` to every drain, each drain pops its queue at its node as today.
   - Until each lane family reads cells under `S` (#1312 strip lanes, #1345 effect lanes, #1346,
     #1347), the watermark is never early. Its `first_sample` is the start of the first block
-    that begins after the commit's last write, so at most one block after the submit returns.
-    A live value of that revision can apply earlier, in any block that ran while the submit
-    pushed its records. One transaction's values can spread across those blocks until #1502,
+    that begins after the commit's last write, so at most one block after the submit returns
+    (while a replacement plan is pending: at the first block after its adoption). A live value
+    of that revision can apply earlier, in any block that ran between the submit's first push
+    and its revision store. One transaction's values can spread across those blocks until #1502,
     #1503, #1504, #1312 and #1345 have all landed, which together make it exact (#1314
     Amendment 2).
 - **D9. The acked-batch question: can an ack ever precede a drop? No.**
