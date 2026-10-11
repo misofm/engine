@@ -100,3 +100,31 @@ fn two_arguments_exit_two() {
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.starts_with("usage: "), "usage text expected: {err:?}");
 }
+
+/// Findings are listed by class, then path, whatever order the walk met them in.
+#[test]
+fn findings_are_sorted_by_class_then_path() {
+    let tree = Tree::base("run-sorted");
+    let bad = format!("{UNSAFE} fn bad() {{}}\n");
+    tree.apply(&[
+        // Met first, sorts last (unsafe code).
+        Edit::Create {
+            path: "crates/aaa/unsafe_code.rs",
+            text: &bad,
+        },
+        // Met second, sorts first (a lex error).
+        Edit::Create {
+            path: "crates/zzz/lex_error.rs",
+            text: "const S: &str = \"open;\n",
+        },
+    ]);
+    let (code, _, err) = run_in(&[&tree.root().into()], Path::new("/"));
+    assert_eq!(code, 1);
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "{err}");
+    assert!(
+        lines[0].contains("file does not lex: crates/zzz/lex_error.rs:1"),
+        "{err}"
+    );
+    assert!(lines[1].contains("crates/aaa/unsafe_code.rs:1"), "{err}");
+}
