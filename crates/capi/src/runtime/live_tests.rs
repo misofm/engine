@@ -11,8 +11,8 @@ use super::tests::{
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
 use session::{
-    DualMonoFader, MatrixOrPan, RouteDestination, RouteSource, SessionModel, StableId, Submix, Vca,
-    parse_session_json,
+    ControlSmoothing, DualMonoFader, MatrixOrPan, RouteDestination, RouteSource, SessionModel,
+    StableId, Submix, Vca, parse_session_json,
 };
 
 const SOURCE: &[u8] = b"fixture-source";
@@ -37,13 +37,32 @@ fn source_chunk(start: u64, frames: usize) -> [Vec<f32>; 2] {
     })
 }
 
-/// The parity session with a source long enough for a whole run.
+/// The parity session with a source long enough for a whole run, under the default
+/// `control_smoothing` (the table of #1055).
 fn long_session(track_count: usize, sample_rate_hz: u32) -> String {
+    long_session_with(track_count, sample_rate_hz, None)
+}
+
+/// [`long_session`] with the session's own `control_smoothing`.
+fn long_session_with(
+    track_count: usize,
+    sample_rate_hz: u32,
+    control_smoothing: Option<ControlSmoothing>,
+) -> String {
     let mut model = parse_session_json(&generated_parity_session(track_count, sample_rate_hz))
         .expect("parity session");
     model.sources[0].frames = SOURCE_FRAMES;
+    model.control_smoothing = control_smoothing;
     session::canonical_session_json(&model).expect("canonical long session")
 }
+
+/// Every length at 0: the hard switch, the session a bit-comparison against a rebuild authors
+/// (#1054 D6).
+const HARD_SWITCH: Option<ControlSmoothing> = Some(ControlSmoothing {
+    mute_ms: 0.0,
+    fader_ms: 0.0,
+    pan_ms: 0.0,
+});
 
 fn bits(pcm: &[f32]) -> Vec<u32> {
     pcm.iter().map(|sample| sample.to_bits()).collect()
@@ -109,6 +128,12 @@ impl Rig {
     }
 
     fn render(&mut self) -> Vec<f32> {
+        self.render_counted().0
+    }
+
+    /// One block, and the calling thread's allocator events inside the `render` call alone (the
+    /// output buffer is allocated before the count starts).
+    fn render_counted(&mut self) -> (Vec<f32>, bench_support::alloc::Counters) {
         let mut pcm = vec![f32::NAN; self.quantum * 2];
         let output = crate::PlanarOutput {
             struct_size: crate::PLANAR_OUTPUT_SIZE,
@@ -119,12 +144,12 @@ impl Rig {
             plane_stride_samples: self.quantum as u32,
             reserved: [0; 2],
         };
-        assert_eq!(
-            crate::ffi::test_render(self.plan, self.block * self.quantum as u64, &output),
-            crate::RESULT_OK
-        );
+        let mark = bench_support::alloc::current_thread_counters();
+        let result = crate::ffi::test_render(self.plan, self.block * self.quantum as u64, &output);
+        let used = bench_support::alloc::current_thread_delta_since(mark);
+        assert_eq!(result, crate::RESULT_OK);
         self.block += 1;
-        pcm
+        (pcm, used)
     }
 
     /// Restarts the source at frame 0 under a new generation, as a host does after a rebuild.
@@ -375,14 +400,23 @@ fn settle(rig: &mut Rig, k: u64, compared: u64) -> Vec<(u64, Vec<f32>)> {
 }
 
 /// Gate 1: mute, unmute, and fader plus pan/matrix edits change the running plan with no rebuild.
-fn live_pcm_shape(track_count: usize, sample_rate_hz: u32) {
-    let label = format!("{track_count} tracks at {sample_rate_hz} Hz");
-    let document = long_session(track_count, sample_rate_hz);
+/// Each edit ramps over the session's `control_smoothing` and, from the block its ramp and the
+/// plan's latency leave behind, renders bit-identically to a rebuild of the committed session.
+fn live_pcm_shape(
+    track_count: usize,
+    sample_rate_hz: u32,
+    control_smoothing: Option<ControlSmoothing>,
+) {
+    let label = format!(
+        "{track_count} tracks at {sample_rate_hz} Hz, control_smoothing {control_smoothing:?}"
+    );
+    let document = long_session_with(track_count, sample_rate_hz, control_smoothing);
     let mut rig = Rig::new(&document);
     let mut original = Reference::new(&document);
     let quantum = rig.quantum;
     let latency = rig.latency();
     let model = parse_session_json(&document).expect("model");
+    let ramps = model.control_smoothing_samples();
 
     for _ in 0..4 {
         assert_eq!(
@@ -405,7 +439,7 @@ fn live_pcm_shape(track_count: usize, sample_rate_hz: u32) {
         "{label}: the mute commits one revision and prepares no plan"
     );
     assert_eq!(pending, 0, "{label}");
-    let k = window(latency, 0, quantum);
+    let k = window(latency, ramps.mute, quantum);
     let muted = settle(&mut rig, k, 3);
     for (block, pcm) in &muted {
         assert!(
@@ -429,7 +463,7 @@ fn live_pcm_shape(track_count: usize, sample_rate_hz: u32) {
     // (b) Unmute: bit-identical to the original session's lanes-free plan.
     assert_eq!(rig.apply(&mute_all(&model, false)), crate::RESULT_OK);
     let edit_block = rig.block;
-    let k = window(latency, 0, quantum);
+    let k = window(latency, ramps.mute, quantum);
     while rig.block < edit_block + k + 3 {
         let block = rig.block;
         let live = rig.step();
@@ -481,7 +515,12 @@ fn live_pcm_shape(track_count: usize, sample_rate_hz: u32) {
         (revision + 1, epoch, 0)
     );
     let committed = rig.snapshot();
-    let settled = settle(&mut rig, window(latency, smoothing, quantum), 3);
+    // The matrix carries its own window; the fader ramps over the session's `fader_ms`.
+    let settled = settle(
+        &mut rig,
+        window(latency, smoothing.max(ramps.fader), quantum),
+        3,
+    );
     let reference = Reference::run(&committed, rig.block);
     for (block, live) in settled {
         let expected = &reference[block as usize];
@@ -499,8 +538,164 @@ fn live_pcm_shape(track_count: usize, sample_rate_hz: u32) {
 fn live_fader_mute_and_pan_edits_change_the_running_plan_bit_exactly() {
     for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
         for track_count in [1, 10] {
-            live_pcm_shape(track_count, sample_rate_hz);
+            // The default table ramps; the hard switch steps.
+            live_pcm_shape(track_count, sample_rate_hz, None);
+            live_pcm_shape(track_count, sample_rate_hz, HARD_SWITCH);
         }
+    }
+}
+
+/// The stateless session (no console slot, no insert, no input filter, so no latency) with a source
+/// long enough for a run, under `control_smoothing`; the same session with every track baked muted
+/// is the control a live mute must land on (#1054 gates 4 and 5).
+fn mute_ramp_documents(control_smoothing: Option<ControlSmoothing>) -> (String, String) {
+    let mut model = super::tests::stateless_session(48_000);
+    model.sources[0].frames = SOURCE_FRAMES;
+    model.control_smoothing = control_smoothing;
+    let live = session::canonical_session_json(&model).expect("canonical");
+    for track in &mut model.tracks {
+        track.fader.left_mute = true;
+        track.fader.right_mute = true;
+    }
+    let muted = session::canonical_session_json(&model).expect("canonical muted");
+    (live, muted)
+}
+
+/// The sum of absolute samples of one block: a measure of how far a mute's ramp has closed.
+fn magnitude(pcm: &[f32]) -> f64 {
+    pcm.iter().map(|sample| f64::from(sample.abs())).sum()
+}
+
+/// Gate 4 (#1054). A playing session whose `control_smoothing` is `default` takes a live mute. The
+/// first block after the commit equals neither the unmuted nor the muted control, the mute ramp
+/// closes block by block, and from the first block after the ramp the output is bit-identical to a
+/// control booted muted. The ramp blocks render without one allocation. (The commit itself is the
+/// control plane and allocates, as `classify_live_delta` documents; only render is counted.)
+///
+/// Test value: red if `LiveRamps::for_session` still returns 0 (the mute steps, so the first block
+/// is already the muted control), if the ramp is cut short or never lands on its target, or if a
+/// ramp block allocates. No other test hears the ramp: the bit-exact ones wait it out.
+#[test]
+fn a_live_mute_ramps_over_the_session_mute_ramp_and_lands_on_the_muted_control() {
+    bench_support::alloc::assert_installed();
+    let (document, muted_document) = mute_ramp_documents(None);
+    let model = parse_session_json(&document).expect("model");
+    assert_eq!(model.control_smoothing, None, "the session says `default`");
+    let ramp = model.control_smoothing_samples().mute;
+    assert_eq!(ramp, 480, "10 ms at 48 kHz");
+    let mut rig = Rig::new(&document);
+    let quantum = rig.quantum;
+    assert_eq!(rig.latency(), 0, "no latency: the mute lands at the fader");
+    assert!(ramp as usize > 2 * quantum, "the ramp spans several blocks");
+    let mut unmuted = Reference::new(&document);
+    let mut muted = Reference::new(&muted_document);
+    for _ in 0..4 {
+        let live = rig.step();
+        assert_eq!(bits(&live), bits(&unmuted.step()), "warm-up");
+        muted.step();
+    }
+
+    let (revision, _, epoch, pending) = rig.summary();
+    assert_eq!(rig.apply(&mute_all(&model, true)), crate::RESULT_OK);
+    assert_eq!(
+        rig.summary(),
+        (revision + 1, rig.summary().1, epoch, pending),
+        "the mute commits one revision and prepares no plan"
+    );
+    assert_eq!(pending, 0);
+
+    let ramp_blocks = u64::from(ramp).div_ceil(quantum as u64);
+    let mut energies = Vec::new();
+    for offset in 0..ramp_blocks {
+        let [left, right] = source_chunk(rig.fed, quantum);
+        submit_c(
+            rig.session,
+            rig.generation,
+            rig.fed,
+            rig.rate,
+            &left,
+            &right,
+            false,
+        );
+        rig.fed += quantum as u64;
+        let (live, used) = rig.render_counted();
+        assert_eq!(
+            (used.allocations, used.deallocations),
+            (0, 0),
+            "ramp block {offset} allocated or freed"
+        );
+        let loud = unmuted.step();
+        let quiet = muted.step();
+        if offset == 0 {
+            assert_ne!(
+                bits(&live),
+                bits(&loud),
+                "the first block is not the unmuted control"
+            );
+            assert_ne!(
+                bits(&live),
+                bits(&quiet),
+                "the first block is not the muted control"
+            );
+        }
+        assert!(
+            live.iter().any(|sample| *sample != 0.0),
+            "ramp block {offset} still sounds"
+        );
+        energies.push(magnitude(&live));
+    }
+    assert!(
+        energies.windows(2).all(|pair| pair[1] < pair[0]),
+        "the mute closes block by block: {energies:?}"
+    );
+
+    // From the first block after the ramp: bit-identical to the control booted muted.
+    for offset in 0..3 {
+        let live = rig.step();
+        assert_eq!(
+            bits(&live),
+            bits(&muted.step()),
+            "block {offset} after the ramp is the muted control"
+        );
+        assert!(
+            live.iter().all(|sample| sample.to_bits() == 0),
+            "exactly +0.0"
+        );
+        unmuted.step();
+    }
+}
+
+/// Gate 5 (#1054). The same edit under `control_smoothing` with every length at 0 is the muted
+/// control from the first block.
+///
+/// Test value: red if a session 0 is read as "use the default" (the first block would still be
+/// ramping).
+#[test]
+fn a_live_mute_under_an_explicit_zero_is_the_muted_control_from_the_first_block() {
+    let (document, muted_document) = mute_ramp_documents(HARD_SWITCH);
+    let model = parse_session_json(&document).expect("model");
+    assert_eq!(model.control_smoothing_samples().mute, 0);
+    let mut rig = Rig::new(&document);
+    assert_eq!(rig.latency(), 0, "no latency: the mute lands at the fader");
+    let mut unmuted = Reference::new(&document);
+    let mut muted = Reference::new(&muted_document);
+    for _ in 0..4 {
+        assert_eq!(bits(&rig.step()), bits(&unmuted.step()), "warm-up");
+        muted.step();
+    }
+    assert_eq!(rig.apply(&mute_all(&model, true)), crate::RESULT_OK);
+    for offset in 0..3 {
+        let live = rig.step();
+        let loud = unmuted.step();
+        assert!(
+            loud.iter().any(|sample| *sample != 0.0),
+            "the unmuted control sounds"
+        );
+        assert_eq!(
+            bits(&live),
+            bits(&muted.step()),
+            "block {offset} after the commit is the muted control"
+        );
     }
 }
 
@@ -521,7 +716,9 @@ enum Mute {
 /// strip input sections, #1276) is the same in every run, and the rebuilt blocks differ only by
 /// what the successor was prepared from.
 fn persistence_run(mute: Mute) -> Vec<Vec<f32>> {
-    let document = long_session(10, 48_000);
+    // A hard switch (#1054 D6): the live mute steps one block before the rebuild and the baked
+    // mute is the rebuild's own retarget, so with a ramp the two would start it a block apart.
+    let document = long_session_with(10, 48_000, HARD_SWITCH);
     let mut rig = Rig::new(&document);
     let model = parse_session_json(&document).expect("model");
     let muted: Vec<SessionEdit> = mute_all(&model, true).into_iter().step_by(2).collect();
@@ -762,8 +959,14 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
 
     rig.render();
     rig.seek_to_start();
-    // The candidate ramps its pan from its prepared value; the control starts at the target.
-    let k = window(rig.latency(), 8, rig.quantum);
+    // The candidate ramps its fader and mute from their prepared values over the session's ramps
+    // and its pan over its own 8-sample window; the control starts at the target.
+    let ramps = model.control_smoothing_samples();
+    let k = window(
+        rig.latency(),
+        ramps.fader.max(ramps.mute).max(8),
+        rig.quantum,
+    );
     let blocks = k + 3;
     let rendered: Vec<_> = (0..blocks).map(|_| rig.step()).collect();
     // The controls take the same rebuild from the same history, so they carry what the candidate
@@ -936,6 +1139,9 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
     model.tracks.truncate(1);
     model.routes.truncate(1);
     model.sources[0].frames = SOURCE_FRAMES;
+    // The claim is bit-identity to a fresh compile from the swap block on, so the live fader is a
+    // step (#1054 D6); a ramp would still be on its way.
+    model.control_smoothing = HARD_SWITCH;
     let fader = model.tracks[0].fader.clone();
     assert_eq!((fader.left_db, fader.right_db), (0.0, 0.0));
     let document = session::canonical_session_json(&model).expect("canonical");
@@ -1366,7 +1572,12 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
     assert_eq!(rig.writes(Epoch::Current, "bus"), (0, 0));
 
     let committed = rig.snapshot();
-    let settled = settle(&mut rig, window(latency, smoothing, quantum), 3);
+    let fader_ramp = rig.model().control_smoothing_samples().fader;
+    let settled = settle(
+        &mut rig,
+        window(latency, smoothing.max(fader_ramp), quantum),
+        3,
+    );
     let reference = Reference::run(&committed, rig.block);
     let original = Reference::run(&document, rig.block);
     for (block, live) in settled {

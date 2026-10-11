@@ -338,9 +338,12 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   `right_db`, `left_mute`, `right_mute`) and `pan`/`matrix` values. The engine pushes the records
   that change a rendered value to the newest plan -- the pending replacement if there is one, else
   the current plan -- and commits. No plan is prepared; source rings, effect state and the render
-  position continue, and the host keeps submitting with no seek. Fader and mute changes are steps
-  until #1054 gives them ramps; a pan or matrix change carries the session's own
-  `smoothing_samples`.
+  position continue, and the host keeps submitting with no seek. Fader, mute, pan and matrix
+  changes ramp over the session's `control_smoothing` (#1054): its `fader_ms`, `mute_ms` and
+  `pan_ms`, or the researched default table (20, 10 and 20 ms) when the session says `default`,
+  rounded at the session's sample rate; an explicit 0 is a step. A pan or matrix record whose
+  committed model carries its own non-zero `smoothing_samples` uses that window instead. Editing
+  `control_smoothing` itself is not a live delta until #1365 (it is a structural difference).
 - **Model-only (#1260).** A delta that changes only fields no prepared plan reads -- the session
   ID, the render profile's `id`, the output profile's `id` and the stored `automation` table --
   is live with no records: it commits through the same admission and protocol predicates, emits
