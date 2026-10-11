@@ -141,7 +141,7 @@ static const char one_track_session[] =
     ".0,\"hpf_hz\":0.0,\"lpf_hz\":0.0,\"delay_samples\":0}},\"console\":[],\"inserts\":{\"e"
     "ffects\":[]},\"fader\":{\"left_db\":0.0,\"right_db\":0.0,\"left_mute\":false,\"right_m"
     "ute\":false},\"pan\":{\"left\":1.0,\"right\":1.0,\"smoothing_samples\":16}}],\"submixe"
-    "s\":[],\"vcas\":[],\"outputs\":[{\"id\":\"main-out\"}],\"routes\":[{\"id\":\"to-main\""
+    "s\":[],\"vcas\":[],\"control_smoothing\":{\"kind\":\"default\"},\"outputs\":[{\"id\":\"main-out\"}],\"routes\":[{\"id\":\"to-main\""
     ",\"source\":{\"kind\":\"track\",\"track_id\":\"vocal\",\"tap\":\"post_pan\"},\"destina"
     "tion\":{\"kind\":\"output_input\",\"output_id\":\"main-out\"},\"channel_matrix\":{\"ll"
     "\":1.0,\"lr\":0.0,\"rl\":0.0,\"rr\":1.0},\"gain_db\":0.0,\"mute\":false,\"follows_mute"

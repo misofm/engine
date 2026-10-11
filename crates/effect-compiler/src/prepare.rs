@@ -2254,7 +2254,7 @@ mod tail_bound_count_tests {
             "content":"blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
             "channels":2,"bit_depth":"32f","frames":"48000"}}],
             "console":{{"pre_insert":[],"post_insert":[]}},
-            "tracks":[{}],"submixes":[],"vcas":[],"outputs":[{{"id":"main-out"}}],
+            "tracks":[{}],"submixes":[],"vcas":[],"control_smoothing":{{"kind":"default"}},"outputs":[{{"id":"main-out"}}],
             "routes":[{}],"automation":[]}}"#,
             join((0..tracks).map(track).collect()),
             join((0..tracks).map(route).collect())

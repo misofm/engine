@@ -12336,6 +12336,9 @@
     }
   ],
   "vcas": [],
+  "control_smoothing": {
+    "kind": "default"
+  },
   "outputs": [
     {
       "id": "main-out"

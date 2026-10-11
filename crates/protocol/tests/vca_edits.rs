@@ -39,6 +39,7 @@ fn base_document() -> String {
           "tracks": [ {}, {} ],
           "submixes": [ {{ "id": "bus", {strip} }} ],
           "vcas": [ {{ "id": "grp", "fader": {FADER}, "members": [ "a", "x" ] }} ],
+          "control_smoothing": {{ "kind": "default" }},
           "outputs": [ {{ "id": "main-out" }} ],
           "routes": [
             {{ "id": "a-bus", "source": {{ "kind": "track", "track_id": "a", "tap": "post_pan" }},
