@@ -136,3 +136,124 @@ Mono-source chains keep collapsing after the swap.
 
 - *Carry fader, mute and pan ramps across a plan swap* (#1277).
 - #1278 is on `main`.
+
+## Attempt record
+
+### Attempt 1
+
+Commits on `codex/d15-stream-a2`, after the #1277 follow-ups `1080ccbc0`: the carry `f5f61af3b`, the
+realtime floor and docs `8f897e6ab`, the layout and agreement tests `bc267c2a5` and `287510412`, the scratch charge `3e1f74c2c`, the capi oracle `7852f0a25`, and this record.
+
+Premise check. A console slot without live controls is an `EffectBankStage`; one with a live
+control lane, or a lane whose session bypass is lowered (#1087), is a `LiveControlEffectBankStage`
+(`graph/src/runtime.rs` `stage_for`). The browser form that attaches fader and matrix lanes only
+keeps `EffectBankStage`; a plan prepared with effect lanes (the C ABI, `HostLiveLanes::ALL`) has no
+`EffectBankStage` console lane, so this slice carries nothing there and every strip with a console
+slot is in `restarted_strips()` until #1280. The spec's premise holds.
+
+Design.
+
+- `rack`: `EffectBankStage` keeps a per-lane `ChannelSymmetryWitness` (the `DESIGNED` and `RESTORED`
+  terms it decides) instead of the `designed` flags, its `EffectLaneLayout` (effect, state layout
+  version, state sizes, prepared bypass, latency) and a saturating `carry_refused`.
+  `carry_lane_from` snapshots the predecessor lane into the scratch, restores it, and recomputes the
+  witness (`DESIGNED` from the bank, `RESTORED` from whether the payload's left and right sections
+  are byte-equal). The cache's rustdoc says restore now runs on a bound bank, in the swap block.
+- `graph`: `bank_effect_lanes` (rows), `GraphEffectMove`, `install_effect_carry` (validates, sorts by
+  predecessor, preallocates the scratch at the largest carried payload), `carry_refusal_count`,
+  `effect_carry_retained_bytes`, `EffectLaneLayout` re-export. At the swap block
+  `can_carry_effect_lanes` checks every move before anything moves (all or nothing, as the other
+  sections); `carry_effect_lanes` disengages each predecessor chain once (`disengage_for_carry`,
+  which desymmetrizes every collapsed bank, D3 step 1 and D4), moves each lane, and ANDs the
+  predecessor chain's agreement into the successor chain (#1276 D5).
+- `host-core`: `EffectLaneInventoryRow` in `PlanStateInventory`; `join_chains` (model half: a console
+  slot is `same` when its session slot, section, bypass and parameters are bit-equal; the chain is
+  changed when a session slot is added, removed or moved, or an insert is added, removed, reordered
+  or changes identity); `resolve_effect_carry` (lane half: row in both plans, `same`, equal layout);
+  the restart set is the union with #1277's; the move table and scratch are charged against the
+  graph cap, the scratch against the named-allocation cap.
+- Owners are console slots only. An insert is a chain member (its addition restarts the strip), but
+  its own lane, banked or per node, is #1281 and #1282; making it an owner here would list every
+  strip with an insert as restarted.
+
+Deviations from the spec text, each forced:
+
+- Gate 1 and the other cases run at four lanes only on a build with `neon` or `simd128`: an effect
+  bank binds only at the width its build executes (D4), so `Backend::Simd4` fails to prepare a
+  console on x86-64-v3 (`console.slot.unbanked`). The four-lane cases compile for
+  `aarch64-unknown-linux-gnu` (`cargo check --tests`) and run in CI only.
+- Gate 2 uses the collapse-capable subset (EQ, compressor, limiter). The gate/expander, soft-clip
+  and transient shaper declare no channel symmetry, so a chain holding one never collapses and
+  "the same console" cannot satisfy the gate.
+- `carry_refusal_count` is `graph::carry_refusal_count(&mut PreparedRenderPlan)`, read by whoever
+  holds the plan: the active plan lives in `RealtimePlanOwner`, whose file is not authorized.
+- Gate 1's "block 7 differs" mutation is red at block 6, the swap block (the swapped run's first).
+- `crates/capi/tests/resource_lifecycle.rs` (not authorized) needed one line: the double-live
+  oracle read the prospective epoch's inventory bytes off a fresh preparation, whose restart set is
+  empty; the successor's inventory now lists the restarted strips (every strip, for that C ABI
+  session). Root to approve or rule otherwise.
+- `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh`: floor 111 to 112
+  regions (one region in `rack`), under STREAMS' standing exception.
+
+Tests (each answers the test-value question):
+
+- `console_effect_state_survives_a_swap_at_*` (gate 1): a lane restored to the wrong lane, an effect
+  whose restore misses state, or a join that skips a slot; `every_console_effect_does_work_at_*`:
+  a session whose effects leave the signal alone would pass gate 1 vacuously.
+- `console_chains_keep_collapsing_across_a_swap_at_*` (gate 2, four cases: successor free or forced
+  dual, input sections carried or restarted): a carry that does not disengage a collapsed predecessor
+  (the dual successor reads a stale right channel), a successor that loses the agreement it inherits.
+- `a_chain_that_could_not_collapse_hands_over_no_agreement_at_*`: the successor chain not taking the
+  predecessor chain's agreement through the effect carry (the input carry is out of play).
+- `a_prepared_change_to_one_slot_restarts_only_its_strip_at_*` (gate 3): a rule that carries a slot
+  whose value changed (old threshold kept: exact at-rest oracle on a lone compressor), a restart set
+  that misses or over-lists, a join that restarts the whole strip (one move fewer, exactly).
+- `an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_*` (gate 3 second case, with a
+  transparent insert as exact oracle): a missing chain-change rule, or a console slot that does not
+  carry beside a changed chain. `a_removed_console_slot_restarts_every_strip_at_*`: the same rule
+  for a session slot.
+- `the_effect_carry_allocates_and_frees_nothing_at_*` (gate 4): an allocation in the swap block.
+- `a_console_slot_with_live_controls_restarts_its_strip_at_*`: a join that assumes a row exists for a
+  `LiveControlEffectBankStage` slot.
+- `prepare::tests::a_lane_of_another_prepared_layout_is_not_moved`: layouts are equal in every
+  reachable session edit, so only the pure join can show a guard that trusts two rows.
+- rack `effect_lane_carry_tests` (6): lane index, `DESIGNED` and `RESTORED` recomputation,
+  refusal counted, saturating, left at rest, layout and scratch guards.
+
+Mutations (defect applied: red; reverted: green):
+
+| Defect | Red |
+| --- | --- |
+| no effect move written | gate 1 (block 6), gate 2, gate 3 (both), removed slot, insert, `a_strip_behind_an_effect_still_carries_at_eight_lanes` (#1277) |
+| successor location = predecessor location | gate 1, 2, 3, 4, insert |
+| carry despite a changed value | `a_prepared_change_to_one_slot_*` |
+| chain change ignored | removed slot, insert |
+| effect carry does not disengage the predecessor chain | `console_chains_keep_collapsing_*` (inputs-restart case) |
+| successor chain does not inherit agreement | `a_chain_that_could_not_collapse_*` |
+| allocation in `carry_effect_lanes` | render audit aborts the binary (gate 4) |
+| missing row not a restart | `a_console_slot_with_live_controls_*` |
+| layout guard dropped from the join | `a_lane_of_another_prepared_layout_is_not_moved` |
+| witness not recomputed / `DESIGNED` stale / sections not compared | rack: `recomputes_the_designed_term`, `divergent_sections_clears_the_restored_term` |
+| refusal not counted / wrapping add | rack: `a_refused_restore_*`, `lanes_that_do_not_fit_*` |
+| predecessor lane index replaced by the successor's | rack: three tests |
+| layout not checked in `can_carry_lane_from` | rack: `lanes_that_do_not_fit_*` |
+
+Gates run (all green, x86-64-v3, AArch64 not run): the gate 5 commands (`cargo test -p rack -p graph
+-p host-core` with the test-support features, 459 passed; `-p builtins -p builtins-compiler`;
+`-p console-workload`), the CI workspace debug test command (1589 passed), `cargo test -p capi`,
+release `audit` with `trace-graph-audit.sh`, `trace-builtins-audit.sh` and
+`trace-builtins-graph-audit.sh`, `audit capi` (0 allocations, 0 syscalls), `check-realtime-policy.sh`
+(112 regions, 27 files) and its self-test, `check-workspace-policy.sh`, rack, host-core, graph and
+builtins policies, `check-capi-abi.sh`, `check-cross-targets.sh`, fmt, clippy `-D warnings`,
+`RUSTDOCFLAGS='-D warnings' cargo doc`, the worklet chain (named-twin build,
+`check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` with a private TMPDIR, empty
+afterwards, the V8 spill gate).
+
+Open items:
+
+- The non-zero path of `graph::carry_refusal_count` (the sum over stages) has no end-to-end test:
+  an own payload is never refused, and no host seam injects a refusing bank. The stage count is
+  covered in `rack`; gate 1 asserts 0.
+- Insert lanes (banked or per node) restart until #1281 and #1282.
+- On a C ABI plan every console slot restarts until #1280.
