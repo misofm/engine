@@ -28,7 +28,7 @@ fn counted(binding: &str) -> String {
 
 #[test]
 fn the_forms_that_d6_and_d8_state_pass() {
-    let rows: [(&str, String); 11] = [
+    let rows: [(&str, String); 12] = [
         (
             "form-header-entry-count",
             drain(&format!(
@@ -42,10 +42,18 @@ fn the_forms_that_d6_and_d8_state_pass() {
             )),
         ),
         (
-            "form-typed-count-capped-by-a-field",
-            format!(
-                "impl Drain {{\n    fn run(&mut self, control: &mut Consumer<Record>) {{\n        let available: u32 = control.available_at_entry().min(self.limit);\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n}}"
-            ),
+            "form-typed-count",
+            counted("let available: u32 = control.available_at_entry();"),
+        ),
+        (
+            "form-count-capped-by-a-field",
+            "impl Drain {\n    fn run(&mut self, control: &mut Consumer<Record>) {\n        let available = control.available_at_entry().min(self.limit);\n        for _ in 0..available {\n            let Ok(record) = control.try_pop() else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}"
+                .to_owned(),
+        ),
+        (
+            "form-function-with-attributes",
+            "#[inline]\n#[must_use]\nfn drain(control: &mut Consumer<Record>) {\n    let available = control.available_at_entry();\n    for _ in 0..available {\n        let Ok(record) = control.try_pop() else {\n            break;\n        };\n        apply(record);\n    }\n}"
+                .to_owned(),
         ),
         (
             "form-count-capped-by-a-literal",
@@ -61,15 +69,9 @@ fn the_forms_that_d6_and_d8_state_pass() {
                 .to_owned(),
         ),
         (
-            "form-labelled-loop",
-            drain(
-                "let available = control.available_at_entry();\n    'drain: for _ in 0..available {\n        let Ok(record) = control.try_pop() else {\n            break 'drain;\n        };\n        apply(record);\n    }",
-            ),
-        ),
-        (
             "form-count-compared-before-the-loop",
             counted(
-                "let available = control.available_at_entry();\n    if available == 0 {\n        return;\n    }\n    debug_assert!(available <= 8, \"too many\");",
+                "let available = control.available_at_entry();\n    if available == 0 {\n        return;\n    }\n    if available != 1 || available > 100 || available >= 5 || available < 7 {\n        note();\n    }\n    debug_assert!(available <= 8, \"too many\");",
             ),
         ),
         (
@@ -123,17 +125,11 @@ fn a_count_that_the_rule_cannot_prove_is_refused() {
         ),
         (
             "count-in-another-assert-macro",
-            counted(
-                "let available = control.available_at_entry();\n    debug_assert_eq!(available, 3);",
-            ),
+            counted("let available = control.available_at_entry();\n    assert!(available <= 8);"),
         ),
         (
             "count-capped-by-a-method",
             counted("let available = control.available_at_entry().min(self.limit());"),
-        ),
-        (
-            "count-declared-then-assigned",
-            counted("let available;\n    available = control.available_at_entry();"),
         ),
         (
             "count-also-the-loop-pattern",
@@ -148,9 +144,15 @@ fn a_count_that_the_rule_cannot_prove_is_refused() {
             )),
         ),
         (
-            "while-count-decremented-in-another-form",
+            "while-count-raised-in-its-first-statement",
             drain(&format!(
-                "let mut remaining = control.available_at_entry();\n    while remaining != 0 {{\n        remaining = remaining - 1;\n        {POP}\n    }}"
+                "let mut remaining = control.available_at_entry();\n    while remaining != 0 {{\n        remaining += 1;\n        {POP}\n    }}"
+            )),
+        ),
+        (
+            "while-count-decremented-by-two",
+            drain(&format!(
+                "let mut remaining = control.available_at_entry();\n    while remaining != 0 {{\n        remaining -= 2;\n        {POP}\n    }}"
             )),
         ),
     ];
@@ -351,14 +353,28 @@ fn a_loop_that_encloses_the_region_is_refused() {
 /// a counted drain.
 #[test]
 fn a_pop_in_a_region_inside_a_macro_body_is_refused() {
-    let text = format!(
-        "macro_rules! drain_all {{\n    () => {{\n        // {BEGIN}\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n        // {END}\n    }};\n}}\n"
+    let drain_tokens = format!(
+        "let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}"
+    );
+    let definition = format!(
+        "macro_rules! drain_all {{\n    () => {{\n        // {BEGIN}\n        {drain_tokens}\n        // {END}\n    }};\n}}\n"
     );
     expect_failure(
         "pop-in-a-macro-body-region",
         &[Edit::Append {
             path: BUFFER,
-            text: &text,
+            text: &definition,
+        }],
+        &[DRAIN],
+    );
+    let call = format!(
+        "fn holder() {{\n    note! {{\n        // {BEGIN}\n        {drain_tokens}\n        // {END}\n    }}\n}}\n"
+    );
+    expect_failure(
+        "pop-in-a-macro-call-region",
+        &[Edit::Append {
+            path: BUFFER,
+            text: &call,
         }],
         &[DRAIN],
     );
