@@ -14,12 +14,12 @@ use std::sync::Mutex;
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, LiveValuesSuperseded, MeterRequest, TEST_ONLY_PAIR_GRAPH_TRACKS,
-    TestOnlyFaderMatrixPair, TestOnlyGate, TestOnlyWriteGate, TrackControlRecord,
-    TrackControlRequest, TrackFaderRecord, TrackInputRecord, prepare_session_builtins,
-    prepare_session_builtins_with_live_controls, test_only_begin_phase_two_allocation_observation,
-    test_only_fader_matrix_witness, test_only_observed_scalar_declined_split_pair_binding,
-    test_only_observed_scalar_pair_binding, test_only_observed_scalar_split_pair_binding,
-    test_only_phase_two_allocation_snapshot, test_only_prepared_scalar_split_pair_graph,
+    TestOnlyFaderMatrixPair, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
+    TrackInputRecord, prepare_session_builtins, prepare_session_builtins_with_live_controls,
+    test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
+    test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
+    test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
+    test_only_prepared_scalar_split_pair_graph,
     test_only_prepared_scalar_split_pair_graph_with_observer_error,
     test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
