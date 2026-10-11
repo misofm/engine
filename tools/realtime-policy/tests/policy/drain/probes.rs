@@ -1,6 +1,10 @@
 //! The verdict probe corpus of #1302 and #1418 (B2a-D5): every compiled probe that `main`'s awk
 //! gate refused, and every bounded probe it passed, plus the six probes that passed it and pop
-//! until the queue is empty (the closure and macro limits B2a closes).
+//! until the queue is empty (the closure and macro limits B2a closes). Two bounded probes are
+//! committed as refused: `v14` and `v14b`, whose outer bound `0..self.controls.len()` runs code the
+//! tool cannot see (B1b-D1's `<bound>`, root Amendment 1, SP-4), and `n06`, a counted drain in the
+//! closure of `array::from_fn`, which is a closure like any other (root Amendment 3, MAJOR-1).
+//! `u19` is committed as accepted: the `awk` gate over-refuses it.
 //!
 //! A probe is a file `tests/fixtures/probes/<group>/<name>.<verdict>.rs.txt`. The case replaces
 //! the base tree's `fn drain_matrix_controls() {}`, inside its region, with the probe's text, whose

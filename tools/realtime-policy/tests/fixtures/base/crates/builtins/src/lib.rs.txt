@@ -6,18 +6,18 @@ fn input_lane_states() -> [[u8; 4]; 2] {
     [gains, trims]
 }
 fn drain_lane_pairs(control: &mut Consumer<Record>) -> [usize; 2] {
-    core::array::from_fn(|lane| {
+    let mut applied = [0; 2];
+    for lane in 0..2 {
         let available = control.available_at_entry();
         // `available` is fixed at entry: a push during this drain waits for the next block.
-        let mut applied = 0;
         for _ in 0..available {
             let Ok(record) = control.try_pop() else {
                 break;
             };
-            applied += apply(lane, record);
+            applied[lane] += apply(lane, record);
         }
-        applied
-    })
+    }
+    applied
 }
 fn drain_two_lanes(controls: &mut [Consumer<Record>; 2]) {
     for lane in 0..2 {

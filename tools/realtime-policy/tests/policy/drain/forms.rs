@@ -142,6 +142,22 @@ fn a_count_that_the_rule_cannot_prove_is_refused() {
     each_row(rows, |name, text| refuses(name, &text));
 }
 
+/// Root Amendment 1 (i): `u19-swapped`. The probe `u19` decrements the outer `remaining` and only
+/// then declares `let remaining = 5;`, which shadows the rest of the body, so it is bounded and
+/// accepted (`the_bounded_probes_pass`). With the inner `let mut remaining = 5;` first, the
+/// decrement counts the inner binding down and the loop runs until the queue is empty. Red if the
+/// resolver accepts a decrement that a body `let` has rebound, which would make `u19`'s acceptance
+/// blind to order.
+#[test]
+fn a_decrement_that_a_body_let_has_rebound_is_refused() {
+    refuses(
+        "u19-swapped",
+        &format!(
+            "fn drain(control: &mut Consumer<Record>) {{\n    let available = control.available_at_entry();\n    let mut remaining = available;\n    while remaining != 0 {{\n        let mut remaining = 5;\n        remaining -= 1;\n        {POP}\n    }}\n}}"
+        ),
+    );
+}
+
 /// A collection loop with no count pops once per element, not once per record counted at entry.
 #[test]
 fn a_loop_with_no_count_does_not_bound_a_pop() {

@@ -8,6 +8,7 @@ mod outer;
 mod per_queue;
 mod ported;
 mod probes;
+mod trusted;
 
 use realtime_policy::Class;
 

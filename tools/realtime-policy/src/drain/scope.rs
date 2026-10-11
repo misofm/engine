@@ -4,8 +4,9 @@
 //! down to the place of the use) and looks upward: the statements of a block before the one the
 //! path goes through, the pattern of a `for` loop or a closure for its body, the patterns of an
 //! `if let` or `while let` chain for its body, an arm's pattern, and a function's parameters, where
-//! the search ends. Items declared in a block do not shadow here: the rules that read a binding ask
-//! [`super::items::names_item`] whether a `static`, `const` or `use` of the region can name it.
+//! the search ends. Items declared in a block do not shadow here: the drain rule asks
+//! [`super::items::names_item`] whether an item of the region can name each binding that a rule read
+//! (D9).
 
 use syn::visit::{self, Visit};
 
@@ -31,8 +32,9 @@ pub(super) enum BindingKind<'f> {
     /// A function parameter. `ty` is its type when the parameter is one plain name (`name` or
     /// `mut name`), and `None` for a receiver or a destructuring pattern.
     Param { ty: Option<&'f syn::Type> },
-    /// The pattern of a `for`, `if let`, `while let`, `match` arm or closure.
-    Pattern,
+    /// The pattern of a `for`, `if let`, `while let`, `match` arm or closure. `owner` is the node
+    /// whose pattern binds the name: the name is in scope in all of it.
+    Pattern { owner: Node<'f> },
 }
 
 impl Binding<'_> {
@@ -43,7 +45,7 @@ impl Binding<'_> {
 
     /// Whether the name is bound by the pattern of this `for` loop.
     pub(super) fn is_pattern_of(&self, each: &syn::ExprForLoop) -> bool {
-        matches!(self.kind, BindingKind::Pattern)
+        matches!(self.kind, BindingKind::Pattern { .. })
             && self.id == (7, std::ptr::from_ref(each) as usize)
     }
 }
@@ -70,7 +72,7 @@ pub(super) fn nearest<'f>(steps: &[Step<'f>], name: &str) -> Option<Binding<'f>>
                     .as_ref()
                     .is_some_and(|(_, guard)| chain_binds(guard, name));
                 (pat_binds(&arm.pat, name) || (guard && matches!(step.via, Some(Via::Body))))
-                    .then(|| pattern(8, std::ptr::from_ref(arm) as usize))
+                    .then(|| pattern(8, std::ptr::from_ref(arm) as usize, Node::Arm(arm)))
             }
             (Node::Item(syn::Item::Fn(function)), Some(Via::Body)) => {
                 return parameter(&function.sig, name);
@@ -86,32 +88,29 @@ pub(super) fn nearest<'f>(steps: &[Step<'f>], name: &str) -> Option<Binding<'f>>
     None
 }
 
-fn pattern<'f>(kind: u8, address: usize) -> Binding<'f> {
+fn pattern<'f>(kind: u8, address: usize, owner: Node<'f>) -> Binding<'f> {
     Binding {
         id: (kind, address),
-        kind: BindingKind::Pattern,
+        kind: BindingKind::Pattern { owner },
     }
 }
 
 /// The binding that an expression introduces for the slot `via` of itself.
 fn expression_binding<'f>(expr: &'f syn::Expr, via: Via, name: &str) -> Option<Binding<'f>> {
     match (expr, via) {
-        (syn::Expr::ForLoop(node), Via::Body) => {
-            pat_binds(&node.pat, name).then(|| pattern(7, std::ptr::from_ref(node) as usize))
-        }
+        (syn::Expr::ForLoop(node), Via::Body) => pat_binds(&node.pat, name)
+            .then(|| pattern(7, std::ptr::from_ref(node) as usize, Node::Expr(expr))),
         (syn::Expr::Closure(node), Via::Body) => node
             .inputs
             .iter()
             .any(|input| pat_binds(input, name))
-            .then(|| pattern(7, std::ptr::from_ref(node) as usize)),
+            .then(|| pattern(7, std::ptr::from_ref(node) as usize, Node::Expr(expr))),
         // A `let` chain binds in the rest of its condition and in the body: read it as binding
         // everywhere in both, which can only refuse more.
-        (syn::Expr::While(node), Via::Body | Via::Header) => {
-            chain_binds(&node.cond, name).then(|| pattern(7, std::ptr::from_ref(node) as usize))
-        }
-        (syn::Expr::If(node), Via::Then | Via::Cond) => {
-            chain_binds(&node.cond, name).then(|| pattern(7, std::ptr::from_ref(node) as usize))
-        }
+        (syn::Expr::While(node), Via::Body | Via::Header) => chain_binds(&node.cond, name)
+            .then(|| pattern(7, std::ptr::from_ref(node) as usize, Node::Expr(expr))),
+        (syn::Expr::If(node), Via::Then | Via::Cond) => chain_binds(&node.cond, name)
+            .then(|| pattern(7, std::ptr::from_ref(node) as usize, Node::Expr(expr))),
         _ => None,
     }
 }

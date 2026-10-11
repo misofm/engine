@@ -43,10 +43,11 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     }
     let mut regions = 0;
     let mut files = 0;
-    // Whether any file under the roots defines or imports a macro named `debug_assert`: then no
-    // file's `debug_assert!` is taken at its word (B2a-D2). It is known only after every file is
-    // read, so the files that are parsed wait for it.
-    let mut debug_assert_shadowed = false;
+    // The trusted-name scan (B2a-D2, D3): whether any file under the roots gives `debug_assert`
+    // another meaning, which withdraws the trust from every file's `debug_assert!`, and the other
+    // names that no file may redefine. It is known only after every file is read, so the files
+    // that are parsed wait for it.
+    let mut names = drain::NameScan::default();
     let mut parsed = Vec::new();
     for file in walk::rust_files(workspace_root, &mut findings) {
         let source = match Source::load(&file.absolute, &file.path) {
@@ -57,7 +58,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             }
         };
         unsafe_scan::scan(&source, policy, &mut findings);
-        debug_assert_shadowed |= drain::debug_assert_shadowed(&source.tokens);
+        names.read(&source);
         let markers = markers::scan(&source, &mut findings);
         if !markers.regions.is_empty() {
             regions += markers.regions.len();
@@ -70,6 +71,8 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             parsed.push((source, file, markers.regions));
         }
     }
+    let (debug_assert_trusted, name_findings) = names.finish();
+    findings.extend(name_findings);
     let mut capi_ffi = None;
     for (source, file, file_regions) in &parsed {
         if !file_regions.is_empty() {
@@ -80,7 +83,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
                 file,
                 &boundaries,
                 file_regions,
-                !debug_assert_shadowed,
+                debug_assert_trusted,
                 &mut findings,
             );
         }

@@ -10,8 +10,7 @@
 //! - `&<fields>`, `&mut <fields>`, `<fields>.iter()` or `<fields>.iter_mut()`, or a slice or array
 //!   parameter of the enclosing `fn` that nothing names before the loop and no `static`, `const`
 //!   or `use` of the region names, each optionally followed by any number of `.enumerate()` and
-//!   `.zip(<literal | fields | &fields | &mut fields>)` steps (a zip ends with its receiver);
-//! - the closure of `core::array::from_fn` or `std::array::from_fn`.
+//!   `.zip(<literal | fields | &fields | &mut fields>)` steps (a zip ends with its receiver).
 //!
 //! `while` and `loop` are refused. So is every other `for` header (`1..n`, `0..=n`, `(0..)`,
 //! `.rev()`, `.take(n)`, a bare local), the over-refusals that D7 keeps. The `<bound>` of
@@ -19,16 +18,18 @@
 //! call and a bracket index (`0..self.controls.len()`, `0..a[i]`): both run code this rule cannot
 //! see, so both are refused, and widening that needs a ruling (B1b-D1).
 //!
+//! The root of `<fields>` is a read (D9): it must resolve to a binding, and no item of the region
+//! may declare its name (see [`super::shadowed_by_an_item`]).
+//!
 //! Not checked: a collection whose type never ends. `&mut <fields>` and `<fields>.iter_mut()` are
-//! finite by their form, so a field or a local that holds an unbounded iterator (`0..`) passes;
-//! and the root of `<fields>` is not asked whether an item shadows it. See the module
-//! documentation of [`super`].
+//! finite by their form, so a field or a local that holds an unbounded iterator (`0..`) passes.
+//! See the module documentation of [`super`].
 
 use super::Ctx;
 use super::count;
 use super::scope::BindingKind;
 use super::shapes::{Place, cap, is_int, method, method0, path_name};
-use super::tree::{Node, Step, array_from_fn_call, pos};
+use super::tree::{Node, Step, pos};
 
 /// Whether the loop at `steps[at]` runs a finite number of passes.
 pub(super) fn finite<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize) -> bool {
@@ -39,7 +40,6 @@ pub(super) fn finite<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize) -> bool {
                 || collection(ctx, steps, at, each)
         }
         Node::Expr(syn::Expr::While(_)) => count::bounds(ctx, steps, at),
-        Node::Expr(syn::Expr::Closure(_)) => array_from_fn(steps, at),
         _ => false,
     }
 }
@@ -55,22 +55,6 @@ fn range_to_a_bound(expr: &syn::Expr) -> bool {
             .as_deref()
             .is_some_and(|start| is_int(start, "0"))
         && range.end.as_deref().is_some_and(cap)
-}
-
-/// Whether the step `at`, a closure, is the argument of `core::array::from_fn` or
-/// `std::array::from_fn` with no generic arguments.
-fn array_from_fn(steps: &[Step<'_>], at: usize) -> bool {
-    let Some(call) = array_from_fn_call(steps, at) else {
-        return false;
-    };
-    let syn::Expr::Path(callee) = &*call.func else {
-        return false;
-    };
-    callee
-        .path
-        .segments
-        .iter()
-        .all(|segment| segment.arguments.is_none())
 }
 
 /// `&<fields>`, `<fields>.iter()`, `<fields>.iter_mut()` or a slice or array parameter, with any
@@ -95,15 +79,32 @@ fn collection<'f>(
         }
     }
     match base {
-        syn::Expr::Reference(reference) => Place::of(&reference.expr).is_some(),
+        syn::Expr::Reference(reference) => {
+            Place::of(&reference.expr).is_some_and(|place| read_root(ctx, &place))
+        }
         syn::Expr::MethodCall(call) => {
             (method0(base, "iter").is_some() || method0(base, "iter_mut").is_some())
-                && Place::of(&call.receiver).is_some()
+                && Place::of(&call.receiver).is_some_and(|place| read_root(ctx, &place))
         }
         syn::Expr::Path(_) => path_name(base)
             .is_some_and(|(name, name_at)| slice_parameter(ctx, steps, at, &name, name_at)),
         _ => false,
     }
+}
+
+/// D9: the loop reads the root of the collection `place` to be finite, so an item of the region
+/// that declares the root's name (a unit struct with an `iter_mut` that repeats) redirects it. The
+/// root must resolve to a binding, which the item rule and D10's span then cover. `self` is a
+/// keyword: nothing can shadow it.
+fn read_root<'f>(ctx: &Ctx<'f>, place: &Place<'f>) -> bool {
+    if place.name == "self" {
+        return true;
+    }
+    let Some(binding) = ctx.binding_of_path(&place.name, place.at) else {
+        return false;
+    };
+    ctx.note_read(&place.name, binding);
+    true
 }
 
 /// A zip's argument: an integer literal, `<fields>`, `&<fields>` or `&mut <fields>`.
@@ -157,10 +158,9 @@ fn slice_parameter<'f>(
     };
     let held = finite
         && ctx.region.holds(signature.core, this.end)
-        && ctx.boundaries.words_in(name, body, this.full) == 0
-        && !ctx.names_item(name);
+        && ctx.boundaries.words_in(name, body, this.full) == 0;
     if held {
-        ctx.note_read(binding);
+        ctx.note_read(name, binding);
     }
     held
 }

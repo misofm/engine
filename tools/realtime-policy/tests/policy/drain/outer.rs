@@ -49,12 +49,6 @@ const CONFIG: &str = ", cfg: &Config";
 /// D1: a loop around a counted drain that runs a finite number of passes by its form.
 #[test]
 fn the_finite_outer_loops_pass() {
-    let from_fn = |path: &str| {
-        format!(
-            "fn drain(control: &mut Consumer<Record>) {{\n    let _lanes: [u8; 4] = {path}(|_| {{\n{}        0\n    }});\n}}",
-            counted_drain("")
-        )
-    };
     let rows: Vec<(&'static str, String)> = vec![
         ("outer-literal-bound", around("", "", "for _ in 0..4", "")),
         (
@@ -158,12 +152,6 @@ fn the_finite_outer_loops_pass() {
                 counted_drain("")
             ),
         ),
-        ("outer-core-array-from-fn", from_fn("core::array::from_fn")),
-        ("outer-std-array-from-fn", from_fn("std::array::from_fn")),
-        (
-            "outer-rooted-array-from-fn",
-            from_fn("::core::array::from_fn"),
-        ),
     ];
     each_row(rows, |name, text| accepts(name, &text));
 }
@@ -227,20 +215,6 @@ fn the_outer_loops_that_may_not_end_are_refused() {
                 "",
                 "for _ in rounds",
                 "",
-            ),
-        ),
-        (
-            "outer-array-from-fn-with-generic-arguments",
-            format!(
-                "fn drain(control: &mut Consumer<Record>) {{\n    let _lanes = core::array::from_fn::<u8, 4, _>(|_| {{\n{}        0\n    }});\n}}",
-                counted_drain("")
-            ),
-        ),
-        (
-            "outer-array-from-fn-in-a-loop-that-never-ends",
-            format!(
-                "fn drain(control: &mut Consumer<Record>) {{\n    loop {{\n        let _lanes: [u8; 4] = core::array::from_fn(|_| {{\n{}            0\n        }});\n    }}\n}}",
-                counted_drain("")
             ),
         ),
         (
@@ -392,6 +366,91 @@ fn unit_struct_shadows_the_alias_source() {
     refuses("unit-struct-shadows-the-alias-source", &text);
 }
 
+/// A unit struct named `controls`, whose `iter_mut` repeats, and a counted drain in each pass of a
+/// loop over `controls`: the attempt-2 verdict's `r01` (#1441), which pops without end.
+const REPEATING_ROOT: &str = "struct controls;\n        impl controls {\n            fn iter_mut(&self) -> core::iter::Repeat<u8> {\n                core::iter::repeat(0)\n            }\n        }\n";
+
+/// A drain whose outer loop is `header` over the collection `controls`, destructured from `state`
+/// (a `let` binding the root), with `item` first in an inner block.
+fn over_a_root(item: &str, header: &str) -> String {
+    format!(
+        "fn drain(state: &mut State) {{\n    let State {{ controls, .. }} = state;\n    {{\n        {item}        {header} {{\n            let available = control.available_at_entry();\n            for _ in 0..available {{\n                {POP}\n            }}\n        }}\n    }}\n}}"
+    )
+}
+
+/// D9 (root Amendment 3, SP-2): the collection root of an outer `for` is a read like the count. An
+/// item of the region that declares its name, of any kind or a `use`, redirects the loop: a unit
+/// struct with an `iter_mut` that repeats turns a finite outer loop into an endless one around a
+/// counted drain. Red if the item rule reads only the count, its alias source and the slice
+/// parameter, and not the root of an outer loop's collection.
+#[test]
+fn an_item_that_declares_the_collection_root_refuses_the_drain() {
+    let each = "for control in controls.iter_mut()";
+    let rows: Vec<(&'static str, String)> = vec![
+        // The attempt-2 verdict's r01.
+        (
+            "unit-struct-shadows-the-collection-root",
+            over_a_root(REPEATING_ROOT, each),
+        ),
+        (
+            "collection-root-shadowed-by-a-const",
+            over_a_root(
+                "const controls: core::ops::RangeFrom<u64> = 0..;\n        ",
+                "for control in &controls",
+            ),
+        ),
+        // The attempt-2 verdict's b06: a slice parameter iterated with `.iter()` and shadowed by a
+        // written struct after the loop.
+        (
+            "slice-parameter-collection-root-shadowed-by-a-struct",
+            format!(
+                "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {{\n    for _ in lanes.iter() {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n    struct lanes;\n    impl lanes {{\n        fn iter(&self) -> core::iter::Repeat<u8> {{\n            core::iter::repeat(0)\n        }}\n    }}\n}}"
+            ),
+        ),
+        (
+            "parameter-collection-root-shadowed-by-a-struct",
+            format!(
+                "fn drain(cfg: &Config) {{\n    for control in &cfg.controls {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            {POP}\n        }}\n    }}\n    struct cfg;\n}}"
+            ),
+        ),
+        (
+            "pattern-bound-collection-root-shadowed-by-a-struct",
+            format!(
+                "fn drain(groups: &mut [Group]) {{\n    for group in groups {{\n        for control in &mut group.controls {{\n            let available = control.available_at_entry();\n            for _ in 0..available {{\n                {POP}\n            }}\n        }}\n        struct group;\n    }}\n}}"
+            ),
+        ),
+    ];
+    each_row(rows, |name, text| refuses(name, &text));
+}
+
+/// D9: the rule refuses the shadow and only the shadow. The same drains pass when no item names the
+/// root, when the item names something else, and for a root that is a pattern or `self`.
+#[test]
+fn a_collection_root_that_no_item_names_passes() {
+    let each = "for control in controls.iter_mut()";
+    let rows: Vec<(&'static str, String)> = vec![
+        // The attempt-2 verdict's r03.
+        ("collection-root-destructured", over_a_root("", each)),
+        (
+            "collection-root-with-an-unrelated-item",
+            over_a_root("struct Lane;\n        ", each),
+        ),
+        (
+            "collection-root-of-a-pattern",
+            format!(
+                "fn drain(groups: &mut [Group]) {{\n    for group in groups {{\n        for control in &mut group.controls {{\n            let available = control.available_at_entry();\n            for _ in 0..available {{\n                {POP}\n            }}\n        }}\n    }}\n}}"
+            ),
+        ),
+        (
+            "collection-root-self",
+            format!(
+                "impl Strip {{\n    fn drain(&mut self) {{\n        for control in self.controls.iter_mut() {{\n            let available = control.available_at_entry();\n            for _ in 0..available {{\n                {POP}\n            }}\n        }}\n        struct Unrelated;\n    }}\n}}"
+            ),
+        ),
+    ];
+    each_row(rows, |name, text| accepts(name, &text));
+}
+
 /// D2: a count binding under a `cfg`-family attribute, on the entry binding or on the one alias
 /// of it, may not be compiled; any other attribute is no reason to refuse.
 #[test]
@@ -445,7 +504,8 @@ fn a_count_binding_that_may_not_be_compiled_is_refused() {
 
 /// D3: `from_fn`, `repeat_with` and `successors` run a closure repeatedly with no loop keyword.
 /// A region refuses them anywhere, a pop or not, except `core::array::from_fn` and
-/// `std::array::from_fn`.
+/// `std::array::from_fn`, whose token is allowed. (A pop in that closure is refused as any pop in
+/// a closure is: see `a_drain_in_the_closure_of_array_from_fn_is_refused`.)
 #[test]
 fn a_constructor_that_loops_is_refused_anywhere_in_a_region() {
     let rows: Vec<(&'static str, &'static str)> = vec![
@@ -511,19 +571,5 @@ fn a_constructor_that_loops_is_refused_anywhere_in_a_region() {
             path: BUFFER,
             text: outside,
         }],
-    );
-}
-
-/// D3: a pop that runs directly in the closure of `array::from_fn` is a constant-bound drain, and
-/// a pop in a counted drain inside that closure is not.
-#[test]
-fn a_pop_directly_in_an_array_from_fn_closure_is_refused() {
-    refuses(
-        "std-array-from-fn-pop",
-        "fn drain(control: &mut Consumer<Record>) {\n    let _: [Result<Record, Empty>; 4] = std::array::from_fn(|_| control.try_pop());\n}",
-    );
-    refuses(
-        "array-from-fn-block-pop",
-        "fn drain(control: &mut Consumer<Record>) {\n    let _: [u8; 4] = core::array::from_fn(|_| {\n        let Ok(record) = control.try_pop() else {\n            return 0;\n        };\n        apply(record);\n        0\n    });\n}",
     );
 }

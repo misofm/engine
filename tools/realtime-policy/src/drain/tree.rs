@@ -91,39 +91,6 @@ impl<'f> Node<'f> {
     }
 }
 
-/// Whether the step `at` of a path is a loop of the drain rule: a `for`, `while` or `loop`, or the
-/// closure argument of `core::array::from_fn` or `std::array::from_fn`, which runs that closure a
-/// constant number of times (D3). Every other `from_fn` is refused by its token, wherever it is.
-pub(super) fn is_loop_at(steps: &[Step<'_>], at: usize) -> bool {
-    steps[at].node.is_loop() || array_from_fn_call(steps, at).is_some()
-}
-
-/// The call of `core::array::from_fn` or `std::array::from_fn` (a leading `::` and generic
-/// arguments allowed) whose closure argument is the step `at`.
-pub(super) fn array_from_fn_call<'f>(steps: &[Step<'f>], at: usize) -> Option<&'f syn::ExprCall> {
-    let Node::Expr(syn::Expr::Closure(_)) = steps.get(at)?.node else {
-        return None;
-    };
-    let Step {
-        node: Node::Expr(syn::Expr::Call(call)),
-        via: Some(Via::Operand(slot)),
-    } = steps[at.checked_sub(1)?]
-    else {
-        return None;
-    };
-    let syn::Expr::Path(callee) = &*call.func else {
-        return None;
-    };
-    let segments: Vec<_> = callee.path.segments.iter().collect();
-    (slot >= 1
-        && callee.qself.is_none()
-        && segments.len() == 3
-        && matches!(bare(&segments[0].ident).as_str(), "core" | "std")
-        && bare(&segments[1].ident) == "array"
-        && bare(&segments[2].ident) == "from_fn")
-        .then_some(call)
-}
-
 /// The slot of a parent that a child fills.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Via {

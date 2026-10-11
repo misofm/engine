@@ -32,6 +32,7 @@ pub(super) fn bounds<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize, site: &Po
         return false;
     };
     (0..header.zips.len()).any(|index| {
+        let mark = ctx.mark();
         let form = Pass {
             each: pass,
             at,
@@ -40,7 +41,12 @@ pub(super) fn bounds<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], at: usize, site: &Po
             r: &names[0],
             c: &names[index + 1],
         };
-        form.holds(ctx, steps, site)
+        let held = form.holds(ctx, steps, site);
+        // A form that does not hold read nothing (D10).
+        if !held {
+            ctx.rewind(mark);
+        }
+        held
     })
 }
 
@@ -253,7 +259,7 @@ impl<'f> Pass<'_, 'f> {
         if !own(&set.r, set.r_at) || !own(&set.c, set.c_at) {
             return false;
         }
-        self.body_holds(ctx, steps, site, &set)
+        let held = self.body_holds(ctx, steps, site, &set)
             && window::holds(
                 self,
                 ctx,
@@ -266,7 +272,17 @@ impl<'f> Pass<'_, 'f> {
                     queue_root: &pass_q,
                     counter_root: &pass_k,
                 },
-            )
+            );
+        // D9: the form reads the roots of `<Q>` and `<K>`, so an item that declares either name
+        // (or a macro that can) redirects it. `self` is a keyword: nothing can shadow it.
+        if held {
+            for (place, root) in [(self.q, pass_q), (self.k, pass_k)] {
+                if place.name != "self" {
+                    ctx.note_read(&place.name, root);
+                }
+            }
+        }
+        held
     }
 
     /// Condition 2's pairing: the last set loop before the pass loop, among the statements of the

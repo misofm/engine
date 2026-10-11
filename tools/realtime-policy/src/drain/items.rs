@@ -1,5 +1,5 @@
 //! The rules that read a region's tokens rather than its syntax tree: the items that can shadow a
-//! name (D2) and the constructors that loop without a loop keyword (D3).
+//! name (D2, D9) and the constructors that loop without a loop keyword (D3).
 //!
 //! Both read leaves, so a macro's token tree and a `macro_rules!` body are read too: tokens in
 //! them can declare an item or call a constructor as well. An item that a macro *expands to* is not
@@ -28,7 +28,7 @@ const NAMING_ITEMS: [&str; 9] = [
     "const", "static", "struct", "enum", "union", "fn", "type", "trait", "mod",
 ];
 
-/// D2: whether an item among `leaves` can name `name`: an item of any kind that declares it as
+/// D2, D9: whether an item among `leaves` can name `name`, a binding that a rule read: an item of any kind that declares it as
 /// its own name (`const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`, `trait`,
 /// `mod`), or a `use` whose tokens up to its `;` hold `name` or a glob `*`. A block item shadows a
 /// `let` of an enclosing block for its whole block, wherever it is declared, so the position of
@@ -69,8 +69,9 @@ pub(super) fn names_item(leaves: &[Leaf], name: &str) -> bool {
 }
 
 /// D3: the lines in which a region calls `from_fn`, `repeat_with` or `successors`, path-qualified
-/// or bare. `core::array::from_fn` and `std::array::from_fn` are the exceptions: the closure of
-/// those runs a constant number of times, and the loop rule judges a pop inside it.
+/// or bare. The token of `core::array::from_fn` and `std::array::from_fn` is the exception: the
+/// closure of those runs a constant number of times. A pop in that closure is refused as a pop in
+/// any closure is (B2a-D1), whatever the path means.
 pub(super) fn constructor_lines(leaves: &[Leaf]) -> Vec<usize> {
     let mut lines = Vec::new();
     for (index, leaf) in leaves.iter().enumerate() {

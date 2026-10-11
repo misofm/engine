@@ -436,3 +436,32 @@ fn per_queue_pass_count_loop_may_not_end() {
         &[DRAIN],
     );
 }
+
+/// D9 (root Amendment 3, SP-2): an item of the region that declares the name of the queue root
+/// `<Q>` or of the counter root `<K>` redirects the form's loops, as a `const` redirects a count.
+/// The form here reads two parameters, `queues` and `counts`. Red if the item rule reads only the
+/// count, its alias source and the slice parameter, and not the roots of a per-queue form.
+#[test]
+fn an_item_that_declares_a_per_queue_root_refuses_the_form() {
+    let form = |after: &str| {
+        format!(
+            "fn poll(queues: &mut Meters, counts: &mut Counts) {{\n    for (lane, left) in queues.lanes.iter().zip(&mut counts.remaining) {{\n        *left = lane.consumer.available_at_entry();\n    }}\n    for (lane, left) in queues.lanes.iter_mut().zip(&mut counts.remaining) {{\n        if *left == 0 {{\n            continue;\n        }}\n        *left -= 1;\n        if let Ok(record) = lane.consumer.try_pop() {{\n            apply(record);\n        }}\n    }}\n{after}}}"
+        )
+    };
+    expect_valid("per-queue-two-roots", &edit(&form("")));
+    for (name, item) in [
+        ("unit-struct-shadows-the-queue-root", "    struct queues;\n"),
+        (
+            "unit-struct-shadows-the-counter-root",
+            "    struct counts;\n",
+        ),
+        ("use-shadows-the-queue-root", "    use other::queues;\n"),
+        ("glob-use-shadows-the-counter-root", "    use other::*;\n"),
+    ] {
+        expect_failure(name, &edit(&form(item)), &[DRAIN]);
+    }
+    expect_valid(
+        "unrelated-item-after-a-per-queue-form",
+        &edit(&form("    struct Lane;\n")),
+    );
+}

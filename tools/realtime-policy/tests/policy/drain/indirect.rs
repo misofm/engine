@@ -35,11 +35,50 @@ fn a_pop_in_a_closure_is_refused() {
             "fn drain(control: &mut Consumer<Record>) {\n    let available = control.available_at_entry();\n    for _ in 0..available {\n        let _ = Some(0).and_then(|_| control.try_pop().ok());\n    }\n}",
         ),
         (
+            // Root Amendment 3, F3. A counted drain, correct on its own, in a closure that stands in
+            // the closure of `array::from_fn`. A rule that exempts every closure below a
+            // `from_fn` closure accepts it, and the row is red then: the drain bounds itself.
             "closure-in-a-nested-closure-in-array-from-fn",
-            "fn drain(control: &mut Consumer<Record>) {\n    let _: [u8; 4] = core::array::from_fn(|_| {\n        let pop = || control.try_pop();\n        let _ = pop();\n        0\n    });\n}",
+            "fn drain(control: &mut Consumer<Record>) {\n    let _: [u8; 4] = core::array::from_fn(|_| {\n        let drain_once = || {\n            let available = control.available_at_entry();\n            for _ in 0..available {\n                let Ok(record) = control.try_pop() else {\n                    break;\n                };\n                apply(record);\n            }\n        };\n        drain_once();\n        0\n    });\n}",
         ),
     ];
     each_row(rows, refuses);
+}
+
+/// D1 (root Amendment 3, MAJOR-1): the closure of `core::array::from_fn` and `std::array::from_fn`
+/// is a closure like any other. The path roots `core` and `std` can be redirected (a workspace
+/// `mod core`, a `use .. as core`, a macro-made module, a Cargo dependency key), so a counted drain
+/// in such a closure is not a finite outer loop around a drain: it is refused, as is a pop that
+/// stands directly in the closure. Red if the `array::from_fn` outer-loop exception for a closure
+/// returns, in any spelling of the path.
+#[test]
+fn a_drain_in_the_closure_of_array_from_fn_is_refused() {
+    let drain = |path: &str| {
+        format!(
+            "fn drain(control: &mut Consumer<Record>) {{\n    let _lanes: [u8; 4] = {path}(|_| {{\n        let available = control.available_at_entry();\n        for _ in 0..available {{\n            let Ok(record) = control.try_pop() else {{\n                break;\n            }};\n            apply(record);\n        }}\n        0\n    }});\n}}"
+        )
+    };
+    let rows: Vec<(&'static str, String)> = vec![
+        (
+            "from-fn-closure-drain-is-refused",
+            drain("core::array::from_fn"),
+        ),
+        ("std-from-fn-closure-drain", drain("std::array::from_fn")),
+        (
+            "rooted-from-fn-closure-drain",
+            drain("::core::array::from_fn"),
+        ),
+        (
+            "from-fn-closure-drain-with-generic-arguments",
+            drain("core::array::from_fn::<u8, 4, _>"),
+        ),
+        (
+            "from-fn-closure-pop-with-no-loop",
+            "fn drain(control: &mut Consumer<Record>) {\n    let _: [Result<Record, Empty>; 4] = std::array::from_fn(|_| control.try_pop());\n}"
+                .to_owned(),
+        ),
+    ];
+    each_row(rows, |name, text| refuses(name, &text));
 }
 
 /// D2: a `try_pop` token in a macro's token tree is refused, in a macro call, in the body of a
@@ -72,11 +111,13 @@ fn a_pop_in_a_macro_token_tree_is_refused() {
 }
 
 /// D3: a path whose last segment is `try_pop` is a pop only where it is called at once: as the
-/// callee of a call, or as the only argument of `.map(..)`. Anywhere else the value can be called
-/// from a place the walk does not see.
+/// callee of a call, or as the only argument of `.map(..)` on `<fields>.as_mut()`, which is
+/// `Option::map` and runs it at most once. Anywhere else the value can be called from a place the
+/// walk does not see, and on any other receiver `.map` may be an iterator adapter that pops once
+/// per item with no count (root Amendment 1, iv).
 #[test]
 fn a_function_value_that_pops_is_refused_unless_it_is_called_in_place() {
-    let rows: [(&str, &str); 7] = [
+    let rows: [(&str, &str); 12] = [
         (
             "function-value-in-a-let",
             "fn drain(control: &mut Consumer<Record>) {\n    let pop = Consumer::try_pop;\n    let _ = pop(control);\n}",
@@ -96,6 +137,31 @@ fn a_function_value_that_pops_is_refused_unless_it_is_called_in_place() {
         (
             "function-value-in-map-with-another-argument",
             "fn drain(control: &mut Consumer<Record>) {\n    let _ = pool.map(Consumer::try_pop, 4);\n}",
+        ),
+        (
+            // Root Amendment 1, iv. Red if `.map(<path>)` is allowed on a receiver other than
+            // `<fields>.as_mut()`.
+            "function-value-in-map-on-an-iterator",
+            "fn drain(qs: &mut [Consumer<Record>]) {\n    let _ = qs.iter_mut().map(Consumer::try_pop).count();\n}",
+        ),
+        (
+            // Root Amendment 1, iv. Red if the restriction is a blacklist of collection receivers
+            // and not an allow-list.
+            "function-value-in-map-on-repeat",
+            "fn drain(q: &Queue) {\n    let _ = std::iter::repeat(q).map(Queue::try_pop).take_while(Result::is_ok).count();\n}",
+        ),
+        (
+            // The attempt-1 verdict's `cycle` shape: it pops 500 of 500 with a `try_pop(&self)`.
+            "function-value-in-map-on-cycle",
+            "fn drain(q: &Queue) {\n    let _ = [q].into_iter().cycle().map(Queue::try_pop).take_while(Result::is_ok).count();\n}",
+        ),
+        (
+            "function-value-in-map-on-as-ref",
+            "impl Drain {\n    fn run(&mut self) {\n        let _ = self.control.as_ref().map(Consumer::try_pop);\n    }\n}",
+        ),
+        (
+            "function-value-in-map-on-a-call-result",
+            "impl Drain {\n    fn run(&mut self) {\n        let _ = self.controls().as_mut().map(Consumer::try_pop);\n    }\n}",
         ),
         (
             "function-value-in-a-field",
@@ -198,6 +264,22 @@ fn a_debug_assert_that_a_file_shadows_is_not_taken_at_its_word() {
     each_row(rows, |name, text| {
         assert_base_drains_refused(name, &shadowed_by_file(name, text));
     });
+}
+
+/// F2 (root Amendment 2): a workspace proc macro named `debug_assert` rebinds the count with no
+/// `macro_rules!`, no `macro` and no `use`, and `#[macro_use] extern crate` brings it into the
+/// drain's file. The file here holds only `#[proc_macro] pub fn debug_assert`. Two rules refuse it
+/// and either alone suffices: F2 (a `debug_assert` that no `!` follows is a shadow, so the base
+/// tree's drains that name a count in one are refused) and D3's (d) (a `proc_macro` identifier).
+/// The row is red only if both are dropped.
+#[test]
+fn a_proc_macro_named_debug_assert_is_refused() {
+    let tree = Tree::base("proc-macro-fn");
+    tree.apply(&[Edit::Create {
+        path: "crates/shadowing/src/lib.rs",
+        text: "#[proc_macro]\npub fn debug_assert(input: TokenStream) -> TokenStream {\n    input\n}\n",
+    }]);
+    assert_classes(&tree, &[DRAIN]);
 }
 
 /// D2: text that is not a definition or an import of the name leaves `debug_assert!` trusted: a

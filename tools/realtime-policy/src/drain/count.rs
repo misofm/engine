@@ -113,17 +113,12 @@ fn counted<'f>(ctx: &Ctx<'f>, name: &str, at: Pos, header: (Pos, Pos)) -> Option
     {
         return None;
     }
-    // D2: a `static`, `const` or `use` of the region that can name the count may be the thing the
-    // loop reads, wherever it sits in its block.
-    if ctx.names_item(name) {
-        return None;
-    }
     let bound = ctx.tree.extent(Node::Stmt(stmt))?;
     if !ctx.region.holds(bound.core, bound.end) || !entry_binding(ctx, &binding, 0) {
         return None;
     }
     only_reads(ctx, name, &binding, bound.end, header.0).then(|| {
-        ctx.note_read(binding);
+        ctx.note_read(name, binding);
         binding
     })
 }
@@ -146,9 +141,6 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> bool
         return false;
     };
     if depth != 0 {
-        return false;
-    }
-    if ctx.names_item(&entry_name) {
         return false;
     }
     let Some(entry) = ctx.binding_of_path(&entry_name, entry_at) else {
@@ -174,7 +166,7 @@ fn entry_binding<'f>(ctx: &Ctx<'f>, binding: &Binding<'f>, depth: usize) -> bool
         && only_reads(ctx, &entry_name, &entry, first.end, alias.core)
         && entry_binding(ctx, &entry, 1);
     if held {
-        ctx.note_read(entry);
+        ctx.note_read(&entry_name, entry);
     }
     held
 }

@@ -21,6 +21,16 @@ const SHADOWS_COUNT: &str =
     "macro_rules! shadow {\n    () => {\n        const available: usize = usize::MAX;\n    };\n}\n";
 const SHADOWS_SLICE: &str =
     "macro_rules! shadow {\n    () => {\n        const lanes: [u8; 1] = [0];\n    };\n}\n";
+/// A macro that declares a unit struct named like a collection root, with the `iter_mut` and the
+/// `iter` that repeat (D9).
+const SHADOWS_ROOT: &str = "macro_rules! shadow {\n    () => {\n        struct controls;\n        impl controls {\n            fn iter_mut(&self) -> core::iter::Repeat<u8> {\n                core::iter::repeat(0)\n            }\n        }\n    };\n}\n";
+const SHADOWS_LANES: &str = "macro_rules! shadow {\n    () => {\n        struct lanes;\n        impl lanes {\n            fn iter(&self) -> core::iter::Repeat<u8> {\n                core::iter::repeat(0)\n            }\n        }\n    };\n}\n";
+/// A macro that declares a struct named like the queue root `queues` of a per-queue form, and one
+/// named like its counter root `counts` (D9).
+const SHADOWS_QUEUES: &str =
+    "macro_rules! shadow {\n    () => {\n        struct queues;\n    };\n}\n";
+const SHADOWS_COUNTS: &str =
+    "macro_rules! shadow {\n    () => {\n        struct counts;\n    };\n}\n";
 /// A macro that declares an unbounded range named like the slice parameter `rounds`.
 const SHADOWS_ROUNDS: &str = "macro_rules! shadow {\n    () => {\n        const rounds: core::ops::RangeFrom<u64> = 0..;\n    };\n}\n";
 
@@ -121,6 +131,54 @@ fn a_statement_macro_or_a_derive_in_the_body_of_a_function_with_a_slice_loop_is_
         ),
     ];
     each_row(rows, |name, text| refused(name, &text));
+}
+
+/// A per-queue form (D8b) whose queue root is the parameter `queues` and whose counter root is the
+/// parameter `counts`, with `before` first in the body.
+fn per_queue_form(before: &str) -> String {
+    format!(
+        "fn poll(queues: &mut Meters, counts: &mut Counts) {{\n{before}    for (lane, left) in queues.lanes.iter().zip(&mut counts.remaining) {{\n        *left = lane.consumer.available_at_entry();\n    }}\n    for (lane, left) in queues.lanes.iter_mut().zip(&mut counts.remaining) {{\n        if *left == 0 {{\n            continue;\n        }}\n        *left -= 1;\n        if let Ok(record) = lane.consumer.try_pop() {{\n            apply(record);\n        }}\n    }}\n}}"
+    )
+}
+
+/// D9 + D10 (root Amendment 3, SP-2): a statement macro that can declare an item shadows the root
+/// of an outer loop's collection, or a root of a per-queue form, as it shadows the count. The macro
+/// stands outside the region, so only D10's span can see it: the attempt-2 verdict's `r02` (the
+/// root is destructured by a `let`, and the macro runs before the loop) and `b01` (a slice
+/// parameter iterated with `.iter()`, the macro after the loop), and the same macro against each
+/// root of a per-queue form. Red if the collection root, or `<Q>` or `<K>`, is not noted as a read.
+#[test]
+fn a_statement_macro_that_can_declare_a_collection_root_refuses_the_drain() {
+    let over_root = "fn drain(state: &mut State) {\n    let State { controls, .. } = state;\n    {\n        shadow!();\n        for control in controls.iter_mut() {\n            let available = control.available_at_entry();\n            for _ in 0..available {\n                POP\n            }\n        }\n    }\n}".replace("POP", POP);
+    let over_lanes = "fn drain(control: &mut Consumer<Record>, lanes: &[u8]) {\n    for _ in lanes.iter() {\n        let available = control.available_at_entry();\n        for _ in 0..available {\n            POP\n        }\n    }\n    shadow!();\n}".replace("POP", POP);
+    let rows: Vec<(&'static str, String)> = vec![
+        (
+            "macro-emitted-struct-shadows-the-collection-root",
+            appended(SHADOWS_ROOT, &over_root),
+        ),
+        (
+            "macro-emitted-struct-shadows-a-slice-parameter-collection-root",
+            appended(SHADOWS_LANES, &over_lanes),
+        ),
+        (
+            "macro-emitted-struct-shadows-the-queue-root",
+            appended(SHADOWS_QUEUES, &per_queue_form("    shadow!();\n")),
+        ),
+        (
+            "macro-emitted-struct-shadows-the-counter-root",
+            appended(SHADOWS_COUNTS, &per_queue_form("    shadow!();\n")),
+        ),
+    ];
+    each_row(rows, |name, text| refused(name, &text));
+    // The same forms pass when the macro is not there.
+    accepted(
+        "collection-root-with-no-macro",
+        &appended("", &over_root.replace("        shadow!();\n", "")),
+    );
+    accepted(
+        "per-queue-roots-with-no-macro",
+        &appended("", &per_queue_form("")),
+    );
 }
 
 /// A derive or an attribute macro emits items beside its item, `cfg_attr` can expand to a derive,
