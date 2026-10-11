@@ -4180,6 +4180,24 @@ fn input_lane_mut(
         crate::runtime::RuntimeUnit::Op(_) => None,
     }
 }
+
+/// The populated lane at `at` of a builtin bank that holds `owner`'s strip state: its chain, slot
+/// and lane (issue #1277 D1).
+fn strip_lane_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    owner: crate::BuiltinStripOwner,
+    at: crate::GraphLaneLocation,
+) -> Option<(&mut BankChain, usize, usize)> {
+    match units.get_mut(at.unit as usize)? {
+        crate::runtime::RuntimeUnit::Bank { chain, .. } => {
+            let slot = usize::from(at.slot);
+            let lane = usize::from(at.lane);
+            let (stage, lanes) = builtin_processor_mut(chain, slot)?.carried_strip_lanes()?;
+            (stage.holds(owner) && lane < lanes).then_some((chain, slot, lane))
+        }
+        crate::runtime::RuntimeUnit::Op(_) => None,
+    }
+}
 // REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
@@ -4221,6 +4239,58 @@ impl crate::runtime::Runtime {
     /// Whether `at` names a populated, carrying input lane of this runtime.
     pub(crate) fn has_input_lane(&mut self, at: crate::GraphLaneLocation) -> bool {
         input_lane_mut(&mut self.units, at).is_some()
+    }
+
+    /// Every strip stage lane of this runtime: `(strip ID, lane)`, in program order (issue #1277
+    /// D1). A fused bank lists both owners at its one location. Read off the render thread, after
+    /// bind.
+    pub(crate) fn builtin_strip_lanes(&mut self) -> Vec<(Box<str>, crate::GraphStripLane)> {
+        let mut lanes = Vec::new();
+        for (unit, row) in self.identity.iter().enumerate() {
+            let (Some(crate::runtime::RuntimeUnit::Bank { chain, .. }), Ok(unit)) =
+                (self.units.get_mut(unit), u32::try_from(unit))
+            else {
+                continue;
+            };
+            let mut slot = 0_usize;
+            while let Some(processor) = builtin_processor_mut(chain, slot) {
+                if let (Some((stage, count)), Ok(slot)) =
+                    (processor.carried_strip_lanes(), u16::try_from(slot))
+                {
+                    for (lane, id) in row.lane_tracks.iter().enumerate().take(count) {
+                        let Ok(lane) = u16::try_from(lane) else {
+                            continue;
+                        };
+                        for owner in [
+                            crate::BuiltinStripOwner::Fader,
+                            crate::BuiltinStripOwner::Matrix,
+                        ] {
+                            if stage.holds(owner) {
+                                lanes.push((
+                                    id.clone(),
+                                    crate::GraphStripLane {
+                                        owner,
+                                        stage,
+                                        location: crate::GraphLaneLocation { unit, slot, lane },
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+                slot += 1;
+            }
+        }
+        lanes
+    }
+
+    /// Whether `at` names a populated lane of this runtime's bank that holds `owner`'s state.
+    pub(crate) fn has_strip_lane(
+        &mut self,
+        owner: crate::BuiltinStripOwner,
+        at: crate::GraphLaneLocation,
+    ) -> bool {
+        strip_lane_mut(&mut self.units, owner, at).is_some()
     }
 
     // REALTIME_POLICY_BEGIN
@@ -4296,6 +4366,79 @@ impl crate::runtime::Runtime {
             if into.adopt_input_lane(lane, from, predecessor_lane) {
                 chain.inherit_channel_agreement(agree);
             }
+        }
+    }
+
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to two lanes [`GraphPreparedBuiltinBankProcessor::adopt_strip_lane`] would join. Checked
+    /// before anything moves, so the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_strip_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphStripMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            let Some((chain, slot, lane)) =
+                strip_lane_mut(&mut self.units, step.owner, step.successor)
+            else {
+                return false;
+            };
+            let Some(successor) = builtin_processor_mut(chain, slot) else {
+                return false;
+            };
+            let Some((chain, slot, predecessor_lane)) =
+                strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)
+            else {
+                return false;
+            };
+            builtin_processor_mut(chain, slot).is_some_and(|from| {
+                successor.can_adopt_strip_lane(step.owner, lane, from, predecessor_lane)
+            })
+        })
+    }
+
+    /// Run the strip section of a carry program at the swap block (issue #1277 D8).
+    ///
+    /// `moves` is sorted by predecessor location. Each predecessor bank applies every pending
+    /// live value once ([`GraphPreparedBuiltinBankProcessor::drain_for_carry`], the block drain
+    /// under `LiveSnapshot::ALL`) before any lane of it is copied. Then every lane is copied. The
+    /// caller has checked [`Self::can_carry_strip_lanes`]. Bounded by `moves.len()`;
+    /// allocation-free.
+    pub(crate) fn carry_strip_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphStripMove],
+    ) {
+        let mut drained: Option<(u32, u16)> = None;
+        for step in moves {
+            let Some((chain, slot, predecessor_lane)) =
+                strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)
+            else {
+                continue;
+            };
+            let Some(from) = builtin_processor_mut(chain, slot) else {
+                continue;
+            };
+            if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
+                // Admission validated every value, so none is refused; a refused one is still
+                // consumed, and the rest of the bank's values with it.
+                let refused = from.drain_for_carry();
+                debug_assert_eq!(
+                    refused, 0,
+                    "an admitted strip value was refused at the carry"
+                );
+                drained = Some((step.predecessor.unit, step.predecessor.slot));
+            }
+            let Some((chain, slot, lane)) =
+                strip_lane_mut(&mut self.units, step.owner, step.successor)
+            else {
+                continue;
+            };
+            let Some(into) = builtin_processor_mut(chain, slot) else {
+                continue;
+            };
+            let adopted = into.adopt_strip_lane(step.owner, lane, from, predecessor_lane);
+            debug_assert!(adopted, "a checked strip move is adopted");
         }
     }
     // REALTIME_POLICY_END

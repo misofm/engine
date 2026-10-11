@@ -1934,6 +1934,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         host_core::SuccessorBase {
             inventory: &current_host.prepared.inventory,
             committed: current_host.store.compiled().normalized_model(),
+            revision: 1,
         },
         None,
         &host_core::LiveValuesSuperseded::default(),

@@ -17,8 +17,7 @@
 use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
 };
-use builtins::{BuiltinLaneSelector, checked_fader_gain};
-use builtins_compiler::{TrackControlRecord, TrackFaderRecord, lower_matrix_or_pan};
+use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 use effect_compiler::{
     LiveEffectAddress, effect_automation_diagnostics, launch_native_effect_registry,
     lowers_session_bypass, resolve_initial_values,
@@ -28,36 +27,13 @@ use effect_contract::{
     ParameterChannel, PreparedEffectTarget,
 };
 use session::{
-    DualMonoFader, Effect, EffectIdentity, EffectParam, RouteSource, SessionModel, Track,
-    canonical_session_json,
+    Effect, EffectIdentity, EffectParam, RouteSource, SessionModel, Track, canonical_session_json,
 };
 
-/// The ramp lengths, in samples, that live fader and mute records carry (#1053 D3).
-///
-/// Pan and matrix records do not take theirs from here: they carry the post-commit model's own
-/// `smoothing_samples`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LiveRamps {
-    /// The ramp of a `FaderDb` record.
-    pub fader_samples: u32,
-    /// The ramp of a `Mute` record.
-    pub mute_samples: u32,
-}
-
-impl LiveRamps {
-    /// The ramps a session's live fader and mute records carry.
-    ///
-    /// #1053 D3: zero (a step) until #1054 derives it from the session's `controlSmoothing`. A
-    /// step is bit-exact to the value a rebuild of the committed model bakes.
-    #[must_use]
-    pub fn for_session(model: &SessionModel) -> Self {
-        let _ = model;
-        Self {
-            fader_samples: 0,
-            mute_samples: 0,
-        }
-    }
-}
+// The ramp rule and the per-owner record derivation live with preparation, which needs them on
+// every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
+pub use crate::prepare::LiveRamps;
+use crate::prepare::{fader_records, matrix_record};
 
 /// The records of one strip whose live values change.
 #[derive(Clone, Debug, PartialEq)]
@@ -286,52 +262,16 @@ pub fn classify_live_delta<'a>(
 
     let mut delta = LiveDelta::default();
     for (before, after) in current.tracks.iter().zip(&next.tracks) {
-        let gains_before = fader_gains(&before.fader)?;
-        let gains_after = fader_gains(&after.fader)?;
-        let (matrix_before, _) =
-            lower_matrix_or_pan(&before.matrix_or_pan).map_err(|_| LiveRebuild::Domain)?;
-        let (matrix_after, smoothing_after) =
-            lower_matrix_or_pan(&after.matrix_or_pan).map_err(|_| LiveRebuild::Domain)?;
-
+        let fader =
+            fader_records(&before.fader, &after.fader, ramps).map_err(|_| LiveRebuild::Domain)?;
+        let matrix = matrix_record(&before.matrix_or_pan, &after.matrix_or_pan)
+            .map_err(|_| LiveRebuild::Domain)?;
         let mutes_before = [before.fader.left_mute, before.fader.right_mute];
         let mutes_after = [after.fader.left_mute, after.fader.right_mute];
         if mutes_before != mutes_after && follows_mute_from(next, after.id.as_str()) {
             return Err(LiveRebuild::FollowedMute);
         }
-
-        let mut fader = [None; 4];
-        let mut used = 0;
-        let mut push = |record| {
-            fader[used] = Some(record);
-            used += 1;
-        };
-        let db_after = [after.fader.left_db, after.fader.right_db];
-        let gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
-        for (lanes, lane) in
-            lane_records(gain_changed, db_after[0].to_bits() == db_after[1].to_bits())
-        {
-            push(TrackFaderRecord::FaderDb {
-                lanes,
-                db: db_after[lane],
-                smoothing_samples: ramps.fader_samples,
-            });
-        }
-        let mute_changed = [0, 1].map(|lane| mutes_before[lane] != mutes_after[lane]);
-        for (lanes, lane) in lane_records(mute_changed, mutes_after[0] == mutes_after[1]) {
-            push(TrackFaderRecord::Mute {
-                lanes,
-                muted: mutes_after[lane],
-                smoothing_samples: ramps.mute_samples,
-            });
-        }
-
-        let matrix = (matrix_bits(matrix_before) != matrix_bits(matrix_after)).then_some(
-            TrackControlRecord {
-                matrix: matrix_after,
-                smoothing_samples: smoothing_after,
-            },
-        );
-        if used > 0 || matrix.is_some() {
+        if fader[0].is_some() || matrix.is_some() {
             delta.strips.push(LiveStripRecords {
                 strip_id: after.id.as_str(),
                 fader,
@@ -520,33 +460,6 @@ fn same_params(before: &[EffectParam], after: &[EffectParam]) -> bool {
         })
 }
 
-/// The gain bits each lane's fader holds, through the one fader-domain authority.
-fn fader_gains(fader: &DualMonoFader) -> Result<[u32; 2], LiveRebuild> {
-    let gain = |db| {
-        checked_fader_gain(db)
-            .map(f32::to_bits)
-            .map_err(|_| LiveRebuild::Domain)
-    };
-    Ok([gain(fader.left_db)?, gain(fader.right_db)?])
-}
-
-/// The lane records for one per-lane change mask: one `Both` when both lanes change and
-/// `same_value`, else one record per changed lane, left first. Each entry names the lane whose
-/// post-commit value the record carries.
-fn lane_records(
-    changed: [bool; 2],
-    same_value: bool,
-) -> impl Iterator<Item = (BuiltinLaneSelector, usize)> {
-    let records: [Option<(BuiltinLaneSelector, usize)>; 2] = match changed {
-        [true, true] if same_value => [Some((BuiltinLaneSelector::Both, 0)), None],
-        [left, right] => [
-            left.then_some((BuiltinLaneSelector::Left, 0)),
-            right.then_some((BuiltinLaneSelector::Right, 1)),
-        ],
-    };
-    records.into_iter().flatten()
-}
-
 /// Whether `next` has a `follows_mute` route whose source is the track `track_id` (#1053 G2).
 fn follows_mute_from(next: &SessionModel, track_id: &str) -> bool {
     next.routes.iter().any(|route| {
@@ -554,8 +467,4 @@ fn follows_mute_from(next: &SessionModel, track_id: &str) -> bool {
             && matches!(&route.source, RouteSource::Track { track_id: source, .. }
                 if source.as_str() == track_id)
     })
-}
-
-fn matrix_bits(matrix: builtins::Matrix2x2) -> [u32; 4] {
-    [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits)
 }

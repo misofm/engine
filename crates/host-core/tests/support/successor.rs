@@ -25,6 +25,8 @@ pub(crate) const QUANTUM: usize = 128;
 pub(crate) const BLOCKS: usize = 12;
 /// The first block the successor renders.
 pub(crate) const SWAP_BLOCK: usize = 6;
+/// The revision the successor commits as (#1277 D10): the predecessor's plan is at revision 1.
+pub(crate) const SUCCESSOR_REVISION: u64 = 2;
 
 /// Generous host caps; a test narrows one row when it needs to.
 pub(crate) fn caps() -> HostPrepareCaps {
@@ -101,6 +103,7 @@ impl Session {
             SuccessorBase {
                 inventory,
                 committed,
+                revision: SUCCESSOR_REVISION,
             },
             backend,
         )
@@ -268,11 +271,19 @@ pub(crate) fn swapped_run(
         Successor::Fresh => (b.prepare(backend), 0),
     };
     let PreparedHost {
-        plan,
+        mut plan,
         sources: mut b_sources,
         report,
         ..
     } = b_prepared;
+    if successor == Successor::Carry {
+        // The commit's last write (#1277 D5): the revision the successor's carry retargets were
+        // stamped with is published on its own gate before the successor is published, so its
+        // adoption block's snapshot covers them.
+        plan.take_revision_gate()
+            .expect("the successor's handle")
+            .publish(SUCCESSOR_REVISION);
+    }
     publisher
         .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
         .unwrap_or_else(|_| panic!("reserve the successor"))

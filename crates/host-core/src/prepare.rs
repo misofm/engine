@@ -7,11 +7,14 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeSet;
 
-use builtins::{InputBoundCache, MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
+use builtins::{
+    BuiltinLaneSelector, InputBoundCache, MeterConfig, MeterHandle, MeterMetricSet, MeterTap,
+    checked_fader_gain,
+};
 use builtins_compiler::{
     BuiltinCompileCaps, LiveValuesSuperseded, MeterConsumer, MeterRequest, SelectedMeterRequest,
-    TrackControlProducer, TrackControlRequest,
-    prepare_selected_session_builtins_between_render_calls,
+    TrackControlProducer, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
+    lower_matrix_or_pan, prepare_selected_session_builtins_between_render_calls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
 };
@@ -21,13 +24,16 @@ use effect_compiler::{
     effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::TailSamples;
-use engine::realtime::PreparedRenderPlan;
+use engine::realtime::{GATE_REVISION_MAX, PreparedRenderPlan};
 use graph::{
     GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, StableGraphId,
     TrackStage,
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
-use session::{CompileCaps, CompiledSession, SessionModel, compile_session, parse_session_json};
+use session::{
+    CompileCaps, CompiledSession, MatrixOrPan, SessionModel, StripKind, StripRef, compile_session,
+    parse_session_json,
+};
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
     SourceGraphTrackMapping, prepare_graph_source_set,
@@ -557,6 +563,19 @@ pub struct PreparedHost {
     pub control_catalog: crate::PreparedSessionControlCatalog,
 }
 
+impl PreparedHost {
+    /// The strip IDs present in both this plan and the plan it was prepared to displace for which
+    /// at least one fader, mute or matrix stage does not carry, so it starts at rest (#1277 D4,
+    /// D6): a prepared value differs, the two plans bank the stage in different forms or attach
+    /// different control kinds. Sorted. Added strips are not listed, and neither is any strip of a
+    /// plan prepared without a predecessor. *Duck-swap a strip whose state cannot continue across
+    /// a plan swap* (#1324) consumes it.
+    #[must_use]
+    pub fn restarted_strips(&self) -> &[Box<str>] {
+        &self.inventory.restarted
+    }
+}
+
 /// One source of a prepared plan, as its successor's preparation sees it (issue #1272 D1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceInventoryRow {
@@ -581,6 +600,31 @@ pub struct PlanStateInventory {
     sources: Box<[SourceInventoryRow]>,
     /// Sorted by strip ID.
     input_sections: Box<[InputSectionInventoryRow]>,
+    /// Sorted by strip ID, then owner.
+    strip_stages: Box<[StripStageInventoryRow]>,
+    /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
+    /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
+    /// for a plan prepared without a predecessor.
+    restarted: Box<[Box<str>]>,
+}
+
+/// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
+/// PostMatrix)`, as its successor's preparation sees it (issue #1277 D1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StripStageInventoryRow {
+    /// The strip ID: a track's or a submix's.
+    pub(crate) id: Box<str>,
+    /// Whose state the row holds.
+    pub(crate) owner: graph::BuiltinStripOwner,
+    /// The kind of bank the lane sits in. A fused bank holds both owners at one location; a
+    /// split one holds each owner in a bank of its own.
+    pub(crate) stage: graph::BuiltinStripStage,
+    /// Where the lane sits in this plan. Meaningful only to this plan's successor's carry
+    /// program, which names it as the lane to copy from.
+    pub(crate) location: graph::GraphLaneLocation,
+    /// Whether this plan attached latest-target cells to the strip's fader, mute and matrix
+    /// stages (the control kind of #1277 D4).
+    pub(crate) live: bool,
 }
 
 /// One banked strip input section of a prepared plan, owner key `(strip ID,
@@ -631,6 +675,22 @@ impl PlanStateInventory {
         input_section_row(&self.input_sections, id)
     }
 
+    /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
+    #[must_use]
+    pub fn strip_stage_count(&self) -> usize {
+        self.strip_stages.len()
+    }
+
+    /// The row of `owner`'s stage of strip `id`, if the plan banks one.
+    #[must_use]
+    pub(crate) fn strip_stage(
+        &self,
+        id: &str,
+        owner: graph::BuiltinStripOwner,
+    ) -> Option<&StripStageInventoryRow> {
+        strip_stage_row(&self.strip_stages, id, owner)
+    }
+
     /// Heap bytes this inventory retains: its row tables and their ID text.
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
@@ -639,10 +699,18 @@ impl PlanStateInventory {
                 .input_sections
                 .iter()
                 .map(|row| row.id.len())
-                .sum::<usize>();
+                .sum::<usize>()
+            + self
+                .strip_stages
+                .iter()
+                .map(|row| row.id.len())
+                .sum::<usize>()
+            + self.restarted.iter().map(|id| id.len()).sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
                 + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
+                + core::mem::size_of_val::<[StripStageInventoryRow]>(&self.strip_stages)
+                + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + ids,
         )
         .unwrap_or(u64::MAX)
@@ -651,19 +719,29 @@ impl PlanStateInventory {
 
 /// The plan a successor is prepared to displace (issue #1272 D2, umbrella #1269 P1).
 ///
-/// `committed` is the predecessor's committed session model at the moment the successor is
-/// prepared. An owner carries only when the transaction left its values equal between
-/// `committed` and the model the successor is compiled from, and its prepared layout equal to
-/// the predecessor's `inventory` row. A source carries when its ID is in both models, its
-/// declaration (content, channels, bit depth, frames) is equal, and its ring configuration is
-/// the inventory row's; which tracks read it does not matter.
+/// `committed` is the predecessor's base at the moment the successor is prepared. An input
+/// section carries only when the transaction left its values equal between `committed` and the
+/// model the successor is compiled from, and its prepared layout equal to the predecessor's
+/// `inventory` row. A fader, mute or matrix stage (#1277) carries when no prepared value of it
+/// differs, and its layout and control kind equal the inventory row's; a difference in its live
+/// values is written to the successor's cells as a retarget stamped with `revision`, so the
+/// stage sounds as "live edit, then structural edit" (D15-7). A source carries when its ID is in
+/// both models, its declaration (content, channels, bit depth, frames) is equal, and its ring
+/// configuration is the inventory row's; which tracks read it does not matter.
 #[derive(Clone, Copy, Debug)]
 pub struct SuccessorBase<'a> {
     /// The predecessor's [`PreparedHost::inventory`].
     pub inventory: &'a PlanStateInventory,
-    /// The predecessor's committed session model, normalized
-    /// ([`CompiledSession::normalized_model`]): strips are looked up in it by ID.
+    /// The predecessor's base: the model it was prepared from plus every live record pushed to
+    /// it (#1277 D2), normalized ([`CompiledSession::normalized_model`]): strips are looked up in
+    /// it by ID.
     pub committed: &'a SessionModel,
+    /// `r`, the revision the successor commits as (#1277 D10). Its carry retargets are stamped
+    /// with it on the successor's own gate pin ([`PreparedRenderPlan::stamp_held_gate`]), and the
+    /// host that commits the successor publishes it on the successor's gate handle. Precondition:
+    /// `1 <= revision <= GATE_REVISION_MAX`; a preparation refuses any other with
+    /// `host.successor.revision` before it allocates. It has no neutral value.
+    pub revision: u64,
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -1201,6 +1279,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    // #1277 D10: a successor commits as a revision its own gate can stamp. Checked before this
+    // preparation allocates anything.
+    if successor.is_some_and(|base| !(1..=GATE_REVISION_MAX).contains(&base.revision)) {
+        return Err(successor_revision_refusal());
+    }
     // #1312 D2: the session's count when the host passed one, else this preparation's own, which
     // the handles hand back. Made before any observed allocation of the preparation.
     let live_superseded = superseded.cloned().unwrap_or_default();
@@ -1342,10 +1425,22 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .collect()
         }
     };
+    // Issue #1277 D3, D4: how each strip's fader/mute and matrix values differ between the
+    // predecessor's base and this model: the join's model half, resolved against the plans' rows
+    // once this plan is bound.
+    let live_strips = live_controls.control_queue_depth.is_some();
+    let strip_joins: Vec<StripJoin<'_>> = match successor {
+        None => Vec::new(),
+        Some(base) => join_strips(base.committed, model, live_strips),
+    };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
     let carry_program = match successor {
-        Some(base) if !carried_sources.is_empty() || !carried_inputs.is_empty() => {
+        Some(base)
+            if !carried_sources.is_empty()
+                || !carried_inputs.is_empty()
+                || strip_joins.iter().any(StripJoin::may_carry) =>
+        {
             Some(graph::GraphCarryProgram {
                 predecessor: base.inventory.plan_identity(),
                 sources: carried_sources.into_boxed_slice(),
@@ -1892,14 +1987,63 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_builtin_input_carry(&mut plan, moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    // Issue #1277 D1: this plan's own fader and matrix lanes, sorted by strip ID and owner: the
+    // inventory its successor joins with, and the table the join below looks this plan's lanes up
+    // in.
+    let mut strip_stages: Vec<StripStageInventoryRow> = graph::builtin_strip_lanes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?
+        .into_iter()
+        .map(|(id, lane)| StripStageInventoryRow {
+            id,
+            owner: lane.owner,
+            stage: lane.stage,
+            location: lane.location,
+            live: live_strips,
+        })
+        .collect();
+    strip_stages
+        .sort_unstable_by(|left, right| left.id.cmp(&right.id).then(left.owner.cmp(&right.owner)));
+    let strip_carry = match successor {
+        Some(base) => resolve_strip_carry(base.inventory, &strip_joins, &strip_stages, live_strips),
+        None => StripCarry::default(),
+    };
+    // The strip moves' table is charged at its exact length: which strips carry is known only
+    // once both plans' lanes are, so it is checked here, against the same cap as the rest of the
+    // plan, instead of before bind.
+    let strip_carry_bytes = u64::try_from(
+        strip_carry
+            .moves
+            .len()
+            .checked_mul(core::mem::size_of::<graph::GraphStripMove>())
+            .ok_or_else(|| resource("host.resource.arithmetic"))?,
+    )
+    .map_err(|_| resource("host.resource.arithmetic"))?;
+    if admitted_graph_and_model
+        .checked_add(strip_carry_bytes)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?
+        > caps.maximum_graph_session_plus_plan_bytes
+    {
+        return Err(resource("host.graph.resource.limit"));
+    }
+    if !strip_carry.moves.is_empty() {
+        graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
-    debug_assert_eq!(carry_program_retained_bytes, carry_program_bytes);
+    debug_assert_eq!(
+        carry_program_retained_bytes,
+        carry_program_bytes + strip_carry_bytes
+    );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    let mut restarted = strip_carry.restarted;
+    restarted.sort_unstable();
     let inventory = PlanStateInventory {
         plan_identity: graph::plan_identity(&mut plan)
             .ok_or_else(|| graph_failure("host.inventory.identity"))?,
         sources: inventory_sources.into_boxed_slice(),
         input_sections: input_sections.into_boxed_slice(),
+        strip_stages: strip_stages.into_boxed_slice(),
+        restarted: restarted.into_boxed_slice(),
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -1962,6 +2106,29 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .map(|(track, _)| track)
         .collect();
     plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
+
+    // Issue #1277 D5: the carried strips' live differences, written to this plan's own cells,
+    // stamped with the revision it commits as. This is preparation's last fallible step, so a
+    // preparation that fails writes nothing, and nothing writes the retargets again: the host's
+    // commit stamps `revision` once more on the handle that inherits the open stamp, and
+    // publishes it. A preparation that writes no retarget does not stamp.
+    if let (Some(base), false) = (successor, strip_carry.retargets.is_empty()) {
+        let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
+            return Err(successor_revision_refusal());
+        };
+        for retarget in &strip_carry.retargets {
+            let Some(&index) = canonical_index.get(retarget.id) else {
+                return Err(graph_failure("host.control.order"));
+            };
+            let producer = &mut strip_controls[index];
+            for record in retarget.fader.iter().map_while(|record| *record) {
+                producer.fader.write(stamp, record);
+            }
+            if let Some(record) = retarget.matrix {
+                producer.producer.write(stamp, record);
+            }
+        }
+    }
 
     Ok((
         PreparedHost {
@@ -2036,6 +2203,377 @@ fn same_input_section(left: &session::DualMonoBuiltins, right: &session::DualMon
                 && left.hpf_hz.to_bits() == right.hpf_hz.to_bits()
                 && left.lpf_hz.to_bits() == right.lpf_hz.to_bits()
         })
+}
+
+/// `owner`'s row of strip `id` in `rows`, which are sorted by strip ID and then owner.
+fn strip_stage_row<'a>(
+    rows: &'a [StripStageInventoryRow],
+    id: &str,
+    owner: graph::BuiltinStripOwner,
+) -> Option<&'a StripStageInventoryRow> {
+    rows.binary_search_by(|row| (*row.id).cmp(id).then(row.owner.cmp(&owner)))
+        .ok()
+        .map(|index| &rows[index])
+}
+
+/// The ramp lengths, in samples, that live fader and mute records carry (#1053 D3).
+///
+/// Pan and matrix records do not take theirs from here: they carry the post-commit model's own
+/// `smoothing_samples`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveRamps {
+    /// The ramp of a `FaderDb` record.
+    pub fader_samples: u32,
+    /// The ramp of a `Mute` record.
+    pub mute_samples: u32,
+}
+
+impl LiveRamps {
+    /// The ramps a session's live fader and mute records carry.
+    ///
+    /// #1053 D3: zero (a step) until #1054 derives it from the session's `controlSmoothing`. A
+    /// step is bit-exact to the value a rebuild of the committed model bakes.
+    #[must_use]
+    pub fn for_session(model: &SessionModel) -> Self {
+        let _ = model;
+        Self {
+            fader_samples: 0,
+            mute_samples: 0,
+        }
+    }
+}
+
+/// A fader or pan value outside the domain its render-side setter accepts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OutOfDomain;
+
+/// The fader and mute records that bring a strip's fader/mute stage from `before`'s values to
+/// `after`'s, in push order: `FaderDb` records first, then `Mute` records, each left before
+/// right; `None` after the last (#1053 D1).
+///
+/// The per-owner function of #1277 D5: the classifier derives a live delta's records with it, and
+/// a successor's preparation derives its carry retargets with it, so the two cannot disagree. A
+/// record is emitted only when the value the render plane holds changes: a `FaderDb` per lane
+/// whose gain bits change (one `Both` when both change to the same dB bits) and a `Mute` per lane
+/// whose mute changes (one `Both` when both change to the same value). A fader move on a lane
+/// that stays muted still gets its record, so the stage remembers the gain for a later unmute.
+///
+/// # Errors
+///
+/// [`OutOfDomain`] when either fader is outside the domain [`checked_fader_gain`] accepts.
+pub(crate) fn fader_records(
+    before: &session::DualMonoFader,
+    after: &session::DualMonoFader,
+    ramps: LiveRamps,
+) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+    let gain = |db| {
+        checked_fader_gain(db)
+            .map(f32::to_bits)
+            .map_err(|_| OutOfDomain)
+    };
+    let gains_before = [gain(before.left_db)?, gain(before.right_db)?];
+    let gains_after = [gain(after.left_db)?, gain(after.right_db)?];
+    let mutes_before = [before.left_mute, before.right_mute];
+    let mutes_after = [after.left_mute, after.right_mute];
+    let mut fader = [None; 4];
+    let mut used = 0;
+    let mut push = |record| {
+        fader[used] = Some(record);
+        used += 1;
+    };
+    let db_after = [after.left_db, after.right_db];
+    let gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
+    for (lanes, lane) in lane_records(gain_changed, db_after[0].to_bits() == db_after[1].to_bits())
+    {
+        push(TrackFaderRecord::FaderDb {
+            lanes,
+            db: db_after[lane],
+            smoothing_samples: ramps.fader_samples,
+        });
+    }
+    let mute_changed = [0, 1].map(|lane| mutes_before[lane] != mutes_after[lane]);
+    for (lanes, lane) in lane_records(mute_changed, mutes_after[0] == mutes_after[1]) {
+        push(TrackFaderRecord::Mute {
+            lanes,
+            muted: mutes_after[lane],
+            smoothing_samples: ramps.mute_samples,
+        });
+    }
+    Ok(fader)
+}
+
+/// The matrix record that brings a strip's matrix/pan stage from `before`'s value to `after`'s,
+/// when a lowered coefficient's bits change (the per-owner function of #1277 D5). A change of the
+/// smoothing window alone is no record.
+///
+/// # Errors
+///
+/// [`OutOfDomain`] when either value does not lower through [`lower_matrix_or_pan`].
+pub(crate) fn matrix_record(
+    before: &MatrixOrPan,
+    after: &MatrixOrPan,
+) -> Result<Option<TrackControlRecord>, OutOfDomain> {
+    let bits = |matrix: builtins::Matrix2x2| {
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits)
+    };
+    let (matrix_before, _) = lower_matrix_or_pan(before).map_err(|_| OutOfDomain)?;
+    let (matrix_after, smoothing_after) = lower_matrix_or_pan(after).map_err(|_| OutOfDomain)?;
+    Ok(
+        (bits(matrix_before) != bits(matrix_after)).then_some(TrackControlRecord {
+            matrix: matrix_after,
+            smoothing_samples: smoothing_after,
+        }),
+    )
+}
+
+/// The lane records for one per-lane change mask: one `Both` when both lanes change and
+/// `same_value`, else one record per changed lane, left first. Each entry names the lane whose
+/// post-commit value the record carries.
+fn lane_records(
+    changed: [bool; 2],
+    same_value: bool,
+) -> impl Iterator<Item = (BuiltinLaneSelector, usize)> {
+    let records: [Option<(BuiltinLaneSelector, usize)>; 2] = match changed {
+        [true, true] if same_value => [Some((BuiltinLaneSelector::Both, 0)), None],
+        [left, right] => [
+            left.then_some((BuiltinLaneSelector::Left, 0)),
+            right.then_some((BuiltinLaneSelector::Right, 1)),
+        ],
+    };
+    records.into_iter().flatten()
+}
+
+/// The refusal of a successor whose revision its gate cannot stamp (#1277 D10).
+fn successor_revision_refusal() -> PrepareDiagnostics {
+    PrepareDiagnostics::fixed(PrepareRejection::Session, "host.successor.revision")
+}
+
+/// How one family of a strip's values differs between the predecessor's base and the successor's
+/// model (#1277 D3): by the records the classifier would emit for the change.
+#[derive(Clone, Copy, Debug)]
+enum FamilyJoin<T> {
+    /// No record: the stage's values are what the base holds.
+    Same,
+    /// The change is live: the records bring the carried stage to the successor's values.
+    Live(T),
+    /// The change is prepared (or its domain is refused): the stage starts at rest.
+    Prepared,
+}
+
+impl<T> FamilyJoin<T> {
+    const fn is_prepared(&self) -> bool {
+        matches!(self, Self::Prepared)
+    }
+}
+
+/// One strip present in both models, with how its fader/mute and matrix families differ.
+struct StripJoin<'a> {
+    id: &'a str,
+    fader: FamilyJoin<[Option<TrackFaderRecord>; 4]>,
+    matrix: FamilyJoin<TrackControlRecord>,
+}
+
+impl StripJoin<'_> {
+    /// Whether any of the strip's stages could carry.
+    fn may_carry(&self) -> bool {
+        !self.fader.is_prepared() || !self.matrix.is_prepared()
+    }
+}
+
+/// The strip `strip` had in `committed`, among strips of its own kind (#1277 D1): its position in
+/// the model's strip order and its fader and matrix. A strip whose kind changed is not found.
+fn committed_strip<'a>(
+    committed: &'a SessionModel,
+    strip: &StripRef<'_>,
+) -> Option<(usize, &'a session::DualMonoFader, &'a MatrixOrPan)> {
+    let id = strip.id.as_str();
+    match strip.kind {
+        StripKind::Track(_) => committed
+            .tracks
+            .binary_search_by(|track| track.id.as_str().cmp(id))
+            .ok()
+            .map(|index| {
+                let track = &committed.tracks[index];
+                (index, &track.fader, &track.matrix_or_pan)
+            }),
+        StripKind::Submix(_) => committed
+            .submixes
+            .binary_search_by(|submix| submix.id.as_str().cmp(id))
+            .ok()
+            .map(|index| {
+                let submix = &committed.submixes[index];
+                (
+                    committed.tracks.len() + index,
+                    &submix.fader,
+                    &submix.matrix_or_pan,
+                )
+            }),
+    }
+}
+
+/// Whether `committed` has a strip of any kind named `id`.
+fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
+    committed
+        .tracks
+        .binary_search_by(|track| track.id.as_str().cmp(id))
+        .is_ok()
+        || committed
+            .submixes
+            .binary_search_by(|submix| submix.id.as_str().cmp(id))
+            .is_ok()
+}
+
+/// A strip's fader as its stage holds it: the VCA-effective values when VCAs are in play (#1242
+/// D2), else the strip's own.
+fn effective_fader(
+    own: &session::DualMonoFader,
+    effective: Option<&session::EffectiveStripFader>,
+) -> session::DualMonoFader {
+    match effective {
+        None => own.clone(),
+        Some(effective) => session::DualMonoFader {
+            left_db: effective.db[0],
+            right_db: effective.db[1],
+            left_mute: effective.mute[0],
+            right_mute: effective.mute[1],
+        },
+    }
+}
+
+/// The model half of the strip join (#1277 D3, D4): for every strip of `model` that `committed`
+/// also has, how its fader/mute and matrix values differ.
+///
+/// A family's difference is live when the classifier would emit a record for it on a plan that
+/// attaches the control kind (`live`): the strip is a track, no VCA is in either model (until
+/// #1247 `LiveRebuild::Vca` keeps them prepared) and the values are in domain. Every other
+/// difference is prepared. A strip whose kind changed has no counterpart and both families are
+/// prepared.
+fn join_strips<'a>(
+    committed: &SessionModel,
+    model: &'a SessionModel,
+    live: bool,
+) -> Vec<StripJoin<'a>> {
+    let vca_in_play = !committed.vcas.is_empty() || !model.vcas.is_empty();
+    let committed_effective = vca_in_play.then(|| committed.effective_strip_faders());
+    let next_effective = vca_in_play.then(|| model.effective_strip_faders());
+    let ramps = LiveRamps::for_session(model);
+    let mut joins = Vec::new();
+    for (index, strip) in model.strips().enumerate() {
+        let id = strip.id.as_str();
+        let Some((position, before_fader, before_matrix)) = committed_strip(committed, &strip)
+        else {
+            if committed_has_strip(committed, id) {
+                joins.push(StripJoin {
+                    id,
+                    fader: FamilyJoin::Prepared,
+                    matrix: FamilyJoin::Prepared,
+                });
+            }
+            continue;
+        };
+        let live_family = live && !vca_in_play && matches!(strip.kind, StripKind::Track(_));
+        let before = effective_fader(
+            before_fader,
+            committed_effective
+                .as_ref()
+                .map(|effective| &effective[position]),
+        );
+        let after = effective_fader(
+            strip.fader,
+            next_effective.as_ref().map(|effective| &effective[index]),
+        );
+        let fader = match fader_records(&before, &after, ramps) {
+            Err(_) => FamilyJoin::Prepared,
+            Ok(records) if records[0].is_none() => FamilyJoin::Same,
+            Ok(_) if !live_family => FamilyJoin::Prepared,
+            Ok(records) => FamilyJoin::Live(records),
+        };
+        let matrix = match matrix_record(before_matrix, strip.matrix_or_pan) {
+            Err(_) => FamilyJoin::Prepared,
+            Ok(None) => FamilyJoin::Same,
+            Ok(Some(_)) if !live_family => FamilyJoin::Prepared,
+            Ok(Some(record)) => FamilyJoin::Live(record),
+        };
+        joins.push(StripJoin { id, fader, matrix });
+    }
+    joins
+}
+
+/// One carried strip's retarget records, to write into the successor's cells (#1277 D5).
+struct StripRetarget<'a> {
+    id: &'a str,
+    fader: [Option<TrackFaderRecord>; 4],
+    matrix: Option<TrackControlRecord>,
+}
+
+/// What the strip join resolved against both plans' lanes.
+#[derive(Default)]
+struct StripCarry<'a> {
+    moves: Vec<graph::GraphStripMove>,
+    restarted: Vec<Box<str>>,
+    retargets: Vec<StripRetarget<'a>>,
+}
+
+/// The lane half of the strip join (#1277 D4, D6, D9): which stage of which strip moves, which
+/// strips restart, and which carried strips retarget.
+///
+/// A stage carries when both plans have its lane in a bank of one kind, attach the same control
+/// kind, and no prepared value of it differs. A fused bank holds both owners in one stage, so it
+/// carries both or neither. A strip with a stage that does not carry starts that stage at rest
+/// and is listed in `restarted`.
+fn resolve_strip_carry<'a>(
+    predecessor: &PlanStateInventory,
+    joins: &[StripJoin<'a>],
+    own: &[StripStageInventoryRow],
+    live: bool,
+) -> StripCarry<'a> {
+    use graph::BuiltinStripOwner::{Fader, Matrix};
+    let mut carry = StripCarry::default();
+    for join in joins {
+        let rows = [Fader, Matrix].map(|owner| {
+            let own = strip_stage_row(own, join.id, owner)?;
+            let before = predecessor.strip_stage(join.id, owner)?;
+            (own.stage == before.stage && before.live == live).then_some((own, before))
+        });
+        let families = [!join.fader.is_prepared(), !join.matrix.is_prepared()];
+        let mut carries = [0, 1].map(|owner| rows[owner].is_some() && families[owner]);
+        if rows
+            .iter()
+            .flatten()
+            .any(|(row, _)| row.stage == graph::BuiltinStripStage::FaderMatrix)
+        {
+            let both = carries[0] && carries[1];
+            carries = [both, both];
+        }
+        for ((owner, row), carries) in [Fader, Matrix].into_iter().zip(rows).zip(carries) {
+            if let (true, Some((own, before))) = (carries, row) {
+                carry.moves.push(graph::GraphStripMove {
+                    owner,
+                    successor: own.location,
+                    predecessor: before.location,
+                });
+            }
+        }
+        if !(carries[0] && carries[1]) {
+            carry.restarted.push(join.id.into());
+        }
+        let fader = match join.fader {
+            FamilyJoin::Live(records) if carries[0] => records,
+            _ => [None; 4],
+        };
+        let matrix = match join.matrix {
+            FamilyJoin::Live(record) if carries[1] => Some(record),
+            _ => None,
+        };
+        if fader[0].is_some() || matrix.is_some() {
+            carry.retargets.push(StripRetarget {
+                id: join.id,
+                fader,
+                matrix,
+            });
+        }
+    }
+    carry
 }
 
 /// Total effect instances across every strip: one per console entry, since each lowers to one

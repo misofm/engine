@@ -987,6 +987,7 @@ impl LivePlan {
                 host_core::SuccessorBase {
                     inventory: predecessor,
                     committed,
+                    revision: successor::SUCCESSOR_REVISION,
                 },
                 backend,
             )
