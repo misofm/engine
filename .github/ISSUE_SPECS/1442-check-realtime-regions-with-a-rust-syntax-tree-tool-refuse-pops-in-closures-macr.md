@@ -114,6 +114,14 @@ the self-test's lines from `:440` on are one lower.
   - **Stated limit.** A registry crate that exports a `debug_assert` macro and is imported with
     `#[macro_use] extern crate` or a glob `use` is outside the check. No crate in the workspace
     does this; the tool's module documentation says so.
+  - **(root Amendment 2, F2)** This text replaces the enumeration in the second bullet above:
+    "Count as a shadow any `debug_assert` identifier (bare or `r#`) under the roots that is not
+    directly followed by `!`. This one rule replaces D2's enumeration of `macro_rules!`, `macro` and
+    `use` forms; delete the enumeration code. Proc macros are refused by D3's (d)."
+    Measured on the tree: 122 `debug_assert` identifiers, all directly followed by `!`, so it refuses
+    nothing. A macro-made `macro_rules! $n` or `use .. as $n` is not an escape: rustc gives E0659.
+    A workspace proc macro is one (`mk!(debug_assert!)` in a proc-macro crate rebinds the count), and
+    D3's (d) closes it.
 - **D3. Function values.**
   - A path expression whose last segment is `try_pop` is allowed only in two positions:
     - as the callee of a call (`Consumer::try_pop(control)`);
@@ -124,6 +132,28 @@ the self-test's lines from `:440` on are one lower.
       iterator adapter that pops once per item with no count, or without end through a
       `try_pop(&self)` and `iter::repeat`. (root Amendment 1, iv)
   - Any other use is refused, for example a `let pop = Consumer::try_pop;`.
+  - **(root Amendment 2, SP-A)** The trusted-name scan below amends D3 and is adopted alongside
+    root Amendment 1 (iv). Its text:
+    "The trusted-name scan reads the tokens of every `.rs` file under the roots, at any depth, and refuses:
+    (a) an identifier `map` or `as_mut` (bare or `r#`) that does not directly follow `.` or `::`;
+    (b) an identifier `try_pop` that does not directly follow `.` or `::`, except in `fn try_pop(&mut self`, with the receiver tokens exactly `&`, `mut`, `self`;
+    (c) an identifier `map`, `as_mut`, `try_pop` or `debug_assert` in the token tree of an invocation of a name-emitting macro. A name-emitting macro is a `macro_rules!` or `macro` under the roots whose body holds `fn` directly followed by `$`, or that invokes a name-emitting macro (the set is closed transitively). An invocation is matched by its last path segment. An invocation through a name that a `use` item under the roots renames (`as n`) counts as one;
+    (d) any identifier `proc_macro`, `proc_macro_attribute` or `proc_macro_derive`. A workspace proc macro can emit any name, pop or shadow that the scan cannot see.
+    A registry trait or type method named `map` or `as_mut` is a stated limit."
+    Why the draft's narrower forms fail: `macro_rules! mk { ($a:ident . $n:ident) => { trait Spin<T>{fn $n..} impl<T> Spin<T> for &mut T { fn $n.. { while f(self).is_ok(){} } } } } mk!(x.map);`
+    compiles, and `c.map(Q::try_pop)` then pops 1000 of 1000, so a scan for the text `fn map` does not
+    see it; `self: &Self`, or `impl Pop for &Q { fn try_pop(self) }`, escape a `&self` receiver check.
+    **Measured** on `main` and on the branch head `1a33b2f6d`, read-only (Python token scan, comments
+    and strings removed, over `crates/`, `hosts/` and `tools/`): the rule refuses nothing.
+    - (a): 2429 `.map(`, 332 `.as_mut(` and 6 `Option::as_mut`. All follow `.` or `::`; there is no
+      `fn map` and no `fn as_mut`.
+    - (b): 102 `.try_pop(`, 1 `Consumer::try_pop`, and the one definition at
+      `crates/engine/src/realtime/spsc.rs:441` (`fn try_pop(&mut self)`).
+    - (c): five `fn $` macros exist (`session/src/estimate.rs:363`, `builtins/src/corpus.rs:599/602/605`,
+      `conformance/src/randomized.rs:2760`) and none receives a trusted name. The only trusted name in
+      any workspace-macro invocation is `.map(` inside `per_width!` (`crates/builtins/src/lib.rs:5851`),
+      and `per_width`'s body emits no `fn $`.
+    - (d): there is no `proc_macro` identifier and no `proc-macro = true`.
 - **D4. The allow-list changes.** B1a-D4 makes `Expr::Closure` and `Expr::Macro` transparent.
   D1 and D2 replace that with refusal on a pop's path. The rest of B1a-D4 is unchanged.
 - **D5. Committed probe cases.**
@@ -172,8 +202,63 @@ the self-test's lines from `:440` on are one lower.
   - (root Amendment 1, iv) `function-value-in-map-on-repeat`
     (`std::iter::repeat(q).map(Queue::try_pop).take_while(Result::is_ok).count()`, refused).
     Test value: red if the restriction is a blacklist of collection receivers, not an allow-list.
+  - (root Amendment 2, SP-A) Five cases for D3's trusted-name scan, each refused. Test value, one
+    sentence each:
+    - `user-map-trait-in-a-nested-module`: F1's reproducer (a user trait with a looping `map`)
+      inside `mod a { mod b { .. } }`. Red if the scan reads only top-level items or one file; this
+      shape passes today.
+    - `try-pop-by-value-on-a-reference-impl`: `impl Pop for &Q { fn try_pop(self) }`. Red if (b)
+      checks only for `&self`, which was the draft's wording.
+    - `macro-made-map-name`: `mk!(x.map)` where `mk!` emits `fn $n` (the shape above). Red if (c) is
+      dropped or matches only the text `fn map`. Reproduced: 1000 of 1000 pops.
+    - `macro-passes-name-to-an-inner-name-emitting-macro`: an outer macro passes `$n` to an inner
+      `fn $n` macro. Red if the name-emitting set is not closed transitively.
+    - `macro-made-proc-macro`: `macro_rules! mk { ($n:ident !) => { #[proc_macro] pub fn $n(..) } }`
+      with `mk!(debug_assert!);` in a workspace proc-macro crate. Red if (d) is dropped.
+  - (root Amendment 2, F2) The 8 existing shadow rows defend the replacement rule. Keep the F2
+    `proc-macro-fn` row: it is red only if both the F2 rule and D3's (d) are dropped.
+  - (root Amendment 2, SP-B) The six D8 cases. Test value, one sentence each:
+    - `#[path = "shadow.txt"]`: red if D8 (a) is dropped.
+    - `cfg_attr(.., path = "x.txt")`: red if (a) matches only a top-level `#[path = ..]`, which was
+      the draft's wording.
+    - `#[path = "../../../scripts/x.rs"]`: red if (a) checks only the `.rs` suffix, which was the
+      draft's wording.
+    - `#[path = $p]`: red if (a) accepts a value that is not a literal.
+    - `include!("x.in")` holding a looping `map` trait: red if (b) is dropped.
+    - `use std::include as inc`: red if (c) is dropped.
 - **D7. Documentation.** The drain rule's module documentation drops the closure,
   function-value and macro limits from B1b-D4, states D1 to D3, and states D2's limit.
+- **D8. Source that rustc reads and the walk does not (root Amendment 2, SP-B).** Adopted from an
+  adversarial review; #1443 D1 rule 3 resolves only the `#[path]` forms this decision accepts. Text:
+  "The walk refuses every way rustc reads source that the walk does not read. Over the tokens of every `.rs` file under the roots, at any depth, refuse:
+  (a) an identifier `path` in an attribute (`#[..]` or `#![..]`, `cfg_attr` arguments included), unless it is directly followed by `=` and a plain string literal whose value ends in `.rs`, is relative, and has no `..`, `target` or `node_modules` component;
+  (b) an `include!` invocation (any path prefix), unless its one argument is a string literal naming a file, relative to the invoking file's directory, whose `proc_macro2` tokens (comments dropped) are literals and punctuation only;
+  (c) an identifier `include` in a `use` item.
+  `include_str!` and `include_bytes!` produce a literal and stay allowed."
+  - **Why the draft was too narrow.** `include!` is not refused today: the tool has no `include!`
+    handling at all. These bypass a rule of "`#[path]` not ending in `.rs`":
+    `#[cfg_attr(all(), path = "x.txt")]` (rustc accepts it); `#[path = "../../scripts/x.rs"]`, a `.rs`
+    file outside the roots or under `target/`; `#[path = $p]` from a `$p:literal` metavariable (rustc
+    accepts it); `use std::include as inc; inc!("z.txt")` (rustc accepts it). `#[path = concat!(..)]`
+    is not an escape: rustc refuses it as a malformed `path` attribute.
+  - **Measured** on `main` and on the branch head `1a33b2f6d` (zero refusals on the real tree).
+    (a) The one `path` attribute, `crates/host-core/tests/successor_swap.rs:24`
+    (`#[path = "support/successor.rs"]`), is accepted. (b) The real tree has 4 `include!` sites, each
+    of a non-`.rs` file whose identifiers are only in `//` comments (a digest array), and all four are
+    accepted: `crates/gate-expander/src/corpus.rs:294`, `crates/multiband-compressor/src/corpus.rs:600`,
+    `crates/soft-clip/src/corpus.rs:212`, `tools/wasm-gate-corpus/src/lib.rs:1865`. A rule that refused
+    `include!` of a non-`.rs` file would refuse the real tree 4 times. (c) There are none. Gate 1 (the
+    real tree) defends the accepted forms.
+  - **Cases (six, D6 style).** The case format may need a non-`.rs` side file.
+    - `#[path = "shadow.txt"]`
+    - `#[cfg_attr(.., path = "x.txt")]`
+    - `#[path = "../../../scripts/x.rs"]`
+    - `#[path = $p]` from a `$p:literal` metavariable
+    - `include!("x.in")` whose file holds a looping `map` trait
+    - `use std::include as inc;` (with `inc!("z.txt")`)
+  - **If attempt 2 fails on D8 alone,** split D8 into its own slice ahead of C2 rather than spending
+    attempt 3 on it. Placement here is otherwise acceptable: same crate, cost 0 on the real tree, and
+    D2's and D3's trust depends on it.
 
 ### Root Amendment 1 (2026-10-11): the attempt-1 open items
 
@@ -191,6 +276,22 @@ belongs and marked "(root Amendment 1)":
   and would accept a `try_pop(&self)` type or a per-item pop through `qs.iter_mut()`.
 - **SP-4** v14 and v14b are committed as refused, expecting {drain} (B1b-D1's `<bound>`).
 
+### Root Amendment 2 (2026-10-11): the trusted-name scan, F2, source rustc reads, and the threat model
+
+Authority: root decisions under the owner's delegation, after the attempt-1 verdict (SP-A, F2, SP-B)
+and a fresh adversarial review (item 1, 2, 3 ACCEPT WITH CHANGES; item 4 REJECT as drafted, ACCEPT
+with a replacement text). Root adopted the review's texts verbatim; the draft threat model is
+rejected. Each is placed where it belongs and marked "(root Amendment 2)":
+
+- **SP-A** D3's trusted-name scan (a) to (d), with five D6 cases and four gate 5 mutations.
+- **F2** One rule replaces D2's enumeration: any `debug_assert` identifier not directly followed by
+  `!` is a shadow. The enumeration code is deleted; the `proc-macro-fn` row stays.
+- **SP-B** New D8: path attributes (`cfg_attr` included), `include!` and `use .. include`, with six
+  D6 cases. If attempt 2 fails on D8 alone, D8 becomes its own slice ahead of C2.
+- **Threat model** The text is in #1438 Hazards; this spec's Hazards refer to it.
+
+All three rules were measured at zero refusals on the real tree (`main` and `1a33b2f6d`).
+
 ## Authorized paths
 
 - `tools/realtime-policy/**`
@@ -207,6 +308,11 @@ belongs and marked "(root Amendment 1)":
 - **The probe sources are in the bundle.** Copy their content into case fixtures. Do not read
   them from `/tmp`.
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. D3's trusted-name
+  scan, D2's replacement rule and D8 are how this slice meets it; a registry trait or type method
+  named `map` or `as_mut` is a stated limit (limit 1). A finding inside a listed limit is recorded,
+  not a FAIL, and only a root ruling adds or widens a limit.
 - A type with its own `as_mut` that returns an iterator would let `.map` pop once per item; the
   tool cannot see types. No `fn as_mut` is defined in the workspace. (root Amendment 1, iv)
 - As in A1: the awk gate scans the tool's own sources until C2.
@@ -215,6 +321,9 @@ belongs and marked "(root Amendment 1)":
 
 1. **The real tree.** `cargo run --locked --release -q -p realtime-policy` prints the same counts
    as before this slice. `bash scripts/check-realtime-policy.sh` passes on the same tree.
+   (root Amendment 2) D2's replacement rule, D3's trusted-name scan and D8 refuse nothing on the real
+   tree (measured on `main` and on `1a33b2f6d`); the implementer re-measures with the tool and the
+   full suite.
 2. **The cases.** `cargo test --locked -p realtime-policy` passes, with every earlier case and
    every D5 and D6 case.
 3. **Parity (PR evidence).** A throwaway script outside the repository runs `main`'s awk gate
@@ -234,6 +343,17 @@ belongs and marked "(root Amendment 1)":
      form, so their failure is further evidence that the mutation bites. (root Amendment 1, iii)
    - any `.map` receiver: turns `function-value-in-map-on-an-iterator` and
      `function-value-in-map-on-repeat` red; the real tree passes. (root Amendment 1, iv)
+   - (root Amendment 2, SP-A) One mutation for each of D3's (a) to (d), each alone, the real tree
+     still passing:
+     - (a) dropped: turns `user-map-trait-in-a-nested-module` red;
+     - (b) limited to a `&self` receiver: turns `try-pop-by-value-on-a-reference-impl` red;
+     - (c) dropped, or matching only the text `fn map`, or not closed transitively: turns
+       `macro-made-map-name` and `macro-passes-name-to-an-inner-name-emitting-macro` red;
+     - (d) dropped: turns `macro-made-proc-macro` red.
+   - (root Amendment 2, F2) The replacement rule removed: turns the 8 shadow rows red; the real tree
+     passes.
+   - (root Amendment 2, SP-B) One mutation for each of D8's (a) to (c), each alone, the real tree still
+     passing: each turns red the D8 cases named for it in D6.
 6. **Shipped artifacts unchanged.** As A1's gate 6.
 7. `cargo fmt --all -- --check`,
    `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and

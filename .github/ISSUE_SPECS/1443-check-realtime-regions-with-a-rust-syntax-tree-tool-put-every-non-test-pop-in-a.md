@@ -96,6 +96,10 @@ them), and `crates/graph/src/lib.rs`, cited below with both trees' lines.
      resolved by Rust's default lookup (`x.rs` or `x/mod.rs` beside a `lib.rs`, `main.rs` or
      `mod.rs`; under `<stem>/` beside any other file; through enclosing inline modules) or by its
      `#[path]` (relative to the declaring file's directory, or to the inline module's directory).
+     (root Amendment 2) Rule 3 resolves only the `#[path]` forms that #1442 D8 accepts: a plain
+     relative `.rs` string literal with no `..`, `target` or `node_modules` component. D8 refuses
+     every other `#[path]` (`cfg_attr` forms and `$p` metavariables included) and `include!` of source
+     before this resolver runs, so the resolver never has to resolve one.
 
   A file that no declaration reaches is not test code. No module is exempt by its name.
   - So `#[cfg(any(test, feature = "test-support"))]` and `#[cfg(feature = "test-support")]` are not
@@ -310,6 +314,14 @@ allows a difference in the `.llvmbc` section of the `libcapi.a` members, because
 bitcode carries each source file's checksum, so any byte change to a source file changes it, and no
 linker copies it into a shipped image. Marked "(root Amendment 1)" in place.
 
+### Root Amendment 2 (2026-10-11): `#[path]` resolution and the threat model
+
+Authority: root decisions under the owner's delegation (J3 rulings of 2026-10-11, adopted verbatim
+from an adversarial review). Each is placed where it belongs and marked "(root Amendment 2)":
+
+- **D1 rule 3** resolves only the `#[path]` forms that #1442 D8 accepts.
+- **Hazards** refers to #1438's threat model.
+
 ## Authorized paths
 
 - `tools/realtime-policy/**`
@@ -344,6 +356,10 @@ linker copies it into a shipped image. Marked "(root Amendment 1)" in place.
   marker raises the floors there. STREAMS names this as a standing exception for every stream
   (STREAMS).
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 
 ## Objective gates
 

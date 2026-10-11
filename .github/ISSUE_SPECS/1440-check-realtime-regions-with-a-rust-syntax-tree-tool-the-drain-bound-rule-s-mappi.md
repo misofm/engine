@@ -415,6 +415,10 @@ end of its `passes` loop it has no macro and no attribute, and its terminal call
 - **Both gates run until C2.**
 - **Over-refusal is acceptable, a false pass is not.** D9's gap is the one stated exception, and
   the awk covers it until B1b.
+- **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 - **What D8b condition 6 leaves to the compiler.** The list reads mentions of the roots of
   `<K>` and `<Q>` only. When a root is a borrow taken from another binding before the set loop (the meter poll's
   `ready`, from `self.ready.as_mut()`), a call on that other binding (`self.refill()`) could reach

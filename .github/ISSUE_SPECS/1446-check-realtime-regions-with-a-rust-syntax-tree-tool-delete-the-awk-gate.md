@@ -185,6 +185,10 @@ source file changes the `.llvmbc` section of the `libcapi.a` members and nothing
   STREAMS). After this slice the floors live only in `Policy::workspace()`.
 - **Every later pop or region edits `Policy::workspace()`** (B2b-1, Hazards): the STREAMS standing
   exception covers it.
+- **Threat model (root Amendment 2, 2026-10-11).** Deleting the awk gate leaves this tool as the only
+  check. Its threat model, with its closed list of limits, is the "Threat model (root ruling
+  2026-10-11)" bullet in #1438 Hazards. A finding inside a listed limit is recorded, not a FAIL, and
+  only a root ruling adds or widens a limit.
 
 ## Objective gates
 

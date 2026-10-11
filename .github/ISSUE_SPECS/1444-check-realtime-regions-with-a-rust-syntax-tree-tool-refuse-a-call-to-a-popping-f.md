@@ -166,6 +166,10 @@ outside the repository.
   and shares a name with a method that a marked loop or closure calls will refuse that loop. The
   fix is a restructure (D3), named by root.
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 1, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 
 ## Objective gates
 

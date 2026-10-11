@@ -209,6 +209,10 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - **`crates/builtins-compiler/src/lib.rs` is a hot file.** Find `impl BuiltinBankProcessor` and
   `fn drain_controls` by name, not by line.
 - **Over-refusal is acceptable, a false pass is not.**
+- **Threat model (root Amendment 2, 2026-10-11).** The tool's threat model, with its closed list of
+  limits, is the "Threat model (root ruling 2026-10-11)" bullet in #1438 Hazards. It binds this
+  slice's rules and its verdicts: a finding inside a listed limit is recorded, not a FAIL, and only a
+  root ruling adds or widens a limit.
 
 ## Objective gates
 

@@ -404,6 +404,12 @@ Root names each cross-stream exception in STREAMS.md (D15-0). The rows are in
   (`Path::join`).
 - **Over-refusal is acceptable, a false pass is not.** Where the tool cannot classify something,
   it refuses (D3, D6).
+- **(root Amendment 2, 2026-10-11; the "Amendment (root, 2026-10-08)" below is Amendment 1.)** The text that follows is root's final ruling, adopted verbatim from an adversarial review, and #1440 to #1446 refer to it.
+  **Threat model (root ruling 2026-10-11).** The tool judges the workspace's own source: every token of every `.rs` file under the scan roots, and every file rustc reads as source from them. The walk refuses a `#[path]`, an `include!` or a proc macro that would put source where it cannot read it. Over that source it fails closed: a form outside its accepted grammar is refused. Over-refusal is acceptable; a false pass is not. Where a rule trusts a name (`map`, `as_mut`, `try_pop`, `debug_assert`), the trusted-name scan refuses every definition, import, rename or macro-emitted use of that name under the roots that the rule's text does not allow. The limits are exactly these:
+  1. code outside the workspace source: registry crates as `Cargo.lock` pins them (their macros, proc macros, traits and types), the compiler and the standard library;
+  2. type-level behaviour the tool cannot read, wherever the type is defined: auto-deref through a `Deref`/`DerefMut` impl (#1440 Hazards, a.3), and which impl a method call resolves to;
+  3. a limit that a slice's spec lists for a later slice of this program to close (#1441 D4), until that slice lands.
+  A verifier finding inside one of these limits is recorded in the issue's evidence and is not a FAIL. Only a root ruling adds or widens a limit; an implementer or a verifier cannot. A documentation or record sentence that claims more than the tool does is a finding as usual.
 
 ## Objective gates
 
