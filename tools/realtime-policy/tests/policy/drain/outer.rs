@@ -202,6 +202,15 @@ fn the_outer_loops_that_may_not_end_are_refused() {
             around(CONFIG, "", "for _ in cfg.controls", ""),
         ),
         (
+            "outer-slice-parameter-rebound-by-a-macro",
+            around(
+                ", rounds: &[u8]",
+                "    macro_rules! shadow {\n        ($x:ident) => {\n            let $x = 0_u32..;\n        };\n    }\n    shadow!(rounds);\n",
+                "for _ in rounds",
+                "",
+            ),
+        ),
+        (
             "outer-slice-parameter-with-a-pattern",
             around(
                 ", [rounds, other]: [core::ops::RangeFrom<u32>; 2]",
