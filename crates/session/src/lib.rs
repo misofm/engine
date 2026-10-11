@@ -8,6 +8,7 @@
 mod canonical;
 mod compile;
 mod diagnostic;
+mod edit_ramp;
 mod estimate;
 mod id;
 mod json_preflight;
@@ -23,6 +24,7 @@ pub use compile::{CompileCaps, CompiledSession, OutputShape, compile_session};
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, PathSegment, SourceSpan,
 };
+pub use edit_ramp::{EditRampRow, EditRampTarget, EditRamps};
 pub use estimate::{ResourceEstimate, estimate_session_resources};
 pub use id::StableId;
 pub use model::*;
