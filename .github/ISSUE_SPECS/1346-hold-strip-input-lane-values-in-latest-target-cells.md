@@ -187,7 +187,8 @@ block applied.
    `fixtures/graph/v1/direct-route.resources.json` `builtin_bank_bytes` 6663 to 7047 (+384 = 8 input
    lanes x 48; regenerated with `graph_fixture --write`, no other graph fixture moved).
 6. Realtime-policy floors: the tree held 100 marked regions in 27 files against a floor of 96; this
-   slice adds two regions (the input drain, and the paired-channel read with `InputReader::drain`)
+   slice adds two regions (the bank's input drain, and the paired-channel and cell-read helpers
+   with `InputReader::drain`)
    and raises the awk gate's floor to 102 regions, 27 files, and the self-test's pad with it (one pad
    file of 20 regions, thirteen of 3, on top of the 13 files and 43 regions).
 7. `InputReader::drain` pairing makes equal words written to the two channels in one block a `Both`
@@ -239,10 +240,11 @@ queue; the refused batch writes no input cell and no fader cell). Adapted for th
 
 | Gate | Result |
 |---|---|
-| `cargo test --locked --workspace --no-fail-fast` | see the final run below |
-| `cargo test --locked -p builtins-compiler --features test-support` | 65 lib + integration tests pass |
-| `cargo test --locked -p host-web --features test-support` | 190 + integration pass |
-| `cargo test --locked -p host-core --features control-provider,test-support --no-fail-fast` | pass, the #1276 carry tests (`successor_swap`) included (gate 4) |
+| `cargo test --locked --workspace --no-fail-fast` | 344 test binaries, none failed (the first run's only failures were the audit resource grid and `graph_fixture`: item 5) |
+| `cargo test --locked -p builtins --features test-support,lane/test-support` | 155 passed |
+| `cargo test --locked -p builtins-compiler --features test-support` | 87 passed |
+| `cargo test --locked -p host-web --features test-support` | 196 passed |
+| `cargo test --locked -p host-core --features control-provider,test-support --no-fail-fast` | 299 passed, the #1276 carry tests (`successor_swap`) included (gate 4) |
 | `cargo build --locked --release -p audit -p capi && target/release/audit capi` | allocations, deallocations, locks, syscalls 0; `total_violations` 0 |
 | `check-realtime-policy.sh`, `test-realtime-policy.sh` | ok (102 marked regions in 27 files) |
 | `check-rack-policy.sh`, `check-workspace-policy.sh`, `check-builtins-policy.sh`, `check-graph-policy.sh`, `check-host-core-policy.sh` | ok |
