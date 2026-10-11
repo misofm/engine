@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use core::num::NonZeroUsize;
 
 use engine::realtime::{
-    ARENA_SILENCE_BUFFER, ArenaStereoPair, DisjointArena, RenderError,
+    ARENA_SILENCE_BUFFER, ArenaStereoPair, DisjointArena, LiveSnapshot, RenderError,
     ResponseSnapshotAvailability, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
     ResponseSnapshotSection, ResponseSnapshotSink,
 };
@@ -892,8 +892,12 @@ impl LiveRoute {
     /// D5: apply, in order, exactly the records available at entry, each ramping from the
     /// coefficients the route is at (D3). Later records wait for a later block; none is dropped.
     /// Returns how many were applied.
+    ///
+    /// `snapshot` is the block's live snapshot `S` (#1504): the route's queue lane ignores it until
+    /// the lane moves to a cell (#1347). The drain runs in every block, active route or not.
     #[inline]
-    fn drain(&mut self) -> usize {
+    fn drain(&mut self, snapshot: LiveSnapshot) -> usize {
+        let _ = snapshot;
         let available = self.control.consumer.available_at_entry();
         let mut applied = 0;
         for _ in 0..available {
@@ -910,6 +914,8 @@ impl LiveRoute {
             self.position = 0;
             applied += 1;
         }
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_count_route_drained(self.route as usize, applied, snapshot);
         applied
     }
 
@@ -1223,6 +1229,20 @@ pub(crate) struct LiveControlEffect {
 }
 
 impl LiveControlEffect {
+    /// Drain this effect's live-control lane and stage the block's spans (issue #143 D3, #1504).
+    ///
+    /// `snapshot` is the block's live snapshot `S`: the queue lane ignores it until the lane moves
+    /// to cells (#1345). Called once in every block, before a sample of the block is touched.
+    #[inline]
+    fn stage(&mut self, snapshot: LiveSnapshot, first_sample: u64) -> effect_contract::Staged {
+        let _ = snapshot;
+        self.control.stage(
+            &mut self.spans,
+            first_sample,
+            self.observation.as_deref_mut(),
+        )
+    }
+
     fn new(
         effect: GraphPreparedEffect,
         control: Box<EffectControlLane>,
@@ -2984,6 +3004,7 @@ impl Runtime {
         &mut self,
         index: usize,
         first_sample: u64,
+        snapshot: LiveSnapshot,
         host: HostMaster<'_>,
         sources: Option<&dyn crate::GraphSourcePlanes>,
     ) -> Result<(), RenderError> {
@@ -3027,6 +3048,7 @@ impl Runtime {
                     track_delays,
                     split_pairs,
                     first_sample,
+                    snapshot,
                     host,
                     route_activity
                         .as_deref_mut()
@@ -3065,6 +3087,7 @@ impl Runtime {
                             track_delays,
                             split_pairs,
                             first_sample,
+                            snapshot,
                             None,
                             None,
                         )?;
@@ -3099,9 +3122,15 @@ impl Runtime {
                         let [gathers, residents] = count.get();
                         count.set([gathers, residents + 1]);
                     });
-                    chain.run_with_resident_input(predecessor, &mut planes, frames, first_sample)
+                    chain.run_with_resident_input(
+                        predecessor,
+                        &mut planes,
+                        frames,
+                        first_sample,
+                        snapshot,
+                    )
                 } else {
-                    chain.run(&mut planes, frames, first_sample)
+                    chain.run(&mut planes, frames, first_sample, snapshot)
                 }
             }
         }
@@ -3110,7 +3139,7 @@ impl Runtime {
     /// Materializes every pending split fader in original schedule order before a render error
     /// escapes. The first product slice admits at most one interval, but the walk keeps this
     /// owner-side contract explicit for later disjoint intervals.
-    pub(crate) fn complete_pending(&mut self, first_sample: u64) {
+    pub(crate) fn complete_pending(&mut self, first_sample: u64, snapshot: LiveSnapshot) {
         let Self {
             arena,
             units,
@@ -3132,6 +3161,7 @@ impl Runtime {
                 left,
                 right,
                 first_sample,
+                live_snapshot: snapshot,
             });
         }
     }
@@ -3385,6 +3415,7 @@ fn execute_op(
     track_delays: &mut [TrackDelayLine],
     split_pairs: &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
     first_sample: u64,
+    snapshot: LiveSnapshot,
     mut host: Option<HostMaster<'_>>,
     routes: Option<(&mut RouteActivity, usize)>,
 ) -> Result<(), RenderError> {
@@ -3409,11 +3440,7 @@ fn execute_op(
     // (an inactive op that skipped the drain would never see its unmute), then decides this
     // block's activity once and writes it before its destination, a later unit, reduces.
     if let NodeKind::LiveRoute(live) = &mut op.kind {
-        let applied = live.drain();
-        #[cfg(any(test, feature = "test-support"))]
-        test_only_count_route_drained(live.route as usize, applied);
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = applied;
+        let _applied = live.drain(snapshot);
         let active = live.active();
         if let Some((activity, _)) = routes.as_mut() {
             activity.set_active(live.route as usize, active);
@@ -3502,6 +3529,7 @@ fn execute_op(
                     left: out_left,
                     right: out_right,
                     first_sample,
+                    live_snapshot: snapshot,
                 };
                 return match slot.role {
                     SplitPairRole::Fader => split_pairs[slot.pair].begin_fader(block),
@@ -3529,6 +3557,7 @@ fn execute_op(
                 left: out_left,
                 right: out_right,
                 first_sample,
+                live_snapshot: snapshot,
             })?;
         }
         NodeKind::Effect(effect) => {
@@ -3570,11 +3599,7 @@ fn execute_op(
             // Issue #143 D3: the subscription and the parameter commands are drained by this one
             // call, so a batch that changes a threshold and arms its tap lands on one sample
             // timeline by construction rather than by two clocks agreeing.
-            let staged = live.control.stage(
-                &mut live.spans,
-                first_sample,
-                live.observation.as_deref_mut(),
-            );
+            let staged = live.stage(snapshot, first_sample);
             // Preparation refuses a queue deeper than the effect's automation capacity, so a full
             // drain can never produce more distinct spans than the window holds. This is the
             // invariant, not a runtime policy: in release it costs nothing.
@@ -4089,8 +4114,12 @@ impl BankStage for BuiltinStage {
     // REALTIME_POLICY_END
     /// The drain, forwarded. `BankChain::run` calls this on every slot before it reads the
     /// collapse witness, which is the ordering the input bank's trim/polarity drain depends on.
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        self.0.begin_block(first_sample)
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        self.0.begin_block(first_sample, snapshot)
     }
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
@@ -6248,6 +6277,12 @@ thread_local! {
     /// Issue #1220: live-route records applied per route index of that bind.
     static ROUTE_DRAINED_COUNTS: std::cell::Cell<[u64; TEST_ONLY_ROUTE_MIX_CAPACITY]> =
         const { std::cell::Cell::new([0; TEST_ONLY_ROUTE_MIX_CAPACITY]) };
+    /// Issue #1504: drains run per route index of that bind, one per block.
+    static ROUTE_DRAIN_CALLS: std::cell::Cell<[u64; TEST_ONLY_ROUTE_MIX_CAPACITY]> =
+        const { std::cell::Cell::new([0; TEST_ONLY_ROUTE_MIX_CAPACITY]) };
+    /// Issue #1504: the revision of the snapshot each route's last drain received.
+    static ROUTE_DRAIN_SNAPSHOTS: std::cell::Cell<[u64; TEST_ONLY_ROUTE_MIX_CAPACITY]> =
+        const { std::cell::Cell::new([0; TEST_ONLY_ROUTE_MIX_CAPACITY]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -6262,16 +6297,32 @@ fn test_only_record_route_activity(built: bool, routes: &[(GraphNodeId, RouteGat
     });
     ROUTE_MIX_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
     ROUTE_DRAINED_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+    ROUTE_DRAIN_CALLS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+    ROUTE_DRAIN_SNAPSHOTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn test_only_count_route_drained(route: usize, applied: usize) {
+fn test_only_count_route_drained(route: usize, applied: usize, snapshot: LiveSnapshot) {
     ROUTE_DRAINED_COUNTS.with(|counts| {
         let mut value = counts.get();
         if let Some(count) = value.get_mut(route) {
             *count += applied as u64;
         }
         counts.set(value);
+    });
+    ROUTE_DRAIN_CALLS.with(|counts| {
+        let mut value = counts.get();
+        if let Some(count) = value.get_mut(route) {
+            *count += 1;
+        }
+        counts.set(value);
+    });
+    ROUTE_DRAIN_SNAPSHOTS.with(|snapshots| {
+        let mut value = snapshots.get();
+        if let Some(last) = value.get_mut(route) {
+            *last = snapshot.revision();
+        }
+        snapshots.set(value);
     });
 }
 
@@ -6312,6 +6363,29 @@ pub fn test_only_route_mix_counts() -> Vec<u64> {
 pub fn test_only_route_mix_reset() {
     ROUTE_MIX_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
     ROUTE_DRAINED_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+    ROUTE_DRAIN_CALLS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+    ROUTE_DRAIN_SNAPSHOTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+}
+
+/// Live-route drains run per route on this thread since the last bind or reset (issue #1504),
+/// indexed as [`test_only_route_mix_counts`]: a live route drains once in every block it is
+/// dispatched, active or not.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_route_drain_calls() -> Vec<u64> {
+    let routes = ROUTE_MIX_ROUTES.with(std::cell::Cell::get);
+    ROUTE_DRAIN_CALLS.with(|counts| counts.get()[..routes].to_vec())
+}
+
+/// The revision of the live snapshot each live route's last drain received (issue #1504),
+/// indexed as [`test_only_route_mix_counts`].
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_route_drain_snapshots() -> Vec<u64> {
+    let routes = ROUTE_MIX_ROUTES.with(std::cell::Cell::get);
+    ROUTE_DRAIN_SNAPSHOTS.with(|counts| counts.get()[..routes].to_vec())
 }
 
 /// Live-route records applied per route on this thread since the last bind or reset (issue
@@ -8155,6 +8229,7 @@ mod tests {
                 },
                 3,
                 71,
+                LiveSnapshot::ALL,
             )
             .unwrap();
         let view = chain.final_output_lane(3, 0).unwrap();
@@ -8652,6 +8727,7 @@ mod tests {
             &mut [],
             &mut [],
             0,
+            LiveSnapshot::ALL,
             None,
             None,
         )
@@ -8664,6 +8740,7 @@ mod tests {
                 &mut [],
                 &mut [],
                 0,
+                LiveSnapshot::ALL,
                 None,
                 None
             ),
@@ -8734,7 +8811,7 @@ mod tests {
             0,
             0,
         );
-        runtime.complete_pending(11);
+        runtime.complete_pending(11, LiveSnapshot::ALL);
         assert_eq!(completions.load(Ordering::Relaxed), 1);
         assert_eq!(runtime.buffer(ARENA_BASE).0, &[0.75, 0.75]);
         assert_eq!(runtime.buffer(ARENA_BASE).1, &[-0.25, -0.25]);
@@ -8922,7 +8999,7 @@ mod tests {
                     sources: SourceGather::NONE,
                 };
                 chain
-                    .run(&mut members, FRAMES as u32, 0)
+                    .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
                     .expect("declined chain render");
                 assert_eq!(
                     first_calls.load(Ordering::Relaxed),
@@ -9548,7 +9625,9 @@ mod tests {
             },
             cohorts: 0,
         };
-        chain.run(&mut members, FRAMES as u32, 0).expect("run");
+        chain
+            .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
+            .expect("run");
         assert_eq!(members.cohorts, 1);
         let (left, right) = members.inner.arena.read_stereo(ARENA_BASE);
         assert_eq!(
@@ -9612,7 +9691,7 @@ mod tests {
             sources: SourceGather::NONE,
         };
         chain
-            .run(&mut members, FRAMES as u32, 0)
+            .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
             .expect("direct graph run");
 
         for (lane, output) in outputs.iter().copied().enumerate() {
@@ -10076,7 +10155,9 @@ mod tests {
                                     fused,
                                     counts: [0; 3],
                                 };
-                                chain.run(&mut arm, frames as u32, 0).expect("run");
+                                chain
+                                    .run(&mut arm, frames as u32, 0, LiveSnapshot::ALL)
+                                    .expect("run");
                                 for (total, count) in counts.iter_mut().zip(arm.counts) {
                                     *total += count;
                                 }
@@ -10483,6 +10564,7 @@ mod tests {
                 &mut [],
                 &mut [],
                 0,
+                LiveSnapshot::ALL,
                 None,
                 None,
             )
@@ -11119,6 +11201,7 @@ mod tests {
                     left: &mut *block.left,
                     right: &mut *block.right,
                     first_sample: block.first_sample,
+                    live_snapshot: block.live_snapshot,
                 })?;
             }
             self.matrix.process(block)
@@ -12182,6 +12265,8 @@ mod tests {
     ) -> Result<(), RenderError> {
         use engine::realtime::PreparedPlanExecutor as _;
         let mut arena = engine::realtime::BufferArena::try_new(&[]).expect("empty arena");
+        // A direct executor render names the snapshot it means, as `PreparedRenderPlan` does.
+        executor.begin_live_block(LiveSnapshot::ALL);
         executor.render(
             &mut arena,
             output,
@@ -12250,7 +12335,7 @@ mod tests {
                 before_master = Some(stereo_bits(runtime.buffer(slot)));
             }
             runtime
-                .execute(unit, first_sample, host.reborrow(), None)
+                .execute(unit, first_sample, LiveSnapshot::ALL, host.reborrow(), None)
                 .expect("oracle unit");
             runtime
                 .observe_unit(unit, first_sample, validity, &host)
@@ -12715,6 +12800,7 @@ mod tests {
                 left,
                 right,
                 first_sample: self.first_sample,
+                live_snapshot: LiveSnapshot::ALL,
             })
         }
     }
@@ -12730,6 +12816,62 @@ mod tests {
         /// The source set fails before any unit runs, in `begin_block` (`true`) or in
         /// `copy_track_input`, over planes still holding the previous block's master.
         Source(bool),
+    }
+
+    /// #1504 D2: no drain falls back to a default snapshot. A block whose `begin_live_block` did not
+    /// run is refused before any unit, and the snapshot of one block is not reused by the next.
+    ///
+    /// Test value: a render that reuses the previous block's snapshot (or a default) when the
+    /// plan forgot to hand it one, which would let a drain read under a stale `S` and the
+    /// watermark run early.
+    #[test]
+    fn a_block_without_its_live_snapshot_is_refused_and_a_snapshot_serves_one_block() {
+        use engine::realtime::PreparedPlanExecutor as _;
+        const FRAMES: u32 = 13;
+        let frames = FRAMES as usize;
+        let published = Published::default();
+        let (plan, bindings, _) = fold_fixture_parts(
+            FoldFixture {
+                metered: false,
+                ..FoldFixture::metered(CONSOLE_WIDTH, 64, FRAMES)
+            },
+            &published,
+        );
+        let (mut executor, _) = bind_executor(plan, bindings, None);
+        let mut arena = engine::realtime::BufferArena::try_new(&[]).expect("empty arena");
+        let mut storage = vec![f32::from_bits(HOST_PAD); 2 * frames];
+        let mut block = |executor: &mut crate::GraphExecutor, storage: &mut [f32], first: u64| {
+            executor.render(
+                &mut arena,
+                engine::realtime::PlanarBufferMut::try_new(storage, 2, frames, frames)
+                    .expect("host output"),
+                engine::realtime::RenderTime {
+                    absolute_sample: first,
+                },
+            )
+        };
+        // Never handed a snapshot: refused, planes untouched.
+        assert_eq!(
+            block(&mut executor, &mut storage, 0),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert!(storage.iter().all(|word| word.to_bits() == HOST_PAD));
+        // Handed one: renders. The next block is not handed one: refused again.
+        executor.begin_live_block(LiveSnapshot::ALL);
+        block(&mut executor, &mut storage, 0).expect("the block with a snapshot renders");
+        let rendered: Vec<u32> = storage.iter().map(|word| word.to_bits()).collect();
+        assert_eq!(
+            block(&mut executor, &mut storage, u64::from(FRAMES)),
+            Err(RenderError::InvalidEnvelope),
+            "the previous block's snapshot is spent"
+        );
+        assert_eq!(
+            storage
+                .iter()
+                .map(|word| word.to_bits())
+                .collect::<Vec<_>>(),
+            rendered
+        );
     }
 
     /// Gate 3 of issue #916: an executor-level failure fills both host planes with `+0.0` before

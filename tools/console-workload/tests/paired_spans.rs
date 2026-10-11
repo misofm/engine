@@ -44,7 +44,7 @@ use effect_contract::{
     ResponseSnapshotRequest, ResponseSnapshotSummary, SeamSide, StatePayloadError,
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, default_initial_values,
 };
-use engine::realtime::{Producer, QueueGeneration, RenderError, bounded_spsc};
+use engine::realtime::{LiveSnapshot, Producer, QueueGeneration, RenderError, bounded_spsc};
 use lane::Backend;
 use rack::{
     AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage,
@@ -1278,11 +1278,21 @@ fn differential(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> Option<Out
         let first_sample = block * u64::from(FRAMES);
         collapsing
             .chain
-            .run(&mut collapsing_planes, FRAMES, first_sample)
+            .run(
+                &mut collapsing_planes,
+                FRAMES,
+                first_sample,
+                LiveSnapshot::ALL,
+            )
             .expect("collapsing render");
         reference
             .chain
-            .run(&mut reference_planes, FRAMES, first_sample)
+            .run(
+                &mut reference_planes,
+                FRAMES,
+                first_sample,
+                LiveSnapshot::ALL,
+            )
             .expect("reference render");
         let mono = collapsing.chain.collapses() > before;
         collapsed.push(mono);

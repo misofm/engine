@@ -137,3 +137,94 @@ live snapshot from it*, #1502).
   (#1502): `begin_live_block`.
 
 Dependents: #1312, #1345, #1346, #1347.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b2`)
+
+**What landed.**
+
+- `rack`: `BankStage::begin_block(first_sample, snapshot)`; `BankChain::{run, run_with_resident_input}`
+  take the block's `LiveSnapshot` and hand it to every active slot's drain. New `BankStage::live_lanes()`
+  (default 0; `LiveControlEffectBankStage` reports the lanes holding a channel) and a debug assertion in
+  `BankChain::new` that a slot with a live lane has an active lane (D3). The slot guard stays.
+- `graph`: `GraphPreparedBuiltinBankProcessor::begin_block(first_sample, snapshot)` (forwarded by
+  `BuiltinStage`); `GraphBindingBlock::live_snapshot`; `GraphExecutor` keeps `Option<LiveSnapshot>`, set by
+  `begin_live_block` and **taken** by `render`, so a block rendered without its own snapshot is refused with
+  `InvalidEnvelope` before any drain and one block's `S` never serves the next (no default snapshot, D2).
+  `Runtime::{execute, complete_pending}`, `execute_op` carry `S` to the route op's `LiveRoute::drain`, to the
+  per-node `Bound`/split-pair `GraphBindingBlock`, to `LiveControlEffect::stage` (a wrapper that calls
+  `EffectControlLane::stage`) and to the bank chain.
+- `builtins-compiler`: the input bank's `begin_block` signature; the three `GraphBindingBlock` destructures
+  name `live_snapshot: _` (fader and matrix queues, #1312 moves them); test construction sites pass
+  `LiveSnapshot::ALL`.
+- Test-support hooks `test_only_route_drain_calls` and `test_only_route_drain_snapshots`, counted **inside**
+  `LiveRoute::drain` (a first draft counted at the call site and could not see a skipped drain; mutation S2).
+- Callers moved to the new signatures with `LiveSnapshot::ALL` (direct, quiescent calls): rack unit tests,
+  `rack/tests/{live_control_bank,mono_reengage}.rs`, graph `runtime.rs` tests, `rt9`,
+  `console-workload/tests/paired_spans.rs`, and two files the spec's list does not name but the signature
+  reaches: `builtins-compiler/tests/allocation_tracker.rs`, `graph-compiler/tests/bypass_shunt_identity.rs`.
+  `scale.rs`, `rt1` and `rt10` implement the trait without overriding `begin_block`, so they did not change.
+
+**Tests.** `crates/graph/tests/live_snapshot_drains.rs` (gates 1-2, both bank widths); rack
+`run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block`,
+`a_slot_with_a_live_lane_must_have_an_active_lane`, `a_live_control_stage_reports_the_lanes_that_hold_a_channel`;
+graph `a_block_without_its_live_snapshot_is_refused_and_a_snapshot_serves_one_block`.
+
+**Gates (all on the final tree).**
+
+| Gate | Result |
+|---|---|
+| `cargo test --locked -p graph --features test-support`, `-p rack`, `-p builtins-compiler --features test-support`, `-p graph-compiler`, `-p host-core` | pass |
+| `cargo test --locked --workspace --no-fail-fast` (before the route-hook move and the last graph test) | exit 0, 341 result lines ok |
+| `cargo test --locked -p console-workload` | pass |
+| `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` | allocations, deallocations, locks, syscalls 0; `total_violations` 0 |
+| `check-realtime-policy.sh` | ok (97 regions in 27 files) |
+| Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh`) | pass; call-graph gate needed no re-pin; graph rows unchanged (graphSessionPlusPlanBytes 29842 of 35648) |
+| `check-cross-targets.sh`, `check-workspace-policy.sh`, `cargo fmt --all -- --check`, clippy `--workspace --all-targets --all-features -D warnings` | pass |
+
+**Mutation evidence.** Each row applies one defect to a committed file and reverts it.
+
+| Defect | Red |
+|---|---|
+| `BankChain` hands `LiveSnapshot::ALL` to a stage | rack `run_hands_...`; graph `every_drain_kind_receives_the_blocks_snapshot` |
+| `BuiltinStage` forwards `ALL` | `every_drain_kind_receives_the_blocks_snapshot` |
+| `GraphBindingBlock` of a `Bound` node built with `ALL` | the same |
+| route op drains with `ALL` | the same |
+| executor hands `ALL` to `execute` | the same |
+| `render` reads the stored snapshot without taking it | `a_block_without_its_live_snapshot_is_refused_...` |
+| S1: chain skips every drain when the gathered inputs are silent | `every_live_drain_runs_once_in_every_block_silent_or_not` |
+| S2: route skips its drain when its input is silent | the same |
+| S2b: route skips its drain when inactive | the same |
+| S3: per-node processor skipped when its input is silent | the same |
+| debug assertion in `BankChain::new` removed | rack `a_slot_with_a_live_lane_must_have_an_active_lane` |
+| `LiveControlEffectBankStage::live_lanes` reports 0 | `a_live_control_stage_reports_the_lanes_that_hold_a_channel` |
+
+**Test value, one line each.** Gate 1: a drain kind handed a fixed or another block's snapshot. Gate 2: a
+silence or activity skip that also skips a drain. Rack chain test: the chain's hand-over to a bare stage, and
+that a stage with no active lane is not drained. Assertion tests: a live lane bound into a slot marked
+inactive, and a stage that stops reporting its live lanes. Executor test: a block that reuses a stale or
+default snapshot.
+
+**Deviations and open items.**
+
+1. **Unprobed lanes.** The per-node live effect (`LiveControlEffect::stage`), the effect bank stage
+   (`LiveControlEffectBankStage::drain`) and the input and fader/matrix builtin banks ignore `S` (queue lanes),
+   so no test can observe `S` there; the signature is type-checked, and `begin_block`'s hand-over to a builtin
+   bank is probed. #1345 and #1312 add the probes when those lanes read cells.
+2. **`EffectControlLane::stage` keeps its signature.** It lives in `effect-contract`, outside the authorized
+   paths; `S` stops at the graph-side `LiveControlEffect::stage` wrapper and at `LiveControlEffectBankStage::drain`.
+   #1345 changes `stage` itself.
+3. **The preparation assertion covers effect banks only.** A builtin bank reports no live lanes
+   (`GraphPreparedBuiltinBankProcessor` has no `live_lanes`; the input bank is in `builtins-compiler`, whose
+   authorization is signatures and block sites only). In graph plans a slot carries the chain's own lane mask,
+   so a builtin slot cannot be wholly inactive in a chain that runs.
+4. **D4 and the resource row.** `GraphExecutor` grows by one `Option<LiveSnapshot>` (`size_of` 392 to 408 bytes
+   on x86-64; the metadata mirror struct carries the field too, so the field delta is unchanged). No browser
+   row moved and every ceiling test passed, but the native executor allocation is 16 bytes larger; D1's
+   "the executor stores `S`" cannot be met with no field.
+5. **"One lane of the probe bank is bypassed" (gate 2)** is a partial bank: `LANES` (3) of the bank's lanes
+   are populated and the rest inactive. A bank with a live-bypassed lane drains the same way and has no
+   probe seam without an effect.
+6. **A direct executor render** (graph `render_host` helper) now names `LiveSnapshot::ALL` through
+   `begin_live_block`; the only direct callers are those tests.

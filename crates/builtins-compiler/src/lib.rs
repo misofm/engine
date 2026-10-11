@@ -532,8 +532,13 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
     /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
     /// documentation for why that ordering is the whole reason this is not folded into `process`.
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        let _ = first_sample;
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: engine::realtime::LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        // The trim and polarity lanes are queues: they ignore `S` until #1346 moves them to cells.
+        let _ = (first_sample, snapshot);
         self.drain_controls(false).map(|_| ()).map_err(render_error)
     }
 
@@ -4581,6 +4586,8 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             left,
             right,
             first_sample,
+            // The fader and matrix lanes are queues: they ignore `S` until #1312 moves them to cells.
+            live_snapshot: _,
         } = block;
         self.fader.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
@@ -4719,6 +4726,8 @@ impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
             left,
             right,
             first_sample,
+            // The fader and matrix lanes are queues: they ignore `S` until #1312 moves them to cells.
+            live_snapshot: _,
         } = block;
         // Validate the envelope before recording deferred state. A malformed fader block must
         // leave the later matrix consumer untouched and cannot leave a completion to run after
@@ -4750,6 +4759,8 @@ impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
             left,
             right,
             first_sample,
+            // The fader and matrix lanes are queues: they ignore `S` until #1312 moves them to cells.
+            live_snapshot: _,
         } = block;
         if let Err(error) = self.matrix.drain_controls() {
             if self.pending_fader {
@@ -5226,6 +5237,8 @@ mod tests {
         PreparedPorts, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
         StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
+    #[cfg(test)]
+    use engine::realtime::LiveSnapshot;
     use engine::{QuantumFrames, SampleRateHz};
     use graph::{
         EffectNodeId, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId,
@@ -10529,6 +10542,7 @@ mod tests {
                     left: &mut left,
                     right: &mut right,
                     first_sample: 0,
+                    live_snapshot: LiveSnapshot::ALL,
                 })
                 .unwrap();
             matrix
@@ -10536,6 +10550,7 @@ mod tests {
                     left: &mut left,
                     right: &mut right,
                     first_sample: 0,
+                    live_snapshot: LiveSnapshot::ALL,
                 })
                 .unwrap();
             assert_eq!(left, [0.0, 0.0], "queued fader state stayed with owner");
@@ -10582,6 +10597,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(paired_left, [0.5, 0.25], "settled fader remains deferred");
@@ -10597,6 +10613,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         let error = split
@@ -10604,6 +10621,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap_err();
         assert_eq!(error, RenderError::InvalidEnvelope);
@@ -10620,6 +10638,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap_err();
 
@@ -10632,6 +10651,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         split
@@ -10639,6 +10659,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_fader
@@ -10646,6 +10667,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_matrix
@@ -10653,6 +10675,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 64,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(
@@ -10703,6 +10726,7 @@ mod tests {
                 left: &mut short_left,
                 right: &mut long_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             }),
             Err(RenderError::InvalidEnvelope)
         );
@@ -10724,6 +10748,7 @@ mod tests {
             left: &mut left,
             right: &mut right,
             first_sample: 0,
+            live_snapshot: LiveSnapshot::ALL,
         });
         assert_eq!(
             (left, right),
@@ -10774,6 +10799,7 @@ mod tests {
                 left: &mut short_left,
                 right: &mut long_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             }),
             Err(RenderError::InvalidEnvelope)
         );
@@ -10794,6 +10820,7 @@ mod tests {
                 left: &mut interrupted_left,
                 right: &mut interrupted_right,
                 first_sample: 2,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         reference
@@ -10801,6 +10828,7 @@ mod tests {
                 left: &mut reference_left,
                 right: &mut reference_right,
                 first_sample: 2,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(
@@ -10863,6 +10891,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         let mut separate_left = [0.5_f32; 3];
@@ -10872,6 +10901,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_matrix
@@ -10879,6 +10909,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
 
@@ -10905,6 +10936,7 @@ mod tests {
                 left: &mut paired_left,
                 right: &mut paired_right,
                 first_sample: 3,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_fader
@@ -10912,6 +10944,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 3,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         separate_matrix
@@ -10919,6 +10952,7 @@ mod tests {
                 left: &mut separate_left,
                 right: &mut separate_right,
                 first_sample: 3,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .unwrap();
         assert_eq!(
@@ -13116,6 +13150,7 @@ mod tests {
                 left: &mut left,
                 right: &mut right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .expect("render");
         assert!(
@@ -13146,6 +13181,7 @@ mod tests {
                 left: &mut left,
                 right: &mut right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .expect("render");
         assert_eq!(left[0].to_bits(), 1.0_f32.to_bits());
@@ -13178,6 +13214,7 @@ mod tests {
                 left: &mut left,
                 right: &mut right,
                 first_sample: 0,
+                live_snapshot: LiveSnapshot::ALL,
             })
             .expect("render");
         assert!(

@@ -13,7 +13,7 @@ use effect_contract::{
     PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes, TailSamples,
 };
-use engine::realtime::{QueueGeneration, bounded_spsc};
+use engine::realtime::{LiveSnapshot, QueueGeneration, bounded_spsc};
 use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
 
 const LANES: usize = 4;
@@ -223,7 +223,9 @@ fn each_lane_receives_only_its_own_commands() {
     // truncated iteration or off-by-one offset silently drops spans (verifier-added coverage,
     // #140 review — a mutation skipping the last lane's drain survived the original pair).
     producers[3].try_push(gain(8.0)).expect("room");
-    chain.run(&mut members, 8, 0).expect("run");
+    chain
+        .run(&mut members, 8, 0, LiveSnapshot::ALL)
+        .expect("run");
     for frame in 0..8 {
         assert_eq!(members.left[0][frame], 0.25, "lane 0 got its own command");
         assert_eq!(members.left[1][frame], 1.0, "lane 1 was never commanded");
@@ -241,19 +243,25 @@ fn each_lane_receives_only_its_own_commands() {
 fn a_command_applies_at_the_block_boundary_and_persists() {
     let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
     let mut members = planes(1.0);
-    chain.run(&mut members, 8, 0).expect("run");
+    chain
+        .run(&mut members, 8, 0, LiveSnapshot::ALL)
+        .expect("run");
     assert_eq!(members.left[0][0], 1.0, "no command yet");
 
     producers[0].try_push(gain(0.5)).expect("room");
     let mut members = planes(1.0);
-    chain.run(&mut members, 8, 8).expect("run");
+    chain
+        .run(&mut members, 8, 8, LiveSnapshot::ALL)
+        .expect("run");
     assert!(
         members.left[0].iter().all(|value| *value == 0.5),
         "every sample of the block that drains the command carries it"
     );
 
     let mut members = planes(1.0);
-    chain.run(&mut members, 8, 16).expect("run");
+    chain
+        .run(&mut members, 8, 16, LiveSnapshot::ALL)
+        .expect("run");
     assert!(
         members.left[0].iter().all(|value| *value == 0.5),
         "the value persists with no further traffic"
@@ -292,7 +300,9 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
                 })
                 .collect(),
         };
-        chain.run(&mut members, 8, block * 8).expect("run");
+        chain
+            .run(&mut members, 8, block * 8, LiveSnapshot::ALL)
+            .expect("run");
         for (lane, seen) in seen_left.iter_mut().enumerate() {
             seen.extend_from_slice(&members.left[lane]);
         }
@@ -329,14 +339,18 @@ fn un_bypassing_returns_the_current_wet_signal() {
         .try_push(EffectControlRecord::Bypass(true))
         .expect("room");
     let mut members = planes(1.0);
-    chain.run(&mut members, 8, 0).expect("run");
+    chain
+        .run(&mut members, 8, 0, LiveSnapshot::ALL)
+        .expect("run");
     assert!(members.left[0].iter().all(|value| *value == 1.0), "dry");
 
     producers[0]
         .try_push(EffectControlRecord::Bypass(false))
         .expect("room");
     let mut members = planes(1.0);
-    chain.run(&mut members, 8, 8).expect("run");
+    chain
+        .run(&mut members, 8, 8, LiveSnapshot::ALL)
+        .expect("run");
     assert!(
         members.left[0].iter().all(|value| *value == 0.25),
         "the gain admitted while bypassed is already in effect when bypass is released"
@@ -352,7 +366,9 @@ fn a_command_timeline_is_partition_invariant() {
         producers[0].try_push(gain(0.5)).expect("room");
         producers[3].try_push(gain(2.0)).expect("room");
         let mut members = planes(1.0);
-        chain.run(&mut members, 8, 0).expect("run");
+        chain
+            .run(&mut members, 8, 0, LiveSnapshot::ALL)
+            .expect("run");
         members
     };
     let split = {
@@ -363,12 +379,14 @@ fn a_command_timeline_is_partition_invariant() {
             left: vec![vec![1.0; 4]; LANES],
             right: vec![vec![1.0; 4]; LANES],
         };
-        chain.run(&mut first, 4, 0).expect("run");
+        chain.run(&mut first, 4, 0, LiveSnapshot::ALL).expect("run");
         let mut second = Planes {
             left: vec![vec![1.0; 4]; LANES],
             right: vec![vec![1.0; 4]; LANES],
         };
-        chain.run(&mut second, 4, 4).expect("run");
+        chain
+            .run(&mut second, 4, 4, LiveSnapshot::ALL)
+            .expect("run");
         Planes {
             left: (0..LANES)
                 .map(|lane| {
@@ -403,6 +421,42 @@ fn a_command_timeline_is_partition_invariant() {
             "lane {lane}: to_bits identity across the partition boundary"
         );
     }
+}
+
+/// #1504 D3: a live-control stage reports exactly the lanes that hold a control channel, which is
+/// what `BankChain::new` checks against the slot's activity.
+///
+/// Test value: a stage that reports no live lane (the trait default), which would turn the
+/// preparation assertion into one that can never fire.
+#[test]
+fn a_live_control_stage_reports_the_lanes_that_hold_a_channel() {
+    let stage_of = |controlled: [bool; LANES]| {
+        let lanes = controlled
+            .iter()
+            .map(|wanted| {
+                wanted.then(|| {
+                    let (_producer, consumer) = bounded_spsc::<EffectControlRecord>(
+                        depth(CAPACITY as usize),
+                        QueueGeneration(0),
+                    )
+                    .expect("queue");
+                    EffectControlLane::new(consumer, false)
+                })
+            })
+            .collect();
+        LiveControlEffectBankStage::new(
+            MockGainBank::new(0).bound(),
+            BankWidth::Four,
+            8,
+            lanes,
+            vec![None, None, None, None],
+            0,
+        )
+        .expect("stage")
+    };
+    assert_eq!(stage_of([false; LANES]).live_lanes(), 0);
+    assert_eq!(stage_of([true, false, true, false]).live_lanes(), 0b0101);
+    assert_eq!(stage_of([true; LANES]).live_lanes(), 0b1111);
 }
 
 /// Shape is validated once, off the render thread.
@@ -568,7 +622,12 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
                 .collect(),
         };
         chain
-            .run(&mut members, FRAMES as u32, (block * FRAMES) as u64)
+            .run(
+                &mut members,
+                FRAMES as u32,
+                (block * FRAMES) as u64,
+                LiveSnapshot::ALL,
+            )
             .expect("run");
         seen.extend_from_slice(&members.left[0]);
     }
@@ -611,7 +670,9 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
     producers[0].try_push(gain(0.25)).expect("room");
 
     let mut members = planes(3.0);
-    chain.run(&mut members, FRAMES as u32, 0).expect("run");
+    chain
+        .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
+        .expect("run");
     assert!(
         members.left[0].iter().all(|value| *value == 0.75),
         "block 0 renders wet"
@@ -622,7 +683,12 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
         .expect("room");
     let mut members = planes(5.0);
     chain
-        .run(&mut members, FRAMES as u32, FRAMES as u64)
+        .run(
+            &mut members,
+            FRAMES as u32,
+            FRAMES as u64,
+            LiveSnapshot::ALL,
+        )
         .expect("run");
     assert!(
         members.left[0].iter().all(|value| *value == 5.0),
@@ -684,7 +750,9 @@ fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
                 .collect(),
             right: vec![vec![-0.0; 8]; LANES],
         };
-        chain.run(&mut members, 8, block * 8).expect("run");
+        chain
+            .run(&mut members, 8, block * 8, LiveSnapshot::ALL)
+            .expect("run");
         for lane in 0..LANES {
             seen[lane].extend_from_slice(&members.left[lane]);
             seen_right[lane].extend_from_slice(&members.right[lane]);

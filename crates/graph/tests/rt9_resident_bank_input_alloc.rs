@@ -4,7 +4,9 @@ use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
 use effect_contract::{BankWidth, ChannelSymmetryWitness, LatencySamples, TailSamples};
 use engine::{
     QuantumFrames,
-    realtime::{self, PlanarBufferMut, PreparedRenderPlan, RenderEnvelope, RenderError},
+    realtime::{
+        self, LiveSnapshot, PlanarBufferMut, PreparedRenderPlan, RenderEnvelope, RenderError,
+    },
 };
 use graph::*;
 use std::sync::{
@@ -115,7 +117,7 @@ impl GraphPreparedBuiltinBankProcessor for Stage {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
     }
-    fn begin_block(&mut self, first: u64) -> Result<(), RenderError> {
+    fn begin_block(&mut self, first: u64, _: LiveSnapshot) -> Result<(), RenderError> {
         self.probe.event(1 + self.id as u64 * 4);
         if self.id == 1 {
             let command = match self.scalar_lane {
@@ -166,7 +168,11 @@ impl GraphPreparedBuiltinBankProcessor for Stage {
 }
 impl GraphRuntimeProcessor for Stage {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        GraphPreparedBuiltinBankProcessor::begin_block(self, block.first_sample)?;
+        GraphPreparedBuiltinBankProcessor::begin_block(
+            self,
+            block.first_sample,
+            block.live_snapshot,
+        )?;
         self.apply(block.left, Some(block.right), block.first_sample)
     }
 }

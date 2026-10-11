@@ -26,7 +26,7 @@ use builtins_compiler::{
     test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
     test_only_scalar_split_outer_layout,
 };
-use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use engine::realtime::{LiveSnapshot, PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
 
 /// Serializes the two tests below (each measures the process-global phase-two tracker) so no
@@ -287,7 +287,7 @@ fn audit_runtime_bank_render(
     LIVE_FREES.set(0);
     armed(|| {
         chain
-            .run(planes, 1, first_sample)
+            .run(planes, 1, first_sample, LiveSnapshot::ALL)
             .expect("runtime bank render")
     });
     assert_eq!(

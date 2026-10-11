@@ -15,7 +15,7 @@ use effect_contract::{
     PreparedEffectBank, PreparedNativeEffectBank, PreparedSidechainPort, SeamSide,
     transpose_tile_4,
 };
-use engine::realtime::RenderError;
+use engine::realtime::{LiveSnapshot, RenderError};
 
 /// Sub-phase timing inside [`BankChain::run`] for the gain/pan phase profile (issue #960).
 ///
@@ -657,9 +657,37 @@ pub trait BankStage: Send {
     ///
     /// So [`BankChain::run`] drains **every** slot first, then reads the witness, then gathers. The
     /// default is a no-op, which is what a live-control-free plan pays.
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        let _ = first_sample;
+    ///
+    /// # The block's live snapshot (#1504)
+    ///
+    /// `snapshot` is the revision `S` render read from the running plan's gate at the start of the
+    /// block. A drain that reads live cells reads under it; a drain of a queue ignores it until its
+    /// lane moves to cells. There is no default snapshot: [`BankChain::run`] hands the block's own to
+    /// every slot, and a direct caller names the one it means.
+    ///
+    /// # Every block, silence included
+    ///
+    /// [`BankChain::run`] calls this once per block on every slot that has an active lane, whether
+    /// or not the block's audio is silent. A stage may skip *processing* on silence; it may never
+    /// skip this drain, because the watermark covers `S` once the block ends, and a cell holding a
+    /// value at or below `S` that was never read would make it early.
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        let _ = (first_sample, snapshot);
         Ok(())
+    }
+
+    /// The lanes (bit `n` is lane `n`) whose [`begin_block`](Self::begin_block) drains a live
+    /// lane, or `0` for a stage with none.
+    ///
+    /// [`BankChain::run`] skips a slot with no active lane, so a slot with a live lane must be
+    /// active: [`BankChain::new`] asserts it in a debug build, off the render thread (#1504 D3).
+    /// The default `0` is a stage that holds no live lane.
+    fn live_lanes(&self) -> u8 {
+        0
     }
 
     /// Which side of the fader/matrix seam this stage sits on.
@@ -1224,8 +1252,21 @@ impl BankStage for LiveControlEffectBankStage {
         self.processor.channels_agree()
     }
 
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        self.drain(first_sample)
+    fn begin_block(
+        &mut self,
+        first_sample: u64,
+        snapshot: LiveSnapshot,
+    ) -> Result<(), RenderError> {
+        self.drain(first_sample, snapshot)
+    }
+
+    fn live_lanes(&self) -> u8 {
+        self.lanes
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (lane, channel)| {
+                mask | (u8::from(channel.is_some()) << lane)
+            })
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1270,7 +1311,11 @@ impl BankStage for LiveControlEffectBankStage {
 impl LiveControlEffectBankStage {
     /// Step 1 of the block, hoisted out of [`Self::process_inner`] so that it runs before the
     /// chain's collapse dispatch reads the witness. See [`BankStage::begin_block`].
-    fn drain(&mut self, first_sample: u64) -> Result<(), RenderError> {
+    ///
+    /// The queue lanes ignore `snapshot`: it is the block's `S`, handed here so the cell lanes that
+    /// replace them (#1345) read under it.
+    fn drain(&mut self, first_sample: u64, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        let _ = snapshot;
         let lane_count = self.width.lanes() as usize;
         let mut packed = 0_usize;
         self.offsets[0] = 0;
@@ -2033,6 +2078,10 @@ impl BankChain {
                 .iter()
                 .enumerate()
                 .fold(0u8, |mask, (lane, active)| mask | ((*active as u8) << lane));
+            debug_assert!(
+                slot.stage.live_lanes() == 0 || active_lanes != 0,
+                "a slot with a live lane is active: `run` skips the drain of a slot with no active lane"
+            );
             prepared_slots.push(PreparedSlot {
                 stage: slot.stage,
                 active_lanes,
@@ -2384,13 +2433,17 @@ impl BankChain {
 
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
     /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
+    ///
+    /// `snapshot` is the block's live snapshot `S` (#1504): every active slot's
+    /// [`BankStage::begin_block`] receives it, once, before anything else of the block runs.
     pub fn run<M: BankMembers + ?Sized>(
         &mut self,
         members: &mut M,
         frames: u32,
         first_sample: u64,
+        snapshot: LiveSnapshot,
     ) -> Result<(), RenderError> {
-        self.run_with_input(members, frames, first_sample, None)
+        self.run_with_input(members, frames, first_sample, snapshot, None)
     }
 
     /// Run after graph has proved that the immediately preceding, successfully observed unit
@@ -2402,8 +2455,9 @@ impl BankChain {
         members: &mut M,
         frames: u32,
         first_sample: u64,
+        snapshot: LiveSnapshot,
     ) -> Result<(), RenderError> {
-        self.run_with_input(members, frames, first_sample, Some(predecessor))
+        self.run_with_input(members, frames, first_sample, snapshot, Some(predecessor))
     }
 
     /// Copy one prepared lane's response sections without touching resident audio or render
@@ -2443,6 +2497,7 @@ impl BankChain {
         members: &mut M,
         frames: u32,
         first_sample: u64,
+        snapshot: LiveSnapshot,
         predecessor: Option<&BankChain>,
     ) -> Result<(), RenderError> {
         #[cfg(feature = "test-support")]
@@ -2467,9 +2522,10 @@ impl BankChain {
         for slot in &mut self.slots {
             // The same identity-slot guard `process` has always taken. A slot that is an identity
             // on every lane renders nothing, and draining its queues would consume records for a
-            // block it does not run.
+            // block it does not run. A slot with a live lane is active: the guard skips a stage
+            // that has no live lane to drain, never a drain (#1504 D3).
             if slot.has_active_lanes() {
-                slot.stage.begin_block(first_sample)?;
+                slot.stage.begin_block(first_sample, snapshot)?;
             }
         }
         // Publish after every drain. The armed decision combines each stage's lane bank once,
@@ -3404,7 +3460,9 @@ mod tests {
                                 .map(|lane| vec![(lane + 1) as f32; frames as usize])
                                 .collect(),
                         };
-                        chain.run(&mut planes, frames, block as u64 * 9).unwrap();
+                        chain
+                            .run(&mut planes, frames, block as u64 * 9, LiveSnapshot::ALL)
+                            .unwrap();
                         assert_eq!(chain.is_collapsed(), !forced);
                         for lane in 0..lanes {
                             let view = chain.final_output_lane(frames, lane);
@@ -3474,7 +3532,9 @@ mod tests {
                     planes.left[0][0] = -0.0;
                     planes.right[0][0] = f32::from_bits(0x7fc0_0713);
                     let mut source = make();
-                    source.run(&mut planes, frames, 0).expect("producer");
+                    source
+                        .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+                        .expect("producer");
                     for mono in [false, true] {
                         let mut resident = make();
                         let mut reference = make();
@@ -3611,9 +3671,15 @@ mod tests {
                                 source.gather(&reads.planes, 3);
                             }
                             let result = if resident {
-                                chain.run_with_resident_input(&source, &mut reads, 3, block * 3)
+                                chain.run_with_resident_input(
+                                    &source,
+                                    &mut reads,
+                                    3,
+                                    block * 3,
+                                    LiveSnapshot::ALL,
+                                )
                             } else {
-                                chain.run(&mut reads, 3, block * 3)
+                                chain.run(&mut reads, 3, block * 3, LiveSnapshot::ALL)
                             };
                             results.push(result);
                         }
@@ -3965,7 +4031,7 @@ mod tests {
             Ok(())
         }
 
-        fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        fn begin_block(&mut self, first_sample: u64, _: LiveSnapshot) -> Result<(), RenderError> {
             TEST_TRACE.with(|trace| {
                 let mut trace = trace.borrow_mut();
                 trace.record(TraceKind::Begin, self.0.id, first_sample, 0);
@@ -4151,7 +4217,7 @@ mod tests {
         } else {
             chain.force_mono_collapse_off(true);
         }
-        let actual_result = chain.run(&mut actual_planes, 3, first_sample);
+        let actual_result = chain.run(&mut actual_planes, 3, first_sample, LiveSnapshot::ALL);
         assert_eq!(actual_result, expected_result);
         let actual_trace = TEST_TRACE.with(|trace| trace.borrow().clone());
         assert_eq!(
@@ -4217,7 +4283,7 @@ mod tests {
             };
             let identity_before = trace_plane_bits(&identity);
             zero_chain
-                .run(&mut identity, 4, 17)
+                .run(&mut identity, 4, 17, LiveSnapshot::ALL)
                 .expect("zero-slot identity");
             assert_eq!(trace_plane_bits(&identity), identity_before);
             drop(zero_chain);
@@ -4267,7 +4333,9 @@ mod tests {
                 left: (0..lanes).map(|_| vec![3.0; 4]).collect(),
                 right: (0..lanes).map(|_| vec![-7.0; 4]).collect(),
             };
-            three_chain.run(&mut rendered, 4, 23).expect("shape render");
+            three_chain
+                .run(&mut rendered, 4, 23, LiveSnapshot::ALL)
+                .expect("shape render");
             assert_eq!(TEST_PREPARED_DROPS.with(std::cell::Cell::get), before_drop);
             drop(three_chain);
             assert_eq!(
@@ -4477,11 +4545,15 @@ mod tests {
             right: (0..4).map(|lane| vec![32.0 + lane as f32; 4]).collect(),
         };
         chain.force_mono_collapse_off(true);
-        chain.run(&mut planes, 4, 0).expect("ordinary run");
+        chain
+            .run(&mut planes, 4, 0, LiveSnapshot::ALL)
+            .expect("ordinary run");
         assert!(!chain.is_collapsed());
         chain.force_mono_collapse_off(false);
         chain.arm_mono_collapse(true);
-        chain.run(&mut planes, 4, 4).expect("collapsed run");
+        chain
+            .run(&mut planes, 4, 4, LiveSnapshot::ALL)
+            .expect("collapsed run");
         assert!(chain.is_collapsed());
         assert_eq!(chain.collapses(), 1);
         let trace = TEST_TRACE.with(|trace| trace.borrow().clone());
@@ -4696,7 +4768,9 @@ mod tests {
             vec![slot(active.to_vec(), Box::new(PassThrough))],
         )
         .expect("chain");
-        chain.run(&mut members, 11, 0).expect("run");
+        chain
+            .run(&mut members, 11, 0, LiveSnapshot::ALL)
+            .expect("run");
         assert_eq!(members.per_lane_writes, 0);
         assert_planes_bit_equal(&members.planes, &expected, "direct call sentinel");
     }
@@ -4734,7 +4808,9 @@ mod tests {
             vec![slot(active.to_vec(), Box::new(PassThrough))],
         )
         .expect("chain");
-        chain.run(&mut malformed, 11, 0).expect("staged fallback");
+        chain
+            .run(&mut malformed, 11, 0, LiveSnapshot::ALL)
+            .expect("staged fallback");
         assert_planes_bit_equal(
             &Planes {
                 left: malformed.planes.left[..8].to_vec(),
@@ -4775,7 +4851,9 @@ mod tests {
             vec![slot(active.to_vec(), Box::new(PassThrough))],
         )
         .expect("chain");
-        chain.run(&mut malformed, 11, 0).expect("staged fallback");
+        chain
+            .run(&mut malformed, 11, 0, LiveSnapshot::ALL)
+            .expect("staged fallback");
         assert_eq!(malformed.per_lane_writes, 4);
         assert_planes_bit_equal(&malformed.planes, &expected, "short-claim staged fallback");
     }
@@ -4805,7 +4883,9 @@ mod tests {
                 .expect("chain");
                 chain.staging_left.fill(f32::from_bits(0x7fc0_3991));
                 chain.staging_right.fill(f32::from_bits(0x7fc0_3992));
-                chain.run(&mut planes, frames, 0).expect("run");
+                chain
+                    .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+                    .expect("run");
                 assert_planes_bit_equal(
                     &planes,
                     &expected,
@@ -4872,7 +4952,9 @@ mod tests {
                     if scalar {
                         chain.force_scalar_transpose();
                     }
-                    chain.run(&mut planes, frames, 0).expect("run");
+                    chain
+                        .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+                        .expect("run");
                     outcomes.push(planes);
                 }
                 let mut staged = StagedPlanes(Planes {
@@ -4887,7 +4969,7 @@ mod tests {
                 )
                 .expect("chain");
                 staged_chain
-                    .run(&mut staged, frames, 0)
+                    .run(&mut staged, frames, 0, LiveSnapshot::ALL)
                     .expect("staged run");
                 assert_planes_bit_equal(
                     &outcomes[0],
@@ -4988,7 +5070,9 @@ mod tests {
         // not touch it, because nothing armed it.
         assert!(chain.aux_lanes().is_empty(), "a fresh chain arms nothing");
         let mut absent = build(vec![true; lanes]);
-        chain.run(&mut absent, frames, 0).expect("unarmed run");
+        chain
+            .run(&mut absent, frames, 0, LiveSnapshot::ALL)
+            .expect("unarmed run");
         assert!(
             absent.aux_left.iter().all(|value| *value == 0.5)
                 && absent.aux_right.iter().all(|value| *value == -0.5),
@@ -5004,7 +5088,9 @@ mod tests {
             .expect("arm");
         assert_eq!(chain.aux_lanes(), &armed_mask[..]);
         let mut armed = build(armed_mask.clone());
-        chain.run(&mut armed, frames, 0).expect("armed run");
+        chain
+            .run(&mut armed, frames, 0, LiveSnapshot::ALL)
+            .expect("armed run");
 
         for frame in 0..frames as usize {
             // (2) Every lane's own output is exactly what the unarmed run produced.
@@ -5178,8 +5264,10 @@ mod tests {
                         }
                         let mut expected = provider();
                         let mut actual = provider();
-                        old.run(&mut expected, FRAMES, 0).expect("old run");
-                        new.run(&mut actual, FRAMES, 0).expect("new run");
+                        old.run(&mut expected, FRAMES, 0, LiveSnapshot::ALL)
+                            .expect("old run");
+                        new.run(&mut actual, FRAMES, 0, LiveSnapshot::ALL)
+                            .expect("new run");
                         let words = |provider: &PlanesWithFold| {
                             provider
                                 .planes
@@ -5267,7 +5355,9 @@ mod tests {
                 "a fresh chain folds nothing"
             );
             let mut oracle = build();
-            unarmed.run(&mut oracle, frames, 0).expect("unarmed run");
+            unarmed
+                .run(&mut oracle, frames, 0, LiveSnapshot::ALL)
+                .expect("unarmed run");
             assert!(
                 oracle.taken.is_empty(),
                 "an unarmed chain must never call fold_plane"
@@ -5282,7 +5372,9 @@ mod tests {
                 .expect("arm");
             assert_eq!(folded.fold_lanes(), &mask[..]);
             let mut armed = build();
-            folded.run(&mut armed, frames, 0).expect("folded run");
+            folded
+                .run(&mut armed, frames, 0, LiveSnapshot::ALL)
+                .expect("folded run");
 
             // (4) Ascending lane order.
             let expected: Vec<usize> = (0..lanes).filter(|lane| mask[*lane]).collect();
@@ -5405,10 +5497,20 @@ mod tests {
                 .expect("fold");
             for block in 0..2 {
                 optimized_chain
-                    .run(&mut members, frames, block * u64::from(frames))
+                    .run(
+                        &mut members,
+                        frames,
+                        block * u64::from(frames),
+                        LiveSnapshot::ALL,
+                    )
                     .expect("run");
                 default_chain
-                    .run(&mut default, frames, block * u64::from(frames))
+                    .run(
+                        &mut default,
+                        frames,
+                        block * u64::from(frames),
+                        LiveSnapshot::ALL,
+                    )
                     .expect("default run");
             }
             let ids: Vec<usize> = (0..lanes).filter(|lane| active[*lane]).collect();
@@ -5545,13 +5647,15 @@ mod tests {
                 // The oracle: the words the unarmed scatter hands every lane.
                 let mut oracle = source.clone();
                 chain(&all, None)
-                    .run(&mut oracle, frames, 0)
+                    .run(&mut oracle, frames, 0, LiveSnapshot::ALL)
                     .expect("unarmed run");
 
                 // (1) + (2): accepted.
                 let mut folded = chain(&all, Some(&all));
                 let mut accepted = provider(true);
-                folded.run(&mut accepted, frames, 0).expect("accepted run");
+                folded
+                    .run(&mut accepted, frames, 0, LiveSnapshot::ALL)
+                    .expect("accepted run");
                 assert_eq!(accepted.offers.len(), 1, "{what}: one offer per block");
                 let (offered_lanes, offered_frames, ids, left, right) = &accepted.offers[0];
                 assert_eq!(*offered_lanes, lanes, "{what}");
@@ -5607,12 +5711,12 @@ mod tests {
                 let mut declining_chain = chain(&all, Some(&all));
                 let mut declined = provider(false);
                 declining_chain
-                    .run(&mut declined, frames, 0)
+                    .run(&mut declined, frames, 0, LiveSnapshot::ALL)
                     .expect("declined run");
                 let mut default_chain = chain(&all, Some(&all));
                 let mut default = provider(false).inner;
                 default_chain
-                    .run(&mut default, frames, 0)
+                    .run(&mut default, frames, 0, LiveSnapshot::ALL)
                     .expect("default run");
                 assert_eq!(declined.offers.len(), 1, "{what}: offered, then declined");
                 assert_eq!(declined.inner.cohorts, vec![(0..lanes).collect::<Vec<_>>()]);
@@ -5653,7 +5757,7 @@ mod tests {
                 ] {
                     let mut unoffered = provider(true);
                     chain(active, fold.map(Vec::as_slice))
-                        .run(&mut unoffered, frames, 0)
+                        .run(&mut unoffered, frames, 0, LiveSnapshot::ALL)
                         .expect("unoffered run");
                     assert!(unoffered.offers.is_empty(), "{what}: {case} was offered");
                 }
@@ -6012,7 +6116,9 @@ mod tests {
             vec![slot(active.clone(), Box::new(PassThrough))],
         )
         .expect("chain");
-        chain.run(&mut planes, frames, 0).expect("run");
+        chain
+            .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+            .expect("run");
         for lane in 0..lanes {
             for frame in 0..frames as usize {
                 assert_eq!(
@@ -6069,7 +6175,107 @@ mod tests {
             vec![slot(active, Box::new(Checker { expected }))],
         )
         .expect("chain");
-        chain.run(&mut planes, frames, 0).expect("run");
+        chain
+            .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+            .expect("run");
+    }
+
+    /// #1504: `run` hands the block's live snapshot to every slot that has an active lane, once in
+    /// every block, silent blocks included, and to no slot that has none.
+    ///
+    /// Test value: a chain that passes a fixed or stale snapshot to a stage, or skips a stage's
+    /// drain when the block is silent. Under `S` that makes the watermark early.
+    #[test]
+    fn run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block() {
+        use engine::realtime::RevisionGate;
+        use std::sync::{Arc, Mutex};
+
+        type Drains = Arc<Mutex<Vec<(usize, u64, u64)>>>;
+        struct Recording {
+            slot: usize,
+            drains: Drains,
+        }
+        impl BankStage for Recording {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn begin_block(
+                &mut self,
+                first_sample: u64,
+                snapshot: LiveSnapshot,
+            ) -> Result<(), RenderError> {
+                self.drains.lock().expect("drains").push((
+                    self.slot,
+                    first_sample,
+                    snapshot.revision(),
+                ));
+                Ok(())
+            }
+        }
+        let frames = 8_u32;
+        // Every block is silent: the planes stay zero.
+        let mut planes = Planes {
+            left: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
+            right: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
+        };
+        let drains = Drains::default();
+        let recording = |slot| {
+            Box::new(Recording {
+                slot,
+                drains: Arc::clone(&drains),
+            })
+        };
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, frames).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            vec![
+                slot(vec![true; 4], recording(0)),
+                // An identity on every lane: it runs nothing, so it has no drain to run.
+                slot(vec![false; 4], recording(1)),
+                slot(vec![true, true, false, false], recording(2)),
+            ],
+        )
+        .expect("chain");
+        let (gate, mut pin) = RevisionGate::pair(0);
+        let revisions = [0_u64, 3, 3, 9];
+        let mut expected = Vec::new();
+        for (block, revision) in revisions.into_iter().enumerate() {
+            if revision > pin.last_published() {
+                pin.publish(&gate, revision);
+            }
+            let first_sample = block as u64 * u64::from(frames);
+            chain
+                .run(&mut planes, frames, first_sample, gate.snapshot())
+                .expect("run");
+            expected.push((0, first_sample, revision));
+            expected.push((2, first_sample, revision));
+        }
+        assert_eq!(*drains.lock().expect("drains"), expected);
+    }
+
+    /// #1504 D3: `run` skips a slot with no active lane, so a slot that holds a live lane while it
+    /// is an identity on every lane would never drain it. Preparation refuses that in a debug build.
+    ///
+    /// Test value: a compiler change that binds a live-control lane into a slot it marks inactive,
+    /// which would strand the lane's queue.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a slot with a live lane is active")]
+    fn a_slot_with_a_live_lane_must_have_an_active_lane() {
+        struct Live;
+        impl BankStage for Live {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn live_lanes(&self) -> u8 {
+                0b1
+            }
+        }
+        let _ = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            vec![slot(vec![false; 4], Box::new(Live))],
+        );
     }
 
     /// T3: a slot that is an identity on every lane is never executed, and the chain still counts
@@ -6108,7 +6314,12 @@ mod tests {
         .expect("chain");
         for block in 1..=5_u64 {
             chain
-                .run(&mut planes, frames, block * u64::from(frames))
+                .run(
+                    &mut planes,
+                    frames,
+                    block * u64::from(frames),
+                    LiveSnapshot::ALL,
+                )
                 .expect("run");
             assert_eq!(chain.transposes(), block);
         }
@@ -6248,7 +6459,7 @@ mod tests {
                         .collect(),
                 };
                 chain
-                    .run(&mut planes, count as u32, first as u64)
+                    .run(&mut planes, count as u32, first as u64, LiveSnapshot::ALL)
                     .expect("run");
                 for (plane, gathered) in out.iter_mut().zip(planes.left.iter()) {
                     plane.extend_from_slice(gathered);
@@ -6300,7 +6511,9 @@ mod tests {
             vec![slot(active, Box::new(FillOnes))],
         )
         .expect("chain");
-        chain.run(&mut planes, frames, 0).expect("run");
+        chain
+            .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+            .expect("run");
         assert_eq!(planes.left[0], vec![1.0; frames as usize]);
         assert_eq!(planes.left[1], vec![10.0; frames as usize]);
         assert_eq!(planes.left[2], vec![1.0; frames as usize]);
@@ -6485,7 +6698,7 @@ mod tests {
             true
         }
 
-        fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        fn begin_block(&mut self, first_sample: u64, _: LiveSnapshot) -> Result<(), RenderError> {
             record_witness_call(|calls| calls.begun |= 1 << self.inner.id);
             if first_sample == 8
                 && let Some(witness) = self.drain_change
@@ -6694,7 +6907,9 @@ mod tests {
                     let mut planes = identical_planes(lanes, 8);
                     for sample in [0, 8] {
                         reset_witness_calls();
-                        chain.run(&mut planes, 8, sample).expect("render");
+                        chain
+                            .run(&mut planes, 8, sample, LiveSnapshot::ALL)
+                            .expect("render");
                         let calls = WITNESS_CALLS.with(std::cell::Cell::get);
                         assert_eq!(
                             calls.bulk,
@@ -6754,10 +6969,14 @@ mod tests {
         );
         assert!(!chain.can_collapse(), "unarmed until the join is performed");
         let mut planes = identical_planes(4, 8);
-        chain.run(&mut planes, 8, 0).expect("render");
+        chain
+            .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+            .expect("render");
         assert_eq!(chain.collapses(), 0);
         chain.arm_mono_collapse(true);
-        chain.run(&mut planes, 8, 0).expect("render");
+        chain
+            .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+            .expect("render");
         assert_eq!(chain.collapses(), 1, "armed, and every lane is symmetric");
     }
 
@@ -6778,8 +6997,11 @@ mod tests {
             let mut planes = identical_planes(4, 8);
             let mut reference = identical_planes(4, 8);
             let mut dual = mono_chain(4, 8, vec![Box::new(Scale::new([2.0, 3.0], symmetric))]);
-            chain.run(&mut planes, 8, 0).expect("render");
-            dual.run(&mut reference, 8, 0).expect("render");
+            chain
+                .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+                .expect("render");
+            dual.run(&mut reference, 8, 0, LiveSnapshot::ALL)
+                .expect("render");
             assert_eq!(chain.collapses(), u64::from(symmetric));
             for lane in 0..4 {
                 let left_agrees = planes.left[lane]
@@ -6858,7 +7080,9 @@ mod tests {
             );
             chain.arm_mono_collapse(armed);
             let mut planes = identical_planes(lanes, frames);
-            chain.run(&mut planes, frames, 0).expect("render");
+            chain
+                .run(&mut planes, frames, 0, LiveSnapshot::ALL)
+                .expect("render");
             assert_eq!(chain.collapses(), u64::from(armed));
             for (lane, lane_expected) in expected.iter().enumerate() {
                 for (frame, (yl, yr)) in lane_expected.iter().enumerate() {
@@ -6950,7 +7174,9 @@ mod tests {
         chain.arm_mono_collapse(true);
         let mut planes = distinct_planes(4, 8);
         let source = distinct_planes(4, 8);
-        chain.run(&mut planes, 8, 0).expect("render");
+        chain
+            .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+            .expect("render");
         assert_eq!(
             chain.collapses(),
             0,
@@ -7008,7 +7234,9 @@ mod tests {
         chain.arm_mono_collapse(true);
         let mut planes = distinct_planes(4, 8);
         let source = distinct_planes(4, 8);
-        chain.run(&mut planes, 8, 0).expect("render");
+        chain
+            .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+            .expect("render");
         assert_eq!(chain.collapses(), 0);
         // Both stages run the whole resident block whenever any lane of theirs is live -- the mask
         // gates the *slot*, not the words -- so the dual bits are both gains on every lane. What is
@@ -7037,10 +7265,14 @@ mod tests {
         );
         chain.arm_mono_collapse(true);
         let mut planes = identical_planes(4, 8);
-        chain.run(&mut planes, 8, 0).expect("render");
+        chain
+            .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+            .expect("render");
         assert!(chain.is_collapsed());
         chain.force_mono_collapse_off(true);
-        chain.run(&mut planes, 8, 0).expect("render");
+        chain
+            .run(&mut planes, 8, 0, LiveSnapshot::ALL)
+            .expect("render");
         assert!(!chain.is_collapsed());
         assert_eq!(
             chain.collapse_transitions(),
@@ -7169,7 +7401,9 @@ mod tests {
                     };
                     profile::reset();
                     profile::enable(profiled);
-                    chain.run(&mut members, FRAMES, 0).expect("run");
+                    chain
+                        .run(&mut members, FRAMES, 0, LiveSnapshot::ALL)
+                        .expect("run");
                     profile::enable(false);
                     (members.words(), profile::snapshot(), profile::slot_names())
                 };
