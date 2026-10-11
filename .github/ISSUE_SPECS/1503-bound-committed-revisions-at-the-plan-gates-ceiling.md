@@ -154,3 +154,64 @@ required `sdk` check red.
 - *Add the latest-target cell primitive and its loom model* (#1432): `GATE_REVISION_MAX`.
 
 Dependents: #1312 (stream order).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b2`)
+
+**What landed (Amendment 1 as written; no spec change needed).**
+
+- `session`: `pub const MAX_SESSION_REVISION = engine::realtime::GATE_REVISION_MAX`; `validate_session` refuses a
+  larger revision with one `NumericOutOfSchemaRange` at `$.revision` (the first check after `schema_version`).
+- `protocol`: `prepare_transaction` replaces the `checked_add` in place with `current >= GATE_REVISION_MAX ->
+  RevisionExhausted` (D1); `SessionStore::new` has no check of its own (its `compile_session` returns the set).
+- `engine`: `PlanExchangeError { Resources(SpscError), RevisionAboveCeiling { revision } }`, returned by
+  `plan_exchange_at_revision` after the own-gate assert and before `plan_exchange_inner`; re-exported at
+  `engine::realtime`. `bench-support` is a dev-dependency of `engine` (`Cargo.lock` gains one line); the gate-4 test is
+  its own binary, `tests/plan_exchange_ceiling.rs`. `control-plane/compile.rs` is untouched (its `.map_err(|_| ..)`
+  covers both variants).
+- `tools/session-validator`: the fold refuses `revision >= MAX_SESSION_REVISION` with "session revision exhausted".
+- Schema/docs: `$defs/revision` (the review's pattern) in `session-v1.schema.json`; `SESSION_SCHEMA_V1.md`;
+  `CONTROL_PROTOCOL_SEMANTICS.md`; one paragraph in `C_ABI_V1_QUALIFICATION.md`. Schema version stays 1.
+- SDK: `sdk/src/core/session.ts` refuses `revision > 9223372036854775807n` with `numeric.out_of_schema_range`
+  (`CODE.outOfRange`); `enginectl` needed no source change (its `MisoUsageError` path already exits 3
+  `request.shape` with the code).
+- Tests: see the gate table. Repointed full-u64 revision vehicles to source `frames`
+  (`json_grammar.rs` two tests, `json_contract_artifacts.rs` u64 test; the `invalid_matrix.rs` row was deleted, because
+  `revision` is no longer a full-domain leaf, and the ceiling is pinned in `diagnostic_parity.rs`). Gate 1's old
+  `u64::MAX` test was replaced in place.
+
+**Gates.**
+
+| Gate | Test | Result |
+|---|---|---|
+| 1 | `protocol` `the_last_commit_reaches_the_ceiling_and_the_next_is_exhausted_before_any_work` | green |
+| 2 | `session` `revision_above_the_plan_gate_ceiling_is_refused_by_every_entry_point`; `protocol` `a_session_above_the_ceiling_is_refused_by_the_one_constructor` | green |
+| 3 | `capi` `the_c_abi_bounds_revisions_at_the_plan_gate_ceiling` (above-ceiling document refused with `numeric.out_of_schema_range\t$.revision`; edit at `ceiling - 1` commits, watermark = ceiling; next edit `RevisionExhausted`; whole `TestTransactionSnapshot` equal but one replay entry; watermark unchanged; bit-identical to a twin that never saw the edit) | green |
+| 4 | `engine` `an_exchange_above_the_gate_ceiling_is_refused_before_it_allocates` (warm call allocates; refusals at `GATE+1` and `u64::MAX` allocate 0, gate unchanged) | green |
+| 5 | `cargo test --locked` for `protocol` (test-support), `engine` (realtime-audit), `control-plane` (test-support), `capi`, `session`, `session-validator`; `check-protocol-control-policy`, `check-bench-policy`, `check-realtime-audit-leak`, `check-workspace-policy`, `check-realtime-policy`; `cargo fmt --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | all green |
+| 5 (SDK) | the `sdk` job's "Qualify the SDK package against the shared artifact" step (`check-sdk-generated`, `check-sdk-deletions`, `check-sdk-types`, `check-sdk-headless` (363 tests), `sdk-package.sh check` (enginectl 18 tests)) against an artifact from `build-web-audioworklet.sh --named-twin` of this tree | green |
+| 6 | `json_contract_artifacts.rs` `session_schema_revision_domain_is_the_validators_ceiling` (also checks the validator accepts the ceiling) and the moved u64 test | green |
+| 7 | builder-evals `the revision ceiling is the engine's...` (builder refuses, the embedded engine accepts the ceiling document and refuses ceiling+1); `enginectl-cli` maximum `9223372036854775807`, `...808` in the malformed list (exit 3) | green |
+
+Also run: `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts`, `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` (private TMPDIR left empty), all green
+(the browser-compiled session validator changed); `cargo build --release` + `./target/release/audit capi` (0
+allocations, 0 deallocations, 0 syscalls, `total_violations: 0`), `check-capi-abi.sh` and `--self-test`,
+`check-cross-targets.sh` (engine code changed) all green. AArch64 not run (CI only).
+
+**Mutation evidence (each applied, red, then reverted, green).**
+
+| Mutation | Red |
+|---|---|
+| gate 4: ceiling check moved after `plan_exchange_inner` | `plan_exchange_ceiling`: "the refusal allocated" |
+| gate 4: `>` -> `>=` | `plan_exchange_ceiling`: "the ceiling itself is accepted" |
+| `validate_session` revision check disabled | `diagnostic_parity` (revision test), `protocol` constructor test, `capi` ceiling test |
+| D1 back to `checked_add(1)` | `protocol` last-commit test (`Validation` instead of `RevisionExhausted`), `capi` ceiling test (`ValidationFailed` instead of `RevisionExhausted`) |
+| fold bound disabled | `fold_mono` `mapped_source_shape_and_map_errors_are_transactional` ("transformed session is invalid" instead of "session revision exhausted") |
+| schema `revision` back to `$defs/u64` | `json_contract_artifacts` revision test ("schema admitted revision 9223372036854775808") |
+| SDK `REVISION_MAX` set to `u64::MAX` | builder-evals ceiling test and `enginectl-cli` "usage and request refusals" |
+
+**Notes.** `sdk/dist` was deleted after the SDK gates; `sdk/node_modules` (ignored) was installed with `npm ci` and is
+not committed.
+`crates/capi/src/runtime/live_tests.rs` is not authorized, so the capi test lives in `tests.rs` with its own helpers.

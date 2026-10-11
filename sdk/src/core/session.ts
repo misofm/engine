@@ -128,6 +128,8 @@ const STABLE_ID = /^[a-z][a-z0-9._-]{0,126}$/;
 const CONTENT_IDENTITY = /^blake3:[0-9a-f]{64}$/;
 const LAUNCH_RATES: readonly number[] = [44_100, 48_000, 88_200, 96_000];
 const U64_MAX = 18_446_744_073_709_551_615n;
+/** The session schema's `revision` ceiling, 2^63 - 1: the largest revision a plan's gate holds. */
+const REVISION_MAX = 9_223_372_036_854_775_807n;
 const SEND_TAPS: ReadonlySet<string> = new Set([
   "input",
   "post_input",
@@ -1027,6 +1029,13 @@ export function session(options: SessionOptions): SessionBuilder {
     );
   }
   const revision = u64(options.revision ?? 0, "session().revision");
+  if (revision > REVISION_MAX) {
+    fail(
+      "session().revision",
+      "a revision must not exceed 9223372036854775807 (2^63 - 1), the plan revision gate's ceiling",
+      CODE.outOfRange,
+    );
+  }
   const quantumFrames = integer(
     options.quantumFrames ?? 128,
     "session().quantumFrames",

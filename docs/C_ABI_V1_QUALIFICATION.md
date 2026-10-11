@@ -139,7 +139,10 @@ revision on the gate of the newest pending candidate, else the running plan, as 
 write, and render takes one snapshot of the gate of the plan it runs per block, after the adoption
 decision and before the executor renders. The
 watermark is a level, not a queue: render overwrites it, never waits and drops no command, so an
-acknowledged edit cannot be dropped behind it. A wrong `struct_size` or a nonzero reserved word is
+acknowledged edit cannot be dropped behind it. The revision ceiling is `2^63 - 1`, the largest
+revision a plan's gate can hold (#1503): a document above it is refused at compile as any invalid
+document is, and a transaction on a session at the ceiling returns the revision-exhausted status
+before it pushes a record, so the watermark never reads a revision the gate cannot hold. A wrong `struct_size` or a nonzero reserved word is
 `RESULT_INVALID_ARGUMENT`; a copy that keeps landing inside render's publication (bounded at 64
 attempts) is `RESULT_BACKPRESSURE` with `out` untouched, and the host retries. In this slice every
 revision completes as `exact`; the `superseded` and `transition_fallback` producers are #1310,

@@ -3689,3 +3689,173 @@ fn service_with_nothing_pending_changes_nothing() {
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 }
+
+/// Issue #1503 gate 3: the C ABI holds the revision at the plan gate's ceiling. A document one
+/// past it is refused as the compiler refuses any document. A session one below it takes one live
+/// fader edit and the watermark reads the ceiling; the next edit is refused with the
+/// revision-exhausted status, pushes no record, changes nothing the transaction may change, and
+/// renders exactly like a twin that never saw it.
+///
+/// Test value: red if a host path bypasses the store's bound (the edit commits a revision the
+/// gate cannot hold, and its watermark is corrupt), if a creation path skips the schema's
+/// ceiling, or if a refused edit still pushes its live record.
+#[test]
+fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
+    const SAMPLE_RATE_HZ: u32 = 48_000;
+    let ceiling = engine::realtime::GATE_REVISION_MAX;
+    let mut model = stateless_session(SAMPLE_RATE_HZ);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let track_id = model.tracks[0].id.as_str().to_owned();
+    let quiet = session::DualMonoFader {
+        left_db: -6.0,
+        right_db: -6.0,
+        ..model.tracks[0].fader.clone()
+    };
+    model.revision = ceiling - 1;
+    let document = session::canonical_session_json(&model).expect("canonical");
+
+    let above = document.replacen(
+        &format!("\"revision\": \"{}\"", ceiling - 1),
+        "\"revision\": \"9223372036854775808\"",
+        1,
+    );
+    assert_eq!(
+        above.matches("9223372036854775808").count(),
+        1,
+        "the above-ceiling document differs by its revision alone"
+    );
+    let at_ceiling = document.replacen(
+        &format!("\"revision\": \"{}\"", ceiling - 1),
+        &format!("\"revision\": \"{ceiling}\""),
+        1,
+    );
+    let refused = compile_children(&above, limits())
+        .err()
+        .expect("above the ceiling");
+    assert!(
+        refused
+            .diagnostics
+            .starts_with(b"numeric.out_of_schema_range\t$.revision"),
+        "{}",
+        String::from_utf8_lossy(&refused.diagnostics)
+    );
+    let (c_session, c_plan) = boxed_c_children(&at_ceiling);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+
+    let fader = |request_id: u64, revision: u64, fader: &session::DualMonoFader| {
+        command_bytes_at_revision(
+            request_id,
+            ExpectedRevision::Exact(SessionRevision(revision)),
+            protocol::CommandPayload::SessionTransactionApply(&[
+                protocol::SessionEdit::SetTrackFader {
+                    track_id: session::StableId::parse(&track_id).expect("track ID"),
+                    fader: fader.clone(),
+                },
+            ]),
+        )
+    };
+    let status = |response: &[u8]| {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+            .expect("typed response")
+        {
+            protocol::DecodedTypedResponseFrame::Success { header, .. }
+            | protocol::DecodedTypedResponseFrame::NonOk { header, .. } => {
+                (header.status, header.revision)
+            }
+        }
+    };
+    let watermark = |plan| {
+        let (result, mark) = crate::ffi::test_plan_watermark(plan);
+        assert_eq!(result, crate::RESULT_OK);
+        mark
+    };
+    // Two identical sessions one revision below the ceiling, each with the same live edit.
+    let start = |_| {
+        let (c_session, c_plan) = boxed_c_children(&document);
+        let (left, right) = continuity_block(0, 0);
+        submit_c(c_session, 1, 0, SAMPLE_RATE_HZ, &left, &right, false);
+        let mut blocks = feed_and_render_c(c_session, c_plan, SAMPLE_RATE_HZ, 0, 4);
+        let (result, response) = command_c(c_session, &fader(1, ceiling - 1, &quiet));
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            status(&response),
+            (StatusCode::Ok, SessionRevision(ceiling)),
+            "the edit that reaches the ceiling commits"
+        );
+        assert_eq!(
+            crate::ffi::test_session_state_summary(c_session).3,
+            0,
+            "a fader edit is live: no rebuild, no pending plan"
+        );
+        blocks.extend(feed_and_render_c(c_session, c_plan, SAMPLE_RATE_HZ, 4, 4));
+        let mark = watermark(c_plan);
+        assert_eq!(
+            mark.revision, ceiling,
+            "render applied the ceiling revision"
+        );
+        (c_session, c_plan, blocks, mark)
+    };
+    let (c_session, c_plan, mut blocks, applied) = start(0);
+    let (t_session, t_plan, mut twin_blocks, _) = start(1);
+
+    let before = crate::ffi::test_transaction_snapshot(c_session);
+    let (result, response) = command_c(
+        c_session,
+        &fader(
+            2,
+            ceiling,
+            &session::DualMonoFader {
+                left_db: -12.0,
+                right_db: -12.0,
+                ..quiet.clone()
+            },
+        ),
+    );
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        status(&response),
+        (StatusCode::RevisionExhausted, SessionRevision(ceiling))
+    );
+    let mut after = crate::ffi::test_transaction_snapshot(c_session);
+    assert_eq!(
+        after.replay_entries,
+        before.replay_entries + 1,
+        "the refusal is replayable"
+    );
+    after.replay_entries = before.replay_entries;
+    assert_eq!(after, before, "no record, no plan, no model change");
+    assert_eq!(watermark(c_plan), applied, "the watermark is unchanged");
+
+    blocks.extend(feed_and_render_c(c_session, c_plan, SAMPLE_RATE_HZ, 8, 4));
+    twin_blocks.extend(feed_and_render_c(t_session, t_plan, SAMPLE_RATE_HZ, 8, 4));
+    assert!(
+        blocks[8..].iter().flatten().any(|sample| *sample != 0.0),
+        "the twin comparison runs on signal"
+    );
+    let bits = |blocks: &[Vec<f32>]| {
+        blocks
+            .iter()
+            .map(|block| {
+                block
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        bits(&blocks),
+        bits(&twin_blocks),
+        "the refused edit changed no sample"
+    );
+    assert_eq!(watermark(c_plan), applied);
+
+    for (session, plan) in [(c_session, c_plan), (t_session, t_plan)] {
+        crate::ffi::test_plan_destroy(plan);
+        crate::ffi::test_session_destroy(session);
+    }
+}

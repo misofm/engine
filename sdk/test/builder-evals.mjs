@@ -28,6 +28,8 @@ import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes } from "./support.mjs";
 
 const CONTENT_A = `blake3:${"0".repeat(64)}`;
+/** The session schema's revision ceiling, 2^63 - 1: the largest revision a plan's gate holds. */
+const REVISION_MAX = 9_223_372_036_854_775_807n;
 const CONTENT_B = `blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea`;
 
 function assertNoNumericExponent(json) {
@@ -1066,7 +1068,7 @@ describe("canonical float spellings", () => {
 
   test("every durable u64 normalizes to a decimal string through u64::MAX", () => {
     const maximum = 18_446_744_073_709_551_615n;
-    const built = session({ id: "u64.maximum", sampleRateHz: 48_000, revision: maximum })
+    const built = session({ id: "u64.maximum", sampleRateHz: 48_000, revision: REVISION_MAX })
       .source("stem", { channels: 1, bitDepth: 16, frames: maximum, content: CONTENT_A })
       .track("t", { source: "stem" })
       .output("out")
@@ -1081,13 +1083,40 @@ describe("canonical float spellings", () => {
         segments: [{ shape: "step", startSample: 0, endSample: maximum, startValue: 0, endValue: 0 }],
       });
     const model = built.toJSON();
-    assert.equal(model.revision, maximum.toString());
+    assert.equal(model.revision, REVISION_MAX.toString());
     assert.equal(model.sources[0].frames, maximum.toString());
     assert.equal(model.automation[0].segments[0].start_sample, "0");
     assert.equal(model.automation[0].segments[0].end_sample, maximum.toString());
-    assert.match(built.toJson(), /"revision": "18446744073709551615"/);
+    assert.match(built.toJson(), /"revision": "9223372036854775807"/);
     assert.throws(() => session({ id: "overflow", sampleRateHz: 48_000, revision: maximum + 1n }), /u64::MAX/);
     assert.throws(() => session({ id: "unsafe", sampleRateHz: 48_000, revision: Number.MAX_SAFE_INTEGER + 1 }), /safe integer/);
+  });
+
+  test("the revision ceiling is the engine's: the builder refuses what the engine refuses", async () => {
+    // Red if the builder's bound drifts from the engine validator's: a builder that accepts
+    // 2^63 emits a document the embedded engine refuses, and one that refuses 2^63 - 1 rejects a
+    // document the engine accepts.
+    session({ id: "revision.ceiling", sampleRateHz: 48_000, revision: REVISION_MAX });
+    for (const above of [REVISION_MAX + 1n, 18_446_744_073_709_551_615n]) {
+      assert.throws(
+        () => session({ id: "revision.above", sampleRateHz: 48_000, revision: above }),
+        (error) => {
+          assert.ok(error instanceof MisoUsageError);
+          assert.equal(error.diagnosticCode, "numeric.out_of_schema_range");
+          assert.match(error.message, /^session\(\)\.revision:/);
+          return true;
+        },
+      );
+    }
+    if (asset !== undefined) {
+      const model = mutableModel(oneTrack().toJSON());
+      model.revision = REVISION_MAX.toString();
+      assert.equal((await validate(JSON.stringify(model), { asset })).ok, true);
+      model.revision = (REVISION_MAX + 1n).toString();
+      const outcome = await validate(JSON.stringify(model), { asset });
+      assert.equal(outcome.ok, false, "the engine must refuse a revision above the ceiling");
+      assert.equal(outcome.diagnostics[0]?.code, "numeric.out_of_schema_range");
+    }
   });
 
   test("every emitted float parses back to the same f32 the model holds", async () => {
