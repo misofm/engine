@@ -48,11 +48,14 @@ fn a_missing_realtime_module_is_a_finding() {
             .expect("remove a realtime file");
     }
     fs::remove_dir(tree.path("crates/engine/src/realtime")).expect("remove the module");
-    let report = tree.check();
-    assert!(
-        report.classes().contains(&Class::MissingRealtimeModule),
-        "{:#?}",
-        report.findings
+    // The six files held marked regions: the floors fire with the missing module.
+    assert_classes(
+        &tree,
+        &[
+            Class::MissingRealtimeModule,
+            super::common::FILE_FLOOR,
+            super::common::REGION_FLOOR,
+        ],
     );
 }
 
@@ -280,4 +283,35 @@ fn nested_files_under_every_root_are_found() {
         let report = assert_classes(&tree, &[]);
         assert_eq!(report.regions, super::common::BASE_REGIONS + 1, "{path}");
     }
+}
+
+/// A FIFO named like a source file is neither a regular file nor a directory nor a link: the walk
+/// cannot read it, so it is a finding. (A FIFO is the one such file that `mkfifo` makes without
+/// a socket path-length limit.)
+#[test]
+fn a_fifo_named_like_a_source_file_is_a_finding() {
+    let tree = Tree::base("walk-fifo");
+    let fifo = tree.path("crates/lane/pipe.rs");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed");
+    let report = assert_classes(&tree, &[Class::NonRegularRustFile]);
+    assert_eq!(
+        report.findings[0].path.as_deref(),
+        Some("crates/lane/pipe.rs")
+    );
+}
+
+/// A FIFO with another name is not source and is ignored.
+#[test]
+fn a_fifo_with_another_name_is_ignored() {
+    let tree = Tree::base("walk-fifo-other-name");
+    let status = std::process::Command::new("mkfifo")
+        .arg(tree.path("crates/lane/pipe.txt"))
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed");
+    assert_classes(&tree, &[]);
 }

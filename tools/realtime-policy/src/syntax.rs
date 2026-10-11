@@ -73,7 +73,11 @@ impl<'ast> Visit<'ast> for VerbatimFinder<'_> {
     }
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
-        if let syn::Expr::Verbatim(tokens) = node {
+        // An empty one is `syn`'s spelling of a statement with no expression (`;;`): it holds
+        // no tokens, so it hides nothing, and its span has no place to report.
+        if let syn::Expr::Verbatim(tokens) = node
+            && !tokens.is_empty()
+        {
             self.report(tokens);
         }
         visit::visit_expr(self, node);

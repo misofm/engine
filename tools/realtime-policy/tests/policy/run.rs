@@ -53,15 +53,7 @@ fn findings_exit_one_and_print_one_line_each_on_stderr() {
 #[test]
 fn findings_without_a_place_print_without_one() {
     let tree = Tree::base("run-floors");
-    tree.apply(&[
-        Edit::Delete {
-            path: "crates/builtins/src/lib.rs",
-        },
-        Edit::Create {
-            path: "crates/builtins/src/lib.rs",
-            text: "fn builtins() {}\n",
-        },
-    ]);
+    super::common::strip_marker_lines(&tree, "crates/builtins/src/lib.rs");
     let (code, _, err) = run_in(&[&tree.root().into()], Path::new("/"));
     assert_eq!(code, 1);
     assert_eq!(

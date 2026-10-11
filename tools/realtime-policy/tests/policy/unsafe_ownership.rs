@@ -140,13 +140,21 @@ fn a_finding_carries_its_file_line_and_source_line() {
     assert_eq!(finding.source.as_deref(), Some(bad.trim()));
 }
 
-/// Token-tree contents are code: a macro body that expands to an unsafe block is found.
+/// Token-tree contents are code: a macro body that expands to an unsafe block is found, and so is
+/// the argument of a macro call.
 #[test]
 fn unsafe_code_inside_a_macro_body_is_a_finding() {
-    let text = format!("macro_rules! m {{\n    () => {{\n        {UNSAFE} {{ }}\n    }};\n}}\n");
+    let definition =
+        format!("macro_rules! m {{\n    () => {{\n        {UNSAFE} {{ }}\n    }};\n}}\n");
     expect_failure(
         "unsafe-in-macro",
-        &[create("tools/bench/src/macro_probe.rs", &text)],
+        &[create("tools/bench/src/macro_probe.rs", &definition)],
+        &[OUTSIDE],
+    );
+    let call = format!("fn call() {{\n    m! {{ {UNSAFE} {{ }} }}\n}}\n");
+    expect_failure(
+        "unsafe-in-macro-call",
+        &[create("tools/bench/src/macro_call_probe.rs", &call)],
         &[OUTSIDE],
     );
 }

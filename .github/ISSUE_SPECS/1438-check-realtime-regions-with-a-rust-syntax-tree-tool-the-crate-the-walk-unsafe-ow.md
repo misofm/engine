@@ -557,8 +557,8 @@ renamed, one new step running `./target/release/realtime_policy`).
   (Amendment gate), the macro case, the finding-place case and the mention/other-spelling case are in
   `tests/policy/unsafe_ownership.rs`.
 - `open-tail-valid` is ported as `an_open_tail_is_misordered` ({misordered, file floor, region floor}).
-  The prepended unmarked `oracle_drain` of the script's case is not ported: no rule in this slice judges it,
-  so it would add no claim. B2b-1 adds it with its class.
+  The prepended unmarked `oracle_drain` of the script's case was first left out; verdict follow-up 1 below
+  ports it.
 - The base tree is `create_fixture`'s output at `2a589d360`, 36 files as `*.rs.txt` under
   `tests/fixtures/base`; it counts 93 regions in 26 files (pad_1 holds 14).
 - Retired, as D10 says: the 22 tool-failure injections and the 5 counter-mutants.
@@ -644,3 +644,47 @@ renamed, one new step running `./target/release/realtime_policy`).
 - `Policy::workspace()`'s floors have no test of their own: the case policy replaces them, and gate 1 is the
   only check of the real values (the awk gate checks them too until C2).
 - The unlistable-directory and unreadable-file cases fail when the tests run as root, by design (D9).
+
+**Verdict follow-ups (attempt 1 verdict PASS; applied after it, before the batch merge).**
+Spec-number notes from the verdict: D5's "14 paths" is 19 on this tree (the five test-file rows that
+#1489/#1494 added under STREAMS' named exception, listed above), and D10's "Unsafe (17)" is 16 (one exact
+duplicate dropped). The decisions are root's and are not edited here.
+1. MINOR-1 (coordinator option A, port faithfully). `the_file_floor_fires_when_a_marked_file_loses_its_markers`
+   and `findings_without_a_place_print_without_one` now delete only the marker lines of
+   `crates/builtins/src/lib.rs` (`strip_marker_lines`, the script's `sed -i "/REALTIME_POLICY/d"`), so the
+   file keeps its four `try_pop` drains; `an_open_tail_is_misordered` prepends the script's unmarked
+   `oracle_drain` to every marked file that does not open with `#!`. This keeps #1443 D8 ("these cases gain
+   {unmarked try_pop}") true: all three of its cases (`open-tail-valid`, `marked-file-count-floor`,
+   `no-marked-files-uses-floor`, the last already filtering marker lines) now carry an unmarked `try_pop`.
+2. MINOR-2: with the drain prepended, the doc comment of `an_open_tail_is_misordered` is true.
+3. MINOR-3: `a_missing_realtime_module_is_a_finding` asserts the exact set {missing module, file floor,
+   region floor}.
+4. NIT-1: `visit_expr` skips an empty `Expr::Verbatim` (syn's spelling of `;;`, no tokens, nothing hidden;
+   it was reported at line 1). New test `an_empty_statement_in_a_marked_file_is_not_a_finding`.
+5. NIT-2: `unsafe_code_inside_a_macro_body_is_a_finding` also has a `m! { unsafe {} }` call row (D11's macro
+   case is the definition body; this row is the call's token tree).
+6. NIT-3: kept the branch (it fails closed) and tested it: `a_fifo_named_like_a_source_file_is_a_finding`
+   (`mkfifo`; a socket path overflows `sun_path` under the long target dir) and
+   `a_fifo_with_another_name_is_ignored`.
+7. NIT-4 not changed: `main` keeps its `current_dir()` failure branch (exit 1, a failure line). A one-statement
+   `main` would have to pass an empty working directory to `run` and rely on a later scan-root failure; the
+   explicit branch is fail-closed with a clearer message. NIT-5 not changed: the append gives the same claim
+   with a cleaner class set, as the verdict says.
+
+Mutations for the changed and new tests (each applied alone to the code, then reverted; `cargo test --locked
+-p realtime-policy` after each; 53 green after the revert):
+- empty `Expr::Verbatim` reported again: 1 red, `an_empty_statement_in_a_marked_file_is_not_a_finding`.
+- groups after `!` skipped in `unsafe_scan`: 1 red, `unsafe_code_inside_a_macro_body_is_a_finding` (it
+  survived all 50 earlier tests).
+- FIFO branch removed from the walk: 1 red, `a_fifo_named_like_a_source_file_is_a_finding` (survived before).
+  Every non-regular file flagged whatever its name: 1 red, `a_fifo_with_another_name_is_ignored`.
+- `MissingRealtimeModule` plus an extra class: 1 red, `a_missing_realtime_module_is_a_finding` (the old
+  `contains` assertion stays green).
+- `strip_marker_lines` drops the whole file again (the old rewrite): 3 red (the helper's own assertion fires
+  in the file-floor, no-marked-files and run-floors cases).
+- misordered markers accepted: 3 red, still including `an_open_tail_is_misordered` with the drain present.
+Gates: `cargo test --locked -p realtime-policy` 53 passed; the release binary prints `realtime policy: ok (93
+marked regions in 26 files)`; `cargo fmt --all -- --check`; `cargo clippy --locked -p realtime-policy
+--all-targets -- -D warnings`; `check-workspace-policy.sh`, `check-realtime-policy.sh`,
+`test-realtime-policy.sh`: all exit 0. (A first draft asserted `contains("try_pop")` on a literal path;
+`check-workspace-policy.sh` refused it as a source-text read, so the guard moved into the helper.)

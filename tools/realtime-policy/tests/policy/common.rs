@@ -200,3 +200,39 @@ pub(crate) fn expect_valid(name: &str, edits: &[Edit]) -> Report {
     tree.apply(edits);
     assert_classes(&tree, &[])
 }
+
+/// Delete the marker lines of `path`, as `sed -i "/REALTIME_POLICY/d"` does, and keep the rest of
+/// the file, including its unmarked code.
+pub(crate) fn strip_marker_lines(tree: &Tree, path: &str) {
+    let kept: Vec<String> = tree
+        .read(path)
+        .lines()
+        .filter(|line| !line.contains(BEGIN) && !line.contains(END))
+        .map(str::to_owned)
+        .collect();
+    assert!(!kept.is_empty(), "{path} keeps its code");
+    tree.write(path, format!("{}\n", kept.join("\n")).as_bytes());
+}
+
+/// The tree's files that hold a begin marker, sorted.
+pub(crate) fn marked_paths(tree: &Tree) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_marked(tree.root(), tree.root(), &mut found);
+    found.sort();
+    found
+}
+
+fn collect_marked(root: &Path, directory: &Path, found: &mut Vec<String>) {
+    for entry in fs::read_dir(directory).expect("list a tree directory") {
+        let path = entry.expect("read a tree entry").path();
+        if path.is_dir() {
+            collect_marked(root, &path, found);
+        } else if fs::read_to_string(&path)
+            .expect("read a tree file")
+            .contains(BEGIN)
+        {
+            let relative = path.strip_prefix(root).expect("under the root");
+            found.push(relative.to_string_lossy().into_owned());
+        }
+    }
+}

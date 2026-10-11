@@ -4,7 +4,7 @@ use realtime_policy::Class;
 
 use super::common::{
     BASE_FILES, BASE_REGIONS, BEGIN, END, Edit, FILE_FLOOR, REGION_FLOOR, Tree, expect_failure,
-    expect_valid,
+    expect_valid, marked_paths, strip_marker_lines,
 };
 
 const MALFORMED: Class = Class::MalformedMarker;
@@ -139,6 +139,14 @@ fn two_begins_in_a_row_are_misordered() {
 #[test]
 fn an_open_tail_is_misordered() {
     let tree = Tree::base("open-tail");
+    // The script's row puts an unbounded, unmarked drain at the top of every marked file that
+    // opens without inner attributes.
+    for path in marked_paths(&tree) {
+        let text = tree.read(&path);
+        if !text.starts_with("#!") {
+            tree.write(&path, format!("{ORACLE_DRAIN}{text}").as_bytes());
+        }
+    }
     let pad = "crates/floor/src/pad_1.rs";
     tree.apply(&[Edit::Append {
         path: pad,
@@ -151,6 +159,9 @@ fn an_open_tail_is_misordered() {
         (BASE_REGIONS - 14, BASE_FILES - 1)
     );
 }
+
+/// An unmarked drain: not control-side code, and not in any region.
+const ORACLE_DRAIN: &str = "fn oracle_drain(control: &mut Consumer<Record>) {\n    while let Ok(record) = control.try_pop() {\n        apply(record);\n    }\n}\n";
 
 #[test]
 fn unmatched_markers_name_the_file_and_drop_it_from_the_floors() {
@@ -173,50 +184,21 @@ fn unmatched_markers_name_the_file_and_drop_it_from_the_floors() {
 
 #[test]
 fn the_file_floor_fires_when_a_marked_file_loses_its_markers() {
-    // Removing every marker of one file drops the file and its regions.
-    expect_failure(
-        "marked-file-count-floor",
-        &rewrite("crates/builtins/src/lib.rs", "fn builtins() {}\n"),
-        &[FILE_FLOOR, REGION_FLOOR],
-    );
+    // Removing every marker line of one file drops the file and its regions; its code stays,
+    // including the file's unmarked `try_pop` drains.
+    let tree = Tree::base("marked-file-count-floor");
+    strip_marker_lines(&tree, "crates/builtins/src/lib.rs");
+    super::common::assert_classes(&tree, &[FILE_FLOOR, REGION_FLOOR]);
 }
 
 #[test]
 fn the_floors_fire_when_no_file_is_marked() {
     let tree = Tree::base("no-marked-files");
     for path in marked_paths(&tree) {
-        let kept: Vec<String> = tree
-            .read(&path)
-            .lines()
-            .filter(|line| !line.contains(BEGIN) && !line.contains(END))
-            .map(str::to_owned)
-            .collect();
-        tree.write(&path, format!("{}\n", kept.join("\n")).as_bytes());
+        strip_marker_lines(&tree, &path);
     }
     let report = super::common::assert_classes(&tree, &[FILE_FLOOR, REGION_FLOOR]);
     assert_eq!((report.regions, report.files), (0, 0));
-}
-
-fn marked_paths(tree: &Tree) -> Vec<String> {
-    let mut found = Vec::new();
-    collect_marked(tree.root(), tree.root(), &mut found);
-    found.sort();
-    found
-}
-
-fn collect_marked(root: &std::path::Path, directory: &std::path::Path, found: &mut Vec<String>) {
-    for entry in std::fs::read_dir(directory).expect("list a tree directory") {
-        let path = entry.expect("read a tree entry").path();
-        if path.is_dir() {
-            collect_marked(root, &path, found);
-        } else if std::fs::read_to_string(&path)
-            .expect("read a tree file")
-            .contains(BEGIN)
-        {
-            let relative = path.strip_prefix(root).expect("under the root");
-            found.push(relative.to_string_lossy().into_owned());
-        }
-    }
 }
 
 #[test]
@@ -261,5 +243,13 @@ fn markers_with_crlf_line_endings_are_regions() {
 fn a_final_marker_without_a_newline_is_a_marker() {
     let text = format!("// {BEGIN}\nfn render() {{}}\n// {END}");
     let report = expect_valid("marker-no-final-newline", &rewrite(BUFFER, &text));
+    assert_eq!((report.regions, report.files), (BASE_REGIONS, BASE_FILES));
+}
+
+/// An empty statement (`;;`) holds no tokens: it is not a node the parser kept raw.
+#[test]
+fn an_empty_statement_in_a_marked_file_is_not_a_finding() {
+    let text = format!("// {BEGIN}\nfn render() {{\n    ;;\n}}\n// {END}\n");
+    let report = expect_valid("marker-empty-statement", &rewrite(BUFFER, &text));
     assert_eq!((report.regions, report.files), (BASE_REGIONS, BASE_FILES));
 }
