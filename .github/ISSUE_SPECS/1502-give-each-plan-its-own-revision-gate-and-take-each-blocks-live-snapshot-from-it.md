@@ -246,3 +246,96 @@ This slice changes no rendered bit. It provides the snapshot.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 
 Dependents: #1503, #1504, #1312, #1310.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b2`, commits d1e0a69dd and 07d5c60ae)
+
+**What landed.**
+
+- `plan.rs`: `PreparedRenderPlan` holds `Arc<RevisionGate>` (built at revision 0) and its `GatePin`;
+  `take_revision_gate() -> Option<PlanRevisionGate>` hands the one handle out once.
+  `PlanRevisionGate { gate, pin }` has `revision`, `last_published`, `stamp`, `publish`.
+  `plan_revision_gate_retained_bytes()` is the `{strong, weak, gate}` allocation (mirror struct, as the
+  mailbox's). `PreparedPlanExecutor::begin_live_block(LiveSnapshot)` (default nothing).
+  `render_inner` takes `S = gate.snapshot()` after the shape and clock checks, calls
+  `begin_live_block`, renders, and returns `S` in `RenderReport::live_snapshot`; it returns a
+  crate-private `BlockFailure { error, after_snapshot }`. No render path uses `LiveSnapshot::ALL`.
+- `plan_exchange.rs`: `RealtimePlanOwner::render_active` advances the watermark to `S` after `Ok`, and
+  counts `live_block_errors` (saturating) when `after_snapshot`. `plan_exchange_at_revision(initial,
+  &mut gate, revision, config)` asserts the handle is the plan's by `Arc::ptr_eq`, publishes the
+  revision when above 0 and starts the watermark there. `RevisionTarget`, `PlanPublisher::
+  {set_revision, revision}`, `PlanReplacementReservation::set_revision` and
+  `UnadoptedCandidate::{revision, set_revision}` are gone.
+- `spsc.rs`: the revision words, I7, `store_revision`, `active_revision`, the reader's `active` index,
+  the `u64` of `MailboxWithdrawal::Withdrawn` and `MailboxPermit::commit`'s revision are gone. I7 stays
+  as a tombstone so I8 keeps its name.
+- Control plane: `PreparedRuntime::revision_gate` (taken from the prepared plan in `prepare_runtime`);
+  `ProviderEpoch::revision_gate`; the initial plan publishes its store revision through
+  `plan_exchange_at_revision`; a rebuild publishes `r` on the candidate epoch's gate after the protocol
+  commit and before `reservation.commit()`; `publish_committed_revision` publishes on
+  `newest_providers_mut()`'s gate. #1314 Amendment 1's debug assertion is gone.
+  `graph_session_plus_plan_bytes` adds `plan_revision_gate_retained_bytes()`.
+  `SharedPlanState::live_block_errors` is stored by `PlanState::render` on the error path;
+  `PlanQueries::live_block_errors()` reads it.
+- Outside the authorized list, each for a reason: `scripts/check-web-audioworklet-callgraph.py`
+  (the worklet chain failed: `render_inner` has a second `call_indirect`, `begin_live_block`, through
+  the same `Box<dyn PreparedPlanExecutor>`, and the `impl` block index in the mangled names moved from
+  `Ms2` to `Ms4`; both entries re-pinned with their reason); `docs/C_ABI_V1_QUALIFICATION.md` (one
+  sentence named the deleted revision words); `crates/capi/tests/resource_lifecycle.rs` (one exact
+  accounting assertion now adds the gate's bytes). `check-realtime-policy.sh` floors did not move
+  (96 regions in 27 files); `expected.json` did not move (graphSessionPlusPlanBytes 29842 of 35648).
+
+**Choices the spec left open.**
+
+1. `PlanRevisionGate` lives in `plan.rs`, not `latest_cell.rs` (which this attempt does not edit).
+2. A foreign handle given to `plan_exchange_at_revision` panics (documented), as `republish` does.
+3. L3 (the reader's cached `Active` index) has no object any more: the reader holds no index. Its
+   defect class (render reads the wrong plan after a lost claim) is held by the new loom model's
+   `snapshot == 1` assertion and by the capi race tests.
+4. The new loom model builds the candidate's gate at 0 and publishes the rebuild's 7 before the commit
+   and the live commit's 8 after it, which is D6's order, and checks a withdrawn candidate's gate reads 8.
+
+**Gates (all on the committed tree).**
+
+| Gate | Result |
+|---|---|
+| `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom` | 13 passed (the new model replaces `..._revision_follows_the_pending_candidate`) |
+| `cargo test --locked -p engine --features realtime-audit` | 80 + 4 + 1 + 2 passed |
+| `cargo test --locked -p control-plane --features test-support` | passed |
+| `cargo test --locked -p capi` | 81 + 3 + 11 passed (gate 3's three tests included) |
+| `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` | 0 allocations, deallocations, locks, syscalls; `"total_violations":0` |
+| `check-realtime-policy.sh`, `test-realtime-policy.sh` | ok |
+| `check-capi-abi.sh`, `check-cross-targets.sh`, `check-workspace-policy.sh` | ok / PASS / ok |
+| `cargo fmt --all -- --check`; clippy `-D warnings` over the workspace; `cargo doc -D warnings` | ok |
+| Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`) | pass after the re-pin above |
+
+**Mutation evidence.** Each row applies one defect to the committed file and reverts it; "red" names
+the tests that failed.
+
+| Defect | Red |
+|---|---|
+| `begin_live_block` receives `LiveSnapshot::ALL` | `each_block_takes_its_snapshot_from_its_own_plans_gate`, `the_direct_render_paths_take_their_own_gates_snapshot`, `a_block_the_executor_fails_after_the_snapshot_is_counted` |
+| `begin_live_block` never called | the same three |
+| snapshot (and the call) before the shape check | `a_block_that_errors_publishes_nothing`, `each_block_takes_its_snapshot_from_its_own_plans_gate` |
+| snapshot after the executor rendered (#1314 M14) | the same three as the `ALL` row; and `a_watermark_advance_names_a_block_that_applied_the_edit` (capi, release) |
+| a pre-snapshot failure counted as a live-block error | `a_block_that_errors_publishes_nothing` |
+| a post-snapshot failure not counted | `a_block_the_executor_fails_after_the_snapshot_is_counted` |
+| the initial revision not published on the initial gate | `each_block_takes_its_snapshot_from_its_own_plans_gate` |
+| ownership assert of `plan_exchange_at_revision` removed | `the_initial_revision_is_published_on_the_initial_plans_gate` |
+| a second `take_revision_gate` returns a handle | `a_plan_hands_out_its_gate_handle_once` |
+| live commit publishes on the current epoch, not the newest | `a_live_edit_on_a_pending_candidate_completes_at_the_swap` |
+| rebuild does not publish `r` on the candidate's gate | `a_live_edit_on_a_pending_candidate_completes_at_the_swap`, `a_scheduled_candidate_survives_service_until_render_adopts_it` |
+| `live_block_errors` mirror stores 0 | `the_live_block_error_count_reaches_the_any_thread_query` |
+| gate bytes not charged to the graph row | `double_live_oracle_drives_exact_and_one_below_c_caps` |
+| loom model: render snapshots the running gate after a claim | `spsc_loom_plan_mailbox_snapshot_follows_the_claimed_plan_gate` |
+| loom model: render snapshots the candidate's gate after a lost claim | the same model |
+
+**Test value, one line each.** Gate 1: a render path that reads another plan's gate or hands the
+executor the wrong `S`. Gate 2 (three rewritten tests): a withdrawn candidate that loses its revision,
+a revision on a held candidate reported early, `superseded` counted per advance. Gate 4: a claim race
+that snapshots the wrong plan. Gate 5: an errored block that goes uncounted or counts a refused one.
+The control-plane mirror test: a count that never leaves the render thread. The handle-once and
+foreign-handle tests: a second writer on a gate and a revision published on another plan's gate.
+
+**Open items.** None blocking. #1503's ceiling, #1504's drains and #1312's stamps are untouched.
