@@ -134,6 +134,14 @@ keeps its line count.
   outputs go in the Evidence. If C1 is not on `main`, this slice waits for it.
 - **D7. STREAMS.** Root names C2's cross-stream edits as D15-0 exceptions (STREAMS).
 
+### Root Amendment 1 (2026-10-11): gate 5 and `.llvmbc`
+
+Authority: root decision under the owner's delegation, after the #1441 attempt-1 verdict (SP-1) and
+an adversarial review (ACCEPT WITH CHANGES). Root adopted the review's text verbatim. Gate 5 carries
+the same text as #1441 gate 6, because D4 edits comments in shipped crates: any byte change to a
+source file changes the `.llvmbc` section of the `libcapi.a` members and nothing else. Marked
+"(root Amendment 1)" in place.
+
 ## Authorized paths
 
 - `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` (deleted). Stream J
@@ -193,9 +201,17 @@ keeps its line count.
      `python3 -B scripts/test-script-reachability.py`;
    - `bash scripts/check-workspace-policy.sh`;
    - `cargo fmt --all -- --check`.
-5. **Shipped artifacts unchanged.** Every edited comment keeps its line count, so
-   `artifact-identity` reports the worklet module UNCHANGED, and the `libcapi` digests are
-   identical, as A1's gate 6 measures them.
+5. **Shipped artifacts unchanged.** Every edited comment keeps its line count. The
+   `artifact-identity` job reports the worklet module UNCHANGED. PR evidence, built as A1's gate 6
+   builds them (parent twice first, then the change, in one checkout):
+   - the sha256 of `libcapi.so` is identical;
+   - `libcapi.a` holds the same members in the same order;
+   - each member is byte-identical after `objcopy --remove-section=.llvmbc`.
+
+   `.llvmbc` is rustc's embedded bitcode. It carries each source file's checksum, so any byte
+   change to a source file changes it, and no linker copies it into a shipped image. Any other
+   difference fails. There is no fallback: if a marker would move a line, D5 is skipped and B2b-1
+   places it. (root Amendment 1, SP-1)
 6. **CI.** The batch's `qualification` run shows `audit-native` running the tool, and `lint`
    running no awk gate.
 7. **GitHub.** After the batch push, C1's script exits 0 on `<base>..<batch tip>`, and its

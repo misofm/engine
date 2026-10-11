@@ -302,6 +302,14 @@ this slice's first commit, after C2, and is judged in this slice's verdict.
 change that restores the capacity bound or the minimum form is refused, which no host-web test
 can show on today's thread layout (no producer runs during the call).
 
+### Root Amendment 1 (2026-10-11): gate 5 and `.llvmbc`
+
+Authority: root decision under the owner's delegation, after the #1441 attempt-1 verdict (SP-1) and
+an adversarial review (ACCEPT WITH CHANGES). Root adopted the review's insertion verbatim. Gate 5
+allows a difference in the `.llvmbc` section of the `libcapi.a` members, because rustc's embedded
+bitcode carries each source file's checksum, so any byte change to a source file changes it, and no
+linker copies it into a shipped image. Marked "(root Amendment 1)" in place.
+
 ## Authorized paths
 
 - `tools/realtime-policy/**`
@@ -359,7 +367,8 @@ can show on today's thread layout (no producer runs during the call).
 5. **Shipped artifacts.** Markers that replace blank lines move nothing. The builtins-compiler
    markers and the restructure move lines in that file. So `artifact-identity` may report ARTIFACT
    CHANGED, and the `libcapi` digests may differ, only in `core::panic::Location` line fields and
-   line tables (root's ruling on the second review's MAJOR-8; this is the one marker commit it
+   line tables and the `.llvmbc` section of the `libcapi.a` members (root Amendment 1, SP-1;
+   root's ruling on the second review's MAJOR-8; this is the one marker commit it
    names). PR evidence, as the stream-J2 batch verdict made it: the function-level comparison of
    the base and head named twins shows no other difference, the render closure is
    byte-identical, and every rendered-digest gate passes with the base's pins (no PCM moved). Any

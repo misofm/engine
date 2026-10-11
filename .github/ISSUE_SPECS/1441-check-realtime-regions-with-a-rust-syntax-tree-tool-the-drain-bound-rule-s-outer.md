@@ -54,8 +54,12 @@ three floor messages are `:1408`, `:1410` and `:1414`.
   - the closure of `core::array::from_fn` or `std::array::from_fn`.
 
   `while` and `loop` around a bounded drain are refused. The loop and the slice parameter's `fn`
-  signature must lie in the pop's region (B1a-D1). This row is `main`'s rule as it stands. #1418
-  (Amendment 1) adds "and selects a different queue" to it.
+  signature must lie in the pop's region (B1a-D1). This row is `main`'s rule as it stands. The
+  tool's `<bound>` is stricter than the awk's `path`, which also accepts zero-argument method
+  calls and bracket indexes (`0..self.controls.len()`, `0..a[i]`). Both are refused: they run code
+  the tool cannot see. This over-refusal is accepted. Widening it needs a ruling. (root Amendment 1,
+  SP-4; test value: red if the outer bound grammar accepts a method call or an index without a
+  ruling.) #1418 (Amendment 1) adds "and selects a different queue" to it.
   - **In a B1a-D8b per-queue form,** the pass loop and every loop between it and the set loop
     must be one of these finite forms. `for _ in 0..passes`, with `passes` the `1 + Σ` sum of the
     counters, is the `0..<bound>` form. The loops that enclose the set loop are the drain's outer
@@ -63,8 +67,11 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - **D2. Attributes and items** (`:100-102`, `:214-217`, `:263-265`).
   - A count binding with a `cfg`-family attribute (`cfg`, `cfg_attr`, or a path ending in either)
     is refused.
-  - A `static`, `const` or `use` in the region that can name `<count>` (a glob `use` included) is
-    refused, wherever it sits in the block.
+  - An item of any kind in the region that declares `<count>`, its alias source or the slice
+    parameter as its name (`const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`,
+    `trait`, `mod`), or a `use` that can name it (a glob `use` included), is refused, wherever it
+    sits in the block. A unit struct with comparison and `SubAssign` impls redirects an alias as a
+    `const` does. (root Amendment 1, NEW-1)
 - **D3. Constructors** (`:115-117`, `:290-291`, `:370-371`, `:384`).
   - `from_fn`, `repeat_with` and `successors`, path-qualified or bare, are refused anywhere in a
     region. `core::array::from_fn` and `std::array::from_fn` are the exceptions; `array::from_fn`
@@ -125,6 +132,55 @@ three floor messages are `:1408`, `:1410` and `:1414`.
     passes, stop and report it.
   - New: a region opened inside a loop's body, around an otherwise counted drain (refused, B1a-D1
     with D1's region test); the D6 twins (accepted).
+  - root Amendment 1 adds the cases named in D2 (`unit-struct-shadows-the-alias-source`), D9
+    (`region-ends-in-a-deeper-block`, and the rewritten `boundary-spans-two-blocks` and
+    `boundary-only-end-splits`) and D10 (four cases), each with its mutation (gate 4).
+
+- **D9. A region ends where it can hold the rest of its block** (amends A2-D1, #1439, which is
+  closed; root Amendment 1, SP-2).
+  - END's innermost container must be BEGIN's innermost container or one that encloses it.
+  - A region whose END sits in a container that does not enclose BEGIN's is refused (boundary
+    class), whatever it holds. It would end inside a block that continues past END, and an item
+    after END would then name a binding of the region for the whole block unseen.
+  - BEGIN inside an `impl` with END after the `impl` (`live.rs:231`,
+    `transient-shaper/src/lib.rs:613`) stays accepted.
+  - The macro-token-tree refusal is unchanged.
+  - The case `boundary-spans-two-blocks` becomes refused, and `boundary-only-end-splits` expects
+    both findings (a superseded case is rewritten in the same PR).
+  - The awk gate keeps this hole until C2. Both gates run, so the tool's refusal covers it.
+  - New case `region-ends-in-a-deeper-block` (the first verdict's probe, refused). Test value: red
+    if a region may end inside a block it does not wholly hold, which lets an item after END
+    shadow the count.
+- **D10. Macros and attributes that can declare an item** (closes a limit the first verdict found;
+  root Amendment 1, SP-3).
+  - From the first binding the drain rule reads for a pop (the count, its alias source, or the
+    start of the slice parameter's `fn` body) to the end of the innermost bounding loop, these
+    refuse the drain:
+    - every macro invocation in statement position (`name!(..);`, `name![..];`, `name! {..}`) or
+      item position;
+    - every item that carries an attribute other than `cfg`, `allow`, `expect`, `warn`, `deny`,
+      `forbid` or `doc`.
+  - A `macro_rules!` item name is not hygienic, and a derive or attribute macro emits items beside
+    its item: either can declare a `const`, `static` or unit struct that shadows the binding for
+    the whole block.
+  - `debug_assert!` is exempt while B2a-D2 trusts it (no file under the roots shadows it).
+    Untrusted, it is refused like any other macro.
+  - Macros in expression position are not in this rule: they cannot declare an item in the
+    enclosing block. (A trailing `m!()` with no semicolon is an expression and cannot expand to an
+    item.)
+  - The #1440 D8b rule (root Amendment 1) is unchanged.
+  - New cases: `item-macro-shadows-the-count` (`shadow!();`, refused; test value: red if a
+    statement macro in the drain's span is not refused);
+    `braced-item-macro-shadows-the-slice-parameter` (`shadow! {}` against a slice parameter,
+    refused; red if braced statement macros, or the span from a slice parameter's `fn` body, are
+    missed); `derive-on-an-item-in-the-drain` (refused; red if an item that carries a derive or
+    attribute macro is not refused); `untrusted-debug-assert-in-the-loop` (`macro_rules!
+    debug_assert` in the file plus `debug_assert!(true);` in a counted loop, refused; red if the
+    `debug_assert!` exemption ignores B2a-D2's trust state).
+  - Production, measured by a grep of the five real drains and `poll_meters`: the only statement
+    macro in a span is `debug_assert!` at `crates/graph/src/runtime.rs:903`; `live.rs:376`
+    `matches!` is in expression position; there are no items in any drain span. The implementer
+    re-measures with the tool.
 
 ## Authorized paths
 
@@ -172,12 +228,29 @@ three floor messages are `:1408`, `:1410` and `:1414`.
    - read an enclosing loop outside the region as an outer loop (B1a-D1): the region-in-a-loop
      case passes;
    - drop the constructor check: `from_fn` and `repeat_with`;
-   - any mutation that B1a moved here (B1a gate 4).
+   - any mutation that B1a moved here (B1a gate 4);
+   - (root Amendment 1) accept END in any container: `region-ends-in-a-deeper-block`;
+   - (root Amendment 1) require the same container: `a_region_may_span_the_end_of_an_impl`, and
+     the real tree then fails at `live.rs:231` and `transient-shaper/src/lib.rs:613`;
+   - (root Amendment 1) restrict the item scan to `static`, `const` and `use`:
+     `unit-struct-shadows-the-alias-source`;
+   - (root Amendment 1) allow statement macros: `item-macro-shadows-the-count` and
+     `braced-item-macro-shadows-the-slice-parameter`;
+   - (root Amendment 1) always exempt `debug_assert!`: `untrusted-debug-assert-in-the-loop`;
+   - (root Amendment 1) refuse `debug_assert!` too: the base route twin, and the real tree then
+     fails at `crates/graph/src/runtime.rs:903`.
 5. **Run time (PR evidence).** As B1a's gate 5.
 6. **Shipped artifacts unchanged.** D5's markers replace blank lines, so no line moves. The
-   `artifact-identity` job reports the worklet module UNCHANGED, and the `libcapi` digests are
-   identical, as A1's gate 6 measures them. There is no fallback: if a marker would move a line,
-   D5 is skipped and B2b-1 places it.
+   `artifact-identity` job reports the worklet module UNCHANGED. PR evidence, built as A1's gate 6
+   builds them (parent twice first, then the change, in one checkout):
+   - the sha256 of `libcapi.so` is identical;
+   - `libcapi.a` holds the same members in the same order;
+   - each member is byte-identical after `objcopy --remove-section=.llvmbc`.
+
+   `.llvmbc` is rustc's embedded bitcode. It carries each source file's checksum, so any byte
+   change to a source file changes it, and no linker copies it into a shipped image. Any other
+   difference fails. There is no fallback: if a marker would move a line, D5 is skipped and B2b-1
+   places it. (root Amendment 1, SP-1)
 7. `cargo fmt --all -- --check`,
    `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
    `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh` and
@@ -208,6 +281,26 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+### Root Amendment 1 (2026-10-11): the first verdict's spec problems
+
+Authority: root decisions under the owner's delegation, after the attempt-1 verdict PASS
+(`/home/bl/misofm/submix-verdicts/1441-attempt1.md`: SP-1 to SP-4) and an adversarial review of
+root's drafts (ACCEPT WITH CHANGES). Root adopted the review's texts verbatim. Each is placed where
+it belongs and marked "(root Amendment 1)":
+
+- **SP-1** Gate 6 compares `libcapi.a` members after removing `.llvmbc`. Only `.llvmbc` differs
+  between the parent and D5's markers; the `.so` and the worklet module are identical.
+- **SP-2** D9 (END's container encloses BEGIN's), not "same block", because that would refuse
+  `live.rs:231` and `transient-shaper/src/lib.rs:613`.
+- **NEW-1** D2's item scan covers every item kind, because a unit struct with comparison and
+  `SubAssign` impls redirects an alias source as a `const` does. It lands before #1446 deletes the
+  awk.
+- **SP-3** D10 (statement and item macros, and attributes that emit items).
+- **SP-4** D1 keeps the refusal of `0..x.len()` and `0..a[i]`.
+- Attempt 2 also closes the first verdict's MINOR-1 (document the `&mut` iterator-in-field or
+  local limit in the tool's documentation), MINOR-2 (state the remaining limits) and NIT-1 (gate 6
+  evidence: only `.llvmbc` differs).
 
 ## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`, base `1e03edf19`)
 
@@ -359,3 +452,9 @@ every one, except where marked *. The spec's named cases are first.
 - Root: deviation 1 (`.len()` and index bounds) and deviation 8 (`libcapi.a` bytes).
 - STREAMS: the hot-file row to "J tool slice B1b", and the floor message text, are root's edits.
 - B2a: the closure and macro transparency and its two superseded B1a tests, as B1a's record says.
+
+## Attempt record (attempt 2 placement, 2026-10-11)
+
+Coordinator's choice, recorded with root Amendment 1: D10 (SP-3) is implemented in this issue's
+attempt 2, not in #1442. B2a-D2's trust state (`src/drain/shadow.rs`, `Facts::of(file,
+trust_debug_assert)`) already exists on the branch (`bfed03af6`), so D10 needs no forward reference.

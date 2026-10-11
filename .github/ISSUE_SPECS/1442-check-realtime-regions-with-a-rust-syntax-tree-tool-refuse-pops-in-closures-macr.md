@@ -117,7 +117,12 @@ the self-test's lines from `:440` on are one lower.
 - **D3. Function values.**
   - A path expression whose last segment is `try_pop` is allowed only in two positions:
     - as the callee of a call (`Consumer::try_pop(control)`);
-    - as the only argument of a `.map(..)` method call (`live.rs:366`, #1426 D2's form).
+    - as the only argument of a `.map(..)` method call whose receiver is `<fields>.as_mut()`,
+      where `<fields>` is an identifier (or `self`) followed by `.field` steps (`live.rs:366`,
+      #1426 D2's form). `Option::as_mut` yields at most one value, so the pop runs at most once
+      per evaluation and is judged by the loops around it. On any other receiver, `.map` may be an
+      iterator adapter that pops once per item with no count, or without end through a
+      `try_pop(&self)` and `iter::repeat`. (root Amendment 1, iv)
   - Any other use is refused, for example a `let pop = Consumer::try_pop;`.
 - **D4. The allow-list changes.** B1a-D4 makes `Expr::Closure` and `Expr::Macro` transparent.
   D1 and D2 replace that with refusal on a pop's path. The rest of B1a-D4 is unchanged.
@@ -126,13 +131,23 @@ the self-test's lines from `:440` on are one lower.
     with its own marker lines removed, so A1-D6 does not refuse nested markers.
   - Split `v1302/a2/rc/shapes.rs` into its three shapes.
   - The expected class sets are stated here, not taken from the tool's output:
-    - every probe that the TSV shows refused with the drain class: {drain};
+    - every probe that the TSV shows refused with the drain class: {drain}, except
+      `v1302/a3/t/u19`, which is bounded (the body's `let remaining = 5;` follows the decrement
+      and shadows only the rest of the body) and is committed as accepted. The awk over-refuses
+      it. (root Amendment 1, i)
+    - `v1302/a3/v/v14_len_outer` and `v14b_len_outer` are committed as refused, expecting
+      {drain} (B1b-D1's `<bound>`). Gate 3 names them as differences from the TSV. Test value:
+      red if the outer bound grammar accepts a method call or an index without a ruling. (root
+      Amendment 1, SP-4)
     - `v1302/a3/t/u08`: {forbidden-body, drain};
     - `v1302/a3/t/u13`: {unsafe, drain};
     - `v1302/a3/t/u03`: committed in a valid form (`//` in place of `//!`), expecting {drain};
     - a06, a07, b02, n09, e11: {drain} (D1);
     - e07: {drain} (D2).
-  - The 33 bounded probes become accepted cases. A probe whose shape the base tree or a B1a or B1b case
+  - The corpus is **88 refused and 32 accepted (120 files)**: refused are 84 shapes plus 6 newly
+    refused, minus 3 duplicates, minus u19, plus v14 and v14b; accepted are 33, minus v14 and v14b,
+    plus u19. (root Amendment 1, ii)
+  - The 33 bounded probes become accepted cases, except v14 and v14b (above), and u19 is added. A probe whose shape the base tree or a B1a or B1b case
     already holds is not committed twice. The Evidence maps it to the case that holds it.
   - Not committed here:
     - a08, which B2b-2 commits with its call rule;
@@ -148,8 +163,33 @@ the self-test's lines from `:440` on are one lower.
     valid drain unchanged (refused at `:284`'s line, D2);
   - `Consumer::try_pop(control)` in a counted loop (accepted, D3);
   - `self.control.as_mut().map(Consumer::try_pop)` in a counted loop (accepted, D3).
+  - (root Amendment 1, i) `u19-swapped`: u19 with the inner `let mut remaining = 5;` before the
+    decrement (refused). Test value: red if the resolver accepts a decrement that a body `let`
+    has rebound, which would make u19's acceptance blind to order.
+  - (root Amendment 1, iv) `function-value-in-map-on-an-iterator`
+    (`qs.iter_mut().map(Consumer::try_pop).count()`, refused). Test value: red if
+    `.map(<path>)` is allowed on a receiver other than `<fields>.as_mut()`.
+  - (root Amendment 1, iv) `function-value-in-map-on-repeat`
+    (`std::iter::repeat(q).map(Queue::try_pop).take_while(Result::is_ok).count()`, refused).
+    Test value: red if the restriction is a blacklist of collection receivers, not an allow-list.
 - **D7. Documentation.** The drain rule's module documentation drops the closure,
   function-value and macro limits from B1b-D4, states D1 to D3, and states D2's limit.
+
+### Root Amendment 1 (2026-10-11): the attempt-1 open items
+
+Authority: root decisions under the owner's delegation, after the #1441 attempt-1 verdict and an
+adversarial review (ACCEPT WITH CHANGES; root adopted its texts verbatim). Each is placed where it
+belongs and marked "(root Amendment 1)":
+
+- **i** u19 is accepted, with D5's text, and `u19-swapped` is added (refused).
+- **ii** The three duplicates (e02, e03, e06) are not committed. The corpus is 88 refused and 32
+  accepted (120 files).
+- **iii** Gate 5's `.map(<path>)` mutation is exempt from "the real tree still passes".
+- **iv** D3 allows `.map(<path>)` only on a `<fields>.as_mut()` receiver, with its Hazards line,
+  the two D6 cases and the gate 5 mutation. `Consumer::try_pop` takes `&mut self` today, so the
+  coordinator's `repeat` bypass does not compile with that type; the rule still matched by name
+  and would accept a `try_pop(&self)` type or a per-item pop through `qs.iter_mut()`.
+- **SP-4** v14 and v14b are committed as refused, expecting {drain} (B1b-D1's `<bound>`).
 
 ## Authorized paths
 
@@ -167,6 +207,8 @@ the self-test's lines from `:440` on are one lower.
 - **The probe sources are in the bundle.** Copy their content into case fixtures. Do not read
   them from `/tmp`.
 - **Over-refusal is acceptable, a false pass is not.**
+- A type with its own `as_mut` that returns an iterator would let `.map` pop once per item; the
+  tool cannot see types. No `fn as_mut` is defined in the workspace. (root Amendment 1, iv)
 - As in A1: the awk gate scans the tool's own sources until C2.
 
 ## Objective gates
@@ -177,7 +219,7 @@ the self-test's lines from `:440` on are one lower.
    every D5 and D6 case.
 3. **Parity (PR evidence).** A throwaway script outside the repository runs `main`'s awk gate
    (gawk) and the tool on each D5 probe. The verdicts agree with the TSV, except for the D1 and D2
-   probes and u03's repaired form. Name each difference.
+   probes, u03's repaired form, u19 and v14/v14b (root Amendment 1). Name each difference.
 4. **Fuzz (PR evidence).** Run the tool's drain rule over the ten fuzz files: 3767 regions are
    refused and 800 are accepted.
 5. **Mutations (PR evidence).** Apply each alone. Each turns red the named cases, and the real
@@ -187,7 +229,11 @@ the self-test's lines from `:440` on are one lower.
    - `debug_assert` always taken at its word: e07, the cross-file case and the `use` case;
    - the shadow check limited to the file of the drain: the cross-file case and the `use` case;
    - any `try_pop` path value allowed: the `let pop` case;
-   - `.map(<path>)` refused: the accepted `.map` case.
+   - `.map(<path>)` refused: turns the accepted `.map` case red. This mutation is exempt from
+     "the real tree still passes": the real tree (`live.rs:366`) and the base tree hold the same
+     form, so their failure is further evidence that the mutation bites. (root Amendment 1, iii)
+   - any `.map` receiver: turns `function-value-in-map-on-an-iterator` and
+     `function-value-in-map-on-repeat` red; the real tree passes. (root Amendment 1, iv)
 6. **Shipped artifacts unchanged.** As A1's gate 6.
 7. `cargo fmt --all -- --check`,
    `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and
