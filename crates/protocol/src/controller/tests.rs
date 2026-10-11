@@ -1533,6 +1533,54 @@ fn edit_rejections_use_typed_operation_diagnostics_not_protocol_failure() {
     assert_eq!(decoded.diagnostics[0].operation_index, Some(0));
 }
 
+/// #1394 D4: a per-edit ramp length above one second of the committed rate is refused on the wire
+/// as `session.edit.ramp_out_of_range` at that edit's `edits[i]` path, and nothing commits.
+///
+/// Red if the controller maps `RampOutOfRange` to another code (the typed error is covered by the
+/// store's own test, the wire spelling by this one only), reports the wrong operation index or
+/// path, or commits the refused transaction.
+#[test]
+fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
+    let mut controller = controller(4, 1);
+    let fader = controller.session().compiled().normalized_model().tracks[0]
+        .fader
+        .clone();
+    let response = controller.process(ControllerRequest {
+        request_id: id(1),
+        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+        canonical_bytes: b"ramp-out-of-range",
+        command: ControlCommand::SessionTransactionApply {
+            edits: &[
+                SessionEdit::SetSessionId {
+                    session_id: session::StableId::parse("renamed").expect("stable ID"),
+                },
+                SessionEdit::SetTrackFader {
+                    track_id: session::StableId::parse("vocal").expect("stable ID"),
+                    fader,
+                    ramp_samples: Some(u32::MAX),
+                },
+            ],
+        },
+    });
+    assert_eq!(response.status, StatusCode::ValidationFailed);
+    let decoded = ProtocolCodec::default()
+        .decode_non_ok_payload(response.payload(), 2)
+        .expect("typed edit error");
+    assert_eq!(decoded.omitted_diagnostics, 0);
+    assert_eq!(decoded.diagnostics.len(), 1);
+    let diagnostic = &decoded.diagnostics[0];
+    assert_eq!(diagnostic.code, "session.edit.ramp_out_of_range");
+    assert_eq!(
+        diagnostic.path,
+        vec![
+            crate::PathSegment::Field("edits".to_owned()),
+            crate::PathSegment::Index(1),
+        ]
+    );
+    assert_eq!(diagnostic.operation_index, Some(1));
+    assert_eq!(controller.session().revision(), SessionRevision(7));
+}
+
 /// Decision 12's retired and refused codes, one conformance row each (#1094): every row's frame,
 /// processed whole by an endpoint over `conformance::console_session_fixture()`, is answered with
 /// the row's status and diagnostic, and a refusing row commits nothing and emits no event -- the

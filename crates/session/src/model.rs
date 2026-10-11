@@ -995,7 +995,7 @@ closed_tokens! {
     ///
     /// The wire codes are explicit (decision 12). `1` (`simd1`) and `3` (`simd2`) are retired:
     /// refused, never reallocated, and their spellings are unknown tokens.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum RackName explicit {
         /// A track's inserts. It kept the retired `dynamic` rack's code.
         Inserts = 2 => "inserts",

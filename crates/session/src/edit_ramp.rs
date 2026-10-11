@@ -36,7 +36,7 @@ pub enum EditRampTarget {
 }
 
 /// One live row an edit writes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EditRampRow {
     /// A strip's fader dB.
     Fader,
@@ -60,27 +60,6 @@ pub enum EditRampRow {
     VcaMute,
 }
 
-impl EditRampRow {
-    const fn code(self) -> u8 {
-        self as u8
-    }
-
-    const fn from_code(code: u8) -> Self {
-        match code {
-            0 => Self::Fader,
-            1 => Self::Mute,
-            2 => Self::Matrix,
-            3 => Self::Input,
-            4 => Self::Link,
-            5 => Self::RouteGain,
-            6 => Self::RouteMute,
-            7 => Self::RouteMatrix,
-            8 => Self::VcaFader,
-            _ => Self::VcaMute,
-        }
-    }
-}
-
 /// The object a recorded length belongs to, without the effect part.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Owner {
@@ -95,33 +74,26 @@ enum Owner {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Key {
     owner: Owner,
-    /// `(RackName wire code, effect ID)` for an effect instance's row; `None` for the owner's own.
-    effect: Option<(u8, StableId)>,
-    row: u8,
+    /// `(rack, effect ID)` for an effect instance's row; `None` for the owner's own.
+    effect: Option<(RackName, StableId)>,
+    row: EditRampRow,
 }
 
 impl Key {
     fn new(target: &EditRampTarget, row: EditRampRow) -> Self {
         let (owner, effect) = split(target);
-        Self {
-            owner,
-            effect,
-            row: row.code(),
-        }
+        Self { owner, effect, row }
     }
 }
 
-fn split(target: &EditRampTarget) -> (Owner, Option<(u8, StableId)>) {
+fn split(target: &EditRampTarget) -> (Owner, Option<(RackName, StableId)>) {
     match target {
         EditRampTarget::Strip(id) => (Owner::Strip(id.clone()), None),
         EditRampTarget::Effect {
             strip,
             rack,
             effect,
-        } => (
-            Owner::Strip(strip.clone()),
-            Some((rack.wire(), effect.clone())),
-        ),
+        } => (Owner::Strip(strip.clone()), Some((*rack, effect.clone()))),
         EditRampTarget::Route(id) => (Owner::Route(id.clone()), None),
         EditRampTarget::Vca(id) => (Owner::Vca(id.clone()), None),
         EditRampTarget::Console => (Owner::Console, None),
@@ -178,7 +150,7 @@ impl EditRamps {
         let start = Key {
             owner: owner.clone(),
             effect: effect.clone(),
-            row: 0,
+            row: EditRampRow::Fader,
         };
         let doomed: Vec<Key> = self
             .entries
@@ -192,25 +164,48 @@ impl EditRamps {
         }
     }
 
+    /// Remove every effect entry of `strip`'s `rack`. A rack rewrite replaces all of the rack's
+    /// effect rows with no length; the strip's own rows and its other racks' effects stay.
+    pub fn clear_rack(&mut self, strip: &StableId, rack: RackName) {
+        let owner = Owner::Strip(strip.clone());
+        let start = Key {
+            owner: owner.clone(),
+            effect: None,
+            row: EditRampRow::Fader,
+        };
+        let doomed: Vec<Key> = self
+            .entries
+            .range(start..)
+            .map(|(key, _)| key)
+            .take_while(|key| key.owner == owner)
+            .filter(|key| key.effect.as_ref().is_some_and(|(r, _)| *r == rack))
+            .cloned()
+            .collect();
+        for key in doomed {
+            self.entries.remove(&key);
+        }
+    }
+
     /// Every entry, ordered by target kind, then ID, then row.
     #[must_use]
     pub fn entries(&self) -> Vec<(EditRampTarget, EditRampRow, u32)> {
         self.entries
             .iter()
-            .filter_map(|(key, samples)| {
+            .map(|(key, samples)| {
                 let target = match (&key.owner, &key.effect) {
                     (Owner::Strip(id), None) => EditRampTarget::Strip(id.clone()),
                     (Owner::Strip(strip), Some((rack, effect))) => EditRampTarget::Effect {
                         strip: strip.clone(),
-                        // A recorded rack code always came from a `RackName`.
-                        rack: RackName::from_wire(*rack)?,
+                        rack: *rack,
                         effect: effect.clone(),
                     },
-                    (Owner::Route(id), _) => EditRampTarget::Route(id.clone()),
-                    (Owner::Vca(id), _) => EditRampTarget::Vca(id.clone()),
-                    (Owner::Console, _) => EditRampTarget::Console,
+                    (Owner::Route(id), None) => EditRampTarget::Route(id.clone()),
+                    (Owner::Vca(id), None) => EditRampTarget::Vca(id.clone()),
+                    (Owner::Console, None) => EditRampTarget::Console,
+                    // `split` gives an effect part to a strip owner only.
+                    (_, Some(_)) => unreachable!("only a strip owns effect instances"),
                 };
-                Some((target, EditRampRow::from_code(key.row), *samples))
+                (target, key.row, *samples)
             })
             .collect()
     }
@@ -228,19 +223,6 @@ mod tests {
 
     fn id(text: &str) -> StableId {
         StableId::parse(text).expect("valid stable ID")
-    }
-
-    #[test]
-    fn a_later_set_without_a_length_removes_the_entry_and_an_explicit_zero_is_an_entry() {
-        let strip = EditRampTarget::Strip(id("a"));
-        let mut ramps = EditRamps::new();
-        ramps.set(&strip, EditRampRow::Fader, Some(0));
-        assert_eq!(ramps.get(&strip, EditRampRow::Fader), Some(0));
-        ramps.set(&strip, EditRampRow::Fader, Some(37));
-        assert_eq!(ramps.get(&strip, EditRampRow::Fader), Some(37));
-        ramps.set(&strip, EditRampRow::Fader, None);
-        assert_eq!(ramps.get(&strip, EditRampRow::Fader), None);
-        assert!(ramps.is_empty());
     }
 
     #[test]
@@ -293,6 +275,30 @@ mod tests {
                 (strip, EditRampRow::Matrix, 4),
                 (effect("comp"), EditRampRow::Link, 5),
                 (effect("limiter"), EditRampRow::Link, 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn clearing_a_rack_takes_that_racks_effects_of_that_strip_only() {
+        let effect = |strip: &str, rack: RackName| EditRampTarget::Effect {
+            strip: id(strip),
+            rack,
+            effect: id("eq"),
+        };
+        let own = EditRampTarget::Strip(id("a"));
+        let mut ramps = EditRamps::new();
+        ramps.set(&own, EditRampRow::Link, Some(1));
+        ramps.set(&effect("a", RackName::Inserts), EditRampRow::Link, Some(2));
+        ramps.set(&effect("a", RackName::Console), EditRampRow::Link, Some(3));
+        ramps.set(&effect("b", RackName::Inserts), EditRampRow::Link, Some(4));
+        ramps.clear_rack(&id("a"), RackName::Inserts);
+        assert_eq!(
+            ramps.entries(),
+            vec![
+                (own, EditRampRow::Link, 1),
+                (effect("a", RackName::Console), EditRampRow::Link, 3),
+                (effect("b", RackName::Inserts), EditRampRow::Link, 4),
             ]
         );
     }

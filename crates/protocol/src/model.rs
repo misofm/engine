@@ -558,7 +558,8 @@ impl SessionEdit {
 
 /// Record into `ramps` the rows `edit` wrote and the length it gave them (#1394 D3): the last
 /// edit that writes a `(target, row)` decides it, so a later edit without a length removes an
-/// earlier one's. An upsert rewrites its target's rows with no length and clears them.
+/// earlier one's. An upsert, a removal or a rack edit that replaces an effect rewrites the
+/// target's rows with no length and clears them.
 fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
     let length = edit.ramp_samples();
     let mut write = |target: EditRampTarget, rows: &[EditRampRow]| {
@@ -626,7 +627,74 @@ fn record_edit_ramps(ramps: &mut EditRamps, edit: &SessionEdit) {
         SessionEdit::UpsertVca { vca } => {
             ramps.clear_target(&EditRampTarget::Vca(vca.id.clone()));
         }
-        _ => {}
+        // A removal ends the target's rows, and only an upsert (above) re-creates it, so the
+        // removal clears too: no entry outlives the thing it describes.
+        SessionEdit::RemoveTrack { track_id } => {
+            ramps.clear_target(&EditRampTarget::Strip(track_id.clone()));
+        }
+        SessionEdit::RemoveSubmix { submix_id } => {
+            ramps.clear_target(&EditRampTarget::Strip(submix_id.clone()));
+        }
+        SessionEdit::RemoveRoute { route_id } => {
+            ramps.clear_target(&EditRampTarget::Route(route_id.clone()));
+        }
+        SessionEdit::RemoveVca { vca_id } => {
+            ramps.clear_target(&EditRampTarget::Vca(vca_id.clone()));
+        }
+        // A rack edit that replaces an effect or a whole rack rewrites the effects' link modes
+        // with no length, as an upsert does for its strip.
+        SessionEdit::SetTrackRack {
+            track_id,
+            rack_name,
+            ..
+        } => ramps.clear_rack(track_id, *rack_name),
+        SessionEdit::PutTrackEffect {
+            track_id,
+            rack_name,
+            effect,
+            ..
+        } => ramps.clear_target(&EditRampTarget::Effect {
+            strip: track_id.clone(),
+            rack: *rack_name,
+            effect: effect.id.clone(),
+        }),
+        SessionEdit::RemoveTrackEffect {
+            track_id,
+            rack_name,
+            effect_id,
+        } => ramps.clear_target(&EditRampTarget::Effect {
+            strip: track_id.clone(),
+            rack: *rack_name,
+            effect: effect_id.clone(),
+        }),
+        // Every other edit writes no row that `EditRamps` keys: a reorder, an identity, quality,
+        // bypass, sidechain or parameter edit leaves the link mode as it was, and a route's
+        // endpoint edit leaves its gain, mute and matrix. The list is exhaustive on purpose: a
+        // new edit must be classified here, not fall into a default.
+        SessionEdit::SetSessionId { .. }
+        | SessionEdit::SetSampleRateHz { .. }
+        | SessionEdit::SetQuantumFrames { .. }
+        | SessionEdit::SetRenderProfile { .. }
+        | SessionEdit::SetOutputProfile { .. }
+        | SessionEdit::UpsertSource { .. }
+        | SessionEdit::RemoveSource { .. }
+        | SessionEdit::SetSourceContent { .. }
+        | SessionEdit::SetTrackSourceAssignment { .. }
+        | SessionEdit::SetTrackEffectOrder { .. }
+        | SessionEdit::SetEffectIdentity { .. }
+        | SessionEdit::SetEffectQuality { .. }
+        | SessionEdit::SetEffectBypass { .. }
+        | SessionEdit::SetEffectSidechain { .. }
+        | SessionEdit::UpsertEffectParam { .. }
+        | SessionEdit::RemoveEffectParam { .. }
+        | SessionEdit::UpsertOutput { .. }
+        | SessionEdit::RemoveOutput { .. }
+        | SessionEdit::SetRouteSource { .. }
+        | SessionEdit::SetRouteDestination { .. }
+        | SessionEdit::UpsertAutomation { .. }
+        | SessionEdit::RemoveAutomation { .. }
+        | SessionEdit::SetAutomationTarget { .. }
+        | SessionEdit::SetAutomationSegments { .. } => {}
     }
 }
 

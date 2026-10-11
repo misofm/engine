@@ -86,7 +86,11 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   The last edit in the transaction that writes a `(target, row)` decides it: `Some(n)` sets the
   entry, `None` removes it. `UpsertTrack`, `UpsertSubmix`, `UpsertRoute` and `UpsertVca` carry no
   field and remove every entry for their target (and, for a strip, its effects), because they
-  rewrite those rows with no length.
+  rewrite those rows with no length. So do the edits that rewrite or end a keyed target the same
+  way (attempt 2, after verdict M1): `RemoveTrack`, `RemoveSubmix`, `RemoveRoute` and `RemoveVca` clear
+  their target; `PutTrackEffect` and `RemoveTrackEffect` clear their `Effect` target; `SetTrackRack`
+  clears every `Effect` entry of that strip and rack. The match over `SessionEdit` is exhaustive, so
+  a new edit must be classified.
 - **D4. Transaction.** `prepare_transaction` builds `EditRamps` beside the candidate model and
   stores it in `PreparedSessionTransaction`, exposed as `edit_ramps(&self) -> &EditRamps`. A value
   above the candidate's `sample_rate_hz` (1000 ms, the bound of #1054 D1) refuses the transaction
@@ -184,7 +188,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
    (`bench_support::alloc` thread counters, process statics warmed).
 7. **Commands:**
    - `cargo test --locked -p session`, `cargo test --locked -p protocol --features test-support`,
-     `cargo test --locked -p host-core --features test-support --test live_delta`,
+     `cargo test --locked -p host-core --features test-support,control-provider --test live_delta`,
      `cargo test --locked -p capi`, `cargo test --locked -p conformance`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `cargo build --locked --release -p audit && ./target/release/audit capi` and
@@ -256,10 +260,12 @@ test and doc (`7cf89f67e`), one more `EditRamps` unit test (`5a18bddde`), and th
    `crates/capi/tests/{design_bound_cache,plan_swap_race,resource_lifecycle}.rs`, `tools/audit/src/capi.rs`
    and `crates/protocol/tests/{console_session_edits,session_edit_builtins_rack,submix_strip_edits,vca_edits}.rs`
    (the last four are inside `crates/protocol/tests/`, authorized). No test body changed in them.
-9. *Removal edits leave entries behind.* `RemoveTrack`, `RemoveSubmix`, `RemoveRoute`, `RemoveVca` and the
-   rack edits do not clear their target (D3 names the four upserts only). A stale entry for a removed
-   target is unreachable: the classifier looks up existing strips, and the upsert that re-creates the ID
-   clears it.
+9. *Removal and rack edits left entries behind (wrong in attempt 1; corrected in attempt 2).* Attempt 1
+   cleared on the four upserts only and recorded that a stale entry for a removed target was unreachable
+   because "the upsert that re-creates the ID clears it". That is false for an effect: `PutTrackEffect`
+   and `SetTrackRack` re-create an effect with no upsert, and rewrite its `link_mode` with no length, so an
+   earlier `SetEffectLinkMode` length survived them (verdict M1; D3's own rule, "the last edit that writes
+   a `(target, row)` decides it"). See Attempt 2.
 
 **What changed.** `crates/session/src/edit_ramp.rs` (`EditRampTarget`, `EditRampRow`, `EditRamps` with `get`,
 `set`, `clear_target`, `entries`, `is_empty`); `ramp_samples: Option<u32>` on eleven `SessionEdit` variants and
@@ -320,3 +326,52 @@ nothing left behind). Not run: AArch64 (CI only), the browser matrix.
 
 **Open items.** The SDK does not encode the field (#1383, #1385) and browser records do not lower into it
 (#1382); both are non-goals here. `control_smoothing` itself stays a structural difference until #1365.
+
+**Attempt 2** (implementer; fixes verdict M1, m1 and the NITs of `submix-verdicts/1394-attempt1.md`).
+
+*M1.* `record_edit_ramps` (`crates/protocol/src/model.rs`) now clears, in addition to the four upserts:
+`RemoveTrack`/`RemoveSubmix` (`Strip` target, which takes the strip's effects with it), `RemoveRoute`,
+`RemoveVca`; `PutTrackEffect` and `RemoveTrackEffect` (their `Effect` target); `SetTrackRack` (new
+`EditRamps::clear_rack(strip, rack)`: every `Effect` entry of that strip and rack, not the strip's own rows,
+not its other racks, not another strip). Every other edit was checked and writes no keyed row:
+`SetTrackEffectOrder`, `SetEffectIdentity`/`Quality`/`Bypass`/`Sidechain`, `UpsertEffectParam`/
+`RemoveEffectParam` (none writes `link_mode`), `SetRouteSource`/`SetRouteDestination` (leave the route's
+gain, mute and matrix), `SetTrackSourceAssignment`, sources, outputs, automation, and the session scalars.
+`SetConsole` and `SetTrackConsole` write their own rows with a length and do not rewrite another keyed
+target's rows. All were decidable from D3's rule; none needed a ruling. The `match` in `record_edit_ramps`
+no longer ends in `_ => {}`: the no-op edits are listed, so a new `SessionEdit` variant fails to compile
+until it is classified. Gate 2 gained `an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths`
+(eleven cases: set then put; set then `SetTrackRack`; set then remove; remove then put; put then set keeps
+the later length; each of the four removals; the rack and put cases also keep the strip's own fader rows and
+the other strip's effect entry). Its base gained a submix `bus`, an empty VCA `grp` and no automation (the
+fixture's automation targets the `eq`, which the removal cases delete).
+
+*m1.* `controller/tests.rs` `a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path`: a
+two-edit transaction whose second edit carries `u32::MAX` answers `ValidationFailed` with exactly one
+diagnostic, code `session.edit.ramp_out_of_range`, path `edits[1]`, `operation_index` 1, and the revision
+stays 7.
+
+*NITs.* n1: deleted the first `EditRamps` unit test (gates 2 and 4 catch what it caught). n2: `Key` now holds
+the typed `RackName` and `EditRampRow` (both gained `Ord`), so `from_code` and the `filter_map` are gone;
+`entries()` has one `unreachable!` for an effect part on a non-strip owner, which `split` cannot produce.
+n3: the gate-7 command now carries `control-provider`. n4 (the uncharged control-thread heap of
+`EditRamps`) is informational and unchanged.
+
+| Test | Plausible defect (mutation) | Result |
+|---|---|---|
+| `edit_ramps.rs` `an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths` | `PutTrackEffect` does not clear; `SetTrackRack` does not clear; `RemoveTrackEffect` does not clear; `RemoveTrack`, `RemoveSubmix`, `RemoveRoute`, `RemoveVca` each do not clear; `SetTrackRack` clears the whole strip; `PutTrackEffect` clears the whole strip | R each (9 runs) |
+| `session/src/edit_ramp.rs` `clearing_a_rack_takes_that_racks_effects_of_that_strip_only` | `clear_rack` ignores the rack; takes the strip's own rows; takes other strips' entries (no owner bound) | R each (the protocol test cannot reach another rack: link edits on the console and builtins racks are refused) |
+| `controller/tests.rs` `a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path` | the controller maps `RampOutOfRange` to `session.edit.not_found`; the path index is wrong | R each |
+
+Each mutation was applied by a text edit, run, and restored; the restored tree is green.
+
+*Gates run (attempt 2, final tree).* `cargo test --locked -p session`; `-p protocol --features test-support`
+(133 lib tests, `edit_ramps` 4); `-p conformance`; `-p host-core --features test-support,control-provider
+--test live_delta` (34); `-p capi`; `cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings`; `cargo fmt --all -- --check`; `check-workspace-policy.sh`, `check-realtime-policy.sh`,
+`check-protocol-control-policy.sh`; `check-cross-targets.sh` (PASS). The wire and the corpus did not change
+(no encoder or schema edit), so the schema hash `5429f052592101ef` is unmoved and the parity script was not
+re-run. `protocol` is compiled into the browser module, so the worklet chain ran: `build-web-audioworklet.sh
+--named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py
+--artifacts` (32 red mutations, every budget met), `check-scalar-oracle-absent.py --wasm`,
+`test-web-audioworklet.sh` (rc 0, nothing left in its TMPDIR).

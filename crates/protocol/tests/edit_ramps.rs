@@ -2,13 +2,15 @@
 //! (`EditRamps`) beside the candidate model and bounded at one second of the committed rate.
 //!
 //! The base is the canonical fixture (track `vocal` with an insert `eq`, route `to-main`, 48 kHz,
-//! revision 7) plus a second track `second`.
+//! revision 7) plus a second track `second`, a submix `bus` and an empty VCA `grp`.
 
 use protocol::{
     ExpectedRevision, SessionEdit, SessionEditError, SessionRevision, SessionStore,
     SessionStoreError,
 };
-use session::{CompileCaps, EditRampRow, EditRampTarget, RackName, StableId, parse_session_json};
+use session::{
+    CompileCaps, EditRampRow, EditRampTarget, RackName, StableId, Submix, Vca, parse_session_json,
+};
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
@@ -31,12 +33,23 @@ fn strip(name: &str) -> EditRampTarget {
     EditRampTarget::Strip(id(name))
 }
 
-/// The fixture with a second track `second`, committed.
+/// The fixture with a second track `second`, a submix `bus` and an empty VCA `grp`, committed.
 fn store() -> SessionStore {
     let mut model = parse_session_json(FIXTURE).expect("fixture");
     let mut second = model.tracks[0].clone();
     second.id = id("second");
+    let vca = Vca {
+        id: id("grp"),
+        fader: second.fader.clone(),
+        members: vec![],
+    };
     model.tracks.push(second);
+    model
+        .submixes
+        .push(Submix::unity(id("bus"), &model.console));
+    model.vcas.push(vca);
+    // The fixture's automation targets the `eq`; the removal cases below must compile without it.
+    model.automation.clear();
     SessionStore::new(model, caps()).expect("the base compiles")
 }
 
@@ -64,10 +77,10 @@ fn fader(store: &SessionStore, track: &str, ramp_samples: Option<u32>) -> Sessio
     }
 }
 
-fn recorded(
-    store: &SessionStore,
-    edits: &[SessionEdit],
-) -> Vec<(EditRampTarget, EditRampRow, u32)> {
+/// The entries a transaction records: `(target, row, samples)`.
+type Recorded = Vec<(EditRampTarget, EditRampRow, u32)>;
+
+fn recorded(store: &SessionStore, edits: &[SessionEdit]) -> Recorded {
     store
         .prepare_transaction(ExpectedRevision::Exact(store.revision()), edits)
         .expect("the transaction prepares")
@@ -324,4 +337,172 @@ fn a_length_above_one_second_of_the_committed_rate_refuses_the_whole_transaction
         }
     );
     assert_eq!(store.revision(), SessionRevision(revision.0));
+}
+
+/// #1394 D3: an edit that rewrites or removes a target whose rows `EditRamps` keys carries no
+/// length for them, so it clears the target's earlier entries; an edit after it decides afresh.
+///
+/// Red if a `PutTrackEffect`, `SetTrackRack`, `RemoveTrackEffect`, `RemoveTrack`, `RemoveSubmix`,
+/// `RemoveRoute` or `RemoveVca` leaves the stale length of an earlier edit in place (a later reader
+/// would ramp a row over a length that its last writer did not give), if `SetTrackRack` takes
+/// another strip's effect entries, or if a clear also drops a write that comes after it.
+#[test]
+fn an_edit_that_rewrites_or_removes_a_target_clears_its_earlier_lengths() {
+    let store = store();
+    let model = store.compiled().normalized_model();
+    let vocal_track = vocal(&store);
+    let eq = vocal_track.inserts.effects[0].clone();
+    let effect_target = |strip: &str| EditRampTarget::Effect {
+        strip: id(strip),
+        rack: RackName::Inserts,
+        effect: eq.id.clone(),
+    };
+    let link = |strip: &str, samples: u32| SessionEdit::SetEffectLinkMode {
+        track_id: id(strip),
+        rack_name: RackName::Inserts,
+        effect_id: eq.id.clone(),
+        link_mode: eq.link_mode,
+        ramp_samples: Some(samples),
+    };
+    let put = SessionEdit::PutTrackEffect {
+        track_id: id("vocal"),
+        rack_name: RackName::Inserts,
+        final_position: 0,
+        effect: eq.clone(),
+    };
+    let set_rack = SessionEdit::SetTrackRack {
+        track_id: id("vocal"),
+        rack_name: RackName::Inserts,
+        rack: vocal_track.inserts.clone(),
+    };
+    let remove_effect = SessionEdit::RemoveTrackEffect {
+        track_id: id("vocal"),
+        rack_name: RackName::Inserts,
+        effect_id: eq.id.clone(),
+    };
+    let strip_fader = |strip: &str, samples: u32| {
+        let fader = if strip == "bus" {
+            model.submixes[0].fader.clone()
+        } else {
+            vocal_track.fader.clone()
+        };
+        SessionEdit::SetTrackFader {
+            track_id: id(strip),
+            fader,
+            ramp_samples: Some(samples),
+        }
+    };
+    let vocal_link = (effect_target("vocal"), EditRampRow::Link, 37);
+    let second_link = (effect_target("second"), EditRampRow::Link, 38);
+    // The entries of `strip_fader("vocal", 9)`: a rack edit does not touch its strip's own rows.
+    let vocal_fader = (
+        (strip("vocal"), EditRampRow::Fader, 9),
+        (strip("vocal"), EditRampRow::Mute, 9),
+    );
+
+    let cases: Vec<(&str, Vec<SessionEdit>, Recorded)> = vec![
+        (
+            "PutTrackEffect replaces the effect with no length",
+            vec![link("vocal", 37), put.clone()],
+            vec![],
+        ),
+        (
+            "SetTrackRack replaces every effect of the rack with no length",
+            vec![link("vocal", 37), set_rack.clone()],
+            vec![],
+        ),
+        (
+            "SetTrackRack clears its own strip's rack only",
+            vec![
+                link("vocal", 37),
+                link("second", 38),
+                strip_fader("vocal", 9),
+                set_rack.clone(),
+            ],
+            vec![
+                second_link.clone(),
+                vocal_fader.0.clone(),
+                vocal_fader.1.clone(),
+            ],
+        ),
+        (
+            "PutTrackEffect clears its own effect only",
+            vec![
+                link("vocal", 37),
+                link("second", 38),
+                strip_fader("vocal", 9),
+                put.clone(),
+            ],
+            vec![second_link, vocal_fader.0, vocal_fader.1],
+        ),
+        (
+            "RemoveTrackEffect removes the effect",
+            vec![link("vocal", 37), remove_effect.clone()],
+            vec![],
+        ),
+        (
+            "RemoveTrackEffect then PutTrackEffect re-creates it with no length",
+            vec![link("vocal", 37), remove_effect, put.clone()],
+            vec![],
+        ),
+        (
+            "an edit after the rewrite decides the row",
+            vec![put, set_rack.clone(), link("vocal", 37)],
+            vec![vocal_link],
+        ),
+        (
+            "RemoveTrack removes the strip's rows and its effects' rows, and only its own",
+            vec![
+                strip_fader("second", 5),
+                link("second", 6),
+                strip_fader("vocal", 7),
+                SessionEdit::RemoveTrack {
+                    track_id: id("second"),
+                },
+            ],
+            vec![
+                (strip("vocal"), EditRampRow::Fader, 7),
+                (strip("vocal"), EditRampRow::Mute, 7),
+            ],
+        ),
+        (
+            "RemoveSubmix removes the strip's rows",
+            vec![
+                strip_fader("bus", 5),
+                SessionEdit::RemoveSubmix {
+                    submix_id: id("bus"),
+                },
+            ],
+            vec![],
+        ),
+        (
+            "RemoveRoute removes the route's rows",
+            vec![
+                SessionEdit::SetRouteGainDb {
+                    route_id: id("to-main"),
+                    gain_db: 0.0,
+                    ramp_samples: Some(5),
+                },
+                SessionEdit::RemoveRoute {
+                    route_id: id("to-main"),
+                },
+            ],
+            vec![],
+        ),
+        (
+            "RemoveVca removes the VCA's rows",
+            vec![
+                SessionEdit::SetVcaFader {
+                    vca_id: id("grp"),
+                    fader: model.vcas[0].fader.clone(),
+                    ramp_samples: Some(5),
+                },
+                SessionEdit::RemoveVca { vca_id: id("grp") },
+            ],
+            vec![],
+        ),
+    ];
+    for (name, edits, expected) in cases {
+        assert_eq!(recorded(&store, &edits), expected, "{name}");
+    }
 }
