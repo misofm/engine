@@ -38,8 +38,9 @@ replaced value. The C ABI's input edits (#1261, #1262) are built on these cells.
   the pair and the six coefficients, eight words). A `Both` record writes both channel cells. One
   dirty word per strip.
 - **D2. Canonical drain order:** trim, then polarity, then filter targets (section 0 before 1),
-  left before right. When both channel cells of a kind are dirty with equal words, render applies
-  one `Both` call.
+  left before right, every block, under the block's live snapshot (#1312 D12, Amendment 1). When
+  both channel cells of a kind are `Applied` in one block with equal words, render applies one
+  `Both` call.
 - **D3. The witness folds from final contents.** For each kind drained, equal left and right
   words are admitted as `SymmetryEvent::Preserve`, any other pair or a lone channel as
   `Desymmetrize`, through the same `admit` hook, so a record kind still cannot reach render state
@@ -47,7 +48,9 @@ replaced value. The C ABI's input edits (#1261, #1262) are built on these cells.
 - **D4. A filter target is a level.** A later target for the same lane and section replaces an
   undrained one; the ramp starts from the coefficients render holds (#1262 D2).
 - **D5. The carry drain** applies every dirty cell of the predecessor before the input lanes
-  carry, as it drains the queue today; a refused apply is counted as now.
+  carry, as it drains the queue today; a refused apply is counted as now. It reads with
+  `LiveSnapshot::ALL`, which on the quiescent predecessor equals the adoption block's snapshot
+  (#1312 D6; Amendment 1).
 - **D6. Producers and admission.** `TrackControlProducer::input` becomes a cell writer with
   infallible writes; the input ring and its rows go. The browser's input band leaves the room
   pass and `in_flight`; its filter shadows stay the control-side authority for the designed pair.
@@ -106,6 +109,13 @@ replaced value. The C ABI's input edits (#1261, #1262) are built on these cells.
   and a trim ride meet in one block.
 - Gate 3: a witness folded per write instead of from final contents, retiring a mono collapse on
   a both-channel edit.
+
+## Amendment 1 (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement (2026-10-05) makes every live value of one revision take effect in one
+block (#1432 Amendment 1, #1312 Amendment 2). D2 reads under the block's snapshot, and D5's carry
+drain reads the quiescent predecessor with `LiveSnapshot::ALL`. D3's witness folds from what this
+block applied.
 
 ## Dependencies
 

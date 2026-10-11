@@ -208,8 +208,31 @@ epoch before A drops (D5 step 5). If B is refused, A is republished untouched (D
   after step 6) leaves the running epoch's entry for `s` vacant, so a source P0 still renders has
   no producer. Gates 1-5 do not see it: none removes a source that A persisted.
 
+## Amendment 1 (root, 2026-10-05)
+
+Root ruled one revision gate per plan (*Give each plan its own revision gate and take each block's
+live snapshot from it*, #1502), which lands before this issue. The mailbox no longer carries
+a revision word. The decisions above keep their meaning, read through the following map.
+
+- **A candidate's revision** is the revision on its plan's gate. The control plane publishes it
+  through the gate handle in that plan's provider epoch (#1502 D6).
+  - D4's "its revision ... words (#1314 D1)" on a republished A: A's plan carries its gate, so
+    republication keeps A's revision by construction.
+  - The `superseded` and `outcome` words stay payload words, written before publication.
+- **D5 step 3** publishes B's revision on B's gate handle before step 4 publishes B, and stores
+  B's `superseded` word.
+- **D6's `r_P0`** is the revision last published on P0's gate. The control plane keeps it per
+  provider epoch, as D6 says.
+- **Live edits while A or B is pending** go to the newest epoch's producers, stamped and published
+  through that epoch's gate handle (#1312 D7). So cells and gate follow one routing.
+- When A is dropped (D5 step 6), its gate handle drops with its provider epoch. Writes to A that
+  render never adopts are outside `live_values_superseded`'s unit (#1312 D2). The watermark
+  reports their revisions as `SUPERSEDED` (D6).
+
 ## Dependencies
 
+- *Give each plan its own revision gate and take each block's live snapshot from it*
+  (#1502): the plan gate (Amendment 1).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Let the control thread withdraw an unadopted candidate plan* (#1343).
 - *Prepare a successor across a withdrawn candidate plan* (#1344).

@@ -266,6 +266,59 @@ realtime-policy floors in `scripts/check-realtime-policy.sh` are raised to the m
 region counts, so deleting a new marker turns the gate red; the raise lands in stream B's batch 1
 after its last slice, at the counts measured then.
 
+## Amendment 2 (root, 2026-10-05)
+
+Root's binding requirement (2026-10-05): every live value of one committed revision takes effect
+in the same block, and the watermark's `first_sample` is exact. Root accepted the revision-bounded
+cell design (#1432 Amendment 1) and ruled that the revision gate lives in each plan, one gate per
+plan. D1-D8 above stay the record of what this issue delivered. They describe the landed code.
+
+**The truth on `main` once batch 1 merges.**
+
+- The watermark is conservative by at most one block. It never reports a revision before that
+  revision is in effect. It can report a revision one block late.
+  - Render loads the running plan's revision word before `render_inner` (D3), but each strip
+    drains its live lane at its own node inside `render_inner`.
+  - So a record pushed after the load and before that strip's drain renders in this block, while
+    the watermark reports it at the next block's first sample (the attempt record's batch
+    follow-up, F2).
+- A transaction committed while render is mid-block can apply across two blocks: one strip's
+  drain can take it in block `k` and another strip's in block `k+1`.
+- D3's sentence "Every drain inside `render_inner` then sees every record released before that
+  store" holds. Its converse does not: a drain can also see records released after the load.
+- The header comment on `miso_engine_v1_plan_watermark`, `docs/C_ABI_V1_QUALIFICATION.md` and
+  AGENTS.md state this bound; none claims `first_sample` is the exact first block in effect.
+
+**The successors that make both exact.**
+
+1. *Add the latest-target cell primitive and its loom model* (#1432) adds the revision gate and
+   the revision-bounded cell.
+2. *Give each plan its own revision gate and take each block's live snapshot from it* (#1502)
+   replaces this issue's mailbox revision words with a gate per plan, following root's ruling.
+   - Gone: I7's words, `MailboxWriter::store_revision`, `MailboxReader::active_revision`, the
+     revision argument of `MailboxPermit::commit`, the revision in `MailboxWithdrawal::Withdrawn`,
+     `RevisionTarget`, the routing in `PlanPublisher::set_revision`,
+     `PlanReplacementReservation::set_revision`, `UnadoptedCandidate::{revision, set_revision}`,
+     and Amendment 1's debug assertion.
+   - Render takes the block's snapshot `S` with one read-modify-write on the running plan's gate
+     and advances the watermark to it.
+   - The control plane publishes each revision on the newest provider epoch's gate: one routing.
+   - D5-D8 (flags, counters, the C ABI query and the header text) are unchanged.
+3. *Bound committed revisions at the plan gate's ceiling* (#1503) bounds every revision at
+   `2^63 - 1`.
+4. *Hand each block's live snapshot to every live drain* (#1504) passes `S` to every drain.
+5. Each lane family then reads its cells under `S`, and for that family the watermark becomes
+   exact and a transaction lands in one block: #1312 (strip fader, mute and matrix), #1345
+   (effect lanes), #1346 (input) and #1347 (routes).
+   - On the C ABI both properties are whole once #1312 and #1345 have landed. The input and route
+     lanes reach the C ABI only through #1261 and #1225, after #1346 and #1347.
+   - *Prove under a racing render that a live transaction lands in one block and the watermark
+     names it* (#1505) asserts the converse this issue's race test leaves out.
+
+**Landed-code correction.** #1311 N4 (`cd5030923`) folded `MailboxPermit::write_revision` and
+`write_adoption` into `MailboxPermit::commit(value, revision, adoption)`. The attempt record is
+corrected to name the HEAD form.
+
 ## Dependencies
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309): the D2 call
@@ -285,10 +338,14 @@ after its last slice, at the counts measured then.
   `pending_outcome` are taken at a claim and consumed by the first advance (D5); claims between two
   advances accumulate, so no outcome is lost to a block that errored.
 - `spsc.rs` (D1 only): each mailbox cell has a revision word (`revisions: [AtomicU64; 2]`,
-  invariant I7). `MailboxPermit::write_revision` (before the publishing `Release`),
+  invariant I7). The cell's revision is stored before the publishing `Release`: at HEAD it is
+  the `revision` argument of `MailboxPermit::commit(value, revision, adoption)`, into which
+  #1311 N4 (`cd5030923`) folded the separate `MailboxPermit::write_revision` this attempt added
+  (Amendment 2);
   `MailboxWriter::store_revision` (`Full` cell if any, else `Active`; `Release`),
   `MailboxReader::active_revision` (`Acquire`, the reader's own `active` index, set by its last
-  claim), and `MailboxWithdrawal::Withdrawn(T, u64)`, which takes the cell's word with the payload.
+  claim), and `MailboxWithdrawal::Withdrawn(T, u64)` (at HEAD `Withdrawn(T, u64, PlanAdoption)`,
+  with #1311's schedule), which takes the cell's word with the payload.
   #1343's tests changed only their `Withdrawn(value)` patterns to `Withdrawn(value, _)`.
 - `plan_exchange.rs`: `superseded` and `outcome` ride in the payload (written only before
   publication); `RevisionTarget`, `PlanPublisher::{set_revision, watermark_reader}`,

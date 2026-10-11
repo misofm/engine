@@ -129,7 +129,7 @@ include it; no other struct, size or `ABI_VERSION` changes. Like `miso_engine_v1
 it runs on any thread, concurrently with render, and is pure: it writes nothing through the plan
 handle, its diagnostic word included. It copies `(revision, first_sample, outcome_flags)` and
 saturating `exact`, `transition_fallback` and `superseded` counts: the highest committed revision
-in effect together with every revision before it, the render sample it took effect at, and the OR
+in effect together with every revision before it, the render sample of the block that reported it (never early and at most one block late; a mid-block commit can span two blocks until #1312 and #1345 land, and #1502 to #1504 make it exact), and the OR
 of `MISO_ENGINE_V1_OUTCOME_*` over the revisions the last advance covered. Submit stays
 synchronous only for what can fail (validate, classify, prepare a rebuild and reserve its
 credits, commit); every committed revision is pending until the watermark covers it, and a paused

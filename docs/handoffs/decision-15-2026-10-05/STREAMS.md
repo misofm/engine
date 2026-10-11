@@ -34,9 +34,11 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
   GitHub) first. Its checklist includes the round-6 folds: the C1 restart walk over every edge kind
   (#1354 D2 step 6), routing a warm growth on #1324 D4's duck set (#1403 D2, #1397 D1), and the
   donor republished on a refused deadline re-preparation (#1358 D3).
-- Critical path: S0, then B #1309, then B #1432 and #1312 (cells) and #1343, then A's carry slices (#1277 onward)
-  and B #1398/#1310/#1311, then {C, D, F, H #1332}, then H's SDK slices. Cells precede the carry
-  slices that write into them (#1312 before #1277, #1345 before #1280). Inside C: #1287, then
+- Critical path: S0, then B #1309, then B batch 1 (#1343, #1314, #1311, #1348), then B batch 2
+  (#1432 → #1502 → #1503 → #1504 → #1312: the revision-bounded cells, root
+  2026-10-05), then A's carry slices (#1277 onward) and B #1398/#1310, then {C, D, F, H #1332},
+  then H's SDK slices. Cells precede the carry slices that write into them (#1312 before #1277,
+  #1345 before #1280). Inside C: #1287, then
   #1402 and (after D #1324) #1354, then #1355, then #1403, then #1397; A's #1286 measures on #1355, and
   #1406, #1358 and #1360 take its constants, so #1361 comes last.
 - Umbrellas (no stream; root keeps them current): #1269 *Swap a rebuilt plan without an audio gap*
@@ -65,6 +67,10 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 A file edited by more than one stream is merged in this order; a later stream rebases. The order
 never overrides an issue's "## Dependencies": where they seem to disagree, the dependencies govern.
 
+Stream B's next batch is #1502 (X1a) → #1503 (X1b) → #1504 (X2), in that order. No other slice
+builds on `store_revision`, `active_revision`, `RevisionTarget` or `set_revision` (#1502 deletes
+them), so a slice in another stream must not call them.
+
 | File | Order |
 |---|---|
 | `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1406) → F; G #1379 (the tail copy and the gain-liveness selection passed to the graph compile, a few lines) in either order with the others, the later slice rebases; G #1469 (the `launch_native_effect_registry` call only, one line) in either order with the others, the later slice rebases; G #1457 (the internal policy function's `bound_cache` parameter, its `None` arguments and one unit test) in either order with the others, the later slice rebases; G #1471 (the two C ABI entry points' `bound_cache` parameter) after #1457 |
@@ -73,20 +79,22 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/lane/src/kernels.rs` (`ramp_block`, the `ramp_toward` re-export), `crates/effect-runtime/src/ramp.rs`, `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`), the effect ramp render bodies (compressor `RampVec`/`advance_ramps`, gate `channel_step`, multiband `Segment`/`run_segment`, delay `LaneChunk`/`CrossChunk`/`delay_chunk`, soft clip `SoftClipCoef`/`soft_clip_block`/`process`, limiter `RampLanes`) | G #1409 → A (#1279, #1280, #1282) → G (#1336, #1338, #1370); G #1455 (multiband `run_segment` and its per-segment dispatch) after #1409, in either order with #1338 (neither depends on the other), the later slice rebases |
 | `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`'s walk, `ramp_path_within`), the effect payload readers' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid`), their restore-refusal test rows (delay `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`, limiter restore corruptions, `crates/compressor/tests/payload.rs`), soft clip's overshoot restore tests (`tests/state_roundtrip.rs`, `tests/randomized.rs`), `crates/delay/tests/MUTATIONS.md` (M18, M19), the #1301 spec | J #1301 → G #1409 → G #1411 (#1409 and #1411 in one Stream G pull request); A's carry slices (#1279, #1280, #1282) and that pull request in either order, the second rebases |
 | `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → G #1377 → G #1461 → G #1462 → B (#1315, #1345) → G (#1339, #1340, #1378); F #1306 after B #1345, either order with G, the second rebases. #1377 goes first (root, 2026-10-06, #1377 Amendment 1): B and G's other slices are blocked, and #1377's edit is one comparison and one test; the later slices rebase. #1461 and #1462 follow #1377 by the same reason and land before #1372 (root, 2026-10-06). G #1464 (the `composition` comparison and its forgery row) after G #1462, and G #1484 (the forgery row's `stall` literal, the field rename only) after G #1464, in either order with B (#1315, #1345); the later slice rebases. G #1469 (the process-lifetime launch registry: its static, builder and entry point, `launch_registry_owns_factory`, and the factory-charging loop of `effect_control_resources`, which now skips a registry-owned factory) after G #1462 and before G #1372, in either order with G #1464 and B (#1315, #1345); the later slice rebases |
-| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1441 (two markers around `impl BuiltinBankProcessor`, replacing blank lines; if a blank line is gone, J #1443 places them) and J #1443 (markers around the three test-support `LiveControl*` drains, and the move of `LiveControlInputProcessor`'s drain into its own `drain_controls`), in any order with A, B (#1312, #1346), D, G and F, the later slice rebases; J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346; G #1464 (the bound type, the seal, `input_bounds`, the tail-entry charge and their unit tests) after G (#1329), in either order with F (#1261, #1262) and J, the later slice rebases |
+| `crates/builtins-compiler/src/lib.rs` | B (#1504 signatures only, #1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1441 (two markers around `impl BuiltinBankProcessor`, replacing blank lines; if a blank line is gone, J #1443 places them) and J #1443 (markers around the three test-support `LiveControl*` drains, and the move of `LiveControlInputProcessor`'s drain into its own `drain_controls`), in any order with A, B (#1312, #1346), D, G and F, the later slice rebases; J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346; G #1464 (the bound type, the seal, `input_bounds`, the tail-entry charge and their unit tests) after G (#1329), in either order with F (#1261, #1262) and J, the later slice rebases |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
 | `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 → G #1461 → G #1462 (root, 2026-10-06; both before #1372) → G #1464 (the `EffectTailBound` → `NodeTailBound` rename, the `composition` field, the two registry rules) → G #1484 (the stall split into `peak_stall` and `tail_stall`, the two clause readers, registry rule (g), `max`'s stall rule; after G #1465, before G #1466); G #1469 (the feature-gated `tail_and_rest` evaluation counter in `NativeEffectRegistry::new` only) after G #1462, in either order with G #1464, the later slice rebases; G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
-| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349; B #1482 (the `note_claim` call only) after #1314, in any order with the rest, the later slice rebases |
-| `crates/engine/src/realtime/plan.rs` | B #1311 → H #1400 → C #1396 → H #1381 |
-| `crates/engine/src/realtime/spsc.rs` | B (#1343, #1311) → C #1320 (`peek` only) |
+| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1314, #1311) → B (#1502, #1503) → B #1310 → C (#1396, #1355) → H #1381 → B #1349; B #1482 (the `note_claim` call only) after #1314, in any order with the rest, the later slice rebases |
+| `crates/engine/src/realtime/plan.rs` | B #1311 → B #1502 → H #1400 → C #1396 → H #1381 |
+| `crates/engine/src/realtime/spsc.rs` | B (#1343, #1314, #1311) → B #1502 (the revision words go) → C #1320 (`peek` only) |
 | `crates/source/src/lib.rs` | B batch 1 (#1343) → B #1447 → B (#1318, #1316, #1350, #1319, #1344) → C (#1320, #1355); J #1443 (three region markers, each replacing a blank line, around `take_recycled_block`, `observe_seek_at_block_boundary` and `acquire_current_block` with #1447's `settle_block`) after B #1447, in any order with the rest; the later slice rebases |
 | `crates/host-core/src/spectrum.rs` | H #1449 (the `SpectrumCapture` drains and the collection's `cancel_except`, by named exception) → A #1327 → A #1395; J #1443 (markers around the spectrum drains and `cancel_except`, replacing blank lines where there are some) after H #1449, in any order with A #1327 and #1395; the later slice rebases; A #1479 (`entry` and `selected_entry`, the private `owned_entry` and `select`'s two `entry` call sites (body only, root's Amendment), outside every marked region) in any order with the others, the later slice rebases; H #1492 (`select`'s and `selection_would_change`'s signatures, `owned_entry`'s removal and the new `SpectrumTargetRef`, outside every marked region) after A #1479, in any order with the rest, the later slice rebases |
 | `crates/host-core/src/transition.rs` | D (#1325, #1324) → C #1397 |
 | `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371; J #1423 (strip record construction only) after B #1312 and #1346, rebasing over the rest; G #1469 (the registry plumbing and `load_registry` only) in any order with the others, the later slice rebases |
-| `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
+| `crates/control-plane/src/*` (after #1309) | B (batch 1, then #1502, #1503, #1312) → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381; `control.rs` is also edited by G #1371 and E #1394 (084754c4b re-anchored their paths from capi), each after B #1312 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) → C #1360 |
-| `crates/graph/src/{lib,runtime}.rs` | G #1460 → G #1461 (the bank record's `metadata` field and `stage_for`'s read; test effects) → G #1462 (one test request's `tail_bound` field) → A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371; G #1464 (the rename only, `lib.rs`) and G #1379 (`GraphNode`'s field and the test literals that build one, `lib.rs`), each after G #1461, in either order with A, B, C and D, the later slice rebases |
-| `crates/graph-compiler/src/*` | G #1460 (`estimate.rs` live-control owner charge and its `lib.rs` test mirror) → G #1461 (`banks.rs` bind check, `estimate.rs` bank reads, test factories) → B #1312 (one test and its doc text) → A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases; G #1469 (test-module `launch_native_effect_registry` call sites only, and only if its return-type change forces them) in any order, the later slice rebases |
+| `crates/graph/src/{lib,runtime}.rs` | G #1460 → G #1461 (the bank record's `metadata` field and `stage_for`'s read; test effects) → G #1462 (one test request's `tail_bound` field) → A and B #1504 (the drain signatures): either order, the second rebases; #1504 lands before A's #1277, which needs it through #1312 → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371; G #1464 (the rename only, `lib.rs`) and G #1379 (`GraphNode`'s field and the test literals that build one, `lib.rs`), each after G #1461, in either order with A, B, C and D, the later slice rebases |
+| `crates/rack/src/lib.rs` | A's slices before #1280 and B #1504 (the drain signatures): either order, the second rebases → B #1345 → A #1280 |
+| `crates/graph-compiler/src/*`, `crates/graph-compiler/tests/scale.rs` | G #1460 (`estimate.rs` live-control owner charge and its `lib.rs` test mirror) → G #1461 (`banks.rs` bind check, `estimate.rs` bank reads, test factories) → B #1504 (`tests/scale.rs` only, if the trait change reaches it) → B #1312 (one test and its doc text) → A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases; G #1469 (test-module `launch_native_effect_registry` call sites only, and only if its return-type change forces them) in any order, the later slice rebases |
+| `crates/protocol/src/model.rs` | B #1503 (the revision ceiling) → later B and E slices rebase |
 | `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → G #1462 (three test requests' `tail_bound` field) → A payload (#1279, #1280) → G #1337 → G #1372; G #1464 (the `tail_and_rest` rename and field only) before G #1372, in either order with A's payload slices and G #1337, the later slice rebases |
 | The other `PreparedEffectMetadata {` literals in the effect crates' payload code and test helpers (`crates/transient-shaper/src/corpus.rs:190` and its peers) | G #1464 (the `composition` field only) in either order with A's payload slices; the later slice rebases |
 | `crates/builtins/src/tail.rs`, `crates/builtins/tests/tail_contract.rs`, `crates/math/src/tail.rs` | G #1464 (`builtins` only) → G #1465 → G #1484 (`builtins` only) → G #1466 → G #1467 → G #1468; G #1485 after #1467, in either order with #1468, the later slice rebases; G #1487 after #1485 and #1379; G #1457 before #1464; G #1474 (`math` and `builtins` tail, after #1457) before #1465, in either order with #1464, the later slice rebases |
@@ -255,40 +263,56 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
 ## Stream B
 
 - **Coordinator scope:** Control plane and protocol: the portable `control-plane` crate, candidate withdrawal and supersession, scheduled adoption, latest-target cells, path field, watermark and service, typed refusals, seek contract, telemetry defects.
-- **Owns:** new `crates/control-plane`, `crates/capi` (incl. `include/miso_engine_v1.h`), `crates/protocol`, `crates/engine/src/realtime`, `crates/host-core/src/live_delta.rs`, `crates/source` (seek parts); by named exception: `crates/graph` route lanes (#1347), `crates/host-core/src/prepare.rs` (#1344), `hosts/host-web` cell and status code (#1312, #1345-#1347, #1349), `crates/effect-compiler/src/prepare.rs` (#1315, #1345), policy and audit scripts each spec lists, `Cargo.lock` (#1447: the `bench-support` dev-dependency line of the `source` package); for #1499: the new `scripts/build-capi-release.sh`, `scripts/check-capi-abi.sh` (its build lines and default library paths; no stream lists it), `scripts/check-release-shape.py` (only if `capi`'s crate-type list changes), `scripts/check-cross-targets.sh` (G's #1472 section: the iOS and Android emission commands only), the `qualification.yml` steps that run the new script and its check, `scripts/check-ci-path-routing.py` and `scripts/test-ci-path-routing.py` (J's; one owner entry and its case, only if the router refuses the new path), `crates/lane/src/fpenv.rs` (G's; the "Realtime properties" comment lines only), `docs/REALTIME_DEPENDENCY_POLICY.md` (`fpenv.rs` citations only, if lines move), `docs/TARGET_MATRIX.md` (H's; the iOS and Android rows) and one paragraph of `docs/C_ABI_V1_QUALIFICATION.md`. #1345 Amendment 1 needs no new exception: its rack edit is in its existing "`crates/rack/` ... where they ... call `stage`" exception, and its floor edit is the standing exception ("How the streams run").
+- **Owns:** new `crates/control-plane`, `crates/capi` (incl. `include/miso_engine_v1.h`), `crates/protocol`, `crates/engine/src/realtime`, `crates/host-core/src/live_delta.rs`, `crates/source` (seek parts); by named exception: `crates/graph` route lanes (#1347), the drain signatures in `crates/graph` and `crates/rack` (#1504), `crates/host-core/src/prepare.rs` (#1344), `hosts/host-web` cell and status code (#1312, #1345-#1347, #1349), `crates/effect-compiler/src/prepare.rs` (#1315, #1345), policy and audit scripts each spec lists, `Cargo.lock` (#1447: the `bench-support` dev-dependency line of the `source` package); for #1499: the new `scripts/build-capi-release.sh`, `scripts/check-capi-abi.sh` (its build lines and default library paths; no stream lists it), `scripts/check-release-shape.py` (only if `capi`'s crate-type list changes), `scripts/check-cross-targets.sh` (G's #1472 section: the iOS and Android emission commands only), the `qualification.yml` steps that run the new script and its check, `scripts/check-ci-path-routing.py` and `scripts/test-ci-path-routing.py` (J's; one owner entry and its case, only if the router refuses the new path), `crates/lane/src/fpenv.rs` (G's; the "Realtime properties" comment lines only), `docs/REALTIME_DEPENDENCY_POLICY.md` (`fpenv.rs` citations only, if lines move), `docs/TARGET_MATRIX.md` (H's; the iOS and Android rows) and one paragraph of `docs/C_ABI_V1_QUALIFICATION.md`. #1345 Amendment 1 needs no new exception: its rack edit is in its existing "`crates/rack/` ... where they ... call `stage`" exception, and its floor edit is the standing exception ("How the streams run").
 - **Depends on:** S0; #1344 needs A #1277; #1349 needs H #1381 and #1399.
 - **Parallel-safe with:** A, G, J, K, H(a).
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
 |---|---|---|---|---|
 | 1 | #1309 | Extract the C ABI control plane into a portable crate both hosts call | — | — |
-| 2 | #1344 | Prepare a successor across a withdrawn candidate plan | — | #1277 |
-| 3 | #1318 | Report held source blocks apart from underruns | — | — |
-| 4 | #1305 | Find live C ABI edit targets without linear scans | #1309 | — |
-| 5 | #1313 | Report each transaction's edit path in its response | #1309 | — |
-| 6 | #1315 | Refuse commands that would be acknowledged with no effect | #1309 | — |
-| 7 | #1343 | Let the control thread withdraw an unadopted candidate plan | #1309 | — |
-| 8 | #1398 | Size the C ABI's plan capacities and resource admission for a superseding candidate | #1309 | — |
-| 9 | #1314 | Publish an applied-revision watermark and complete edits asynchronously | #1309, #1343 | — |
-| 10 | #1310 | Supersede an unadopted candidate plan by compare-and-swap | #1309, #1314, #1343, #1344, #1398 | — |
-| 11 | #1311 | Adopt a successor plan no earlier than a scheduled sample | #1309, #1314, #1343 | — |
-| 12 | #1316 | Anchor every seek on the plan's source-read clock | #1314, #1318 | — |
-| 13 | #1348 | Add miso_engine_v1_service for bounded control work between edits | #1309, #1311, #1314 | — |
-| 14 | #1447 | Bound the source acquire by the blocks queued at its entry, and observe a late seek outside the loop | #1309, #1343, #1314, #1311, #1348 | — |
-| 15 | #1317 | Document the seek contract and the C ABI growth rule in the header | #1316, #1318 | — |
-| 16 | #1350 | Tighten the seek entry points: source.id.invalid, a typed held preparation, timed reads only | #1316 | — |
-| 17 | #1432 | Add the latest-target cell primitive and its loom model | #1309 | — |
-| 18 | #1312 | Hold live values in latest-target cells on both hosts | #1309, #1348, #1432 | — |
-| 19 | #1319 | Test held seeks across swaps and supersession, and add a seek to audit capi | #1310, #1348 | — |
-| 20 | #1351 | Report each configured counter's own value in the C ABI counter snapshot | #1309, #1348 | — |
-| 21 | #1346 | Hold strip input-lane values in latest-target cells | #1312 | — |
-| 22 | #1347 | Hold route-lane values in latest-target cells | #1312 | — |
-| 23 | #1399 | Report live_values_superseded in the browser status and prove both hosts drain strip cells alike | #1312 | — |
-| 24 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
-| 25 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312, #1399 | — |
-| 26 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
-| 27 | #1482 | Attribute each claim's revisions exactly in the watermark and share one seqlock | #1314 | — |
-| 28 | #1499 | Build the shipped mobile C ABI libraries with the release profile's fat LTO, and gate it | — | G #1495 |
+| 2 | #1343 | Let the control thread withdraw an unadopted candidate plan | #1309 | — |
+| 3 | #1314 | Publish an applied-revision watermark and complete edits asynchronously | #1309, #1343 | — |
+| 4 | #1311 | Adopt a successor plan no earlier than a scheduled sample | #1309, #1314, #1343 | — |
+| 5 | #1348 | Add miso_engine_v1_service for bounded control work between edits | #1309, #1311, #1314 | — |
+| 6 | #1432 | Add the latest-target cell primitive and its loom model | #1309 | — |
+| 7 | #1502 | Give each plan its own revision gate and take each block's live snapshot from it | #1309, #1311, #1314, #1343, #1432 | — |
+| 8 | #1503 | Bound committed revisions at the plan gate's ceiling | #1432, #1502 | — |
+| 9 | #1504 | Hand each block's live snapshot to every live drain | #1502 | — |
+| 10 | #1312 | Hold live values in latest-target cells on both hosts | #1309, #1348, #1432, #1502, #1503, #1504 | — |
+| 11 | #1447 | Bound the source acquire by the blocks queued at its entry, and observe a late seek outside the loop | #1309, #1343, #1314, #1311, #1348 | — |
+| 12 | #1344 | Prepare a successor across a withdrawn candidate plan | — | #1277 |
+| 13 | #1318 | Report held source blocks apart from underruns | — | — |
+| 14 | #1305 | Find live C ABI edit targets without linear scans | #1309 | — |
+| 15 | #1313 | Report each transaction's edit path in its response | #1309 | — |
+| 16 | #1315 | Refuse commands that would be acknowledged with no effect | #1309 | — |
+| 17 | #1398 | Size the C ABI's plan capacities and resource admission for a superseding candidate | #1309 | — |
+| 18 | #1310 | Supersede an unadopted candidate plan by compare-and-swap | #1309, #1314, #1343, #1344, #1398, #1502 | — |
+| 19 | #1316 | Anchor every seek on the plan's source-read clock | #1314, #1318 | — |
+| 20 | #1317 | Document the seek contract and the C ABI growth rule in the header | #1316, #1318 | — |
+| 21 | #1350 | Tighten the seek entry points: source.id.invalid, a typed held preparation, timed reads only | #1316 | — |
+| 22 | #1319 | Test held seeks across swaps and supersession, and add a seek to audit capi | #1310, #1348 | — |
+| 23 | #1351 | Report each configured counter's own value in the C ABI counter snapshot | #1309, #1312, #1348 | — |
+| 24 | #1346 | Hold strip input-lane values in latest-target cells | #1312 | — |
+| 25 | #1347 | Hold route-lane values in latest-target cells | #1312 | — |
+| 26 | #1399 | Report live_values_superseded in the browser status and prove both hosts drain strip cells alike | #1312 | — |
+| 27 | #1505 | Prove under a racing render that a live transaction lands in one block and the watermark names it | #1312 | — |
+| 28 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
+| 29 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312, #1399 | — |
+| 30 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
+| 31 | #1482 | Attribute each claim's revisions exactly in the watermark and share one seqlock | #1314 | — |
+| 32 | #1499 | Build the shipped mobile C ABI libraries with the release profile's fat LTO, and gate it | — | G #1495 |
+
+- **Batches (root, 2026-10-05).** Batch 1 is orders 1-5. Batch 2 is orders 6-10, the
+  revision-bounded cells: root's binding requirement that one committed revision takes effect in
+  one block and that the watermark's `first_sample` is exact. Its design and review are in
+  `revision-bounded-cells/`, and root's five rulings are recorded in #1432 Amendment 1. The rest
+  follows in this order, starting with #1447 (order 11), which waits only for batch 1.
+- **Stream B's next batch is #1502 (X1a) → #1503 (X1b) → #1504 (X2), in that order**, after #1432
+  and before #1312. No other slice builds on `store_revision`, `active_revision`, `RevisionTarget`
+  or `set_revision` (#1502 deletes them).
+- **Watermark bound on `main` today.** The watermark never reports a revision early and reports
+  at most one block late. A transaction committed while render is mid-block can span two blocks
+  until #1312 and #1345 land; #1502 and #1503 (X1) with #1504 (X2) make `first_sample` exact.
 
 #1447 is stream B batch 1's successor in `crates/source/src/lib.rs` and merges before #1318 (the
 hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 as a dependent.
@@ -591,7 +615,7 @@ therefore follows #1447, #1448, #1449 and #1345 (Amendment 1) on `main`.
 - **#1418 and #1426 are outside the batch** (root, 2026-10-05). They start when the batch is on
   `main`, so they come after #1444 and after #1345.
 - **Cost.** All nine tool issues stay unpushed until #1345 lands. On stream B's table after batch
-  1, #1345 is row 25, behind #1432, #1312 and #1399.
+  1, #1345 is row 29, behind #1432, #1502, #1503, #1504, #1312 and #1399.
 
 ## Stream K
 

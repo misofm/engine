@@ -52,11 +52,14 @@ Superseded values are counted by #1312's `live_values_superseded`.
   channel cells of one parameter or target are dirty with equal words, render applies one `Both`.
   The witness folds from the final cell contents: equal `Left`/`Right` values are a pair, so the
   #1004 deferral becomes structural.
-- **D4. The span window.** Render stages at most `automation_capacity` parameter spans per block,
-  in D3's order; a dirty cell beyond that stays dirty for the next block and is neither dropped
-  nor counted as superseded. A new test proves every launch effect has at most
-  `automation_capacity` live parameter cells, so for launch effects this never defers. Sizing the
-  window for stored automation is #1306.
+- **D4. The span window holds every live cell (root ruling 5, 2026-10-05).**
+  - The lane's staging window is sized at preparation to hold at least one span for every live
+    parameter cell, beside `automation_capacity`. Render stages every applied cell in the block
+    that reads it. There is no deferral path.
+  - A deferral would split one revision across blocks, against root's binding requirement (#1432
+    Amendment 1). It would also resolve a covered value under a later snapshot, so a value that
+    should apply could be counted as superseded.
+  - Sizing the window for stored automation is #1306.
 - **D5. Producers and admission.** `EffectControlProducer` writes cells: `preflight` keeps its
   domain checks, writes are infallible. The EQ owner transaction keeps its revision checks and
   loses its capacity check. In `commit_live` the queue-capacity rebuild (`:1266-1273`) and the
@@ -66,8 +69,8 @@ Superseded values are counted by #1312's `live_values_superseded`.
   lane rebuilds" leave the header; `docs/C_ABI_V1_QUALIFICATION.md` follows.
 - **D7. The acked-batch question: can an ack ever precede a drop? No.** Every fallible check
   precedes the first cell write and writes cannot fail; a replaced value is in the committed
-  model, render applies the newest, and #1312's counter records the replacement. D4 defers, never
-  drops. Observe records keep FIFO order.
+  model, render applies the newest, and #1312's counter records the replacement. D4 stages every
+  applied cell in its block. Observe records keep FIFO order.
 
 ## Deliverables
 
@@ -100,9 +103,12 @@ Superseded values are counted by #1312's `live_values_superseded`.
    `39 + 2 × 39 = 117` in #1312 D2's per-cell unit.
 2. **Bypass ahead of parameters (new capi test).** One transaction lifts a bypass and changes a
    parameter: the block renders as the twin's rebuild of the committed model.
-3. **Window bound (new effect-contract test).** For every launch effect descriptor, the live
-   parameter cell count is at most its `automation_capacity`. A synthetic descriptor with more
-   cells than capacity defers the excess one block and applies it then.
+3. **Window holds every live cell (new effect-contract test).**
+   - For every launch effect descriptor, the prepared staging window is at least its live
+     parameter cell count.
+   - A synthetic descriptor with more live parameter cells than `automation_capacity` writes
+     every cell in one transaction, and one block applies all of them.
+   - Mutation (PR evidence): the window sized to `automation_capacity` alone turns it red.
 4. **Symmetry (keep green, no change):** the #1004 tests on a both-channel `PerLane` edit keep a
    mono bank collapsed; a one-channel edit still clears `LIVE`.
 5. **Both hosts agree (extend the cross-host test of *Report live_values_superseded in the browser
@@ -129,7 +135,8 @@ Superseded values are counted by #1312's `live_values_superseded`.
 
 - Gate 1: an effect lane left a queue, or a miscount of superseded parameter or target values.
 - Gate 2: a drain order that applies parameters before the bypass changes.
-- Gate 3: a window that drops a dirty cell instead of deferring it.
+- Gate 3: a window smaller than the live cell count, which would drop or defer a cell and so
+  split a revision across blocks.
 - Gate 5: the two hosts staging effect cells differently.
 
 ## Dependencies
@@ -241,3 +248,9 @@ moves the pop back behind a call in the lane loop.
   issue.
 
 **Size.** D8 and D9 add about an hour to this issue's rewrite of the same two functions.
+
+## Amendment 2 (root, 2026-10-05): revision-bounded cells
+
+Root ruling 5 (2026-10-05): D4's window holds every live cell, and its deferral and gate 3's
+deferral case go. The cells read under the block's snapshot (#1432 Amendment 1, #1312
+Amendment 2). D3's drain order is unchanged.

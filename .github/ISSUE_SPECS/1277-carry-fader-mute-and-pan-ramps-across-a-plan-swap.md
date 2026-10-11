@@ -76,6 +76,12 @@ then structural edit" (D15-7, carry then retarget).
     comes from the older prepared model, can never overwrite it. This holds for every successor,
     including a warm successor that adopts at a later block `S` (#1287): its cells stay dirty until
     its first block and apply there.
+  - Amendment 1: each retarget write is stamped from the successor plan's own gate handle with the
+    structural transaction's revision. That revision is published on the successor's gate before
+    the successor is published (#1312 D6, D7;
+    *Give each plan its own revision gate and take each block's live snapshot from it*,
+    #1502). The successor applies its dirty cells under its adoption block's snapshot, which
+    covers that revision (#1432 D1).
 - **D6. Restart set.** `PreparedHost` gains `restarted_strips()`: the strip IDs present in both
   plans for which at least one owner failed D4 for a prepared difference, sorted. Added strips are
   not in it. *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it,
@@ -155,6 +161,19 @@ then structural edit" (D15-7, carry then retarget).
   keeps the old gain too. Each turns it red.
 - Gate 5: a rule that treats a VCA change as live carries X at the old gain. A restart set that
   lists added or unchanged strips fails the exact list. Either turns it red.
+
+## Amendment 1 (root, 2026-10-05): revision-bounded cells
+
+Root's binding requirement (2026-10-05) makes every live value of one revision take effect in one
+block. #1432 Amendment 1 and #1312 Amendment 2 put the cells under each block's snapshot, with one
+revision gate per plan (#1502).
+
+- D5 gains the stamp rule.
+- D8's `apply_pending` reads the quiescent predecessor with `LiveSnapshot::ALL` (#1312 D6). Every
+  predecessor write is below the successor's revision, so this equals reading under the adoption
+  block's snapshot.
+
+Nothing else changes.
 
 ## Dependencies
 

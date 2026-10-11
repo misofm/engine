@@ -69,19 +69,24 @@ extern "C" {
  * plan swap. Every committed revision is pending until the plan watermark covers it.
  * miso_engine_v1_plan_watermark copies (revision, first_sample, outcome_flags) and per-outcome
  * counters: revision is the highest committed revision in effect together with every revision
- * before it, and first_sample the absolute render sample of the first block in which it was in
- * effect (a live value's ramp starts there, a replacement plan renders from there). A revision
- * committed while a replacement is pending completes when render adopts that replacement, never
- * earlier. A host that renders nothing completes nothing: a paused host's revisions stay pending
- * until render resumes. The watermark is a level, not a queue: render overwrites it, so a host
- * that polls it late still reads the newest revision, and the counters still count every
- * revision. outcome_flags is the OR over the revisions the last advance covered of
- * MISO_ENGINE_V1_OUTCOME_EXACT, MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and
- * MISO_ENGINE_V1_OUTCOME_SUPERSEDED. The host polls the watermark to learn that an edit is
- * audible, never the event lane. The caller zeroes reserved0 and reserved[] and sets struct_size,
- * or the call returns MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's
- * publication returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host
- * checks MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
+ * before it, and first_sample the absolute render sample at the start of the block that reported
+ * it. The watermark is never early: a revision is in effect no later than the block it names. It
+ * is at most one block late: a live value can already have applied, and its ramp started, in
+ * the block before first_sample. A live transaction committed while a render call is running can
+ * take effect across two consecutive blocks, some of its values in one and the rest in the next,
+ * until issues 1312 and 1345 land; issues 1502, 1503 and 1504 make first_sample exact. A
+ * replacement plan renders from first_sample. A revision committed while a replacement is
+ * pending completes when render adopts that replacement, never earlier. A host that renders
+ * nothing completes nothing: a paused host's revisions stay pending until render resumes. The
+ * watermark is a level, not a queue: render overwrites it, so a host that polls it late still
+ * reads the newest revision, and the counters still count every revision. outcome_flags is the
+ * OR over the revisions the last advance covered of MISO_ENGINE_V1_OUTCOME_EXACT,
+ * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and MISO_ENGINE_V1_OUTCOME_SUPERSEDED. The host
+ * polls the watermark to learn that an edit is audible, never the event lane. The caller zeroes
+ * reserved0 and reserved[] and sets struct_size, or the call returns
+ * MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's publication
+ * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
+ * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
  *
  * Control service (issue 1348). The engine owns no thread, so the host drives the control work
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans

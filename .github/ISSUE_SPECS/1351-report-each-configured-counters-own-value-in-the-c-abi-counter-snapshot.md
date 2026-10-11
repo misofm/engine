@@ -53,11 +53,14 @@ counter the C ABI does not serve is refused with a type.
   outside the served set is `ParameterProviderError::NotFound`, which the controller answers with
   `StatusCode::NotFound`; the stored configuration does not change. Meter handles use the same
   path in #1352.
-- **D3. Own values, refreshed by the service step.** The telemetry counter refresh of
-  `control.rs:986-989` moves into `SessionState::service` (#1348 D1), before
-  `collect_render_activity`, so every control call refreshes the provider's counters once, not
-  only `command`. The snapshot's values are, for each configured ID in order, the provider's
-  current value for that ID, read after that refresh in the same service step.
+- **D3. Own values, refreshed by the service step.**
+  - #1348 D1 has landed the refresh. `SessionState::service` runs `refresh_provider_counters`
+    before `collect_render_activity` (`crates/control-plane/src/control.rs:1028`) and again after
+    it (`:1030`). Every argument-valid control call runs `service` first (#1348 D2).
+  - The snapshot's values are, for each configured ID in order, the provider's current value for
+    that ID, read after the first refresh in the same service step.
+  - So a counter that render changes between two control calls (`LIVE_VALUES_SUPERSEDED`, #1312
+    D8) reaches the snapshot that the next call stages (gate 7; Amendment 1).
 - **D4. Cadence.** The control plane stages a snapshot only when render has completed at least
   `counter_period_blocks` blocks since the last staged one (the render sequence counts blocks),
   with `observed_sample` the render sample at that point. Blocks rendered with no control call in
@@ -113,6 +116,17 @@ counter the C ABI does not serve is refused with a type.
    test-support`; `cargo test --locked -p host-core --features control-provider,test-support`;
    `bash scripts/check-protocol-control-policy.sh`; `cargo fmt --all -- --check`;
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+7. **The first refresh is observable (new capi test; #1348 verdict N-3).**
+   - Configure `[LIVE_VALUES_SUPERSEDED]` with period 1.
+   - With no render in between, commit three fader edits on one track, then render one block.
+     Each edit writes the left and right fader cells, so render adds `2 × 2 = 4` to the session
+     counter (#1312 D2).
+   - The next control call, a `source_submit`, stages a snapshot whose value is 4, equal to
+     `COUNTERS_GET` at that call.
+   - Mutation (PR evidence): removing the refresh before `collect_render_activity`
+     (`control.rs:1028`) turns it red, because the snapshot then reads the stale 0.
+   - No other counter discriminates this: the telemetry counters change only inside the service
+     step itself.
 
 ## Test value
 
@@ -121,9 +135,26 @@ counter the C ABI does not serve is refused with a type.
 - Gate 3: a configuration accepted for a counter that can never report.
 - Gate 4: an ID missing from the decoder or the served set makes a host's read of the counter
   `NOT_FOUND` or its configuration refused.
+- Gate 7: a service step that stages the snapshot before refreshing the provider, so a counter
+  render changed since the last call is reported stale. #1348's suite stays green without that
+  refresh (#1348 verdict N-3).
+
+## Amendment 1 (root, 2026-10-05)
+
+The #1348 verifier (verdict N-3, `docs/handoffs/decision-15-2026-10-05/verdicts/stream-b/1348-attempt1.md`)
+found that #1348's first counter refresh in `service()` has no observable effect today: removing
+it left all 94 capi tests green. This issue owns the requirement, so it gains gate 7.
+
+- The telemetry counters change only while the service step stages records. The test therefore
+  uses `LIVE_VALUES_SUPERSEDED`, which render changes between calls.
+- This issue now depends on #1312, which adds that counter. The stream order already places it
+  after #1312.
+- D3 states the landed refresh order.
 
 ## Dependencies
 
+- *Hold live values in latest-target cells on both hosts* (#1312): `LIVE_VALUES_SUPERSEDED`, the
+  counter gate 7 reads (Amendment 1).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348): the service step
   that refreshes the counters (D3).
