@@ -132,3 +132,94 @@ one bit.
 ## Dependencies
 
 - none (it does not wait for #1312; that issue converts these lanes on both hosts).
+
+## Attempt record
+
+### Attempt 1 (implementer)
+
+**Change.** D1-D4 as frozen, on `2a589d360`.
+
+- `crates/host-core/src/prepare.rs`: new `pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize` = 16
+  (re-exported in `lib.rs`). `prepare_host_runtime_with_live_controls_and_spectrum`,
+  `..._and_spectrum_collection` and `prepare_host_runtime_with_selected_meters_between_render_calls`
+  gain a trailing `lanes: HostLiveLanes`. The last one used to go through the policy wrapper, whose
+  `selected_meters` parameter no other caller set; it now calls
+  `prepare_host_runtime_with_live_controls_policy_and_spectrum` directly (as the live-lanes entries
+  do) and the wrapper lost that parameter. Doc comments that said "every entry but
+  `prepare_host_runtime_with_live_lanes` passes ALL" now say what is true.
+- `crates/control-plane/src/compile.rs`: `LIVE_QUEUE_DEPTH` is `host_core::STRIP_LIVE_QUEUE_DEPTH`.
+- `hosts/host-web/src/lib.rs`: `live_control_request` always returns `Some(depth)` (option, else
+  `STRIP_LIVE_QUEUE_DEPTH`); `live_lanes(options)` is `ALL` for a nonzero option, else
+  `FADER_AND_MATRIX`, passed to all three branches; `ReadyOwnership.commands_enabled` (the option)
+  replaces `controls.is_empty()` in `live_controls_attached`, the two VCA/route refusals, the
+  input-filter shadows and the live VCA state. The `WebBootOptions` doc says what 0 means now.
+- Call sites: host-core `tests/{prepare,strip_meters,spectrum}.rs` and three host-web mirrors in
+  `tests.rs` (those pass `live_lanes(options)`, the production choice). `tools/console-workload`
+  calls none of the three entries (only a doc comment names one), so it is unchanged.
+- One new test, `every_browser_plan_carries_the_strip_lanes_and_renders_the_lane_free_bits`.
+
+**Gate 1 and 2.** The test boots three tracks (asymmetric faders, pans) and one submix (`bus`,
+compressor insert, routes into it) with option 0 and option 64 through all three branches (plain,
+single spectrum, spectrum collection). Option 0: four `controls` in order `t0 t1 t2 bus`, each with
+fader and matrix producers, no `input`, a nonempty effect table that is all `None`, no route
+producer, `live_controls_attached() == false`. Option 64 (contrast): input lane on all strips,
+an effect lane present, three route producers. It renders 64 blocks and requires option 0 bit
+equal to option 64 and to an independent host-core plan prepared with `HostLiveControlRequest::default()`
+(no lane at all, the browser's own delivery `BetweenRenderCalls`): the plan option 0 prepared
+before this change. The existing host-core bit test (`live_lanes.rs`) prepares with delivery
+`Concurrent`, not the browser's, so it does not cover this.
+
+**Gate 3.** Met by the existing `a_live_control_free_host_refuses_every_live_kind_as_unsupported`
+(boots `command-session.json` with option 0: `RESULT_UNSUPPORTED`, `COMMAND_REASON_UNSUPPORTED_KIND`,
+no staging buffer). That session now carries the lanes, so the test now proves the gate keys on the
+option. The new test repeats one `submit_commands(1)` refusal on its lane-bearing session; the
+D4 mutation turns both red, so that assertion is not a unique catch. No new gate-3 test was added.
+
+**Mutations (each applied, `cargo test -p host-web --features host-web/test-support --lib`, then
+reverted; the tree was clean afterwards).**
+
+| Mutation | Red | Other tests red |
+| --- | --- | --- |
+| Option 0 maps back to `control_queue_depth: None` (D1) | the new test (`assertion left == right`, 0 vs 4) | none (188 others pass) |
+| The collection branch prepares with `control_queue_depth: None` | the new test, Collection branch only | none |
+| `live_lanes` returns `ALL` for option 0 (D3) | the new test (`Plain: no input lane`) | `live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them` (route producers appear) |
+| Settled fader lane multiplies by `1 + EPSILON` (`FaderRampStage::process_plane`, `maximum == 0` path) | the new test, at the lane-free comparison | three existing fader tests (`a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp`, `a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp`, `native_command_timeline_digest_pins_the_wasm_parity`) |
+| `live_controls_attached` reads `!controls.is_empty()` again (D4) | the new test (its refusal assertion) | `a_live_control_free_host_refuses_every_live_kind_as_unsupported` |
+
+So the new test alone catches a dropped lane (all branches), and the lane-free bit comparison it adds
+is the only check of option 0 against a plan with no lane; a broad change to the settled lane's
+arithmetic is also caught by the existing fader tests that run opted-in plans. An `ALL` mapping for
+option 0 is also caught by one existing route test.
+
+**Gate 4, memory.** Native, `retained_ceilings.rs`, one-strip identity fixture: only
+`builtin_retained_bytes` moves, 2,149 to 3,383 (+1,234); ceiling 2,176 to 3,776
+(3,383 x 1.1, rounded up to 64). Across other sessions: nine tracks 19,179 to 30,249 (+11,070, 1,230
+per strip), three strips (`observation-frame-shape`) 6,366 to 10,050 (+3,684, 1,228 per strip).
+The bridge, graph and source rows are equal before and after. Shipped simd128 module
+(`check-browser-expected-resources.py --artifacts`, base `2a589d360` built in a scratch export):
+`builtinRetainedBytes` 2,033 to 3,219 (+1,186 for the one strip); `expected.json`
+`resourceCeilings.builtinRetainedBytes` 2,048 to 3,584 (3,219 x 1.1 = 3,540.9, rounded up to 64);
+no other row moves (bridge metadata and retained, graph, source rows identical). The lanes are two
+16-record rings per strip. No other row was re-pinned.
+
+**Gate 5 results (x86_64, this box).**
+
+- `cargo test --locked -p host-core -p host-web -p capi --features host-core/test-support,host-web/test-support`:
+  pass (and with `-p control-plane`).
+- `cargo test --locked --release -p console-workload`: pass.
+- `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts` (rows above), `test-web-audioworklet.sh`
+  (exit 0), `check-sdk-headless.sh` (362 of 362, `browser-defaults-evals.mjs` unchanged):
+  pass.
+- `npm run qualify -- ... --check-matrix --self-test-mutations` in chromium (151.0.7922.34),
+  firefox (153.0) and webkit (26.5): all qualification gates passed.
+- `check-host-core-policy.sh`, `check-workspace-policy.sh`, `check-realtime-policy.sh`,
+  `check-cross-targets.sh` (PASS), `cargo clippy --locked --workspace --all-targets --all-features
+  -- -D warnings`, `cargo fmt --all -- --check`: pass.
+- Not run: `check-capi-abi.sh` and `audit capi` (no ABI or capi source change; the only capi-side
+  edit is the constant's alias, same value).
+
+**Open items for root.** Stale wording outside the authorized paths: `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts:791`
+("`0n` to attach no control channel"), `.d.ts:44`, `miso-engine-v1-audio-worklet.js:1549` and
+`sdk/src/browser/shipped-host.d.ts:44` still say option 0 has no control channel; they are stream
+H's files. The merge with stream B on `crates/control-plane/src/compile.rs` is the one constant line.
