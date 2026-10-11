@@ -451,7 +451,8 @@ returns. Comment-only header change (`check-capi-abi.sh` ok).
 **m3 (gate 4, re-run on the final code).** Same frozen driver and workload as attempt 1 (scratch,
 not committed, deleted); release, `taskset -c 7`, one invocation per document and trim setting
 with the process's first compile, one warmup round and two measured rounds; no tuning or retry.
-Raw: `bench-1471-a3.log` (scratchpad).
+The figures are transcribed in the table below; the raw logs (attempts 1 and 3) were session-local
+and were not retained.
 
 | document | cold compile (ms, M1/M2) | rebuild (ms) | warm compile (ms) | designs, cold / rebuild, warm |
 |---|---|---|---|---|

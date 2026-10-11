@@ -1517,8 +1517,8 @@ unsafe fn engine_destroy_freed(engine: *mut Engine) -> u64 {
 /// the same document and then a document with no input filter. B's cache holds the same designs
 /// as A's, so the bytes engine destroy frees are equal. A journal that `take_journal` leaves open
 /// holds a record of the designs a compile used beside the cache's own entries, which the
-/// header's ceiling does not count; B's second compile has no filter to record, so the first
-/// compile's record would stay and B would free more than A.
+/// header's ceiling does not count; B's second compile restarts the journal with nothing to
+/// record, so A keeps its 200-design record and frees more than B.
 ///
 /// Defect it turns red: a journal that stays open on the engine's cache after a compile, so the
 /// engine keeps a second copy of the designs the ceiling counts once. (The ceiling test below also

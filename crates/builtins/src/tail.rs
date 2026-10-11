@@ -401,10 +401,10 @@ pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
 /// several preparations fill, an engine's (#1471), can reach the cap and clear in the middle of a
 /// preparation, and a cleared design is computed again, with the same result. So a session does not
 /// seed its rebuilds from the engine's cache: it keeps the designs its newest plan used, recorded
-/// at the time of use ([`InputBoundCache::begin_journal`]). A full cache of 8,192 entries holds
-/// about 2.4 MiB for one fill order (2,486,520 bytes measured, about 304 bytes an entry); that is
-/// not a ceiling. The derived worst case, whatever the order, is 4,300,720 bytes on a 64-bit
-/// target (`docs/C_ABI_V1_QUALIFICATION.md`, "Design-bound caches").
+/// at the time of use ([`InputBoundCache::begin_journal`]). One fill order of 16,384 distinct
+/// designs measured 3,602,112 bytes (240-byte entries in 2,608-byte leaf and 2,704-byte internal
+/// nodes); that is not a ceiling. The derived worst case, whatever the order, is 4,300,720
+/// requested heap bytes on a 64-bit target (`docs/C_ABI_V1_QUALIFICATION.md`).
 pub const INPUT_BOUND_CACHE_ENTRIES: usize = 8192;
 
 /// A control-side cache of input-section design bounds across preparations (#1457 D2), keyed by
