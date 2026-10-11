@@ -696,7 +696,7 @@ describe("issue 1223 -- live controls drive sends", () => {
         const send = controls.edit.route("kick-verb");
         const edits = [
           send.gainDb(-12, { smoothingSamples: 64 }),
-          send.mute(true),
+          send.mute(true, { smoothingSamples: 0 }),
           send.matrix({ ll: 0.5, lr: 0.25, rl: -0.75, rr: 0.125 }, { smoothingSamples: 32 }),
         ];
         assert.deepEqual(edits.map((edit) => edit.kind), ["routeGainDb", "routeMute", "routeMatrix"]);
@@ -878,7 +878,7 @@ describe("issue 1246 -- live controls drive VCA groups", () => {
       for (const controls of [engine.liveControls(), await createBrowserLiveControls(host)]) {
         const drums = controls.edit.vca("drums");
         const edits = [
-          drums.faderDb(-6),
+          drums.faderDb(-6, { smoothingSamples: 0 }),
           drums.mute(true, { channel: "left", smoothingSamples: 32 }),
           controls.edit.vca("band").faderDb(1.5, { channel: "right", smoothingSamples: 64 }),
         ];
@@ -949,7 +949,7 @@ describe("issue 1246 -- live controls drive VCA groups", () => {
     for (const [what, edit, edited] of [
       ["fader", (controls) => controls.edit.vca("drums").faderDb(-6, { smoothingSamples: 0 }),
         { drums: { leftDb: -6, rightDb: -6 } }],
-      ["left-lane mute", (controls) => controls.edit.vca("fx").mute(true, { channel: "left" }),
+      ["left-lane mute", (controls) => controls.edit.vca("fx").mute(true, { channel: "left", smoothingSamples: 0 }),
         { fx: { leftMute: true } }],
     ]) {
       const live = await createOfflineEngine(vcaSession(), options);
@@ -984,5 +984,184 @@ describe("issue 1246 -- live controls drive VCA groups", () => {
         booted.dispose();
       }
     }
+  });
+});
+
+describe("issue 1364 -- an absent ramp length is the session default", () => {
+  const MARKER = 0xffff_ffff;
+  const map = {
+    tracks: ["t"],
+    sources: [],
+    metersAttached: false,
+    submixes: ["s"],
+    routes: ["r"],
+    vcas: ["v"],
+  };
+
+  /** Each ramped builder method, given the options to pass. */
+  function rampedEdits(options) {
+    const edits = new LiveControlEdits(map);
+    const track = edits.track("t");
+    const submix = edits.submix("s");
+    const send = edits.route("r");
+    const vca = edits.vca("v");
+    return {
+      pan: track.pan(-0.5, 0.5, options),
+      matrix: track.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, options),
+      faderDb: track.faderDb(-3, options),
+      mute: track.mute(true, options),
+      trimDb: track.trimDb(-3, options),
+      polarityInvert: track.polarityInvert(true, options),
+      solo: track.solo(true, options),
+      submixFaderDb: submix.faderDb(-3, options),
+      routeGainDb: send.gainDb(-3, options),
+      routeMute: send.mute(true, options),
+      routeMatrix: send.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, options),
+      vcaFaderDb: vca.faderDb(-3, options),
+      vcaMute: vca.mute(true, options),
+    };
+  }
+
+  /** The `u32` at the record's `smoothingSamples` offset, as the browser transport writes it. */
+  function wireWord(edit) {
+    const layout = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples");
+    assert.equal(layout.offset, 16, "the ramp word sits at offset 16 of the 48-byte record");
+    return new DataView(encodeBrowserCommands([edit]).buffer).getUint32(layout.offset, true);
+  }
+
+  test("every ramped builder method writes the session-default marker when no length is given, and the given length otherwise", () => {
+    // Red if any method's default is still 0 (a step), if the marker is not 0xFFFFFFFF, or if a
+    // given length -- 0 included -- is replaced.
+    const absent = rampedEdits({});
+    assert.equal(Object.keys(absent).length, 13, "the twelve ramped kinds, and the submix strip fader");
+    for (const [name, edit] of Object.entries(absent)) {
+      assert.equal(edit.smoothingSamples, MARKER, `${name} record`);
+      assert.equal(wireWord(edit), MARKER, `${name} wire`);
+    }
+    for (const given of [0, 37, MARKER - 1]) {
+      for (const [name, edit] of Object.entries(rampedEdits({ smoothingSamples: given }))) {
+        assert.equal(edit.smoothingSamples, given, `${name} record at ${given}`);
+        assert.equal(wireWord(edit), given, `${name} wire at ${given}`);
+      }
+    }
+  });
+
+  test("the kinds that carry no ramp still write 0", () => {
+    // Red if `trackEdit`'s default moved to the marker: the engine refuses a non-zero word on an
+    // input filter or a bypass as malformed.
+    const track = new LiveControlEdits(map).track("t");
+    const compressor = track.effect("console", 0, "miso.compressor");
+    for (const edit of [
+      track.hpfHz(80),
+      track.lpfHz(12_000),
+      track.inputFilters({ hpfHz: 80, lpfHz: 12_000 }),
+      compressor.bypass(true),
+    ]) {
+      assert.equal(wireWord(edit), 0, edit.kind);
+    }
+  });
+
+  test("the marker is not a length: smoothingSamples 4294967295 throws on every ramped method", () => {
+    // Red if the marker passes as an explicit length (the engine would then read it as "default"
+    // and the author's `u32::MAX` would silently mean something else).
+    const names = Object.keys(rampedEdits({}));
+    const attempts = {
+      pan: (o) => new LiveControlEdits(map).track("t").pan(0, 0, o),
+      matrix: (o) => new LiveControlEdits(map).track("t").matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, o),
+      faderDb: (o) => new LiveControlEdits(map).track("t").faderDb(0, o),
+      mute: (o) => new LiveControlEdits(map).track("t").mute(true, o),
+      trimDb: (o) => new LiveControlEdits(map).track("t").trimDb(0, o),
+      polarityInvert: (o) => new LiveControlEdits(map).track("t").polarityInvert(true, o),
+      solo: (o) => new LiveControlEdits(map).track("t").solo(true, o),
+      submixFaderDb: (o) => new LiveControlEdits(map).submix("s").faderDb(0, o),
+      routeGainDb: (o) => new LiveControlEdits(map).route("r").gainDb(0, o),
+      routeMute: (o) => new LiveControlEdits(map).route("r").mute(true, o),
+      routeMatrix: (o) => new LiveControlEdits(map).route("r").matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, o),
+      vcaFaderDb: (o) => new LiveControlEdits(map).vca("v").faderDb(0, o),
+      vcaMute: (o) => new LiveControlEdits(map).vca("v").mute(true, o),
+    };
+    assert.deepEqual(Object.keys(attempts), names);
+    for (const [name, attempt] of Object.entries(attempts)) {
+      assert.throws(
+        () => attempt({ smoothingSamples: MARKER }),
+        (error) => error instanceof MisoUsageError && /session-default marker/.test(error.message),
+        name,
+      );
+      // The bounds that were already there still hold.
+      for (const bad of [-1, 1.5, 4_294_967_296, Number.NaN]) {
+        assert.throws(() => attempt({ smoothingSamples: bad }), /smoothingSamples must be a u32/, `${name} ${bad}`);
+      }
+    }
+  });
+
+  /** The one-track document with `control_smoothing` and a constant fader of `faderDb`. */
+  function documentWith(controlSmoothing, faderDb = 0) {
+    const document = JSON.parse(sessionDocument({ frames: 128 * 24 }));
+    document.control_smoothing = controlSmoothing;
+    document.tracks[0].fader.left_db = faderDb;
+    document.tracks[0].fader.right_db = faderDb;
+    return JSON.stringify(document);
+  }
+
+  /**
+   * Boot a live engine from `controlSmoothing`, move the fader to -6 dB at block 2 with `options`,
+   * and return for each of blocks 2..13 whether the live output differs from an engine booted at
+   * -6 dB.
+   */
+  async function differsFromBooted(controlSmoothing, options) {
+    const live = await createOfflineEngine(documentWith(controlSmoothing), {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    const booted = await createOfflineEngine(documentWith(controlSmoothing, -6), { asset });
+    try {
+      const differs = [];
+      for (let block = 0; block < 14; block += 1) {
+        if (block === 2) {
+          const controls = live.liveControls();
+          const report = await controls.submit(controls.edit.track("t").faderDb(-6, options));
+          assert.equal(report.ok, true, report.reasonName);
+          assert.equal(report.appliedAtSample, BigInt(2 * live.shape().quantumFrames));
+        }
+        feed(live, block);
+        feed(booted, block);
+        const [a, b] = [live.render(), booted.render()];
+        assert.ok(a.left.some((sample) => sample !== 0), "the mix carries signal");
+        if (block >= 2) {
+          differs.push(a.left.some((sample, index) => sample !== b.left[index])
+            || a.right.some((sample, index) => sample !== b.right[index]));
+        }
+      }
+      return differs;
+    } finally {
+      live.dispose();
+      booted.dispose();
+    }
+  }
+
+  test("a fader move without a length ramps over the session's fader length and lands on the booted value", async () => {
+    // Gate 2, through the shipped module. Red if the SDK still writes 0 (every block settled, the
+    // first one included), if the engine reads the marker as a length, or if it ignores the
+    // session's table: the default table's 20 ms is 960 samples, 7.5 blocks of 128; 2 ms is 96
+    // samples, inside the first block; an explicit all-zero table is a step.
+    const defaultTable = await differsFromBooted({ kind: "default" }, {});
+    assert.deepEqual(defaultTable.slice(0, 7), Array(7).fill(true), "ramping through block 8");
+    assert.deepEqual(defaultTable.slice(8), Array(4).fill(false), "settled from block 10");
+
+    const twoMs = await differsFromBooted(
+      { kind: "explicit", mute_ms: 10, fader_ms: 2, pan_ms: 20 },
+      {},
+    );
+    assert.deepEqual(twoMs.slice(0, 2), [true, false], "a 96-sample ramp ends inside block 2");
+    assert.deepEqual(twoMs.slice(2), Array(10).fill(false));
+
+    const stepTable = await differsFromBooted(
+      { kind: "explicit", mute_ms: 0, fader_ms: 0, pan_ms: 0 },
+      {},
+    );
+    assert.deepEqual(stepTable, Array(12).fill(false), "an all-zero table steps from block 2");
+
+    const explicitZero = await differsFromBooted({ kind: "default" }, { smoothingSamples: 0 });
+    assert.deepEqual(explicitZero, Array(12).fill(false), "an explicit 0 steps under the default table");
   });
 });

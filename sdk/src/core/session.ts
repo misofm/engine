@@ -115,6 +115,22 @@ export interface SessionModel extends ModelRecord {
   readonly automation: readonly ModelRecord[];
 }
 
+/**
+ * The ramp lengths of a session's live mute, fader and pan edits, in milliseconds (#1364 D4;
+ * decision 15 D15-1). Each is a finite number in `[0, 1000]`; `0` is a hard step.
+ *
+ * `muteMs` is the mute, solo, send-mute, `follows_mute` and VCA-mute ramp, and twice it the
+ * polarity-invert ramp. `faderMs` is the fader, input-trim, send-gain and VCA-offset ramp. `panMs`
+ * is the pan, matrix and send-matrix ramp. A live edit that gives no `smoothingSamples` ramps over
+ * these, rounded to samples at the session's rate, or over the engine's default table (10, 20 and
+ * 20 ms) when the session sets none.
+ */
+export interface ControlSmoothingOptions {
+  readonly muteMs: number;
+  readonly faderMs: number;
+  readonly panMs: number;
+}
+
 export interface SessionOptions {
   /** Stable Session V1 identity. */
   readonly id: string;
@@ -123,6 +139,11 @@ export interface SessionOptions {
   readonly revision?: number | bigint;
   /** Nonzero. Defaults to 128, the quantum every launch host actually renders. */
   readonly quantumFrames?: number;
+  /**
+   * The session's live-ramp lengths. Omitted, the document says `{ "kind": "default" }` and the
+   * engine uses its researched default table; the key itself is never left out.
+   */
+  readonly controlSmoothing?: ControlSmoothingOptions;
 }
 
 const STABLE_ID = /^[a-z][a-z0-9._-]{0,126}$/;
@@ -656,6 +677,8 @@ interface NormalizedOptions {
   readonly revision: bigint;
   readonly sampleRateHz: SessionSampleRateHz;
   readonly quantumFrames: number;
+  /** The `control_smoothing` record, `default` or `explicit` (#1364 D4). */
+  readonly controlSmoothing: ModelRecord;
 }
 
 interface SourceEntry {
@@ -1017,6 +1040,44 @@ export class SessionBuilder {
   }
 }
 
+/** The inclusive upper bound of each `control_smoothing` length, a copy of the engine's
+ * `session::CONTROL_SMOOTHING_MS_MAXIMUM` (#1054 D1), held to it by the builder evals. */
+const CONTROL_SMOOTHING_MS_MAXIMUM = 1000;
+const CONTROL_SMOOTHING_KEYS: ReadonlyMap<string, string> = new Map([
+  ["muteMs", "mute_ms"],
+  ["faderMs", "fader_ms"],
+  ["panMs", "pan_ms"],
+]);
+
+/**
+ * The `control_smoothing` record for the options' `controlSmoothing`: `{ kind: "default" }` when
+ * omitted, else `explicit` with each length a finite `f32` in `[0, 1000]` ms. A missing, unknown or
+ * out-of-range key is refused at `session().controlSmoothing`, under the engine's own codes.
+ */
+function normalizeControlSmoothing(value: unknown): ModelRecord {
+  if (value === undefined) return freeze({ kind: "default" });
+  const path = "session().controlSmoothing";
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    fail(path, "expected an object with muteMs, faderMs and panMs", CODE.wrongType);
+  }
+  knownKeys(value, new Set(CONTROL_SMOOTHING_KEYS.keys()), path, "controlSmoothing");
+  const record: Record<string, string | number> = { kind: "explicit" };
+  for (const [name, key] of CONTROL_SMOOTHING_KEYS) {
+    const supplied = (value as Record<string, unknown>)[name];
+    if (supplied === undefined) fail(`${path}.${name}`, "a length in milliseconds is required");
+    const length = f32(supplied, `${path}.${name}`);
+    if (length < 0 || length > CONTROL_SMOOTHING_MS_MAXIMUM) {
+      fail(
+        `${path}.${name}`,
+        `a control smoothing length must lie in [0, ${CONTROL_SMOOTHING_MS_MAXIMUM}] ms`,
+        CODE.outOfRange,
+      );
+    }
+    record[key] = length;
+  }
+  return freeze(record);
+}
+
 /** Start an immutable Session V1 builder. */
 export function session(options: SessionOptions): SessionBuilder {
   if (options === null || typeof options !== "object") {
@@ -1044,7 +1105,13 @@ export function session(options: SessionOptions): SessionBuilder {
     0xffff_ffff,
   );
   return new SessionBuilder(freeze({
-    options: { sessionId, revision, sampleRateHz: options.sampleRateHz, quantumFrames },
+    options: {
+      sessionId,
+      revision,
+      sampleRateHz: options.sampleRateHz,
+      quantumFrames,
+      controlSmoothing: normalizeControlSmoothing(options.controlSmoothing),
+    },
     sources: [],
     console: undefined,
     tracks: [],
@@ -1699,9 +1766,8 @@ function normalize(state: BuilderState): SessionModel {
     tracks,
     submixes,
     vcas,
-    // #1054: every session says its live-ramp lengths. The builder writes the researched default
-    // table until #1364 lets an author set lengths.
-    control_smoothing: { kind: "default" },
+    // #1054: every session says its live-ramp lengths, `default` or `explicit` (#1364 D4).
+    control_smoothing: options.controlSmoothing,
     outputs,
     routes,
     automation,

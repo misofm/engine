@@ -409,6 +409,13 @@ export interface MisoCommand {
   /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb`,
   /// `PolarityInvert`, the three route kinds and the two VCA kinds; the observation kinds read it
   /// as a window length in render blocks, and it is ignored by the rest.
+  ///
+  /// For the ramped kinds, `4294967295` (`0xFFFFFFFF`, `SESSION_DEFAULT_RAMP`) means no length was
+  /// given: admission replaces it with the session's own length for the kind (its
+  /// `controlSmoothing`, or the default table, at the session's sample rate; a strip's own pan or
+  /// matrix window first for `Pan` and `Matrix`). Any other value, `0` (a hard step) included, is
+  /// the length itself. The input filters and the bypass carry no ramp and refuse the marker as
+  /// `Malformed`, as they refuse any non-zero word.
   smoothingSamples: number;
   /// `Pan`: `[left, right, 0, 0]`. `Matrix` and `RouteMatrix`: `[ll, lr, rl, rr]`. `Mute`,
   /// `Solo`, `PolarityInvert`, `RouteMute` and `VcaMute`: `[0|1, 0, 0, 0]` exactly. Everything
