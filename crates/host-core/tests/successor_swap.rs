@@ -2669,6 +2669,41 @@ fn strip_state_survives_a_swap_at_four_lanes() {
     strip_state_survives_a_swap(Backend::Simd4);
 }
 
+/// A strip whose chain has an effect between its input section and its fader still carries its
+/// fader and matrix stage: the fixture's nine tracks keep their console slots and inserts, so the
+/// builtin stages sit behind effect slots of the same bank chain. Red if the walk over a chain's
+/// slots stops at the first slot that is not a builtin stage: no row is recorded, nothing carries,
+/// and every strip is listed as restarted.
+#[cfg(target_feature = "avx2")]
+fn a_strip_behind_an_effect_still_carries(backend: Backend) {
+    let mut model = parse_session_json(FIXTURE).expect("fixture parses");
+    for track in &mut model.tracks {
+        assert!(
+            !track.console.is_empty() || !track.inserts.effects.is_empty(),
+            "the fixture's tracks carry effects"
+        );
+    }
+    let a = Session::compile(model.clone());
+    add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
+    let b = Session::compile(model);
+    assert_eq!(a.prepare(backend).inventory.strip_stage_count(), 18);
+    let feed = Feed::new(SOURCE, 15);
+    let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+    assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+    assert!(run.restarted.is_empty(), "{backend:?}: {:?}", run.restarted);
+    assert!(
+        run.successor.carry_program_retained_bytes >= strip_moves(18),
+        "{backend:?}: all eighteen strip stages move"
+    );
+}
+
+/// Eight lanes only: the fixture's console equalizer is not banked at four (`console.slot.unbanked`).
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_strip_behind_an_effect_still_carries_at_eight_lanes() {
+    a_strip_behind_an_effect_still_carries(Backend::Simd8);
+}
+
 /// The model, the records and the sessions of gate 2: a fader ramp over `RAMP_FRAMES` frames, a
 /// pan ramp and a mute fade, all in flight across the swap.
 const RAMP_FRAMES: u32 = 400;

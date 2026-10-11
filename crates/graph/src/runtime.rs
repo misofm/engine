@@ -4252,11 +4252,13 @@ impl crate::runtime::Runtime {
             else {
                 continue;
             };
+            // A chain slot that is not a builtin stage (an effect between the input section and
+            // the fader, say) is skipped; the walk ends at the first slot the chain does not have.
             let mut slot = 0_usize;
-            while let Some(processor) = builtin_processor_mut(chain, slot) {
-                if let (Some((stage, count)), Ok(slot)) =
-                    (processor.carried_strip_lanes(), u16::try_from(slot))
-                {
+            while chain.slot_stage_mut(slot).is_some() {
+                let carried = builtin_processor_mut(chain, slot)
+                    .and_then(|processor| processor.carried_strip_lanes());
+                if let (Some((stage, count)), Ok(slot)) = (carried, u16::try_from(slot)) {
                     for (lane, id) in row.lane_tracks.iter().enumerate().take(count) {
                         let Ok(lane) = u16::try_from(lane) else {
                             continue;
