@@ -233,8 +233,8 @@ committed.
 
 The first compile's design-bound work is within #1457's budget (charged 13,193; 807,296; and
 1,509,488 of 1,510,000 at 65,537 strips, where the budget stops the 753rd design). The 64-track
-rebuild is 13.5 ms faster than its cold compile, 14.2 ms of design work removed at 18 ns a charged
-frame-equivalent (807,296 x 18 ns). First-touch, first compile in a fresh process against the
+rebuild is 14.6 ms faster than its cold compile; the design work removed is 14.5 ms at 18 ns a
+charged frame-equivalent (807,296 x 18 ns). First-touch, first compile in a fresh process against the
 measured cold compile: trimming on, 9 strips 2.41 vs 1.65 ms (0.76 ms, 31 % of the first compile),
 64 strips 29.18 vs 26.87 ms (2.3 ms, 8 %); trimming off (`MALLOC_TRIM_THRESHOLD_=4294967295`), 9
 strips 2.46 vs 1.66 ms, 64 strips 30.28 vs 27.20 ms (3.1 ms). So at these sizes first-touch is
