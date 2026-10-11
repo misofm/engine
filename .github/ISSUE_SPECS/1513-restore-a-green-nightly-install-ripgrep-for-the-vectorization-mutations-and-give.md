@@ -74,3 +74,21 @@ reduction is owned by #1511.
   Test value: catches the step-level mask coming back, the defect that hid this since September; the
   existing `UNMASKABLE` rule cannot.
 - G5. The next scheduled nightly on `main` is green; then close #1501.
+
+## Evidence record (2026-10-11)
+
+- Implementation 459f77c63 (Sonnet worker), verdict PASS (fresh Opus) with two low findings: a quoted
+  `continue-on-error` key passed the D6 guard, and the message named a value rather than the key. Both are
+  fixed in d1f8ed6e6 with a quoted-key mutation, which is red against 459f77c63's checker. The `lscpu | grep`
+  locale nit is not taken: the runner image is fixed, and a nightly.yml change would need another runner
+  proof (D5).
+- G1: dispatched nightly run 38141994194 on 459f77c63. The probe job succeeded in 2m43s (limit 20). Its log
+  has the report with `"status":"pass"` and `native vectorization red mutations: ok`.
+- G2: the same run. The link proof succeeded on an AMD EPYC 7763 runner: build 37m42s, randomized step
+  6m17s, total 44m12s, against the 60-minute limit (26% headroom). The old 45-minute limit would have
+  passed by 48 s. #1511 owns the cost; its trigger is a night above 50 minutes.
+- G3: reproduced by the worker and again by the verifier: (i) exit 1 at line 65, (ii) exit 2 with
+  "require rg", (iii) `red mutations: ok`.
+- G4: `python3 -B scripts/test-ci-path-routing.py` passes; the step, quoted-key, expression, flow-mapping
+  and job-level mutations fail the checker.
+- G5: pending; the next scheduled nightly on `main`, then close #1501.
