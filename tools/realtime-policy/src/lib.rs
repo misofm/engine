@@ -43,7 +43,11 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     }
     let mut regions = 0;
     let mut files = 0;
-    let mut capi_ffi = None;
+    // Whether any file under the roots defines or imports a macro named `debug_assert`: then no
+    // file's `debug_assert!` is taken at its word (B2a-D2). It is known only after every file is
+    // read, so the files that are parsed wait for it.
+    let mut debug_assert_shadowed = false;
+    let mut parsed = Vec::new();
     for file in walk::rust_files(workspace_root, &mut findings) {
         let source = match Source::load(&file.absolute, &file.path) {
             Ok(source) => source,
@@ -53,6 +57,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             }
         };
         unsafe_scan::scan(&source, policy, &mut findings);
+        debug_assert_shadowed |= drain::debug_assert_shadowed(&source.tokens);
         let markers = markers::scan(&source, &mut findings);
         if !markers.regions.is_empty() {
             regions += markers.regions.len();
@@ -62,19 +67,30 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         if (markers.mentions_marker || source.path == whole_plan::CAPI_FFI)
             && let Some(file) = syntax::parse(&source, &mut findings)
         {
-            if !markers.regions.is_empty() {
-                let boundaries = boundary::Boundaries::new(&source, &file, &markers.regions);
-                boundary::check(&source, &boundaries, &markers.regions, &mut findings);
-                drain::check(&source, &file, &boundaries, &markers.regions, &mut findings);
-            }
-            if source.path == whole_plan::CAPI_FFI {
-                capi_ffi = Some((source, file));
-            }
+            parsed.push((source, file, markers.regions));
+        }
+    }
+    let mut capi_ffi = None;
+    for (source, file, file_regions) in &parsed {
+        if !file_regions.is_empty() {
+            let boundaries = boundary::Boundaries::new(source, file, file_regions);
+            boundary::check(source, &boundaries, file_regions, &mut findings);
+            drain::check(
+                source,
+                file,
+                &boundaries,
+                file_regions,
+                !debug_assert_shadowed,
+                &mut findings,
+            );
+        }
+        if source.path == whole_plan::CAPI_FFI {
+            capi_ffi = Some((source, file));
         }
     }
     if !workspace_root.join(whole_plan::CAPI_FFI).is_file() {
         findings.push(Finding::bare(Class::MissingCapiFfi));
-    } else if let Some((source, file)) = &capi_ffi {
+    } else if let Some((source, file)) = capi_ffi {
         whole_plan::scan(source, file, &mut findings);
     }
     if files < policy.marked_files_floor {

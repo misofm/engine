@@ -1,0 +1,14 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while self
+            .control_lane_consumer_for_this_strip
+            .pending_records_for_the_block_count() as u64
+            > u64::from(self.limit)
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

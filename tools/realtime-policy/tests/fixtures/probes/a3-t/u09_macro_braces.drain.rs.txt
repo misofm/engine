@@ -1,0 +1,13 @@
+macro_rules! twice {
+    ($body:block) => {
+        $body;
+        $body
+    };
+}
+fn drain(control: &mut Consumer<Record>) {
+    twice! {{
+        while let Ok(record) = control.try_pop() {
+            apply(record);
+        }
+    }}
+}

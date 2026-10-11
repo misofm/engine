@@ -1,0 +1,8 @@
+fn drain(q: &mut Consumer<Record>) {
+    loop {
+        match q.try_pop() {
+            Ok(record) => apply(record),
+            Err(_) => break,
+        }
+    }
+}

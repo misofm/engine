@@ -1,0 +1,14 @@
+fn drain(control: &mut Consumer<Record>, flag: Option<u8>) {
+    while if let Some(x) = flag {
+        x > 0
+    } else if let None = flag {
+        true
+    } else {
+        false
+    } {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

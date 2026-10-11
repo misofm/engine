@@ -1,0 +1,4 @@
+use core::iter::from_fn;
+fn drain(q: &mut Consumer<Record>) {
+    from_fn(|| q.try_pop().ok()).for_each(apply);
+}

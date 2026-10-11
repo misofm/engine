@@ -1,0 +1,12 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while let (Some(first_record_for_the_lane), Some(second_record_for_the_lane)) =
+            (self.first.peek(), self.second.peek())
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

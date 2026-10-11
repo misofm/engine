@@ -1,0 +1,14 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while let Some(PendingRecordForTheLane {
+            very_long_field_name_one,
+            very_long_field_name_two,
+        }) = self.next_pending_record_for_the_lane()
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

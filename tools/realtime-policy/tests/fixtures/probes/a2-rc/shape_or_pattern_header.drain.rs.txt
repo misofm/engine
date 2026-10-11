@@ -1,0 +1,9 @@
+impl LaneDrainForTheStrip {
+    fn or_pattern_header(&mut self, control: &mut Consumer<Record>) {
+        while let Ok(Record::GainChangeForTheLaneWithLongName(x))
+        | Ok(Record::PanChangeForTheLaneWithLongName(x)) = control.try_pop()
+        {
+            self.apply_value(x);
+        }
+    }
+}

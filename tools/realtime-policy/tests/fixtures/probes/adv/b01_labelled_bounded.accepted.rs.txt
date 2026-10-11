@@ -1,0 +1,14 @@
+fn drain<T: Copy>(controls: &mut [Consumer<T>])
+where
+    T: Default,
+{
+    'lanes: for control in controls.iter_mut() {
+        let available = control.available_at_entry();
+        'records: for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                continue 'lanes;
+            };
+            apply(record);
+        }
+    }
+}

@@ -1,0 +1,16 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while if self.use_the_first_consumer_for_this_block {
+            &self.first_consumer_of_the_lane
+        } else {
+            &self.second_consumer_of_the_lane
+        }
+        .has_records()
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

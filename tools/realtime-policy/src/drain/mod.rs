@@ -22,11 +22,30 @@
 //!   `successors` are refused anywhere in a region, except `core::array::from_fn` and
 //!   `std::array::from_fn`, whose closure is a finite outer loop and never bounds a pop of its own.
 //!
+//! Pops that run where the surrounding loops cannot bound them are refused, wherever they stand
+//! (B2a):
+//!
+//! - **Closures (D1).** A pop in a closure is refused: it runs wherever the closure is called, and
+//!   a closure that a loop calls, or that a repeating adapter holds (`repeat(()).map_while(..)`),
+//!   pops until the queue is empty. The closure of `array::from_fn` is the one exception, a finite
+//!   outer loop that never bounds a pop of its own.
+//! - **Macros (D2).** A `try_pop` identifier in any macro's token tree is refused: in a macro
+//!   call, a `macro_rules!` body and the arguments of `debug_assert!`. A count named inside
+//!   `debug_assert!` is a read only while no file under the scan roots defines or imports a macro
+//!   of that name ([`shadow`]); then `debug_assert!` is any other macro, and a drain that names its
+//!   count in one is refused in every file. Stated limit: a registry crate that exports a
+//!   `debug_assert` macro, imported with `#[macro_use] extern crate` or a glob `use`, is outside
+//!   the check; no crate of the workspace does this.
+//! - **Function values (D3).** A path expression whose last segment is `try_pop` is allowed only as
+//!   the callee of a call (`Consumer::try_pop(control)`) or as the only argument of a `.map(..)`
+//!   method call (`self.control.as_mut().map(Consumer::try_pop)`), where it is called at once and
+//!   the loops around it bound it. Any other use (`let pop = Consumer::try_pop;`, an argument, a
+//!   field) is refused.
+//!
 //! What stays outside the rule (D4): recursion; a pop in a helper function (`begin_block` calling
 //! `drain_controls` is one); a loop in a caller, outside the region (a loop that encloses the
 //! region inside the same function is refused above, not a limit); and a macro, defined elsewhere,
-//! that expands to a loop. A pop in a closure or a macro is judged by the loops around it as if
-//! the closure or macro were not there; a later slice refuses it.
+//! that expands to a loop.
 //!
 //! It refuses these bounded drains (D7; restructure the drain to pass): a count used other than as
 //! the left operand of a comparison before its loop (`0 == available`, `apply(available)`,
@@ -41,6 +60,7 @@ mod names;
 mod outer;
 mod per_queue;
 mod scope;
+mod shadow;
 mod shapes;
 mod tree;
 
@@ -51,8 +71,9 @@ use crate::leaf::Leaf;
 use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
-use facts::{Facts, PopSite, Use};
+use facts::{Facts, PopKind, PopSite, Use};
 use scope::{Binding, nearest};
+pub(crate) use shadow::debug_assert_shadowed;
 use tree::{Node, Pos, Step, Tree, Via, is_loop_at};
 
 /// What a judgment reads: the file's tree, its facts, the pop's region, and every pop of the file.
@@ -105,6 +126,7 @@ pub(crate) fn check(
     file: &syn::File,
     boundaries: &Boundaries,
     regions: &[Region],
+    trust_debug_assert: bool,
     findings: &mut Vec<Finding>,
 ) {
     let mut refused = BTreeSet::new();
@@ -130,7 +152,7 @@ pub(crate) fn check(
         })
         .collect();
     if !placed.is_empty() {
-        let facts = Facts::of(file);
+        let facts = Facts::of(file, trust_debug_assert);
         let tree = Tree::new(file, boundaries, &facts.debug_args);
         let nodes: Vec<RegionNodes> = regions
             .iter()
@@ -164,8 +186,18 @@ pub(crate) fn check(
 
 /// Whether the pop is bounded (D1, D4, D8, D8b).
 fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
+    // A `try_pop` token in a macro's token tree runs wherever the macro expands: no loop around
+    // the call bounds it (B2a-D2).
+    if site.kind == PopKind::MacroToken {
+        return false;
+    }
     let steps = ctx.tree.descend(site.pos);
     if !reached(&steps, site) {
+        return false;
+    }
+    // A pop in a closure runs wherever the closure is called, and a function value is called
+    // wherever it is passed (B2a-D1, D3).
+    if in_closure(&steps) || (site.kind == PopKind::Path && !called_in_place(&steps)) {
         return false;
     }
     // The outermost node of the region on the path.
@@ -195,6 +227,30 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
         return false;
     }
     count::bounds(ctx, &steps, at) || per_queue::bounds(ctx, &steps, at, site)
+}
+
+/// Whether a closure other than the closure of `array::from_fn` holds the last node of the path
+/// (B2a-D1). That closure is a finite outer loop (B1b-D1), judged with the loops around it.
+fn in_closure(steps: &[Step<'_>]) -> bool {
+    (0..steps.len()).any(|at| {
+        matches!(steps[at].node, Node::Expr(syn::Expr::Closure(_)))
+            && tree::array_from_fn_call(steps, at).is_none()
+    })
+}
+
+/// Whether the path expression that ends `steps` stands where it is called at once (B2a-D3): as
+/// the callee of a call, or as the only argument of a `.map(..)` method call.
+fn called_in_place(steps: &[Step<'_>]) -> bool {
+    let Some(parent) = steps.len().checked_sub(2).map(|at| steps[at]) else {
+        return false;
+    };
+    match (parent.node, parent.via) {
+        (Node::Expr(syn::Expr::Call(_)), Some(Via::Operand(0))) => true,
+        (Node::Expr(syn::Expr::MethodCall(call)), Some(Via::Operand(1))) => {
+            names::bare(&call.method) == "map" && call.args.len() == 1
+        }
+        _ => false,
+    }
 }
 
 /// Whether the last node of the path is the pop itself, or the macro call that holds it.

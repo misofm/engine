@@ -1,0 +1,11 @@
+impl LaneDrain {
+    fn drain_controls_for_lane(&mut self) {
+        while let Ok(record) = self
+            .control
+            .try_pop()
+            .map(|record| record.with_lane_index_and_sample(self.lane, 0))
+        {
+            self.apply(record);
+        }
+    }
+}

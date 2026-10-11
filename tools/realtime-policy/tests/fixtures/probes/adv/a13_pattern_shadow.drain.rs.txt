@@ -1,0 +1,12 @@
+fn drain(control: &mut Consumer<Record>, limit: Option<usize>) {
+    let available = control.available_at_entry();
+    let Some(available) = limit else {
+        return;
+    };
+    for _ in 0..available {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

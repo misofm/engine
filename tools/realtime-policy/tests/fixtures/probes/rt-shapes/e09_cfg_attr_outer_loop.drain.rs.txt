@@ -1,0 +1,13 @@
+fn drain_matrix_controls(control: &mut Consumer<Record>, rounds: &mut core::ops::RangeFrom<u32>) {
+    #[cfg(any())]
+    let rounds = [0_u8; 2];
+    for _ in rounds {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            apply(record);
+        }
+    }
+}

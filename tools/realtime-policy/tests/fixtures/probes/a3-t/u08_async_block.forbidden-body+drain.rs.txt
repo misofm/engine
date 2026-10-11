@@ -1,0 +1,7 @@
+fn drain(control: &mut Consumer<Record>) {
+    let _work = async {
+        while let Ok(record) = control.try_pop() {
+            apply(record);
+        }
+    };
+}

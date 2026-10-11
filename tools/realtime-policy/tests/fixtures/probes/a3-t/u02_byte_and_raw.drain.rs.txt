@@ -1,0 +1,11 @@
+fn drain(control: &mut Consumer<Record>) {
+    let _s = b"}\"{";
+    let _r = br##"}"# {"##;
+    let _q = r#"\"#;
+    while control.available_at_entry() != 0 {
+        let Ok(record) = control.try_pop() else {
+            break;
+        };
+        apply(record);
+    }
+}

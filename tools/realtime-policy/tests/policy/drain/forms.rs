@@ -28,7 +28,7 @@ fn counted(binding: &str) -> String {
 
 #[test]
 fn the_forms_that_d6_and_d8_state_pass() {
-    let rows: [(&str, String); 10] = [
+    let rows: [(&str, String); 9] = [
         (
             "form-header-entry-count",
             drain(&format!(
@@ -70,12 +70,6 @@ fn the_forms_that_d6_and_d8_state_pass() {
             drain(&format!(
                 "let available = control.available_at_entry();\n    let mut remaining: usize = available;\n    while remaining != 0 {{\n        remaining -= 1;\n        {POP}\n    }}"
             )),
-        ),
-        (
-            "form-pop-token-in-a-macro-in-a-counted-loop",
-            drain(
-                "let available = control.available_at_entry();\n    for _ in 0..available {\n        note!(control.try_pop());\n    }",
-            ),
         ),
         (
             "form-shadow-in-a-closed-block",
@@ -242,20 +236,6 @@ fn a_raw_identifier_pop_is_a_pop() {
     refuses(
         "raw-identifier-pop",
         "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        let Ok(record) = control.r#try_pop() else {\n            break;\n        };\n        apply(record);\n    }\n}",
-    );
-}
-
-/// D5: a pop in a macro's token tree is judged by the loops around the macro call, and a closure
-/// does not hide the loop around it.
-#[test]
-fn a_pop_in_a_macro_or_a_closure_is_judged_by_the_loops_around_it() {
-    refuses(
-        "pop-token-in-a-macro-in-an-unbounded-loop",
-        "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        note!(control.try_pop());\n    }\n}",
-    );
-    refuses(
-        "pop-in-a-closure-in-an-unbounded-loop",
-        "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        let pop = || control.try_pop();\n        apply(pop());\n    }\n}",
     );
 }
 

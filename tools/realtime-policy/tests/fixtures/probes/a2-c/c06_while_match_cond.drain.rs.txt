@@ -1,0 +1,13 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while match self.control_lane_consumer_for_this_strip.state() {
+            State::Ready => true,
+            State::Idle => false,
+        } {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

@@ -1,0 +1,14 @@
+impl Strip {
+    fn drain(&mut self) {
+        for lane in 0..self.lanes {
+            let control = &mut self.controls[lane];
+            let available = control.available_at_entry();
+            for _ in 0..available {
+                let Ok(record) = control.try_pop() else {
+                    break;
+                };
+                apply(record);
+            }
+        }
+    }
+}

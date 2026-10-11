@@ -1,0 +1,6 @@
+fn drain(control: &mut Consumer<Record>) {
+    let mut pop = || control.try_pop().ok();
+    while let Some(record) = pop() {
+        apply(record);
+    }
+}

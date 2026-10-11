@@ -107,6 +107,9 @@ pub(super) struct Use {
 /// attributes of one file.
 #[derive(Default)]
 pub(super) struct Facts {
+    /// Whether `debug_assert!` is the standard macro (D2): its arguments are parsed as
+    /// expressions. When a file under the scan roots shadows the name, it is any other macro.
+    trust_debug_assert: bool,
     /// The uses of each name (a raw identifier is its bare name), sorted by position.
     pub(super) uses: HashMap<String, Vec<Use>>,
     /// The arguments of each `debug_assert!`, parsed as expressions, by [`macro_key`].
@@ -119,8 +122,11 @@ pub(super) struct Facts {
 }
 
 impl Facts {
-    pub(super) fn of(file: &syn::File) -> Self {
-        let mut facts = Self::default();
+    pub(super) fn of(file: &syn::File, trust_debug_assert: bool) -> Self {
+        let mut facts = Self {
+            trust_debug_assert,
+            ..Self::default()
+        };
         facts.visit_file(file);
         for uses in facts.uses.values_mut() {
             uses.sort_by_key(|used| used.pos);
@@ -193,7 +199,7 @@ impl<'ast> Visit<'ast> for Facts {
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         self.macros.push(pos(node.path.span().start()));
-        let parsed = is_debug_assert(node)
+        let parsed = (self.trust_debug_assert && is_debug_assert(node))
             .then(|| {
                 syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
                     .parse2(node.tokens.clone())
@@ -205,7 +211,10 @@ impl<'ast> Visit<'ast> for Facts {
             return;
         };
         let args: Vec<syn::Expr> = args.into_iter().collect();
-        let mut inner = Self::default();
+        let mut inner = Self {
+            trust_debug_assert: true,
+            ..Self::default()
+        };
         for arg in &args {
             inner.visit_expr(arg);
         }

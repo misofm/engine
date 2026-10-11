@@ -1,0 +1,13 @@
+fn render(control: &mut Consumer<Record>, frames: usize) {
+    let mut cursor = 0;
+    while cursor < frames {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            apply(record);
+        }
+        cursor += 16;
+    }
+}

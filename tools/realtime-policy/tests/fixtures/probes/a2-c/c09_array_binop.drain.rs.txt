@@ -1,0 +1,18 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while [
+            self.first_lane_consumer_count,
+            self.second_lane_consumer_count,
+            self.third_lane_consumer_count,
+        ]
+        .iter()
+        .sum::<usize>()
+            > self.limit
+        {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}

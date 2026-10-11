@@ -1,0 +1,11 @@
+fn drain(controls: &mut [Consumer<Record>], gains: &[f32]) {
+    for (control, gain) in controls.iter_mut().zip(gains) {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            apply(record);
+        }
+    }
+}

@@ -1,0 +1,5 @@
+fn drain(q: &mut Consumer<Record>) {
+    while let Some(record) = q.try_pop().ok() {
+        apply(record);
+    }
+}

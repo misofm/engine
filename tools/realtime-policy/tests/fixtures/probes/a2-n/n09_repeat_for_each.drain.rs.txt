@@ -1,0 +1,5 @@
+fn drain_matrix_controls(control: &mut Consumer<Record>, limits: &[usize]) {
+    core::iter::repeat(())
+        .take_while(|()| control.try_pop().map(apply).is_ok())
+        .for_each(drop);
+}

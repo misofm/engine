@@ -1,0 +1,11 @@
+fn drain(control: &mut Consumer<Record>, ticks: &mut core::iter::Repeat<()>) {
+    for _ in ticks.by_ref() {
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            apply(record);
+        }
+    }
+}

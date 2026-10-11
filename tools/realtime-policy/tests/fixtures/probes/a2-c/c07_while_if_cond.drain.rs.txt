@@ -1,0 +1,14 @@
+impl LaneDrainForTheStrip {
+    fn drain_controls_for_lane(&mut self, control: &mut Consumer<Record>) {
+        while if self.enabled_for_the_current_block {
+            self.control_lane_consumer_for_this_strip.has_records()
+        } else {
+            false
+        } {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
+            self.apply(record);
+        }
+    }
+}
