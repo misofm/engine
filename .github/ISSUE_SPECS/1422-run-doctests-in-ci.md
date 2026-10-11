@@ -275,8 +275,13 @@ Gate 3 (`cargo test --locked -p engine --doc`; each run reverted):
 | delete: `T: Sync` to `T: Send` in the `compile_fail` | exit 101; `compile_fail` (line 560) red; twin ok |
 
 Gate 1 for the pair: `cargo test --locked -p engine --doc` exit 0, 2 doctests (1 `compile_fail`, 1
-twin). With this pair the `test-debug-a` doctest command's expected count is 19 (graph-compiler 6 + 6,
-host-core 3 + 2, plan.rs 1 + 1), plus whatever stream B and later slices add. *Test value.* The twin
+twin). With this pair the exact `test-debug-a` "Workspace doctests" command (`qualification.yml`
+lines 639-647) runs 23 doctests, all ok, measured on this branch: engine 2 (`plan.rs` lines 560 and
+569), graph-compiler 12 (6 `compile_fail` + 6 twins), host-core 9 (6 `compile_fail` + 3 twins). Of the
+host-core 9, five are this issue's (`render_session.rs` 50, 55, 63; `prepare.rs` 517, 526) and four are
+#1416's `route_controls.rs` doctests (`compile_fail` at lines 43, 58, 72 and the twin at 86), already
+on `main` at `2a589d360`. So 19 doctests come from this issue's fences and twins and 4 from #1416; any
+later slice adds to the total. *Test value.* The twin
 is red if `PreparedRenderPlan` is renamed or its re-export moves while the `compile_fail` stays green
 for an unresolved-import reason.
 
