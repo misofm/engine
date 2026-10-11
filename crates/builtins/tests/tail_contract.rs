@@ -671,8 +671,8 @@ fn a_journal_holds_the_hits_and_the_stopped_walks_a_preparation_used() {
     );
 }
 
-/// #1471 Amendment 2 (D1, D3): a cache that reads a record finds every design in it (the record
-/// is sorted and searched by key, so a wrong order loses designs from the middle), computes only
+/// #1471 Amendment 2 (D1, D3): a cache that reads a record finds every design in it (a lookup
+/// that reaches only part of a forty-design record loses designs from its middle), computes only
 /// the design the record lacks, and its own journal holds the designs this preparation used, not
 /// the record's other designs: a session's seed follows its newest plan, never grows by union.
 #[cfg(feature = "test-support")]
