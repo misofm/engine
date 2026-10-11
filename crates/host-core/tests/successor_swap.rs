@@ -3113,6 +3113,104 @@ fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
     );
 }
 
+/// D4 decides per stage: when X's followed mute changes and X's pan changes too, the fader/mute
+/// stage restarts (X is in the restart set, at rest at the new mute) and the matrix stage still
+/// carries and is retargeted. The reference writes the pan record to A just before the swap, as
+/// gate 4 does, so the fader/mute stage restarts identically in both runs and only the matrix
+/// carry is compared. Split form only: the fused stage carries both halves or neither (D9).
+/// Red if the followed mute also makes the matrix family prepared: the matrix stage then restarts
+/// at the new pan, and the pan ramp the carry continues is lost.
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
+    let form = Form::Split;
+    let before = with_send_through_submix(strip_state_session(), MOVED, true);
+    let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
+    // Only the left channel mutes, so X's right channel stays audible and its pan ramp is heard.
+    let after = |base: &SessionModel| {
+        let mut model = with_muted_track(base.clone());
+        track_mut(&mut model, MOVED).fader.left_mute = true;
+        model
+    };
+    let (a, b) = (
+        Session::compile(before.clone()),
+        Session::compile(after(&moved)),
+    );
+    let feed = feed_for_strips();
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    let written = [CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record: CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
+    }];
+    let reference = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &moved,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &written,
+        backend,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(reference.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?}: the followed mute restarts X's fader/mute stage"
+    );
+    assert_eq!(
+        reference.restarted, run.restarted,
+        "{backend:?}: the reference restarts the same stage"
+    );
+    assert_eq!(
+        first_cell_difference(&run, &reference),
+        None,
+        "{backend:?}: X's matrix stage carries and is retargeted"
+    );
+    // Not vacuous: the pan ramp is audible after the swap, so a matrix stage that restarts at the
+    // new pan sounds different.
+    let unmoved = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &Session::compile(after(&before)),
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_ne!(unmoved.blocks[SWAP_BLOCK + 1], run.blocks[SWAP_BLOCK + 1]);
+}
+
+#[test]
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_four_lanes() {
+    a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd4);
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_eight_lanes() {
+    a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd8);
+}
+
 #[test]
 fn a_followed_mute_change_restarts_the_stage_at_four_lanes() {
     for form in forms() {

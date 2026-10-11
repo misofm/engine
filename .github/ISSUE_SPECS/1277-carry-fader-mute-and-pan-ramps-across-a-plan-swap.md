@@ -355,16 +355,19 @@ Fixes for the attempt 2 verdict (FAIL: BLOCKER 1, MAJOR 2, MINOR 3), on top of `
   - Audit of the other `LiveRebuild` refusals the classifier can return for this family:
     `Vca` is `vca_in_play`; `Structure` (track set) is a strip with no counterpart; a submix strip
     has no live family; `Domain` (a fader dB refused by `checked_fader_gain`, a pan/matrix refused
-    by `lower_matrix_or_pan`) was already `Prepared` for the family that errs. One gap: the
+    by `lower_matrix_or_pan`) was already `Prepared` for the family that errs. Note: the
     classifier refuses a strip as a whole, so an error in one family leaves the other family with
-    no record too, while the join could still carry the other family live. The join now makes both
-    families of a strip prepared when either errs or the mute is followed. A compiled session
+    no record too; per the ruling below this does not change the other family. A compiled session
     cannot hold an out-of-domain value, so the `Domain` branch has no test; the shared
     `followed_mute_changes` branch has the new gate. The remaining refusals (`PreparedBypass`,
     `Prepared`, `AutomationTarget`) concern effect instances and automation, not this family.
-  - A decision recorded here: the refusal is per strip, so the strip's matrix stage also starts at
-    rest when the mute is followed and its pan changes in the same transaction. That is the
-    classifier's own whole-strip result.
+  - Coordinator ruling (2026-10-11): D3 decides per value and D4 per stage, so a refusal of one
+    family's value makes only that family prepared. A followed mute (or an out-of-domain fader)
+    makes only the fader/mute stage prepared; the matrix stage of the same strip still carries and
+    is retargeted by `matrix_record`, and the reverse holds for a matrix-family error. (An earlier
+    draft of this attempt made both families prepared; the classifier's whole-delta refusal does
+    not make another stage's value prepared.) In the fused form the one stage carries both halves
+    or neither (D9), so a followed mute restarts the whole fused stage.
   - D7 note (verdict NIT 5): a change of the matrix's smoothing window alone is no record
     (`matrix_record`), so a carried matrix stage keeps the predecessor's window; every retarget
     passes its own, so this is inert. The `join_strips` doc says so.
@@ -386,6 +389,17 @@ mutes a ramp) while the following route steps.
 
 Mutation evidence: the join's `followed_mute_changes` guard disabled (`|| true`): both new tests red
 (`restarted` is `[]`, expected `["eq0"]`); reverted: green.
+
+Second gate: `a_followed_mute_change_leaves_the_matrix_stage_carrying_at_{four,eight}_lanes` (split
+form). X's left mute follows and changes while X's pan also changes (only the left channel mutes, so
+the right channel's pan ramp stays audible). `restarted_strips()` is exactly `[X]`; every block
+equals a reference in which the pan record is written to A just before the swap (as gate 4), so
+the fader/mute stage restarts identically in both runs and only the matrix carry differs; and the
+ramp is audible (not equal to a swap that leaves the pan unchanged). Test value: catches a join
+that lets a followed mute make the matrix family prepared, which restarts the pan stage at its new
+value and drops the pan ramp in flight. Mutation: the matrix family made prepared whenever the
+fader family is (`matrix_live = fader_live && ..`): both tests red, the first gate stays green;
+reverted: green.
 
 Gates run (all green): every run step of the `lint` job of `qualification.yml` in order (31 steps:
 fmt, clippy `--all-features -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked

@@ -2510,8 +2510,9 @@ fn effective_fader(
 /// attaches the control kind (`live`): the strip is a track, no VCA is in either model (until
 /// #1247 `LiveRebuild::Vca` keeps them prepared), the strip's values are in domain and its mute
 /// does not change under a `follows_mute` route (`LiveRebuild::FollowedMute`, one predicate with
-/// the classifier). The classifier refuses a strip as a whole, so a refused strip's matrix
-/// difference is prepared too. Every other difference is prepared.
+/// the classifier). Each family is judged on its own values (D4 decides per stage): a followed
+/// mute or an out-of-domain fader makes only the fader/mute family prepared, and the matrix
+/// family of the same strip still carries and retargets. Every other difference is prepared.
 ///
 /// A change of the matrix's smoothing window alone is `Same` (as on the live path, whose
 /// classifier emits no record for it): a carried matrix stage keeps the predecessor's window,
@@ -2551,24 +2552,25 @@ fn join_strips<'a>(
             strip.fader,
             next_effective.as_ref().map(|effective| &effective[index]),
         );
-        // The classifier refuses a strip as a whole (`Domain`, `FollowedMute`) and then emits no
-        // record for either family, so a refused strip's differences are all prepared.
+        // D3 decides per value, D4 per stage: a refusal of one family's value makes only that
+        // family prepared. The classifier refuses a whole delta, but that does not turn the other
+        // stage's own live change into a prepared one.
         let fader_records = fader_records(&before, &after, ramps);
         let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan);
-        let live_family = live_family
+        let fader_live = live_family
             && fader_records.is_ok()
-            && matrix_record.is_ok()
             && !followed_mute_changes(before_fader, strip.fader, model, id);
+        let matrix_live = live_family && matrix_record.is_ok();
         let fader = match fader_records {
             Err(_) => FamilyJoin::Prepared,
             Ok(records) if records[0].is_none() => FamilyJoin::Same,
-            Ok(_) if !live_family => FamilyJoin::Prepared,
+            Ok(_) if !fader_live => FamilyJoin::Prepared,
             Ok(records) => FamilyJoin::Live(records),
         };
         let matrix = match matrix_record {
             Err(_) => FamilyJoin::Prepared,
             Ok(None) => FamilyJoin::Same,
-            Ok(Some(_)) if !live_family => FamilyJoin::Prepared,
+            Ok(Some(_)) if !matrix_live => FamilyJoin::Prepared,
             Ok(Some(record)) => FamilyJoin::Live(record),
         };
         joins.push(StripJoin { id, fader, matrix });
