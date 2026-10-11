@@ -383,7 +383,7 @@ Root names each cross-stream exception in STREAMS.md (D15-0). The rows are in
   changes both gates. A floor raise in the awk also raises the awk self-test's base tree, which
   sits exactly on the floors: its pad loop, the pad comment and the matching floor message, as
   `98a2d6bfc` authorized for #1314 (STREAMS' standing exception names this). An open spec that adds a marker or raises a floor today names only the
-  script: #1321 (`:55`).
+  script: #1321 (`c45f48691:.github/ISSUE_SPECS/1321-render-a-successor-plan-off-the-render-thread-with-a-pinned-floating-point-envir.md:55`).
 - **Re-measure on rebase.** Each slice that changes the marked regions re-measures the floors when
   it lands, whatever landed before it: the tool slices, stream B's cell slices (#1312, #1346,
   #1347, #1345), #1321 and the production issues that mark a function.
