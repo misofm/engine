@@ -802,11 +802,16 @@ pub fn prepare_host_runtime_with_live_controls(
 /// filter), allocates no effect or route ring, and keeps every route's fold. Observation taps ride
 /// the effect lanes, so `observation_taps > 0` with `effects: false` is refused with
 /// `host.observation.live_controls`.
+///
+/// `bound_cache` (#1471) is a design-bound cache the host keeps on its control thread across
+/// preparations (#1457): a design it holds is not computed again, and every prepared value is the
+/// same with and without it. `None` computes every design, as before.
 pub fn prepare_host_runtime_with_live_lanes(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     lanes: HostLiveLanes,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -818,7 +823,7 @@ pub fn prepare_host_runtime_with_live_lanes(
         None,
         None,
         lanes,
-        None,
+        bound_cache,
     )?;
     Ok((prepared, handles))
 }
@@ -826,13 +831,15 @@ pub fn prepare_host_runtime_with_live_lanes(
 /// [`prepare_host_runtime_with_live_lanes`] for a successor of a running plan (issues #1053 and
 /// #1269): the selected live lanes attach exactly as there, and every source `base` left
 /// unchanged is prepared vacant for the carry program exactly as in
-/// [`prepare_host_runtime_successor`].
+/// [`prepare_host_runtime_successor`]. `bound_cache` is as in
+/// [`prepare_host_runtime_with_live_lanes`].
 pub fn prepare_host_runtime_with_live_lanes_successor(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     live_controls: &HostLiveControlRequest,
     lanes: HostLiveLanes,
     base: SuccessorBase<'_>,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -844,7 +851,7 @@ pub fn prepare_host_runtime_with_live_lanes_successor(
         None,
         Some(base),
         lanes,
-        None,
+        bound_cache,
     )?;
     Ok((prepared, handles))
 }

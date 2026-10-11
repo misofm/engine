@@ -421,6 +421,10 @@ pub struct Engine {
     header: HandleHeader,
     pub(crate) last_error: RefCell<[u8; 256]>,
     pub(crate) last_error_len: core::cell::Cell<usize>,
+    /// The design-bound cache every compile on this engine reads and fills (#1471). Control
+    /// thread only; render never reads it, and a session copies none of it (its own cache is
+    /// seeded from the compile's journal).
+    pub(crate) bound_cache: RefCell<control_plane::InputBoundCache>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
@@ -430,6 +434,7 @@ impl Engine {
             header: HandleHeader::new(HANDLE_KIND_ENGINE),
             last_error: RefCell::new([0; 256]),
             last_error_len: core::cell::Cell::new(0),
+            bound_cache: RefCell::new(control_plane::InputBoundCache::new()),
             not_sync: PhantomData,
         }
     }

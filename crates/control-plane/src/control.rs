@@ -340,6 +340,10 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) render_diagnostic_head: usize,
     pub(crate) render_diagnostic_len: usize,
     pub(crate) protocol_reliable_pending: bool,
+    /// This session's design-bound cache (#1471): seeded at compile from the designs that compile
+    /// used, read and filled by every structural rebuild. Control thread only; render never reads
+    /// it and no plan holds it.
+    pub(crate) bound_cache: InputBoundCache,
 }
 
 pub(crate) struct ObservedController {
@@ -1099,6 +1103,10 @@ where
                 }
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
                 // transaction leaves unchanged is prepared to carry that plan's ring.
+                // The session's cache moves out for the preparation (an empty cache is a const
+                // value; nothing allocates) and back before the result is looked at, so the
+                // rebuild fills it whether or not it is admitted.
+                let mut bound_cache = core::mem::take(&mut self.bound_cache);
                 let prepared_runtime = prepare_runtime::<A>(
                     prepared.get().prospective_session().compiled(),
                     self.limits,
@@ -1106,8 +1114,10 @@ where
                         inventory: &self.newest_providers().inventory,
                         committed: self.controller.session().compiled().normalized_model(),
                     }),
-                )
-                .map_err(CommandError::CompileRejected)?;
+                    Some(&mut bound_cache),
+                );
+                self.bound_cache = bound_cache;
+                let prepared_runtime = prepared_runtime.map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
                     sources,
                     strips,

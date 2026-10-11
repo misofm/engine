@@ -146,7 +146,7 @@ fn with_lanes(
     model: &SessionModel,
     lanes: HostLiveLanes,
 ) -> (PreparedHost, HostLiveControlHandles) {
-    prepare_host_runtime_with_live_lanes(&compile(model), &caps(), &request(), lanes)
+    prepare_host_runtime_with_live_lanes(&compile(model), &caps(), &request(), lanes, None)
         .unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
         })
@@ -319,7 +319,7 @@ fn observation_without_effect_lanes_is_refused() {
         effects: false,
         ..HostLiveLanes::ALL
     };
-    let failure = prepare_host_runtime_with_live_lanes(&compiled, &caps(), &request, lanes)
+    let failure = prepare_host_runtime_with_live_lanes(&compiled, &caps(), &request, lanes, None)
         .err()
         .expect("observation without effect lanes is refused");
     assert!(
@@ -328,7 +328,7 @@ fn observation_without_effect_lanes_is_refused() {
         String::from_utf8_lossy(failure.as_bytes())
     );
     // The same request with effect lanes prepares, so the refusal is the selection's.
-    prepare_host_runtime_with_live_lanes(&compiled, &caps(), &request, HostLiveLanes::ALL)
+    prepare_host_runtime_with_live_lanes(&compiled, &caps(), &request, HostLiveLanes::ALL, None)
         .unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
         });

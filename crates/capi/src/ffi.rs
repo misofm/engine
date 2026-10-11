@@ -379,7 +379,12 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
                 };
             }
         };
-        let children = match compile_children(document, limits) {
+        // SAFETY: `engine` passed the live-kind check and can be borrowed for this call.
+        let children = match compile_children(
+            document,
+            limits,
+            Some(&mut unsafe { &*engine }.bound_cache.borrow_mut()),
+        ) {
             Ok(value) => value,
             Err(mut failure) => {
                 let maximum =

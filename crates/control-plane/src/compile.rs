@@ -576,10 +576,13 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
 /// With a `successor` base (a structural transaction, issue #1273 D1) every source the
 /// transaction leaves unchanged is prepared vacant, to carry the displaced plan's ring; the
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
+///
+/// `bound_cache` (#1471) is the design-bound cache the preparation reads and fills.
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
     compiled: &CompiledSession,
     limits: ControlLimits,
     successor: Option<SuccessorBase<'_>>,
+    bound_cache: Option<&mut InputBoundCache>,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
@@ -603,8 +606,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             &live,
             C_ABI_LIVE_LANES,
             base,
+            bound_cache,
         ),
-        None => prepare_host_runtime_with_live_lanes(compiled, &caps, &live, C_ABI_LIVE_LANES),
+        None => prepare_host_runtime_with_live_lanes(
+            compiled,
+            &caps,
+            &live,
+            C_ABI_LIVE_LANES,
+            bound_cache,
+        ),
     }
     .map_err(prepare_failure)?;
     // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
@@ -697,9 +707,17 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 /// Compile `document` under `limits` into a control session and the plan it drives.
 ///
 /// The adapter keeps its own per-session diagnostic storage; it builds that after this returns.
+///
+/// `engine_cache` (#1471) is the host's design-bound cache: the compile reads and fills it. The
+/// session's own cache, which every structural rebuild of the session reads and fills, is seeded
+/// from the designs this compile used, journaled at the time of use with their stored charges
+/// (`InputBoundCache::begin_journal`), so a clear of `engine_cache` in the middle of the compile
+/// loses none of them and no mutable state is shared between the host and its sessions. With
+/// `None` the compile uses a cache of its own, which yields the same seed.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
+    engine_cache: Option<&mut InputBoundCache>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -719,7 +737,13 @@ where
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
-    let runtime = prepare_runtime::<A>(store.compiled(), limits, None)?;
+    let mut compile_cache = InputBoundCache::new();
+    let engine_cache = engine_cache.unwrap_or(&mut compile_cache);
+    engine_cache.begin_journal();
+    let runtime = prepare_runtime::<A>(store.compiled(), limits, None, Some(&mut *engine_cache));
+    // Closed on every path: a failed compile's journal is dropped, not kept open.
+    let bound_cache = engine_cache.take_journal();
+    let runtime = runtime?;
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -836,6 +860,7 @@ where
             render_diagnostic_head: 0,
             render_diagnostic_len: 0,
             protocol_reliable_pending: false,
+            bound_cache,
         },
         plan: PlanState::new(owner, shared),
     })

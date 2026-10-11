@@ -62,7 +62,7 @@ fn assert_cap(label: &str, peak: u64, code: &str, check: impl Fn(u64) -> Result<
 
 #[test]
 fn the_live_admission_accepts_each_cap_and_refuses_one_byte_below() {
-    let base = compile_children(SESSION, limits())
+    let base = compile_children(SESSION, limits(), None)
         .unwrap_or_else(|_| panic!("fixture compiles"))
         .plan
         .resources();

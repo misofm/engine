@@ -616,6 +616,7 @@ fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
             effects: true,
             routes: false,
         },
+        None,
     )
     .unwrap_or_else(|_| panic!("the reference session prepares"));
     let host_core::HostLiveControlHandles {
@@ -1630,6 +1631,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             inventory: &current_host.prepared.inventory,
             committed: current_host.store.compiled().normalized_model(),
         },
+        None,
     )
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
     .0
