@@ -66,7 +66,9 @@ gate's announcement bit in a release build.
 - `crates/session/src/{lib.rs,validate.rs}`
 - `crates/session/tests/{diagnostic_parity.rs,json_grammar.rs,invalid_matrix.rs,json_contract_artifacts.rs}`
 - `docs/session-v1.schema.json`, `docs/SESSION_SCHEMA_V1.md`, `docs/CONTROL_PROTOCOL_SEMANTICS.md`
-- `crates/engine/src/realtime/{plan_exchange.rs,mod.rs}`, `crates/engine/Cargo.toml` (dev-dependency `bench-support` only), `crates/engine/tests/plan_exchange_ceiling.rs`, `Cargo.lock`
+- `crates/engine/src/realtime/{plan_exchange.rs,mod.rs}`
+- `crates/engine/Cargo.toml` (removal of the `bench-support` dev-dependency only), `Cargo.lock` (the `engine` package's `bench-support` line only)
+- `tools/bench-support/tests/plan_exchange_ceiling.rs` (moved from `crates/engine/tests/plan_exchange_ceiling.rs`, which is deleted)
 - `tools/session-validator/src/lib.rs` (fold bound only), `tools/session-validator/tests/fold_mono.rs`
 - `sdk/src/core/session.ts` (revision bound only), `sdk/test/builder-evals.mjs`, `sdk/test/enginectl-cli.mjs`
 - `crates/capi/src/runtime/tests.rs` or `crates/capi/tests/`, `docs/C_ABI_V1_QUALIFICATION.md`
@@ -94,7 +96,7 @@ gate's announcement bit in a release build.
      `GATE_REVISION_MAX`.
    - The next edit is refused with the revision-exhausted status. No record is pushed, the output
      equals a twin without that edit, and the watermark is unchanged.
-4. **Exchange** (an engine integration test in its own binary, using `bench_support::alloc`).
+4. **Exchange** (a bench-support integration test in its own binary, `tools/bench-support/tests/plan_exchange_ceiling.rs`, using `bench_support::alloc`'s thread-scoped counters; it runs in the required `test-debug-a` job; Amendment 2).
    - First, a warm call: an exchange at `GATE_REVISION_MAX` succeeds, and the thread counters show allocations > 0. This proves the probe is live.
    - Then the call at `GATE_REVISION_MAX + 1` returns `RevisionAboveCeiling { revision }`, with `allocations == 0` across the call (the dropped plan's deallocations are expected), and the gate's `revision()` unchanged.
    - Test value: a ceiling check placed after `plan_exchange_inner`, which allocates the exchange before refusing.
@@ -105,6 +107,8 @@ gate's announcement bit in a release build.
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; plus:
    - `cargo test --locked -p session`
    - `cargo test --locked -p session-validator`
+   - `cargo test --locked -p bench-support --test plan_exchange_ceiling` (Amendment 2)
+   - the qualification `test-release` loom leg, `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom` (13 tests; Amendment 2)
    - `bash scripts/check-bench-policy.sh`, `bash scripts/check-realtime-audit-leak.sh`
    - the qualification `sdk` job's "Qualify the SDK package against the shared artifact" step, against an artifact built from this tree by `scripts/build-web-audioworklet.sh`
 6. **Schema artifact** (json_contract_artifacts.rs).
@@ -146,6 +150,19 @@ Scope (AGENTS.md split rule): the slice now reaches `session`, the normative sch
 builder and `session-validator`. Root keeps it one issue: it is one product outcome (the revision
 domain), and a split would leave the SDK building documents the engine refuses, which turns the
 required `sdk` check red.
+
+## Root Amendment 2 (2026-10-11): gate 4 moves to bench-support; the loom leg joins gate 5
+
+`5df1ce8b9` made `bench-support` a dev-dependency of `engine`. bench-support depends on `engine`. Under `--cfg loom`, cargo then builds `engine` as a plain library for bench-support, and that build cannot see `loom`, which is a dev-dependency. The required loom leg fails with "loom unresolved". Gate 4's test moves unchanged to bench-support's own tests, and `engine` drops the dev-dependency. That removes the cycle. A `cfg(loom)` dependency is refused: it would put loom in engine's non-dev graph, against `docs/REALTIME_DEPENDENCY_POLICY.md`, and it would keep the cycle.
+
+Authorized paths: replace the line `crates/engine/src/realtime/{plan_exchange.rs,mod.rs}`, `crates/engine/Cargo.toml` (dev-dependency `bench-support` only), `crates/engine/tests/plan_exchange_ceiling.rs`, `Cargo.lock` with:
+- `crates/engine/src/realtime/{plan_exchange.rs,mod.rs}`
+- `crates/engine/Cargo.toml` (removal of the `bench-support` dev-dependency only), `Cargo.lock` (the `engine` package's `bench-support` line only)
+- `tools/bench-support/tests/plan_exchange_ceiling.rs` (moved from `crates/engine/tests/plan_exchange_ceiling.rs`, which is deleted)
+
+Gate 4, first line: "**Exchange** (a bench-support integration test in its own binary, `tools/bench-support/tests/plan_exchange_ceiling.rs`, using `bench_support::alloc`'s thread-scoped counters; it runs in the required `test-debug-a` job)." The rest of the gate is unchanged.
+
+Gate 5: add `cargo test --locked -p bench-support --test plan_exchange_ceiling` and the qualification `test-release` loom leg, `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom` (13 tests). The loom leg is part of #1503's gate 5: the slice changes engine's dependency graph, and the leg is the gate that catches a dev-dependency cycle on a crate built under `cfg(loom)`.
 
 ## Dependencies
 
@@ -234,7 +251,7 @@ not committed.
   same reason: `MISO_ENGINE_SDK_SKIP_ASSET=1` runs the builder checks without the engine asset, and
   without the guard this test's engine half would fail there. The verdict's "neighbours use asset
   without a guard" holds only for the tests that do not support that mode.
-- **OPEN, found by the batch gates: the CI loom leg does not build since this slice.**
+- **Closed by Amendment 2 (was OPEN), found by the batch gates: the CI loom leg did not build since this slice.**
   `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked
   --release -p engine --lib spsc_loom` fails to compile `engine` (12 errors, `loom` unresolved in
   `latest_cell.rs` and `spsc.rs`) at `5df1ce8b9` and every commit after it; at `70017bf09` (the
