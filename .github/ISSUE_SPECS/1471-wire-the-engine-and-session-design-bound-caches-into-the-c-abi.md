@@ -136,6 +136,51 @@ session's first rebuild computes them again. Root chose option (1), the journal:
   walked frames; a mutant that seeds from the post-compile copy turns it red. The per-session seed's
   memory is measured and recorded beside gate 4.
 
+## Amendment 2 (root, 2026-10-11): the session seed is the newest plan's designs, charged exactly
+
+- **D1 (amended again).** The design-bound seed is an epoch owner.
+  - Each `ProviderEpoch` owns `bound_seed`: the journal of the preparation that made its plan, meaning every design that preparation used, at the time of use, each with its stored charge or stopped-walk horizon.
+  - The compile seeds the first epoch from the journal it opens on the engine's cache.
+  - A structural rebuild reads `newest_providers().bound_seed` read-only and opens a journal of its own. A design it computes goes into its journal only, never into that seed.
+  - The candidate epoch owns the journal as its `bound_seed`. The commit publishes it with the candidate (`pending_providers.push`). A refused or abandoned rebuild drops it with the candidate, and every existing seed is unchanged.
+  - An epoch's seed drops when the epoch is reclaimed.
+  - `SessionState` holds no cache.
+- **D3 (new). Exact form.**
+  - `take_journal` returns the record in an exact-size, read-only form: entries sorted by key in one boxed slice of exactly its length, looked up by binary search.
+  - `retained_bytes()` is `len × size_of::<(InputBoundKey, CachedDesign)>()`.
+  - A preparation over a read-only form never changes it.
+  - A journal is opened and taken inside one call of `prepare_runtime`, before `prepared_capi_resources`. It is never open across preparations.
+  - D2's parameter type does not change.
+- **D4 (new). Charge.**
+  - The seed is a row of `epoch_retained` (`capi_resources`' `epoch_rows`), and its slice is a candidate for `largest`.
+  - So `prepare_runtime`'s `active_retained` check and `validate_replacement_peak` refuse a compile or a rebuild whose seed would pass `maximum_capi_retained_bytes`. The refusal is the existing `ResourceFault::Limit`, it comes before any commit, and nothing changes.
+  - At most 1,805 designs are recorded per preparation. Record their bytes at the exact size.
+- **D5 (new). Engine cache.**
+  - The C ABI header gets one comment-only paragraph. It says the engine owns a control-thread design-bound cache for its whole life, outside every compile limit, and that engine destroy frees it. It states a ceiling derived from `INPUT_BOUND_CACHE_ENTRIES`, the entry layout and the map's worst-case node occupancy. A measured figure for one fill order is not a ceiling.
+  - `docs/C_ABI_V1_QUALIFICATION.md` states the same ceiling.
+- **Gate 3 (amended).** `scripts/check-capi-abi.sh` passes with no change to the declarations, symbols or layout. The only header change is D5's comment.
+- **Named exceptions.**
+  - `crates/builtins/src/tail.rs`: the read-only form, `retained_bytes`, and a fix to the doc link and to the cap wording.
+  - `crates/control-plane/src/control.rs` and `compile.rs` (`ProviderEpoch`).
+  - `crates/capi/tests/resource_lifecycle.rs`: the `capi_epoch_terms` seed term, one more document, the engine-ceiling test, and restating the `capi_retained_bytes` budget row with its reason if the seed passes it.
+  - `docs/REALTIME_DEPENDENCY_POLICY.md`: the `design_bound_cache.rs` ownership entry, whose unsafe is the C calls, render included.
+  - `scripts/check-realtime-policy.sh` (one line).
+  - The capi `builtins` test-support dev-dependency.
+  - The header comment.
+  - The browser module's sha256, recorded here.
+- **Recorded consequence.** A revert to a design that the newest plan does not use computes that design again, within #1457's budget.
+
+### Amendment 2 gates added or changed, each with its test-value sentence
+
+1. **Existing `capi_retained_bytes_charge_every_byte_the_compile_retains` and `tiny_control_frame_still_accounts_three_provider_counters_exactly` go green again, unedited.** Defect: a seed that the compile leaves live and nothing charges (both are red on attempt 1).
+2. **The same test gains one document with at least two distinct enabled input designs.** Defect: a seed charge that is right for one design but wrong per design, for example a fixed size, or a growable buffer's capacity in place of its length.
+3. **`capi_epoch_terms` adds the prospective preparation's seed bytes, and `double_live_oracle_drives_exact_and_one_below_c_caps` asserts that the seed is not zero.** Defect: a rebuild whose successor seed is left out of the prospective epoch's charge, so a rebuild past `maximum_capi_retained_bytes` is admitted.
+4. **New in `design_bound_cache.rs`: `a_rebuild_keeps_only_the_designs_its_plan_uses`.** Compile the 64-track document. A rebuild that changes one strip's HPF computes exactly 1 design. An unchanged rebuild then computes 0. Reverting the strip computes exactly 1. Defect: a session cache that keeps designs the newest plan does not use, growing toward 8,192 entries with nothing charging it (option B's shape), or a rebuild that recomputes strips it did not change.
+5. **New: `a_refused_rebuild_leaves_the_seed_as_it_was`.** A rebuild that changes one strip is refused after its preparation, either through a control-plane test fault after admission or with a capi limit one byte below its peak. The same edit submitted again commits and computes exactly 1 design. Defect: a rebuild that writes its designs into the newest seed before commit (attempt 1's shape), so a refused rebuild grows session memory past its charge.
+6. **New in `resource_lifecycle.rs`: `the_engine_cache_stays_within_its_stated_ceiling`.** Fill one engine's cache to `INPUT_BOUND_CACHE_ENTRIES`. The bytes engine destroy frees, less an empty engine's, are at most D5's ceiling. Defect: an entry-layout change, a cap that no longer applies, or a journal left open on the engine's cache, any of which pushes the engine's lifetime memory past the figure the header gives app developers.
+
+Authority: root decision under the owner's delegation of 2026-10-11, after a fresh Opus review (ACCEPT WITH CHANGES) adopted verbatim. Attempt 1's pre-admission fill of the session cache (`control.rs` ~1106-1119) is a defect to remove.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, 2026-10-11) -- BLOCKED on one accounting question for root
