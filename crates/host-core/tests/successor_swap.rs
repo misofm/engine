@@ -3652,14 +3652,15 @@ fn console_session(mono: bool, slots: &[&str]) -> SessionModel {
     model
 }
 
-/// [`Feed::new`] with an envelope: loud over frames 0..300 and 500..1000, quiet (a fiftieth of the
-/// level) between and after, so a gate opens and closes and a dynamics effect has an envelope in
-/// flight when the swap block renders (frame 768).
+/// [`Feed::new`] with an envelope: loud over frames 0..300, 500..740 and from 1100, quiet (a
+/// fiftieth of the level) between, so a gate opens and closes and a dynamics effect has an
+/// envelope in flight when the swap block renders (frame 768). The gate is in its release at the
+/// swap, not fully open, so its state there differs from its state at rest.
 fn bursty_feed(id: &'static str, seed: u32) -> Feed {
     let mut feed = Feed::new(id, seed);
     for plane in &mut feed.planes {
         for (frame, sample) in plane.iter_mut().enumerate() {
-            if !(frame < 300 || (500..1000).contains(&frame)) {
+            if !(frame < 300 || (500..740).contains(&frame) || frame >= 1100) {
                 *sample *= 0.02;
             }
         }
@@ -3815,35 +3816,46 @@ fn console_effect_state_survives_a_swap_at_eight_lanes() {
 }
 
 /// Four lanes: the NEON and simd128 width. A console effect bank binds only at the width its
-/// build executes (decision D4), so on a build with eight lanes this case cannot prepare.
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+/// build executes (decision D4), so on a build with eight lanes this case is ignored.
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn console_effect_state_survives_a_swap_at_four_lanes() {
     console_effect_state_survives_a_swap(Backend::Simd4);
 }
 
-/// Each of the six effects changes the test signal, so a lane it fails to carry is heard: a
-/// session with only that slot differs from a session with no console, after the swap block.
+/// For each of the six effects, alone on every strip, the state it holds at the swap block is
+/// heard: the swapped run equals a fresh B fed from frame 0 (its state carried), and differs from
+/// a B that starts the slot at rest at the swap block on the same PCM (a lane it fails to carry
+/// would render as that). With the input section flat, the slot is the only state in the strip, so
+/// the second oracle is exact. An effect whose state at the swap equals its state at rest -- an
+/// open gate, a feed that never moves it -- fails here by name, and not silently in gate 1.
 fn every_console_effect_does_work(backend: Backend) {
     let feed = bursty_feed(SOURCE, 5);
-    let bare = plain_run(
-        &Session::compile(console_session(false, &[])),
-        None,
-        &feed,
-        backend,
-        false,
-    );
+    let from_swap = spliced(SOURCE, &feed, |block| {
+        (block + SWAP_BLOCK < BLOCKS).then_some(block + SWAP_BLOCK)
+    });
     for slot in ALL_SLOTS {
-        let with = plain_run(
-            &Session::compile(console_session(false, &[slot])),
+        let a_model = unfiltered(console_session(false, &[slot]));
+        let a = Session::compile(a_model.clone());
+        let b = Session::compile(with_muted_track(a_model));
+        let reference = plain_run(&b, None, &feed, backend, false);
+        let at_rest = plain_run(&b, None, &from_swap, backend, false);
+        let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}: {slot}");
+        assert_eq!(run.refusals, 0, "{backend:?}: {slot}");
+        assert_eq!(
+            first_plain_difference(&run, &reference),
             None,
-            &feed,
-            backend,
-            false,
+            "{backend:?}: {slot} carried equals a fresh B from frame 0"
         );
-        assert!(
-            with.blocks[SWAP_BLOCK..] != bare.blocks[SWAP_BLOCK..],
-            "{backend:?}: {slot} leaves the signal as it found it"
+        assert_ne!(
+            run.blocks[SWAP_BLOCK..],
+            at_rest.blocks[..BLOCKS - SWAP_BLOCK],
+            "{backend:?}: {slot} at the swap holds state its rest does not"
         );
     }
 }
@@ -3854,8 +3866,12 @@ fn every_console_effect_does_work_at_eight_lanes() {
     every_console_effect_does_work(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn every_console_effect_does_work_at_four_lanes() {
     every_console_effect_does_work(Backend::Simd4);
 }
@@ -3882,8 +3898,12 @@ fn the_effect_carry_allocates_and_frees_nothing_at_eight_lanes() {
     the_effect_carry_allocates_and_frees_nothing(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn the_effect_carry_allocates_and_frees_nothing_at_four_lanes() {
     the_effect_carry_allocates_and_frees_nothing(Backend::Simd4);
 }
@@ -3984,8 +4004,12 @@ fn console_chains_keep_collapsing_across_a_swap_at_eight_lanes() {
     }
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn console_chains_keep_collapsing_across_a_swap_at_four_lanes() {
     for inputs_restart in [false, true] {
         console_chains_keep_collapsing(Backend::Simd4, false, inputs_restart);
@@ -4006,8 +4030,8 @@ fn stereo_source(mut model: SessionModel) -> SessionModel {
 /// its carried lanes' state over without a claim that the two channels agree, because they were fed
 /// different PCM. B maps every track mono, so its chains can collapse, and changes every trim to
 /// `-0.0` so that no input section carries and the effect carry alone speaks for the chain. The
-/// successor must stay dual -- and render exactly what a successor forced dual renders -- instead of
-/// collapsing onto a left channel its carried right state no longer matches.
+/// successor must stay dual -- and render exactly what a successor forced dual renders -- instead
+/// of collapsing onto a left channel its carried right state no longer matches.
 fn a_chain_that_could_not_collapse_hands_over_no_agreement(backend: Backend) {
     const SLOTS: [&str; 3] = ["eq", "comp", "limiter"];
     let base = || unfiltered(console_session(true, &SLOTS));
@@ -4049,8 +4073,12 @@ fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_eight_lanes() {
     a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_four_lanes() {
     a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd4);
 }
@@ -4199,8 +4227,12 @@ fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_eight_lanes() {
     a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_four_lanes() {
     a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd4, &ALL_SLOTS);
     a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd4);
@@ -4272,8 +4304,12 @@ fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_eight_lanes
     an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_four_lanes() {
     an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd4);
 }
@@ -4324,8 +4360,12 @@ fn a_removed_console_slot_restarts_every_strip_at_eight_lanes() {
     a_removed_console_slot_restarts_every_strip(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn a_removed_console_slot_restarts_every_strip_at_four_lanes() {
     a_removed_console_slot_restarts_every_strip(Backend::Simd4);
 }
@@ -4386,8 +4426,12 @@ fn a_console_slot_with_live_controls_restarts_its_strip_at_eight_lanes() {
     a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd8);
 }
 
-#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 #[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
 fn a_console_slot_with_live_controls_restarts_its_strip_at_four_lanes() {
     a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd4);
 }

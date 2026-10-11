@@ -257,3 +257,71 @@ Open items:
   covered in `rack`; gate 1 asserts 0.
 - Insert lanes (banked or per node) restart until #1281 and #1282.
 - On a C ABI plan every console slot restarts until #1280.
+
+### Attempt 2
+
+Attempt 1's verdict was FAIL on one MAJOR (test strength) and passed every gate. This attempt fixes
+the test, records the open reading, and takes the NITs. No production behaviour changed.
+
+- **MAJOR 1 (gate 1 did not see the gate/expander).** The swap block (frame 768) fell inside the loud
+  burst `500..1000`, so the gate was fully open and its state rendered as at rest. `bursty_feed` is
+  now loud over `0..300`, `500..740` and from `1100`, quiet (a fiftieth of the level) between: the
+  gate is in its release at the swap. `every_console_effect_does_work_at_{eight,four}_lanes` is
+  rewritten so its claim is true. For each of the six slots, alone on every strip with the input
+  section flat (so the slot is the only state), it requires the swapped run (a) to equal a fresh B
+  fed from frame 0 and (b) to differ from a B that starts the slot at rest at the swap block on the
+  same PCM (the spliced-feed oracle of `a_restarted_slot_starts_at_rest_at_its_new_value`).
+  Defect it defends: a feed under which one effect's state at the swap equals its state at rest, so
+  that effect's carry is not heard. With the old feed restored the test fails by name on the gate
+  ("gate at the swap holds state its rest does not"); with the new feed all six pass.
+- **MINOR 1 (inserts and `restarted_strips()`).** An insert is a chain member and not an owner. Its
+  lane, banked or per node, starts at rest on every swap until #1281 and #1282, so a strip whose
+  only restarted state is an insert is not in `restarted_strips()` and is not ducked. This follows
+  #1277 D6 (later slices add their families' restarts). #1324 must know it: until #1281 and #1282,
+  a strip with a stateful insert restarts that insert at rest and is not in the set. The rustdoc of
+  `restarted_strips` now says so. Root is asked to confirm the reading.
+- **NIT 1.** The five over-wide doc lines are rewrapped (`effect-contract/src/lib.rs` three,
+  `host-core/src/prepare.rs` one, `host-core/tests/successor_swap.rs` one). The only other lines
+  over 100 columns in the range are two shell lines of the realtime policy scripts, whose
+  one-sentence messages are the scripts' own style and unchanged.
+- **NIT 2.** `rack` calls `effect_contract::payload_sections_agree` at the restore. Its rustdoc
+  (`effect-contract/src/symmetry.rs`, outside the authorized paths) still says "Off the render
+  thread, at restore time"; a restore now also runs in the swap block. The function is a pure byte
+  comparison and allocates nothing. Root to authorize the one-line doc edit, or rule otherwise.
+- **NIT 3.** Every four-lane case added by this slice (nine) is now
+  `#[test] #[cfg_attr(not(any(target_feature = "neon", target_feature = "simd128")), ignore = "...")]`,
+  the form `scripts/run-aarch64-tests.sh` names and `symmetry_witness.rs` uses. They compile on
+  x86-64-v3 and are listed as ignored with the reason (9 ignored in `successor_swap`). The
+  eight-lane cases keep `#[cfg(target_feature = "avx2")]`, as the other eight-lane cases of the
+  file do.
+- Not changed: `crates/capi/tests/resource_lifecycle.rs` (the exception is root's). NIT 4 (no
+  production reader of `carry_refusal_count`) and NIT 5 (a stale `DESIGNED` term cannot be reached
+  through a session, so the spec's gate 2 sentence is wrong and the `rack` unit tests are the only
+  defence) are left to root and the successor that surfaces the sum.
+
+Mutations (defect applied to `resolve_effect_carry`: the slot's move is not written and the strip
+is not listed, so only bits can tell; reverted: green). Eight-lane build, the two tests named:
+
+| Slot not carried | `console_effect_state_survives_a_swap` first differing block | `every_console_effect_does_work` |
+| --- | --- | --- |
+| eq (pre) | 9 | red, block 6 |
+| comp (pre) | 9 | red, block 6 |
+| gate (pre) | 10 | red, block 7 |
+| transient (pre) | 9 | red, block 6 |
+| clip (post) | 8 | red, block 6 |
+| limiter (post) | 6 | red, block 6 |
+
+`CONSOLE_EFFECTS` puts eq, comp, gate and transient in `pre_insert` and clip and limiter in
+`post_insert`, so both sections are covered. Before this attempt the gate/expander row was green on
+bits. Test-feed defect: with the attempt 1 feed and the new test, `every_console_effect_does_work`
+is red on the gate only.
+
+Gates run (all green, x86-64-v3, AArch64 not run): `cargo test -p rack -p graph -p host-core` with
+the test-support features (`successor_swap`: 65 passed, 9 ignored), `cargo test -p capi`,
+`-p console-workload`, release `audit` with `trace-graph-audit.sh` (1,000,000 blocks),
+`check-realtime-policy.sh` (112 regions, 27 files), `check-workspace-policy.sh`,
+`check-rack-policy.sh`, `check-host-core-policy.sh`, `check-cross-targets.sh`, fmt, clippy
+`-D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc`, and the worklet chain (`rack/src/lib.rs` is
+browser-compiled code): named-twin build, `check-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+`test-web-audioworklet.sh` with a private TMPDIR (empty afterwards), the V8 spill gate.

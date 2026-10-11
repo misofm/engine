@@ -969,7 +969,7 @@ impl EffectBankStage {
                     StatePayloadInput::new(common, left, right, sizes).ok()?,
                 )
                 .ok()?;
-            Some(left == right)
+            Some(effect_contract::payload_sections_agree(left, right))
         })();
         match taken {
             Some(restored) => {

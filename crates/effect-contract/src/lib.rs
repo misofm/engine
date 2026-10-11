@@ -2532,10 +2532,11 @@ pub trait PreparedNativeEffectBank: Send {
     /// A state payload taken while a bank is collapsed would carry a right section that is whatever
     /// the right channel held when the collapse engaged. Calling this first makes the payload the
     /// one a dual run would have written, and calling it is always sound -- it is the counterfactual
-    /// state, not an approximation of it, so a collapsed bank's published output is the same after the
-    /// call as before.
+    /// state, not an approximation of it, so a collapsed bank's published output is the same after
+    /// the call as before.
     /// The plan-swap carry (#1279) is the caller that does: it disengages a collapsed predecessor
-    /// chain, which calls this on every collapsed bank in it, and then snapshots the lanes it moves.
+    /// chain, which calls this on every collapsed bank in it, and then snapshots the lanes it
+    /// moves.
     /// Every later carry slice that snapshots a bank lane relies on the same rule.
     fn desymmetrize_channels(&mut self) {}
 
@@ -2589,8 +2590,8 @@ pub trait PreparedNativeEffectBank: Send {
     /// invokes it on a bound bank. The one restore a bound bank takes, the plan-swap carry's
     /// (#1279), is no way back either: it overwrites a lane with the displaced plan's state, whose
     /// channels agree only if that plan's chain agreed, and the successor's chain inherits exactly
-    /// that agreement. And [`ResetKind`] is not a symmetrising operation in any of the shipped effects -- both kinds
-    /// clear the *running* state to constants but re-seed the *designed* words from each channel's
+    /// that agreement. And [`ResetKind`] is not a symmetrising operation in any of the shipped
+    /// effects -- both kinds clear the *running* state to constants but re-seed the *designed* words from each channel's
     /// own defaults or its own ramp targets, so a reset preserves whatever parameter asymmetry the
     /// two channels already carried. It is the witness, not the reset, that would have to speak to
     /// that half; the witness already does, and this method covers what it cannot see.

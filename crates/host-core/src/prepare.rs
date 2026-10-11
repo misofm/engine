@@ -571,8 +571,10 @@ impl PreparedHost {
     /// effect bank lane without live control in both plans. A strip whose effect chain changed (an
     /// insert added, removed or reordered, or a session console slot added, removed or moved) is
     /// listed too, even when its remaining owners carry (D15-9). Sorted. Added strips are not
-    /// listed, and neither is any strip of a plan prepared without a predecessor. *Duck-swap a strip whose state cannot continue across
-    /// a plan swap* (#1324) consumes it.
+    /// listed, and neither is any strip of a plan prepared without a predecessor. An insert is a
+    /// chain member and not an owner, so its lane starts at rest on every swap until #1281 and
+    /// #1282 (#1277 D6), and a strip whose only restarted state is an insert is not listed.
+    /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
         &self.inventory.restarted
