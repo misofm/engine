@@ -391,3 +391,144 @@ fresh adversarial review (ACCEPT WITH CHANGES):
 
 Dependents: #1277 (which writes into these cells), #1280 (which peeks them), #1345, #1346, #1347,
 #1399 and #1505, each on this primitive and counter.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b2`, commits `b472a7421` to `0976694b4`)
+
+**What landed.**
+
+- `builtins-compiler`: `FaderCells` (four cells: fader left and right, mute left and right) and
+  `MatrixCells` (one cell) replace the two rings in `TrackControlProducer::{fader, producer}`; their
+  `write(stamp, record)` is infallible. Readers (`FaderReader`, `MatrixReader`) hold the lane `Arc`,
+  the `CellReader`s, a `DirtyReader` and the session count. The drain is D4's: fader before mute,
+  left before right, a pair of equal words applied as one `Both` call, a cell read `Unchanged` not
+  paired, every read value applied before the first refusal is returned. The drains moved from
+  `process` to `begin_block` (`FaderBankProcessor`, `MatrixBankProcessor`, the fused
+  `FaderMatrixBankProcessor`) and to the top of `process` for the test-only scalar owners (their
+  `GraphBindingBlock::live_snapshot`). `apply_pending` is the drain with `LiveSnapshot::ALL` on
+  each. `LiveValuesSuperseded` is the session count (`Arc<AtomicU64>`; load, saturating add, store).
+  The resource plan charges one `Arc` allocation per lane in place of the two rings.
+  `TestOnlyWriteGate`, `TestOnlyGate` and `PreparedBuiltinsGraphBound::test_only_write` are the
+  test helpers that stamp, write and publish.
+- `host-core`: `prepare_host_runtime_with_live_lanes{,_successor}` take the session's
+  `&LiveValuesSuperseded`; every other entry makes a fresh one; `HostLiveControlHandles` returns the
+  plan's. The provider holds counter 16 (`set_live_values_superseded`, four provider counter
+  slots).
+- `protocol`: `CounterId::LiveValuesSuperseded = 16`.
+- `control-plane`: `commit_live` drops the fader and matrix room terms; after step 5 and the
+  `BeforeLivePush` hook it stamps from the newest epoch's `PlanRevisionGate` (a refusal is
+  `Internal`, nothing written), writes the strips' cells, pushes the effect records, commits, and
+  publishes the stamped revision (a `debug_assert_eq!` against the committed revision). A rebuild
+  stamps `r` on the candidate's gate before the protocol commit and publishes it before
+  `reservation.commit()`. `SessionState` owns the count and its service step copies it into the
+  provider; `capi_resources` charges its allocation as a fixed row.
+- `host-web`: `ReadyOwnership::plan_gate`; `write_strip_cells` stamps `last_published + 1` after
+  the room pass, writes the cells and publishes at once (also on the invariant-failure path); the
+  matrix and fader bands take no room and no `in_flight` credit.
+- Header and `docs/C_ABI_V1_QUALIFICATION.md` text per D9; `docs/CONTROL_PROTOCOL_REGISTRY.md`
+  counter 16. The watermark bound text ("until issues 1502, 1503, 1504, 1312 and 1345 have all
+  landed") is unchanged, as root ruled.
+
+**Choices the spec left open, and files outside the authorized list (each forced).**
+
+1. The count enters preparation as a trailing parameter of the two `..._with_live_lanes` entries,
+   not as a `HostLiveControlRequest` field: a new field would break 22 struct literals in test
+   files outside the list. Every other entry makes its own count and returns it in the handles.
+2. `crates/{host-core,control-plane}/Cargo.toml`: `test-support` chains to
+   `builtins-compiler/test-support`, so the control plane's snapshot can read cell write counts
+   (`TestTransactionSnapshot::live_rooms` became `strip_cells`).
+3. `fixtures/graph/v1/direct-route.resources.json` and its manifest line: `builtin_bank_bytes`
+   6599 to 6663 (+64: reader arrays replace consumer arrays). No other graph fixture moved.
+4. `tools/audit/src/fixture_builtins.rs` and `fixtures/builtins/v1/{resources.jsonl,MANIFEST.tsv}`:
+   `STRIP_PREPARATION_BYTES` 1080 to 1088 (+8, measured with `size_of::<StripPreparation>()`); only
+   `resources.jsonl` moved, and the joined manifest pin is re-pinned with that reason. Found by the
+   full workspace run: `issue067_graph_pdc_and_dependent_identity_mutations_are_rejected`.
+5. `hosts/host-web/tests/browser-v1/direct-oracle.mjs`: the raw-Wasm timeline's "flood" was
+   matrix records, which no longer overfill anything; it is now bypass records. The report
+   (`expected.json`'s `flood`: result 6, reason 8, index 0, admitted 0) is unchanged, and the
+   command-timeline PCM digest is unchanged.
+6. `crates/capi/tests/resource_lifecycle.rs`: the racing test's paused phase sends 40 fader edits
+   and requires none refused, in place of "fill the 16-record lane until refused";
+   `COUNTERS_GET`'s pinned response vector (index 9) gains the third counter value (re-pin: length
+   0x70 to 0xa0, TLV count 3 to 4).
+
+**Tests moved or deleted.** Deleted: `a_full_live_lane_refuses_before_anything_changes`,
+`a_live_transaction_with_one_full_lane_pushes_to_no_lane`; the fader-lane half of
+`a_vca_batch_that_overfills_a_queue_is_refused_whole`, `a_refused_send_batch_pushes_nothing_...`'s
+"fader full" case, the first half of `a_refused_eq_transaction_leaves_its_owner_idle`, the
+"queue bound" half of host-core `prepare.rs`'s control-queue test. Rewritten on a queue that is
+still one (input, effect bypass, observation, send): `command_flood_is_typed_backpressure_...`
+(observation subscriptions), `overfilling_a_bus_queue_...` (bus compressor parameters),
+`a_mixed_batch_is_one_transaction_across_every_queue`, `a_refused_solo_submission_...`,
+`prepared_eq_owner_refusals_...`, `prepared_builtin_input_filter_owner_...`,
+`idle_render_skips_admission_counter_clear_...`. Where two records of one cell met in one drain the
+scalar-graph tests now write the invalid value alone and the retry value after the error (a cell
+keeps the newest value only); `composite_raw_record_errors_...` became
+`composite_drain_applies_the_other_stages_value_when_one_stage_is_refused` (the drain runs in
+`begin_block`, so a refused value stops the block and the other stage's value is still applied).
+No digest other than the three resource pins above moved; the command-timeline and identity PCM
+digests are unchanged.
+
+**New tests.** Gate 1 `forty_fader_edits_before_one_block_...` (capi); gate 2
+`a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone` (capi; the next edit is a
+different one, so a leaked write is heard); gate 4 `apply_pending_equals_the_block_drain`
+(builtins-compiler; compares `apply_pending` alone, then the empty-drain blocks); gate 8
+`one_transaction_is_applied_whole_in_the_block_its_revision_is_published_for`
+(`crates/host-core/tests/live_transaction.rs`); gate 9
+`a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone` (host-web, debug build; the
+worklet admission); `a_drain_applies_the_newest_value_its_snapshot_covers_and_counts_the_rest` and
+`the_drain_applies_the_fader_before_the_mute_whatever_the_write_order` (builtins-compiler).
+
+**Gates (final tree unless noted).**
+
+| Gate | Result |
+|---|---|
+| `cargo test --locked --workspace --no-fail-fast` | all pass except the audit resource grid (item 4), fixed and re-run: `cargo test -p audit --bin audit` 33 passed |
+| `-p capi`; `-p control-plane --features test-support`; `-p builtins-compiler --features test-support`; `-p host-web --features test-support`; `-p host-core --features control-provider,test-support`; `-p protocol --features test-support` | pass (capi 81 + 3 + 11; builtins-compiler 60 lib + 11 allocation tracker; host-web 189 + 2 + ...; host-core and protocol all green) |
+| `cargo build --locked --release -p audit -p capi && target/release/audit capi` | allocations, deallocations, locks, syscalls 0; `total_violations` 0 |
+| `check-realtime-policy.sh`, `test-realtime-policy.sh` | ok (100 marked regions in 27 files) |
+| `check-capi-abi.sh`, `check-workspace-policy.sh`, `check-builtins-policy.sh`, `check-host-core-policy.sh`, `check-protocol-control-policy.sh`, `check-graph-policy.sh` | ok |
+| `check-cross-targets.sh` | PASS |
+| `cargo fmt --all -- --check`; clippy `--workspace --all-targets --all-features -D warnings` | ok |
+| Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh` (call graph included, no re-pin), `check-browser-expected-resources.py --artifacts` (runs `direct-oracle.mjs`; digests and the `flood` row agree), `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` | pass |
+
+**Mutation evidence.** Each applies one defect to a committed file, runs the named tests, reverts.
+
+| Defect | Red |
+|---|---|
+| reader counts the replaced writes of the first cell only | `a_drain_applies_the_newest_value_its_snapshot_covers_...`; capi `forty_fader_edits_...` |
+| fader and matrix drains read `LiveSnapshot::ALL` (gate 8) | `one_transaction_is_applied_whole_...` at the first block ("an unpublished revision's writes are not applied"); `a_drain_applies_...` |
+| mute drained before fader | `the_drain_applies_the_fader_before_the_mute_...` |
+| fused drain returns after a refused fader without draining the matrix | `composite_drain_applies_the_other_stages_value_...` |
+| fused `apply_pending` skips the matrix | `apply_pending_equals_the_block_drain` |
+| equal channel words no longer paired into one `Both` call | `a_drain_applies_...` and seven scalar-graph tests (the applied-value witness) |
+| cell writes moved above step 5 (gate 2) | `a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone` ("no cell took a write") |
+| session count not copied into the provider | capi `forty_fader_edits_...` |
+| `commit_live` does not publish its revision | capi `a_live_edit_completes_in_the_next_block` and five more |
+| browser cell writes moved before the room pass (gate 9) | `a_refused_browser_batch_writes_no_cell_and_leaves_the_gate_alone` and eleven more refusal tests |
+| browser stamp taken before the checks with a monotone counter (gate 9) | `a_refused_browser_batch_...`: `GatePin` panics "stamped revision 4 while revision Some(1) is stamped and not yet published" |
+| browser batch does not publish | `a_fader_command_names_the_exact_application_sample` and the timeline tests |
+
+**Test value, one line each.** Gate 1: a lane left a queue, or a counter in another unit. Gate 2: a
+cell write moved before a fallible check. Gate 4: `apply_pending` that skips a stage or reads under
+another snapshot than the block drain. Gate 8: a drain that applies a value above the block's
+snapshot, or a watermark naming another block. Gate 9: a browser path that writes or stamps before
+its last check. Snapshot/count unit test: a drain ignoring `S`, or a count in another unit. Order
+test: a fader move cutting a mute's ramp short. Composite test: a refused value that drops the
+other stage's acked value.
+
+**Open items.**
+
+1. `scripts/check-rack-policy.sh` fails on `crates/rack/src/lib.rs:6191` (`use std::sync::{Arc,
+   Mutex}` in a #1504 test module). `crates/rack` is untouched by this tranche; the failure is not
+   caused by it.
+2. #1504's verifier note: `BuiltinStage` should report live lanes so `BankChain::new`'s assertion
+   covers builtin banks. It needs `GraphPreparedBuiltinBankProcessor::live_lanes` and the stage
+   forwarding in `crates/graph` and `crates/rack`, outside this slice's paths; the fader and matrix
+   banks would then report their reader count.
+3. The browser's `live_values_superseded` count exists (the plan's `HostLiveControlHandles` entry)
+   and is not exposed; the status field is #1399.
+4. `apply_pending` has no production caller until #1277; it is `allow(dead_code)` with that reason.
+5. The browser oracle legs under Playwright (`npm run qualify`) were not run here (no browsers);
+   the Node legs (`direct-oracle.mjs` through `check-browser-expected-resources.py`) were.
