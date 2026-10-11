@@ -522,3 +522,27 @@ models needed no edit). `cargo test --locked -p engine --features realtime-audit
 passed, plus the doc tests (the `LiveStamp` pass example and compile-fail example, and the existing
 `PreparedRenderPlan` compile-fail). Policy, fmt, clippy, doc, workspace-policy and cross-target
 results are in the commit message.
+
+### Root ruling n3 follow-up (stale or over-ceiling stamp; implementer of #1502, commit 35b15eb2c)
+
+`GatePin::stamp(&mut self, revision) -> Result<LiveStamp<'_>, StampRefused>` now refuses, in every
+build, a revision at or below `last_published` or above `GATE_REVISION_MAX`, and a refusal returns
+before `open` is set. `StampRefused { revision, last_published }` borrows nothing, so 48a13bbc1's
+`LiveStamp<'p>` borrow design stands. `PlanRevisionGate::stamp` returns the same `Result`. `publish`
+and the open-stamp rule keep their debug assertions. The only callers on the branch are
+`latest_cell.rs`'s tests, loom models and doc examples and `PlanRevisionGate::stamp`; each takes the
+`Result` (`.expect` in tests). The control plane stamps nothing yet: #1312 D7 adds the stamps, with the
+refusal mapped to the internal-error refusal. The spec text of A, B and C is folded into #1432 D1,
+#1312 D7 and #1277 D5 as the ruling gives it.
+
+Tests: `a_stamp_at_or_below_the_published_revision_or_above_the_ceiling_is_refused_and_changes_nothing`
+is added (a plain `#[test]`), and `a_stamp_at_the_last_published_revision_panics` is deleted in the
+same commit. Gates: `cargo test --locked --release -p engine --lib latest_cell` 12 passed;
+`cargo test --locked -p engine --lib latest_cell` 17 passed; loom 13 passed, also with
+`-C debug-assertions=on`; the #1502 gates rerun green.
+
+| Mutation | Red |
+|---|---|
+| the bound made a `debug_assert!` (release run) | the new test, at the first refused stamp |
+| the ceiling kept, the published-revision bound dropped (release run) | the new test |
+| a refusal sets `open` (debug run) | the new test, at the legal `stamp(7)` |
