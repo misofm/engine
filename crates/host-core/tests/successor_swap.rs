@@ -3200,6 +3200,57 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     assert_ne!(unmoved.blocks[SWAP_BLOCK + 1], run.blocks[SWAP_BLOCK + 1]);
 }
 
+/// The fused form of the second case: the fused stage is one unit (D9), so when X's followed
+/// mute changes and X's pan changes too, the whole stage restarts. X is exactly the restart set
+/// and every block from the swap on equals a fresh B (X at rest at the new mute and the new pan).
+/// Red if the matrix half of the fused stage carries while its fader half restarts: the carried
+/// half ramps to the new pan where a fresh B starts at it.
+fn a_followed_mute_change_restarts_the_fused_stage_whole(backend: Backend) {
+    let form = Form::Fused;
+    let before = with_send_through_submix(strip_state_session(), MOVED, true);
+    let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
+    let mut model = with_muted_track(moved);
+    track_mut(&mut model, MOVED).fader.left_mute = true;
+    let (a, b) = (Session::compile(before.clone()), Session::compile(model));
+    let feed = feed_for_strips();
+    let reference = cell_run(&b, form, None, &feed, &[], backend);
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?}: the followed mute restarts X's whole fused stage"
+    );
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?}: X's fused stage starts at rest, both halves"
+    );
+}
+
+#[test]
+fn a_followed_mute_change_restarts_the_fused_stage_whole_at_four_lanes() {
+    a_followed_mute_change_restarts_the_fused_stage_whole(Backend::Simd4);
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_followed_mute_change_restarts_the_fused_stage_whole_at_eight_lanes() {
+    a_followed_mute_change_restarts_the_fused_stage_whole(Backend::Simd8);
+}
+
 #[test]
 fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_four_lanes() {
     a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd4);

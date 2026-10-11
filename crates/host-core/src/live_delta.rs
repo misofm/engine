@@ -143,8 +143,9 @@ pub enum LiveRebuild {
 ///    (decision 15 E1, #1335 D4). An unchanged automation table is never re-checked: it was
 ///    prepared. An accepted change stays live with no records, as #1260 D2 made it.
 /// 5. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
-///    [`builtins::checked_fader_gain`] or a pan/matrix does not lower through [`builtins_compiler::lower_matrix_or_pan`] (the
-///    single authorities the render-side setters use); [`LiveRebuild::FollowedMute`] if a lane's
+///    [`builtins::checked_fader_gain`] or a pan/matrix does not lower through
+///    [`builtins_compiler::lower_matrix_or_pan`] (the single authorities the render-side setters
+///    use); [`LiveRebuild::FollowedMute`] if a lane's
 ///    mute changes and a `follows_mute` route in `next` sends from the track; otherwise the
 ///    track's records. Then, for each of the track's effect instances in chain order whose
 ///    `bypass` differs: [`LiveRebuild::PreparedBypass`] if [`lowers_session_bypass`] is false

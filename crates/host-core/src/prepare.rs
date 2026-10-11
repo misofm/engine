@@ -2516,8 +2516,8 @@ fn effective_fader(
 ///
 /// A change of the matrix's smoothing window alone is `Same` (as on the live path, whose
 /// classifier emits no record for it): a carried matrix stage keeps the predecessor's window,
-/// and every retarget passes its own. A strip whose kind changed has no counterpart and both families are
-/// prepared.
+/// and every retarget passes its own. A strip whose kind changed has no counterpart and both
+/// families are prepared.
 fn join_strips<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,

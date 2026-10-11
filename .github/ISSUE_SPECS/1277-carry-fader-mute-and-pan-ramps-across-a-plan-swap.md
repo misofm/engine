@@ -350,8 +350,9 @@ Fixes for the attempt 2 verdict (FAIL: BLOCKER 1, MAJOR 2, MINOR 3), on top of `
   a `follows_mute` route sends from (`LiveRebuild::FollowedMute`), so by D3 the difference is
   prepared. `prepare.rs` now owns one predicate, `followed_mute_changes`, beside `fader_records`;
   the classifier calls it (its private `follows_mute_from` is deleted, so nothing is duplicated)
-  and so does `join_strips`. A strip it refuses carries neither stage and is in
-  `restarted_strips()`, with no retarget written.
+  and so does `join_strips`. A strip it refuses has its fader/mute stage restart (no mute retarget
+  is written and the strip is in `restarted_strips()`); in the split form its matrix stage still
+  carries and is retargeted, and in the fused form the one stage restarts whole.
   - Audit of the other `LiveRebuild` refusals the classifier can return for this family:
     `Vca` is `vca_in_play`; `Structure` (track set) is a strip with no counterpart; a submix strip
     has no live family; `Domain` (a fader dB refused by `checked_fader_gain`, a pan/matrix refused
@@ -414,3 +415,14 @@ clippy; also `check-capi-abi.sh`, `target/release/audit capi` (0 allocations, 0 
 worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
 `test-web-audioworklet.sh` with a private TMPDIR, empty afterwards). AArch64 runs in CI only.
+
+### Follow-ups (verdict of attempt 3)
+
+- **MINOR 1, the fused clamp.** `a_followed_mute_change_restarts_the_fused_stage_whole_at_{four,eight}_lanes`:
+  fused form, X's left mute follows and changes and X's pan changes; `restarted_strips() == [X]` and
+  every block from the swap on equals a fresh B. Test value: catches a carry that moves only the
+  matrix half of a fused stage whose fader half restarts. Mutation: `carries = [both, both]` in
+  `resolve_strip_carry` replaced by `let _ = both;` turns both red (the other four followed-mute
+  tests stay green, which is why the case was missing); reverted, all six green.
+- **MINOR 2.** The Attempt 3 record above now states the per-family behaviour.
+- **NIT 3.** The two doc lines over 100 characters (`live_delta.rs`, `prepare.rs`) are rewrapped.
