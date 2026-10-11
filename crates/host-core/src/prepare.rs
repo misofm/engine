@@ -442,10 +442,10 @@ pub struct HostLiveControlHandles {
     /// (issue #1211 D1); empty when no channel was requested. A host's track lanes are
     /// `strip_controls[..track_count]`.
     ///
-    /// Each carries a strip's builtin channels: always the matrix/pan queue (#137 D1) and the
-    /// fader/mute queue (#140 B), and the input trim/polarity queue (#210 phase 3) only when
-    /// [`HostLiveLanes::strip_input`] was set -- under [`HostLiveLanes::ALL`], which an entry with
-    /// no `lanes` argument attaches. With [`HostLiveLanes::FADER_AND_MATRIX`] its
+    /// Each carries a strip's builtin channels: always the matrix/pan cells (#137 D1) and the
+    /// fader/mute cells (#140 B), and the input trim/polarity/filter cells (#210 phase 3, #1346)
+    /// only when [`HostLiveLanes::strip_input`] was set -- under [`HostLiveLanes::ALL`], which an
+    /// entry with no `lanes` argument attaches. With [`HostLiveLanes::FADER_AND_MATRIX`] its
     /// `input` is `None`. A submix's producer carries the submix ID in `track_id`.
     pub strip_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared strip effect instance (#140 A); empty when no channel was

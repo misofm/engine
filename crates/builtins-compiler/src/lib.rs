@@ -4921,7 +4921,7 @@ fn resource_plan(
         // sections now live *inline* in the strip vector charged above rather than behind a `Box`,
         // so they are charged by that vector's layout and not per track. `controlled` therefore
         // changes no byte of the *section* storage, and the only live-control-dependent rows left
-        // are the input ring (until #1346) and the fader and matrix cells' `Arc`s charged below.
+        // are the input, fader and matrix cells' `Arc`s charged below.
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
     add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
@@ -14516,7 +14516,7 @@ mod tests {
         let width = bank.width().lanes() as usize;
         let signal = |plane: f32| -> Vec<f32> {
             (0..FRAMES * width)
-                .map(|index| ((index as f32) * 0.37 + plane).sin())
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.07 + plane)
                 .collect()
         };
         let (mut left, mut right) = (signal(0.0), signal(1.0));
@@ -14762,17 +14762,30 @@ mod tests {
             gate.write_published(|stamp| cells.write(stamp, trim(-12.0)));
             let second = gate.snapshot();
 
+            // The coefficient a trim of `db` settles to, from a bank that was told it directly.
+            let settled = |db: f32| {
+                let width = BankWidth::for_backend(backend).expect("a banking backend");
+                let input = BuiltinChain::new(48_000, BuiltinParameters::default())
+                    .expect("chain")
+                    .into_input_builtins();
+                let mut bank = BuiltinInputBank::new(backend, width, vec![input]).expect("bank");
+                bank.set_trim_db(0, BuiltinLaneSelector::Both, db, 0)
+                    .expect("trim");
+                bank.trim_signed(0, 0).to_bits()
+            };
             processor.begin_block(0, first).expect("the first block");
-            let after_first = processor.bank.trim_signed(0, 0);
+            let after_first = processor.bank.trim_signed(0, 0).to_bits();
             processor.begin_block(64, second).expect("the second block");
-            let after_second = processor.bank.trim_signed(0, 0);
-            assert!(
-                (after_first - 10.0_f32.powf(-6.0 / 20.0)).abs() < 1.0e-6,
-                "{backend:?}: the first block applied revision 1: {after_first}"
+            let after_second = processor.bank.trim_signed(0, 0).to_bits();
+            assert_eq!(
+                after_first,
+                settled(-6.0),
+                "{backend:?}: the first block applied revision 1"
             );
-            assert!(
-                (after_second - 10.0_f32.powf(-12.0 / 20.0)).abs() < 1.0e-6,
-                "{backend:?}: the second block applied revision 2: {after_second}"
+            assert_eq!(
+                after_second,
+                settled(-12.0),
+                "{backend:?}: the second block applied revision 2"
             );
             assert_eq!(superseded.get(), 0, "no value was replaced unread");
         }

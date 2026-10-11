@@ -2469,7 +2469,6 @@ fn input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkle
     })
 }
 
-#[cfg(feature = "test-support")]
 fn effect_input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
         .expect("accepted command fixture");
@@ -3332,7 +3331,6 @@ fn effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost 
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect live-control boot")
 }
 
-#[cfg(feature = "test-support")]
 fn bank_effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     let document = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
     let options = WebBootOptions {
@@ -8428,7 +8426,6 @@ fn a_both_lane_trim_command_addresses_both_lanes() {
 /// Red mutation: give the input band a ring again (push the trim records to a depth-16 queue) ->
 /// the 17th trim is refused. Count the replaced writes of the left cell only -> 58, not 116. Apply
 /// the oldest value of each cell -> the bits differ from the twin's.
-#[cfg(feature = "test-support")]
 #[test]
 fn many_input_edits_before_one_render_apply_the_last_and_are_counted() {
     const QUANTUM: u32 = 128;

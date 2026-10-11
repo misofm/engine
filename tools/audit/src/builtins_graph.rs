@@ -56,9 +56,9 @@ const REFUSED_RANGE: u64 = BLOCKS - 4;
 const B_RENDERS: u64 = REFUSED_RANGE + 2;
 // Digest of `fixtures/builtins/v1/MANIFEST.tsv`, the corpus's single owner. Re-pinned for #1312
 // (452e6eead): the cell readers grew `StripPreparation` by 8 bytes per track, so `resources.jsonl`
-// and its manifest row moved.
+// and its manifest row moved. Re-pinned for #1346: the input cell reader grew it by 48 more.
 const ACCEPTED_MANIFEST_SHA256: &str =
-    "0834666e8f2ea44131efd5906d3017c511cc7e4f88923b0588d01c051410580e";
+    "28f109c918b027b20d5b4cce6a6b0a7ec7c3b8be5eb7bd6f8a1daae82b93e9d0";
 const ACCEPTED_GRAPH_PCM_SHA256: &str =
     "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const ACCEPTED_GRAPH_METERS_SHA256: &str =

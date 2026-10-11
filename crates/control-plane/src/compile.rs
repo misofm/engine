@@ -10,8 +10,8 @@ pub struct CompiledChildren<A: ControlAdapter> {
     pub plan: PlanState<A>,
 }
 
-/// Every live queue's depth: each strip's input queue and each effect's queue hold 16 records
-/// (#1053 D4). The fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312).
+/// Every live queue's depth: each effect's queue holds 16 records (#1053 D4). The strips' input,
+/// fader/mute and matrix/pan lanes are latest-target cells with no depth (#1312, #1346).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]

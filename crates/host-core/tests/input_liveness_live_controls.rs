@@ -8,9 +8,9 @@
 //!    polarity command renders byte-identically to the same session prepared with **no live
 //!    controls at all** -- which is the plan the engine built before this phase existed. That is
 //!    the render-identity half of the C3 form, in tree, on a real fixture.
-//! 2. **The drain reaches the addressed member and only it.** A command pushed onto track `t`'s
-//!    input queue moves track `t`'s coefficient, at the block that drains it, and moves no other
-//!    track's. On a banked plan the queues are drained by the *bank* over its member lanes, so a
+//! 2. **The drain reaches the addressed member and only it.** A command written to track `t`'s
+//!    input cells moves track `t`'s coefficient, at the block that drains it, and moves no other
+//!    track's. On a banked plan the cells are drained by the *bank* over its member lanes, so a
 //!    lane-index slip is a command landing on the wrong track -- silent, and inaudible on any
 //!    single-track fixture.
 //! 3. **The collapse census follows the commands.** An asymmetric ride declines the ridden track
@@ -543,10 +543,14 @@ fn the_collapse_census_follows_the_commands() {
 ///
 /// The stereo fixture never collapses (its two lanes read different source channels), so it is the
 /// never-collapsed oracle for the mono one -- except that the two sessions differ, so the
-/// comparison is not of mixes but of the *mono* plan against itself with the collapse forced off.
+/// comparison is not of mixes but of the *mono* plan against itself with the collapse declined.
 /// The engine has no such switch, so what is compared instead is the mono plan's output under a
-/// symmetric ride against the same plan's output under the same ride issued as two per-lane
-/// commands, which declines the collapse and renders dual throughout.
+/// symmetric ride against the same plan's output under the same ride plus one value that changes
+/// no arithmetic and declines the collapse: a left-only polarity write to the polarity the lane
+/// already has. A lone channel is a `Desymmetrize` event whatever its value (#1346 D3), so that
+/// arm renders dual throughout. The ride itself cannot be split into two per-lane writes for this:
+/// equal words written to the two channels in one block are one `Both` record and keep the
+/// collapse.
 ///
 /// Red mutation: drop `mirror_trim_ramp` from `InputStage::process_mono` -> the collapsed arm's
 /// right channel freezes mid-ride and the two arms diverge.
@@ -557,28 +561,24 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
     let mut collapsed = prepare_with_live_controls(&session);
     let mut dual = prepare_with_live_controls(&session);
     for track in 0..TRACKS {
+        let ride = TrackInputRecord::TrimDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -9.0,
+            smoothing_samples: 512,
+        };
+        push(&mut collapsed, track, ride);
+        push(&mut dual, track, ride);
+        // The same coefficient, as far as arithmetic goes: the left lane already is not inverted.
+        // A one-channel write declines the collapse all the same.
         push(
-            &mut collapsed,
+            &mut dual,
             track,
-            TrackInputRecord::TrimDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -9.0,
+            TrackInputRecord::PolarityInvert {
+                lanes: BuiltinLaneSelector::Left,
+                inverted: false,
                 smoothing_samples: 512,
             },
         );
-        // The same coefficient, reached by two per-lane records: identical arithmetic, and a
-        // declined collapse.
-        for lanes in [BuiltinLaneSelector::Left, BuiltinLaneSelector::Right] {
-            push(
-                &mut dual,
-                track,
-                TrackInputRecord::TrimDb {
-                    lanes,
-                    db: -9.0,
-                    smoothing_samples: 512,
-                },
-            );
-        }
     }
     let eligible_before = census(&dual)[0];
     let collapsed_bits = render(&mut collapsed, 8);
@@ -586,13 +586,13 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
     assert_eq!(
         census(&dual)[0],
         eligible_before - TRACKS as u64,
-        "the two-record arm declines all eight input-bank lanes, so those tracks render dual \
+        "the one-channel write declines all eight input-bank lanes, so those tracks render dual \
          throughout"
     );
     assert_eq!(
         census(&collapsed)[0],
         eligible_before,
-        "the one-record arm declines nothing"
+        "the symmetric ride alone declines nothing"
     );
     assert_eq!(
         collapsed_bits, dual_bits,

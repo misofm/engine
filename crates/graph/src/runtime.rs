@@ -9232,6 +9232,43 @@ mod tests {
         }
     }
 
+    /// A builtin bank that drains live lanes `mask` (bit `n` is lane `n`).
+    struct LiveLaneBank(u8);
+    impl GraphPreparedBuiltinBankProcessor for LiveLaneBank {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn live_lanes(&self) -> u8 {
+            self.0
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    /// A builtin bank's live lanes reach the chain's slot guard (#1346; #1504 D3): `BuiltinStage`
+    /// forwards `live_lanes`, so `BankChain::new`'s assertion that a slot with a live lane is
+    /// active sees the builtin banks the strip cells moved onto.
+    ///
+    /// Red mutation: drop `BuiltinStage::live_lanes` (the trait default `0`) -> every mask reads
+    /// `0` and the guard is vacuous for builtin banks again.
+    #[test]
+    fn a_builtin_stage_forwards_its_banks_live_lanes() {
+        for mask in [0b0000_u8, 0b0001, 0b0101, 0b1111, 0b1000_0001] {
+            let stage = BuiltinStage(Box::new(LiveLaneBank(mask)));
+            assert_eq!(BankStage::live_lanes(&stage), mask);
+        }
+    }
+
     #[test]
     fn prepared_fold_retains_first_slots_scratch_through_pair_success_and_decline() {
         for accepted in [false, true] {

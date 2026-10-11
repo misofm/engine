@@ -4342,9 +4342,9 @@ impl CommandRecord {
                 }))
             }
             // #210 phase 3. The shape rules are `faderDb`'s, because the two parameters share a
-            // domain and a smoothing law; the destination is the input queue rather than the
-            // fader one, which `admit_commands_staged` decides from the lowered variant exactly as
-            // it already decides between the matrix and fader bands.
+            // domain and a smoothing law; the destination is the strip's input cells (#1346)
+            // rather than the fader ones, which `admit_commands_staged` decides from the lowered
+            // variant exactly as it already decides between the matrix and fader bands.
             COMMAND_TRIM_DB => {
                 if self.rack != RACK_NOT_APPLICABLE
                     || self.values[1..].iter().any(|value| *value != 0.0)
