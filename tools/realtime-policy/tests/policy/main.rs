@@ -10,6 +10,7 @@ mod drain;
 mod forbidden;
 mod markers;
 mod run;
+mod source_reads;
 mod unsafe_ownership;
 mod valid;
 mod walk;

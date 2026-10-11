@@ -18,6 +18,7 @@ mod markers;
 mod policy;
 mod report;
 mod source;
+mod source_reads;
 mod syntax;
 mod unsafe_scan;
 mod walk;
@@ -58,6 +59,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             }
         };
         unsafe_scan::scan(&source, policy, &mut findings);
+        source_reads::scan(&source, &file.absolute, &mut findings);
         names.read(&source);
         let markers = markers::scan(&source, &mut findings);
         if !markers.regions.is_empty() {

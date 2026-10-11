@@ -97,9 +97,10 @@ them), and `crates/graph/src/lib.rs`, cited below with both trees' lines.
      `mod.rs`; under `<stem>/` beside any other file; through enclosing inline modules) or by its
      `#[path]` (relative to the declaring file's directory, or to the inline module's directory).
      (root Amendment 2) Rule 3 resolves only the `#[path]` forms that #1442 D8 accepts: a plain
-     relative `.rs` string literal with no `..`, `target` or `node_modules` component. D8 refuses
-     every other `#[path]` (`cfg_attr` forms and `$p` metavariables included) and `include!` of source
-     before this resolver runs, so the resolver never has to resolve one.
+     relative `.rs` string literal with no `..`, `target` or `node_modules` component. D8 refuses every other
+     `#[path]` (every `path` in `cfg_attr` arguments or in a macro token tree, and every `$p` metavariable,
+     included) and every `include!` of source before this resolver runs, so the resolver never has to
+     resolve one.
 
   A file that no declaration reaches is not test code. No module is exempt by its name.
   - So `#[cfg(any(test, feature = "test-support"))]` and `#[cfg(feature = "test-support")]` are not

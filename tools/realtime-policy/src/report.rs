@@ -28,6 +28,14 @@ pub enum Class {
     ParseError,
     /// A parsed file holds a node that `syn` keeps as raw tokens, so no rule can judge it.
     Verbatim,
+    /// A `path` attribute that is not a plain relative `.rs` file outside `cfg_attr` and macro
+    /// token trees: rustc reads the module from a file no rule would see.
+    RefusedPathAttribute,
+    /// An `include!` of source: its argument is not a string literal naming a readable file of
+    /// literals and punctuation only.
+    RefusedInclude,
+    /// An identifier `include` in a `use` item, which renames the macro past the `include!` rule.
+    RefusedIncludeImport,
     /// Unsafe code outside the allowlisted ownership files.
     UnsafeOutsideOwnership,
     /// A line mentions a region marker but is not a valid marker line.
@@ -72,6 +80,13 @@ impl fmt::Display for Class {
             Self::LexError => out.write_str("file does not lex"),
             Self::ParseError => out.write_str("file does not parse"),
             Self::Verbatim => out.write_str("syntax node kept verbatim by the parser"),
+            Self::RefusedPathAttribute => out.write_str(
+                "path attribute that is not a plain relative .rs file outside cfg_attr and macros",
+            ),
+            Self::RefusedInclude => out.write_str(
+                "include! of source (only a string literal naming a file of literals and punctuation is allowed)",
+            ),
+            Self::RefusedIncludeImport => out.write_str("include named in a use item"),
             Self::UnsafeOutsideOwnership => {
                 out.write_str("unsafe code exists outside the issue-approved ownership/audit files")
             }

@@ -85,3 +85,84 @@ resolve.
 ## Budget, size and order
 
 Three attempts; about half a day. After B1b (#1441); before C2 (#1446) and B2b-1 (#1443).
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`, base `49f02e984`)
+
+**Built.** `tools/realtime-policy/src/source_reads.rs` (new; one token walk over every `.rs` file under the roots,
+called from `check` right after the unsafe scan), three classes in `report.rs` (`RefusedPathAttribute`,
+`RefusedInclude`, `RefusedIncludeImport`), one line in `lib.rs`, and `tests/policy/source_reads.rs` (14 tests).
+No other `src` file of the tool is touched (the drain files are not).
+- (a) is read from the tokens: `#` (and `#!`) followed by a bracket group. Every identifier `path` at any depth
+  inside is refused unless `=` and a string literal follow it directly (`syn::LitStr`, so a raw string counts; a
+  byte string, `concat!`, `$p`, a bare `#[path]` do not), the value ends in `.rs`, does not start with `/` or `\`, and has no
+  `..`, `target` or `node_modules` component (split on `/` and `\`), and the attribute is not inside a macro token
+  tree and its first token is not `cfg_attr`.
+- A macro token tree is the group after `name!`, `path::name!`, `macro_rules! name` and `macro name` (with its
+  second group), at any depth below. `ident ! group` also matches `if !(..)`; no attribute can sit there, so the
+  over-match refuses nothing real.
+- (b) `include` followed by `!` and a group of any delimiter, any path prefix: the group must be exactly one string
+  literal, relative, naming a file under the invoking file's directory that is readable, lexes, and holds
+  `Literal`, `Punct` and groups of them only. Everything else is a finding, a missing file included.
+- (c) any identifier `include` in the tokens of a `use` item (up to its `;`, into braces); `use<..>` is skipped.
+- `r#path`, `r#include` read as `path`, `include`: rustc accepts both (checked with rustc 1.97.1, below).
+- D2: the sentence in #1443 is replaced with D2's text. D3 was already in the tree (root's rj3-c commit): #1442's
+  D8 pointer, SP-B line and gate-5 bullet; "ten" slices in #1438 and each header; #1446 and #1443 Dependencies.
+  Re-checked, no edit needed. #1442 holds no `x.txt` case, so there was nothing to delete.
+
+**Real tree (re-measured on the branch).** `grep`: 1 `path` attribute (`crates/host-core/tests/successor_swap.rs:24`),
+4 `include!` (`gate-expander/src/corpus.rs:294`, `multiband-compressor/src/corpus.rs:600`,
+`soft-clip/src/corpus.rs:212`, `tools/wasm-gate-corpus/src/lib.rs:1865`), none in `cfg_attr` or a macro, none
+in a `use`: as the spec says, no difference. Tool and `scripts/check-realtime-policy.sh`: `ok (94 marked regions in
+26 files)`, zero refusals. The sites are seen: with the `path` acceptance forced off the tool refuses
+`successor_swap.rs:24` alone; with the include base wrong it refuses the four `include!` (mutation N).
+
+**Gates.** 1 real tree: above. 2 `cargo test --locked -p realtime-policy`: 177 passed (163 before this slice +
+14). 4 shipped artifacts: `cargo tree -i realtime-policy` shows no dependent, so no shipped input changed; no
+artifact was built. 5 `cargo fmt --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+`scripts/check-workspace-policy.sh` (`ok`), `scripts/check-realtime-policy.sh`, `scripts/test-realtime-policy.sh`
+(`ok`): exit 0.
+
+**Gate 3 mutations** (each alone, applied to `source_reads.rs`; the real tree passes under all but N and V; red =
+tests of `tests/policy/source_reads.rs`, abbreviated by the claim they defend):
+| Mutation | Red |
+|---|---|
+| A (a) dropped | `.txt` path; the line of the finding; cfg_attr; macro; `..`/target/absolute table; non-literal; raw ident (7) |
+| B exception applied inside `cfg_attr` | cfg_attr test only |
+| C exception applied inside macro trees | macro test only |
+| D (b) dropped | include of a looping trait; include forms the tool cannot judge; included file with identifier; include directory; raw include (5) |
+| E (c) dropped | use-item test; raw ident (`use std::r#include`) |
+| F `.rs` suffix dropped | `.txt` path; table; line; raw ident |
+| G / H / I `..` / `target` / `node_modules` component dropped | the table test, each alone |
+| J leading `/` dropped | the table test |
+| K a non-literal value accepted | the non-literal test only |
+| L raw identifier not normalised | the raw-identifier test only |
+| M included-file content check dropped | looping trait; cannot-judge; identifier in included file |
+| N include read from the working directory, not the invoking file's | include-directory test, accepted-forms test; the real tree fails on the 4 `include!` sites |
+| O `use` braces not descended | use-item test only |
+| P / Q / R `macro_rules!` / `macro` / invocation group not marked a macro tree | the macro test, each alone |
+| S inner attribute `#![..]` not read | cfg_attr test (its inner row) only |
+| T nested group of an attribute not descended | cfg_attr test only |
+| U absolute `include!` accepted | `an_absolute_include_is_a_finding` only (first run: no red, because the case named a missing file; the case now writes the file) |
+| V `use` scan runs past the `;` | accepted-forms test (a `use` is followed by a legitimate `include!`); the real tree fails too |
+| (X, `=` spacing check) | no red: the check was dead (rustc rejects `path ==`); removed |
+
+**Test value** (which defect turns each red that no existing test catches): the `.txt`/table tests, a path
+check that tests the suffix only or misses a component; cfg_attr and macro tests, the SP-1 false pass (a plain
+`.rs` literal accepted where #1443's resolver cannot see the declaration, rustc then building `tests.rs` as
+production); non-literal test, `concat!`/`$p` accepted by a check that looks at the next token only; raw-identifier
+test, a name compared without `r#`; include tests, an `include!` of a trait that no rule reads, a content check
+that is missing or reads the wrong directory; use-item test, `use std::include as inc` past the `include!` rule;
+accepted-forms test, a rule that refuses the real `#[path]` and the digest `include!`s (and a `use` scan that
+swallows the next item).
+
+**Deviations.** None from the rule text. `r#` normalisation is a reading of "identifier `path`". The sentence in
+#1443 follows D2; the previous text there was root's Amendment 2 wording, which D2 replaces.
+
+**Open items (rule gaps, each reproduced with rustc 1.97.1; not fixed, rule text is root's).**
+1. `macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path = "y.rs");` compiles and builds `y.rs` as production
+   code: the `path` is in an invocation, not in an attribute, so (a) does not see it.
+2. `macro_rules! inc { ($i:ident) => { $i!("z.txt") } }` with `inc!(include)` compiles and includes `z.txt`: the
+   identifier `include` has no `!` after it and is in no `use` item, so (b) and (c) do not see it.
+3. An `include!` inside a `macro_rules!` body reads its file relative to the file that expands the macro, not the
+   file that holds the body (`sub/def.rs` defines it, `./w.in` was read, not `sub/w.in`). The tool judges the
+   file beside the body. The real tree has no `include!` in a macro.

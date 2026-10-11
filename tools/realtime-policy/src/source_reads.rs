@@ -1,0 +1,254 @@
+//! The ways rustc reads source that the walk does not: `#[path]` attributes and `include!`.
+//!
+//! The walk reads each `.rs` file under the roots and follows no module declaration, so a module
+//! that `#[path = ".."]` points at, or code that `include!` pulls in, would reach rustc and no
+//! rule. This scan runs over the tokens of every file and refuses each such form except two
+//! that read nothing a rule needs to judge (#1519 D1):
+//!
+//! - a `#[path = "x.rs"]` that names a relative `.rs` file with no `..`, `target` or
+//!   `node_modules` component, in an attribute that is neither inside `cfg_attr` arguments nor
+//!   inside a macro token tree (a later rule resolves these declarations, and can resolve only
+//!   a declaration it sees whole);
+//! - an `include!("file")` of a file that holds literals and punctuation only, such as a digest
+//!   array.
+//!
+//! `include_str!` and `include_bytes!` produce a literal and are not read.
+
+use std::fs;
+use std::path::Path;
+use std::str::FromStr;
+
+use proc_macro2::{Delimiter, Group, Ident, TokenStream, TokenTree};
+
+use crate::report::{Class, Finding};
+use crate::source::Source;
+
+/// Scan `source`; `absolute` is the file's path on disk, whose directory a relative `include!`
+/// argument is read from.
+pub(crate) fn scan(source: &Source, absolute: &Path, findings: &mut Vec<Finding>) {
+    let mut scan = Scan {
+        directory: absolute.parent(),
+        found: Vec::new(),
+    };
+    scan.stream(&source.tokens, false);
+    scan.found.sort();
+    scan.found.dedup();
+    for (line, class) in scan.found {
+        findings.push(Finding::at_line(
+            class,
+            &source.path,
+            line,
+            source.line_text(line),
+        ));
+    }
+}
+
+struct Scan<'a> {
+    /// The directory of the scanned file, when it has one.
+    directory: Option<&'a Path>,
+    /// `(line, class)` of each refused form.
+    found: Vec<(usize, Class)>,
+}
+
+impl Scan<'_> {
+    /// Scan one token stream. `in_macro` is true inside a macro token tree: a `macro_rules!` or
+    /// `macro` definition, or a macro invocation's delimited tokens.
+    fn stream(&mut self, stream: &TokenStream, in_macro: bool) {
+        let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
+        // The groups of this stream that are macro token trees, by index.
+        let mut macro_trees = vec![false; tokens.len()];
+        for (index, token) in tokens.iter().enumerate() {
+            match token {
+                TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                    let mut at = index + 1;
+                    if matches!(tokens.get(at), Some(TokenTree::Punct(bang)) if bang.as_char() == '!')
+                    {
+                        at += 1;
+                    }
+                    if let Some(TokenTree::Group(group)) = tokens.get(at)
+                        && group.delimiter() == Delimiter::Bracket
+                    {
+                        self.attribute(&group.stream(), in_macro);
+                    }
+                }
+                TokenTree::Ident(ident) => {
+                    self.ident(&tokens, index, ident, &mut macro_trees);
+                }
+                _ => {}
+            }
+        }
+        for (token, is_macro_tree) in tokens.iter().zip(macro_trees) {
+            if let TokenTree::Group(group) = token {
+                self.stream(&group.stream(), in_macro || is_macro_tree);
+            }
+        }
+    }
+
+    /// The forms that start at an identifier of `tokens`: a macro invocation or definition (whose
+    /// groups are marked), `include!` and a `use` item.
+    fn ident(
+        &mut self,
+        tokens: &[TokenTree],
+        index: usize,
+        ident: &Ident,
+        macro_trees: &mut [bool],
+    ) {
+        let word = name(ident);
+        let after = |offset: usize| tokens.get(index + offset);
+        match (after(1), after(2)) {
+            // `name!(..)`, `path::name!{..}`: the group is a macro invocation's token tree.
+            (Some(TokenTree::Punct(bang)), Some(TokenTree::Group(group)))
+                if bang.as_char() == '!' =>
+            {
+                macro_trees[index + 2] = true;
+                if word == "include" {
+                    self.include(group, ident);
+                }
+            }
+            // `macro_rules! name { .. }`
+            (Some(TokenTree::Punct(bang)), Some(TokenTree::Ident(_)))
+                if bang.as_char() == '!' && word == "macro_rules" =>
+            {
+                if matches!(after(3), Some(TokenTree::Group(_))) {
+                    macro_trees[index + 3] = true;
+                }
+            }
+            // `macro name(..) { .. }` and `macro name { .. }`
+            (Some(TokenTree::Ident(_)), Some(TokenTree::Group(first))) if word == "macro" => {
+                macro_trees[index + 2] = true;
+                if first.delimiter() == Delimiter::Parenthesis
+                    && matches!(after(3), Some(TokenTree::Group(_)))
+                {
+                    macro_trees[index + 3] = true;
+                }
+            }
+            _ => {}
+        }
+        if word == "use"
+            && !matches!(after(1), Some(TokenTree::Punct(open)) if open.as_char() == '<')
+        {
+            self.use_item(&tokens[index + 1..]);
+        }
+    }
+
+    /// An attribute's tokens (between its brackets).
+    fn attribute(&mut self, attribute: &TokenStream, in_macro: bool) {
+        let tokens: Vec<TokenTree> = attribute.clone().into_iter().collect();
+        let in_cfg_attr =
+            matches!(tokens.first(), Some(TokenTree::Ident(head)) if name(head) == "cfg_attr");
+        self.attribute_tokens(&tokens, in_macro || in_cfg_attr);
+    }
+
+    /// Every `path` in `tokens`, at any depth. `refused` is true where no `path` is accepted.
+    fn attribute_tokens(&mut self, tokens: &[TokenTree], refused: bool) {
+        for (index, token) in tokens.iter().enumerate() {
+            match token {
+                TokenTree::Ident(ident) if name(ident) == "path" => {
+                    if refused || !names_a_plain_file(tokens.get(index + 1), tokens.get(index + 2))
+                    {
+                        self.refuse(ident, Class::RefusedPathAttribute);
+                    }
+                }
+                TokenTree::Group(group) => {
+                    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                    self.attribute_tokens(&inner, refused);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `include!(<group>)` at `ident`.
+    fn include(&mut self, group: &Group, ident: &Ident) {
+        let accepted = string_literal(&group.stream())
+            .and_then(|argument| {
+                let path = Path::new(&argument);
+                if path.is_relative() {
+                    self.directory.map(|directory| directory.join(path))
+                } else {
+                    None
+                }
+            })
+            .and_then(|file| fs::read_to_string(file).ok())
+            .and_then(|text| TokenStream::from_str(&text).ok())
+            .is_some_and(|tokens| literals_and_punctuation_only(&tokens));
+        if !accepted {
+            self.refuse(ident, Class::RefusedInclude);
+        }
+    }
+
+    /// The tokens after a `use` keyword, up to the item's `;` (or the end of the stream).
+    fn use_item(&mut self, tokens: &[TokenTree]) {
+        let end = tokens
+            .iter()
+            .position(|token| matches!(token, TokenTree::Punct(semi) if semi.as_char() == ';'))
+            .unwrap_or(tokens.len());
+        self.use_tokens(&tokens[..end]);
+    }
+
+    fn use_tokens(&mut self, tokens: &[TokenTree]) {
+        for token in tokens {
+            match token {
+                TokenTree::Ident(ident) if name(ident) == "include" => {
+                    self.refuse(ident, Class::RefusedIncludeImport);
+                }
+                TokenTree::Group(group) => {
+                    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                    self.use_tokens(&inner);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn refuse(&mut self, ident: &Ident, class: Class) {
+        let line = ident.span().start().line;
+        self.found.push((line, class));
+    }
+}
+
+/// An identifier's name without a raw-identifier prefix: rustc reads `r#path` as `path`.
+fn name(ident: &Ident) -> String {
+    let text = ident.to_string();
+    text.strip_prefix("r#").map_or(text.clone(), str::to_owned)
+}
+
+/// True when `equals` and `value` are `=` and a plain string literal that names a file the tool
+/// accepts as a `#[path]` (#1519 D1 (a)).
+fn names_a_plain_file(equals: Option<&TokenTree>, value: Option<&TokenTree>) -> bool {
+    let Some(TokenTree::Punct(equals)) = equals else {
+        return false;
+    };
+    if equals.as_char() != '=' {
+        return false;
+    }
+    let Some(TokenTree::Literal(literal)) = value else {
+        return false;
+    };
+    let Ok(string) =
+        syn::parse2::<syn::LitStr>(TokenStream::from(TokenTree::Literal(literal.clone())))
+    else {
+        return false;
+    };
+    let value = string.value();
+    let mut components = value.split(['/', '\\']);
+    value.ends_with(".rs")
+        && !value.starts_with(['/', '\\'])
+        && components.all(|component| !matches!(component, ".." | "target" | "node_modules"))
+}
+
+/// The value of `stream` when it is exactly one string literal.
+fn string_literal(stream: &TokenStream) -> Option<String> {
+    syn::parse2::<syn::LitStr>(stream.clone())
+        .ok()
+        .map(|string| string.value())
+}
+
+/// True when `stream` holds literals, punctuation and groups of them, and no identifier.
+fn literals_and_punctuation_only(stream: &TokenStream) -> bool {
+    stream.clone().into_iter().all(|token| match token {
+        TokenTree::Group(group) => literals_and_punctuation_only(&group.stream()),
+        TokenTree::Literal(_) | TokenTree::Punct(_) => true,
+        TokenTree::Ident(_) => false,
+    })
+}
