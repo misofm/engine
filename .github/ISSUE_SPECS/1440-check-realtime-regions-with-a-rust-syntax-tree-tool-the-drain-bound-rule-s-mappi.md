@@ -515,8 +515,8 @@ Implemented on `394a85c6d` (A2 with its verdict follow-ups). No production code 
    stays a token count (so `for available in 0..available` is refused, as in the awk).
 5. **A pop in a `macro_rules!` body, or in any item the list omits (`const`, `static`, an `impl` constant), is
    refused**; a region whose markers sit in a macro token tree has no region node and is refused. Three guards
-   overlap there (`is_tokens`, the missing top, the unreached pop); each alone leaves the cases red-free, so the
-   macro-region cases turn red only under the combined mutation below.
+   overlap there (`is_tokens`, the missing top, the unreached pop); with any one dropped the cases are still
+   refused, so the macro-region cases turn red only under the combined mutation below.
 6. **D10's expected deferred list was a guess; the measured one is 14.** `second_loop_in_bounded_region` and
    `loop_inside_bounded_for` are refused here (their pops sit in an unbounded `loop`), so they are committed.
    `count_from_another_function` is ported with a changed place for the earlier binding (a new function
@@ -537,7 +537,8 @@ Implemented on `394a85c6d` (A2 with its verdict follow-ups). No production code 
    files)`; `bash scripts/check-realtime-policy.sh` prints the same.
 2. `cargo test --locked -p realtime-policy`: 113 passed.
 3. Parity (gawk 5.2.1; the tool's release binary; every tree the harness builds, 327, kept by a throwaway patch
-   of `Tree::drop`, reverted): 259 agree, 68 differ. 21 are A1's and 37 are A2's (unchanged lists). The 10 of
+   of `Tree::drop`, reverted): 259 agree, 68 differ. 21 are A1's and 37 are A2's (the lists of their
+   records, plus the rows that their follow-ups added). The 10 of
    this slice are all deliberate:
    - awk pass, tool fail: `allow-list-const-block`, `allow-list-const-item`, `allow-list-macro-item` (D4:
      nodes off the list, and `macro_rules!` bodies), `loop-around-the-region` (D1: a loop that encloses the
@@ -619,8 +620,7 @@ Implemented on `394a85c6d` (A2 with its verdict follow-ups). No production code 
 6. Shipped artifacts: `git diff --stat 394a85c6d..HEAD` outside `tools/realtime-policy` and `.github/ISSUE_SPECS`
    is empty; `cargo tree -e normal,features -p capi` names no `realtime-policy`; `cargo build --locked --release
    -p capi` built twice at the parent and twice at the change gives the same digests each time: `libcapi.a`
-   `3431f546ec53477d...`, `libcapi.so` `0213cd820e2715de...` (A2's digests, taken at `394a85c6d`'s parent: the
-   same). The `artifact-identity` job is CI-only.
+   `3431f546ec53477d...`, `libcapi.so` `0213cd820e2715de...` (the same as A2's recorded digests). The `artifact-identity` job is CI-only.
 7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
    `check-workspace-policy.sh`, `check-bench-policy.sh`, `check-realtime-policy.sh`,
    `test-realtime-policy.sh`: all exit 0.
