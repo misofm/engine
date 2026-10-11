@@ -953,6 +953,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             &caps,
             &live_controls,
             &[],
+            live_lanes(options),
         )
         .expect("independent engine preparation");
         assert_eq!(
@@ -3411,6 +3412,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             &caps,
             &live_controls,
             &[],
+            live_lanes(options),
         )
         .expect("independent effect preparation");
         let dense_table = shape
@@ -9566,6 +9568,251 @@ fn strip_options(queue_records: u64, meter_blocks: u64, master_plus_one: u64) ->
     }
 }
 
+/// How the three preparation branches of `compile_ready` are reached.
+#[derive(Clone, Copy, Debug)]
+enum LaneBranch {
+    /// No spectrum: the selected-meters entry.
+    Plain,
+    /// One spectrum observer.
+    Single,
+    /// A spectrum observer collection.
+    Collection,
+}
+
+/// Issue #1326: three tracks and one submix (`bus`), every track with an asymmetric fader and a
+/// non-identity pan, so a settled lane has arithmetic to get wrong; the bus is gate 1's strip `S`.
+fn lane_session() -> String {
+    let (document, _) = strip_pair_documents(None);
+    let mut model = parse_session_json(&document).expect("lane session parses");
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        let step = (index + 1) as f32;
+        track.fader.left_db = -1.5 * step;
+        track.fader.right_db = -0.75 * step;
+        track.matrix_or_pan = session::MatrixOrPan::Pan {
+            left: 0.9 - 0.1 * step,
+            right: 0.2 + 0.15 * step,
+            smoothing_samples: 0,
+        };
+    }
+    canonical_session_json(&model).expect("lane session canonicalizes")
+}
+
+fn lane_options(queue_records: u64) -> WebBootOptions {
+    WebBootOptions {
+        source_ring_frames: STRIP_QUANTUM * 4,
+        live_control_command_queue_records: queue_records,
+        ..boot_options(STRIP_QUANTUM)
+    }
+}
+
+fn lane_boot(document: &str, queue_records: u64, branch: LaneBranch) -> AudioWorkletEngineHost {
+    let target = SpectrumTarget::TrackPostMatrix("t0".into());
+    let request = match branch {
+        LaneBranch::Plain => None,
+        LaneBranch::Single => Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+            target,
+            channels: SpectrumChannels::Stereo,
+            maximum_capture_bytes: u64::MAX,
+        })),
+        LaneBranch::Collection => Some(SpectrumPreparationRequest::Collection(
+            SpectrumCaptureCollectionRequest {
+                entries: vec![host_core::SpectrumCaptureCollectionEntry {
+                    target,
+                    channels: SpectrumChannels::Stereo,
+                }],
+                maximum_capture_bytes: u64::MAX,
+            },
+        )),
+    };
+    AudioWorkletEngineHost::boot_with_spectrum(
+        document.as_bytes(),
+        lane_options(queue_records),
+        request,
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "#1326 boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+/// The output bits of `blocks` blocks of the lane session's three sources rendered through `host`.
+fn lane_render(host: &mut AudioWorkletEngineHost, blocks: u64) -> Vec<u32> {
+    let mut bits = Vec::new();
+    for block in 0..blocks {
+        for feeder in 0..3_u64 {
+            submit_strip_source(
+                host,
+                &format!("t{feeder}"),
+                block,
+                &strip_planes(feeder, block),
+            );
+        }
+        assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+        bits.extend(
+            host.output_pcm()
+                .expect("output")
+                .iter()
+                .map(|sample| sample.to_bits()),
+        );
+    }
+    bits
+}
+
+/// The same blocks through an independent host-core plan prepared with no live lane at all: the
+/// plan option 0 prepared before issue #1326.
+fn lane_free_render(document: &str, blocks: u64) -> Vec<u32> {
+    let parsed = parse_host_session(document).expect("lane session parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("lane session compile");
+    let options = lane_options(0);
+    let caps = prepare_caps(&compiled, options, options.source_ring_frames, u64::MAX);
+    let (mut host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &caps,
+        &HostLiveControlRequest::default(),
+        &[],
+        HostLiveLanes::ALL,
+    )
+    .expect("lane-free preparation");
+    assert!(handles.strip_controls.is_empty(), "no lane at all");
+    let quantum = STRIP_QUANTUM as usize;
+    let mut bits = Vec::new();
+    for block in 0..blocks {
+        for feeder in 0..3_u64 {
+            let planes = strip_planes(feeder, block);
+            host.sources
+                .submit(
+                    format!("t{feeder}").as_bytes(),
+                    host_core::SourceSubmission {
+                        generation: 1,
+                        start_frame: block * u64::from(STRIP_QUANTUM),
+                        sample_rate_hz: 48_000,
+                        planes: &[&planes[0], &planes[1]],
+                        frames: STRIP_QUANTUM,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+        }
+        let mut samples = vec![0.0_f32; quantum * 2];
+        let output = PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("planes");
+        host.plan
+            .render(
+                RenderIo { output },
+                RenderTime {
+                    absolute_sample: block * u64::from(STRIP_QUANTUM),
+                },
+            )
+            .expect("render");
+        bits.extend(samples.iter().map(|sample| sample.to_bits()));
+    }
+    bits
+}
+
+/// Issue #1326 gates 1 and 2: whatever the app's live-control options say, every preparation branch
+/// attaches each strip's fader/mute and matrix/pan lanes, tracks then submixes, and an app that did
+/// not opt in gets no input, effect or route lane; and attaching them moves no rendered bit, neither
+/// against the same session with every lane (option 64) nor against a plan with no lane at all.
+///
+/// Test value: red if option 0 still prepares no lane, if any one of the three preparation
+/// branches drops them (the spectrum boots), if option 0 attaches the input, effect or route lanes
+/// (an infinite tail, a lost route fold), or if a settled lane renders a different bit than the
+/// lane-free plan the browser prepared before. No earlier test boots the browser with option 0
+/// and reads its producers: the lane-bit test in host-core prepares with delivery `Concurrent`,
+/// not the browser's `BetweenRenderCalls`.
+#[test]
+fn every_browser_plan_carries_the_strip_lanes_and_renders_the_lane_free_bits() {
+    const BLOCKS: u64 = 64;
+    let document = lane_session();
+    let lane_free = lane_free_render(&document, BLOCKS);
+    assert!(
+        lane_free.iter().any(|bits| f32::from_bits(*bits) != 0.0),
+        "the session is audible"
+    );
+    let ids = ["t0", "t1", "t2", "bus"];
+    for branch in [
+        LaneBranch::Plain,
+        LaneBranch::Single,
+        LaneBranch::Collection,
+    ] {
+        let mut opted_in = lane_boot(&document, 64, branch);
+        {
+            let ready = opted_in.ready.as_ref().expect("opted-in ownership");
+            assert!(ready.commands_enabled, "{branch:?}");
+            assert_eq!(ready.controls.len(), ids.len(), "{branch:?}");
+            assert!(
+                ready.controls.iter().all(|control| control.input.is_some()),
+                "{branch:?}: option 64 attaches the input lane"
+            );
+            assert!(
+                ready.effect_controls.iter().any(Option::is_some),
+                "{branch:?}: option 64 attaches effect lanes"
+            );
+            assert_eq!(ready.route_controls.len(), 3, "{branch:?}");
+        }
+        let mut host = lane_boot(&document, 0, branch);
+        {
+            let ready = host.ready.as_ref().expect("ownership");
+            assert!(!ready.commands_enabled, "{branch:?}");
+            assert_eq!(
+                ready
+                    .controls
+                    .iter()
+                    .map(|control| &*control.track_id)
+                    .collect::<Vec<_>>(),
+                ids,
+                "{branch:?}: one fader/mute and matrix/pan producer per strip, tracks then submixes"
+            );
+            assert!(
+                ready.controls.iter().all(|control| control.input.is_none()),
+                "{branch:?}: no input lane"
+            );
+            assert!(
+                !ready.effect_controls.is_empty()
+                    && ready.effect_controls.iter().all(Option::is_none),
+                "{branch:?}: the session has effects and none has a lane"
+            );
+            assert!(ready.route_controls.is_empty(), "{branch:?}: no route lane");
+        }
+        assert!(
+            !host.live_controls_attached(),
+            "{branch:?}: the lanes are not an opt-in"
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_UNSUPPORTED,
+            "{branch:?}: a plan with lanes still refuses every command"
+        );
+        assert_eq!(
+            host.command_report().reason,
+            COMMAND_REASON_UNSUPPORTED_KIND,
+            "{branch:?}"
+        );
+        let bits = lane_render(&mut host, BLOCKS);
+        assert_eq!(
+            bits, lane_free,
+            "{branch:?}: option 0 against no lane at all"
+        );
+        assert_eq!(
+            lane_render(&mut opted_in, BLOCKS),
+            bits,
+            "{branch:?}: option 0 against option 64"
+        );
+    }
+}
+
 /// Gate 1's hosts: A over the bus session, B over the reference session.
 fn strip_pair(
     insert: Option<session::Effect>,
@@ -11809,6 +12056,7 @@ fn send_prepare_report(document: &str, queue_records: u64) -> host_core::HostPre
         &caps,
         &live_controls,
         &[],
+        live_lanes(options),
     )
     .expect("independent send preparation");
     engine.report

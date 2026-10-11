@@ -534,3 +534,53 @@ the rack's latency-preserving bypass shunt (decision 14).
   tracks at the four launch rates. A second stateful effect after the switched one (a compressor
   after a compressor) does not converge within that window; its difference decays.
 - **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.
+
+## Design-bound caches (#1471)
+
+The engine owns one control-thread cache of input-section design bounds (`builtins::
+InputBoundCache`, #1457), read and filled by every `miso_engine_v1_compile_session` on it. A
+session keeps none of it: each provider epoch owns the designs the preparation that made its plan
+used (`bound_seed`), journaled at the time of use with each stored charge or stopped-walk horizon,
+and a structural rebuild reads the newest epoch's seed read-only and journals its own. The seed is
+one exact-size boxed slice, a row of the epoch's `epoch_retained` charge and a candidate for the
+largest named allocation, so a compile or a rebuild whose seed would pass `maximum_capi_retained_bytes`
+is refused before any commit with the existing limit refusal.
+
+**The engine cache's ceiling.** The cache is outside every compile limit, lives as long as the
+engine, and `miso_engine_v1_engine_destroy` frees it. Its ceiling on a 64-bit target is derived
+here from the cap, the entry layout and the ordered map's worst-case node occupancy, not measured:
+
+- The cap is `INPUT_BOUND_CACHE_ENTRIES` = 8,192 entries; an insertion past it clears the map first.
+- An entry is a 124-byte key (the rate and per channel two sections' seven words and a trim
+  magnitude, 4-byte aligned) and a 112-byte value (8-byte aligned), 236 bytes without padding and
+  240 in a pair.
+- The standard `BTreeMap` (B = 6) stores entries in its internal nodes as well as its leaves. Every
+  node but the root holds 5 to 11 entries (a full node splits into two of at least 5), and the
+  cache never removes one entry (it only clears), so occupancy stays at that bound whatever the
+  insertion order. 8,192 entries need at most 1 + (8,192 - 1) / 5 = 1,639 nodes.
+- A leaf is `repr(C)` {parent 8, parent index 2, length 2, 11 keys x 124, 11 values x 112} = 2,608
+  bytes. An internal node adds 12 child pointers of 8 bytes = 2,704 bytes. Each internal node
+  but the root has at least 6 children and the root at least 2, so a tree of 1,639 nodes has at
+  most 273 internal nodes.
+- So, between calls, the map holds at most 1,639 x 2,608 + 273 x 96 = **4,300,720 bytes of
+  requested heap**, plus the map's own header inside the engine. The figure counts requested
+  bytes. The platform allocator rounds each block up to its own size class and keeps its own
+  bookkeeping (glibc, libmalloc and scudo differ), so the extra is platform-specific and no figure
+  is stated for it.
+- During `miso_engine_v1_compile_session` the cache also holds the open journal: at most one
+  preparation's designs, at most 1,805 (`INPUT_BOUND_BUDGET_FRAMES / 837` + 1), in the same
+  map shape. By the same arithmetic that is at most 1 + 1,804 / 5 = 361 nodes, at most 60
+  internal, so 361 x 2,608 + 60 x 96 = **947,248 bytes of requested heap**. The call takes the
+  journal on every path and frees it before it returns; the record it becomes is the plan
+  epoch's seed, charged to `maximum_capi_retained_bytes`, not the engine's cache.
+
+`resource_lifecycle`'s `the_engine_cache_stays_within_its_stated_ceiling` measures the leaf node (a
+one-design compile on a fresh engine frees exactly one), derives the worst case with the formula
+above and asserts it is at most the stated figure, so a larger key or value turns it red. It then
+compiles twice the cap's distinct designs on one engine (the cache fills, clears at the 8,193rd
+and fills again) and asserts that engine destroy frees at most that ceiling over an empty
+engine's. One fill order measured 3,602,112 bytes; that figure is not the ceiling.
+`a_compile_leaves_nothing_open_on_the_engine_cache` compiles a 200-design document on two
+engines, a no-filter document on the second as well, and asserts engine destroy frees the same
+bytes for both (84,208 each), so a journal left open turns it red. The C header states the
+ceiling in its "Engine memory" paragraph.

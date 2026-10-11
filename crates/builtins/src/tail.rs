@@ -397,12 +397,14 @@ pub const INPUT_BOUND_BUDGET_FRAMES: u64 = 1_510_000;
 /// enabled section, and such a design charges at least 837 frame-equivalents (a walk of at least
 /// 257 frames, one 256-frame block of the majorant pass and one deviation frame, plus one section's
 /// charge of 580). So one preparation computes at most `INPUT_BOUND_BUDGET_FRAMES / 837` = 1,804
-/// designs exactly, and stops one more: the cap holds a whole preparation's designs. A rebuild of an
-/// unchanged session is served entirely from the cache only while the cache has not been cleared
-/// since that session's designs were inserted: a cache shared by several sessions (an engine's,
-/// #1471) can fill and clear in the middle of a preparation, and a cleared design is computed
-/// again, with the same result. A full cache of 8,192 entries holds about 2.4 MiB (2,486,520 bytes
-/// measured, about 304 bytes an entry; the attempt record).
+/// designs exactly, and stops one more: the cap holds a whole preparation's designs. A cache that
+/// several preparations fill, an engine's (#1471), can reach the cap and clear in the middle of a
+/// preparation, and a cleared design is computed again, with the same result. So a session does not
+/// seed its rebuilds from the engine's cache: it keeps the designs its newest plan used, recorded
+/// at the time of use ([`InputBoundCache::begin_journal`]). One fill order of 16,384 distinct
+/// designs measured 3,602,112 bytes (240-byte entries in 2,608-byte leaf and 2,704-byte internal
+/// nodes); that is not a ceiling. The derived worst case, whatever the order, is 4,300,720
+/// requested heap bytes on a 64-bit target (`docs/C_ABI_V1_QUALIFICATION.md`).
 pub const INPUT_BOUND_CACHE_ENTRIES: usize = 8192;
 
 /// A control-side cache of input-section design bounds across preparations (#1457 D2), keyed by
@@ -418,10 +420,18 @@ pub const INPUT_BOUND_CACHE_ENTRIES: usize = 8192;
 /// cap the cache is cleared first (clear-on-full): the cap bounds its memory, and a cleared design
 /// is computed again with the same result ([`INPUT_BOUND_CACHE_ENTRIES`] states when a rebuild is
 /// served entirely from the cache). Render never reads it.
+///
+/// A cache may read an [`InputBoundRecord`] besides its own entries ([`with_seed`](Self::with_seed)):
+/// a hit in the record charges its stored value, and the record is never changed.
 #[derive(Clone, Debug)]
-pub struct InputBoundCache {
+pub struct InputBoundCache<'seed> {
     entries: std::collections::BTreeMap<InputBoundKey, CachedDesign>,
     capacity: core::num::NonZeroUsize,
+    /// A read-only record this cache reads after its own entries.
+    seed: Option<&'seed InputBoundRecord>,
+    /// The designs preparations used since [`begin_journal`](Self::begin_journal), while open. It
+    /// has no entry cap, so a clear of `entries` loses none of it.
+    journal: Option<std::collections::BTreeMap<InputBoundKey, CachedDesign>>,
 }
 
 /// One cached design (#1457 D2).
@@ -434,13 +444,53 @@ pub(crate) enum CachedDesign {
     ChargeAbove(u64),
 }
 
-impl InputBoundCache {
+/// The designs one preparation used, each with the value it held when used (its stored charge, or
+/// its stopped walk's horizon), in an exact-size, read-only form (#1471 Amendment 2, D3): entries
+/// sorted by key in one boxed slice of exactly its length, looked up by binary search. A
+/// preparation that reads it ([`InputBoundCache::with_seed`]) never changes it. It is the C ABI's
+/// per-plan seed for the next plan's preparation, and it drops with its owner.
+#[derive(Clone, Debug, Default)]
+pub struct InputBoundRecord {
+    entries: Box<[(InputBoundKey, CachedDesign)]>,
+}
+
+impl InputBoundRecord {
+    /// The designs recorded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no design is recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The bytes this record retains: its length times the size of one entry. The boxed slice is
+    /// exactly that long, so this is also the size of its one allocation (none when empty).
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        (self.entries.len() as u64) * (size_of::<(InputBoundKey, CachedDesign)>() as u64)
+    }
+
+    fn get(&self, key: &InputBoundKey) -> Option<CachedDesign> {
+        self.entries
+            .binary_search_by(|(probe, _)| probe.cmp(key))
+            .ok()
+            .map(|index| self.entries[index].1)
+    }
+}
+
+impl<'seed> InputBoundCache<'seed> {
     /// An empty cache holding at most `capacity` designs.
     #[must_use]
     pub const fn with_capacity(capacity: core::num::NonZeroUsize) -> Self {
         Self {
             entries: std::collections::BTreeMap::new(),
             capacity,
+            seed: None,
+            journal: None,
         }
     }
 
@@ -452,13 +502,23 @@ impl InputBoundCache {
         )
     }
 
-    /// The designs cached.
+    /// An empty cache that reads `seed` after its own entries. A design found there charges what
+    /// the record stored, as one found in the cache's own entries does; a design computed goes
+    /// into the cache's entries and journal only, never into `seed`.
+    #[must_use]
+    pub const fn with_seed(seed: &'seed InputBoundRecord) -> Self {
+        let mut cache = Self::new();
+        cache.seed = Some(seed);
+        cache
+    }
+
+    /// The designs cached in this cache's own entries.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether no design is cached.
+    /// Whether no design is cached in this cache's own entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -470,8 +530,46 @@ impl InputBoundCache {
         self.capacity
     }
 
-    pub(crate) fn get(&self, key: &InputBoundKey) -> Option<CachedDesign> {
-        self.entries.get(key).copied()
+    /// Starts recording every design a preparation uses through this cache, hit (in its entries or
+    /// its seed) or computed, a stopped walk's horizon included, at the time it is used (#1471
+    /// Amendment 2). The record has no entry cap, so a clear of this cache loses none of it. A
+    /// journal already open is discarded and restarted empty.
+    ///
+    /// A preparation uses at most `INPUT_BOUND_BUDGET_FRAMES / 837` + 1 = 1,805 distinct designs
+    /// with an enabled section (the budget charges every design a cache holds at least 837, and
+    /// the first design past it stops). A caller opens a journal for one preparation and takes it
+    /// when that preparation returns; one left open across preparations holds the union of their
+    /// designs.
+    pub fn begin_journal(&mut self) {
+        self.journal = Some(std::collections::BTreeMap::new());
+    }
+
+    /// Closes the journal and returns exactly the designs recorded since
+    /// [`begin_journal`](Self::begin_journal), each with the value it held when last used, as an
+    /// exact-size, read-only [`InputBoundRecord`]. Empty when no journal is open. A preparation
+    /// served from the record reports what it reports from this cache at the time of use (#1457's
+    /// stored-charge rule).
+    #[must_use]
+    pub fn take_journal(&mut self) -> InputBoundRecord {
+        let entries: Vec<(InputBoundKey, CachedDesign)> =
+            self.journal.take().into_iter().flatten().collect();
+        InputBoundRecord {
+            entries: entries.into_boxed_slice(),
+        }
+    }
+
+    /// The cached design under `key`, from this cache's entries or its seed, recorded in the open
+    /// journal as used.
+    pub(crate) fn lookup(&mut self, key: &InputBoundKey) -> Option<CachedDesign> {
+        let hit = self
+            .entries
+            .get(key)
+            .copied()
+            .or_else(|| self.seed.and_then(|seed| seed.get(key)))?;
+        if let Some(journal) = self.journal.as_mut() {
+            journal.insert(*key, hit);
+        }
+        Some(hit)
     }
 
     pub(crate) fn insert(&mut self, key: InputBoundKey, value: CachedDesign) {
@@ -479,10 +577,13 @@ impl InputBoundCache {
             self.entries.clear();
         }
         self.entries.insert(key, value);
+        if let Some(journal) = self.journal.as_mut() {
+            journal.insert(key, value);
+        }
     }
 }
 
-impl Default for InputBoundCache {
+impl Default for InputBoundCache<'_> {
     fn default() -> Self {
         Self::new()
     }

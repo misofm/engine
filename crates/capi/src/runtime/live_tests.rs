@@ -1193,7 +1193,7 @@ fn deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing() {
         crate::RESULT_COMPILE_REJECTED
     );
     let rejected = with_model(&base, |model| model.tracks[0].fader.left_db = 30.0);
-    let Err(failure) = compile_children(&rejected, limits()) else {
+    let Err(failure) = compile_children(&rejected, limits(), None) else {
         panic!("a 30 dB fader does not prepare")
     };
     assert_eq!(
@@ -1371,7 +1371,7 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_n
 /// so cannot see it.
 #[test]
 fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() {
-    let mut children = compile_children(SESSION, limits()).expect("children");
+    let mut children = compile_children(SESSION, limits(), None).expect("children");
     let mut pcm = [0.0_f32; 256];
     children
         .plan
@@ -1716,6 +1716,7 @@ impl LaneReference {
                 ..HostLiveControlRequest::default()
             },
             HostLiveLanes::ALL,
+            None,
         )
         .expect("lane prepare");
         Self {
@@ -2071,7 +2072,7 @@ fn an_effect_edit_larger_than_its_queue_rebuilds() {
         multiband.bypass = false;
         model.tracks[0].inserts.effects.push(multiband);
     });
-    let descriptor = compile_children(&document, limits())
+    let descriptor = compile_children(&document, limits(), None)
         .expect("multiband session")
         .session
         .test_providers()
@@ -3026,7 +3027,7 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     let mut rejected = parse_session_json(&document).expect("model");
     protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
     let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
-    let Err(failure) = compile_children(&rejected, limits()) else {
+    let Err(failure) = compile_children(&rejected, limits(), None) else {
         panic!("an automation on band-1-enabled does not prepare")
     };
     assert_eq!(

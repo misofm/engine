@@ -108,6 +108,21 @@ extern "C" {
  * miso_engine_v1_service (or another session call) at least once per render-buffer period. A host
  * checks MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
  *
+ * Engine memory (issue 1471). The engine owns one control-thread cache of input-section design
+ * bounds for its whole life. It is outside every compile limit: no field of
+ * miso_engine_v1_compile_limits caps or counts it, and a compile that fails can still have added
+ * designs to it. miso_engine_v1_engine_destroy frees it. It holds at most 8,192 entries and is cleared when an
+ * insertion would pass that, and a session keeps none of it. Between calls, on a 64-bit target, it
+ * holds at most 4,300,720 bytes of requested heap, whatever the order of the designs it was
+ * given: 8,192 entries of 236 bytes live in the nodes of an ordered map, each node holds 5 to 11
+ * entries, so at most 1,639 nodes, at most 273 of them internal (2,704 bytes) and the rest leaves
+ * (2,608 bytes). That figure counts the bytes the engine requests. The platform allocator rounds
+ * each block up to its own size class and keeps its own bookkeeping; that comes on top, differs
+ * by platform, and is not counted. During miso_engine_v1_compile_session the cache also holds the
+ * open record of the designs that compile uses, at most 1,805 of them, so by the same arithmetic
+ * (361 nodes, 60 of them internal) at most 947,248 bytes of requested heap; the call frees it
+ * before it returns.
+ *
  * Borrowed pointers (session JSON, source IDs, request frames, chunk planes, output samples, and
  * every out pointer) are read or written only for the duration of the call and are never retained.
  * Every float plane pointer (chunk planes and output samples) must be 4-byte aligned, and the chunk

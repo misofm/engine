@@ -75,16 +75,16 @@
 //!   `scripts/check-realtime-policy.sh` enforces the source-level half of that;
 //!   `tools/audit` and the browser call-graph gate enforce the binary half.
 //! * **A native render entry borrows the caller's floating-point environment; it never adopts it**
-//!   (issue #146). Every DAW audio callback arrives with hardware FTZ and DAZ set, and issue #144
-//!   measured what that does: 69-70 of the 331 cross-target corpus comparisons render off-pin,
-//!   because a transient intra-block denormal is not a recursive state word the master-plan D7
-//!   flush law can reach. So the entry saves the caller's control word, installs the canonical one,
-//!   renders, and restores the caller's exact word -- on the success path, on every rejection path
-//!   and while unwinding. A host does not have to configure its thread, and gets its thread back
-//!   unchanged. [`StartedRenderSession`] is that entry for an embedding host;
-//!   `miso_engine_v1_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
-//!   specification fixes round-to-nearest-even and full subnormal arithmetic, so the guard is a
-//!   zero-sized value there and the shipped artifact is unchanged.
+//!   (issue #146). A native audio thread may run with hardware FTZ and DAZ set (see
+//!   `crates/lane/src/fpenv.rs`), and issue #144 measured what that does: 69-70 of the 331 corpus
+//!   comparisons render off-pin, because a transient intra-block denormal is not a recursive state
+//!   word the master-plan D7 flush law can reach. So the entry saves the caller's control word,
+//!   installs the canonical one, renders, and restores the caller's exact word -- on the success
+//!   path, on every rejection path and while unwinding. A host does not have to configure its
+//!   thread, and gets its thread back unchanged. [`StartedRenderSession`] is that entry for an
+//!   embedding host; `miso_engine_v1_render_f32_planar` is it for the C ABI. Browser Wasm needs
+//!   neither: the core specification fixes round-to-nearest-even and full subnormal arithmetic, so
+//!   the guard is a zero-sized value there and the shipped artifact is unchanged.
 //! * **A started session is neither `Send` nor `Sync`.** The attestation is a statement about one
 //!   thread; a handle that could move would let a host launder it onto a thread that was never
 //!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
@@ -137,9 +137,9 @@ pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveR
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, PlanStateInventory, PreparedHost,
-    SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, compile_host_model,
-    compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
-    prepare_host_runtime, prepare_host_runtime_between_render_calls,
+    SOURCE_STALL_TOLERANCE_MS, STRIP_LIVE_QUEUE_DEPTH, SourceInventoryRow, SuccessorBase,
+    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
+    parse_host_session, prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
@@ -231,6 +231,10 @@ pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 /// so a host that pushes `classify_live_delta`'s records names them without depending on
 /// `builtins-compiler` or `builtins`.
 pub use builtins::BuiltinLaneSelector;
+/// The design-bound cache `prepare_host_runtime_with_live_lanes{,_successor}` take (issue #1471),
+/// re-exported so a host that keeps one names it without depending on `builtins`, with the
+/// read-only record of the designs one preparation used, which another cache can read.
+pub use builtins::{InputBoundCache, InputBoundRecord};
 /// One strip's live-control producers (`HostLiveControlHandles::strip_controls`), re-exported so a
 /// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
 /// depending on `builtins-compiler`.

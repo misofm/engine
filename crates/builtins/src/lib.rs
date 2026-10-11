@@ -44,9 +44,9 @@ pub use filter_response::{
 use tail::CachedDesign;
 pub use tail::{
     ChargedInputBound, INPUT_BOUND_BUDGET_FRAMES, INPUT_BOUND_CACHE_ENTRIES,
-    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, input_section_flush_law, input_section_live_bound,
-    input_section_live_bound_table, input_section_live_cascade, input_section_live_envelope,
-    input_section_worst_case_pair,
+    INPUT_BOUND_SECTION_CHARGE, InputBoundCache, InputBoundRecord, input_section_flush_law,
+    input_section_live_bound, input_section_live_bound_table, input_section_live_cascade,
+    input_section_live_envelope, input_section_worst_case_pair,
 };
 
 use effect_contract::{
@@ -3573,7 +3573,7 @@ fn input_section_bounds_within(
             let cached = if remaining == 0 {
                 Some(CachedDesign::ChargeAbove(0))
             } else {
-                cache.as_deref().and_then(|cache| cache.get(&key))
+                cache.as_deref_mut().and_then(|cache| cache.lookup(&key))
             };
             let charged = match cached {
                 Some(CachedDesign::Bound(hit)) => (hit.charge <= remaining).then_some(hit),

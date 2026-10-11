@@ -32,11 +32,12 @@ use effect_contract::{
 use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
-    HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind,
-    LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState, LiveVcaState, PrepareDiagnostics,
-    PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord,
-    SourceControlError, SourceSubmission, StripMuteSeed, apply_input_filter_edit,
-    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
+    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit,
+    InputFilterEditErrorKind, LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState,
+    LiveVcaState, PrepareDiagnostics, PrepareRejection, PreparedHost, RouteControlError,
+    RouteControlProducer, RouteControlRecord, STRIP_LIVE_QUEUE_DEPTH, SourceControlError,
+    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
@@ -1222,8 +1223,12 @@ pub struct WebBootOptions {
     pub reserved0: u32,
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
     pub maximum_memory_bytes: u64,
-    /// Per-track live-control queue depth in records, or `0` to attach no control channel
-    /// and no command staging at all (issue #137 D1).
+    /// Per-track live-control queue depth in records, or `0` to accept no live command and
+    /// allocate no command staging (issue #137 D1).
+    ///
+    /// Zero still leaves every strip's fader/mute and matrix/pan lanes on the plan, at the engine's
+    /// own depth ([`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a strip's mute for its
+    /// own transitions, and no command can reach them (issue #1326).
     pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -1511,6 +1516,11 @@ impl PreparedSpectrumCapture {
 /// the source consumers) before its control-side producers, and the compiled session model outlives
 /// both. Nothing here is ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
 struct ReadyOwnership {
+    /// Whether the app opted in to live commands (`live_control_command_queue_records != 0`,
+    /// issue #1326 D4). The command gate reads this, never the producers: every plan carries each
+    /// strip's fader/mute and matrix/pan lanes for the engine's own transitions, and only an app
+    /// that opted in may drive them.
+    commands_enabled: bool,
     /// Issue #137 D1 / #140 B: per-strip control-side producers -- matrix/pan and fader/mute --
     /// declared first so they are released before the plan that owns their consumer endpoints.
     /// Parallel to the strips (issue #1211 D3); a command's index word is a strip index (#1213).
@@ -1780,7 +1790,8 @@ impl ReadyOwnership {
         if slot < tracks * 3 {
             return u32::try_from(
                 // #1254 D4: a strip prepared without its input lane is unaddressable here, like an
-                // absent effect lane; the browser always prepares with it, so this never fires.
+                // absent effect lane; a plan that takes commands always has it and an option-0
+                // plan takes none (it refuses every command first), so this never fires.
                 self.controls
                     .get(slot - tracks * 2)?
                     .input
@@ -3040,12 +3051,14 @@ impl AudioWorkletEngineHost {
         self.submit_commands_inner(count, Some(companion_bytes))
     }
 
-    /// Whether preparation attached a live-control channel (issue #137 D1).
+    /// Whether the app opted in to live commands (issue #137 D1). Every plan carries each strip's
+    /// fader/mute and matrix/pan lanes whatever this says (issue #1326), so it keys on the boot
+    /// option, not on the lanes.
     #[must_use]
     pub fn live_controls_attached(&self) -> bool {
         self.ready
             .as_ref()
-            .is_some_and(|ready| !ready.controls.is_empty())
+            .is_some_and(|ready| ready.commands_enabled)
     }
 
     /// Copy one canonical live-control track ID into ID staging; returns its byte length.
@@ -4925,8 +4938,9 @@ fn admit_commands_staged(
             // change once. The mute term reaches the strip-mute owner at once, so a later kind 4
             // in the same batch composes with it.
             COMMAND_VCA_FADER_DB | COMMAND_VCA_MUTE => {
-                // No live controls at all: the session has no write path for any member.
-                if ready.controls.is_empty() {
+                // No live commands: the app did not opt in, so the session has no write path for
+                // any member.
+                if !ready.commands_enabled {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
                 if track >= ready.vcas.vca_count() {
@@ -4969,8 +4983,9 @@ fn admit_commands_staged(
             // batch reads it, so several edits of one send stage one record each, in wire order,
             // and the render plane, applying them in order, settles on the last.
             COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX => {
-                // No live controls at all: the session has no write path for any send.
-                if ready.controls.is_empty() {
+                // No live commands: the app did not opt in, so the session has no write path for
+                // any send.
+                if !ready.commands_enabled {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
                 let (Some(slot), Some(producer), Some(&current)) = (
@@ -6653,6 +6668,8 @@ fn compile_ready(
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let live_controls = live_control_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.live_controls.config"))?;
+    let lanes = live_lanes(options);
+    let commands_enabled = options_enable_commands(options);
     // Issue #1209 D3: one meter per strip, the tracks then the submixes, in the strip order
     // host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair.
     let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
@@ -6678,6 +6695,7 @@ fn compile_ready(
                 caps,
                 &live_controls,
                 request,
+                lanes,
             )
             .map_err(BootFailure::preparation)?;
             (
@@ -6693,6 +6711,7 @@ fn compile_ready(
                     caps,
                     &live_controls,
                     request,
+                    lanes,
                 )
                 .map_err(BootFailure::preparation)?;
             (
@@ -6707,6 +6726,7 @@ fn compile_ready(
                 caps,
                 &live_controls,
                 &meters,
+                lanes,
             )
             .map_err(BootFailure::preparation)?;
             (host, handles, None)
@@ -6742,7 +6762,7 @@ fn compile_ready(
     // One input-filter shadow per strip, the tracks then the submixes (issue #1213 D1): the order
     // of `handles.strips`, so a bus's prepared input-filter owner is its strip index.
     let mut input_filter_shadows = Vec::new();
-    if !handles.strip_controls.is_empty() {
+    if commands_enabled {
         let model = session.normalized_model();
         input_filter_shadows
             .try_reserve_exact(model.tracks.len() + model.submixes.len())
@@ -7016,7 +7036,7 @@ fn compile_ready(
     // model, and charged beside the route mirror -- every byte it reserved, its shadow included.
     // A session without VCAs, or a host without live controls (which refuses every VCA kind),
     // keeps the empty state and adds nothing to any row.
-    let vcas = if handles.strip_controls.is_empty() {
+    let vcas = if !commands_enabled {
         LiveVcaState::empty()
     } else {
         LiveVcaState::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?
@@ -7192,6 +7212,7 @@ fn compile_ready(
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
     let ready = ReadyOwnership {
+        commands_enabled,
         controls: handles.strip_controls,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),
@@ -7262,9 +7283,10 @@ fn live_control_request(
     options: WebBootOptions,
     quantum_frames: u32,
 ) -> Option<HostLiveControlRequest> {
+    // Issue #1326 D1: every plan carries the lanes, so the depth is always `Some`.
     let control_queue_depth = match options.live_control_command_queue_records {
-        0 => None,
-        records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
+        0 => STRIP_LIVE_QUEUE_DEPTH,
+        records => NonZeroUsize::new(u32::try_from(records).ok()? as usize)?,
     };
     let meter_period_frames = if options.live_control_meter_blocks == 0 {
         None
@@ -7273,7 +7295,7 @@ fn live_control_request(
         Some(NonZeroU32::new(blocks.checked_mul(quantum_frames)?)?)
     };
     Some(HostLiveControlRequest {
-        control_queue_depth,
+        control_queue_depth: Some(control_queue_depth),
         meter_period_frames,
         meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
         meter_tap: MeterTap::PostMatrix,
@@ -7284,6 +7306,24 @@ fn live_control_request(
             value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
         },
     })
+}
+
+/// Whether the app opted in to live commands (issue #1326 D4): the one word the public command
+/// gate, the input-filter shadows and the live VCA state read. The lanes do not say, because every
+/// plan carries them.
+fn options_enable_commands(options: WebBootOptions) -> bool {
+    options.live_control_command_queue_records != 0
+}
+
+/// The live lanes a browser plan attaches (issue #1326 D3): every lane for an app that opted in to
+/// live commands, and only each strip's fader/mute and matrix/pan lanes otherwise, so no strip's
+/// builtin tail turns infinite and no route loses its fold.
+fn live_lanes(options: WebBootOptions) -> HostLiveLanes {
+    if options_enable_commands(options) {
+        HostLiveLanes::ALL
+    } else {
+        HostLiveLanes::FADER_AND_MATRIX
+    }
 }
 
 fn boxed_zero_u32(count: usize) -> Result<Box<[u32]>, Vec<u8>> {

@@ -203,6 +203,10 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   `LifecycleAllocator`, a `GlobalAlloc` that delegates the original pointer and layout unchanged
   to `System` and adds thread-local counters that are enabled only around its isolated test
   thread.
+- `crates/capi/tests/design_bound_cache.rs` (#1471): the exported-C design-bound cache evidence.
+  It compiles, submits structural transactions, renders (so a pending plan swaps in) and drains the
+  event lanes through the C entries. Its unsafe is the C calls themselves, render included, each
+  with the handle and storage contract stated beside it; it installs no allocator.
 - `tools/audit/src/capi.rs` (issue 022): the non-timed audit plan for the exported C render entry.
   Its unsafe is the C calls, each with the handle and storage contract stated beside it; only the
   render call is inside the audited scope.
@@ -339,8 +343,9 @@ Approved unsafe code that runs on a render thread, per entry:
   unwrapped `spectrum_request_ptr`. Qualification reads the count of each instance before its
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
-- Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs` and
-  `tools/audit/src/capi.rs` call the C render entry from threads of their own. Their own unsafe is
+- Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,
+  `design_bound_cache.rs` and `tools/audit/src/capi.rs` call the C render entry from threads of
+  their own. Their own unsafe is
   the caller side of the C contract, apart from `resource_lifecycle.rs`'s `LifecycleAllocator`,
   which runs on the same test thread as its render calls.
 

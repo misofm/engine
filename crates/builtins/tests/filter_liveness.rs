@@ -1209,3 +1209,186 @@ fn every_lane_steps_exactly_four_words_from_its_own_countdown() {
         );
     }
 }
+
+/// Which render body a re-elision leg runs through.
+#[derive(Clone, Copy)]
+enum Body {
+    /// `BuiltinInputBank::process` with a `Left`-addressed target: the dual body.
+    Dual,
+    /// `BuiltinInputBank::process_mono` with a `Both`-addressed target: the one-plane body.
+    Mono,
+}
+
+/// One lane's pre-disable input at global frame `n`: a sawtooth whose period differs per lane,
+/// so a lane that is cleared or coupled by mistake shows in the bits, and whose phase at the
+/// disable moves with the history's length. Integer steps and one division: the same bits on
+/// every target.
+fn history_input(n: usize, lane: usize) -> f32 {
+    let period = 61 + 12 * lane;
+    ((n % period) as f32 / period as f32 - 0.5) * 0.8
+}
+
+/// Renders one block of `frames` frames, frame `f` of lane `l` at `value(f, l)`, through `body`.
+/// Returns the left and right planes (the right plane equals the left under the one-plane body).
+fn render_bank_block(
+    bank: &mut BuiltinInputBank,
+    body: Body,
+    frames: usize,
+    value: impl Fn(usize, usize) -> f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut left: Vec<f32> = (0..frames * 4)
+        .map(|index| value(index / 4, index % 4))
+        .collect();
+    match body {
+        Body::Dual => {
+            let mut right = left.clone();
+            bank.process(&mut left, &mut right, frames as u32);
+            (left, right)
+        }
+        Body::Mono => {
+            bank.process_mono(&mut left, frames as u32);
+            let right = left.clone();
+            (left, right)
+        }
+    }
+}
+
+/// Asserts that every lane in `lanes` renders the same bits in both banks' planes.
+fn assert_lanes_equal(
+    got: &(Vec<f32>, Vec<f32>),
+    reference: &(Vec<f32>, Vec<f32>),
+    lanes: &[usize],
+    context: &str,
+) {
+    for frame in 0..got.0.len() / 4 {
+        for &lane in lanes {
+            let at = frame * 4 + lane;
+            assert_eq!(
+                got.0[at].to_bits(),
+                reference.0[at].to_bits(),
+                "left, lane {lane}, frame {frame}, {context}"
+            );
+            assert_eq!(
+                got.1[at].to_bits(),
+                reference.1[at].to_bits(),
+                "right, lane {lane}, frame {frame}, {context}"
+            );
+        }
+    }
+}
+
+/// Issue #1268: after a live disable settles it, a lane's HPF section is cleared and elided
+/// again, and its output is the never-enabled lane's; no other lane differs from the twin.
+///
+/// `history_blocks` sets the sawtooth phase at the disable, so the integrators the ramp leaves
+/// differ. With `neighbour`, lane 3 also holds a settled HPF in both banks, so its integrators
+/// are live while lane 1 settles and a clear that reaches it would show.
+fn settled_disable_scenario(body: Body, neighbour: bool, history_blocks: usize) {
+    const FRAMES: usize = 24;
+    let prepared = prepare_input_filter_pair(48_000, 120.0, 0.0).expect("design");
+    let off = prepare_input_filter_pair(48_000, 0.0, 0.0).expect("disabled");
+    let lanes = match body {
+        Body::Dual => BuiltinLaneSelector::Left,
+        Body::Mono => BuiltinLaneSelector::Both,
+    };
+    let aim = |target: PreparedInputFilterTarget| PreparedInputFilterTarget { lanes, ..target };
+    let mut bank = bank_with_members(4);
+    let mut twin = bank_with_members(4);
+    bank.apply_prepared_filter(1, aim(prepared.targets[0]))
+        .expect("enable");
+    if neighbour {
+        for each in [&mut bank, &mut twin] {
+            each.apply_prepared_filter(3, aim(prepared.targets[0]))
+                .expect("neighbour");
+        }
+    }
+    // The enabled history, past the 64-update ramp.
+    let unaffected: &[usize] = &[0, 2, 3];
+    for block in 0..history_blocks {
+        let at = block * FRAMES;
+        let got = render_bank_block(&mut bank, body, FRAMES, |frame, lane| {
+            history_input(at + frame, lane)
+        });
+        let reference = render_bank_block(&mut twin, body, FRAMES, |frame, lane| {
+            history_input(at + frame, lane)
+        });
+        assert_lanes_equal(&got, &reference, unaffected, "enabled history");
+    }
+    let live = builtins::test_support::bank_lane_state_words(&bank, 1);
+    assert_ne!(&live[..2], &[0, 0], "the enabled section holds a state");
+    assert!(
+        !builtins::test_support::bank_elision_plan(&bank)[0][0],
+        "the enabled section is not elided"
+    );
+    if neighbour {
+        let held = builtins::test_support::bank_lane_state_words(&twin, 3);
+        assert_ne!(&held[..2], &[0, 0], "the neighbour holds a live state");
+    }
+
+    bank.apply_prepared_filter(1, aim(off.targets[0]))
+        .expect("disable");
+    // 64 updates take three 24-frame blocks (the third completes it, mid-block). Every sample
+    // after the disable is an exact -0.0, the never-enabled twin's own input.
+    for block in 0..6 {
+        let got = render_bank_block(&mut bank, body, FRAMES, |_, _| -0.0);
+        let reference = render_bank_block(&mut twin, body, FRAMES, |_, _| -0.0);
+        let context = format!(
+            "{} body, neighbour {neighbour}, {history_blocks} history blocks, block {block}",
+            match body {
+                Body::Dual => "dual",
+                Body::Mono => "mono",
+            }
+        );
+        assert_lanes_equal(&got, &reference, unaffected, &context);
+        if block >= 3 {
+            assert_lanes_equal(&got, &reference, &[1], &context);
+        }
+        if block >= 2 {
+            assert_eq!(
+                builtins::test_support::bank_lane_state_words(&bank, 1),
+                [0; 8],
+                "lane 1 integrators are +0.0 after {context}"
+            );
+            let plan = builtins::test_support::bank_elision_plan(&bank);
+            if neighbour {
+                assert!(
+                    !plan[0][0],
+                    "the neighbour keeps the left HPF live, {context}"
+                );
+                // Lane 3 holds a left-addressed HPF under the dual body and a both-channel one
+                // under the one-plane body, so only the dual body leaves the right HPF elided.
+                assert_eq!(
+                    plan[1][0],
+                    matches!(body, Body::Dual),
+                    "the right HPF is elided only when no lane holds one, {context}"
+                );
+            } else {
+                assert!(
+                    plan[0][0] && plan[1][0],
+                    "both HPF sections elided after {context}"
+                );
+            }
+        }
+        for lane in 0..4 {
+            if lane == 1 {
+                continue;
+            }
+            assert_eq!(
+                builtins::test_support::bank_lane_state_words(&bank, lane),
+                builtins::test_support::bank_lane_state_words(&twin, lane),
+                "lane {lane} state, {context}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_settled_live_disable_is_re_elided_and_bit_identical_to_never_enabled() {
+    for body in [Body::Dual, Body::Mono] {
+        // The history length moves the sawtooth's phase, and so the integrators, at the disable.
+        for history_blocks in 6..14 {
+            settled_disable_scenario(body, false, history_blocks);
+            settled_disable_scenario(body, true, history_blocks);
+        }
+    }
+}

@@ -94,13 +94,18 @@ pub(crate) struct CompiledChildren {
 
 /// Compiles `document` under capi's validated `limits`: converts them once (#1309 D3), runs the
 /// control plane's compile, and builds the session's diagnostic storage after it, as the last
-/// allocation of the compile.
+/// allocation of the compile. `engine_cache` is the engine's design-bound cache (#1471).
 pub(crate) fn compile_children(
     document: &str,
     limits: CompileLimits,
+    engine_cache: Option<&mut control_plane::InputBoundCache>,
 ) -> Result<CompiledChildren, CompileRejection> {
     let control_plane::CompiledChildren { session, plan } =
-        control_plane::compile_children::<CapiAdapter>(document, ControlLimits::from(limits))?;
+        control_plane::compile_children::<CapiAdapter>(
+            document,
+            ControlLimits::from(limits),
+            engine_cache,
+        )?;
     Ok(CompiledChildren {
         session,
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,

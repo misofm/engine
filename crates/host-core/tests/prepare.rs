@@ -7,8 +7,8 @@
 use builtins::{MeterMetricSet, MeterTap};
 use core::mem::{size_of, size_of_val};
 use host_core::{
-    EffectControlProducer, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
-    HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, PrepareRejection,
+    EffectControlProducer, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, PrepareRejection,
     SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
     control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
     prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
@@ -81,6 +81,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
         &limits,
         &live_controls,
         &meters,
+        HostLiveLanes::ALL,
     )
     .expect("selected observers");
     assert_eq!(handles.meters.len(), 2);
@@ -99,6 +100,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
         &limits,
         &live_controls,
         &invalid,
+        HostLiveLanes::ALL,
     ) else {
         panic!("unknown metric bit must be rejected");
     };
@@ -392,6 +394,7 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
         &caps(),
         &live_controls,
         &[],
+        HostLiveLanes::ALL,
     )
     .expect("live-control preparation");
     assert_eq!(
@@ -478,6 +481,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         &caps(),
         &live_controls,
         &[],
+        HostLiveLanes::ALL,
     )
     .expect("live-control preparation");
     let admitted = prepared
@@ -501,6 +505,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         &equal,
         &live_controls,
         &[],
+        HostLiveLanes::ALL,
     )
     .expect("exact graph plus effect budget must admit");
     let mut below = caps();
@@ -510,6 +515,7 @@ fn effect_control_bytes_join_the_graph_session_cap() {
         &below,
         &live_controls,
         &[],
+        HostLiveLanes::ALL,
     ) {
         Ok(_) => panic!("one byte below graph plus effect budget must refuse"),
         Err(failure) => failure,

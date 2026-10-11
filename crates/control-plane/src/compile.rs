@@ -14,7 +14,7 @@ pub struct CompiledChildren<A: ControlAdapter> {
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
-pub const LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
+pub const LIVE_QUEUE_DEPTH: NonZeroUsize = host_core::STRIP_LIVE_QUEUE_DEPTH;
 
 /// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
 /// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
@@ -40,6 +40,8 @@ pub(crate) struct PreparedRuntime {
     pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: PreparedSessionControlCatalog,
     pub(crate) capi: CapiResources,
+    /// The designs this preparation used, for the next preparation to read (#1471 Amendment 2).
+    pub(crate) bound_seed: InputBoundRecord,
 }
 
 /// A zeroed byte buffer of exactly `bytes` bytes, allocated fallibly.
@@ -174,6 +176,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
     effect_controls: host_core::EffectControlResources,
+    bound_seed_bytes: u64,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -236,6 +239,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         inventory_bytes,
         strip_table_bytes,
         effect_row,
+        // #1471 Amendment 2 D4: each epoch keeps the design bounds its plan's preparation used,
+        // one exact-size boxed slice, for its successor's preparation to read.
+        bound_seed_bytes,
     ];
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?
@@ -290,7 +296,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // The effect row is several allocations; its own largest one stands for it.
     let largest = [control_table_row, source_id_row, strip_table_bytes]
         .into_iter()
-        .chain([effect_controls.largest_allocation_bytes()])
+        .chain([effect_controls.largest_allocation_bytes(), bound_seed_bytes])
         .chain(fixed_allocation_rows)
         .chain(adapter_allocation_rows.iter().copied())
         .chain(prepared_protocol_allocation_rows)
@@ -315,6 +321,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     catalog: &PreparedSessionControlCatalog,
     inventory: &PlanStateInventory,
     effect_controls: host_core::EffectControlResources,
+    bound_seed_bytes: u64,
     limits: ControlLimits,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
@@ -353,6 +360,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         provider,
         inventory.retained_bytes(),
         effect_controls,
+        bound_seed_bytes,
     )
 }
 
@@ -575,10 +583,16 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
 /// With a `successor` base (a structural transaction, issue #1273 D1) every source the
 /// transaction leaves unchanged is prepared vacant, to carry the displaced plan's ring; the
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
+///
+/// `bound_cache` (#1471) is the design-bound cache the preparation reads and fills: the host's
+/// own for a compile, one over the newest epoch's seed for a rebuild. A journal opens on it here
+/// and closes before the capi rows are read, on every path, so the designs the preparation used
+/// are the new plan's seed (`PreparedRuntime::bound_seed`, charged as an epoch row, D4).
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
     compiled: &CompiledSession,
     limits: ControlLimits,
     successor: Option<SuccessorBase<'_>>,
+    bound_cache: &mut InputBoundCache<'_>,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
@@ -595,17 +609,26 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         control_queue_depth: Some(LIVE_QUEUE_DEPTH),
         ..HostLiveControlRequest::default()
     };
-    let (prepared, handles) = match successor {
+    bound_cache.begin_journal();
+    let prepared = match successor {
         Some(base) => prepare_host_runtime_with_live_lanes_successor(
             compiled,
             &caps,
             &live,
             C_ABI_LIVE_LANES,
             base,
+            Some(&mut *bound_cache),
         ),
-        None => prepare_host_runtime_with_live_lanes(compiled, &caps, &live, C_ABI_LIVE_LANES),
-    }
-    .map_err(prepare_failure)?;
+        None => prepare_host_runtime_with_live_lanes(
+            compiled,
+            &caps,
+            &live,
+            C_ABI_LIVE_LANES,
+            Some(&mut *bound_cache),
+        ),
+    };
+    let bound_seed = bound_cache.take_journal();
+    let (prepared, handles) = prepared.map_err(prepare_failure)?;
     // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
     // empty drop here, on the control thread; each producer keeps its own `track_id`. The
     // producer vector is built at exactly one entry per strip, so the boxed slice does not
@@ -628,6 +651,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         &prepared.control_catalog,
         &prepared.inventory,
         prepared.report.effect_control_resources,
+        bound_seed.retained_bytes(),
         limits,
     )?;
     if capi.active_retained > limits.maximum_control_retained_bytes
@@ -690,15 +714,24 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
+        bound_seed,
     })
 }
 
 /// Compile `document` under `limits` into a control session and the plan it drives.
 ///
 /// The adapter keeps its own per-session diagnostic storage; it builds that after this returns.
+///
+/// `engine_cache` (#1471) is the host's design-bound cache: the compile reads and fills it. The
+/// first epoch owns the designs this compile used, journaled at the time of use with their stored
+/// charges (`InputBoundCache::begin_journal`) as its `bound_seed`, which the first structural
+/// rebuild reads: a clear of `engine_cache` in the middle of the compile loses none of them, and
+/// no mutable state is shared between the host and its sessions. With `None` the compile uses a
+/// cache of its own, which yields the same seed.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
+    engine_cache: Option<&mut InputBoundCache>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -718,7 +751,9 @@ where
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
-    let runtime = prepare_runtime::<A>(store.compiled(), limits, None)?;
+    let mut compile_cache = InputBoundCache::new();
+    let engine_cache = engine_cache.unwrap_or(&mut compile_cache);
+    let runtime = prepare_runtime::<A>(store.compiled(), limits, None, engine_cache)?;
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
@@ -755,6 +790,7 @@ where
         inventory,
         control_catalog,
         capi,
+        bound_seed,
     } = runtime;
     // #1314 D1: the initial plan carries the store's initial revision, and the watermark starts
     // there.
@@ -821,7 +857,9 @@ where
     Ok(CompiledChildren {
         session: SessionState {
             controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(sources, inventory, strips, effects, capi),
+            providers: ProviderEpoch::current(
+                sources, inventory, strips, effects, capi, bound_seed,
+            ),
             pending_providers,
             retired_providers,
             publisher,

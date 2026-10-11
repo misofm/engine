@@ -421,6 +421,11 @@ pub struct Engine {
     header: HandleHeader,
     pub(crate) last_error: RefCell<[u8; 256]>,
     pub(crate) last_error_len: core::cell::Cell<usize>,
+    /// The design-bound cache every compile on this engine reads and fills (#1471). Control
+    /// thread only; render never reads it, and a session copies none of it (its first epoch owns
+    /// the designs that compile used, journaled at the time of use). It lives as long as the
+    /// engine, outside every compile limit; `miso_engine_v1_engine_destroy` frees it.
+    pub(crate) bound_cache: RefCell<control_plane::InputBoundCache<'static>>,
     not_sync: PhantomData<core::cell::Cell<()>>,
 }
 
@@ -430,6 +435,7 @@ impl Engine {
             header: HandleHeader::new(HANDLE_KIND_ENGINE),
             last_error: RefCell::new([0; 256]),
             last_error_len: core::cell::Cell::new(0),
+            bound_cache: RefCell::new(control_plane::InputBoundCache::new()),
             not_sync: PhantomData,
         }
     }
