@@ -16,7 +16,7 @@ is green, and every new test turns red on its named defect.
 ### MINOR
 
 1. **The gate-2 test-value claim is still false in the spec body**
-   (`2a589d360:.github/ISSUE_SPECS/1408-keep-every-trim-fader-and-matrix-ramp-inside-its-endpoints.md:264-265`, and gate 2 at `:223`). The text says the long flip
+   (`1f333e98d:.github/ISSUE_SPECS/1408-keep-every-trim-fader-and-matrix-ramp-inside-its-endpoints.md:264-265`, and gate 2 at `:223`). The text says the long flip
    catches "a kernel site left on the old law (any of the trim bodies, dual or banked)". It reaches
    only `identity_chain_ramp_block` (site 7). I re-ran each site mutation alone. For sites 3, 4, 5,
    6 and 8, both gate-2 tests stay green and only the added `every_trim_body_keeps_a_flip_inside_its_trim`

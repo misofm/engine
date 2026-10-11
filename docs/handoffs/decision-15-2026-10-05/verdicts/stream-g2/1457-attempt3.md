@@ -53,7 +53,7 @@ None.
 
 **m1. #1474's certified-flush requirement prescribes a treatment that is sound only for
 non-negative majorants, and it does not state the rounding-model condition that the proof needs.**
-Location: `2a589d360:.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:47-54`
+Location: `0b3957808:.github/ISSUE_SPECS/1474-remove-the-data-dependent-cost-of-the-near-top-tail-walk.md:47-54`
 (Scope item 2) and gate 5 (`:74-75`).
 
 1. **The prescription does not fit the signed state.** The spec says: "Where a component that the

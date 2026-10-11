@@ -91,7 +91,7 @@ match these line shifts exactly, so these bytes are almost certainly `core::pani
 numbers. I did not decode the data segment to confirm this. No code byte moves (all 11 offsets are
 past the end of the code section). No rendered bit moves, which agrees with
 the spec's "no code or rendered bit moves"
-(`2a589d360:.github/ISSUE_SPECS/1300-let-soft-clip-restore-its-own-non-finite-history.md:360`). Any record
+(`43ba3f7c0:.github/ISSUE_SPECS/1300-let-soft-clip-restore-its-own-non-finite-history.md:360`). Any record
 that cites "the batch's module" should cite `d4cf86ea...`, which is the digest the PR's CI will
 print. This does not block the push. If root wants the README line to name the head's digest, it is
 a one-line edit, and that edit would not move the module again (it is a `.md` file).

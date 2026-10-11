@@ -19,7 +19,7 @@ No BLOCKER. No MAJOR.
 ### MINOR
 
 1. **Gate 5 attribution sentence is unsupported and wrong in direction**
-   (`2a589d360:.github/ISSUE_SPECS/1330-validate-each-effect-descriptor-once-per-type-not-once-per-prepared-instance.md:176-186`, Attempt record, Gate 5). The record handles the load
+   (`9edd1a6b8:.github/ISSUE_SPECS/1330-validate-each-effect-descriptor-once-per-type-not-once-per-prepared-instance.md:176-186`, Attempt record, Gate 5). The record handles the load
    honestly: one invocation each, both `uncontrolled`, loadavg stated, no retry. The issue is the
    last sentence: "most of this ~30 % is the load difference ... the profile's 8-9 % attribution is
    the better estimate of the change's share." The two committed records cannot support that, and

@@ -10,7 +10,7 @@ Verdict: FAIL on one MAJOR finding. The fix is to the text of the record only. T
 ## MAJOR
 
 **MAJOR-1. The polarity parity claim "within 0.8 dB on every measure and rate" is false against `polarity_click.csv` and `mute_click.csv`.**
-Where the claim appears: `docs/handoffs/control-smoothing-defaults/FINDINGS.md:378` (9.2), `:537` (9.6), and the spec Attempt record (`2a589d360:.github/ISSUE_SPECS/1055-research-default-ramp-lengths-for-live-mute-fader-and-pan-changes-cited-measured.md:160`).
+Where the claim appears: `docs/handoffs/control-smoothing-defaults/FINDINGS.md:378` (9.2), `:537` (9.6), and the spec Attempt record (`9d2d26ab2:.github/ISSUE_SPECS/1055-research-default-ramp-lengths-for-live-mute-fader-and-pan-changes-cited-measured.md:160`).
 
 Both files are written by the same `click_rows`, with the same columns. On the total-splatter column `splatter_db`, the 20 ms flip does not match the 10 ms mute:
 

@@ -32,7 +32,7 @@ Base: main `1d294c700` (11 commits; slices #1488, #1490, #1491, #1492, #1489).
   - `hosts/host-web/src/render_lock.rs:5-11`: the module header. It no longer names the two
     selects as exceptions.
 - **What the records say:**
-  - The #1492 spec, Authorized paths (`2a589d360:.github/ISSUE_SPECS/1492-select-a-spectrum-collection-entry-without-allocating-on-the-browser-audio-thread.md:84`), lists `render_lock.rs`
+  - The #1492 spec, Authorized paths (`8bd74b1ef:.github/ISSUE_SPECS/1492-select-a-spectrum-collection-entry-without-allocating-on-the-browser-audio-thread.md:84`), lists `render_lock.rs`
     as a "coordinator amendment after attempt 1, pending root's ratification".
   - The coordinator note (`:86-96`) says "Root is asked to ratify both".
   - STREAMS row 101 gives row `:563` to "A #1479 (row `:563` only)". #1492 may only add or edit

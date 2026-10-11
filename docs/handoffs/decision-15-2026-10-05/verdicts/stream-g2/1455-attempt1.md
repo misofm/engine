@@ -33,7 +33,7 @@ No BLOCKER. No MAJOR.
    code.
 
 2. **The spec body's Test value clause is still false.**
-   `2a589d360:.github/ISSUE_SPECS/1455-give-the-multiband-compressor-an-unarmed-form-for-live-audio.md:130-133` says "the multiband `DIGESTS` cover live and silent-tail
+   `db4078c3a:.github/ISSUE_SPECS/1455-give-the-multiband-compressor-an-unarmed-form-for-live-audio.md:130-133` says "the multiband `DIGESTS` cover live and silent-tail
    frames". They do not: `corpus.rs:120-158` calls `lr4_step` with its own counter and never calls
    `process_block`. The implementer recorded this correctly in the Attempt record ("Spec correction"),
    and I confirmed it. The body text belongs to root and is not amended. It is listed here so that
