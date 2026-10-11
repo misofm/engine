@@ -1970,6 +1970,13 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     // capi's epoch row is the prospective epoch's producers and the plan state inventory it keeps
     // (#1273 D5), and the prepared-protocol term is unchanged (`capi_epoch_terms`).
     let (prospective_epoch, prepared_protocol) = prospective_host.capi_epoch_terms(&limits());
+    // The prospective epoch keeps its successor's inventory, not a fresh plan's: it lists the
+    // strips the swap restarts (#1277 D6, #1279 D1). This session's console slots have live
+    // effect lanes, which the effect carry does not move (#1280), so every strip restarts and the
+    // inventory is that much larger than `capi_epoch_terms` read off the fresh preparation.
+    let prospective_epoch = prospective_epoch
+        - prospective_host.prepared.report.inventory_retained_bytes
+        + successor.inventory_retained_bytes;
     // The prospective epoch keeps the design bounds its preparation used (#1471 Amendment 2 D4),
     // so the term above is not the seedless one: the oracle's replacement peak charges it.
     assert!(
