@@ -52,6 +52,21 @@ resolve.
   Dependencies add "After: this issue". The existing `cfg_attr(.., path = "x.txt")` case is superseded by
   the `.rs` case below and is deleted.
 
+## Root Amendment 1 (2026-10-11)
+
+Root's text, verbatim (it closes the three open items that attempt 1 reproduced; it amends D1, and rule 4 is conditional on a measurement):
+
+>
+> They apply the threat model (fail closed, a false pass is not acceptable) to the three gaps.
+> 1. Inside any macro token tree (a macro_rules! or macro body, or any macro invocation's tokens), refuse:
+>    - any identifier `path` (r# forms included), whatever follows it;
+>    - any attribute whose content starts with a `$` metavariable (`#[$m]`, `#![$m]`).
+>    This closes `m!(path = "y.rs")` through a `$m:meta` splice.
+> 2. Outside a `use` item, an identifier `include` (r# included) not directly followed by `!` is refused, anywhere. This is the same idea as F2 for debug_assert, and it closes `inc!(include)`.
+> 3. Inside any macro token tree, refuse `include!` (any path prefix). Its file is read relative to the expanding file, which the tool cannot judge. Also refuse an `include` identifier there in any form.
+> 4. include_str!/include_bytes! stay allowed outside macro token trees. Inside a macro token tree, refuse them too, but only after the implementer measures the real tree. If any real site has include_str!/include_bytes! (or their identifiers) inside a macro token tree, do NOT refuse them. Report the sites to me first.
+> Each rule gets a refused case with a test-value sentence and a mutation, re-measured to zero refusals on the real tree. Reading `path` and `include` to cover the r# forms is correct; keep it. Matching `if !(..)` as a macro shape is harmless over-refusal, so record it as such.
+
 ## Authorized paths
 
 `tools/realtime-policy/**`, this spec, and only the sentences and lines named in D2 and D3 of the #1442,
@@ -68,6 +83,17 @@ resolve.
 - `#[path = $p]` from a `$p:literal`: red if (a) accepts a value that is not a literal.
 - `include!("x.in")` whose file holds a looping `map` trait: red if (b) is dropped.
 - `use std::include as inc;` with `inc!("z.txt")`: red if (c) is dropped.
+- Placement (Root Amendment 1; the case list follows the amendment's rules, not rule text of this spec). Each is
+  refused, each has a one-sentence test value and a mutation in the Attempt record:
+  - Rule 1: `macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path = "y.rs");` and a `path` (also `r#path`)
+    followed by anything in a macro token tree; `#[$m]` and `#![$m]` in a macro token tree.
+  - Rule 2: `macro_rules! inc { ($i:ident) => { $i!("z.txt") } } inc!(include);` and `r#include` not followed by
+    `!` outside a `use` item.
+  - Rule 3: `include!` (any path prefix) and an `include` identifier in any form inside a macro token tree.
+  - Rule 4 (only if the measurement of the real tree finds no `include_str!`/`include_bytes!` inside a macro
+    token tree): both refused inside a macro token tree, still allowed outside. If a real site exists, rule 4 is
+    not implemented and the sites go to root.
+  - Recorded as harmless over-refusal: `if !(..)` matches the macro shape `name ! group`.
 
 ## Gates
 
@@ -77,6 +103,9 @@ resolve.
 3. Mutations (PR evidence), each alone, with the real tree still passing; each turns red only the case
    named for it: (a) dropped; the (a) exception applied inside `cfg_attr`; the (a) exception applied inside
    macro token trees; (b) dropped; (c) dropped.
+   Placement (Root Amendment 1): one mutation per amendment rule (1: `path` in a macro tree, and the `$`-metavariable
+   attribute; 2: bare `include`; 3: `include!` and `include` in a macro tree; 4 if implemented), each alone, red only
+   on its own case.
 4. Shipped artifacts unchanged, as A1's gate 6 (`.so` identical; `.a` members identical once `.llvmbc` is
    removed; the worklet module UNCHANGED).
 5. `cargo fmt --check`, `cargo clippy -p realtime-policy --all-targets -- -D warnings` and
