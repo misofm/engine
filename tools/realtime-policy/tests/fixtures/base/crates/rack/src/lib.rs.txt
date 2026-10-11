@@ -1,0 +1,54 @@
+// REALTIME_POLICY_BEGIN
+fn gather_lane() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn gather_lane_left() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn scatter_lane() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn tile_gather() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn tile_scatter() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn effect_bank_process_mono() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn effect_bank_process() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn live_control_process_mono() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn live_control_process() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn process_inner() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn run() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn gather_mono() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn gather_mono_tiled() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn accumulate_aux() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn gather() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn gather_tiled() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn scatter() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn scatter_tiled() {}
+// REALTIME_POLICY_END

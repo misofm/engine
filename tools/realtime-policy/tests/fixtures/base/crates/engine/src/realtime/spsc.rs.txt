@@ -1,0 +1,11 @@
+#![allow(unsafe_code)]
+unsafe impl Send for Allowed {}
+struct Allowed;
+// REALTIME_POLICY_BEGIN
+fn push() {}
+impl<T> Consumer<T> {
+    pub fn try_pop(&mut self) -> Result<T, QueueEmpty> {
+        self.take_front()
+    }
+}
+// REALTIME_POLICY_END

@@ -1,0 +1,3 @@
+#![allow(unsafe_code)]
+unsafe impl Send for CapiAudit {}
+struct CapiAudit;

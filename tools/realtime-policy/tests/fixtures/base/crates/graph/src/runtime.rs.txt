@@ -1,0 +1,29 @@
+struct Runtime;
+
+impl Runtime {
+    // REALTIME_POLICY_BEGIN
+    fn execute_op() {}
+    // REALTIME_POLICY_END
+}
+
+// REALTIME_POLICY_BEGIN
+fn reduce_plane() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn compensation_delay_process() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn track_delay_process() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn publish_observations() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn buffer_mut() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn arena_members_fold_plane() {}
+// REALTIME_POLICY_END
+// REALTIME_POLICY_BEGIN
+fn observe() {}
+// REALTIME_POLICY_END

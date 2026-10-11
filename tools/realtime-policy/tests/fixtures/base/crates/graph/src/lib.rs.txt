@@ -1,0 +1,7 @@
+struct GraphPlan;
+
+impl GraphPlan {
+    // REALTIME_POLICY_BEGIN
+    fn lowered() {}
+    // REALTIME_POLICY_END
+}

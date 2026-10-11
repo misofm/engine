@@ -1,0 +1,3 @@
+// REALTIME_POLICY_BEGIN
+fn render_next() {}
+// REALTIME_POLICY_END

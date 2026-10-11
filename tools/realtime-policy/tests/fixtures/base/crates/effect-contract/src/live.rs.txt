@@ -1,0 +1,28 @@
+// REALTIME_POLICY_BEGIN
+impl ObservationLane {
+    fn accumulate() {}
+}
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN
+impl EffectControlLane {
+    fn stage() {}
+    pub fn stage_records(&mut self) -> usize {
+        let available = self
+            .control
+            .as_ref()
+            .map_or(0, Consumer::available_at_entry);
+        let mut staged = 0_usize;
+        let mut remaining = available;
+        // A comment line between the alias and the loop is not code.
+        while remaining != 0 {
+            remaining -= 1;
+            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {
+                break;
+            };
+            staged += admit(record);
+        }
+        staged
+    }
+}
+// REALTIME_POLICY_END
