@@ -653,10 +653,22 @@ pub fn plan_revision_gate_retained_bytes() -> u64 {
 }
 /// Exclusive realtime state. It is `Send` but intentionally `!Sync`.
 ///
+/// A shared reference is refused at compile time. rustc reports E0277 (`Sync` is not implemented);
+/// the fence carries no code because stable rustdoc does not check one.
+///
 /// ```compile_fail
 /// use engine::realtime::PreparedRenderPlan;
-/// fn requires_sync<T: Sync>() {}
-/// requires_sync::<PreparedRenderPlan>();
+/// fn requires<T: Sync>() {}
+/// requires::<PreparedRenderPlan>();
+/// ```
+///
+/// Moving it to the render thread is the allowed path. This twin differs from the doctest above in
+/// the bound only, so a renamed item or a typo in the shared code turns it red (issue #1422 D2):
+///
+/// ```
+/// use engine::realtime::PreparedRenderPlan;
+/// fn requires<T: Send>() {}
+/// requires::<PreparedRenderPlan>();
 /// ```
 pub struct PreparedRenderPlan {
     program: PreparedProgram,
