@@ -7,6 +7,9 @@
 //! loop only reads the counts (2), the loops are the form's own (3), the pass loop pairs queue i
 //! with counter i (4), its body is the guard, the decrement and one pop of the counted queue (5),
 //! and nothing in the window between the loops writes the counters or replaces the queues (6).
+//!
+//! The loops around the form, the pass count loop between the loops included, are judged by
+//! [`super::outer`] like the loops around any other drain.
 
 mod window;
 

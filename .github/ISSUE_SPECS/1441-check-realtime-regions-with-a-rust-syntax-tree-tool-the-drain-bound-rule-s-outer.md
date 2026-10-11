@@ -208,3 +208,154 @@ three floor messages are `:1408`, `:1410` and `:1414`.
 - A test that greps source or prose is refused. The cases are the tool's own input.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`, base `1e03edf19`)
+
+Commits: `993b85745` (D5 and both floors), `10f867f65` (rules, cases, twins), and three small follow-ups. Edits:
+`tools/realtime-policy/**`, `crates/builtins-compiler/src/lib.rs` (two comment lines),
+`scripts/check-realtime-policy.sh` (floor line and comment), `scripts/test-realtime-policy.sh` (pad loop, its
+comment, the region-floor message) and this spec. No `Cargo.toml` or `Cargo.lock` change.
+
+**What is where.**
+- `src/drain/outer.rs` (D1): `finite` judges every loop of the pop's path between the region's top node and the
+  innermost bounding loop: a B1a-D8 bounded loop (`count::bounds`), `for P in 0..<bound>`, the collection forms
+  with any `.enumerate()` and `.zip(..)` steps, a slice or array parameter, or the `array::from_fn` closure.
+- `src/drain/items.rs` (D2, D3): two token scans over the region's leaves (`names_item`, `constructor_lines`). They
+  read macro token trees and `macro_rules!` bodies too.
+- `src/drain/count.rs`: `under_cfg` and the item check, in `counted` and in the alias branch.
+- `src/drain/tree.rs`: `is_loop_at` and `array_from_fn_call` (the closure argument of `core::array::from_fn` or
+  `std::array::from_fn` is a loop of the tree rule); `src/drain/scope.rs`: `BindingKind::Param { ty }`.
+- `src/drain/mod.rs`: `check` scans each region for constructors whether or not a pop stands in it; `bounded`
+  judges the outer loops; the module documentation states D4's limits and D7's over-refusals.
+- `src/boundary.rs`: `leaves_between`, `marker_start`, `RegionNodes::bounds`. `src/policy.rs`: region floor 94.
+
+**Real tree (re-measured).** `drain_controls` is at `crates/builtins-compiler/src/lib.rs:460-515`; the blank lines
+were `:459` and `:516` (the spec's `:451`/`:508` are `main`'s). It still pops (`:482`) and now has a `carry` argument
+and a `let Self { .. } = self;` destructure. D5 applied: the two markers replace the two blank lines, so no line
+moves. `cargo run --locked --release -q -p realtime-policy` and `bash scripts/check-realtime-policy.sh` both print
+`realtime policy: ok (94 marked regions in 26 files)`. The cell slices have not landed on this branch: the marked
+pops are `lib.rs:482`, `:1084` (fader), `:1128` (matrix), `live.rs:366`, `runtime.rs:900`.
+Floors: regions 93 to 94 in `Policy::workspace()` and the awk floor line; files stay 26. The awk self-test's pad file
+`pad_1.rs` 14 to 15 regions and its message `ninety-three` to `ninety-four`. The tool's own base tree needed the same
+region (`pad_1.rs.txt` 14 to 15, `BASE_REGIONS` 94), because its `run.rs` cases run `Policy::workspace()` on the
+base tree.
+
+**Deviations and notes.**
+1. **`<bound>` grammar.** D1 states the integer literal or an identifier with `.field` and `::segment` steps (the
+   same `cap` as D6), and the tool follows it. The awk's `path` also accepts zero-argument method calls and a
+   bracket index (`0..self.controls.len()`, `0..a[i]`), so the tool refuses `0..x.len()` where the awk passes. No
+   real region needs it and no ported case holds it. Widening it is one change in `shapes::cap`'s caller
+   (`outer::range_to_a_bound`). Open item for root: decide whether D1's `main`-parity wording means the awk's path.
+2. **The tree rule treats only the `array::from_fn` closure as a loop.** Every other `from_fn`, `repeat_with` and
+   `successors` is refused by its token. With both mechanisms on every `from_fn`, no mutation could turn the
+   ported `from_fn` case red alone. Now the token scan owns `from_fn`/`bare_from_fn`/`repeat_with` (gate 4,
+   constructor mutation), and the tree rule owns `array_from_fn_pop`.
+3. **The item scan is token-based over the whole region** (`static [mut] name`, `const name`, a `use` whose tokens
+   up to `;` hold the name or `*`), as the awk's `item()`. The resolver is unchanged; `scope.rs` documents that
+   rules which read a binding ask `names_item`. The scan covers the count, its alias source and a slice
+   parameter. The per-queue roots are not asked (D2 names `<count>` only).
+4. **A `cfg`-family attribute** means the last path segment is `cfg` or `cfg_attr` (the spec's words); the awk
+   matched any identifier starting with `cfg`. It is checked on the entry binding and on the alias source.
+5. **Slice parameter:** the parameter is a plain name (`name` or `mut name`) of type `&[T]`, `&mut [T]`, `&[T; N]`
+   (any lifetime) or `[T; N]`; its `fn` signature and the loop lie in the region (`region.holds(signature.core,
+   loop.end)`); and `words_in(name, body_open, loop.full) == 0`.
+6. **Base-tree twins (D6).** The base already held `drain_fader_records`, `stage_records`, the `plan_exchange`
+   pops, and (A1) `drain_lane_pairs` (an `array::from_fn` drain) and `drain_two_lanes`. Added: the `drain_controls`
+   twin (`let Self { .. } = self`, `controls.iter_mut().enumerate()`, `let .. else` with `.as_mut()`) in the first
+   `builtins-compiler` region, and the route `drain` twin (`self.control.consumer`, a `debug_assert!` in the loop)
+   in `graph/runtime.rs`'s first region. No region was added.
+7. **Cases.** The 14 deferred cases are rows of `ported.rs` (kebab names) and all expect {drain class}. The
+   region-in-a-loop case existed (`loop-around-the-region`, `loop`); B1b adds `finite-loop-around-the-region`
+   (`for _ in 0..4` outside the region), which is the case that tells the mutation "read the enclosing loop as an
+   outer loop" apart from the unconditional refusal. 131 tests (121 before).
+8. **`libcapi.a` digest.** The parent (`1e03edf19`) builds `libcapi.a` `3431f546ec53477d...` and `libcapi.so`
+   `0213cd820e2715de...`; with D5's markers the `.so` is identical and the `.a` is `2aa32d808165aef3...`. Three
+   objects of the archive differ (`builtins_compiler`, `graph_compiler`, `host_core`); their code and data sections are
+   identical, and only `.debug*` and `.llvmbc` (embedded bitcode) differ, which carry the changed source text of
+   `lib.rs`. A comment in place of a blank line cannot leave that unchanged. The worklet module is byte-identical:
+   `scripts/build-web-audioworklet.sh --module-only` at the parent and at the change both give `9784d3509dba6bfd...`
+   (the CI `artifact-identity` job is not run here). Open item for root: gate 6's "libcapi digests identical" holds
+   for the `.so` and for the code of the `.a`, not for the `.a` bytes.
+9. Not changed: B1a's per-queue window, terminal-call and macro-and-attribute rules; a doc sentence in
+   `per_queue/mod.rs` says the loops around the form are judged by `outer`. STREAMS' hot-file row and its
+   "ninety-three" floor message (`docs/handoffs/.../STREAMS.md`) are root's files and are not edited.
+
+**Gates.**
+1. Real tree: both gates print `ok (94 marked regions in 26 files)` (above).
+2. `cargo test --locked -p realtime-policy`: 131 passed.
+3. Parity (the B1a method: an instrumented copy of `scripts/test-realtime-policy.sh` outside the repository runs the
+   awk gate and the release binary on every `expect_failure` tree, 96): awk fails on all 96. The tool fails on all
+   96: 55 with the drain class (B1a's 41 plus the 14 deferred cases) and 41 without it (A1 and A2 cases,
+   `open-tail-last-file` and `region-ends-in-comment`, the two D10 class changes). No tree passes the tool. The
+   verdicts agree on all 57 ported cases.
+4. Mutations: below.
+5. Run time, release binary: real tree 1.05 s, 1.05 s, 1.06 s (B1a: 1.03-1.04 s; the awk gate 0.64 s). The base
+   tree plus one marked file of 3,006 lines (`for lane in 0..cfg.lanes` around 300 counted drains): 0.07 s with the
+   same count name 300 times and 0.07 s with 300 distinct names. Not tuned.
+6. See deviation 8. Outside the authorized paths only the two comment lines of `lib.rs` changed.
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `check-realtime-policy.sh`, `test-realtime-policy.sh` (with the raised pad), `check-workspace-policy.sh` and
+   `check-bench-policy.sh` all exit 0.
+
+**Mutations** (each applied alone, `cargo test` and the real tree after each, then reverted by `git checkout`;
+131 green and the real tree ok after every revert). "red" lists tests and rows; the real tree still passed under
+every one, except where marked *. The spec's named cases are first.
+- Accept a `cfg` binding: `count-under-cfg` (ported) and the four `count-under-*`/`alias-source-under-cfg` rows.
+- Drop the `static`/`const`/`use` check: `count-shadowed-by-block-static` and
+  `outer-over-slice-parameter-shadowed-by-block-const` (ported), with five count rows.
+- Accept any `for` as an outer loop: `outer-repeat` and `paren-open-range-outer` (ported), with the rest of the
+  outer ported cases and nine refusal rows.
+- Read an enclosing loop outside the region as an outer loop: `finite-loop-around-the-region` (alone;
+  `loop-around-the-region` stays red because a `loop` is not finite).
+- Drop the constructor check: `from-fn`, `bare-from-fn` and `repeat-with` (ported) and nine rows.
+- B1a mutations moved here: none (B1a's gate 4 names no deferred case).
+- New rules, one red test each unless noted: raw prefix not stripped (`raw-identifier-from-fn`); longer path ending
+  in `array::from_fn` accepted; any root for `array::from_fn`; constructors scanned over the whole file
+  (`constructors-outside-every-region`); constructors checked only in a region with a pop (nine rows); generic
+  arguments ignored by the outer exemption (`outer-array-from-fn-with-generic-arguments`); the `array::from_fn`
+  closure not a loop (`array-from-fn-pop`, `std-array-from-fn-pop`, `array-from-fn-block-pop`, the generic-argument
+  row); never a finite outer (the base tree and the three `outer-*-array-from-fn` rows); `loop` accepted as an
+  outer (`outer-loop`, the per-queue `loop` pass count and `loop` around the form, `bounded-drain-inside-outer-loop`);
+  `while` accepted (`outer-while-condition`, `-while-let`, `wrapped-outer-while`); range start, inclusive range and
+  open end (one row each); any adapter after the base (`outer-reversed`, `-taken`, `-cycled`,
+  `outer-zip-then-cycle`); slice parameter type unchecked (`outer-vec-parameter-by-value`,
+  `outer-over-iterator-parameter`); a destructured parameter takes the type
+  (`outer-slice-parameter-with-a-pattern`); signature outside the region
+  (`slice-parameter-outside-the-region`); mention before the loop unchecked
+  (`outer-slice-parameter-rebound-by-a-macro`; `outer-over-rebound-slice-parameter` stays red through the resolver
+  alone); `use` arm dropped; `static mut` not skipped; any `static`/`const` refuses; any `use` refuses; `cfg` only
+  (`count-under-cfg-attr`); first path segment; any attribute (the two `*-under-allow` rows); first attribute only;
+  alias source unchecked; only the nearest outer loop judged (`outer-finite-loop-inside-an-unbounded-one`, the
+  `never-ends` row, `per_queue_inside_an_unbounded_outer_loop`); outer loops not judged (B1a's state: the three
+  per-queue cases, 16 rows and 8 ported cases); bounded `for` or `while` not an outer
+  (`outer-counted-for-header`, `outer-counted-while`); zip reference or literal arm dropped (`outer-zip-chain`);
+  impl method body not found (`outer-slice-parameter-of-a-method`).
+- D6 twins: receiver of an entry count limited to one field: the route twin (`graph/runtime.rs`) fails in the base
+  tree, and the real `runtime.rs:900`*; outer collection root must be a parameter: the `drain_controls` twin fails
+  in the base tree, and the real `lib.rs:482`*.
+
+**Test value (the one-sentence answer, per new test).**
+- `the_finite_outer_loops_pass`: red if any finite form of D1 (bound, reference, `iter`, adapters, slice or array
+  parameter, bounded loop, `array::from_fn`) is refused, which no earlier case or base-tree shape pins.
+- `the_outer_loops_that_may_not_end_are_refused`: red if a loop that can run forever, or that D1 and D7 cannot
+  prove finite, is accepted as an outer loop.
+- `a_slice_parameter_of_a_function_outside_the_region_is_not_read`: red if a signature outside the region is read.
+- `an_item_that_can_name_the_count_refuses_the_drain`: red if a `const`, `static mut` or `use` (glob, name, nested)
+  that can shadow the count or the slice parameter is not seen, or if an unrelated item refuses.
+- `a_count_binding_that_may_not_be_compiled_is_refused`: red if `cfg_attr`, a `cfg` path, a `cfg` after another
+  attribute or a `cfg` alias source is missed, or if any attribute refuses.
+- `a_constructor_that_loops_is_refused_anywhere_in_a_region`: red if a constructor with no pop, a raw spelling, a
+  longer or foreign path or a macro token escapes, or if the exempt `array::from_fn` paths, or a constructor outside
+  every region, are refused.
+- `a_pop_directly_in_an_array_from_fn_closure_is_refused`: red if the closure of `std::array::from_fn` is no loop.
+- `finite-loop-around-the-region` (in `a_loop_that_encloses_the_region_is_refused`): red if an enclosing loop outside
+  the region is judged as an outer loop.
+- `per_queue_inside_a_finite_outer_loop`, `per_queue_inside_an_unbounded_outer_loop`,
+  `per_queue_pass_count_loop_may_not_end`: red if the loops around a D8b form, the pass count loop included, are
+  refused when finite or left unjudged when not.
+- The D6 twins (base tree): red if the port refuses the `drain_controls` or route shape.
+
+**Open items.**
+- Root: deviation 1 (`.len()` and index bounds) and deviation 8 (`libcapi.a` bytes).
+- STREAMS: the hot-file row to "J tool slice B1b", and the floor message text, are root's edits.
+- B2a: the closure and macro transparency and its two superseded B1a tests, as B1a's record says.
