@@ -73,10 +73,12 @@ fn edit(text: &str) -> [Edit<'_>; 1] {
     }]
 }
 
-/// Every refused probe fails with exactly its classes. A probe holds the construct whose syntax-tree
-/// walk the case defends: a literal form, a let chain, an or-pattern, a struct pattern; a labelled,
-/// `const` or `unsafe` block, a closure in a header; a `cfg` attribute. A walk that skips one of
-/// them passes the probe.
+/// Every refused probe fails with exactly its classes. Each is a drain that pops until the queue is
+/// empty, or that hides its bound, in a position where a rule that accepts too much passes it:
+/// a literal form, a let chain, an or-pattern, a struct pattern; a labelled, `const` or `unsafe`
+/// block, a closure in a header; a `cfg` attribute; a closure or a macro. (A walk that merely
+/// skips a node leaves its pop unreached, and an unreached pop is refused, so the bounded probes
+/// below are what catch a skipped node.)
 #[test]
 fn the_refused_probes_are_refused() {
     let rows: Vec<_> = probes()

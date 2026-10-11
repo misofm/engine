@@ -231,3 +231,130 @@ the self-test's lines from `:440` on are one lower.
 - Size: half a day. The rules (D1-D3) are small. The probe cases are mechanical: a throwaway
   script outside the repository writes each case file from the bundle (PR evidence, not committed),
   and the expected class sets are fixed by D5, not judged case by case.
+
+## Attempt record (attempt 1, J batch branch `codex/d15-stream-j3`, base `d08217cef`)
+
+Commits: `bfed03af6` (rules, cases, corpus) and the evidence commit that holds this record. Edits:
+`tools/realtime-policy/**` and this spec only. No production code, `Cargo.toml` or `Cargo.lock` change; no
+shipped crate depends on `realtime-policy` (`cargo tree -i realtime-policy` lists only itself), so gate 6 holds
+trivially.
+
+**What is where.**
+- `src/drain/mod.rs` (`bounded`): a `PopKind::MacroToken` site is refused first (D2). `in_closure` refuses a pop
+  below any closure step that is not the closure of `core::array::from_fn` or `std::array::from_fn` (D1; that
+  closure stays B1b's finite outer loop). `called_in_place` allows a `PopKind::Path` site only as operand 0 of a
+  `Call`, or as operand 1 of a `.map(..)` method call with one argument (D3). Module documentation: the closure,
+  macro and function-value limit is gone; D1 to D3 and D2's stated limit are in (D7).
+- `src/drain/shadow.rs` (new, D2): a token scan of one file for `macro_rules! debug_assert`, `macro debug_assert`
+  and any `use` item that holds the identifier `debug_assert` (before its `;`, at any depth of the tokens; `use<..>`
+  precise capturing is skipped). `src/lib.rs` runs it on every lexed `.rs` file under the roots, then judges the
+  files that need the syntax tree (the marked files and `capi/src/ffi.rs`), which now wait for the whole walk.
+  `src/drain/facts.rs`: `Facts::of(file, trust_debug_assert)`; untrusted, a `debug_assert!` is any other macro
+  (its identifiers are macro uses, so a count named in it is refused).
+- Deleted in the same commit (superseded, as the earlier slices' records say):
+  `form-pop-token-in-a-macro-in-a-counted-loop` (a row of `the_forms_that_d6_and_d8_state_pass`) and
+  `a_pop_in_a_macro_or_a_closure_is_judged_by_the_loops_around_it`.
+- `tests/policy/drain/probes.rs` + `tests/fixtures/probes/<group>/<name>.<verdict>.rs.txt` (118 files): the
+  corpus. The verdict in the file name is the expected class set: `drain`, `accepted`, `forbidden-body+drain` (u08),
+  `unsafe+drain` (u13). Each file replaces `fn drain_matrix_controls() {}` in the base tree with its own marker
+  lines removed. `a2-rc/` holds the three shapes of `rc/shapes.rs`. u03 is committed with `//` in place of `//!`.
+- `tests/policy/drain/indirect.rs`: the D6 cases (8 tests).
+
+**Real tree (re-measured).** `cargo run --locked --release -q -p realtime-policy` and
+`bash scripts/check-realtime-policy.sh`: `realtime policy: ok (94 marked regions in 26 files)`, as before the
+slice. No marked region pops in a closure, a macro or through a function value (the tool passes). No file under
+the roots defines or imports a `debug_assert` macro. Release run time 1.27 s (B1b: 1.05 s; the second pass and
+the token scan of every file add about 0.2 s). Not tuned.
+
+**Deviations from the spec's numbers and decisions.**
+1. **Corpus size.** Committed: 86 refused and 32 accepted probes (118). The spec's 84 + 6 refused and 33 accepted
+   change as follows. (a) `e02_cfg_count`, `e03_slice_param_shadowed_by_block_const` and `e06_raw_keyword_macro`
+   are token-for-token the ported cases `count-under-cfg`, `outer-over-slice-parameter-shadowed-by-block-const`
+   and `count-in-raw-identifier-macro`: not committed twice (D5). (b) `v14_len_outer` and `v14b_len_outer` are
+   not committed: the tool refuses `0..self.controls.len()` as an outer bound where the awk gate passes (B1b
+   deviation 1, still an open item for root). Committing them as accepted needs `outer::range_to_a_bound` widened;
+   committing them as refused would pin an over-refusal. Open item below. (c) `u19_while_count_alias_twice` is
+   committed as `accepted`, not `drain`: the drain is bounded (`let remaining = 5;` after the decrement shadows
+   only the rest of the loop body; the header and `remaining -= 1` read the outer binding) and the awk refuses it
+   by over-counting aliases. D5's {drain} for u19 is wrong; the tool is right.
+2. **Gate 5, `.map(<path>)` refused.** The real tree does not pass under this mutation: `live.rs:366` is exactly
+   that form. The base tree fails too (its `effect-contract/src/live.rs`), so the mutation is red in the whole
+   suite, not in one case. The D6 `.map` case is among the red rows.
+3. The refused probes do not catch a visitor that skips a node: an unreached pop is refused (B1a-D4, fail-closed).
+   The spec's test-value sentence says they do. The accepted probes catch the skip (mutation C3 below); the
+   refused probes catch a rule that accepts too much (C4, C5). The test docs say so.
+4. `Tree::apply` is unchanged; `each_row` takes `&'static str`, so the probe names are leaked in the test.
+
+**Gates.**
+1. Real tree: both gates `ok (94 marked regions in 26 files)`.
+2. `cargo test --locked -p realtime-policy`: 140 passed (131 before; -1 test, -1 row, +2 corpus, +8 indirect).
+3. Parity (throwaway script outside the repository: base tree + each probe, `scripts/check-realtime-policy.sh`
+   under gawk, and the release binary), run on the 123 probes generated from the bundle (the 118 committed, the
+   three duplicates and v14, v14b). The gawk verdicts equal the TSV on all 123. The tool differs on 9:
+   a06, a07, b02, n09, e07, e11 (awk passes, tool refuses: D1 and D2, as intended); v14 and v14b (awk passes, tool
+   refuses: B1b deviation 1); u19 (awk refuses, tool accepts: above). u03 repaired: both refuse.
+4. Fuzz (throwaway; each file split into its regions, regions the parser rejects removed one at a time, the rest
+   judged in one file): fz_1-4 and fz_11-14 hold 3767 regions: 3762 refused with the drain class, 1 does not parse
+   (`fz_2`, refused as a parse error), 4 accepted. The 4 (`fz_1` s249, `fz_11` s170, `fz_14` s229, `fz_3` s63) are
+   `for/while <header>.. { body } { <pop block> }`: the generator wrote the pop in a bare block that follows the
+   loop, because a range's `..` before `{` takes no block as its end; the pop is under no loop, so it is bounded.
+   (The awk's lexer reads that block as the loop's body.) fz_21 and fz_22 hold 800 regions: 0 refused with the
+   drain class; 125 are refused as unsafe code (the generator uses `unsafe { }` in headers), the class `main`'s
+   unsafe pass also reports.
+5. Mutations: below.
+6. Shipped artifacts: unchanged (above).
+7. `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+   `scripts/check-workspace-policy.sh`, `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh`
+   exit 0.
+
+**Mutations** (each alone, `cargo test` and the real tree after each, source restored by the harness; 140 green and
+the real tree ok after every revert). Red = tests and rows.
+- Closures transparent again: `closure-in-a-let-called-in-a-loop`, `-called-once`, `-in-a-counted-loop`,
+  `-argument-of-an-adapter`, and probes a06, a07, b02, n09, e11. Real tree ok.
+- Macro token trees transparent (the `MacroToken` refusal removed): `macro-call-in-a-counted-loop`,
+  `macro-call-with-no-loop`, `debug-assert-argument`, probe u09. Real tree ok.
+- Macro token trees skipped (pop finder ignores macros): the five macro rows (the body, both calls, no loop,
+  `debug_assert`), u09, and three B1a/B1b macro cases. Real tree ok.
+- `debug_assert` always taken at its word: probe e07, all 8 `a_debug_assert_that_a_file_shadows..` rows and the
+  cross-file case. Real tree ok.
+- Shadow check limited to the file of the drain: the cross-file case and the 8 shadow rows (e07 stays green: its
+  macro is in the drain's file). Real tree ok.
+- Any `try_pop` path value allowed: the 7 `function-value-*` rows (the `let pop` row first). Real tree ok.
+- `.map(<path>)` refused: see deviation 2 (the `.map` case, every test that builds the base tree, and the
+  real tree at `live.rs:366`).
+- Shadow internals, one red test each: braced `use` group ignored (`use-in-a-group`); no recursion into groups
+  (`macro-rules-in-a-function-body`, `macro-rules-in-a-macro-body`); `use<..>` not skipped
+  (`precise-capturing-bound`); decl macro arm removed (`declarative-macro-2`); `use` scan runs past `;`
+  (`use-then-a-call-of-debug-assert`).
+- Path rule internals, one red row each: `.map` with any argument count (`function-value-in-map-with-another-argument`);
+  any method name for operand 1 (`function-value-in-and-then`); any call operand (`function-value-as-an-argument`).
+- `array::from_fn` exemption removed from the closure rule: the base tree and the `outer-*-array-from-fn` rows.
+- Corpus: `match` arms not walked: probes v01 and v07 (accepted); `let` expressions not walked and collection
+  outer loops never finite: the base tree and all 32 accepted probes; any loop bounds a pop
+  (C4): 57 refused probe rows; unreached pops accepted (C5): the u08 probe. The real tree stays ok except under
+  "collection outer loops never finite", which refuses `lib.rs:1128`.
+
+**Test value (one sentence per new test).**
+- `a_pop_in_a_closure_is_refused`: red if a pop that runs wherever its closure is called passes (a closure in a
+  `let` called by a loop, called once, in a counted loop, or held by an adapter). B1a's transparency passed them.
+- `a_pop_in_a_macro_token_tree_is_refused`: red if a `try_pop` token in a macro call, a `macro_rules!` body or
+  `debug_assert!` arguments is judged by the loops around the call.
+- `a_function_value_that_pops_is_refused_unless_it_is_called_in_place` and
+  `a_function_value_called_in_place_is_judged_by_its_loops`: red if a stored, passed or parenthesised `try_pop`
+  value passes, or if the callee and the `.map(..)` argument are refused or stop being judged by their loops.
+- `a_debug_assert_that_a_file_shadows_is_not_taken_at_its_word` and
+  `a_debug_assert_shadowed_in_the_parent_module_is_shadowed_in_the_child`: red if the shadow check misses a form
+  (`use`, rename, group, nested or local `macro_rules!`, decl macro) or looks at one file only.
+- `text_that_does_not_shadow_debug_assert_leaves_it_trusted`: red if a string, a comment, a longer name or a
+  `use<..>` bound withdraws the trust from the valid drain.
+- `the_refused_probes_are_refused`, `the_bounded_probes_pass`: red if a rule accepts a drain the verdicts refused,
+  or refuses a bounded form `main` accepts, in the positions the probes hold (C3, C4, C5, M1, M2, M3 above).
+
+**Open items.**
+- Root: B1b deviation 1 (`0..x.len()` and bracket-index outer bounds). When widened, commit `v14` and `v14b`
+  (`/tmp` copies are not needed: they are `v1302/a3/v/v14_len_outer.rs` and `v14b_len_outer.rs` in the bundle)
+  as accepted cases.
+- Root: u19 (deviation 1c) and the 4 accepted fuzz regions (gate 4) are awk over-refusals the tool does not repeat.
+- A `.map(Consumer::try_pop)` on an iterator of `&mut Consumer` is allowed by D3 as written. Such an iterator
+  yields each consumer once, so it is finite; no infinite form is reachable without `from_fn`, `repeat_with` or
+  `successors`, which stay refused.
