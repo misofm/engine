@@ -315,10 +315,8 @@ re-pins the graph digests its tighter value moves only if #1379 has landed first
   (#1502 deletes them).
 - **Watermark bound on `main` today.** Never early. `first_sample` is the start of the first block
   that begins after the commit's last write, so at most one block after the submit returns
-  (while a replacement plan is pending: the block that adopts it). A live value of
-  that revision can apply earlier, in any block that ran between the submit's first push and its
-  revision store. One transaction's values can spread across those blocks until #1502, #1503, #1504,
-  #1312 and #1345 have all landed, which together make it exact.
+  (while a replacement plan is pending: the block that adopts it). Every live value of that revision
+  takes effect together, in the block `first_sample` names.
 
 #1447 is stream B batch 1's successor in `crates/source/src/lib.rs` and merges before #1318 (the
 hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 as a dependent.
