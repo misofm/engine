@@ -927,19 +927,30 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         };
       }
     }, sdkEnabled);
-    if (sdkEnabled) {
-      // Resume each real AudioContext with a trusted gesture across browsers. The SDK
-      // qualification creates these controls in execution order; racing completion keeps
-      // a preceding failure from turning into a locator timeout that hides its diagnostic.
+    {
+      // Resume each real AudioContext with a trusted gesture across browsers: WebKit starts or
+      // restarts a context only inside a user activation, and leaves `resume()` pending without one.
+      // The SDK qualification creates its two controls in execution order; the observation-unsubscribe
+      // gate (#1345 Amendment 5; batch-verdict 2, B2) then creates one for each resume it makes and
+      // marks it `data-qualification-resume`; a kick adds more, so the loop runs until completion.
+      // Racing completion keeps a preceding failure from turning into a locator timeout that hides
+      // its diagnostic.
       const completion = execution.then((value) => ({ kind: "complete", value }));
-      for (const selector of ["#spectrum-collection-resume", "#spectrum-hop-resume"]) {
-        const click = page.locator(selector).click().then(
+      const selectors = sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : [];
+      for (;;) {
+        const selector = selectors.shift() ?? "button[data-qualification-resume]";
+        const click = page.locator(selector).first().click().then(
           () => ({ kind: "clicked" }),
           (error) => ({ kind: "click-error", error }),
         );
         const outcome = await Promise.race([completion, click]);
         if (outcome.kind === "complete") break;
-        if (outcome.kind === "click-error") throw outcome.error;
+        if (outcome.kind === "click-error") {
+          // The page neither finished nor made the control this loop waits for: it is stuck (WebKit
+          // can wedge a page whose context stalls under full CPU load). Name that, with what the
+          // page logged, instead of a bare locator timeout.
+          throw new Error(`${browserName}: the page did not finish or offer a control to click (${selector}) within 120 s: ${outcome.error.message}; page diagnostics: ${diagnostics.join("; ")}`);
+        }
       }
     }
     const result = await execution;

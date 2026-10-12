@@ -115,8 +115,8 @@ and must report no reduction. A render-allocation row, `observation-unsubscribe`
 *Note, 2026-10-12 (batch verdict 2, B2).* Every wait of `runObservationUnsubscribeRun` is bounded
 at 10 s, the bound `sdk-response-entry.ts` uses, and a stall fails the gate as `<kind> timeout at
 <step>` (kind `suspend`, `resume` or `await`) with the context state; a timeout is never a pass, a
-skip or a retry. The first `suspend()` of the new context is not awaited (WebKit 26.5 never settles
-it with every CPU busy); a bounded poll requires `context.state` to be `suspended` before boot and
+skip or a retry. The first `suspend()` of the new context is not awaited (it is only a request; a bounded
+poll replaces the await); a bounded poll requires `context.state` to be `suspended` before boot and
 again before the unsubscribe, and the run records both states. New mutation
 `observation-unsubscribe-context-running` sets the second recorded state to `running`; the
 `observation-unsubscribe` gate must then fail (the same gate, the same message). *Page-level checks
@@ -130,6 +130,14 @@ removed too, `createHost` refuses the running context (`miso.error.v1`, result 1
 *Engine-side red check (not a committed mutation):* with the page's unsubscribe replaced by a
 stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
 failed; with the unsubscribe sent, 0.
+
+*Note, 2026-10-12 (batch verdict 2, B2 diagnosis).* Every `resume()` of the gate's real
+`AudioContext` now runs inside a trusted click (`resumeThroughClick`; `run.mjs` clicks each button
+marked `data-qualification-resume`). WebKit starts or restarts an `AudioContext` only inside a user
+activation and otherwise leaves `resume()` pending. *Page-level check (not committed; WebKit, no
+busy loops):* with the gate's first `resume()` called directly (the version before this change) and
+the page idle for 6 s after the SDK phase, so the harness's activation has expired, the gate fails as
+`resume timeout at a frame from the armed tap`; with the click, it passes.
 
 ### And the same mutation against a real engine, in a real browser
 

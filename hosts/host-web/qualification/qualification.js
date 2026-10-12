@@ -508,8 +508,8 @@ const AUDIO_STEP_TIMEOUT_MS = 10_000;
 
 /// Await `start()`, failing with `<kind> timeout at <step>` and the context's state if it has not
 /// settled within `AUDIO_STEP_TIMEOUT_MS`. A timeout is a failure of the gate: never a pass, a skip
-/// or a retry. WebKit 26.5 with every CPU busy never settles a `suspend()` of a fresh context
-/// (batch-verdict 2, B2); an unbounded wait there hangs the page until CI kills the job.
+/// or a retry. WebKit leaves a `resume()` that has no user activation pending (batch-verdict 2, B2);
+/// an unbounded wait there hangs the page until CI kills the job.
 async function bounded(kind, step, context, start) {
   let timer;
   const stalled = new Promise((_, reject) => {
@@ -525,8 +525,8 @@ async function bounded(kind, step, context, start) {
 }
 
 /// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
-/// The first `suspend()` of a new context is not awaited (WebKit may not settle it on a saturated
-/// machine, and Firefox can create a later context already running), so this poll is what keeps the
+/// The first `suspend()` of a new context is not awaited (Firefox can create a later context already
+/// running, and the `suspend()` is only a request), so this poll is what keeps the
 /// gate from going on with a context that is still running: the "between" steps need a suspended
 /// context. Returns the state it saw, which the run records.
 async function requireSuspended(context, step) {
@@ -542,12 +542,36 @@ async function requireSuspended(context, step) {
   return context.state;
 }
 
-/// Resume `context` and wait until `condition` holds. A resumed context can sit running without
-/// pulling its graph (WebKit on a loaded machine does), so a second without progress suspends and
-/// resumes it again. Every wait is bounded and names `what`; the loop fails loudly, naming
-/// `describe()`'s state, after `milliseconds`.
+/// Resume `context` with a trusted click on a button this function adds, the way an app must in
+/// Safari. WebKit starts a new `AudioContext`, or restarts a suspended one, only inside a user
+/// activation, and otherwise leaves `resume()` pending (state "suspended", or "interrupted"); it
+/// neither rejects nor settles. The harness's `page.evaluate` activation lasts only a short while,
+/// so a page that has run longer than that before it resumes (the SDK phase makes it so, much
+/// longer on a busy machine) has none left (batch-verdict 2, B2). `run.mjs` clicks every button
+/// marked `data-qualification-resume`, which is a trusted event in all three browsers, in the order
+/// they appear. The wait for the click is bounded like every other wait here.
+async function resumeThroughClick(context, what) {
+  const button = document.createElement("button");
+  button.setAttribute("data-qualification-resume", what);
+  button.textContent = `Resume qualification audio: ${what}`;
+  document.body.append(button);
+  try {
+    await bounded("resume", `${what} (click)`, context, () => new Promise((resolve, reject) => {
+      button.addEventListener("click", () => context.resume().then(resolve, reject), { once: true });
+    }));
+  } finally {
+    button.remove();
+  }
+}
+
+/// Resume `context` through a trusted click and wait until `condition` holds. A resumed context can
+/// sit running without pulling its graph (WebKit on a loaded machine does), so a second without
+/// progress suspends and resumes it again, and that resume is a trusted click as well: a script
+/// `resume()` after a script `suspend()` has no activation, and on WebKit with every CPU busy it hung
+/// the whole page in 4 of 12 loaded runs (the bound's own timer never fired). Every wait is bounded
+/// and names `what`; the loop fails loudly, naming `describe()`'s state, after `milliseconds`.
 async function resumeUntil(context, condition, milliseconds, what, describe) {
-  await bounded("resume", what, context, () => context.resume());
+  await resumeThroughClick(context, what);
   const started = performance.now();
   let kicked = started;
   while (!(await condition())) {
@@ -557,7 +581,7 @@ async function resumeUntil(context, condition, milliseconds, what, describe) {
     }
     if (now - kicked > 1000) {
       await bounded("suspend", `${what} (kick)`, context, () => context.suspend());
-      await bounded("resume", `${what} (kick)`, context, () => context.resume());
+      await resumeThroughClick(context, `${what} (kick)`);
       kicked = performance.now();
     }
     await delay(4);
@@ -574,7 +598,8 @@ async function resumeUntil(context, condition, milliseconds, what, describe) {
 /// separates two operations on one tap. Admission itself still never coalesces. So the run renders
 /// between the subscribe and the unsubscribe:
 ///
-/// 1. suspended, it feeds the sixteen-block region, subscribes, and resumes until a frame arrives
+/// 1. suspended, it feeds the sixteen-block region, subscribes, and resumes (through a trusted click,
+///    see [`resumeThroughClick`]) until a frame arrives
 ///    (the armed tap publishes real reduction), then suspends again;
 /// 2. it unsubscribes, which the engine admits because blocks have rendered since the subscribe,
 ///    seeks the source back to its start and feeds the same region again, so the signal that
@@ -588,9 +613,9 @@ async function resumeUntil(context, condition, milliseconds, what, describe) {
 async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
   // The first `suspend()` of a new context is not awaited, the way `sdk-response-entry.ts` keeps its
-  // contexts suspended across addModule: WebKit 26.5 never settles it when every CPU is busy
-  // (batch-verdict 2, B2). The state poll below is the check that replaces the await: the run goes
-  // on only with a context that reports "suspended", and fails with a named location otherwise.
+  // contexts suspended across addModule. The state poll below is the check that replaces the await:
+  // the run goes on only with a context that reports "suspended", and fails with a named location
+  // otherwise.
   void context.suspend().catch(() => {});
   const stateBeforeBoot = await requireSuspended(context, "the new context before boot");
   const step = (name, work) => bounded("await", name, context, work);

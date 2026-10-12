@@ -906,12 +906,68 @@ the WebKit leg under full load.**
   clock. The new context's creation, the state poll and `createHost` before it passed. Before the
   change the same load hung at the first `suspend()`. So the unbounded wait is gone, but WebKit
   26.5 under full CPU load also does not service a fresh context's `resume()`. No retry and no
-  looser bound was added. STOPPED per root's rule: the next step needs a ruling (for example, not
+  looser bound was added (the cause is found: see "B2 diagnosis and fix" below). STOPPED per root's rule: the next step needs a ruling (for example, not
   running the real-context gate under the SDK phase's leftover contexts, or running the gate
   before the SDK phase), because it changes what the gate tests.
 - The re-verify's counts (batch verdict 2): chromium 18 of 18 and firefox 18 of 18 (7 unloaded, 11 at
   32 loops); webkit 8 of 8 unloaded, 4 of 4 at 24 loops, 3 of 3 at 30 loops, 12 of 12 hung at 32 loops
   before this change.
+
+**B2 diagnosis and fix (root's bounded diagnosis, 2026-10-12; Sonnet 5.5; scratch trees and logs in
+`/tmp/claude-1002/b2diag/`).** Machine: 32 CPUs, shared with other jobs; the load average of each set is
+in `logs/summary` rows (`bar.txt`).
+- *Cause.* WebKit starts a new `AudioContext`, or restarts a suspended one, only inside a user activation;
+  otherwise `resume()` stays pending (`state=suspended`, or `interrupted`), neither rejecting nor
+  settling. The gate called `resume()` with no click. It passed unloaded because the harness's
+  `page.evaluate` activation was still live when the gate started (`navigator.userActivation.isActive`
+  true at 6.3 s after the SDK phase's last click); under full load the SDK phase takes longer, the
+  activation has expired (`isActive` false at 16.8 s) and the first `resume()` never settles. It is not a
+  leak and not an interaction with the SDK phase's contexts.
+- *(a) SDK contexts after `close()`.* Every live context of the SDK phase is `closed` 1 to 8 ms after
+  `engine.close()` (the offline `spectrum-query-closed` context never starts, so it stays `suspended`; its
+  `close` is a no-op), unloaded and with 32 busy loops (`logs/a-unl-webkit.log`, `logs/a-l1-webkit.log`).
+- *(b) The `pageerror: the browser engine is closed`.* Source: `hosts/host-web/qualification/
+  sdk-response-entry.ts:1098-1108`, the deliberate `spectrum-query-closed` check. `pending =
+  closedBrowser.querySpectrum(..)` rejects when `closeSdkEngine` closes the engine (line 1100), and its
+  `catch` is attached only after that await, so the rejection is unhandled for a turn (`unhandledrejection`
+  logged in all three browsers). It is an ordering defect in the check, not an SDK promise that outlives
+  its engine. Attaching `pending.then(() => false, () => true)` before the close removes the event
+  (webkit and chromium, `logs/b-unl-*.log`). Not fixed here: the file is stream H's and J's (STREAMS.md);
+  it needs authorization.
+- *(c) Trusted click.* With the gate's `resume()` inside a click, WebKit passes 3 of 3 at 32 busy loops
+  where it failed 3 of 3 before (`logs/base-l*`, `logs/c-l*`).
+- *(d) Skipping the two live-context SDK workloads* (so no click happens) fails the gate even with no load:
+  `resume timeout ... state=interrupted currentTime=0` (`logs/d-unl-webkit.log`). With no SDK phase at all it
+  passes, because the evaluate's activation is fresh (`isActive` true at 1 s; `logs/e-nosdk-unl*`).
+- *(e) Bounding `dispose()` and `close()` at 10 s in the SDK close path* (`sdk/src/browser/engine.ts:
+  1311-1321`): not done. The 17 SDK closes took 0 to 8 ms in every run and no run waited in a close, so this
+  is no part of the cause. The edit is outside the `renderWait` exception; it needs authorization.
+- *Change* (`qualification.js`, `run.mjs`, the named exceptions of Amendment 5): every `resume()` of the
+  gate's real context runs inside a trusted click on a button the page adds (`resumeThroughClick`, marked
+  `data-qualification-resume`); `run.mjs` clicks each such button in order until the page completes. A
+  `resumeUntil` kick is a `suspend()` followed by another click. If the page neither finishes nor offers a
+  button for 120 s, `run.mjs` fails with a named message and the page's diagnostics instead of a bare
+  locator timeout. Page-level check (WebKit, no load, committed in `MUTATIONS.md`): with the gate's
+  `resume()` called directly and 6 s of idle before the gate, it fails `resume timeout at a frame from the
+  armed tap` (`logs/mut-A-webkit.log`); with the click it passes (`mut-B`).
+- *What the click does not fix: a WebKit fault, with a page that has no engine code.* With every CPU busy,
+  a running `AudioContext` that has an `AudioWorkletNode` sometimes never advances its clock after its first
+  `resume()` (the promise settles, `state` is `running`, `currentTime` stays near 0.04 for more than
+  10 s): 2 of 3 runs of up to 40 fresh contexts failed (stall at context 12 and at context 17); the same
+  loop with an `OscillatorNode` and no worklet, 120 contexts in 3 runs, never stalled
+  (`/tmp/claude-1002/b2diag/repro/repro.mjs`, `run.sh`; the numbers are in `drv4.out`). With a script
+  `suspend()` then a click `resume()` as the recovery, 3 of 8 runs of 40 contexts ended with the page
+  hung: `resume()` never returned and the page's own 10 s timer never fired (`drv5.out`). This is the
+  stall that `resumeUntil`'s kick answered, and the kick can hang the page. The gate cannot give a bound
+  inside the page for it; `run.mjs` now bounds it from outside at 120 s with a named failure. Root rules.
+- *Load bar, SDK source-bundle mode, CI command, private pulseaudio sink (`bar.txt`, rows in `summary.txt`).*
+  Unloaded: webkit, chromium and firefox 5 of 5 each. Leg i (32 busy loops, unpinned; the machine's load
+  average read up to 131 at the end of the leg because other jobs ran at the same time): chromium 10 of 10;
+  webkit 7 of 10 (2 pages stuck for 120 s, 1 `sdk-spectrum-hop` H1024); firefox 7 of 10 (1
+  `sdk-spectrum-hop` H1024, 2 `sdk-observation-subscription`: both SDK-phase gates of stream H, before this
+  gate). Leg ii (browser and 4 busy loops pinned to CPUs 0-3): chromium 10 of 10; firefox 10 of 10; webkit 8
+  of 10 (2 `sdk-spectrum-hop` H1024). No failure was in `observation-unsubscribe`. The bar (zero failures)
+  is not met on webkit, and on firefox in leg i; this record does not claim it.
 
 **MINOR 1:** `a_pending_trim_record_in_a_later_bank_survives_the_swap_at_{four,eight}_lanes`
 (`crates/host-core/tests/successor_swap.rs`; `eq5` is lane 1 of the second predecessor bank at four
