@@ -10,12 +10,18 @@
 //! resolved when the file imports it from `crate::render_lock` and defines no other name
 //! `render_locked` anywhere (a function, a macro, any item, a `use` of another path or a binding),
 //! or when the callee is written as the full path.
+//!
+//! The syntax tree of one file proves the wrap only if the build compiles that file as read.
+//! `web_host` refuses what could make it not (conditional compilation on the import, an export, a
+//! wrap call or a guarded module, `#[export_name]`, `#[path]` and glob `use`); a cfg-split twin
+//! or a glob pass-through is refused there, not resolved here.
 
 use syn::visit::{self, Visit};
 
 use crate::policy::Policy;
 use crate::report::{Class, Finding};
 use crate::source::Source;
+use crate::web_host::refuse_conditional;
 
 /// The file the rule reads, relative to the workspace root.
 pub(crate) const WEB_FFI: &str = "hosts/host-web/src/ffi.rs";
@@ -31,6 +37,14 @@ pub(crate) fn scan(
     findings: &mut Vec<Finding>,
 ) {
     let resolution = Resolution::of(file);
+    for line in &resolution.conditional_imports {
+        findings.push(Finding::at_line(
+            Class::ConditionalWrapPath,
+            &source.path,
+            *line,
+            source.line_text(*line),
+        ));
+    }
     if !resolution.imported {
         findings.push(Finding::at_path(
             Class::RenderLockedNotImported,
@@ -59,6 +73,9 @@ pub(crate) fn scan(
             .iter()
             .filter(|function| function.sig.ident == entry.name.as_str())
             .collect();
+        for function in &found {
+            refuse_conditional(source, &function.attrs, Some(&entry.name), findings);
+        }
         let [function] = found.as_slice() else {
             let class = if found.is_empty() {
                 Class::ExportMissing
@@ -75,6 +92,9 @@ pub(crate) fn scan(
                 findings.push(at(Class::UnwrappedNotPermitted).about(&entry.name));
             }
             continue;
+        }
+        if let Some(call) = sole_call(function) {
+            refuse_conditional(source, &call.attrs, Some(&entry.name), findings);
         }
         match callee_of_sole_call(function) {
             None => findings.push(at(Class::RenderLockedBody).about(&entry.name)),
@@ -108,12 +128,18 @@ enum Callee {
     Other,
 }
 
+/// The body's only statement, when it is a call.
+fn sole_call(function: &syn::ItemFn) -> Option<&syn::ExprCall> {
+    match function.block.stmts.as_slice() {
+        [syn::Stmt::Expr(syn::Expr::Call(call), _)] => Some(call),
+        _ => None,
+    }
+}
+
 /// The callee of the body's only statement, when that statement is a call of one argument, a
 /// closure that takes no parameter. `None` when the body is anything else.
 fn callee_of_sole_call(function: &syn::ItemFn) -> Option<Callee> {
-    let [syn::Stmt::Expr(syn::Expr::Call(call), _)] = function.block.stmts.as_slice() else {
-        return None;
-    };
+    let call = sole_call(function)?;
     let [syn::Expr::Closure(closure)] = call.args.iter().collect::<Vec<_>>().as_slice() else {
         return None;
     };
@@ -148,16 +174,23 @@ struct Resolution {
     imported: bool,
     /// The line of every other way the name is introduced, anywhere in the file.
     shadows: Vec<usize>,
+    /// The line of each `#[cfg]` or `#[cfg_attr]` on a top-level `use` that imports the real
+    /// function.
+    conditional_imports: Vec<usize>,
 }
 
 impl Resolution {
     fn of(file: &syn::File) -> Self {
         let mut imported = false;
+        let mut conditional_imports = Vec::new();
         for item in &file.items {
             if let syn::Item::Use(item) = item {
                 let mut names = Vec::new();
                 flatten(&item.tree, &mut Vec::new(), &mut names);
-                imported |= names.iter().any(|name| name.is_the_real_import());
+                if names.iter().any(|name| name.is_the_real_import()) {
+                    imported = true;
+                    conditional_imports.extend(crate::web_host::conditional(&item.attrs));
+                }
             }
         }
         let mut finder = Shadows { lines: Vec::new() };
@@ -167,6 +200,7 @@ impl Resolution {
         Self {
             imported,
             shadows: finder.lines,
+            conditional_imports,
         }
     }
 }

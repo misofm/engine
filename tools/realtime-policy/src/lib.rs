@@ -1,6 +1,6 @@
 //! Checks the marked realtime regions (their boundaries, forbidden spellings and `try_pop` drains),
-//! the C ABI's whole-plan rule, the browser host's render-locked wrap rule and the unsafe-ownership boundary of the workspace from Rust's own
-//! lexer and syntax tree.
+//! the C ABI's whole-plan rule, the browser host's render-locked wrap rule and the unsafe-ownership
+//! boundary of the workspace from Rust's own lexer and syntax tree.
 //!
 //! [`check`] walks `crates`, `hosts` and `tools` under a workspace root and returns a [`Report`].
 //! [`run`] is the binary's whole behaviour with its environment passed in. [`Policy`] holds the
@@ -24,6 +24,7 @@ mod syntax;
 mod table;
 mod unsafe_scan;
 mod walk;
+mod web_host;
 mod whole_plan;
 
 use std::path::Path;
@@ -72,7 +73,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         }
         if (markers.mentions_marker
             || source.path == whole_plan::CAPI_FFI
-            || source.path == render_wrap::WEB_FFI)
+            || source.path.starts_with(web_host::WEB_SRC))
             && let Some(file) = syntax::parse(&source, &mut findings)
         {
             parsed.push((source, file, markers.regions));
@@ -82,6 +83,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     findings.extend(name_findings);
     let mut capi_ffi = None;
     let mut web_ffi = None;
+    let mut web_files = Vec::new();
     for (source, file, file_regions) in &parsed {
         if !file_regions.is_empty() {
             let boundaries = boundary::Boundaries::new(source, file, file_regions);
@@ -101,6 +103,9 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         if source.path == render_wrap::WEB_FFI {
             web_ffi = Some((source, file));
         }
+        if source.path.starts_with(web_host::WEB_SRC) {
+            web_files.push((source, file));
+        }
     }
     if !workspace_root.join(whole_plan::CAPI_FFI).is_file() {
         findings.push(Finding::bare(Class::MissingCapiFfi));
@@ -112,6 +117,13 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     } else if let Some((source, file)) = web_ffi {
         render_wrap::scan(source, file, policy, &mut findings);
     }
+    for path in [web_host::WEB_LIB, web_host::WEB_RENDER_LOCK] {
+        if !workspace_root.join(path).is_file() {
+            findings.push(Finding::at_path(Class::MissingWebSource, path));
+        }
+    }
+    web_host::scan_modules(&web_files, &mut findings);
+    web_host::scan_export_names(&web_files, &mut findings);
     if files < policy.marked_files_floor {
         findings.push(Finding::bare(Class::MarkedFileFloor(
             policy.marked_files_floor,

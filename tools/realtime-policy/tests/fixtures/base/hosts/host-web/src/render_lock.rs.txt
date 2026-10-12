@@ -1,0 +1,12 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
+pub(crate) fn render_locked<R>(body: impl FnOnce() -> R) -> R {
+    body()
+}
+pub(crate) fn render_allocation_count() -> u32 {
+    RENDER_ALLOCATIONS.load(Ordering::Relaxed)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+}

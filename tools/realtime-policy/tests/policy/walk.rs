@@ -23,12 +23,13 @@ fn a_scan_root_that_is_a_file_is_a_finding() {
     fs::remove_dir_all(tree.path("hosts")).expect("remove the hosts root");
     tree.write("hosts", b"not a directory");
     // `hosts/host-web/src/lib.rs` held one region and its file: the floors fire too, and the
-    // render-locked rule's file is gone with the root.
+    // render-locked rule's files are gone with the root.
     assert_classes(
         &tree,
         &[
             Class::ScanRootUnusable,
             Class::MissingWebFfi,
+            Class::MissingWebSource,
             super::common::FILE_FLOOR,
             super::common::REGION_FLOOR,
         ],

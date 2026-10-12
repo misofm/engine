@@ -82,6 +82,22 @@ pub enum Class {
     RenderLockedBody,
     /// A wrapped export calls a `render_locked` that the file does not resolve to the real one.
     RenderLockedUnresolved,
+    /// A `#[cfg]` or `#[cfg_attr]` on the `render_locked` import, a listed export, a wrap call, or
+    /// a guarded module's declaration or inner attributes: the build could ship something else
+    /// than the code the wrap rule read (rule (a)).
+    ConditionalWrapPath,
+    /// An `#[export_name]` whose value starts with `miso_engine_web_v1_` under
+    /// `hosts/host-web/src` (rule (b)).
+    ExportNameOnWebExport,
+    /// A `#[path]` on `mod ffi;` or `mod render_lock;` in `hosts/host-web/src/lib.rs` (rule (c)).
+    PathOnWebModule,
+    /// A glob `use` among the top-level items of `ffi.rs` or `render_lock.rs` (rule (d)).
+    GlobInWrapModule,
+    /// `hosts/host-web/src/lib.rs` does not declare `mod ffi;` and `mod render_lock;` as
+    /// out-of-line modules.
+    WebModuleNotDeclared,
+    /// A file of the browser host that the wrap rule reads does not exist.
+    MissingWebSource,
     /// Fewer marked files than the policy's floor; the number is the floor.
     MarkedFileFloor(usize),
     /// Fewer marked regions than the policy's floor; the number is the floor.
@@ -156,6 +172,22 @@ impl fmt::Display for Class {
             Self::RenderLockedUnresolved => out.write_str(
                 "the export calls render_locked, which the file does not resolve to crate::render_lock::render_locked",
             ),
+            Self::ConditionalWrapPath => out.write_str(
+                "#[cfg] or #[cfg_attr] on the render_locked import, a render-thread export, its wrap call or a guarded module (hosts/host-web/src/ffi.rs, render_lock.rs)",
+            ),
+            Self::ExportNameOnWebExport => out.write_str(
+                "#[export_name] with the miso_engine_web_v1_ prefix (every exported name comes from a listed function's own identifier)",
+            ),
+            Self::PathOnWebModule => out.write_str(
+                "#[path] on `mod ffi;` or `mod render_lock;`, which would move the shipped module away from the file the wrap rule reads",
+            ),
+            Self::GlobInWrapModule => out.write_str(
+                "glob use at the top level of ffi.rs or render_lock.rs, which could supply a render_locked the wrap rule never sees",
+            ),
+            Self::WebModuleNotDeclared => out.write_str(
+                "hosts/host-web/src/lib.rs does not declare `mod ffi;` and `mod render_lock;` as out-of-line modules",
+            ),
+            Self::MissingWebSource => out.write_str("a file the render-locked wrap rule reads is missing"),
             Self::MarkedFileFloor(floor) => {
                 write!(out, "expected at least {floor} marked realtime files")
             }

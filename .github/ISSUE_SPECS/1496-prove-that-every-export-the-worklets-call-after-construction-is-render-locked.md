@@ -197,9 +197,11 @@ Base `58cdcaf5f` (`codex/d15-stream-j3`, J batch 3). Everything below was measur
 - Set 1 of the policy section (`docs/REALTIME_DEPENDENCY_POLICY.md`, "The browser render-locked
   allocator") is 33 exports, 31 wrapped; each is defined once in `hosts/host-web/src/ffi.rs` as a
   top-level `#[unsafe(no_mangle)]` function and the rule passes on all 31 with no ffi change (D4 holds).
-  The engine worklet calls `buffer_ptr`, `prepared_companion_*`, `observation_id_*`,
-  `spectrum_target_id_*` and the other construction-path exports only from `initialize`'s path
-  (`bindLiveControls`, `stageSpectrumRequest`), so they are outside the table, as the ffi header says.
+  The engine worklet calls `buffer_ptr`, `prepared_companion_*`, `observation_id_*` and the other
+  construction-path exports only from `initialize`'s path (`bindLiveControls`, `stageSpectrumRequest`),
+  so they are outside the table, as the ffi header says. (Corrected in attempt 2, F2: both
+  `spectrum_target_id_ptr` and `spectrum_target_id_capacity` are also called after construction, by
+  `receiveSpectrum`, and are in the table.)
 - `scripts/check-realtime-policy.sh` no longer exists (#1446); the tool runs as
   `cargo run --locked --release -q -p realtime-policy`.
 - Gate 1 "the tool passes on the tree" does not hold on this branch for a reason that is not this
@@ -240,7 +242,7 @@ Base `58cdcaf5f` (`codex/d15-stream-j3`, J batch 3). Everything below was measur
 - D3, `sdk/test/browser-pcm-evals.mjs`: `recordFeedCalls` wraps the `exports` of both engine fakes the feed
   worklet drives (the actual-Wasm one and `runPrelude`'s); the last test requires `source_submit` and
   `source_seek` to have been seen and every recorded name to be a table entry with a `feed` caller.
-- Tests: `tests/policy/render_wrap.rs` (11 cases on a base fixture whose `ffi.rs` now holds a small
+- Tests: `tests/policy/render_wrap.rs` (10 cases, corrected from "11" in attempt 2, on a base fixture whose `ffi.rs` now holds a small
   exports file and a small case table), `src/table.rs`'s two unit tests; `walk.rs`'s root-is-a-file case
   gains `MissingWebFfi` (the file is gone with its root).
 
@@ -287,3 +289,88 @@ without a word (a misspelled key, an unwrapped entry with no reason).
 **Open.** The headers and the policy section still carry the set as prose (`ffi.rs` header, `render_lock.rs`
 header, policy "set 1"); D4 forbids a header edit here and the policy file is outside the authorized paths.
 Root may point them at the table in a doc pass. The tool run on the whole tree stays red until #1345 D8.
+
+## Attempt 2 record
+
+Base `d8a1f734c` (the spec-only commit that records D2 Amendment 1), `codex/d15-stream-j3`.
+
+**Measured first (Step 2), on the real tree.** Rules (a), (b) and (c) refuse nothing: no `#[cfg]` or
+`#[cfg_attr]` on the import (`ffi.rs:43`), on any of the 33 listed exports, on any wrap call or on
+`mod ffi;` / `mod render_lock;` (`lib.rs:7443-7444`); no `export_name` under `hosts/host-web/src`; no
+`#[path]`. Rule (d) read literally (a `use ...::*` anywhere in the two files) would have refused five
+real lines, all `use super::*;` in child `#[cfg(test)]` modules: `ffi.rs:4853`, `4883`, `5351`,
+`6443` and `render_lock.rs:141`. I stopped and reported them; root ruled on (d)'s scope (recorded
+verbatim in D2 Amendment 1) and the tool reads the two files' top-level items only. Real-tree result
+with the finished tool: the release tool prints exactly `crates/effect-contract/src/live.rs:366`
+(pre-#1345) and nothing else. The only `cfg` near the exports is on `pub mod native_staging`
+(`ffi.rs:4613`), a child module that holds no listed export; no rule touches it.
+
+**What changed**
+- `tools/realtime-policy/src/web_host.rs` (new): rule (a) on `lib.rs`'s `mod ffi;` / `mod render_lock;`
+  and on the two files' inner attributes; rule (c); rule (d) on the two files' top-level `use` items
+  (plain, `pub`, grouped, nested path); rule (b) over every parsed file of `hosts/host-web/src`
+  (every attribute, through `unsafe(..)` and `cfg_attr(.., ..)`, any nesting). `lib.rs` now parses
+  every file under `hosts/host-web/src`.
+- `render_wrap.rs`: rule (a) on the real import's `use` item, on each matching export (also when the
+  table's export is defined twice) and on the sole wrap call.
+- New classes: `ConditionalWrapPath`, `ExportNameOnWebExport`, `PathOnWebModule`, `GlobInWrapModule`,
+  and two fail-closed classes the rules need to mean anything: `WebModuleNotDeclared` (`lib.rs` does not
+  declare `mod ffi;` / `mod render_lock;` as out-of-line modules: an inline `mod ffi { .. }` would move
+  what ships away from what is read) and `MissingWebSource` (`lib.rs` or `render_lock.rs` missing).
+  Two readings that go slightly past root's letter, flagged for root: an inner `#![cfg(..)]` in
+  `ffi.rs` / `render_lock.rs` is refused as the same thing as `#[cfg]` on `mod ffi;`, and the two
+  classes above. The real tree has none of them.
+- A listed export that moves into a child module is `ExportMissing` (the tool already requires a
+  top-level item), so root's "any module that holds a listed export" clause needs no code beyond
+  the top-level requirement; a case defends it.
+- Fixtures: `lib.rs.txt` declares the two modules; `render_lock.rs.txt` is new and holds a
+  `#[cfg(test)] mod tests { use super::* }` (the accepted shape). `walk.rs`'s root-is-a-file case gains
+  `MissingWebSource`.
+- F2 and the NITs: the attempt-1 record sentence corrected (above); "11 cases" corrected to 10;
+  `src/lib.rs:2` rewrapped. Integration tests: 196 to 203 (seven new, all in `tests/policy/web_host.rs`).
+
+**Gates.** `cargo test --locked -p realtime-policy`: 203 integration + 2 unit pass. Release tool on the
+real tree: only `live.rs:366`. `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `bash scripts/check-workspace-policy.sh` exit 0. Worklet chain
+(`build-web-audioworklet.sh --named-twin`: shipped module `9784d3509dba...`, same as attempt 1 and as
+the base, since no browser-compiled code changed; `check-web-audioworklet.sh
+--without-metadata-regeneration`; `check-browser-expected-resources.py --artifacts`;
+`test-web-audioworklet.sh` under a private TMPDIR, left empty): exit 0. `check-sdk-headless.sh`:
+363 pass, 0 fail.
+
+**Cases, test values and mutations** (each mutation applied alone to the finished tool, red, then
+reverted, green; the verifier's reproducers are the sources of the first two cases):
+- `a_cfg_split_twin_with_an_export_name_is_refused` (rules (a) and (b)). Test value: a `#[cfg]` split
+  that keeps the wrapped export for native builds and exports an unwrapped copy to wasm through
+  `export_name`, which the attempt-1 tool passed while the shipped module exported the unwrapped body.
+  Mutations: ignore `cfg` on a listed export (red, also the next test); stop reading `unsafe(..)` inside
+  attributes (red).
+- `conditional_compilation_on_a_guarded_item_is_refused` (rule (a), eight sites, plus the
+  `cfg(any())` import with a glob pass-through, the verifier's second form, plus an accepted `cfg` on an
+  unguarded item). Test value: a build that drops the import, an export, the wrap call or a module
+  declaration while the file the rule read stays wrapped. Mutations, each red: the import site not
+  checked; the export site; the call site; the `mod` declaration site; the inner-attribute site;
+  `cfg_attr` not treated as conditional.
+- `an_export_name_with_the_table_prefix_is_refused_and_another_is_not` (rule (b), three spellings in
+  three places, plus an accepted `export_name = "memory_probe"`). Test value: an exported name that
+  does not come from a listed function's identifier, in any attribute spelling and any file of the
+  crate. Mutations, each red: `cfg_attr` arguments not read; `unsafe(..)` not read; only `ffi.rs`
+  scanned; every `export_name` refused (the accepted case goes red).
+- `a_path_on_a_guarded_module_or_an_inline_module_is_refused` (rule (c)). Test value: `#[path]`
+  moves `mod render_lock;` (or `ffi`) to a file the rule never read, as #1442 D8 accepts for its own
+  modules; an inline `mod ffi {}` does the same. Mutations, each red: `#[path]` not checked;
+  an undeclared or inline module not refused.
+- `a_top_level_glob_use_is_refused_and_a_child_module_glob_is_not` (rule (d), four spellings in both
+  files, plus the accepted child-module globs, `use super::*;` and `pub use super::*;`). Test value: a
+  glob that supplies a pass-through `render_locked` to the import's module, and the over-refusal of
+  the five real test-module lines it must not make. Mutations, each red: groups not searched; nested
+  paths not searched; `render_lock.rs` not searched; "refuse globs in every module" (red in the
+  dedicated test and in every case of the suite, because the base fixture carries the accepted shape).
+- `an_export_moved_into_a_child_module_is_missing`. Test value: an export moved into a child module,
+  where a glob is allowed and the wrap would be judged from the wrong scope. Mutation: collect exports
+  from child modules too (red).
+- `a_missing_host_module_file_is_a_finding`. Test value: a deleted `render_lock.rs` treated as a pass.
+  Mutation: no `MissingWebSource` finding (red, with `walk.rs`'s root-is-a-file case).
+
+**Open.** An export or attribute that a macro expansion assembles from parts is #1438 limit 4. The
+prose copies of the set (headers, policy "set 1") remain, as in attempt 1.
