@@ -101,6 +101,7 @@ No other slice builds on `store_revision`, `active_revision`, `RevisionTarget` o
 | `hosts/host-web/src/lib.rs` | H owns; J #1423 (record construction in `into_track_record` and the coalescing sites) lands after B #1312 and #1346; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381; H #1448 (`poll_meters`, unmarked) lands in any order with the B, D, E and J slices that land before H #1332, the later slice rebases; then "H #1448's guard, landed by J after C2" (two markers replacing blank lines, in the J tool batch) after H #1448, in any order with the rest, the later slice rebases; B #1523 (`live_control_request`), B #1524 and B #1525 land before H #1332, and B #1525 before H #1382 |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
+| `sdk/src/browser/engine.ts` | B #1345 (the `renderWait` hook) → H #1532 (the close-path bounds) → H #1332 (root, 2026-10-12) |
 | `tools/parameter-metadata/src/abi_layout.rs` | H (#1333, #1380, #1332, #1381, #1293, #1386) and B (#1399, #1349) → C #1406 (the `sourceRing` rule only); B #1524 after B (#1399, #1349), before C #1406 |
 | `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only); B #1524 after B #1349, before C #1406 |
 | `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit; B #1524 and B #1525 in any order with the rest, the later slice rebases, both before H #1332 |
@@ -503,8 +504,11 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 26 | #1488 | Bring the PCM-feed worklet's source submit and seek under the render-locked allocation count | — | — |
 | 27 | #1491 | Make the boot contract red when the worklet skips spectrum collection staging | #1477 | — |
 | 28 | #1492 | Select a spectrum collection entry without allocating on the browser audio thread | #1488 | A #1479 |
-| 29 | #1522 | Find and fix the intermittent Firefox SDK spectrum gate failures | — | — |
+| 29 | #1522 | Find and fix the intermittent SDK spectrum gate failures in Firefox and WebKit | — | — |
 | 30 | #1530 | Qualify the browser observation wait against the real AudioWorklet in three browsers | — | B #1345 on `main`; before H #1332 and #1382 |
+| 31 | #1531 | Separate the worklet AudioContext clock stall on Playwright WebKit, Linux, GStreamer and a PulseAudio null sink | — | — (diagnosis only; can start now) |
+| 32 | #1532 | Bound the browser SDK close path with named failures | — | B #1345 on `main`; before H #1332 |
+| 33 | #1533 | Fail the browser qualification on any page error or unhandled rejection | — | B #1345 on `main` (its `spectrum-query-closed` handler fix) |
 
 #1448's markers are not in its row: stream J lands them as "H #1448's guard, landed by J after C2"
 (stream J's table).
