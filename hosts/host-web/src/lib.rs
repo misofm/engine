@@ -1533,7 +1533,8 @@ struct ReadyOwnership {
     controls: Vec<TrackControlProducer>,
     /// The session's `live_values_superseded` count (#1312 D2): one count, made once by
     /// [`compile_ready`], which every cell reader of every plan the session prepares adds to, and
-    /// which the status reports (#1399). A successor plan is prepared with this same count.
+    /// which the status reports (#1399). A successor plan the session prepares must be given this
+    /// same count.
     live_values_superseded: host_core::LiveValuesSuperseded,
     /// The plan's gate handle (#1502 D1, #1312 D7). The worklet writes the strips' cells, so it
     /// stamps those writes from this handle and publishes their revision on it, as the control

@@ -709,7 +709,8 @@ impl LiveValuesSuperseded {
         .expect("a count allocation's size fits u64")
     }
 
-    /// Control: the writes counted so far.
+    /// The writes counted so far: a relaxed load. Control reads it for the counters, and render
+    /// reads it after each block to publish it in the browser's status (#1399).
     #[must_use]
     pub fn get(&self) -> u64 {
         self.0.load(core::sync::atomic::Ordering::Relaxed)

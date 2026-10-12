@@ -273,13 +273,17 @@ fn bits(pcm: &[f32]) -> Vec<u32> {
 /// The count is 3: the second `Both` fader edit replaces the first's value in each of the two
 /// channel cells (2), and the second pan edit replaces the first's in the matrix cell (1).
 ///
-/// Test value: red if one host applies a cell's older value, writes a `Both` record into one
-/// channel cell rather than two, or counts a replaced write the other does not: each breaks
-/// #1054's cross-host bit-identity for two edits in one block, which no per-host test sees,
-/// because each host agrees with itself.
+/// Test value: red when one host's admission or stage composition drifts from the other's and
+/// that host's own pins are re-pinned to the drift, as re-pins routinely are. Every per-host test
+/// then agrees with its own host, and only this test compares the two hosts' PCM bits and counts
+/// for two edits in one block (#1054's cross-host bit-identity). A drift that is not re-pinned is
+/// also caught by the host's own tests. The matrix and fader readers are shared code, so a defect
+/// in a reader moves both hosts alike and is for their own tests, not this one.
 ///
-/// Red mutation: make the browser's `Both` fader record write only the left cell -> the browser
-/// count is 2 and its PCM differs. Count the control plane's matrix cell as unreplaced -> 2, not 3.
+/// Red mutations (each also turns that host's own tests red): make the browser's `Both` fader
+/// record write only the left cell -> the browser count is 2 and its PCM differs; make the
+/// control plane's fader ramp 64 samples -> its PCM differs; add one sample to the browser's pan
+/// smoothing -> its PCM differs.
 #[test]
 fn both_hosts_drain_two_fader_and_two_pan_edits_alike() {
     let track = StableId::parse("track").expect("track ID");

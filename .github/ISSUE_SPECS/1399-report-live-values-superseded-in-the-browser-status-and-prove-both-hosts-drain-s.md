@@ -69,6 +69,12 @@ hosts, so the two admissions and drains cannot drift apart.
   reply's field list and validation only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
   and `sdk/src/browser/shipped-host.d.ts` (`MisoStatus` only).
 - `scripts/test-web-audioworklet.mjs` (the fake status reply and gate 3's case only).
+- Amendment (root, 2026-10-12), exception m1: `sdk/src/core/boundary.ts` (`EngineStatus` and
+  `status()`: the headless status carries `liveValuesSuperseded`, so its doc "the whole status
+  structure" is true), with one eval in `sdk/test/capability-evals.mjs`.
+- Amendment (root, 2026-10-12), exception m2: `hosts/host-web/tests/browser-v1/direct-oracle.mjs`
+  (line 56: word 48 is the superseded count and is no longer required zero; words 56, 64 and 72
+  stay required zero).
 
 ## Non-goals
 
@@ -192,7 +198,7 @@ must express the cell semantics: a filter edit is never refused for room).
 |---|---|---|
 | gate 1, `the_status_reports_the_sessions_superseded_count` (`src/tests.rs`) | a status word never written, written before the block it counts, or counting a `Both` edit once | the load in `render_next` removed: `left: 0, right: 78`; the load moved before `plan.render`: `left: 0, right: 78` |
 | `frozen_layouts_and_values_are_exact`, moved asserts | the word at another offset, `reserved` not moved to 56 | covered by the layout assert and `check-abi-layout-v1.py` (not mutated separately) |
-| gate 2, `both_hosts_drain_two_fader_and_two_pan_edits_alike` (`tests/strip_cells_cross_host.rs`) | the two hosts draining or counting differently for two edits in one block | the load removed: `left: 0, right: 3` at the final status assertion (the PCM half and the control-plane half are green, so the failure names the status word) |
+| gate 2, `both_hosts_drain_two_fader_and_two_pan_edits_alike` (`tests/strip_cells_cross_host.rs`) | the two hosts draining or counting differently for two edits in one block, with the drifting host's own pins re-pinned to match | see Follow-ups n4: the load removed (`left: 0, right: 3`) turns gate 1 and the two #1346 status tests red as well, so it does not show gate 2's own catch |
 | gate 3, `scripts/test-web-audioworklet.mjs` | a reader that rejects word 48; a reader that drops the field; a reader that stops checking word 72; a host check that drops the field from its list or the `u64` check | reader checks 48: `Expected values to be strictly equal` (fake status block with a nonzero word); reader drops the field: `expected: 1108152157446n`; reader skips word 72: `a nonzero reserved word at 72 fails the boot`; host list without the field: exit 1, `miso.error.v1 result 255`; host without `validU64`: `expected rejection` |
 | `the_graph_row_charges_the_plans_gate_and_not_the_sessions_superseded_count` | the graph row charging the session's count per plan (the #1312 m3 defect) | host-core charges although a count was passed: `left: 48, right: 24` |
 | the two exact-decomposition tests | the session's count dropped from the bridge rows (never charged) | `ready_metadata` without the count: both fail |
@@ -224,3 +230,71 @@ a number, a negative, a value past `u64`; a `u64::MAX` count accepted).
 - Not run: the Playwright browser legs of `qualification.yml`'s `browser` job (no browsers on this
   machine), the V8 spill gate (needs Node 22.23.2 exactly), the AArch64 legs, `check-capi-abi.sh`
   (the C ABI did not change).
+
+### Follow-ups (Sonnet 5.5, on `codex/d15-stream-b3`; the attempt 1 verdict, PASS)
+
+**Amendment (root, 2026-10-12): two exceptions to the authorized list.**
+
+- **m1.** `sdk/src/core/boundary.ts`: `EngineStatus` gains `liveValuesSuperseded: bigint` and
+  `status()` reads it from the generated layout by name (`status.u64("liveValuesSuperseded")`), so the
+  headless SDK reports the whole status structure and the doc is true.
+- **m2.** `hosts/host-web/tests/browser-v1/direct-oracle.mjs`: the status reader no longer requires
+  word 48 to be zero (it is the superseded count); words 56, 64 and 72 are still required zero. The
+  returned status object is unchanged, so the transcript the artifact gate compares keeps its shape.
+
+**m1 test and mutation run.** `sdk/test/capability-evals.mjs`, "status carries the session's count of
+superseded live values". Test value: it goes red when the headless status drops, zeroes or misreads
+the field, which no existing headless eval reads. It boots a live-controls session, checks the count
+is 0, submits two left-channel `faderDb` edits before any render (the count is still 0: render has
+not read either), renders two blocks, and expects `liveValuesSuperseded === 1n` (the left cell was
+written twice before the block read it) and `renderedQuanta === 2n`, so a status that read the
+rendered-quanta word instead would give 2, not 1. Mutations on `sdk/src/core/boundary.ts`, each alone
+then reverted, run as `node --test test/capability-evals.mjs` against a module built from this tree
+(11 pass, 1 fail each): the field removed from `status()` (red, expected `1n`, actual `undefined`);
+the field read from `renderedQuanta` (red); the field fixed at `0n` (red). Reverted: 12 of 12 pass.
+
+**NITs.**
+
+- **n1.** `ReadyOwnership::live_values_superseded`'s doc (`hosts/host-web/src/lib.rs`) now states the
+  rule: a successor plan the session prepares must be given this same count. It no longer says a
+  successor "is prepared" with it, which the browser does not do today.
+- **n2.** `LiveValuesSuperseded::get`'s doc (`crates/engine/src/realtime/latest_cell.rs`) is no
+  longer "Control:" only: control reads it for the counters and render reads it after each block for
+  the status.
+- **n3.** Gate 2's doc comment no longer says its mutations are ones "no per-host test sees". It
+  states the test's own catch: a drift in one host's admission or stage composition whose own pins
+  are re-pinned to match, which only the cross-host comparison sees. It names the verdict's M5, M6
+  and M7 as mutations that also turn the host's own tests red, and drops the matrix-reader
+  mutation, which cannot be made on one host (the reader is shared code).
+- **n4.** The attempt 1 gate 2 row no longer cites "the load removed" as gate 2's red run: gate 1
+  and the two #1346 status tests catch that mutation too. Gate 2's catch is the re-pinned drift of
+  n3, judged as a differential by what it reaches.
+- **n5.** `scripts/fixtures/abi-layout-v1-self-test.json` is current: its `status` structure has
+  `liveValuesSuperseded` at 48 and `reserved` `u64[3]` at 56 (regenerated by #1345,
+  `122bdbbc0`); `check-abi-layout-v1.py --self-test` and `cargo test -p parameter-metadata` pass.
+
+**STREAMS hot-file rows (root ratified).** `docs/handoffs/decision-15-2026-10-05/STREAMS.md` names
+#1399 in the rows for `crates/host-core/src/prepare.rs` (with its test call sites in
+`crates/host-core/tests/{prepare,spectrum,strip_meters}.rs`), `Cargo.toml`/`Cargo.lock` and
+`scripts/test-web-audioworklet.mjs`.
+
+**Not changed.** `hosts/host-web/qualification/suspended-host.mjs` (verdict question 5): whoever
+revives it must add `liveValuesSuperseded` to its two status field lists; recorded for #1349 or the
+revival issue.
+
+**Gates (the head of the follow-up series: #1447, #1346, #1347 and #1399 follow-ups).**
+`cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D
+warnings`; `cargo test --locked -p source` (debug 38 lib tests, release the same, run for #1447),
+`-p engine`, `-p host-web --features test-support` (191 lib tests pass, 2 ignored, and the
+integration tests), `-p parameter-metadata` (the ABI layout fixture tests: 5 and 5 pass);
+`check-abi-layout-v1.py` on the asset and `--self-test` (22 mutations caught);
+`check-workspace-policy.sh`, `check-realtime-policy.sh` (106 regions in 27 files) and
+`test-realtime-policy.sh`: ok. Worklet chain on this tree: `build-web-audioworklet.sh --named-twin`
+(shipped module `d7be511fbfb5...`), `strip-wasm-names.py` check, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts` (the direct
+oracle accepts word 48; 32 red mutations), `check-scalar-oracle-absent.py --wasm` and
+`test-web-audioworklet.sh` (private TMPDIR, nothing left): pass. SDK job (source-bundle mode):
+`check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`, `check-sdk-headless.sh`
+(363 tests, 363 pass: the 362 of the #1347 verdict plus the new m1 eval) and `sdk-package.sh check`
+pass; `sdk/dist` removed afterwards. Not run: the Playwright `browser` legs (no browsers on this
+box), AArch64.

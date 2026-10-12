@@ -54,7 +54,9 @@ function status(exports, handle) {
   assert.equal(view.getUint32(0, true), 80);
   assert.equal(view.getUint32(4, true), ABI_VERSION);
   assert.equal(view.getUint32(28, true), 0);
-  for (const offset of [48, 56, 64, 72]) assert.equal(view.getBigUint64(offset, true), 0n);
+  // Word 48 is `live_values_superseded` (#1399): a script that replaces a live value render has
+  // not read counts it, so it is not required zero. Words 56, 64 and 72 are still reserved.
+  for (const offset of [56, 64, 72]) assert.equal(view.getBigUint64(offset, true), 0n);
   return {
     state: view.getUint32(8, true),
     lastResult: view.getUint32(12, true),

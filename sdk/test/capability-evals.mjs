@@ -159,6 +159,42 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
+  test("status carries the session's count of superseded live values", async () => {
+    // Red if the headless status drops `liveValuesSuperseded`: an agent on the headless SDK then
+    // cannot read the count that the browser host and the C ABI report (#1399 verdict m1).
+    const engine = await createOfflineEngine(sessionDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: 16, meterBlocks: 0, observationTaps: 0 },
+    });
+    try {
+      assert.equal(engine.status().liveValuesSuperseded, 0n);
+      const liveControls = engine.liveControls();
+      const track = liveControls.edit.track("t");
+      for (const db of [-3, -6]) {
+        const report = await liveControls.submit(track.faderDb(db, { channel: "left" }));
+        assert.equal(report.ok, true);
+      }
+      assert.equal(
+        engine.status().liveValuesSuperseded,
+        0n,
+        "render has not read either write: nothing is superseded yet",
+      );
+      // Two blocks, so the count (1) cannot be mistaken for the rendered-quanta word (2).
+      for (const block of [0n, 1n]) {
+        feed(engine, 1n, block * BigInt(engine.shape().quantumFrames));
+        engine.render();
+      }
+      assert.equal(engine.status().renderedQuanta, 2n);
+      assert.equal(
+        engine.status().liveValuesSuperseded,
+        1n,
+        "the left fader cell was written twice before the block read it: one value replaced",
+      );
+    } finally {
+      engine.dispose();
+    }
+  });
+
   test("seek changes generation/frame and the source remains renderable", async () => {
     const engine = await createOfflineEngine(sessionDocument(), { asset });
     try {
