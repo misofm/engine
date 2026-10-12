@@ -264,6 +264,65 @@ Root ruling 5 (2026-10-05): D4's window holds every live cell, and its deferral 
 deferral case go. The cells read under the block's snapshot (#1432 Amendment 1, #1312
 Amendment 2). D3's drain order is unchanged.
 
+## Amendment 3 (root, 2026-10-12): the observation queue's one-record-per-tap rule (attempt-1 M1)
+
+Root's ruling on the attempt-1 verdict's M1, copied from root's review of the proposal. Decisions
+D2, gate 6 (below, named "Gate 6 (M1)" so it is not mistaken for gate 6 of the issue above),
+authorized paths and D8.
+
+**D2 Amendment 1 (root, 2026-10-12; attempt-1 M1).** An `Observe` record overwrites its tap's whole
+state at the block that drains it, and every record of one submission drains in one block. So a
+submission names each observation tap at most once. Admission refuses a second `Observe` for the
+same (strip, rack, effect, tap) in one submission with `COMMAND_REASON_MALFORMED` at that record's
+wire index, before the room pass and before any write. Admission never coalesces: Observe records
+stay FIFO and are never superseded (D15-2). The queue depth stays the number of the effect's
+declared taps. With this rule, every admitted submission fits an empty queue, so
+`COMMAND_REASON_BACKPRESSURE` from the effect band only means records of earlier submissions are
+not yet drained, and it clears after one render. The SDK's managed `update()` sends one re-arm
+(`armed=true`, new window) for a tap its handle alone owns, not a disarm and an arm. Every managed
+submission sends at most one record per tap. The C ABI has no observation path and does not change.
+
+**Gate 6 (M1).** In `sdk/test/observation-subscription-evals.mjs`, against the real headless engine
+(`createOfflineEngine`):
+1. Subscribe a managed handle to the compressor's Gain Reduction tap at `windowBlocks: 2` and
+   render until it is ready. Then `update()` the same selection with `windowBlocks: 4`. It
+   resolves. After 4 renders the reading has `window.blocks === 4` and `window.firstSample >=` the
+   update receipt's `appliedAtSample`. The submit hook records exactly one Observe edit for the
+   update.
+2. A raw `liveControls.submit` of `observe(false, 2)` then `observe(true, 4)` on that tap in one
+   call returns `ok=false`, `reason=MALFORMED`, `admitted=0`, and the next reading still has
+   `window.blocks === 4`.
+3. Subscribe, then close, with no render between them: both resolve.
+
+Also restore the one-submit re-arm in `observation-evals.mjs:172-187`, as one `observe(true, 2)` on
+the armed tap with no withdrawal and no render before it.
+
+*Test value.*
+- Bullet 1 turns red if the SDK sends disarm plus arm for one tap, or if the observation depth
+  cannot hold a whole submission. No existing eval catches either, because none calls `update()`
+  with a window change on the real engine.
+- Bullet 2 turns red if admission sends a batch that can never fit to BACKPRESSURE, which invites
+  a retry that can never succeed, or if it partly applies the batch.
+- Bullet 3 turns red if consecutive managed operations between renders throw. This is the parent's
+  accepted behaviour, which the 1-slot queue changed.
+
+If bullet 3 is red, the fix is SDK-side: on BACKPRESSURE, retry after the applied watermark moves,
+the same flow-control policy as `sdk/src/core/writer.ts:245-253`.
+
+**Authorized paths, added.** `sdk/src/core/observation-subscriptions.ts`,
+`sdk/test/observation-subscription-evals.mjs`, `sdk/test/observation-evals.mjs`,
+`sdk/src/browser/shipped-host.d.ts` and `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+(the twins; one sentence in the reason docs, and the m2 declaration prose).
+
+**D8 amendment (J3 #1442).** The stage drain in `crates/effect-contract/src/live.rs` uses a direct
+count and direct pops:
+`if let Some(control) = self.control.as_mut() { let available = control.available_at_entry();
+let mut remaining = available; while remaining != 0 { remaining -= 1; let Ok(record) =
+control.try_pop() else { break; }; ... } }`. The `.map(Consumer::try_pop)` and
+`map_or(0, Consumer::available_at_entry)` forms go. (On this branch the popping drain left in
+`live.rs` is the observation drain, `drain_observations`, the cells having replaced the record
+drain; the shape is applied to it, receiver `observe`.)
+
 ## Attempt record
 
 ### Attempt 1 (implementer, on `codex/d15-stream-b3`; checkpoints `09190ea55`, `122bdbbc0`, `ba14de159` and the docs commit that follows them)
@@ -443,3 +502,147 @@ Not run: the Playwright `browser` legs (no browsers on this machine), AArch64.
 5. `parameter-metadata`'s abi-layout fixture was stale before this change (#1399); regenerated here.
 6. Gate 2's order claim (bypass before parameters) is unobservable at the output, so only construction
    and the effect-contract canonical-order test hold it.
+
+### Attempt 2 (implementer, on `codex/d15-stream-b3`; commits `01f859ba1`, `f05ef8066`, `aacf6afaa` and the record commit that follows)
+
+Applies root's ruling on M1 (Amendment 3) and the attempt-1 verdict's other findings
+(`submix-verdicts/1345-attempt1.md`).
+
+**M1 (D2 Amendment 1).**
+- Browser admission (`hosts/host-web/src/lib.rs`): a per-effect bit mask of the taps this
+  submission has named (`observe_named`, cleared with `command_wanted`) refuses a second `Observe`
+  for one (strip, rack, effect, tap) with `COMMAND_REASON_MALFORMED` at that record's wire index,
+  in staging, before the room pass, any cell write or the stamp. Nothing coalesces; Observe records
+  stay FIFO. The reason's doc is widened in `lib.rs` and in both `.d.ts` twins.
+- SDK `update()` (`sdk/src/core/observation-subscriptions.ts`): a window change on a tap this
+  handle alone holds sends one re-arm (the new key's arm); the old key sends no disarm. Duplicate
+  selections in one request are refused by `validateObservationSelections` (its key is track, rack,
+  effect slot, tap, so two channels of one tap are a duplicate too), so a managed submission
+  carries at most one record per tap.
+- C ABI: no `Observe` exists there (no opcode, no observation taps: `observation_taps` is 0, so
+  lanes have no queue); a duplicate cannot arise and the C ABI does not change.
+- Bullet 3 was red (`subscribe` then `close` with no render: `backpressure: observation
+  transaction was refused`), so the SDK retry is added: `#submit` waits for the transport's
+  `nextRender` and sends again, up to 8 renders, on `backpressure` only (the same policy as the
+  live-control writer: flow control retried, anything else thrown). The headless engine resolves
+  `nextRender` at its next `render()` (and at reload and `dispose()`); the browser engine polls the
+  host's `renderedQuanta`. A transport without it throws as before. This needed
+  `sdk/src/headless/engine.ts` and `sdk/src/browser/engine.ts` beyond the amendment's path list.
+- Gate 6 (M1) bullets 1-3 are in `sdk/test/observation-subscription-evals.mjs`, against the real
+  headless engine. The re-arm in `observation-evals.mjs` is one `observe(true, 2)` on the armed tap
+  again. The host-web tests that attempt 1 fitted to the one-slot queue now say what the rule says
+  (a flood of one submission is MALFORMED; an earlier submission still holding the slot is
+  BACKPRESSURE; the mixed-batch, solo, bus and idle-counter tests fill the slot with an earlier
+  submission, then refuse the batch whole), and `a_submission_names_each_observation_tap_once` is
+  new. `tools/parameter-metadata`'s round trip keeps one render between its subscribe and its
+  unsubscribe: they are two submissions, so the second is BACKPRESSURE until a block drains the
+  first (the accepted residual), and the comment says so; it is flow control, not a workaround for
+  the depth.
+
+**D8 amendment.** `EffectControlLane::drain_observations` (the one popping drain left in
+`live.rs`) is the direct form: `if let Some(observe) = self.observe.as_mut() { let available =
+observe.available_at_entry(); .. while remaining != 0 { remaining -= 1; let Ok(record) =
+observe.try_pop() else { break; }; .. } }`. `check-realtime-policy.sh` still prints `ok (106
+marked regions in 27 files)`. There is no fixture twin of `live.rs` for the realtime-policy tool on
+this branch (`tools/realtime-policy` is not here; only the awk gate and its self-test), so none
+was updated.
+
+**M2.** The estimate charges the bank's observation table per lane that has a queue,
+`queued_lanes * size_of::<(usize, Consumer<EffectControlRecord>)>()` (48 B), not `Option<Consumer>`
+(40 B) per bank lane. Reference-session rows move by -640 B (two eight-lane banks with no queue):
+`graph_session_plus_plan_bytes` 406,438 -> 405,798, `graph_incremental_plan_bytes` 406,414 ->
+405,774, `graph_metadata_bytes` 198,241 -> 197,601 (no ceiling moves; the qualification table
+follows). `crates/graph-compiler/tests/bypass_resources.rs` gains
+`an_observed_lanes_queue_is_charged_exactly_what_bind_retains` (taps off vs on, per node and banked:
+charged == retained, 736 B and 6,656 B) and `a_lanes_own_accounting_is_what_the_allocator_sees`
+(a lane's `retained_resources` plus its writer's equals the audited allocator's reading, for the EQ
+and the compressor, with and without a queue; exact). **m8:** the lib resource test no longer
+copies the queue formula (its lanes have no queue, so the table is empty), takes a lane's heap from
+the accounting the allocator test holds, drops the vacuous assertion, and checks the real attach
+path's compressor lane equals one built directly from its shape.
+
+**Smaller findings.**
+- m1: `live_control_command_queue_records` no longer raises `maximum_automation_spans_per_block`
+  (`prepare_caps`); the option's doc says what the word does now (the boot word and
+  `control_queue_depth` stay for a successor issue).
+- m2: both `.d.ts` copies (byte-identical) say effect values are cells and only an observation
+  subscription is a queue record; Malformed and Backpressure docs follow Amendment 1.
+- m3: `docs/C_ABI_V1_QUALIFICATION.md`: the #1256 paragraph (rings were #1256's, cells since #1312;
+  no input or route lane is attached, which is still true of the code), the #1263 intro, #1264's
+  "pushes one record", #1265's "prepared-target staging", #1266's bypass record, and the resource
+  rows.
+- m4: header: "same cell"; an edit that moves both channels of a per-lane parameter or of an EQ
+  target writes two cells, a shared parameter's edit one; reflowed to 100 columns (NIT 2).
+- m5: `live_window`'s docs now say what each test catches; the preparation-level test is
+  effect-compiler's `every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells`, which
+  now also writes every live cell of each prepared launch lane (requested capacity 1) in one
+  transaction and stages them in one block into a window of exactly the prepared capacity. A
+  synthetic descriptor through preparation would need a synthetic factory; the launch effects
+  already exceed a request of 1 (14 cells for the compressor).
+- m6: graph `a_per_node_effect_waits_for_the_revision_that_covers_its_value`.
+- m7: the rack test with no unique catch is deleted.
+- m9: console-workload asserts `apart_kept == kept - 3 * PREROLL_BLOCKS` and its doc says the
+  three EQ cohorts stay retired for the whole preroll.
+- m10: the SDK writer eval stages `[1, 2, 0]` and asserts the narrowed batch is admitted while the
+  host is paused with the blocked record still pending.
+- m11: gate 2's test doc states the deviation (the reference is host-core's lane given the same
+  cells, the convention of the file; a rebuild twin matches only after the settling window and
+  would not catch more), and its real catch (the C ABI dropping a `Bypass` beside parameter
+  records). The spec's "twin's rebuild" is not implemented.
+- m12: capi `one_transaction_with_more_cells_than_the_old_queue_held_stays_live` (every live
+  parameter of a multiband compressor on both channels in one transaction: 20 cells > 16; one
+  revision, no candidate, one write per cell, the render equals the one-edit-at-a-time twin), and
+  host-web `a_flood_of_effect_values_is_admitted_whole_and_the_last_is_heard` (NIT 11).
+- NITs: stale queue-era prose (rack, graph, host-core, control-plane, audit, console-workload,
+  `sdk/src/core/writer.ts`) and the graph test's name; D15-2's parenthetical marks #1345 and names
+  #1346 and #1347 (NIT 3); the browser push arm for a raw `PreparedTarget` is `unreachable!`
+  (NIT 4); `preflight_candidate_targets` asks the writer about every target, so D7 is structural
+  (NIT 5); the observation-order test asserts the window in force and the reversed order (NIT 6;
+  `ObservationLane::window_blocks` is a new off-thread accessor); the duplicate paired_spans test
+  and the rig-loop assertion are deleted (NIT 7); the #1504 test's doc claims only what it
+  catches (NIT 8); the preparation comment says why the EQ is raised too (NIT 10). NIT 9 is prose
+  only, unchanged.
+
+**Gates (all on this tree, no browsers, no AArch64).**
+
+| gate | result |
+|---|---|
+| `lint` job steps (fmt; clippy `--workspace --all-targets --all-features -D warnings`; rustdoc; workspace, session, env, bench, host-core, protocol, test-support, scalar-oracle, reachability, realtime (`ok (106 marked regions in 27 files)` and its self-test and leak checks), lane, unfused, rack/builtins/graph, effect-runtime, conformance, EQ seal policies; console and builtins fixture checks; the three sub-v3 probes) | pass |
+| `test-debug-a` (`--workspace --all-targets` with the job's excludes: 1,573 passed, 0 failed; doctests) and `test-debug-b` (914 passed; doctests; `conformance_fixtures --check`) | pass |
+| `test-release` steps (lane, math, wasm-gates; filter_liveness, tail_contract, ramp_endpoint, designer_total; FMA cfg; loom SPSC; M1 and F1 exhaustive) | pass |
+| `audit-native` steps: `audit capi` (100,000 calls, all counts 0, `pcm_digest cb10fbface44a3a4`, the parent's), delay, compressor, EQ, gate audits, builtins and graph traces, protocol allocation audit, realtime probes and traces (1,000,000), effect-contract trace, `check-capi-abi.sh` and its self-test, `check-scalar-oracle-absent --native`, graph determinism, builtins, console and effect-contract fixture checks | pass |
+| `check-cross-targets.sh`, `check-release-shape.py` | pass |
+| worklet chain: `build-web-audioworklet.sh --named-twin` (shipped module `f16ba0b7af05f1ff5cb7bdb54b9ab10125c949736b8dcc0cc887f36bec26561b`), `strip-wasm-names.py` self-test and check, `check-web-audioworklet.sh --without-metadata-regeneration` (callgraph pins included), `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` (private TMPDIR left empty), the V8 spill self-test and gate | pass |
+| `check-abi-layout-v1.py` and `--self-test` | pass |
+| `sdk` job checks in source-bundle mode: `check-sdk-generated`, `check-sdk-deletions`, `check-sdk-types`, `check-sdk-headless` (367 passed, 0 failed), `sdk-package.sh check`; `sdk/dist` deleted | pass |
+
+**Mutation evidence (applied: red; reverted: green).**
+
+| change | red |
+|---|---|
+| browser admission: delete the duplicate-tap check | host-web `a_submission_names_each_observation_tap_once`, `observation_misuse_is_typed_and_all_or_nothing`, `idle_render_skips_admission_counter_clear_without_losing_queue_credit`; and, in the shipped module rebuilt with it, the SDK gate 6 bullet 2 only |
+| SDK `update()` sends disarm plus arm | gate 6 bullet 1 (`invalidArgument: observation transaction was refused`) |
+| SDK `#submit` does not retry on backpressure | gate 6 bullet 3, and the dispose-while-waiting eval |
+| estimate charges `Option<Consumer>` per bank lane | `an_observed_lanes_queue_is_charged_exactly_what_bind_retains` (banked: 5,888 B charged for 6,656 B retained) |
+| a lane's `retained_resources` omits `dirty` | `a_lanes_own_accounting_is_what_the_allocator_sees` (3,664 vs 3,672 B) |
+| per-node `LiveControlEffect::stage` reads `LiveSnapshot::ALL` | the new graph test (the only red) |
+| preparation drops `.max(live_parameter_cells)` | `every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells` |
+| `commit_live` rebuilds an instance with more than 16 records | the new capi test only (more than 3: also the two EQ parameter tests) |
+| writer batch taken from the back of the pending map | the writer eval's paused-split assertion |
+
+**Open items for root.**
+1. Waiting for a render: the headless engine's `subscribe`, `update` and `close` now wait for the
+   next `render()` when an earlier subscription still holds the tap's slot. A caller that awaits
+   them and never renders does not get an error, it waits (the doc on `subscribeObservations`
+   says so; `dispose()` ends the wait with the stale-owner error). The alternative (throw at once,
+   as before) leaves gate 6 bullet 3 red.
+2. Outside the amendment's path list: `sdk/src/headless/engine.ts`, `sdk/src/browser/engine.ts`
+   (the `nextRender` hook), `sdk/src/core/writer.ts` (prose), and the graph-compiler, host-core,
+   ABI-fixture, callgraph-script edits of attempt 1 (m13: STREAMS' hot-file rows do not list
+   #1345 for them). I did not edit STREAMS.md; its "Watermark bound on `main` today" sentence
+   still needs root's replacement.
+3. `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` still calls the in-flight bound "the
+   worklet-side queue depth" (a stale comment; the file is not on the path list).
+4. The boot word `live_control_command_queue_records` and host-core's `control_queue_depth` stay
+   (frozen ABI offset 32 and an `Option` flag); a successor issue removes the number.
+5. AArch64 rows (four-lane resource figures) and the Playwright legs were not run.

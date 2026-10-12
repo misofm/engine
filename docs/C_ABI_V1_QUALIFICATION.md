@@ -471,9 +471,9 @@ lane is attached.
 
   | row | parent | cells |
   |---|---|---|
-  | `graph_session_plus_plan_bytes` | 393,718 | 406,438 |
-  | `graph_incremental_plan_bytes` | 393,694 | 406,414 |
-  | `graph_metadata_bytes` | 185,521 | 198,241 |
+  | `graph_session_plus_plan_bytes` | 393,718 | 405,798 |
+  | `graph_incremental_plan_bytes` | 393,694 | 405,774 |
+  | `graph_metadata_bytes` | 185,521 | 197,601 |
   | `capi_retained_bytes` | 277,481 | 281,513 |
   | `largest_named_allocation_bytes` | 90,720 | 90,720 |
 
