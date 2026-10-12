@@ -85,6 +85,11 @@ does not list.
   > A cfg-split twin and a glob pass-through bypass are refused by these rules. An export or
   > attribute that a macro expansion assembles from parts is #1438 limit 4.
 
+  Root's correction (2026-10-12, follow-ups part 2): the tool refuses only an `export_name` whose
+  value starts with `miso_engine_web_v1_`. The clause "every exported name comes from a listed fn's
+  own identifier" in rule (b) is the invariant that rule serves, not something the tool enforces;
+  the full invariant moves to the successor of #1496.
+
   Root's ruling on (d)'s scope (2026-10-12), verbatim:
 
   > (d) refuses a glob `use` (including `pub use` and a glob nested in a grouped tree) that is an
@@ -352,9 +357,9 @@ reverted, green; the verifier's reproducers are the sources of the first two cas
   checked; the export site; the call site; the `mod` declaration site; the inner-attribute site;
   `cfg_attr` not treated as conditional.
 - `an_export_name_with_the_table_prefix_is_refused_and_another_is_not` (rule (b), three spellings in
-  three places, plus an accepted `export_name = "memory_probe"`). Test value: an exported name that
-  does not come from a listed function's identifier, in any attribute spelling and any file of the
-  crate. Mutations, each red: `cfg_attr` arguments not read; `unsafe(..)` not read; only `ffi.rs`
+  three places, plus an accepted `export_name = "memory_probe"`). Test value: an `export_name` with
+  the `miso_engine_web_v1_` prefix, in any attribute spelling and any file of the crate; it does not
+  defend the full identifier invariant (see the successor of #1496). Mutations, each red: `cfg_attr` arguments not read; `unsafe(..)` not read; only `ffi.rs`
   scanned; every `export_name` refused (the accepted case goes red).
 - `a_path_on_a_guarded_module_or_an_inline_module_is_refused` (rule (c)). Test value: `#[path]`
   moves `mod render_lock;` (or `ffi`) to a file the rule never read, as #1442 D8 accepts for its own
