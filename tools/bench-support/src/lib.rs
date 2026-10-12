@@ -9,8 +9,8 @@
 //!
 //! This crate is test scaffolding. Packages under `crates/` and `hosts/` may use it only as a
 //! dev-dependency, and
-//! `tools/realtime-policy` names `src/alloc.rs` as the single file under `tools/`
-//! allowed to contain `allow(unsafe_code)`.
+//! `src/alloc.rs` is one of three `tools/` files that `tools/realtime-policy`'s `UNSAFE_ALLOWLIST`
+//! lets contain `unsafe` code; it also holds `allow(unsafe_code)`.
 
 pub mod alloc;
 pub mod digest;

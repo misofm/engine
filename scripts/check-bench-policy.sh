@@ -207,8 +207,8 @@ for subject in "${timed_subjects[@]}"; do
 done
 
 # `allow(unsafe_code)` is denied workspace-wide; these four files are the approved exceptions under
-# `tools/`, and `tools/realtime-policy` holds the matching list for `crates/` and
-# `hosts/`. A fifth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# `tools/`; a fifth is a new unsafe ownership boundary and needs a decision, not a grep. A separate
+# list, `tools/realtime-policy`'s `UNSAFE_ALLOWLIST`, covers `unsafe` code in `crates/`, `hosts/`, `tools/`.
 # (#1494 added gate G6's corpus test, whose only unsafe is its calls of the `unsafe fn`
 # `lane::fpenv::write_fp_control_word`.)
 # (#1033 removed `tools/native-pcm-runner` and its row; #1075 removed `tools/bench/src/protocol.rs`,

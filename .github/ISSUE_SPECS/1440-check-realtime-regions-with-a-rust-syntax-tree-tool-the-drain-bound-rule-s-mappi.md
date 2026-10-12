@@ -900,3 +900,7 @@ release binary on the real tree: `realtime policy: ok (94 marked regions in 26 f
 `1e03edf19`; `993b85745` marks `drain_controls` and raises the floor to 94). The fmt, clippy `-D warnings`,
 `check-workspace-policy.sh` and `check-realtime-policy.sh` results are below.
 Results: fmt, clippy `-D warnings` (crate, all targets), `check-workspace-policy.sh` ("workspace policy: ok") and `check-realtime-policy.sh` ("ok (94 marked regions in 26 files)") all exit 0.
+
+**Batch follow-up (root, 2026-10-12): NIT-1 closed as a reading, not a decision change.** D7's text is unchanged.
+The verdict accepted deviation 4 of attempt 1 as the reading of D7: "a `mention` is a D2-resolved use" of the
+count's binding (a path expression, or an identifier in a macro's tokens), not a token that spells the name.

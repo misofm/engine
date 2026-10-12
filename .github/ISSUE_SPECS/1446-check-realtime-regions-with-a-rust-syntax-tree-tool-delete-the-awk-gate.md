@@ -322,3 +322,9 @@ step at `:527-534` (awk lines `:529-530`) is the same; `resource_lifecycle.rs` c
    `scripts/build-web-audioworklet.sh --module-only`, is `9784d3509dba6bfd...` at the parent and at the change.
    (The `artifact-identity` job is CI only.)
 6, 7. CI and GitHub: after the batch push (C1's script and its `--check`).
+
+**Rebase plan (root, 2026-10-12).** At the rebase onto stream B3, J re-applies D5 only to the specs that are still
+open then, and drops the D5 edits to any spec that B3 closed (a closed spec leaves `.github/ISSUE_SPECS/`). If
+#1447 is still open, J fixes the contradiction in its gate 3 (it names the awk script that this slice deletes). J
+moves #1345 D9's awk floor raises into `Policy::workspace()`, because #1345's gate 9 has no awk script to run once
+this slice has landed.

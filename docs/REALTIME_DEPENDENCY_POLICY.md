@@ -78,7 +78,7 @@ that is not listed here needs a new decision, not an edit to a pattern.
 
 `crates/graph` is entirely free of unsafe code. (`crates/engine/src/arch` was a third owner until
 #84 phase A deleted it: the per-target kernels moved to `crates/lane`, and the exemption was
-removed from `tools/realtime-policy` in the same change.)
+removed from the realtime policy gate (then `scripts/check-realtime-policy.sh`) in the same change.)
 
 ### Lane intrinsics
 

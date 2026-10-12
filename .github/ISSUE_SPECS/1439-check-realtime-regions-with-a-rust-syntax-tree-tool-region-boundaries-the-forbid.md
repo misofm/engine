@@ -423,3 +423,7 @@ Implemented on `e5fa8319b` (A1 with its verdict follow-ups). No production code 
   deleted from an existing test); release binary and `check-realtime-policy.sh` print
   `realtime policy: ok (93 marked regions in 26 files)`; `cargo fmt --all -- --check`,
   `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings` and `check-workspace-policy.sh` exit 0.
+
+**Batch follow-up (root, 2026-10-12): `eprintln!` beside `println!`.** `eprintln!` is redundant beside `println!` in
+the 37-pattern list, because the `println!` substring matches inside `eprintln!`. It stays in the list because
+A2-D2 fixes the list at 37 patterns; the decision text is unchanged.
