@@ -617,6 +617,8 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 39 | #1489 | Correct the realtime dependency policy's unsafe-ownership statements | — | H #1488 (preferred; else its D-M2 exception clause) |
 | 40 | #1496 | Prove that every export the worklets call after construction is render-locked | #1446 | H #1488, H #1492 |
 | 41 | #1527 | Read workspace manifests and build config as TOML for the realtime tool's claims | #1519, #1442 (either order with #1446) | — |
+| 42 | #1528 | Close the remaining render-lock proof gaps in the realtime-policy tool | the J3 batch on `main` | — |
+| 43 | #1529 | Prove a real allocation inside a render-lock window is counted, natively and in the shipped wasm module | the J3 batch on `main`; after #1528 or either order | — |
 
 **#1527 (root, 2026-10-12)** runs after #1519 and #1442 and in either order with #1446 (neither depends on the
 other); it takes over #1442's dependency-key manifest rule, which #1442's attempt-3 verdict failed.

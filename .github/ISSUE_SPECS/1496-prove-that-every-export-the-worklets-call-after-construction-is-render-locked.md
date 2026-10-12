@@ -88,7 +88,7 @@ does not list.
   Root's correction (2026-10-12, follow-ups part 2): the tool refuses only an `export_name` whose
   value starts with `miso_engine_web_v1_`. The clause "every exported name comes from a listed fn's
   own identifier" in rule (b) is the invariant that rule serves, not something the tool enforces;
-  the full invariant moves to the successor of #1496.
+  the full invariant moves to #1528.
 
   Root's ruling on (d)'s scope (2026-10-12), verbatim:
 
@@ -359,7 +359,7 @@ reverted, green; the verifier's reproducers are the sources of the first two cas
 - `an_export_name_with_the_table_prefix_is_refused_and_another_is_not` (rule (b), three spellings in
   three places, plus an accepted `export_name = "memory_probe"`). Test value: an `export_name` with
   the `miso_engine_web_v1_` prefix, in any attribute spelling and any file of the crate; it does not
-  defend the full identifier invariant (see the successor of #1496). Mutations, each red: `cfg_attr` arguments not read; `unsafe(..)` not read; only `ffi.rs`
+  defend the full identifier invariant (see #1528). Mutations, each red: `cfg_attr` arguments not read; `unsafe(..)` not read; only `ffi.rs`
   scanned; every `export_name` refused (the accepted case goes red).
 - `a_path_on_a_guarded_module_or_an_inline_module_is_refused` (rule (c)). Test value: `#[path]`
   moves `mod render_lock;` (or `ffi`) to a file the rule never read, as #1442 D8 accepts for its own
@@ -379,3 +379,15 @@ reverted, green; the verifier's reproducers are the sources of the first two cas
 
 **Open.** An export or attribute that a macro expansion assembles from parts is #1438 limit 4. The
 prose copies of the set (headers, policy "set 1") remain, as in attempt 1.
+
+## Attempt 2 verdict and close (root rescope, 2026-10-12)
+
+The verdict is `/home/bl/misofm/submix-verdicts/1496-attempt2.md`. Root's close text, verbatim:
+
+> Attempt 2 FAIL (F1). Budget spent; no attempt 3. Root rescope (2026-10-12): F1 (generic/twin export), SP-1 (render_locked definition and global_allocator cfg), SP-2 (rule (b)'s second clause) and SP-3 (host-web crate-root location) move to #1528 (tool rules: F1, SP-1 rule, SP-2, SP-3) and #1529 (SP-1 runtime gate). The remaining scope has no other BLOCKER or MAJOR (attempt-2 verdict).
+
+### D2 Amendment 1, completion (root, 2026-10-12)
+
+Root ratified the three readings that attempt 2 added beyond the letter of D2 Amendment 1 (the verdict's
+"implementer's additions"): an inner `#![cfg]` or `#![cfg_attr]` in `ffi.rs` or `render_lock.rs` is
+refused as the same thing as `#[cfg]` on `mod ffi;`; `WebModuleNotDeclared`; and `MissingWebSource`.
