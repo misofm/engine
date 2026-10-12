@@ -135,20 +135,87 @@ about 31 us, render call about 13 us.
 | M2: snapshot taken after `render_block` (drains under `ALL`) | red ("advanced to edit 1 in a block that does not show it") | red | red, both profiles |
 | M3: report taken from a second `gate.snapshot()` after the block rendered | red | red | red, both profiles |
 | M4: watermark advances to `S - 1` | red | red | red (the edits never complete) |
-| M5: watermark advances to the previous block's `S` (one block late) | red (3/3) | red (3/3) | red in debug (3/3), green in release (3/3) |
+| M5: watermark advances to the previous block's `S` (one block late); how it was written in attempt 1 was not recorded, and a field-based form (verifier) leaves the one-way test green | red (3/3) | red (3/3) | red in debug (3/3), green in release (3/3), for that unrecorded form |
 
-M1 is the defect only the new test catches in both profiles, and M5 in release: a revision whose
-cell stores land after a block's snapshot and before its drains is applied a block early, and a
-watermark that is a block late both pass the one-way test's "an advance names a block that applied
-the edit". M2 to M4 are also caught by the one-way test, which the spec's second mutation already
-implies; they are recorded as the new test's own red runs, not as unique catches. The first
-assertion (mixed planes) did not fire in any mutation run, because under M1 the drains read both
-strips' cells in the same sliver and the "new state without an advance" assertion fires first; it
-defends a transaction whose two strips straddle a block boundary, which no available mutation
-produces without a hook in the product, and the spec's D2 names it.
+M1 and M5 are not unique to this test (corrected in attempt 2, verifier m-1). Against the one-way
+test alone they are: a revision whose cell stores land after a block's snapshot and before its
+drains is applied a block early, and a watermark that is a block late both pass the one-way test's
+"an advance names a block that applied the edit". Other tests catch them, though: M1 is red in
+`crates/host-core/tests/live_transaction.rs`
+(`one_transaction_is_applied_whole_in_the_block_its_revision_is_published_for`), in
+`crates/graph/tests/live_snapshot_drains.rs` and in `crates/graph-compiler/tests/live_routes.rs`;
+M5 is red in the same host-core test, in the `engine::realtime::tests::watermark` tests and in
+host-core runtime tests. M2 to M4 are also caught by the one-way test. The gate-1 evidence (the
+defect no other workspace test catches) is MX, in attempt 2 below. In attempt 1 the first assertion
+(mixed planes) did not fire in any M1 to M5 run, because under M1 the drains read both strips'
+cells in the same sliver and the "new state without an advance" assertion fires first; MX is the
+mutation that reaches it.
 
 **Gates run.** `cargo fmt --all -- --check` ok. `cargo clippy --locked -p capi --all-targets
 --all-features -- -D warnings` clean. `bash scripts/check-workspace-policy.sh` ok. `cargo test
 --locked -p capi`: all suites green (4 in `plan_swap_race`). `cargo test --locked --release -p capi
 --test plan_swap_race` green, 10 runs. The workspace-wide clippy of gate 2 was not run (the change is
 one test file in `capi`).
+
+### Attempt 2 (implementer, on `codex/d15-stream-b3`, one test-only commit)
+
+Verdict of attempt 1: FAIL on M-1, with m-1, m-2 and two NITs. Only
+`crates/capi/tests/plan_swap_race.rs` and this record changed.
+
+**M-1, the lock.** A file-level `static RACES: Mutex<()>`, taken by `one_race_at_a_time()` (a poisoned
+lock is taken anyway, so one failure stays one failure) at the start of all four race tests: in
+`race_plan_swaps` (so the two plan-swap tests) and in the two live races. Measured with
+`taskset -c 0-3`, the whole `plan_swap_race` binary, on the shared 32-CPU box (other agents' jobs
+ran on the same CPUs; the counts below are from the quiet periods unless said):
+
+| Binary | Release | Debug |
+| --- | --- | --- |
+| attempt 1 head, no lock | 23/50, and 32/40 interleaved with the final binary | 0/30 |
+| lock only (no D3 guard) | 0/50 | 0/30 |
+| final (lock and guard) | 0/50, 0/80 and 0/40 (the last two interleaved with other binaries) | 0/30 |
+
+Every head failure is `control_calls_racing_plan_swapping_renders_never_wedge_replacement`
+("vacuous: no control call overlapped a render call"). During a period of heavy outside load
+(load average 13 to 22, from other agents' builds and tests landing on CPUs 0-3) the final binary
+failed 2/50 and 5/60: 4 times that same existing guard and 3 times the new thin-sweep guard below
+(25, 34 and 36 of 320); the lock-only binary was 0/60 at a nearby time. That existing test's
+guard therefore still fails when outside load takes its cores; that predates this slice and is not
+tuned here.
+
+**m-1, the record.** Corrected in place above. MX re-run by me, applied to unmodified product code
+and reverted with `git checkout`: in `drain_fader_controls`
+(`crates/builtins-compiler/src/lib.rs`) the drain of bank lane 1 (eq1) reads under
+`LiveSnapshot::ALL`, lane 0 under the block's snapshot. Result: the new test is red 6/6 in debug
+and 6/6 in release, each time on the first assertion ("block N mixes the two strips' states");
+the one-way test is green 6/6 in each profile. Re-run of M1 (as in attempt 1): the new test is red
+8/8 in each profile, the one-way test green 8/8. M5, written here as "the render report carries the
+previous block's snapshot" (a process-static holding the last `S`, applied to
+`RealtimePlan`'s report in `crates/engine/src/realtime/plan.rs`), is red 4/4 in the new test and
+4/4 in the one-way test in each profile; no uniqueness is claimed for it.
+
+**m-2, the thin-sweep guard.** `RenderGate` gained `render_began` (stored before `in_render`). The
+control side times each store of the thin sweep (`LiveControl::timed_sweep`) at the return of the
+submit call (`commit_c_noting`, which calls a closure right after `miso_engine_v1_submit_command`
+returns, before the response is read), against the latest render call's start; it counts the store
+as early when it falls within `render_nanos / 16` of that start. The test refuses the run
+("vacuous: N of M thin-sweep revision stores landed in the first 1/16 of a render call") when
+`early < timed / 8`, that is below 40 of 320. Why 40: the sweep is built to put half its stores
+there (a 4/64 window of its 8/64 span). Measured early counts of the final code, 60 runs each,
+`taskset -c 0-3`: debug 142 to 166, release 95 to 128; earlier runs on 32 CPUs, 4 and 2 CPUs:
+debug 150 to 167, release 66 to 126. The floor is a quarter of the ideal and 60 percent of the
+lowest release run seen. Verifier's counted-catch rates: M1 gave 5 to 10 catches per debug run
+and 81 to 126 per release run on 4 CPUs, so a run at the floor is a run that is hardly racing.
+Shown not to be flaky on this machine: 0 guard failures in the quiet-period runs above (50 + 80
++ 40 release, 30 debug on 4 CPUs, 60 + 60 measured runs, runs on 32 and 2 CPUs); under the outside load
+described above it fired 3 times in about 110 runs, as loudly as it should. Shown to fire: with the
+thin sweep moved to `(20, 40)`, debug and release both failed with "0 of 320" and "1 of 320".
+MX and M1 stay red with the guard in place (the runs above are of the final code).
+
+**NITs.** The `windows` doc now counts edits from 0 as `committed` does and says so; the
+`command` doc counts from 1. The M5 row says how M5 was written (above).
+
+**Gates run.** `cargo fmt --all -- --check` ok. `cargo clippy --locked -p capi --all-targets
+--all-features -- -D warnings` clean. `bash scripts/check-workspace-policy.sh` ok. `cargo test
+--locked -p capi` green (4 in `plan_swap_race`, 10 s in debug now that the races run one at a
+time). `cargo test --locked --release -p capi --test plan_swap_race` green. The runs on 4 CPUs
+are in the table above.

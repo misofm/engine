@@ -11,6 +11,7 @@
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
 use bench_support::producer::render_while_producing;
@@ -25,6 +26,17 @@ const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-n
 
 /// Frames per render block and per submitted source chunk.
 const QUANTUM: u32 = 128;
+
+/// Held for the whole of every timing-sensitive race test in this file. Each race spins at least
+/// two threads and guards itself against vacuity with an overlap count, so two races at once
+/// starve each other's overlap on a machine with few cores (a 4-CPU runner), and the test harness
+/// runs a binary's tests in parallel. A failed race poisons the lock; the next race takes it anyway
+/// so one failure stays one failure.
+static RACES: Mutex<()> = Mutex::new(());
+
+fn one_race_at_a_time() -> MutexGuard<'static, ()> {
+    RACES.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Render blocks after an admission beyond which `RESULT_BACKPRESSURE` is a wedge. A healthy
 /// replacement is admitted again once its swapping block has rendered.
@@ -442,6 +454,7 @@ impl Control<'_> {
 /// ring: `source.ring.vacated` (a submit routed to an epoch whose producer has moved) or
 /// `source.frame.noncontiguous` (a ring that lost its write position) fails.
 fn race_plan_swaps(swaps: u64, readers: usize) {
+    let _race = one_race_at_a_time();
     assert_installed();
     // Warm the JSON frontend's lazily boxed process statics before anything is observed.
     let _ = session::parse_session_json(r#"{"warm":0}"#);
@@ -660,6 +673,22 @@ fn watermark_c(plan_address: usize) -> Option<Watermark> {
 ///
 /// `session` must be live and used by this thread alone for the call.
 unsafe fn commit_c(session: *mut Session, request: &[u8], revision: u64) -> u32 {
+    // SAFETY: The caller guarantees a live session used by this thread alone.
+    unsafe { commit_c_noting(session, request, revision, || {}) }
+}
+
+/// [`commit_c`] that calls `submitted` as soon as the submit call returns, before its response is
+/// read: the commit's revision store has landed by then.
+///
+/// # Safety
+///
+/// As [`commit_c`].
+unsafe fn commit_c_noting(
+    session: *mut Session,
+    request: &[u8],
+    revision: u64,
+    submitted: impl FnOnce(),
+) -> u32 {
     let mut response = [0_u8; 4_096];
     let mut fields = [0_u16; 64];
     let mut output = BytesOut {
@@ -673,6 +702,7 @@ unsafe fn commit_c(session: *mut Session, request: &[u8], revision: u64) -> u32 
     let code = unsafe {
         miso_engine_v1_submit_command(session, request.as_ptr(), request.len() as u64, &mut output)
     };
+    submitted();
     if code == RESULT_OK {
         let header = match ProtocolCodec::default()
             .decode_typed_response(
@@ -926,6 +956,8 @@ struct RenderGate {
     parked: AtomicBool,
     start: AtomicU64,
     in_render: AtomicBool,
+    /// When the latest render call began (set before `in_render`).
+    render_began: AtomicU64,
     render_nanos: AtomicU64,
 }
 
@@ -972,9 +1004,15 @@ struct LiveControl<'a> {
     /// Encodes edit `n` (the request ID, the expected revision, `n`) as one transaction.
     command: fn(u64, u64, u64) -> Vec<u8>,
     /// The sweeps of a revision store across a render call, each in 64ths of the call from its
-    /// `from` to its `to`; edit `n` takes sweep `n % len` and, in it, the offset
+    /// `from` to its `to`. Counting edits from 0 as `committed` does (edit `n` here is edit `n + 1`
+    /// of `command`), edit `n` takes sweep `n % len` and, in it, the offset
     /// `from + (to - from) * (n / len % PHASES) / PHASES`.
     windows: &'static [(i64, i64)],
+    /// The sweep whose stores are timed against the render call they landed in, if any: a
+    /// store counts in `early` when the submit call returned within the call's first 1/16.
+    timed_sweep: Option<usize>,
+    timed: u64,
+    early: u64,
     committed: u64,
     revision: u64,
     gate: &'a RenderGate,
@@ -1009,7 +1047,8 @@ impl LiveControl<'_> {
         // `commit_nanos - target` before the store when that is positive, else start it now and
         // commit `target - commit_nanos` later.
         let render = self.gate.render_nanos.load(Ordering::Acquire);
-        let (from, to) = self.windows[self.committed as usize % self.windows.len()];
+        let sweep = self.committed as usize % self.windows.len();
+        let (from, to) = self.windows[sweep];
         let phase = self.committed / self.windows.len() as u64 % PHASES;
         let span = i128::from(to - from);
         let target = (i128::from(from) * i128::from(render)
@@ -1026,13 +1065,23 @@ impl LiveControl<'_> {
             core::hint::spin_loop();
         }
         let began = self.gate.now();
+        let mut stored = 0;
+        let gate = self.gate;
         // SAFETY: as above.
-        let code = unsafe { commit_c(session, &request, self.revision) };
+        let code =
+            unsafe { commit_c_noting(session, &request, self.revision, || stored = gate.now()) };
         // The commit's last write, the revision store, fell inside a render call.
         let inside = self.gate.in_render.load(Ordering::SeqCst);
         self.commit_nanos = self.gate.now() - began;
         match code {
             RESULT_OK => {
+                if self.timed_sweep == Some(sweep) {
+                    self.timed += 1;
+                    let call = self.gate.render_began.load(Ordering::SeqCst);
+                    let length = self.gate.render_nanos.load(Ordering::Acquire);
+                    // A render call that began after the store is not the call it landed in.
+                    self.early += u64::from(stored >= call && stored - call < length / 16);
+                }
                 self.overlapped += u64::from(inside);
                 self.committed += 1;
                 self.revision += 1;
@@ -1060,6 +1109,7 @@ impl LiveControl<'_> {
 /// advance the watermark at that block, which renders the previous level throughout.
 #[test]
 fn a_watermark_advance_names_a_block_that_applied_the_edit() {
+    let _race = one_race_at_a_time();
     const EDITS: u64 = 320;
     let document = live_document();
     let levels = live_levels(&document);
@@ -1076,6 +1126,7 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
         parked: AtomicBool::new(false),
         start: AtomicU64::new(0),
         in_render: AtomicBool::new(false),
+        render_began: AtomicU64::new(0),
         render_nanos: AtomicU64::new(0),
     };
     let rendered = AtomicU64::new(0);
@@ -1087,6 +1138,9 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
         edits: EDITS,
         command: fader_command,
         windows: &[(-16, 64)],
+        timed_sweep: None,
+        timed: 0,
+        early: 0,
         committed: 0,
         revision: first,
         gate: &gate,
@@ -1114,6 +1168,7 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
             let mut pcm = [f32::NAN; 2 * LIVE_FRAMES];
             gate.wait_for_start();
             let started = gate.now();
+            gate.render_began.store(started, Ordering::SeqCst);
             gate.in_render.store(true, Ordering::SeqCst);
             // SAFETY: This thread is the plan's only renderer.
             let code = unsafe { render_live(plan_address as *mut Plan, start, &mut pcm) };
@@ -1178,9 +1233,12 @@ fn a_watermark_advance_names_a_block_that_applied_the_edit() {
 /// or publishing the watermark a block late, turns the third assertion red; the one-way test
 /// accepts both. Half of the commits sweep their revision store across the whole render call, as
 /// the one-way test does, and half across the call's first few percent, where a store lands after
-/// the snapshot and before the strips' drains.
+/// the snapshot and before the strips' drains. The run refuses to pass unless at least an
+/// eighth of the thin sweep's stores landed in that first 1/16 as well as a tenth of all stores
+/// landing inside a call.
 #[test]
 fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
+    let _race = one_race_at_a_time();
     const EDITS: u64 = 640;
     let document = pair_document();
     let states = pair_levels(&document);
@@ -1198,6 +1256,7 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
         parked: AtomicBool::new(false),
         start: AtomicU64::new(0),
         in_render: AtomicBool::new(false),
+        render_began: AtomicU64::new(0),
         render_nanos: AtomicU64::new(0),
     };
     let rendered = AtomicU64::new(0);
@@ -1209,6 +1268,9 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
         edits: EDITS,
         command: pair_command,
         windows: &[(-16, 64), (-2, 6)],
+        timed_sweep: Some(1),
+        timed: 0,
+        early: 0,
         committed: 0,
         revision: first,
         gate: &gate,
@@ -1238,6 +1300,7 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
             let mut pcm = [f32::NAN; 2 * LIVE_FRAMES];
             gate.wait_for_start();
             let started = gate.now();
+            gate.render_began.store(started, Ordering::SeqCst);
             gate.in_render.store(true, Ordering::SeqCst);
             // SAFETY: This thread is the plan's only renderer.
             let code = unsafe { render_live(plan_address as *mut Plan, start, &mut pcm) };
@@ -1277,7 +1340,7 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
             rendered.store(block + 1, Ordering::Release);
         },
     );
-    let overlapped = control.overlapped;
+    let (overlapped, timed, early) = (control.overlapped, control.timed, control.early);
     // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
     unsafe {
         miso_engine_v1_session_destroy(session);
@@ -1291,5 +1354,15 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
     assert!(
         overlapped > EDITS / 10,
         "vacuous: {overlapped} of {EDITS} revision stores fell inside a render call"
+    );
+    // The thin sweep aims half its stores (a 4/64 window of the 8/64 span) at the call's first
+    // 1/16, between the block's snapshot and the strips' drains, which is where a drain that reads
+    // outside the snapshot is caught. Measured with the stores timed at their submit call's return:
+    // 150 to 167 of 320 in debug and 66 to 126 in release, on 32, 4 and 2 CPUs. A run below an
+    // eighth of the thin stores (40) did not sweep that window and says nothing about the defect.
+    assert!(
+        early >= timed / 8,
+        "vacuous: {early} of {timed} thin-sweep revision stores landed in the first 1/16 of a \
+         render call"
     );
 }
