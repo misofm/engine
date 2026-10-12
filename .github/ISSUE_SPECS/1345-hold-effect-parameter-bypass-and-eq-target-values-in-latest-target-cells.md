@@ -263,3 +263,183 @@ moves the pop back behind a call in the lane loop.
 Root ruling 5 (2026-10-05): D4's window holds every live cell, and its deferral and gate 3's
 deferral case go. The cells read under the block's snapshot (#1432 Amendment 1, #1312
 Amendment 2). D3's drain order is unchanged.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b3`; checkpoints `09190ea55`, `122bdbbc0`, `ba14de159` and the docs commit that follows them)
+
+**What landed.**
+- `effect-contract/src/live.rs`: the lane is cells. `EffectLaneShape` (cell counts from a descriptor
+  and the effect's target slots), `EffectCellWriter` (control side: `check`, `write(stamp, record)`,
+  `try_push_observe`), `EffectControlLane` (render side: `stage` reads bypass, then the parameter
+  cells in `(parameter_index, channel)` order, then the target cells in `(slot, channel)` order,
+  all under the block's snapshot; `drain_observations` pops the observation queue apart). Equal
+  `Left`/`Right` words of one parameter or target applied in one block are a pair: the witness keeps
+  `LIVE`, a target is applied once as `Both`. The superseded count is charged only through
+  `CellReader::read_counted`. `// REALTIME_POLICY_BEGIN/END` surrounds the render-side impl, `Reads`
+  and `apply_observe`.
+- D4: preparation raises each instance's `automation_capacity` to `max(S, live parameter cells)`; the
+  window equals the capacity (the #1012 pairing equality), and `check_window` refuses a window below
+  the lane's parameter cells at bind (`RackError::AutomationWindow`, an `.expect` in the per-node path).
+- D2: the observation queue holds one slot per declared tap (`observation_taps` is the host's cap).
+- D5: `EffectControlProducer` writes cells (`preflight` refuses a record with no cell, and refuses a
+  raw `PreparedTarget`: targets only go through the owner transaction). The EQ owner keeps its
+  revision/shape checks and loses capacity (`preflight_candidate_targets`,
+  `publish_candidate_targets(stamp, ..)`). `commit_live` lost the queue-capacity rebuild and the room
+  checks; `LiveBackpressure` and `control.live.backpressure` are gone. host-web writes effect values in
+  `write_strip_cells` under the batch's one stamp (EQ via the owner marker); only `Observe` is queued
+  and room-checked; `queue_available` is the observation queue's room.
+- D8/D9: `LiveControlEffectBankStage::drain` is two loops (stage every lane's cells, then a drain-only
+  loop over `(lane index, Consumer)` pairs whose pop is `queue.try_pop()` under a counted
+  `available_at_entry`); `LiveControlEffect::stage` (graph) is region-marked. Floors: 106 regions in
+  27 files (was 104).
+- The #1504 deferral: `crates/graph/tests/live_snapshot_drains.rs` gained `effect_bank::
+  a_live_bypassed_lane_is_drained_every_block_under_the_blocks_snapshot`.
+- Docs (D6 and the doc set): `miso_engine_v1.h` (effect-before-fader sentence, "up to one quantum
+  apart", the 16-record room, the rebuild-for-too-big text and `control.live.backpressure` deleted;
+  the exact rule stated), AGENTS.md (the one sentence, no "until then"), D15-2 in the ruling,
+  `docs/C_ABI_V1_QUALIFICATION.md` (timing, cells, the #1263/#1264/#1265/#1266 paragraphs, resource
+  movement).
+
+**Choices left open by the spec.** (1) Canonical order is by construction in `stage`; it is not
+observable at the effect's output (bypass and parameters are applied in the same `stage` call and the
+rack applies the shunt after), so gate 2 is an end-to-end equality gate, not an order gate; the
+mutation that moves the bypass read after the parameters turns no test red and none can. (2) The
+observation drain sits in the rack stage as a second loop (not a `live.rs` function) because the
+per-node path calls `drain_observations` once and the bank owns the dense `(lane, queue)` table.
+(3) A queue-less lane is not an `Option` in the table: the bank stores only lanes that have a queue,
+with the lane index, so the pop's receiver is the loop pattern (the `Option::as_mut().map(try_pop)`
+form fails #1418's rule: measured with attempt 2's gate on this tree before the change).
+
+**Files outside the spec's list, each with its reason.**
+- `crates/graph-compiler/src/{estimate,lib}.rs` and its two tests: the estimate charges what a lane
+  retains (`EffectLaneResources`) so estimate equals prepared bytes exactly (four cases checked).
+- `crates/host-core/src/{prepare,limiter_linked_session}.rs` and tests: the attach call takes the
+  superseded count and the tap cap; test helpers write cells.
+- `crates/effect-compiler/src/control.rs`: the owner loses its capacity variant.
+- `crates/effect-contract/src/{lib,symmetry,prepared_target}.rs`: re-exports, pairing prose, the
+  defaulted `target_slots()` on the target-preparation trait.
+- `crates/capi/src/ffi.rs`, `crates/capi/tests/resource_lifecycle.rs`: `LiveBackpressure` arm and
+  counter removed.
+- `tools/console-workload` (src + tests), `tools/audit/src/capi.rs` (a comment),
+  `tools/parameter-metadata/tests/round_trip.rs`: ported (details below).
+- `hosts/host-web/tests/browser-v1/{direct-oracle.mjs,expected.json}`: the effect-bypass flood entry
+  is removed; the native digest is unchanged.
+- `sdk/src/core/writer.ts` (header prose), `sdk/test/{writer-evals,observation-evals}.mjs`: the
+  headless gate failed on the removed effect queue (below).
+- Re-pins, each individually. (a) `scripts/fixtures/abi-layout-v1-self-test.json`: stale since #1399
+  (`liveValuesSuperseded` u64 at offset 48, `reserved` u64[3] at 56); regenerated with
+  `--print-abi-layout`; it made `parameter-metadata`'s `the_checked_in_self_test_fixture_is_current`
+  fail on the branch before this change. (b) `scripts/check-web-audioworklet-callgraph.py`: the two
+  `EffectControlProducer` pins `..publish_candidate_targets` and `..preflight_candidate_targets`
+  keep their site counts (4 each) and reason; only the impl-block disambiguator moved `Ms2_` to
+  `Ms1_` because the producer lost an `impl` block. (c) The region floor and its self-test pad
+  (104 to 106), as the standing exception. No resource-ceiling or fixture digest moved: the reference
+  rows stay inside their ceilings (below), and the fixture/manifest checks pass unchanged.
+
+**Tests moved, deleted, new.**
+- Deleted (gate 6, plus those their rewrite made false): capi `an_effect_edit_larger_than_its_queue_
+  rebuilds`, `a_full_effect_lane_refuses_before_anything_changes`,
+  `an_eq_edit_designing_more_targets_than_its_queue_rebuilds`,
+  `an_eq_bypass_and_targets_without_room_for_both_refuse_before_anything_changes`,
+  `an_eq_bypass_beside_targets_filling_its_queue_rebuilds`, and the `effect_room`/`eligible_values`
+  helpers; host-web's native effect-bypass timeline flood and its `expected.json` row; paired_spans'
+  queue-at-capacity and `Both`-span scenarios; the SDK's four paused writer evals on EQ records.
+- Rewritten: host-web backpressure and flood tests now fill the observation queue (depth 1 at the
+  observed compressor); `loaded_effect_queues` became `written_effects`; the effect-contract
+  `live_control`, `paired_spans`, `observation_lane` suites run on `Rig` (a lane, its writer, the plan's
+  gate); host-core `symmetry_witness` (the EQ per-lane-target test became two: equal words in one block
+  keep the lane, unequal or split across blocks decline it); console-workload `paired_spans` on cell
+  writers (a long run of pairs before one block is `Kept`; a run ending in a lone half is retired; per-
+  channel EQ owner edits are `Kept`); console-workload `automation`
+  `the_eq_lowering_keeps_the_collapse_when_a_pair_lands_in_one_block` (the old "harness-only lowering
+  retires the collapse" claim is false once the cells hold the latest word per channel; the retiring
+  case is now a block between the two edits); `chain_shape` pushes the `Right` half (a `PerLane`
+  parameter has no `Both` cell; the old test pushed a `Both` the effect refused and so never moved the
+  right channel); `round_trip` renders between a subscribe and its unsubscribe (depth 1).
+- New, with the defect each defends (mutation runs below):
+  - effect-contract `live_window`: a window smaller than the live cell count (a cell dropped or
+    deferred, splitting a revision); the synthetic effect has 85 cells (> one dirty word).
+  - effect-contract `live_control`/`paired_spans`/`observation_lane`: cell identity per
+    `(parameter, channel)`, last-write-wins with an exact superseded count, one transaction in one
+    block under the snapshot, a value above the snapshot waiting exactly once, the pair rule in either
+    write order and split across blocks, target cells folding the witness from final contents.
+  - effect-compiler `native_session`: every launch effect is prepared with a window for all its live
+    cells; an entry below its cells is refused at attach.
+  - rack `live_control_bank`: each lane's subscriptions reach that lane's taps in order; a revision's
+    bypass and gain land together under the block's snapshot; a bank window below a lane's cells is
+    refused at bind.
+  - graph `live_snapshot_drains` (effect bank): a live-bypassed lane is drained every block under the
+    block's snapshot (the #1504 deferral).
+  - capi `forty_effect_edits_of_each_kind_before_one_block_are_all_accepted_and_the_last_is_heard`
+    (gate 1: 40 left-only threshold edits, then 40 `Both` EQ band-gain edits, each `RESULT_OK`, one block
+    equals the twin that sent only the last of each, `LIVE_VALUES_SUPERSEDED` += 117), capi
+    `a_bypass_lifted_beside_a_parameter_renders_like_the_browsers_lane` (gate 2, against host-core's
+    lane reference) and `a_refused_eq_transaction_leaves_its_owners_idle_and_writes_no_cell` (D7).
+  - host-web `strip_cells_cross_host::both_hosts_drain_two_parameter_edits_and_one_eq_gain_edit_alike`
+    (gate 5; equal PCM, equal counters, superseded 1).
+  - SDK `writer-evals` "a paused host takes any number of effect edits, refuses none, and the last of
+    each lands" (the writer/host reintroducing a bound on effect edits or losing the last value) and
+    three observation-queue refusal evals that keep the writer's flow-control contract on the one
+    queue left.
+
+**Gates.**
+
+| gate | command | result |
+|---|---|---|
+| 1 | `cargo test --locked -p capi --lib forty_effect_edits` | pass; superseded 117 |
+| 2 | `cargo test --locked -p capi --lib a_bypass_lifted_beside` | pass |
+| 3 | `cargo test --locked -p effect-contract --test live_window`; effect-compiler `native_session` | pass |
+| 4 | host-core `symmetry_witness`, console-workload `paired_spans`/`chain_shape` | pass (the `Both`-edit collapse stays; one-channel edit still clears `LIVE`) |
+| 5 | `cargo test --locked -p host-web --features test-support --test strip_cells_cross_host` | pass |
+| 6 | the four named capi tests are gone | done |
+| 7 | `audit capi` | 0 violations, 100000 calls, `pcm_digest cb10fbface44a3a4` (equals the parent's); `check-realtime-policy.sh` ok (106 regions, 27 files); `test-realtime-policy.sh` ok; `check-effect-contract.sh` ok; `check-capi-abi.sh` ok; worklet chain below |
+| 8 | `cargo test --locked --workspace --no-fail-fast` (4 targets failed on the first run, fixed: console-workload `chain_shape` and `paired_spans` x2, parameter-metadata `abi_layout` and `round_trip`); then effect-contract, effect-compiler `--features test-support`, capi, host-web `--features test-support`, control-plane `--features test-support`, rack, graph, host-core, console-workload, parameter-metadata | all pass; `cargo fmt --all -- --check` clean; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` clean |
+| 9 | `check-realtime-policy.sh` / `test-realtime-policy.sh` | pass with D9's markers and floors |
+| 10 | attempt 2's gate on a scratch export of this tree with 27 files / 106 regions and the current unsafe-exclusion line | `realtime policy: ok (106 marked regions in 27 files)` |
+| extra | `check-workspace-policy`, `check-rack-policy`, `check-graph-policy`, `check-graph-determinism` (100/100), `check-host-core-policy`, `check-builtins-policy`, `check-builtins-fixtures`, `check-effect-runtime-{fixtures,policy}`, `check-protocol-control-policy`, `check-console-fixtures`, `check-console-benchmark-fixture`, `check-bench-policy`, `check-lane-policy`, `check-session-policy`, `check-ci-path-routing.py`, `check-abi-layout-v1.py --self-test` | ok |
+| extra | `check-cross-targets.sh` | PASS |
+| worklet | `build-web-audioworklet.sh --named-twin` (shipped `b44cf5b1d1feb075fb215a451d7777b27a3cc26883595942394c7248c1c71825`), `strip-wasm-names.py check`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts` (self-test 32 mutations), `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` (private TMPDIR left empty) | pass after the callgraph re-pin (b); `check-web-audioworklet-v8-spill.py --self-test` ok (the exact-Node gate itself not run) |
+| sdk | `check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`, `check-sdk-headless.sh`, `sdk-package.sh check` over the artifact above | pass after the SDK eval rewrite; `sdk/dist` deleted |
+
+Not run: the Playwright `browser` legs (no browsers on this machine), AArch64.
+
+**Resource movement** (nine-track EQ reference session, x86-64, eight lanes, `reference_session_retained_rows_stay_within_their_budgets`, parent `710f77df7` -> this change): graph session+plan 393,718 -> 406,438; graph incremental 393,694 -> 406,414; graph metadata 185,521 -> 198,241; `capi_retained_bytes` 277,481 -> 281,513 (ceiling 282,432, headroom 919); largest allocation 90,720 unchanged. No ceiling needed a re-pin. The next slice that adds capi-retained bytes will need to raise `capi_retained_bytes`'s ceiling.
+
+**Mutation runs** (applied, red; reverted, green).
+
+| test | mutation | result |
+|---|---|---|
+| native_session `every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells` | drop the `.max(live_parameter_cells)` in `prepare.rs` | red |
+| live_window `a_window_shorter_than_..._count_it_needs` | `check_window` always `Ok` | red |
+| effect-contract pair tests (7) | `paired = false` | 7 red |
+| effect-contract / console-workload (`the_eq_lowering_keeps_the_collapse_when_a_pair_lands_in_one_block`) | targets with equal words not merged to `Both` | red (`[320, 8]` vs `[512, 8]`) |
+| console-workload `paired_spans` | `paired = false` | red (5 tests) |
+| effect-contract `a_drain_emits_the_contract_canonical_span_order` | `Left`/`Right` cell indexes swapped | red |
+| effect-contract (5 tests) and capi gate 2 | parameter index map `^ 1` | red; capi gate 1 stays green (its twin shares the writer, so a consistent swap cancels) |
+| capi gate 2 | bypass cell read but ignored | red |
+| capi gate 1 | target cells read uncounted | red (`39` vs `117`) |
+| graph effect-bank `live_snapshot_drains` | rack `drain` skips a bypassed lane; `stage` reads `LiveSnapshot::ALL` | red, red |
+| host-web `a_mixed_batch_is_one_transaction_across_every_queue` | room pass reads `command_wanted[0]` | red (a push panics at the free-room expect) |
+| host-web `strip_cells_cross_host` (gate 5) | browser publishes a `Both` EQ target as `Left` | red (the owner's shape check panics before PCM is compared) |
+| effect-contract canonical order (bypass read after the parameters) | moved | no test red, by construction (see choice 1) |
+
+**Open items for root.**
+1. **Observation depth (D2 as written) is one slot per declared tap.** Every launch effect declares one
+   tap, so a subscribe and its unsubscribe, or an unsubscribe and a re-arm, in one block interval is a
+   typed `BACKPRESSURE`. The SDK's `observation-evals` re-arm (`observe(false)` then `observe(true)` in one
+   submit) and `parameter-metadata`'s round trip both hit it; I rendered a block between the records. If
+   the idiom must work in one submit, D2's depth needs two slots per tap (one line in `prepare.rs`'s
+   observation sizing and the tests that fill depth 1). I kept D2 literal.
+2. STREAMS.md "Watermark bound on `main` today" (`:312-317`) is stale after this change: the last two
+   sentences ("A live value of that revision can apply earlier ... until #1502, #1503, #1504, #1312 and
+   #1345 have all landed") should be replaced by "Every live value of that revision takes effect
+   together, in the block `first_sample` names." I did not edit STREAMS.md.
+3. Stale text I did not touch: `docs/C_ABI_V1_QUALIFICATION.md` still says the strip lanes are "a 16-record
+   fader/mute ring and a 16-record matrix/pan ring" (`:319`, #1256-era), and the #1263 intro says "No
+   input or route lane is attached"; both are older than this issue.
+4. `control_queue_depth` (host-core) and `live_control_command_queue_records` (browser) size no queue now;
+   only `Some`/`None` and `0` mean anything. A later cleanup could drop the number.
+5. `parameter-metadata`'s abi-layout fixture was stale before this change (#1399); regenerated here.
+6. Gate 2's order claim (bypass before parameters) is unobservable at the output, so only construction
+   and the effect-contract canonical-order test hold it.
