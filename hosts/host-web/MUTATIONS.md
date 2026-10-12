@@ -100,6 +100,21 @@ audio**. Four self-test mutations run against every browser's real result:
 | `observation-identity` | `arming a declared tap moved a rendered sample` |
 | `observation-window` | `observation windows did not advance monotonically and tile` |
 
+*Note, 2026-10-12 (stream B batch-3 verdict B1, #1345 Amendment 5).* The engine admits one
+observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), so the raw `host.observe`
+unsubscribe of this row, sent before any render, was refused with typed backpressure on all three
+browsers. Firefox has no `OfflineAudioContext.suspend`, so the unsubscribe now runs on a real
+`AudioContext` held suspended between steps (`runObservationUnsubscribeRun`): feed the region,
+subscribe, resume until a frame arrives, suspend, unsubscribe, seek the source back and feed the
+region again, resume until sixteen more blocks have rendered. The `observation-unsubscribe` mutation
+now sets `observation.unsubscribe.maximumTrackGrDbAfterUnsubscribe = 1`, and the gate's message
+reads `an unsubscribed tap kept publishing, or the run never exercised the armed tap` followed by
+the run's numbers. The offline "disarmed" run never subscribes; it still feeds the identity gate
+and must report no reduction. A render-allocation row, `observation-unsubscribe`, makes eleven.
+*Engine-side red check (not a committed mutation):* with the page's unsubscribe replaced by a
+stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
+failed; with the unsubscribe sent, 0.
+
 ### And the same mutation against a real engine, in a real browser
 
 The self-test mutates a *result*. To prove the gate catches a mutated *engine*, the

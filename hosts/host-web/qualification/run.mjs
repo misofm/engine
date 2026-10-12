@@ -219,10 +219,24 @@ function validate(browserName, result) {
   gate(browserName, "observation-window", observation?.armed?.firstSampleMonotonic === true
     && observation?.armed?.windowsTile === true,
   "observation windows did not advance monotonically and tile");
-  gate(browserName, "observation-unsubscribe", observation?.disarmed?.unsubscribeResult === 0
-    && observation?.disarmed?.unsubscribeBindings === 0
+  // The tap published while armed, the unsubscribe was admitted after a render (the engine admits
+  // one record per tap per render, #1345), and a replay of the same signal under the unsubscribed
+  // tap published no reduction. A never-armed tap publishes none either.
+  const unsubscribe = observation?.unsubscribe;
+  gate(browserName, "observation-unsubscribe", unsubscribe?.subscribeResult === 0
+    && unsubscribe?.unsubscribeResult === 0
+    && unsubscribe?.unsubscribeBindings === 0
+    && unsubscribe?.seekResult === 0
+    && unsubscribe?.armedFrames >= 1
+    && unsubscribe?.armedMaximumTrackGrDb > 0
+    && unsubscribe?.replayedBlocks >= 16
+    && unsubscribe?.framesAfterUnsubscribe >= 1
+    && unsubscribe?.maximumTrackGrDbAfterUnsubscribe === 0
     && observation?.disarmed?.maximumTrackGrDb === 0,
-  "an unsubscribed tap kept publishing");
+  `an unsubscribed tap kept publishing, or the run never exercised the armed tap: ${JSON.stringify({
+    unsubscribe,
+    disarmedMaximumTrackGrDb: observation?.disarmed?.maximumTrackGrDb,
+  })}`);
   gate(browserName, "observation-identity", observation?.identicalAudio === true,
     "arming a declared tap moved a rendered sample");
 
@@ -265,7 +279,7 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 10
+    && allocations.length === 11
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -716,7 +730,7 @@ function mutate(result, mutation) {
   if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
-  if (mutation === "observation-unsubscribe") copy.observation.disarmed.maximumTrackGrDb = 1;
+  if (mutation === "observation-unsubscribe") copy.observation.unsubscribe.maximumTrackGrDbAfterUnsubscribe = 1;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-observation-window-reversed") {

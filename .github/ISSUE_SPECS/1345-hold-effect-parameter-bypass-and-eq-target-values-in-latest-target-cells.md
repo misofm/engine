@@ -396,11 +396,26 @@ raw `host.observe` unsubscribe came before any render and Amendment 3 refuses a 
 tap until a render drains the first.
 
 **Named exception (root, 2026-10-12, batch-verdict B1).** `hosts/host-web/qualification/qualification.js`
-(`runObservationRun`) is outside this issue's path lists. Under D2 Amendments 1 and 2 the honest
-contract is that a render separates two operations on one tap, so the disarmed run renders one
-quantum between the raw subscribe and the unsubscribe: the offline context suspends after one
-quantum, the page unsubscribes, and the context resumes. Admission still never coalesces, and the
-gate and its mutation proof are unchanged. STREAMS.md carries the file's hot-file row.
+(`runObservationRun`, `runObservationUnsubscribeRun`) and `hosts/host-web/qualification/run.mjs` (the
+gate, its mutation and the render-allocation row count) are outside this issue's path lists. Under D2
+Amendments 1 and 2 the honest contract is that a render separates two operations on one tap, so the
+unsubscribe gate renders between the raw subscribe and the unsubscribe. Admission still never
+coalesces, and the gate keeps its name and its mutation proof.
+
+*How it is built.* The first design suspended an `OfflineAudioContext` after one quantum. Chromium and
+WebKit accept it; Firefox 153 has no `OfflineAudioContext.suspend` (`context.suspend is not a
+function`), as `runCorpusQualification` already records. The gate therefore runs the unsubscribe on a
+real `AudioContext` held suspended between steps: feed the sixteen-block region, subscribe, resume
+until a frame arrives (the armed tap publishes real reduction), suspend, unsubscribe (admitted,
+because blocks rendered since the subscribe), seek the source back to its start and feed the same
+region again, resume until sixteen more blocks have rendered. The gate requires the unsubscribe to
+return result 0 with zero bindings, the armed pass to have published a positive reduction, at least
+sixteen replayed blocks, meter frames still arriving, and a maximum reduction of exactly 0 after the
+unsubscribe. The offline "disarmed" run (the identity witness) never subscribes and must report no
+reduction. `resumeUntil` suspends and resumes again after a second without progress, because WebKit
+under a saturated machine left a resumed context running without pulling its graph (one stall in
+five runs with 24 busy loops on 32 cores, none in 14 runs with the retry).
+STREAMS.md carries the file's hot-file row.
 
 ## Attempt record
 

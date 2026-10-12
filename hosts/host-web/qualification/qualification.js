@@ -399,13 +399,14 @@ async function runLiveControlQualification(createHost, sessionDocument) {
 /// Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, in a real browser.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
-/// the tap is armed when rendering starts. That is the eval's shape and it is also E1's leg (c)
-/// against leg (d) in a browser: the two renders must produce **identical PCM**, because arming a
-/// declared tap may not move a sample.
+/// the tap is armed when rendering starts. That is E1's leg (c) against leg (d) in a browser: the
+/// two renders must produce **identical PCM**, because arming a declared tap may not move a sample.
 ///
-/// `armed` is `true` for the first run and `false` for the second, which subscribes and then
-/// immediately unsubscribes -- so the second run proves that an unsubscribe actually stops the
-/// traffic rather than merely being accepted.
+/// `armed` is `true` for the first run and `false` for the second, which never subscribes. That the
+/// tap stops publishing after an unsubscribe is [`runObservationUnsubscribeRun`]'s, on a real
+/// context: the engine admits one observation record per tap per render (#1345 D8, D2 Amendments
+/// 1 and 2), so the unsubscribe needs a render after the subscribe, and an offline context renders
+/// only inside one `startRendering` call (Firefox has no `OfflineAudioContext.suspend`).
 async function runObservationRun(createHost, sessionDocument, armed) {
   const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -455,29 +456,9 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
   };
-  const subscribed = await host.observe({ subscriptions: [subscription] });
-  let unsubscribed = null;
-  let rendering;
-  if (armed) {
-    rendering = context.startRendering();
-  } else {
-    // A named #1345 exception (root, 2026-10-12, batch-verdict B1): this page calls the raw
-    // `host.observe`, and the engine admits one observation record per tap per render (#1345 D8,
-    // D2 Amendments 1 and 2), so the unsubscribe is refused with typed backpressure until a block
-    // has drained the subscribe. The honest contract is the one the SDK keeps (`renderWait`): a
-    // render separates two operations on one tap. The offline context suspends after one quantum,
-    // which is shorter than the tap's two-block window, so no frame can have published when the
-    // unsubscribe is admitted; admission itself still never coalesces.
-    const suspended = context.suspend(QUANTUM_FRAMES / SAMPLE_RATE);
-    rendering = context.startRendering();
-    await suspended;
-    unsubscribed = await host.observe({
-      subscriptions: [{ ...subscription, armed: false }],
-    });
-    await context.resume();
-  }
+  const subscribed = armed ? await host.observe({ subscriptions: [subscription] }) : null;
 
-  const rendered = await rendering;
+  const rendered = await context.startRendering();
   for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
     await new Promise((resolve) => setTimeout(resolve, 4));
   }
@@ -496,13 +477,11 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   }
   return {
     meterLeaseResult: meterLease.result,
-    subscribeResult: subscribed.result,
-    subscribeReason: subscribed.reason,
-    bindings: subscribed.bindings.length,
-    frameSlot: subscribed.bindings[0]?.frameSlot ?? -1,
-    windowBlocks: subscribed.bindings[0]?.windowBlocks ?? -1,
-    unsubscribeResult: unsubscribed === null ? null : unsubscribed.result,
-    unsubscribeBindings: unsubscribed === null ? null : unsubscribed.bindings.length,
+    subscribeResult: subscribed === null ? null : subscribed.result,
+    subscribeReason: subscribed === null ? null : subscribed.reason,
+    bindings: subscribed === null ? 0 : subscribed.bindings.length,
+    frameSlot: subscribed?.bindings[0]?.frameSlot ?? -1,
+    windowBlocks: subscribed?.bindings[0]?.windowBlocks ?? -1,
     frames: frames.length,
     trackGrDbWidth: frames.length === 0 ? -1 : frames[0].trackGrDb.length,
     peakWidth: frames.length === 0 ? -1 : frames[0].peaks,
@@ -519,11 +498,174 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   };
 }
 
-/// Issue #143 E12: the observation row, both runs.
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/// Resume `context` and wait until `condition` holds. A resumed context can sit running without
+/// pulling its graph (WebKit on a loaded machine does), so a second without progress suspends and
+/// resumes it again. Fails loudly, naming `describe()`'s state, after `milliseconds`.
+async function resumeUntil(context, condition, milliseconds, what, describe) {
+  await context.resume();
+  const started = performance.now();
+  let kicked = started;
+  while (!(await condition())) {
+    const now = performance.now();
+    if (now - started > milliseconds) {
+      throw new Error(`timed out waiting for ${what}: ${diagnosticJson(await describe())}`);
+    }
+    if (now - kicked > 1000) {
+      await context.suspend();
+      await context.resume();
+      kicked = performance.now();
+    }
+    await delay(4);
+  }
+}
+
+/// Issue #143 E12 and #1345 batch-verdict B1: subscribe -> frames -> unsubscribe -> no frames, in a
+/// real browser, on a real `AudioContext` held suspended between steps.
+///
+/// A named #1345 exception (root, 2026-10-12, batch-verdict B1). This page calls the raw
+/// `host.observe`, and the engine admits one observation record per tap per render (#1345 D8, D2
+/// Amendments 1 and 2): a second record for the tap is refused with typed backpressure until a block
+/// has drained the first. The honest contract is the one the SDK keeps (`renderWait`): a render
+/// separates two operations on one tap. Admission itself still never coalesces. So the run renders
+/// between the subscribe and the unsubscribe:
+///
+/// 1. suspended, it feeds the sixteen-block region, subscribes, and resumes until a frame arrives
+///    (the armed tap publishes real reduction), then suspends again;
+/// 2. it unsubscribes, which the engine admits because blocks have rendered since the subscribe,
+///    seeks the source back to its start and feeds the same region again, so the signal that
+///    published frames is under the tap once more;
+/// 3. it resumes until sixteen more blocks have rendered. Meter frames keep arriving (the meter
+///    lease is held), but none may carry a reduction: an unarmed tap publishes zero.
+///
+/// Nothing here depends on how many blocks run before a suspension takes effect: the replay makes
+/// the second pass carry the same signal as the first whatever the first consumed, and a pass that
+/// rendered fewer than sixteen blocks fails the run as vacuous.
+async function runObservationUnsubscribeRun(createHost, sessionDocument) {
+  const context = new AudioContext({ sampleRate: SAMPLE_RATE });
+  await context.suspend();
+  const host = await createHost({
+    context,
+    document: sessionDocument,
+    options: bootOptions(
+      OBSERVATION_FRAMES,
+      LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
+      LIVE_CONTROL_METER_BLOCKS,
+      OBSERVATION_TAPS,
+      OBSERVATION_MASTER_TRACK_PLUS_ONE,
+    ),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+
+  const feed = async (generation) => {
+    for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
+      const acknowledgement = await host.submitSource({
+        sourceId: "live-control-source",
+        generation,
+        startFrame: BigInt(block * QUANTUM_FRAMES),
+        sampleRateHz: SAMPLE_RATE,
+        planes: observationPlanes(block),
+        frames: QUANTUM_FRAMES,
+        endOfRegion: block === OBSERVATION_BLOCKS - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("observation unsubscribe feed rejected");
+    }
+  };
+  const renderedQuanta = async () => (await host.status()).renderedQuanta;
+  const frames = [];
+  const meterLease = await host.meters({
+    enabled: true,
+    onFrame: (frame) => frames.push({
+      trackGrDb: Array.from(frame.trackGrDb),
+      firstSample: frame.firstSample.toString(),
+      endSample: frame.endSample.toString(),
+    }),
+  });
+  await feed(1n);
+  const subscription = {
+    trackIndex: 0,
+    rack: 1,
+    effectIndex: 0,
+    tapId: OBSERVATION_TAP_ID,
+    windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+    armed: true,
+  };
+  const subscribed = await host.observe({ subscriptions: [subscription] });
+
+  await resumeUntil(
+    context,
+    () => frames.length > 0,
+    10_000,
+    "a frame from the armed tap",
+    async () => ({ contextState: context.state, status: await host.status() }),
+  );
+  await context.suspend();
+  // Frames the render published before the suspension took effect may still be on their way.
+  await delay(100);
+  const armedFrames = frames.length;
+  const maximumGrDb = (list) => list.reduce(
+    (highest, frame) => Math.max(highest, frame.trackGrDb[0]),
+    0,
+  );
+  const armedMaximumTrackGrDb = maximumGrDb(frames);
+
+  const unsubscribed = await host.observe({
+    subscriptions: [{ ...subscription, armed: false }],
+  });
+  const seeked = await host.seekSource({
+    sourceId: "live-control-source",
+    generation: 2n,
+    sourceFrame: 0n,
+  });
+  await feed(2n);
+  const renderedBefore = await renderedQuanta();
+  await resumeUntil(
+    context,
+    async () => await renderedQuanta() >= renderedBefore + BigInt(OBSERVATION_BLOCKS),
+    10_000,
+    "the replayed region to render",
+    async () => ({ contextState: context.state, renderedBefore, status: await host.status() }),
+  );
+  await context.suspend();
+  await delay(100);
+  const renderedAfter = await renderedQuanta();
+  const framesAfterUnsubscribe = frames.length - armedFrames;
+  const maximumTrackGrDbAfterUnsubscribe = maximumGrDb(frames.slice(armedFrames));
+
+  const renderAllocations = await renderAllocationCount(host);
+  await host.dispose();
+  await context.close();
+  return {
+    meterLeaseResult: meterLease.result,
+    subscribeResult: subscribed.result,
+    unsubscribeResult: unsubscribed.result,
+    unsubscribeBindings: unsubscribed.bindings.length,
+    seekResult: seeked.result,
+    armedFrames,
+    armedMaximumTrackGrDb,
+    replayedBlocks: Number(renderedAfter - renderedBefore),
+    framesAfterUnsubscribe,
+    maximumTrackGrDbAfterUnsubscribe,
+    renderAllocations,
+  };
+}
+
+/// Issue #143 E12: the observation row, its two offline runs and the real-context unsubscribe.
 async function runObservationQualification(createHost, sessionDocument) {
   const armed = await runObservationRun(createHost, sessionDocument, true);
   const disarmed = await runObservationRun(createHost, sessionDocument, false);
-  return { armed, disarmed, identicalAudio: armed.renderedDigest === disarmed.renderedDigest };
+  const unsubscribe = await runObservationUnsubscribeRun(createHost, sessionDocument);
+  return {
+    armed,
+    disarmed,
+    unsubscribe,
+    identicalAudio: armed.renderedDigest === disarmed.renderedDigest,
+  };
 }
 
 async function runStallQualification(createHost, sessionDocument) {
@@ -878,6 +1020,7 @@ export async function runQualification() {
       { workload: "live-control", count: live.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
+      { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
       { workload: "stall", count: stall.renderAllocations },
       { workload: "staging-reads-one-shot", count: stagingReads.oneShot.renderAllocations },
       { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
