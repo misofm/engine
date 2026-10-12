@@ -273,7 +273,7 @@ every plan is prepared with an explicit `source_ring_frames = stall_ring_frames(
    `P − Δ = 26` absorbs that.
 10. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 
 ## Test value

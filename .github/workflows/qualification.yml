@@ -524,10 +524,8 @@ jobs:
         run: |
           bash scripts/check-protocol-control-policy.sh
           bash scripts/test-protocol-control-policy.sh
-      - name: Realtime source policy and mutation tests
+      - name: Realtime audit and artifact evidence leak gates
         run: |
-          bash scripts/check-realtime-policy.sh
-          bash scripts/test-realtime-policy.sh
           bash scripts/check-realtime-audit-leak.sh
           bash scripts/test-realtime-audit-leak.sh
           bash scripts/check-artifact-evidence-leak.sh

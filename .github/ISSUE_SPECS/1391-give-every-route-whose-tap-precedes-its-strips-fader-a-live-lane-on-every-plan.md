@@ -141,7 +141,7 @@ its master already does not fold.
    - `bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts && bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`
    - `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts`
    - `bash scripts/check-graph-policy.sh`, `bash scripts/check-host-core-policy.sh`,
-     `bash scripts/check-realtime-policy.sh`, `bash scripts/check-capi-abi.sh`,
+     `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-capi-abi.sh`,
      `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

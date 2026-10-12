@@ -24,7 +24,7 @@ No change to which cohorts get banked (that is the identity-lane issue), no kern
 
 1. New test: for every active count 1..W-1 and random active-lane masks, the gathered scratch and the scattered outputs are bit-identical to the current per-lane path on random input (extend `full_bank_gather_scatter_round_trip_is_bit_exact`).
 2. Allocation test: preparing and rendering a partial bank allocates nothing on render (use the crate's existing allocation-counter test pattern).
-3. `cargo test -p rack` green; `scripts/check-rack-policy.sh`, `scripts/check-realtime-policy.sh` pass.
+3. `cargo test -p rack` green; `scripts/check-rack-policy.sh`, `tools/realtime-policy` pass.
 4. One descriptive `scripts/run-rack-benchmark.sh` run before/after, attached.
 
 ## Dependencies
@@ -35,7 +35,7 @@ None. Unblocks the identity-lane issues.
 
 - Work only from this body. Read the cited functions first; do not survey the workspace.
 - Class A means the change moves no rendered bit: same arithmetic in the same order, fewer passes, loads, stores, copies or branches. Every gate below that says "bit-identical" is a hard stop, not a tolerance.
-- Render paths stay allocation-free, lock-free and syscall-free (`scripts/check-realtime-policy.sh` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
+- Render paths stay allocation-free, lock-free and syscall-free (`tools/realtime-policy` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.

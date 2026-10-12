@@ -176,7 +176,7 @@ and `k = 3`.
 7. Commands:
    - `cargo test --locked -p engine`, `cargo test --locked -p source`
    - `cargo test --locked -p host-core --features host-core/test-support`, `cargo test --locked -p capi`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `cargo test --locked -p realtime-policy`
    - `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 

@@ -189,7 +189,7 @@ epoch before A drops (D5 step 5). If B is refused, A is republished untouched (D
 9. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p control-plane --features
    test-support`; `cargo test --locked -p protocol --features test-support`;
    `bash scripts/check-capi-abi.sh`; `bash scripts/check-protocol-control-policy.sh`;
-   `bash scripts/check-realtime-policy.sh`; `bash scripts/check-workspace-policy.sh`;
+   `cargo run --locked --release -q -p realtime-policy`; `bash scripts/check-workspace-policy.sh`;
    `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features
    -- -D warnings`.
 

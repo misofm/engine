@@ -179,7 +179,7 @@ Run every command from the repository root.
    - `cargo test --locked --all-targets -p builtins --features builtins/test-support`
    - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`
    - `bash scripts/check-workspace-policy.sh`, `bash scripts/check-host-core-policy.sh`,
-     `bash scripts/check-realtime-policy.sh`
+     `cargo run --locked --release -q -p realtime-policy`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
    - `cargo fmt --all -- --check`
    - 4-lane (NEON) is CI-only here.

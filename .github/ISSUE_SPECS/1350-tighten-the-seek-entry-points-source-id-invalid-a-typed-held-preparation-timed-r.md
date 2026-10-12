@@ -92,7 +92,7 @@ Four seek-path defects found in the #1275 review are closed:
 5. Commands:
    - `cargo test --locked -p source` and `cargo test --locked -p capi`
    - `cargo test --locked -p host-core --features host-core/test-support`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh`
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-cross-targets.sh`
    - `bash scripts/check-workspace-policy.sh`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 
 ## Test value

@@ -269,7 +269,7 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
    - `cargo test --locked -p capi --test strip_transitions`
    - `cargo test --locked -p host-core -p capi --features host-core/test-support`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
-   - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-realtime-policy.sh`,
+   - `bash scripts/check-host-core-policy.sh`, `cargo run --locked --release -q -p realtime-policy`,
      `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

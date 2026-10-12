@@ -149,7 +149,7 @@ it needs; on its own it changes no host behaviour.
    unchanged after each refusal.
 6. **Realtime and workspace.** `cargo test --locked -p host-core --features
    control-provider,test-support`; `cargo test --locked -p graph --features test-support`;
-   `cargo test --locked -p source`; `bash scripts/check-realtime-policy.sh`;
+   `cargo test --locked -p source`; `cargo run --locked --release -q -p realtime-policy`;
    `bash scripts/check-graph-policy.sh`; `bash scripts/check-host-core-policy.sh`;
    `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features
    -- -D warnings`.

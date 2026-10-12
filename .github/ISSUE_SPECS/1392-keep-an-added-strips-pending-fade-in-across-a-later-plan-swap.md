@@ -146,7 +146,7 @@ In `crates/host-core/tests/successor_swap.rs`, quantum 128, `N = 2000`, at `Back
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit && bash scripts/trace-graph-audit.sh target/release/audit`
    - `bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts && bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`
    - `bash scripts/check-builtins-policy.sh`, `bash scripts/check-graph-policy.sh`,
-     `bash scripts/check-host-core-policy.sh`, `bash scripts/check-realtime-policy.sh`,
+     `bash scripts/check-host-core-policy.sh`, `cargo run --locked --release -q -p realtime-policy`,
      `bash scripts/check-cross-targets.sh`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

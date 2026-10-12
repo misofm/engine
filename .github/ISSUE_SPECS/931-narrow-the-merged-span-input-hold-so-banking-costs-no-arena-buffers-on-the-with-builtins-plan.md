@@ -20,7 +20,7 @@ No change to cohort merging (#202), to bank eligibility, or to any kernel. No be
 
 1. `compile_with_builtins` on the console fixture: banked arena equals per-node arena, pinned with the corrected rationale.
 2. The random-graph lowering corpus (`lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs`) green with zero dataflow divergence; `scripts/check-graph-determinism.sh` bit-identical.
-3. `cargo test -p graph -p graph-compiler -p console-workload` green; `check-graph-policy.sh`, `check-realtime-policy.sh`.
+3. `cargo test -p graph -p graph-compiler -p console-workload` green; `check-graph-policy.sh`, `tools/realtime-policy`.
 
 ## Dependencies
 

@@ -52,8 +52,8 @@ and obtain explicit review. Unsafe code must not leak through a public API. A `p
 `# Safety` section states the caller's contract is not a leak: the compiler makes every caller take
 on that contract in an `unsafe` block of its own (#1494's control-word writers below).
 
-The authority is the unsafe allowlist of `scripts/check-realtime-policy.sh` (its `unsafe source
-exclusions` line), the list that CI runs; this section lists it, one entry per path, and adds
+The authority is the unsafe allowlist of `tools/realtime-policy` (`UNSAFE_ALLOWLIST` in
+`src/policy.rs`), the list that CI runs; this section lists it, one entry per path, and adds
 nothing to it. `scripts/check-bench-policy.sh` holds the matching exact set of
 `#![allow(unsafe_code)]` files under `tools/`; `scripts/check-lane-policy.sh`, through
 `scripts/policies/lane-source.toml`, confines raw architecture intrinsics to `softfma.rs` and
@@ -78,7 +78,7 @@ that is not listed here needs a new decision, not an edit to a pattern.
 
 `crates/graph` is entirely free of unsafe code. (`crates/engine/src/arch` was a third owner until
 #84 phase A deleted it: the per-target kernels moved to `crates/lane`, and the exemption was
-removed from `scripts/check-realtime-policy.sh` in the same change.)
+removed from `tools/realtime-policy` in the same change.)
 
 ### Lane intrinsics
 
@@ -147,10 +147,10 @@ every render; it does not anchor a value held entirely in registers, and
 product that a release build really does schedule outside the guard until the test anchors it
 itself.
 
-The exemption is the file, not the crate: `scripts/check-realtime-policy.sh` and
+The exemption is the file, not the crate: `tools/realtime-policy` and
 `scripts/check-lane-policy.sh` (through `scripts/policies/lane-source.toml`) both name `fpenv.rs`
 explicitly, and both have a mutation test that proves a third lane file does not inherit it
-(`scripts/test-realtime-policy.sh`, `scripts/test-lane-policy.sh`, `fpenv_extra.rs`).
+(`cargo test -p realtime-policy`, `scripts/test-lane-policy.sh`, `fpenv_extra.rs`).
 
 ### Control-word test writers
 
@@ -370,9 +370,9 @@ gone. #1033 removed `tools/native-pcm-runner` and its exemption.
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or
 render-reachable dependency.
 
-`scripts/check-realtime-policy.sh` extracts explicitly marked render-reachable regions and rejects
+`tools/realtime-policy` extracts explicitly marked render-reachable regions and rejects
 allocation/growth, locks, waits, I/O, logging, networking, process/thread APIs, and async surfaces.
-Its mutation suite (`scripts/test-realtime-policy.sh`) proves allocation, lock, log, and
+Its test suite (`cargo test -p realtime-policy`) proves allocation, lock, log, and
 unsafe-scope violations are rejected, including unsafe code in a file beside an allowlisted one
 (`tools/audit/src/other.rs` beside `capi.rs`) and at the paths of retired exceptions. Runtime
 mutation probes (`tools/audit/src/realtime.rs`, `--probe`) separately prove the realtime

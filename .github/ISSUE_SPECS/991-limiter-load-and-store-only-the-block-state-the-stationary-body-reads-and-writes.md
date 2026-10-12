@@ -101,7 +101,7 @@ Steps:
    * M2: have `store_stationary` scatter the lean `RampLanes` back, writing its zero `target`. Gate
      2's payload comparison goes red.
    * M3: skip `apply_automation` when spans exist. The automation test goes red.
-5. **Realtime and wasm.** `tests/allocation.rs`, `check-realtime-policy.sh`, and
+5. **Realtime and wasm.** `tests/allocation.rs`, `tools/realtime-policy`, and
    `check-web-audioworklet.sh`: roster, rule 3 and callgraph unchanged. Scalar loads are not
    counted arithmetic.
 

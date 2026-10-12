@@ -105,7 +105,7 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
    - `cargo test --locked -p graph -p graph-compiler -p host-core --features graph/test-support,host-core/test-support`
    - `bash scripts/check-graph-determinism.sh`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 
 ## Test value

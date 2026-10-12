@@ -13,7 +13,7 @@
 //! multiply-add any more and the emulation was retired along with G3 -- it cost about 54
 //! instructions per operation on wasm, measured 5.5x on the SVF kernel, which was the tax the
 //! phase existed to delete. The file keeps its name because
-//! `scripts/check-lane-policy.sh`, `scripts/check-realtime-policy.sh` and
+//! `scripts/check-lane-policy.sh`, `tools/realtime-policy` and
 //! `docs/REALTIME_DEPENDENCY_POLICY.md` name this path as one of the two places in the lane crate
 //! allowed to carry `unsafe`, and renaming it would edit policy files to no numeric purpose.
 //!
@@ -27,7 +27,7 @@
 //! pins the canonical floating-point environment at every native `x86_64` render entry; it is
 //! their only non-test caller. Gate G6 reaches the word through `lane::fpenv`. The workspace
 //! denies `unsafe` outside an enumerated allowlist, so the helpers live here, in one of the two
-//! lane files `scripts/check-realtime-policy.sh` allows to carry `unsafe`, and use the deprecated
+//! lane files `tools/realtime-policy` allows to carry `unsafe`, and use the deprecated
 //! `_mm_getcsr`/`_mm_setcsr` intrinsics rather than the inline assembly their deprecation note
 //! recommends.
 

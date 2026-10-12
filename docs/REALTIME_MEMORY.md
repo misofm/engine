@@ -80,7 +80,7 @@ and queue slots are source overhead, not the session's PCM charge.
 Browser launch uses `LocalRing`: the same bounded semantics with `MaybeUninit<T>` slots (for
 `T: Copy`) and plain cursors. #84 phase B replaced the `Option<T>` slots: the discriminant
 duplicated occupancy the head/tail cursors already carry, and `Option::take().expect(..)` put a
-panic path inside a `REALTIME_POLICY` region, which `scripts/check-realtime-policy.sh` now
+panic path inside a `REALTIME_POLICY` region, which `tools/realtime-policy` now
 rejects. It is host-mediated on one render agent and does not claim SharedArrayBuffer or Wasm-thread
 support.
 

@@ -207,7 +207,7 @@ for subject in "${timed_subjects[@]}"; do
 done
 
 # `allow(unsafe_code)` is denied workspace-wide; these four files are the approved exceptions under
-# `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
+# `tools/`, and `tools/realtime-policy` holds the matching list for `crates/` and
 # `hosts/`. A fifth file is a new unsafe ownership boundary and needs a decision, not a grep.
 # (#1494 added gate G6's corpus test, whose only unsafe is its calls of the `unsafe fn`
 # `lane::fpenv::write_fp_control_word`.)

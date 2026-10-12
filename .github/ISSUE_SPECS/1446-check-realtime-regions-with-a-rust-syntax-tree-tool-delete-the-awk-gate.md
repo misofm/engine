@@ -247,3 +247,78 @@ source file changes the `.llvmbc` section of the `libcapi.a` members and nothing
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: half a day. The command-form edits are one scripted pass (D5); the judgment is in about
   21 specs that name the bare path.
+
+## Attempt 1 record
+
+Base `b45d4836c` (`codex/d15-stream-j3`). Everything below was measured on this branch.
+
+**Re-measured, differing from the Problem.** The Problem's line numbers moved: `qualification.yml`
+step at `:527-534` (awk lines `:529-530`) is the same; `resource_lifecycle.rs` comment is at `:3022`
+(not `:2988`); `REALTIME_DEPENDENCY_POLICY.md` mentions were at `:55`, `:81`, `:150-153`, `:368-370`
+(not `:52`, `:84`, `:120`, `:132`); `REALTIME_MEMORY.md:83`. Real tree: 94 marked regions in 26 files
+(`git grep -c '^\s*// REALTIME_POLICY_BEGIN'`), equal to `Policy::workspace()`'s floors. Open specs:
+80 numbered specs name a script (gh open set read once); 67 were edited, 13 mention lines were left
+(below). `.github/ISSUE_SPECS/` also holds 58 specs of closed issues, 180 mentions, none edited.
+
+**What changed**
+- Deleted `scripts/check-realtime-policy.sh` and `scripts/test-realtime-policy.sh` (D1). `scripts/lib/gate.sh` kept.
+- `qualification.yml`, `lint`: deleted the two awk lines, step renamed "Realtime audit and artifact
+  evidence leak gates" (four leak-gate lines kept). `audit-native` (`if:` is the full-route condition)
+  still runs `./target/release/realtime_policy`; the tool's tests run in `test-debug-a`'s workspace test.
+- `scripts/check-ci-path-routing.py`: `"audit-native": ("./target/release/realtime_policy",)` in
+  `DEDUPLICATED_OWNERS`, with a header comment line naming the claim.
+- `scripts/test-ci-path-routing.py`: the owner loop covers the deletion mutation of the new entry; two
+  explicit cases added: the tool's step given a step-level `if:`, and `audit-native` moved off the full route.
+- Comment-only edits (each keeps its line count; `git diff --numstat` is 1/1 or 2/2 per file):
+  `crates/engine/src/realtime/observe.rs:18` ("an approved-unsafe list of exactly two files" becomes "its
+  approved-unsafe list"), `crates/engine/src/realtime/watermark.rs:32`, `crates/lane/src/fpenv.rs:63`,
+  `crates/lane/src/softfma.rs:16` and `:30`, `crates/capi/tests/resource_lifecycle.rs:3022`,
+  `crates/host-core/src/lib.rs:75`, `tools/bench-support/src/lib.rs:12`, `scripts/check-bench-policy.sh:210`.
+- Docs: `REALTIME_DEPENDENCY_POLICY.md` six lines (the allowlist authority now says `tools/realtime-policy`
+  (`UNSAFE_ALLOWLIST` in `src/policy.rs`) in place of the false "`unsafe source exclusions` line"; the
+  mutation suite is now `cargo test -p realtime-policy`, which has the third-lane-file and `other.rs` cases
+  in `tests/policy/unsafe_ownership.rs`); `REALTIME_MEMORY.md:83`.
+- Specs (D5): one scripted pass for the command form (`bash scripts/check-realtime-policy.sh` to
+  `cargo run --locked --release -q -p realtime-policy`, `bash scripts/test-realtime-policy.sh` to
+  `cargo test --locked -p realtime-policy`), bare path to `tools/realtime-policy`; the diff was reviewed
+  line by line. Hand edits: #1447's line anchor `:208-228` became "the count form of the drain-bound rule
+  of `tools/realtime-policy`"; #1482's "(or the tool)" was dropped with the script name.
+
+**Mentions left unchanged in open specs (D5 history or time-bound), with reason**
+- #1345:219, :228, :229, :233, :234, :238 (D9 and its "added" paths, gate 9 and gate 10): they authorise
+  and gate edits to the awk scripts for stream B3's commits that land before this one, and say "Stream J's
+  tool is not on `main` yet". Same reason as the nine tool specs. Root: after the batch merges, #1345's
+  gate 9 has no awk script to run. Its D9 floors move to `Policy::workspace()`.
+- #1447:27: a measurement the awk gate gave on `origin/main` (Problem, history).
+- #1422:290: evidence record of its `plan.rs` pair.
+- #349:205 and :315: finding rows (`RT-16`, `IO-14`) with line anchors into the old script (findings index).
+- #881:122, :179, :398: attempt 1 and attempt 2 evidence records.
+- #948:5, :16, :31: #948 closes with A2 (D5).
+- #1443:37, #1444:27, the nine tool specs, #1519 (6) and #1418, #1426: D5 lists them; #1519 is the tenth
+  tool slice and its mentions are its own attempt records and gates for commits before this one.
+- `crates/graph/tests/MUTATIONS.md` (12) and `docs/handoffs/**`, `BRIEFS/` (3): history (D4, D5).
+- Specs of closed issues (58 files, 180 mentions): not edited.
+
+**Gates**
+1. `cargo run --locked --release -q -p realtime-policy` exits 1 with exactly one finding:
+   `marked realtime unbounded try_pop drain ... crates/effect-contract/src/live.rs:366` (pre-#1345;
+   stream B3's #1345 rewrites that function; J rebases onto it before the batch gate). No exception added,
+   `live.rs` not touched. Nothing else is refused.
+2. `cargo test --locked -p realtime-policy`: 186 passed, 0 failed.
+3. `git grep` for either script name lists only the mentions above, plus none in code, workflows, scripts or
+   docs outside `docs/handoffs/` and `MUTATIONS.md`.
+4. exit 0: `check-ci-path-routing.py`, `test-ci-path-routing.py`, `check-script-reachability.py` (118
+   files reached), `test-script-reachability.py` (20 cases), `check-workspace-policy.sh`,
+   `check-bench-policy.sh`, `cargo fmt --all -- --check`, `cargo clippy --locked -p realtime-policy
+   --all-targets -- -D warnings`; `cargo check` of engine, lane, host-core, bench-support and `capi --tests`.
+   *Mutation:* with the new `DEDUPLICATED_OWNERS` entry removed, `test-ci-path-routing.py` exits 1
+   (`#1044 mutation was accepted ... Realtime source policy (tools/realtime-policy)`); restored, it exits 0.
+   Test value: the new cases defend the tool's `audit-native` step and job `if:` being edited off the full
+   route or conditioned, which no other table entry covers.
+5. Shipped artifacts: `libcapi.so` sha256 `0213cd820e2715de...` at the parent (two builds) and at the
+   change. `libcapi.a`: parent `2aa32d808165aef3...` twice (reproducible), change `fd2c8d49063a2f2c...`; 387
+   members, same names and order; 5 members differ raw and 0 differ after
+   `objcopy --remove-section=.llvmbc`. The worklet module, built with
+   `scripts/build-web-audioworklet.sh --module-only`, is `9784d3509dba6bfd...` at the parent and at the change.
+   (The `artifact-identity` job is CI only.)
+6, 7. CI and GitHub: after the batch push (C1's script and its `--check`).

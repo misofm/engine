@@ -15,7 +15,7 @@
 //! sequence counter: the writer makes it odd, stores the fields, makes it even; a reader that sees
 //! an odd counter, or a different counter before and after, retries. There is no `UnsafeCell` and
 //! no `unsafe` block, which matters because this module is inside the realtime root that
-//! `scripts/check-realtime-policy.sh` holds to an approved-unsafe list of exactly two files.
+//! `tools/realtime-policy` holds to its approved-unsafe list.
 //!
 //! Under `wasm32-unknown-unknown` without the `atomics` target feature -- the browser-local
 //! fallback the AudioWorklet ships -- every operation below lowers to a plain load or store (the

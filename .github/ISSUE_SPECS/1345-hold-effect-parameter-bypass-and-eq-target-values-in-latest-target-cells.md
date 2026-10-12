@@ -122,7 +122,7 @@ Superseded values are counted by #1312's `live_values_superseded`.
    (`crates/capi/src/runtime/live_tests.rs:1943`, `:2016`, `:2419`, `:2680`); gate 1 replaces
    them. Rewrite the browser effect-band backpressure assertions the same way.
 7. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`
-   (all violation counts 0); `bash scripts/check-realtime-policy.sh`;
+   (all violation counts 0); `cargo run --locked --release -q -p realtime-policy`;
    `bash scripts/check-effect-contract.sh`; `bash scripts/check-web-audioworklet.sh`; the browser
    legs of `qualification.yml`'s `browser` job.
 8. **Workspace.** `cargo test --locked -p effect-contract`; `cargo test --locked -p

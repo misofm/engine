@@ -29,7 +29,7 @@
 //! counter fences the window. Render is the only writer. A reader that sees an odd counter, or a
 //! different counter before and after its loads, retries, at most [`MAXIMUM_READ_ATTEMPTS`] times,
 //! then reports [`WatermarkBusy`]. There is no `unsafe` here: this module is inside the realtime
-//! root that `scripts/check-realtime-policy.sh` holds to its approved-unsafe list.
+//! root that `tools/realtime-policy` holds to its approved-unsafe list.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::Arc;

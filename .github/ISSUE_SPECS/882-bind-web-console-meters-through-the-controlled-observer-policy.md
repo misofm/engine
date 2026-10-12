@@ -30,7 +30,7 @@ No change to the meter kernel (separate issue), to native hosts, to the master-p
 
 1. New Rust test in `hosts/host-web`: with the lease not held, a rendered block invokes no meter observer (assert through the observation activation snapshot or an observer call counter) and publishes no snapshot.
 2. New Rust test: with the lease held, the sequence of published snapshots for a fixed input is bit-identical to the permanent binding on the same input (run both policies on the same plan and compare every field).
-3. `bash scripts/test-web-audioworklet.sh` passes; `scripts/check-host-core-policy.sh` and `scripts/check-realtime-policy.sh` pass.
+3. `bash scripts/test-web-audioworklet.sh` passes; `scripts/check-host-core-policy.sh` and `tools/realtime-policy` pass.
 4. Browser qualification `npm run qualify -- --artifacts <dir> --sdk-root sdk --browser all --check-matrix --self-test-mutations` passes against the rebuilt artifact (rebuild with `scripts/build-web-audioworklet.sh`, then repin per its REPIN mode and re-record the matrix in a separate checkpoint, as the qualification workflow requires).
 
 ## Dependencies
@@ -41,7 +41,7 @@ None. Pairs with "Keep the route fold eligible when the folded lane is observed"
 
 - Work only from this body. Read the cited functions first; do not survey the workspace.
 - Class A means the change moves no rendered bit: same arithmetic in the same order, fewer passes, loads, stores, copies or branches. Every gate below that says "bit-identical" is a hard stop, not a tolerance.
-- Render paths stay allocation-free, lock-free and syscall-free (`scripts/check-realtime-policy.sh` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
+- Render paths stay allocation-free, lock-free and syscall-free (`tools/realtime-policy` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.

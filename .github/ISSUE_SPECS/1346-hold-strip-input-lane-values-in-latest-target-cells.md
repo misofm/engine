@@ -95,7 +95,7 @@ replaced value. The C ABI's input edits (#1261, #1262) are built on these cells.
    `hosts/host-web/src/tests.rs:8359`) are deleted or rewritten on observation records; gate 1
    replaces them.
 6. **Realtime and workspace.** `cargo build --locked --release -p audit -p capi &&
-   target/release/audit capi` (all violation counts 0); `bash scripts/check-realtime-policy.sh`;
+   target/release/audit capi` (all violation counts 0); `cargo run --locked --release -q -p realtime-policy`;
    `bash scripts/check-web-audioworklet.sh`; `cargo test --locked -p builtins-compiler --features
    test-support`; `cargo test --locked -p builtins --features test-support,lane/test-support`;
    `cargo test --locked -p host-web --features test-support`; `cargo test --locked -p host-core

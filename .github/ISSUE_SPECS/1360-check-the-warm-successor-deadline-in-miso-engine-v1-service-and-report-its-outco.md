@@ -162,7 +162,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 7. Commands:
    - `cargo test --locked -p capi`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
-   - `bash scripts/check-workspace-policy.sh`, `bash scripts/check-realtime-policy.sh`
+   - `bash scripts/check-workspace-policy.sh`, `cargo run --locked --release -q -p realtime-policy`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 
 ## Test value

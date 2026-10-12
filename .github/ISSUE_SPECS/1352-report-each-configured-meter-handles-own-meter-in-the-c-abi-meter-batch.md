@@ -93,7 +93,7 @@ blocks, with honest flags.
    re-pin those wire bytes with this issue as the reason.
 6. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`
    (allocations, deallocations, locks, syscalls and `total_violations` 0);
-   `bash scripts/check-realtime-policy.sh`.
+   `cargo run --locked --release -q -p realtime-policy`.
 7. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p control-plane --features
    test-support`; `cargo test --locked -p host-core --features control-provider,test-support`;
    `bash scripts/check-capi-abi.sh`; `cargo fmt --all -- --check`; `cargo clippy --locked

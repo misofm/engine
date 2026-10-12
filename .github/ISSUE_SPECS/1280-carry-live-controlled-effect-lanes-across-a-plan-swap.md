@@ -154,7 +154,7 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
 7. Commands:
    - `cargo test --locked -p effect-contract -p rack -p graph -p host-core --features rack/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit -p bench && bash scripts/trace-graph-audit.sh target/release/audit && bash scripts/trace-effect-contract-audit.sh target/release/bench`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`,
      `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 

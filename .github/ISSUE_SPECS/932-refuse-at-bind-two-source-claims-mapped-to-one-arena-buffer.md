@@ -13,6 +13,6 @@ No change to the colouring, to #918's or #927's eligibility clauses, or to any r
 ## Objective gates
 
 1. New test: the hand-built two-claims-one-slot plan is refused at bind; every compiled console workload and every graph fixture still binds.
-2. `cargo test -p graph` (both configurations), `-p console-workload`, `-p graph-compiler`; `scripts/check-graph-policy.sh`, `check-realtime-policy.sh`.
+2. `cargo test -p graph` (both configurations), `-p console-workload`, `-p graph-compiler`; `scripts/check-graph-policy.sh`, `tools/realtime-policy`.
 
 Note for the successor: on a compiled builtins-less plan where an unrouted track immediately precedes a routed one in track order, the routed track's Input takes the dead slot and #927's clause (e) declines it (one copy per block); correct, but a lost in-place read worth one line in the evidence.

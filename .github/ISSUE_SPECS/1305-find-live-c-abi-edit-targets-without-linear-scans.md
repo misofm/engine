@@ -158,7 +158,7 @@ transaction; that is out of scope here.
    - `cargo fmt --all -- --check`
    - `cargo clippy --locked -p host-core -p control-plane -p capi -p effect-compiler
      --all-targets --all-features -- -D warnings`
-   - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-realtime-policy.sh`,
+   - `bash scripts/check-host-core-policy.sh`, `cargo run --locked --release -q -p realtime-policy`,
      `bash scripts/check-workspace-policy.sh`
    - `bash scripts/check-capi-abi.sh` (no header change expected).
 7. **Descriptive timing (PR evidence, not a gate, not committed).** Freeze one workload before

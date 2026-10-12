@@ -95,7 +95,7 @@ adopts in move mode at its first ready block too, so it moves the instance the s
 5. Commands:
    - `cargo test --locked -p graph -p host-core --features graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-workspace-policy.sh`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 
 ## Test value

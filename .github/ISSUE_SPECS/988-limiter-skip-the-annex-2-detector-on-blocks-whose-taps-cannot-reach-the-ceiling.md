@@ -173,7 +173,7 @@ Steps:
    * M4: do not update the history on a screened block. Gates 3 and 5 go red.
    * M5: screen during a ramp. Gates 3 and 4 go red.
 8. **Realtime and wasm.**
-   * `tests/allocation.rs`, `bash scripts/check-realtime-policy.sh`, `check-lane-policy.sh`.
+   * `tests/allocation.rs`, `cargo run --locked --release -q -p realtime-policy`, `check-lane-policy.sh`.
    * `bash scripts/check-web-audioworklet.sh`: the roster row "true-peak-limiter f32x4 dual" still
      matches exactly one function, the rule-3 kernel count does not drop, and the render callgraph
      is unchanged.

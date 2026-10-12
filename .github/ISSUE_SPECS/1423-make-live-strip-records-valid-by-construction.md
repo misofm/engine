@@ -134,7 +134,7 @@ moves.
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
    `cargo clippy --locked -p builtins-compiler --all-targets -- -D warnings`;
    `bash scripts/check-builtins-policy.sh`; `bash scripts/check-host-core-policy.sh`;
-   `bash scripts/check-realtime-policy.sh`; `bash scripts/check-workspace-policy.sh`.
+   `cargo run --locked --release -q -p realtime-policy`; `bash scripts/check-workspace-policy.sh`.
 
 *Test value.*
 - Gate 1's test is red if a constructor admits a value the render-side apply refuses, which would

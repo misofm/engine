@@ -193,7 +193,7 @@ widths.
    - `cargo test --locked -p host-core --features host-core/test-support --test warm_successor`
    - `cargo test --locked -p graph --features graph/test-support`, `cargo test --locked -p source`
    - `cargo test --locked -p engine --features realtime-audit`, `cargo test --locked -p capi`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `cargo test --locked -p realtime-policy`,
      `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

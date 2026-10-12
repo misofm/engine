@@ -250,7 +250,7 @@ Fail closed (D2): the policy script run with a `python3` on `PATH` that lacks `t
    manifests: none refused.
 5. **Test value.** Each new or rewritten test in the PR carries its one-sentence answer to "which plausible
    defect turns this red that no existing test catches" in the attempt record.
-6. `bash scripts/check-realtime-policy.sh` and `cargo test --locked -p realtime-policy` unchanged (the tool is
+6. `cargo run --locked --release -q -p realtime-policy` and `cargo test --locked -p realtime-policy` unchanged (the tool is
    untouched except for one doc comment); `cargo fmt --check` and `cargo clippy -p realtime-policy --all-targets
    -- -D warnings` exit 0.
 

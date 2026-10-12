@@ -96,7 +96,7 @@ No rendered bit moves. No allocation, lock or syscall is added on the render pat
    evidence).
 3. `cargo test --locked -p engine --features engine/realtime-audit`, the C ABI tests
    (`cargo test --locked -p capi`), `audit capi` (`allocations 0`, `syscalls 0`, same
-   `pcm_digest`), `bash scripts/check-realtime-policy.sh` (or the tool) and
+   `pcm_digest`), `cargo run --locked --release -q -p realtime-policy` and
    `bash scripts/check-workspace-policy.sh` pass.
 
 *Test value.* Gate 1's test is red when claims between two advances lose or misattribute a

@@ -198,7 +198,7 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
    - `bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,
      `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`,
      `bash scripts/test-web-audioworklet.sh`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-effect-runtime-policy.sh`,
+   - `cargo run --locked --release -q -p realtime-policy`, `bash scripts/check-effect-runtime-policy.sh`,
      `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

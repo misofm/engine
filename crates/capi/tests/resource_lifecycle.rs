@@ -3374,7 +3374,7 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
 // written before the word was named passes -- and the two remaining reserved words (#1243 named
 // `maximum_vcas` after it) still refuse when nonzero. It lives here, not in a file of its own,
 // because this file is the C ABI's approved owner of exported-C `unsafe` calls
-// (`scripts/check-realtime-policy.sh`).
+// (`tools/realtime-policy`).
 
 const SUBMIX_FIXTURE: &str =
     include_str!("../../../fixtures/session/v1/observation-frame-shape.json");

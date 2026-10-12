@@ -23,7 +23,7 @@ No change to settled dispatch, to ramp step arithmetic, to the input section, or
 
 1. New lane test: for random ramps (fader only, matrix only, both, with and without mute, at scalar/`Simd4`/`Simd8`), the fused kernel's output and the lane words after the block are bit-identical to running the three current kernels in sequence.
 2. New builtins test: a bank with one lane ramping renders bit-identically before and after, across the ramp's start, middle, end and the first settled block.
-3. `scripts/check-builtins-fixtures.sh`, `scripts/check-builtins-policy.sh`, `scripts/check-lane-policy.sh`, `scripts/check-realtime-policy.sh` pass.
+3. `scripts/check-builtins-fixtures.sh`, `scripts/check-builtins-policy.sh`, `scripts/check-lane-policy.sh`, `tools/realtime-policy` pass.
 4. One descriptive `console_automation` row before/after, attached.
 
 ## Dependencies
@@ -34,7 +34,7 @@ None.
 
 - Work only from this body. Read the cited functions first; do not survey the workspace.
 - Class A means the change moves no rendered bit: same arithmetic in the same order, fewer passes, loads, stores, copies or branches. Every gate below that says "bit-identical" is a hard stop, not a tolerance.
-- Render paths stay allocation-free, lock-free and syscall-free (`scripts/check-realtime-policy.sh` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
+- Render paths stay allocation-free, lock-free and syscall-free (`tools/realtime-policy` is mandatory). Only `crates/lane` may name `wide` or intrinsics (`scripts/check-lane-policy.sh`).
 - Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, and the focused tests named below before every checkpoint. Commit on a `codex/<issue>-<slug>` branch from synchronized `main`; do not touch paths outside the authorized list.
 - Do not quote a projected saving. If a benchmark row is listed, run it exactly once, one warmup and two measured rounds, and attach the record as descriptive evidence.
 - Source of these findings: `docs/audits/render-path-cost-audit-2026-09-24.md` (PR #879) and tracker #349.
