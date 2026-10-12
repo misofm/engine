@@ -2379,8 +2379,8 @@ struct CellWrite {
 
 /// A live plan with the handle that stamps and publishes its writes.
 struct CellPlan {
+    /// The plan, its handles and the gate handle every transaction below stamps from.
     live: LivePlan,
-    gate: engine::realtime::PlanRevisionGate,
     /// The next revision a transaction stamps.
     next: u64,
 }
@@ -2417,8 +2417,11 @@ impl CellPlan {
             .take_revision_gate()
             .expect("a fresh plan's handle");
         Self {
-            live: LivePlan { prepared, handles },
-            gate,
+            live: LivePlan {
+                prepared,
+                handles,
+                gate,
+            },
             next: 1,
         }
     }
@@ -2462,8 +2465,11 @@ impl CellPlan {
             .expect("the open revision stamps again");
         gate.publish(revision);
         Ok(Self {
-            live: LivePlan { prepared, handles },
-            gate,
+            live: LivePlan {
+                prepared,
+                handles,
+                gate,
+            },
             next: revision + 1,
         })
     }
@@ -2494,7 +2500,7 @@ impl CellPlan {
             return;
         }
         let revision = self.next;
-        let stamp = self.gate.stamp(revision).expect("a legal revision");
+        let stamp = self.live.gate.stamp(revision).expect("a legal revision");
         for (strip, record) in writes {
             let index = self
                 .live
@@ -2509,7 +2515,7 @@ impl CellPlan {
                 CellRecord::Matrix(record) => producer.producer.write(stamp, record),
             }
         }
-        self.gate.publish(revision);
+        self.live.gate.publish(revision);
         self.next = revision + 1;
     }
 
