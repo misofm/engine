@@ -70,6 +70,45 @@ does not list.
   and fails if a recorded name is not in the table (engine worklet entries). The PCM-feed worklet's
   harness in `sdk/test/browser-pcm-evals.mjs` does the same for the feed worklet. A recorded call
   before `miso.ready.v1` is construction and is not checked.
+- **D2 Amendment 1 (root, 2026-10-12; attempt-1 F1).** Root's ruling, verbatim. These are direct
+  written forms, so they are closed, not listed as limits.
+
+  > Under hosts/host-web/src, the tool refuses:
+  > (a) a #[cfg] or #[cfg_attr] attribute on the render_locked import, on each export listed in
+  > render-thread-exports.json, on the wrap call inside it, and on `mod ffi;` and `mod render_lock;`
+  > in lib.rs;
+  > (b) any #[export_name] (unsafe or not) whose value starts with `miso_engine_web_v1_`; every
+  > exported name comes from a listed fn's own identifier;
+  > (c) a #[path] attribute on `mod ffi;` or `mod render_lock;`;
+  > (d) a glob `use` that can bring a `render_locked` name into the ffi module (a `use ...::*` in
+  > ffi.rs or render_lock.rs).
+  > A cfg-split twin and a glob pass-through bypass are refused by these rules. An export or
+  > attribute that a macro expansion assembles from parts is #1438 limit 4.
+
+  Root's ruling on (d)'s scope (2026-10-12), verbatim:
+
+  > (d) refuses a glob `use` (including `pub use` and a glob nested in a grouped tree) that is an
+  > item of ffi.rs's or render_lock.rs's top level, or of any module that holds a listed export or
+  > the render_locked import; globs in other child modules (the five #[cfg(test)] `use super::*;`
+  > lines) are not refused, because they cannot change how a listed export or the import resolves.
+
+  Root added: if the tool does not already require each listed export to be a top-level item of
+  ffi.rs, the "any module that holds a listed export" clause covers a moved export. The tool
+  requires it (a listed export that is not a top-level `#[unsafe(no_mangle)]` function of ffi.rs is
+  `ExportMissing`), so a moved export is `ExportMissing`, and (d) reads the two files' top levels.
+  The measurement and the ruling: on the real tree the five `use super::*;` lines are
+  `ffi.rs:4853`, `ffi.rs:4883`, `ffi.rs:5351`, `ffi.rs:6443` and `render_lock.rs:141`, all in child
+  `#[cfg(test)]` modules; the tool has 0 refusals under (a) to (d) on the real tree.
+
+  *Placement.* The rules live in `tools/realtime-policy/src/web_host.rs` (the module-level forms
+  and `#[export_name]`) and in `render_wrap.rs` (the forms on the import, the exports and the wrap
+  call). Cases are in `tools/realtime-policy/tests/policy/web_host.rs`, one per rule, each built
+  from a verifier reproducer (`/home/bl/misofm/submix-verdicts/evidence/1496-attempt1/`):
+  the cfg-split twin with `export_name` (rules (a) and (b)); the `#[cfg(any())]` import with a glob
+  pass-through (rules (a) and (d)); a `#[path]` on `mod render_lock;` (rule (c)); a glob `use`
+  (rule (d)); and one accepted case, a `use super::*;` inside a child `mod` that holds no listed
+  export. Each case has a one-sentence test value and a mutation in the Attempt 2 record.
+
 - **D4. No product change.** No export, worklet or header changes. If D2 finds an export the table
   lists unwrapped, the slice stops and reports it to root.
 
@@ -80,6 +119,11 @@ does not list.
   check only, by named exception)
 - `sdk/test/browser-pcm-evals.mjs` (stream H's; the feed worklet harness's recording proxy and its
   check only, by named exception)
+- `tools/realtime-policy/Cargo.toml` and the one `Cargo.lock` line it adds: the dependency
+  `serde_json = "=1.0.151"` (the version `crates/session`, `tools/session-validator` and
+  `hosts/host-web` pin), which D1's JSON table needs; ratified by root as a named exception
+- `scripts/test-web-audioworklet.mjs`: the module-scope load of the table, as a minimal named
+  exception (root, 2026-10-12): the load only, its uses stay in `testProcessor`
 - this spec
 
 ## Non-goals
