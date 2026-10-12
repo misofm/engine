@@ -103,8 +103,8 @@ stored automation and VCAs in one `engine.apply` transaction. The bytes equal th
 ## Amendment 1 (root, 2026-10-12)
 
 *Edit control_smoothing by a session transaction, model-only* (#1365) adds opcode
-`SetControlSmoothing` `0x0008`. #1383 and this slice must encode it, or the SDK would cover all but
-one protocol edit. The Context list, D1, D2, the Test value count and the Dependencies carry the
+`SetControlSmoothing` `0x0008`. This slice encodes it (#1383 leaves `0x0001`-`0x0008` to it), or the SDK
+would cover all but one protocol edit. The Context list, D1, D2, the Test value count and the Dependencies carry the
 change above. Three gates are added (each with its own test-value sentence; the numbers A1.1 to
 A1.3 are this amendment's own, so they do not clash with gates 1 to 4 above), and gates 1 and 2
 also include the new method where they name "each method in D1":

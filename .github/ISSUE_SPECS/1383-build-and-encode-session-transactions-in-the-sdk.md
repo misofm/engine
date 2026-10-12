@@ -131,5 +131,4 @@ transaction format.
 
 - *m3, Root ruling (2026-10-12):* the non-goal's opcode range read `0x0001`-`0x0007`, which was stale:
   #1385's Amendment 1 adds `SetControlSmoothing` (`0x0008`) to the opcodes that slice encodes, so the range
-  now reads `0x0001`-`0x0008`. (#1385's Amendment 1 also says #1383 must encode `0x0008`; this spec carries no
-  such amendment. That open question is root's.)
+  now reads `0x0001`-`0x0008`.
