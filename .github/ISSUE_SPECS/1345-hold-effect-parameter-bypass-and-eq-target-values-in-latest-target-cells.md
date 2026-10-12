@@ -323,6 +323,71 @@ control.try_pop() else { break; }; ... } }`. The `.map(Consumer::try_pop)` and
 `live.rs` is the observation drain, `drain_observations`, the cells having replaced the record
 drain; the shape is applied to it, receiver `observe`.)
 
+## Amendment 4 (root, 2026-10-12): the SDK's wait on observation backpressure (attempt-2 M1)
+
+Root's ruling on the attempt-2 verdict's M1 (`submix-verdicts/1345-attempt2.md`, "SDK wait: hang,
+reorder, alternatives"). It supersedes the last paragraph of Amendment 3 ("If bullet 3 is red, the
+fix is SDK-side: on BACKPRESSURE, retry after the applied watermark moves") and Gate 6 (M1)
+bullet 3 as written there.
+
+**D2 Amendment 2 (root, 2026-10-12; attempt-2 M1).**
+- Headless (caller-driven render): no `nextRender` wait. A backpressured managed submit is refused
+  at once with the existing typed MisoEngineError code `backpressure` (commandFailure), which is
+  retryable. The caller renders and retries. Remove `nextRender` from the headless transport.
+- Browser (autonomous render): the managed owner may wait for the next render and resend, ONLY on
+  `backpressure`. The wait is bounded by `requestDeadlineMs`, and at the deadline it ends in the same
+  typed `backpressure` error. It never waits without a bound while the AudioContext does not render.
+- Gate 6 bullet 3, per engine: headless, subscribe then an awaited close with no render gives a typed
+  `backpressure`; a render and a retry then succeed. Browser: it resolves within the deadline, and
+  with the context suspended it ends in typed `backpressure` at the deadline. Each case gets a
+  test-value sentence. Include the exact hang the verifier probed (`await handle.close()` before
+  render) as a case.
+- m1: add a test that turns red if the retry runs on any reason other than `backpressure` (e.g. a
+  MALFORMED refusal must reject at once, with no resend).
+- Fold the NITs from the attempt-2 verdict (stale "command queue" prose at
+  `host-core/src/prepare.rs` and `effect-compiler/src/prepare.rs`; the doc of
+  `a_submission_names_each_observation_tap_once` overclaiming; `round_trip.rs` comment stays as
+  accepted). The `worklet-host.js` "worklet-side queue depth" prose stays with #1524.
+
+**Named exceptions ratified by root (2026-10-12).** Files outside this issue's path lists that the
+attempts touched, now part of its decision record:
+- `sdk/src/headless/engine.ts` and `sdk/src/browser/engine.ts` (the owner's transport seam);
+- `sdk/src/core/writer.ts` (prose) and `sdk/test/writer-evals.mjs` (attempt-1 m10);
+- `tools/console-workload`, `tools/audit` and `tools/parameter-metadata` (prose and attempt-1 m9);
+- `crates/host-core` prose (and `crates/effect-compiler/src/prepare.rs` doc prose);
+- the D15-2 ruling document (the parenthetical naming #1345, #1346 and #1347);
+- attempt 1's `crates/graph-compiler`, `crates/host-core`, ABI-fixture and callgraph-script edits
+  (attempt-1 m13).
+
+**Authorized paths, added.** `sdk/src/browser/engine.ts`, `sdk/src/headless/engine.ts` (above).
+
+**Gate 6 (M1) bullet 3, as built.** Per engine, in `sdk/test/observation-subscription-evals.mjs`:
+- Headless, against the real engine (`createOfflineEngine`): subscribe, then `await handle.close()`
+  with no render rejects at once with `MisoEngineError` code `backpressure`, and nothing is admitted
+  (the handle is open, `pump()` is not "already in flight", the tap stays armed after the next
+  render); a render and the same `close()` resolve and the tap is unarmed after the next render.
+  The same holds for `update()` (the handle keeps its configuration) and for a `subscribe` made
+  while a close's disarm holds the slot.
+- Browser: no browser runs on the development machine, so the real browser entry (`createEngine`)
+  runs over a scripted host that models the effect's one-slot queue (a command is admitted while
+  the slot is free, refused with result `backpressure` / reason `backpressure` while an earlier
+  command holds it, and a render, `renderedQuanta` moving, frees it). With the context rendering
+  within the deadline, the close resolves after the render and the same record is sent again; with
+  the context suspended and `requestDeadlineMs: 80` it rejects with `backpressure` after the
+  deadline, and the engine stops polling the host. The CI browser legs exercise the same owner
+  against the worklet (see Attempt 3, open item 1).
+- m1: a `malformed` refusal on the browser engine rejects at once (`invalidArgument`), with no
+  resend and no wait for a render.
+
+*Test value.*
+- Headless close/update/subscribe: turns red if the headless engine waits for a render (a hang for a
+  caller that awaits before it renders), if a refusal admits part of the submission, or if it leaves
+  the owner busy. No other eval awaits a managed operation on a drained-less slot.
+- Browser wait: turns red if the wait has no bound (a suspended context holds the caller and keeps
+  polling), or if the resend does not follow a render.
+- Browser malformed: turns red if the retry runs on any reason other than `backpressure` (the
+  mutation that drops the reason check left all 367 attempt-2 evals green).
+
 ## Attempt record
 
 ### Attempt 1 (implementer, on `codex/d15-stream-b3`; checkpoints `09190ea55`, `122bdbbc0`, `ba14de159` and the docs commit that follows them)
@@ -646,3 +711,97 @@ path's compressor lane equals one built directly from its shape.
 4. The boot word `live_control_command_queue_records` and host-core's `control_queue_depth` stay
    (frozen ABI offset 32 and an `Option` flag); a successor issue removes the number.
 5. AArch64 rows (four-lane resource figures) and the Playwright legs were not run.
+
+### Attempt 3 (implementer, on `codex/d15-stream-b3`; commits `c7791ea9e`, `bb8827b4c` and the record commit that follows)
+
+Applies Amendment 4 (root's D2 Amendment 2) and the attempt-2 verdict (`submix-verdicts/1345-attempt2.md`).
+
+**M1 (the unbounded wait).**
+- `sdk/src/core/observation-subscriptions.ts`: the transport's `nextRender` is gone. A transport
+  that renders on its own clock may carry `renderWait: { boundMs, next(timeoutMs) }`; one without it
+  (the headless engine) gets the typed refusal thrown at once from `#submit`. With it, the owner
+  waits only on `backpressure`: one deadline of `boundMs` is fixed at the first refusal and spans all
+  resends, each wait is capped by what is left, and a wait that ends without a render (`false`:
+  deadline, or the engine closed) throws the same `commandFailure`, so the caller sees the typed
+  `backpressure` error. The cap of 8 resends stays as a second bound against another writer that
+  refills the slot.
+- `sdk/src/headless/engine.ts`: `#renderWaiters`, `#releaseRenderWaiters` and the transport's
+  `nextRender` are removed; `render()` is `this.#boundary.render(..)` again. `subscribeObservations`
+  states that a refusal is typed, retryable, and that the caller renders and submits again.
+- `sdk/src/browser/engine.ts`: `renderWait.boundMs` is `options.requestDeadlineMs ?? 5_000`.
+  `next(timeoutMs)` polls `host.status().renderedQuanta` every 4 ms, resolves `true` when it moves,
+  `false` at `timeoutMs` or when the engine is closed, rejects if the host rejects, and clears both
+  timers when it settles (a pending `host.status()` that never answers is still cut off by the
+  deadline). The `BrowserEngine.subscribeObservations` doc states the bound.
+- Evals (`sdk/test/observation-subscription-evals.mjs`): the two attempt-2 wait evals (the close that
+  waits, and the dispose-while-waiting eval, whose wait no longer exists) are deleted; five evals
+  replace them (367 -> 370 evals in the headless gate).
+
+**Gate 6 (M1) bullet 3, per engine, and test value.**
+- *Headless, an awaited `close()` before any render* (the verifier's hang): rejects at once with
+  `MisoEngineError` code `backpressure`, the owner is released (`pump()` is not "already in
+  flight"), the tap is still armed after the next render, and a render and a second `close()` leave
+  it unarmed. Test value: red if the headless engine waits for a render that only the caller makes
+  (the hang), if the refused close disarms or half-applies, or if it leaves the owner busy; no other
+  eval awaits a managed operation on an undrained slot.
+- *Headless `update()` and `subscribe`, same slot*: an update before the slot drains is refused
+  typed and the handle keeps its configuration; after a render the same update goes through; a
+  subscribe made while a close's disarm holds the slot is refused typed, and succeeds after the
+  render. Test value: red if a refused update changes the handle's state, or if a refusal for the slot
+  waits.
+- *Browser, context renders within the deadline*: a close whose slot is taken resolves after the
+  render and the same record is sent again (three commands: subscribe, the refused close, the close
+  after the render). Test value: red if the browser owner no longer resends after a render.
+- *Browser, context suspended*: `requestDeadlineMs: 80`, the close rejects `backpressure` after the
+  deadline (not before 70 ms), the host is not polled afterwards, and once the context renders the
+  same close succeeds. Test value: red if the wait is unbounded (a suspended context holds the
+  caller and polls the host for as long as it stays suspended) or leaks its poll.
+- *m1, browser, a `malformed` refusal*: rejects at once with `invalidArgument`, no wait, exactly one
+  refused close and no resend. Test value: red if the retry runs on a reason other than
+  `backpressure` (the mutation was green on all 367 attempt-2 evals).
+- The browser cases run the real browser entry, `createEngine`, over a scripted host that models the
+  effect's one-slot queue; the pattern is the one `spectrum-browser-evals.mjs` and
+  `live-controls-evals.mjs` use. No browser runs on this machine.
+
+**NITs.** `host-core/src/prepare.rs` (two places) and `effect-compiler/src/prepare.rs` name the
+effect's observation queue and the control lane that drains it, not a "command queue";
+`a_submission_names_each_observation_tap_once` says the reason code is what catches an order after
+the room pass, and the fader and armed-tap assertions state the all-or-nothing outcome beside it.
+`round_trip.rs` is unchanged (accepted). `worklet-host.js` stays with #1524.
+
+**Gates (this tree, no browsers, no AArch64).**
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | pass |
+| `test-debug-a` steps as the job runs them (`--workspace --all-targets` with the excludes and features; doctests) | 1,615 passed, 0 failed; doctests 24 |
+| `test-debug-b` steps (DSP crates; doctests; `conformance_fixtures --check`) | 916 passed, 0 failed; doctests 7 |
+| `scripts/check-workspace-policy.sh` | ok |
+| `scripts/check-realtime-policy.sh`, `scripts/test-realtime-policy.sh` | `ok (118 marked regions in 27 files)`, as expected (no region added); mutation tests ok |
+| worklet chain: `build-web-audioworklet.sh --named-twin` (shipped module `c98f68380b79b9a68cf7c216d15f3694943969b33f05551f1f1555a0fa4e44dc`), `strip-wasm-names.py` self-test and check, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`, `test-web-audioworklet.sh` (private TMPDIR left empty), V8 spill self-test and gate | pass (the only Rust edits since attempt 2 are comments and a test doc) |
+| `sdk` job checks in source-bundle mode: `check-sdk-generated`, `check-sdk-deletions`, `check-sdk-types` (both `.d.ts` twins byte-identical, `cmp`), `check-sdk-headless` (370 passed, 0 failed), `sdk-package.sh check`; `sdk/dist` deleted | pass (`npm ci` not repeated: `sdk/node_modules` was present) |
+
+`check-cross-targets.sh` and `audit capi` were not re-run: no engine code moved since attempt 2
+(Rust edits are comments and a test doc).
+
+**Mutation evidence (applied: red; reverted: green).**
+
+| change | red |
+|---|---|
+| headless engine gets a `renderWait` whose `next` never resolves (the attempt-2 wait) | the two headless evals (the awaited close; the update, subscribe and close refusals) |
+| browser `next` loses its deadline timer | the suspended-context eval (the only red) |
+| `#submit` retries on any refusal (drops `reasonName !== "backpressure"`) | the browser malformed eval (the only red) |
+
+**Open items for root.**
+1. Browser leg. The scripted-host eval stands in for a browser here. The CI `browser` legs
+   (`hosts/host-web/qualification/sdk-response-entry.ts`, resident-observation case) should gain the
+   case against the real worklet: subscribe, then `await close()` on a context that is not rendering,
+   with a small `requestDeadlineMs`, ends in typed `backpressure`; after the context renders the same
+   close resolves. I read the existing resident-observation flow: it makes no same-tap operation
+   after a non-rendering gap (its `OfflineAudioContext` renders once, at `startRendering()`), so the
+   new bound does not change it. I did not add the case: the qualification entry is outside this
+   issue's paths and cannot run here.
+2. `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` ("the worklet-side queue depth") stays
+   with #1524.
+3. Attempt 2's open items 2 (STREAMS' "Watermark bound on `main` today"), 4 (the boot word and
+   `control_queue_depth` remain) and 5 (AArch64 rows; Playwright legs not run) stand.
