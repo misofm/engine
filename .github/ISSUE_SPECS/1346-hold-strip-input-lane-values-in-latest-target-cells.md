@@ -361,10 +361,30 @@ refusal and its "queue drain" no longer exist. The defect it defended, a pair ac
 half, cannot happen in a cell: both channel cells are written under the batch's one stamp after
 every check, and a render applies the pair whole or not at all. That is held by host-web
 `prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches` (a refused batch writes
-neither cell) and by builtins-compiler `the_input_witness_folds_from_the_final_cell_contents`
-(`paired_channels` collapses equal words into one `Both` record). I looked for a defect only an
-SDK-level rewrite would catch (the SDK lowering a `both` filter record to one channel's cell) and
+neither cell; it is also the only test that turns red when a write lands only the first
+prepared-filter target of a pair). I looked for a defect only an SDK-level rewrite would catch (the SDK lowering a `both` filter record to one channel's cell) and
 found none: the eval observed acknowledgements, not cells, and a rewrite on the cell path would
 need a render and a bit comparison, which the host-web twin tests already make. The other SDK
 evals that set `commandQueueRecords` (the bounded-queue writer evals run on EQ parameter records,
 an effect lane) are unaffected. `compressorDocument` stays: the raw queue-cost probe still uses it.
+
+### Follow-ups 2 (Sonnet 5.5, on `codex/d15-stream-b3`; #1347 attempt 2 verdict, section on `51d6ba7a9`)
+
+**NIT: the note above named a test that does not hold the pair whole.** It named builtins-compiler
+`the_input_witness_folds_from_the_final_cell_contents` as keeping a filter pair whole. That test
+defends the `Both` fold (`paired_channels` collapsing equal words into one record); the verdict
+measured it green when half the pair is dropped. The note now names only host-web
+`prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches` for the writer side: it is the
+only test that turns red when the host writes just the first prepared-filter target of a pair (the
+verdict's MP1), and it also turns red when cells are written before the room pass. The render side
+(a render that never reads the right channel's filter cells, the verdict's MP2) is caught by six
+other tests: builtins-compiler `input_cells_drain_in_the_canonical_order_whatever_the_write_order`,
+`many_input_edits_before_one_block_...` and `the_per_node_live_control_input_processor_drains_and_folds_its_witness`;
+host-web `many_input_edits_before_one_render_...` and the two `a_collapsed_chain_renders_the_forced_dual_bits_*` tests.
+The m3 paragraph above is unchanged: it concerns `paired_channels` without `left == right`, which
+the witness test does catch.
+
+**STREAMS hot-file rows (root ratified).** `docs/handoffs/decision-15-2026-10-05/STREAMS.md` now
+names #1346 in the rows for `crates/graph/src/{lib,runtime}.rs` (the `live_lanes` forward),
+`crates/graph-compiler/src/*` (`lib.rs` test literals for the removed `queue_capacity`) and
+`crates/host-core/src/prepare.rs`.
