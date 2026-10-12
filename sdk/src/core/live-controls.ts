@@ -11,6 +11,7 @@ import type { CommandReport, SessionMap } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
+import { checkedRampLength } from "./writer.ts";
 import type { LaneEdit } from "./writer.ts";
 
 /**
@@ -24,15 +25,6 @@ import type { LaneEdit } from "./writer.ts";
  */
 export type LiveControlRack = "console" | "inserts";
 export type LiveControlChannel = "left" | "right" | "both";
-
-/**
- * The `smoothingSamples` word of a command record that means "no length given" (`u32::MAX`).
- *
- * A ramped edit built without `smoothingSamples` carries this word, and the engine replaces it
- * with the session's own length for that edit's row: the session's `controlSmoothing` keys, or the
- * default table (decision 15 D15-1). It is not a length, so it is never accepted as one.
- */
-export const SESSION_DEFAULT_RAMP = 0xffff_ffff;
 
 export interface SmoothingOptions {
   /**
@@ -311,18 +303,13 @@ function u32(value: number, name: string): number {
 }
 
 /**
- * The ramp word of a ramped edit: the session default when no length is given (D1, D3 of #1364),
- * else the given length. `u32::MAX` is the sentinel, never a length.
+ * The ramp length of a ramped edit as the builder records it: the given length, checked, or
+ * `undefined` when none was given (D1, D3 of #1364). An absent length is resolved to the
+ * session-default word where the edit is encoded (`laneEditSmoothingWord` in the writer module),
+ * for a hand-written `LaneEdit` as well as for this builder's, so the two cannot disagree.
  */
-function smoothing(options: SmoothingOptions): number {
-  if (options.smoothingSamples === undefined) return SESSION_DEFAULT_RAMP;
-  const samples = u32(options.smoothingSamples, "smoothingSamples");
-  if (samples === SESSION_DEFAULT_RAMP) {
-    throw new MisoUsageError(
-      "smoothingSamples must be a u32 below 4294967295: 4294967295 is the session-default marker, not a length",
-    );
-  }
-  return samples;
+function smoothing(options: SmoothingOptions): number | undefined {
+  return checkedRampLength(options.smoothingSamples);
 }
 
 type RuntimeParameterOptions = {
@@ -428,7 +415,7 @@ function trackEdit(
     readonly channel?: number;
     readonly effectIndex?: number;
     readonly parameterId?: number;
-    readonly smoothingSamples?: number;
+    readonly smoothingSamples?: number | undefined;
     readonly values?: readonly [number, number, number, number];
   } = {},
 ): LaneEdit {
@@ -439,7 +426,9 @@ function trackEdit(
     channel: options.channel ?? NONE,
     effectIndex: options.effectIndex ?? 0,
     parameterId: options.parameterId ?? 0,
-    smoothingSamples: options.smoothingSamples ?? 0,
+    // Left absent when none was given: the encoder writes 0 for a kind that carries no ramp and
+    // the session-default word for a ramped one.
+    smoothingSamples: options.smoothingSamples,
     values: options.values ?? values(),
   });
 }

@@ -6,6 +6,7 @@ import { before, describe, test } from "node:test";
 import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
 import { EngineLiveControls, LiveControlEdits } from "../src/core/live-controls.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
+import { encodeLaneEdits, LiveControlWriter } from "../src/core/writer.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
@@ -1022,20 +1023,21 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
     };
   }
 
-  /** The `u32` at the record's `smoothingSamples` offset, as the browser transport writes it. */
+  /** The `u32` at the record's `smoothingSamples` offset, as the SDK's record encoder writes it. */
   function wireWord(edit) {
     const layout = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples");
     assert.equal(layout.offset, 16, "the ramp word sits at offset 16 of the 48-byte record");
-    return new DataView(encodeBrowserCommands([edit]).buffer).getUint32(layout.offset, true);
+    return new DataView(encodeLaneEdits([edit]).buffer).getUint32(layout.offset, true);
   }
 
   test("every ramped builder method writes the session-default marker when no length is given, and the given length otherwise", () => {
-    // Red if any method's default is still 0 (a step), if the marker is not 0xFFFFFFFF, or if a
+    // Red if any method's default is still 0 (a step), if the marker is not 0xFFFFFFFF, if a method
+    // resolves the word itself instead of leaving it to the encoder, or if a
     // given length -- 0 included -- is replaced.
     const absent = rampedEdits({});
     assert.equal(Object.keys(absent).length, 13, "the twelve ramped kinds, and the submix strip fader");
     for (const [name, edit] of Object.entries(absent)) {
-      assert.equal(edit.smoothingSamples, MARKER, `${name} record`);
+      assert.equal(edit.smoothingSamples, undefined, `${name} record leaves the length absent`);
       assert.equal(wireWord(edit), MARKER, `${name} wire`);
     }
     for (const given of [0, 37, MARKER - 1]) {
@@ -1091,6 +1093,87 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
       for (const bad of [-1, 1.5, 4_294_967_296, Number.NaN]) {
         assert.throws(() => attempt({ smoothingSamples: bad }), /smoothingSamples must be a u32/, `${name} ${bad}`);
       }
+    }
+  });
+
+  /** A literal `LaneEdit` (a plain object, as an app writes one), with no `smoothingSamples`. */
+  function literal(kind, extra = {}) {
+    return {
+      kind,
+      trackIndex: 0,
+      rack: 255,
+      channel: 2,
+      values: [0, 0, 0, 0],
+      ...extra,
+    };
+  }
+  const RAMPED_KINDS = [
+    "pan", "matrix", "faderDb", "mute", "solo", "trimDb", "polarityInvert",
+    "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
+  ];
+  const UNRAMPED_KINDS = ["effectBypass", "inputFilters", "observeSubscribe", "observeUnsubscribe"];
+
+  test("a literal LaneEdit without a length encodes the marker through the writer's encoder, by kind", () => {
+    // Red if `encodeLaneEdits` writes `smoothingSamples ?? 0` again (a step on a literal edit, the
+    // path `LiveControlWriter` and the headless engine take): the builder evals above never reach it.
+    const at = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples").offset;
+    const word = (edit) => new DataView(encodeLaneEdits([edit]).buffer).getUint32(at, true);
+    for (const kind of RAMPED_KINDS) {
+      assert.equal(word(literal(kind)), MARKER, `${kind} absent`);
+      assert.equal(word(literal(kind, { smoothingSamples: 0 })), 0, `${kind} explicit 0 is a step`);
+      assert.equal(word(literal(kind, { smoothingSamples: 37 })), 37, `${kind} explicit 37`);
+      assert.throws(
+        () => encodeLaneEdits([literal(kind, { smoothingSamples: MARKER })]),
+        (error) => error instanceof MisoUsageError && /session-default marker/.test(error.message),
+        `${kind} explicit marker`,
+      );
+    }
+    for (const kind of UNRAMPED_KINDS) {
+      assert.equal(word(literal(kind)), 0, `${kind} absent stays 0`);
+    }
+    // The writer refuses the marker when the edit is staged, so it never poisons a later flush.
+    const writer = new LiveControlWriter({ submit: () => ({ ok: true }) });
+    assert.throws(() => writer.stage(literal("faderDb", { smoothingSamples: MARKER })), MisoUsageError);
+    assert.equal(writer.pending, 0);
+  });
+
+  test("a literal LaneEdit without a length reaches the worklet host with the marker, by kind", async () => {
+    // Red if the browser transport writes `smoothingSamples ?? 0` again: a literal fader edit sent
+    // to the worklet would then step under every session table.
+    let request;
+    const host = {
+      async sessionMap() {
+        return {
+          tag: "miso.sessionmap.v1", requestId: 1, result: 0, tracks: ["t"], sources: [],
+          metersAttached: false, submixes: [], routes: [], vcas: [],
+        };
+      },
+      async command(value) {
+        request = value;
+        return {
+          tag: "miso.ack.v1", requestId: 2, result: 0, reason: 0, rejectedIndex: 0,
+          admitted: value.commands.length, appliedAtSample: 0n,
+          records: new Uint8Array(value.commands.length * 48),
+        };
+      },
+    };
+    const controls = await createBrowserLiveControls(host);
+    await controls.submit(controls.edit.track("t").faderDb(-3));
+    assert.equal(request.commands[0].smoothingSamples, MARKER, "a builder edit agrees with a literal one");
+    for (const kind of RAMPED_KINDS) {
+      await controls.submit(literal(kind));
+      assert.equal(request.commands[0].smoothingSamples, MARKER, `${kind} absent`);
+      await controls.submit(literal(kind, { smoothingSamples: 0 }));
+      assert.equal(request.commands[0].smoothingSamples, 0, `${kind} explicit 0`);
+      await assert.rejects(
+        controls.submit(literal(kind, { smoothingSamples: MARKER })),
+        (error) => error instanceof MisoUsageError && /session-default marker/.test(error.message),
+        `${kind} explicit marker`,
+      );
+    }
+    for (const kind of UNRAMPED_KINDS) {
+      await controls.submit(literal(kind));
+      assert.equal(request.commands[0].smoothingSamples, 0, `${kind} absent stays 0`);
     }
   });
 

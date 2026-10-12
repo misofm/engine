@@ -247,3 +247,18 @@ intended files); the full suites below ran after the last revert.
   slice does not touch. AArch64 runs only in CI.
 
 **Open items.** None for this slice. The browser has no transaction API for the edit (non-goal; #1309).
+
+## Amendment 1 (root, 2026-10-12)
+
+Stream E2 asked whether host-web's cached ramp table must be refreshed when this edit lands. The
+table is `SessionRamps` (`LiveRamps::for_session` plus one pan window per strip), built once in
+`compile_ready` by #1364. Today the answer is no, and no code is added: the browser cannot commit a
+`control_smoothing` change, or a change to a strip's model `smoothing_samples`, without a new boot.
+`compile_ready` has one caller, `boot` (`hosts/host-web/src/lib.rs:2274`); host-web holds the
+`SessionModel` only inside that call; and none of its entry points edits a model, because the browser
+has no session transaction and no committed model (this spec's non-goal; #1309). A new boot builds a
+fresh `SessionRamps`. The issue that adds the first browser path to commit a model-only edit is
+*Admit browser live edits in the Worker through the committed model* (#1382, after #1309). It must
+drop `SessionRamps` (the classifier resolves an absent length with `LiveRamps::resolve` over the
+committed model, #1394 D5) or refresh it on every model-only commit, and it must add a test that goes
+red without that. Until then a cached table cannot go stale.

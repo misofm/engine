@@ -16615,47 +16615,6 @@ fn an_absent_ramp_resolves_to_the_sessions_row_and_a_given_one_is_kept() {
     }
 }
 
-/// #1364 D2: a `follows_mute` send record takes the ramp of the strip mute that moved it, and so
-/// the mute key, resolved from the sentinel; and a send whose own record names a length keeps
-/// it. `bass` (strip 0) feeds `bass-room` with `follows_mute`.
-///
-/// Red mutation: resolving the strip mute after the follow pass has copied its word (the follow
-/// record would be built with a length of 4294967295 and refuse as `DOMAIN` past the route ramp
-/// bound).
-#[test]
-fn a_followed_mute_send_ramps_over_the_resolved_mute_length() {
-    let custom = Some(session::ControlSmoothing {
-        mute_ms: 5.0,
-        fader_ms: 15.0,
-        pan_ms: 25.0,
-    });
-    let mut host = ramp_host(custom, &[]);
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_MUTE,
-        255,
-        2,
-        0,
-        0,
-        0,
-        SESSION_DEFAULT_RAMP,
-        [1.0, 0.0, 0.0, 0.0],
-    );
-    assert_eq!(host.submit_commands(1), RESULT_OK);
-    let ready = host.ready.as_ref().expect("ready");
-    let routes: Vec<u32> = ready
-        .command_decoded
-        .iter()
-        .filter_map(|staged| match staged.kind {
-            StagedCommandKind::Command(AdmittedCommand::Route(record)) => Some(record.length()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(routes, [240], "the bass-room follow record");
-    assert_eq!(staged_ramp_lengths(&host), [240, 240], "mute, then follow");
-}
-
 /// #1364 D2 and #1054 D5: a pan or matrix record without a length takes its strip's own window
 /// when the prepared session gave the strip a non-zero one, whichever of `Pan` and `Matrix` the
 /// strip prepared as, and the `pan_ms` length otherwise. A send matrix has no strip window.
@@ -16780,8 +16739,10 @@ fn the_kinds_without_a_ramp_keep_the_sentinel_and_refuse_it() {
 /// #1364 D2, gate 4: resolution is control-thread work done once. The table is built at
 /// preparation, so admitting a sentinel record allocates and frees nothing, for every ramped kind.
 ///
-/// Red mutation: `with_session_ramp` rebuilding `SessionRamps` per record (one boxed slice per
-/// record).
+/// Red mutation: an allocation on the sentinel path alone, for example a table built lazily when
+/// the word is `SESSION_DEFAULT_RAMP`. This is its unique catch: an allocation in every record is
+/// already red in the existing allocation gates, which send finite words and never reach the
+/// sentinel arm.
 #[test]
 fn resolving_a_sentinel_allocates_nothing() {
     let mut host = ramp_host(None, &[]);

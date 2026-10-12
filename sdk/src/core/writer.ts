@@ -55,8 +55,65 @@ export interface LaneEdit {
   /** A console slot's index in the session's slot order, or an insert's index on its track. */
   readonly effectIndex?: number;
   readonly parameterId?: number;
-  readonly smoothingSamples?: number;
+  /**
+   * The edit's ramp length in samples, or the length the kind reads as its word.
+   *
+   * Omitted, a ramped kind (`pan`, `matrix`, `faderDb`, `mute`, `solo`, `trimDb`,
+   * `polarityInvert`, the three route kinds, `vcaFaderDb`, `vcaMute`) ramps over the session's
+   * own length for that kind (`controlSmoothing`, or the default table at the session's sample
+   * rate): the encoders write {@link SESSION_DEFAULT_RAMP} and the engine resolves it. An
+   * explicit value overrides it and `0` is a hard step. `4294967295` is refused with a
+   * `MisoUsageError`: it is {@link SESSION_DEFAULT_RAMP}, not a length. Every other kind (bypass,
+   * input filters, effect parameters, observation) has no session ramp: omitted, its word is `0`,
+   * and an explicit value is carried as given.
+   */
+  readonly smoothingSamples?: number | undefined;
   readonly values: readonly [number, number, number, number];
+}
+
+/**
+ * The `smoothingSamples` word of a command record that means "no length given" (`u32::MAX`).
+ *
+ * A ramped edit built without `smoothingSamples` carries this word, and the engine replaces it
+ * with the session's own length for that edit's row: the session's `controlSmoothing` keys, or the
+ * default table (decision 15 D15-1). It is not a length, so it is never accepted as one.
+ */
+export const SESSION_DEFAULT_RAMP = 0xffff_ffff;
+
+const RAMPED_KINDS: ReadonlySet<CommandKindName> = new Set<CommandKindName>([
+  "pan", "matrix", "faderDb", "mute", "solo", "trimDb", "polarityInvert",
+  "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
+]);
+
+/**
+ * Check an explicit ramp length and pass an absent one through. `u32::MAX` is the marker, never a
+ * length, and a non-`u32` is no length either: both throw a `MisoUsageError`. The builders call
+ * this once per edit and leave an absent length absent; the encoders resolve it by kind
+ * ({@link laneEditSmoothingWord}), so there is one place an absent length becomes a word.
+ */
+export function checkedRampLength(samples: number | undefined): number | undefined {
+  if (samples === undefined) return undefined;
+  if (!Number.isSafeInteger(samples) || samples < 0 || samples > 0xffff_ffff) {
+    throw new MisoUsageError("smoothingSamples must be a u32");
+  }
+  if (samples === SESSION_DEFAULT_RAMP) {
+    throw new MisoUsageError(
+      "smoothingSamples must be a u32 below 4294967295: 4294967295 is the session-default marker, not a length",
+    );
+  }
+  return samples;
+}
+
+/**
+ * The `smoothingSamples` word a literal {@link LaneEdit} puts on the wire, by its kind: the
+ * ramped kinds resolve an absent length to the session default; every other kind writes `0`.
+ * The one rule behind `encodeLaneEdits` and the browser transport.
+ */
+export function laneEditSmoothingWord(edit: LaneEdit): number {
+  if (RAMPED_KINDS.has(edit.kind)) {
+    return checkedRampLength(edit.smoothingSamples) ?? SESSION_DEFAULT_RAMP;
+  }
+  return edit.smoothingSamples ?? 0;
 }
 
 export interface FlushOutcome {
@@ -159,7 +216,7 @@ export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
     view.setUint32(base + offsetOf("trackIndex"), edit.trackIndex, true);
     view.setUint32(base + offsetOf("effectIndex"), edit.effectIndex ?? 0, true);
     view.setUint32(base + offsetOf("parameterId"), edit.parameterId ?? 0, true);
-    view.setUint32(base + offsetOf("smoothingSamples"), edit.smoothingSamples ?? 0, true);
+    view.setUint32(base + offsetOf("smoothingSamples"), laneEditSmoothingWord(edit), true);
     const values = offsetOf("values");
     edit.values.forEach((value, slot) => {
       view.setFloat32(base + values + slot * 4, value, true);
@@ -215,9 +272,13 @@ export class LiveControlWriter {
    * Stage one edit, superseding any pending edit for the same address.
    *
    * This is where a drag stops being a backlog: a hundred intermediate positions of one fader
-   * collapse to one pending record, and the one that survives is the latest.
+   * collapse to one pending record, and the one that survives is the latest. An edit whose
+   * `smoothingSamples` is not a length (`4294967295`, or not a `u32`) throws a `MisoUsageError`.
    */
   stage(edit: LaneEdit): void {
+    // A ramp length the encoder would refuse is refused here, so it never sits in the pending map
+    // and fails every later flush.
+    laneEditSmoothingWord(edit);
     const key = coalescingKey(edit);
     if (this.#pending.has(key)) this.#coalesced += 1;
     // Delete before set so a superseded edit also moves to the back of the insertion order: the
