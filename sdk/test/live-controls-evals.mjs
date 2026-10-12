@@ -1191,6 +1191,29 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
     }
   });
 
+  test("a literal LaneEdit of an unramped kind with a non-u32 length is refused, as the browser refuses it", () => {
+    // Red if `laneEditSmoothingWord` passes an unramped kind's word through unchecked again: the
+    // headless `DataView.setUint32` would then wrap `-1` to `0xFFFFFFFF` and truncate `1.5` to `1`,
+    // so a headless `observeSubscribe` silently got a 1-block window the browser refuses.
+    const at = ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "smoothingSamples").offset;
+    const word = (edit) => new DataView(encodeLaneEdits([edit]).buffer).getUint32(at, true);
+    for (const kind of UNRAMPED_KINDS) {
+      for (const bad of [-1, 1.5, 0x1_0000_0000, Number.NaN, Number.POSITIVE_INFINITY]) {
+        assert.throws(
+          () => encodeLaneEdits([literal(kind, { smoothingSamples: bad })]),
+          (error) => error instanceof MisoUsageError && /must be a u32/.test(error.message),
+          `${kind} ${bad}`,
+        );
+      }
+      // Every u32 stays a valid word on an unramped kind, the marker's bit pattern included.
+      assert.equal(word(literal(kind, { smoothingSamples: 5 })), 5, `${kind} 5`);
+      assert.equal(word(literal(kind, { smoothingSamples: MARKER })), MARKER, `${kind} u32 max`);
+    }
+    const writer = new LiveControlWriter({ submit: () => ({ ok: true }) });
+    assert.throws(() => writer.stage(literal("observeSubscribe", { smoothingSamples: 1.5 })), MisoUsageError);
+    assert.equal(writer.pending, 0);
+  });
+
   /** The one-track document with `control_smoothing` and a constant fader of `faderDb`. */
   function documentWith(controlSmoothing, faderDb = 0) {
     const document = JSON.parse(sessionDocument({ frames: 128 * 24 }));

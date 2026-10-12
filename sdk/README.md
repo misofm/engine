@@ -216,13 +216,14 @@ export async function adjustVocal(controls: EngineLiveControls) {
 An edit that gives no `smoothingSamples` ramps over the session's length for that kind of edit
 (its `controlSmoothing`, or the default table), so a drag never steps by omission. An explicit
 `smoothingSamples` overrides it for that edit, and `smoothingSamples: 0` is a hard step. In the
-example above the fader moves over 64 samples while the other edits take the session's lengths.
+example above the fader moves over 64 samples; the parameter edit and the bypass carry no session
+ramp (the parameter edit writes the length it is given, or `0`, and the bypass always writes `0`).
 A hand-written `LaneEdit` (a plain object passed to `submit`) follows the same rule: the encoder
 resolves an absent `smoothingSamples` by the edit's kind, so a fader, mute, pan, matrix, solo, trim,
 polarity, route or VCA edit ramps over the session's length, while bypass, input-filter,
 effect-parameter and observation edits carry no session ramp and keep an absent value as `0`.
-`4294967295` is the engine's session-default marker, not a length, and is refused with a
-`MisoUsageError`.
+`4294967295` is the engine's session-default marker, not a length, and a ramped kind refuses it
+with a `MisoUsageError`; the encoder does not check an unramped kind's word against the marker.
 
 `controls.edit.submix(id)` addresses a submix strip (a bus) the same way, with every edit a track
 offers except `solo` (a bus is solo-safe), and `controls.edit.strip(id)` resolves either kind by

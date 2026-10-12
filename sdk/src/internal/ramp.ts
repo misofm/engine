@@ -31,15 +31,19 @@ const RAMPED_KINDS: ReadonlySet<CommandKindName> = new Set<CommandKindName>([
  */
 export function checkedRampLength(samples: number | undefined): number | undefined {
   if (samples === undefined) return undefined;
-  if (!Number.isSafeInteger(samples) || samples < 0 || samples > 0xffff_ffff) {
-    throw new MisoUsageError("smoothingSamples must be a u32");
-  }
+  requireU32(samples);
   if (samples === SESSION_DEFAULT_RAMP) {
     throw new MisoUsageError(
       "smoothingSamples must be a u32 below 4294967295: 4294967295 is the session-default marker, not a length",
     );
   }
   return samples;
+}
+
+function requireU32(samples: number): void {
+  if (!Number.isSafeInteger(samples) || samples < 0 || samples > 0xffff_ffff) {
+    throw new MisoUsageError("smoothingSamples must be a u32");
+  }
 }
 
 /**
@@ -51,5 +55,10 @@ export function laneEditSmoothingWord(edit: LaneEdit): number {
   if (RAMPED_KINDS.has(edit.kind)) {
     return checkedRampLength(edit.smoothingSamples) ?? SESSION_DEFAULT_RAMP;
   }
-  return edit.smoothingSamples ?? 0;
+  // An unramped kind's word is a window, a parameter ramp or `0`: any `u32`, `4294967295`
+  // included (the engine judges it). A non-`u32` is refused here, as the browser
+  // host refuses it, so `DataView.setUint32` never wraps `-1` or truncates `1.5` on the headless path.
+  const samples = edit.smoothingSamples ?? 0;
+  requireU32(samples);
+  return samples;
 }

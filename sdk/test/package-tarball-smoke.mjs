@@ -59,6 +59,14 @@ for (const [subpath, module] of Object.entries(imported)) {
     false,
     `${subpath} must not expose the internal serializer test hook`,
   );
+  // The encoder's ramp rules and the builder's shared validators live in `src/internal/` and are
+  // not API on any subpath (only `SESSION_DEFAULT_RAMP` is public, through the writer module).
+  for (const internal of [
+    "checkedRampLength", "laneEditSmoothingWord", "normalizeControlSmoothing",
+    "knownKeys", "nameList",
+  ]) {
+    assert.equal(internal in module, false, `${subpath} must not expose the internal ${internal}`);
+  }
 }
 for (const assetUrl of Object.values(imported["./assets"].BUNDLED_ENGINE_ASSETS)) {
   await readFile(assetUrl);

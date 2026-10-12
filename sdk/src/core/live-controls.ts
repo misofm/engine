@@ -126,9 +126,11 @@ export type LiveControlSubmit = (
 /**
  * Optional owner hook used to serialize observation edits with managed subscriptions.
  *
- * The hook sees the edits as the builders made them. A builder edit given no explicit
+ * The hook sees the edits as the builders made them. A ramped-kind builder edit given no explicit
  * `smoothingSamples` shows `smoothingSamples` as `undefined`: the encoder resolves the absent
- * length (the session's ramp for a ramped kind, `0` for the others), not the builder.
+ * length (the session's ramp for a ramped kind, `0` for the others), not the builder. A bypass or
+ * input-filter edit also shows `undefined` and encodes `0`. An effect-parameter edit shows the
+ * length it was given, or `0`, and an observation edit shows its window.
  */
 export type LiveControlBeforeSubmit = (
   edits: readonly LaneEdit[],
@@ -311,7 +313,7 @@ function u32(value: number, name: string): number {
 /**
  * The ramp length of a ramped edit as the builder records it: the given length, checked, or
  * `undefined` when none was given (D1, D3 of #1364). An absent length is resolved to the
- * session-default word where the edit is encoded (`laneEditSmoothingWord` in the writer module),
+ * session-default word where the edit is encoded (`laneEditSmoothingWord` in `src/internal/ramp.ts`),
  * for a hand-written `LaneEdit` as well as for this builder's, so the two cannot disagree.
  */
 function smoothing(options: SmoothingOptions): number | undefined {

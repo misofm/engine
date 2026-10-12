@@ -1,6 +1,8 @@
 import { CATALOG } from "../generated/catalog.ts";
 import type { BuiltinParameter, EffectDescriptor, EffectId } from "../generated/catalog.ts";
 import { MisoUsageError } from "./errors.ts";
+import { normalizeControlSmoothing } from "../internal/control-smoothing.ts";
+import { CODE, f32, fail, freeze, knownKeys, nameList } from "../internal/validation.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type {
   AutomationSpec,
@@ -225,47 +227,6 @@ export const EFFECT_LINK_MODES: Readonly<Record<EffectId, readonly LinkMode[]>> 
   "miso.true-peak-limiter": Object.freeze(["dual_mono", "maximum"] as const),
 });
 
-/** The engine's diagnostic codes for the refusals the builder makes in front of it. */
-const CODE = Object.freeze({
-  unknownField: "schema.unknown_field",
-  invalidEnum: "schema.invalid_enum",
-  invalidId: "id.invalid",
-  duplicateId: "id.duplicate",
-  missingEntity: "reference.missing_entity",
-  entryOrder: "console.entry_order",
-  entryMissing: "console.entry_missing",
-  ineligibleEffect: "console.slot.ineligible_effect",
-  wrongType: "schema.wrong_type",
-  qualityUnsupported: "effect.quality.unsupported",
-  linkModeUnsupported: "effect.link_mode.unsupported",
-  outOfRange: "numeric.out_of_schema_range",
-} as const);
-
-function fail(path: string, message: string, code?: string): never {
-  throw new MisoUsageError(`${path}: ${message}`, code);
-}
-
-/** Refuse any own key outside `allowed`, as the engine refuses an unknown member. */
-function knownKeys(value: object, allowed: ReadonlySet<string>, path: string, what: string): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) {
-      fail(
-        `${path}.${key}`,
-        `${what} has no '${key}'; its keys are ${nameList([...allowed])}`,
-        CODE.unknownField,
-      );
-    }
-  }
-}
-
-function freeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const child of Object.values(value as Record<string, unknown>)) freeze(child);
-  }
-  return value;
-}
-
 function asciiCompare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -332,20 +293,6 @@ function linkMode(effectId: EffectId, value: unknown, path: string): LinkMode {
 }
 
 /**
- * Round a caller's `f64` to the `f32` the document will actually carry.
- *
- * The rounding happens here rather than at emit time so that `toJSON()` reports the value the
- * engine will see. A gate that compared unrounded inputs would call two sessions equal that render
- * differently, and one that compared the *text* would be comparing the speller.
- */
-function f32(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) fail(path, "expected a finite number");
-  const rounded = Math.fround(value);
-  if (!Number.isFinite(rounded)) fail(path, "value is outside the finite f32 domain");
-  return rounded;
-}
-
-/**
  * A route's gain domain in dB, inclusive: a copy of the engine's `session::ROUTE_GAIN_DB_MINIMUM`
  * and `ROUTE_GAIN_DB_MAXIMUM` (issue #1237 D1), held to the engine by `sdk/test/builder-evals.mjs`.
  */
@@ -395,13 +342,6 @@ function effectDescriptor(effectId: string, path: string): EffectDescriptor {
   const found = CATALOG.effects.find((candidate) => candidate.id === effectId);
   if (found === undefined) fail(path, `unknown native effect '${effectId}'`);
   return found;
-}
-
-/** `'a', 'b' and 'c'` -- the candidate list a refusal quotes back. */
-function nameList(names: readonly string[]): string {
-  const quoted = names.map((name) => `'${name}'`);
-  if (quoted.length <= 1) return quoted.join("");
-  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
 }
 
 /**
@@ -1040,44 +980,6 @@ export class SessionBuilder {
   }
 }
 
-/** The inclusive upper bound of each `control_smoothing` length, a copy of the engine's
- * `session::CONTROL_SMOOTHING_MS_MAXIMUM` (#1054 D1), held to it by the builder evals. */
-const CONTROL_SMOOTHING_MS_MAXIMUM = 1000;
-const CONTROL_SMOOTHING_KEYS: ReadonlyMap<string, string> = new Map([
-  ["muteMs", "mute_ms"],
-  ["faderMs", "fader_ms"],
-  ["panMs", "pan_ms"],
-]);
-
-/**
- * The `control_smoothing` record for the options' `controlSmoothing`: `{ kind: "default" }` when
- * omitted, else `explicit` with each length a finite `f32` in `[0, 1000]` ms. A missing, unknown or
- * out-of-range key is refused at `session().controlSmoothing`, under the engine's own codes.
- */
-function normalizeControlSmoothing(value: unknown): ModelRecord {
-  if (value === undefined) return freeze({ kind: "default" });
-  const path = "session().controlSmoothing";
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    fail(path, "expected an object with muteMs, faderMs and panMs", CODE.wrongType);
-  }
-  knownKeys(value, new Set(CONTROL_SMOOTHING_KEYS.keys()), path, "controlSmoothing");
-  const record: Record<string, string | number> = { kind: "explicit" };
-  for (const [name, key] of CONTROL_SMOOTHING_KEYS) {
-    const supplied = (value as Record<string, unknown>)[name];
-    if (supplied === undefined) fail(`${path}.${name}`, "a length in milliseconds is required");
-    const length = f32(supplied, `${path}.${name}`);
-    if (length < 0 || length > CONTROL_SMOOTHING_MS_MAXIMUM) {
-      fail(
-        `${path}.${name}`,
-        `a control smoothing length must lie in [0, ${CONTROL_SMOOTHING_MS_MAXIMUM}] ms`,
-        CODE.outOfRange,
-      );
-    }
-    record[key] = length;
-  }
-  return freeze(record);
-}
-
 /** Start an immutable Session V1 builder. */
 export function session(options: SessionOptions): SessionBuilder {
   if (options === null || typeof options !== "object") {
@@ -1110,7 +1012,7 @@ export function session(options: SessionOptions): SessionBuilder {
       revision,
       sampleRateHz: options.sampleRateHz,
       quantumFrames,
-      controlSmoothing: normalizeControlSmoothing(options.controlSmoothing),
+      controlSmoothing: normalizeControlSmoothing(options.controlSmoothing, "session().controlSmoothing"),
     },
     sources: [],
     console: undefined,
