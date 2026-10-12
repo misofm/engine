@@ -40,7 +40,15 @@ const MUTATIONS = [
   "render-allocations", "staging-reads",
   // Issue #1476 D5: one SDK instance's allocator call, and one SDK instance closed without its read.
   "sdk-render-allocations", "sdk-render-allocations-missing",
+  // Batch-verdict 2, B2 (root 2026-10-12): a real AudioContext resumed outside a trusted click, and
+  // a harness that clicked fewer or more controls than the page declared.
+  "resume-clicks-direct", "resume-clicks-missing", "resume-clicks-extra",
 ];
+
+// The total time the page may take, from the first evaluate to the result, clicks included. A page
+// that is stuck (WebKit can wedge a page whose context stalls under full CPU load) fails by name here
+// instead of waiting on a locator.
+const PAGE_DEADLINE_MS = 300_000;
 
 // Issue #1476 D4: every SDK engine `sdk-response-entry.ts` creates, in the order its count is
 // read (with repeats). A new SDK instance adds its label here.
@@ -246,6 +254,16 @@ function validate(browserName, result) {
   })}`);
   gate(browserName, "observation-identity", observation?.identicalAudio === true,
     "arming a declared tap moved a rendered sample");
+  // Every real `AudioContext.resume()` ran inside a trusted click (the page counts them, split by
+  // `window.event`) and the harness clicked exactly the controls the page declared: no direct
+  // `resume()`, no missing click, no extra one (batch-verdict 2, B2).
+  const resumes = result.resumes;
+  gate(browserName, "resume-clicks", resumes?.direct === 0
+    && Number.isInteger(resumes?.declared) && resumes.declared > 0
+    && resumes.inClick === resumes.declared
+    && resumes.planned === resumes.declared
+    && resumes.clicksPerformed === resumes.declared,
+  `a real AudioContext was resumed outside a trusted click, or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -741,6 +759,9 @@ function mutate(result, mutation) {
   // The state check let a running context through before the unsubscribe.
   if (mutation === "observation-unsubscribe-context-running") copy.observation.unsubscribe.contextStateBeforeUnsubscribe = "running";
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
+  if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
+  if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
+  if (mutation === "resume-clicks-extra") copy.resumes.clicksPerformed += 1;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-observation-window-reversed") {
     const window = copy.sdkResponse.observations.resident.windows[0];
@@ -793,7 +814,9 @@ function mutationProofs(browserName, result) {
   for (const mutation of mutations) {
     assert.throws(
       () => validate(browserName, mutate(result, mutation)),
-      (error) => error instanceof Error && error.message.startsWith(`${browserName}:`),
+      (error) => error instanceof Error && error.message.startsWith(
+        mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:` : `${browserName}:`,
+      ),
       `${browserName}: ${mutation}: red mutation escaped its gate`,
     );
   }
@@ -912,6 +935,11 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     });
     page.setDefaultTimeout(120000);
     await page.goto(`${origin}/qualification/index.html`);
+    const plan = await page.evaluate(
+      async (enabled) => (await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`))
+        .resumeClickPlan(enabled),
+      sdkEnabled,
+    );
     const execution = page.evaluate(async (enabled) => {
       try {
         const module = await import(`/qualification/qualification.js${enabled ? "?sdk=1" : ""}`);
@@ -927,33 +955,48 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         };
       }
     }, sdkEnabled);
-    {
-      // Resume each real AudioContext with a trusted gesture across browsers: WebKit starts or
-      // restarts a context only inside a user activation, and leaves `resume()` pending without one.
-      // The SDK qualification creates its two controls in execution order; the observation-unsubscribe
-      // gate (#1345 Amendment 5; batch-verdict 2, B2) then creates one for each resume it makes and
-      // marks it `data-qualification-resume`; a kick adds more, so the loop runs until completion.
-      // Racing completion keeps a preceding failure from turning into a locator timeout that hides
-      // its diagnostic.
-      const completion = execution.then((value) => ({ kind: "complete", value }));
-      const selectors = sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : [];
-      for (;;) {
-        const selector = selectors.shift() ?? "button[data-qualification-resume]";
-        const click = page.locator(selector).first().click().then(
+    // Resume each real AudioContext with a trusted gesture across browsers: WebKit starts or restarts
+    // a context only inside a user activation, and leaves `resume()` pending without one. The page
+    // declares the controls it needs clicked (`resumeClickPlan`), in order, and this loop clicks
+    // exactly those, counting its clicks, under the one `PAGE_DEADLINE_MS` deadline for the whole
+    // page. The count goes into the result: a missing or an extra click, or a `resume()` that was
+    // not in a click, fails the `resume-clicks` gate by name. Racing completion keeps a preceding
+    // failure from turning into a locator timeout that hides its diagnostic.
+    const deadline = Date.now() + PAGE_DEADLINE_MS;
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const completion = execution.then((value) => ({ kind: "complete", value }));
+    let deadlineTimer;
+    const expired = new Promise((resolve) => {
+      deadlineTimer = setTimeout(() => resolve({ kind: "deadline" }), remaining());
+    });
+    let clicksPerformed = 0;
+    try {
+      for (const selector of plan) {
+        const click = page.locator(selector).first().click({ timeout: remaining() }).then(
           () => ({ kind: "clicked" }),
           (error) => ({ kind: "click-error", error }),
         );
-        const outcome = await Promise.race([completion, click]);
+        const outcome = await Promise.race([completion, click, expired]);
         if (outcome.kind === "complete") break;
-        if (outcome.kind === "click-error") {
-          // The page neither finished nor made the control this loop waits for: it is stuck (WebKit
-          // can wedge a page whose context stalls under full CPU load). Name that, with what the
-          // page logged, instead of a bare locator timeout.
-          throw new Error(`${browserName}: the page did not finish or offer a control to click (${selector}) within 120 s: ${outcome.error.message}; page diagnostics: ${diagnostics.join("; ")}`);
+        if (outcome.kind === "deadline" || outcome.kind === "click-error") {
+          // The page neither finished nor made the control this loop waits for: it is stuck. Name
+          // that, with what the page logged, instead of a bare locator timeout.
+          throw new Error(`${browserName}: the page did not finish or offer a declared control to click (${selector}; ${clicksPerformed} of ${plan.length} clicks done) within ${PAGE_DEADLINE_MS} ms: ${outcome.error?.message ?? "total deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
         }
+        clicksPerformed += 1;
       }
+      const outcome = await Promise.race([completion, expired]);
+      if (outcome.kind === "deadline") {
+        throw new Error(`${browserName}: the page did not finish within ${PAGE_DEADLINE_MS} ms (${clicksPerformed} of ${plan.length} declared clicks done); page diagnostics: ${diagnostics.join("; ")}`);
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
     }
     const result = await execution;
+    if (result.resumes !== undefined) {
+      result.resumes.planned = plan.length;
+      result.resumes.clicksPerformed = clicksPerformed;
+    }
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);

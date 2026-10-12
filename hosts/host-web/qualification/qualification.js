@@ -542,14 +542,55 @@ async function requireSuspended(context, step) {
   return context.state;
 }
 
+/// The labels of the two trusted-click resumes `runObservationUnsubscribeRun` makes, in order. The
+/// click plan below names the buttons by these labels, so the gate and its plan cannot drift apart.
+const UNSUBSCRIBE_ARMED_RESUME = "a frame from the armed tap";
+const UNSUBSCRIBE_REPLAY_RESUME = "the replayed region to render";
+
+/// Every control the page asks the harness to click, in the order the page offers them, as selectors
+/// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
+/// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
+/// when the page resumed a context any other way, offered another control, or did not offer one.
+/// The two SDK controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
+/// first; the other two are `resumeThroughClick`'s buttons.
+export function resumeClickPlan(sdkEnabled) {
+  if (!WebAssembly.validate(SIMD128_PROBE)) return [];
+  return [
+    ...(sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
+    ...[UNSUBSCRIBE_ARMED_RESUME, UNSUBSCRIBE_REPLAY_RESUME].map(resumeControlSelector),
+  ];
+}
+
+function resumeControlSelector(what) {
+  return `button[data-qualification-resume="${what}"]`;
+}
+
+/// Count every `AudioContext.resume()` of the page, split by whether it ran synchronously inside a
+/// trusted click handler (`window.event` is that click) or anywhere else (`direct`). Offline contexts
+/// are not counted: they need no activation. The count is part of the result, so a `resume()` that
+/// bypasses [`resumeThroughClick`] (the gate's own, or one added to the SDK workloads) turns the
+/// `resume-clicks` gate red whatever the browser happens to allow.
+function countResumes() {
+  const record = { inClick: 0, direct: 0 };
+  if (typeof AudioContext !== "function") return record;
+  const resume = AudioContext.prototype.resume;
+  AudioContext.prototype.resume = function countedResume(...args) {
+    const event = window.event;
+    if (event?.type === "click" && event.isTrusted) record.inClick += 1;
+    else record.direct += 1;
+    return resume.apply(this, args);
+  };
+  return record;
+}
+
 /// Resume `context` with a trusted click on a button this function adds, the way an app must in
 /// Safari. WebKit starts a new `AudioContext`, or restarts a suspended one, only inside a user
 /// activation, and otherwise leaves `resume()` pending (state "suspended", or "interrupted"); it
 /// neither rejects nor settles. The harness's `page.evaluate` activation lasts only a short while,
 /// so a page that has run longer than that before it resumes (the SDK phase makes it so, much
-/// longer on a busy machine) has none left (batch-verdict 2, B2). `run.mjs` clicks every button
-/// marked `data-qualification-resume`, which is a trusted event in all three browsers, in the order
-/// they appear. The wait for the click is bounded like every other wait here.
+/// longer on a busy machine) has none left (batch-verdict 2, B2). `run.mjs` clicks the button named
+/// by [`resumeClickPlan`], which is a trusted event in all three browsers. The wait for the click is
+/// bounded like every other wait here.
 async function resumeThroughClick(context, what) {
   const button = document.createElement("button");
   button.setAttribute("data-qualification-resume", what);
@@ -564,28 +605,36 @@ async function resumeThroughClick(context, what) {
   }
 }
 
-/// Resume `context` through a trusted click and wait until `condition` holds. A resumed context can
-/// sit running without pulling its graph (WebKit on a loaded machine does), so a second without
-/// progress suspends and resumes it again, and that resume is a trusted click as well: a script
-/// `resume()` after a script `suspend()` has no activation, and on WebKit with every CPU busy it hung
-/// the whole page in 4 of 12 loaded runs (the bound's own timer never fired). Every wait is bounded
-/// and names `what`; the loop fails loudly, naming `describe()`'s state, after `milliseconds`.
-async function resumeUntil(context, condition, milliseconds, what, describe) {
+/// Resume `context` through a trusted click and wait until `condition` holds, for at most
+/// `AUDIO_STEP_TIMEOUT_MS`. There is no recovery: a context that does not pull its graph is a named
+/// failure of the gate, never a retry (root, 2026-10-12; a script `suspend()` then `resume()` hung
+/// the whole page in 3 of 8 runs of the minimal repro, `/tmp/claude-1002/b2diag/drv5.out`). The
+/// failure carries `describe()` sampled twice across the window, right after the resume and at the
+/// timeout, so a stalled clock (`currentTime`) and a stalled render count (`renderedQuanta`) show as
+/// equal samples.
+async function resumeUntil(context, condition, what, describe) {
   await resumeThroughClick(context, what);
   const started = performance.now();
-  let kicked = started;
+  const atResume = await describe();
   while (!(await condition())) {
-    const now = performance.now();
-    if (now - started > milliseconds) {
-      throw new Error(`timed out waiting for ${what}: ${diagnosticJson(await describe())}`);
-    }
-    if (now - kicked > 1000) {
-      await bounded("suspend", `${what} (kick)`, context, () => context.suspend());
-      await resumeThroughClick(context, `${what} (kick)`);
-      kicked = performance.now();
+    if (performance.now() - started > AUDIO_STEP_TIMEOUT_MS) {
+      throw new Error(`stall timeout at ${what} after ${AUDIO_STEP_TIMEOUT_MS} ms: ${diagnosticJson({
+        atResume,
+        atTimeout: await describe(),
+      })}`);
     }
     await delay(4);
   }
+}
+
+/// One sample of a real context for a stall record: its state, its clock and the host's status (the
+/// engine's own `renderedQuanta` counts the blocks whose render returned).
+async function sampleContext(context, step, host) {
+  return {
+    contextState: context.state,
+    currentTime: context.currentTime,
+    status: await step("status", () => host.status()),
+  };
 }
 
 /// Issue #143 E12 and #1345 batch-verdict B1: subscribe -> frames -> unsubscribe -> no frames, in a
@@ -672,9 +721,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   await resumeUntil(
     context,
     () => frames.length > 0,
-    10_000,
-    "a frame from the armed tap",
-    async () => ({ contextState: context.state, status: await step("status", () => host.status()) }),
+    UNSUBSCRIBE_ARMED_RESUME,
+    () => sampleContext(context, step, host),
   );
   await bounded("suspend", "after the armed frames", context, () => context.suspend());
   // Frames the render published before the suspension took effect may still be on their way.
@@ -702,13 +750,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   await resumeUntil(
     context,
     async () => await renderedQuanta() >= renderedBefore + BigInt(OBSERVATION_BLOCKS),
-    10_000,
-    "the replayed region to render",
-    async () => ({
-      contextState: context.state,
-      renderedBefore,
-      status: await step("status", () => host.status()),
-    }),
+    UNSUBSCRIBE_REPLAY_RESUME,
+    async () => ({ renderedBefore, ...(await sampleContext(context, step, host)) }),
   );
   await bounded("suspend", "after the replayed region", context, () => context.suspend());
   await delay(100);
@@ -955,6 +998,7 @@ async function runStagingReadQualification(createHost, sessionDocument) {
 }
 
 export async function runQualification() {
+  const resumeRecord = countResumes();
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
     liveControlResponse, observationResponse,
@@ -1107,6 +1151,9 @@ export async function runQualification() {
       { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
     ],
     sdkResponse,
+    // Every `AudioContext.resume()` of the page, for the `resume-clicks` gate: `declared` is the click
+    // plan's length, which `run.mjs` also holds the harness to.
+    resumes: { declared: resumeClickPlan(sdkResponse !== null).length, ...resumeRecord },
   };
 }
 

@@ -1096,13 +1096,13 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
       return reply;
     };
     const pending = closedBrowser.querySpectrum(SPECTRUM_QUERIES[0]);
+    // Settle `pending` before the close rejects it: a rejection with no handler yet is an unhandled
+    // rejection for a turn (a pageerror in all three browsers). The handler is attached first, so the
+    // refusal this check proves is the only outcome observed (root, 2026-10-12, named #1345 exception).
+    const settled = pending.then(() => false, () => true);
     await armed;
     await closeSdkEngine(closedBrowser);
-    try {
-      await pending;
-    } catch {
-      closedRefused = true;
-    }
+    closedRefused = await settled;
   } catch (error) {
     throw sdkEngineFailed(closedBrowser, error);
   } finally {

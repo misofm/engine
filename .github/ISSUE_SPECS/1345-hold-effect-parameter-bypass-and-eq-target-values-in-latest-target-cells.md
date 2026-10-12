@@ -417,6 +417,12 @@ under a saturated machine left a resumed context running without pulling its gra
 five runs with 24 busy loops on 32 cores, none in 14 runs with the retry).
 STREAMS.md carries the file's hot-file row.
 
+**Named exception (root, 2026-10-12, B2 second round).** `hosts/host-web/qualification/sdk-response-entry.ts`
+lines 1098-1108 only (the `spectrum-query-closed` check) are in this issue's reach: `pending` gets its
+rejection handler before the engine close, so the check proves its refusal without an unhandled
+rejection. STREAMS.md carries the hot-file row. `qualification.js` and `run.mjs` also carry the click
+plan, the resume count and the removal of the retry, by the same Amendment.
+
 *Batch verdict 2, B2 (2026-10-12).* On WebKit 26.5 with every CPU busy the gate's first
 `suspend()` of a new context never settled and the leg hung. The gate now bounds every wait at 10 s
 and fails with a named location, does not await a new context's first suspend, and requires
@@ -945,7 +951,7 @@ in `logs/summary` rows (`bar.txt`).
 - *Change* (`qualification.js`, `run.mjs`, the named exceptions of Amendment 5): every `resume()` of the
   gate's real context runs inside a trusted click on a button the page adds (`resumeThroughClick`, marked
   `data-qualification-resume`); `run.mjs` clicks each such button in order until the page completes. A
-  `resumeUntil` kick is a `suspend()` followed by another click. If the page neither finishes nor offers a
+  `resumeUntil` kick is a `suspend()` followed by another click (removed in the second round below). If the page neither finishes nor offers a
   button for 120 s, `run.mjs` fails with a named message and the page's diagnostics instead of a bare
   locator timeout. Page-level check (WebKit, no load, committed in `MUTATIONS.md`): with the gate's
   `resume()` called directly and 6 s of idle before the gate, it fails `resume timeout at a frame from the
@@ -968,6 +974,40 @@ in `logs/summary` rows (`bar.txt`).
   gate). Leg ii (browser and 4 busy loops pinned to CPUs 0-3): chromium 10 of 10; firefox 10 of 10; webkit 8
   of 10 (2 `sdk-spectrum-hop` H1024). No failure was in `observation-unsubscribe`. The bar (zero failures)
   is not met on webkit, and on firefox in leg i; this record does not claim it.
+
+**B2 second round (root's rulings, 2026-10-12; Sonnet 5.5; logs in `/tmp/claude-1002/b2r2/logs/`).**
+1. *Handler fix (the named exception above).* In the `spectrum-query-closed` check,
+   `const settled = pending.then(() => false, () => true)` is attached before `closeSdkEngine`, and
+   `closedRefused = await settled` replaces the `try { await pending } catch`. Evidence (source-bundle
+   mode, the CI command, `B2_DUMP` printing the page errors, a temporary patch of `run.mjs` that is not
+   committed): on revert, `pageerror: MisoUsageError: the browser engine is closed` on webkit and
+   `pageerror: the browser engine is closed` on chromium (`logs/revert-webkit.log`, `revert-chromium.log`);
+   with the fix, no page error on either (`logs/fix-webkit.log`, `fix-chromium.log`). All four runs pass.
+2. *The kick is removed.* It was a retry: no script `suspend()` then `resume()` recovery is left in the
+   gate. A context that does not pull its graph fails as `stall timeout at <step> after 10000 ms`, and
+   every bounded await stays (`bounded`, `requireSuspended`). Page and harness now agree on the clicks:
+   `qualification.js` exports `resumeClickPlan(sdkEnabled)` (the two SDK controls when the SDK
+   workloads run, then the `data-qualification-resume` buttons of the gate, by label); `run.mjs` reads
+   the plan before the run, clicks exactly those controls in order under one 300 s deadline
+   (`PAGE_DEADLINE_MS`), counts its clicks and copies the count and the plan length into the result; the
+   page counts every `AudioContext.resume()` as in a trusted click or direct (`window.event`). The new
+   `resume-clicks` gate requires `direct` 0 and `declared`, `inClick`, `planned` and `clicksPerformed`
+   equal. Mutations (`--self-test-mutations`, every browser run below): `resume-clicks-direct`,
+   `resume-clicks-missing` and `resume-clicks-extra` each fail with `<browser>: resume-clicks:`
+   (`mutationProofs` checks that prefix for these). Real-browser checks of the gate are in
+   `hosts/host-web/MUTATIONS.md`. *Test value:* red if a `resume()` of a real context bypasses the
+   click (the gate's own or an SDK workload's), or the harness clicks fewer or more controls than the
+   page declared, which the page-side activation check alone would not catch in a browser that does not
+   enforce activation. The hang count of the removed kick is one figure now: 3 of 8 runs of the minimal
+   page (`/tmp/claude-1002/b2diag/drv5.out`); the earlier "4 of 12" in a code comment is deleted.
+3. *Process counters (a').* The stall record now has `currentTime` and the host status (`renderedQuanta`,
+   the blocks whose render returned) sampled twice, right after the resume and at the 10 s timeout. A
+   process-entry count needs a counter in `process()` of the worklet; that file is outside the ratified
+   exceptions, so it was not edited: STOPPED for root's authorization (below).
+   A first unloaded webkit run of the new gate failed exactly there, which the record now shows:
+   `stall timeout at the replayed region to render`, `contextState` `running`, `currentTime`
+   0.0213 and `renderedQuanta` 8 at both samples (`logs/t1-webkit.log`): the clock did not move after the
+   second resume.
 
 **MINOR 1:** `a_pending_trim_record_in_a_later_bank_survives_the_swap_at_{four,eight}_lanes`
 (`crates/host-core/tests/successor_swap.rs`; `eq5` is lane 1 of the second predecessor bank at four

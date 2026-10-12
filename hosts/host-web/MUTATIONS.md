@@ -131,13 +131,40 @@ removed too, `createHost` refuses the running context (`miso.error.v1`, result 1
 stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
 failed; with the unsubscribe sent, 0.
 
-*Note, 2026-10-12 (batch verdict 2, B2 diagnosis).* Every `resume()` of the gate's real
-`AudioContext` now runs inside a trusted click (`resumeThroughClick`; `run.mjs` clicks each button
-marked `data-qualification-resume`). WebKit starts or restarts an `AudioContext` only inside a user
-activation and otherwise leaves `resume()` pending. *Page-level check (not committed; WebKit, no
-busy loops):* with the gate's first `resume()` called directly (the version before this change) and
-the page idle for 6 s after the SDK phase, so the harness's activation has expired, the gate fails as
-`resume timeout at a frame from the armed tap`; with the click, it passes.
+*Note, 2026-10-12 (batch verdict 2, B2 diagnosis and second round).* Every `resume()` of a real
+`AudioContext` of the page now runs inside a trusted click. WebKit starts or restarts an
+`AudioContext` only inside a user activation and otherwise leaves `resume()` pending. The page
+declares its click plan (`resumeClickPlan`: the two SDK controls, when the SDK workloads run, and the
+two `data-qualification-resume` buttons of `resumeThroughClick`), `run.mjs` clicks exactly those
+controls, counts its clicks and runs the page under one 300 s deadline, and the page counts every
+`AudioContext.resume()` by whether `window.event` was a trusted click. The result carries
+`resumes: { declared, inClick, direct, planned, clicksPerformed }`; the `resume-clicks` gate requires
+`direct` 0 and the other four equal. There is no recovery in the gate: the former `resumeUntil` kick
+(`suspend()` then another click) is removed because it is a retry, and a context that does not pull its
+graph fails as `stall timeout at <step> after 10000 ms` with the context state, `currentTime` and the
+host's status (`renderedQuanta`) sampled right after the resume and at the timeout. Three committed
+self-test mutations of the real result, each required to fail with `<browser>: resume-clicks:`:
+
+| mutation | change | gate |
+|---|---|---|
+| `resume-clicks-direct` | `resumes.direct = 1` | `resume-clicks`: a real AudioContext was resumed outside a trusted click |
+| `resume-clicks-missing` | `resumes.clicksPerformed` one fewer than declared | `resume-clicks`: the harness did not click exactly the declared controls |
+| `resume-clicks-extra` | `resumes.clicksPerformed` one more than declared | the same gate |
+
+*Page-level checks (not committed; chromium and webkit, no busy loops):* with the first
+`resumeThroughClick` replaced by a direct `context.resume()`, both browsers go red as `resume timeout at
+the replayed region to render (click)` (the harness waits for the first control, the page offers the next
+one, and no run reaches the result; `/tmp/claude-1002/b2r2/logs/mut-direct-chromium.log` and
+`mut-direct-webkit.log`); with `resumeClickPlan` declaring one control the page never offers, chromium
+fails `resume-clicks` with `{"declared":5,"inClick":4,"direct":0,"planned":5,"clicksPerformed":4}`
+(`/tmp/claude-1002/b2r2/logs/mut-missing-chromium.log`). Before the click existed,
+the gate's first `resume()` called directly with the page idle for 6 s after the SDK phase failed as
+`resume timeout at a frame from the armed tap` on WebKit (`/tmp/claude-1002/b2diag/logs/mut-A-webkit.log`);
+with the click it passed (`mut-B`).
+*The kick's hang count, one sourced figure:* a script `suspend()` followed by a script or click `resume()`
+as the recovery left the minimal page (a real `AudioWorkletNode`, no engine code, 40 fresh contexts per
+run, 32 busy loops, WebKit) hung with `resume()` never returning in 3 of 8 runs
+(`/tmp/claude-1002/b2diag/drv5.out`; the `HANG` lines of runs 2, 6 and 8).
 
 ### And the same mutation against a real engine, in a real browser
 
