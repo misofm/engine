@@ -1555,7 +1555,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     ///
     /// `snapshot` is the block's live snapshot `S` (#1504): the revision render read from the
     /// running plan's gate at the start of the block. A drain that reads live cells reads under
-    /// it; a drain of a queue ignores it until its lane moves to cells. The bank stage hands every
+    /// it; an observation queue is a FIFO and ignores it. The bank stage hands every
     /// bank the block's own, once per block, whether or not the block's audio is silent: silence
     /// may skip a bank's processing and never this drain.
     fn begin_block(
@@ -2577,8 +2577,8 @@ pub struct GraphBindingBlock<'a> {
     pub first_sample: u64,
     /// The block's live snapshot `S` (#1504): the revision render read from the running plan's
     /// gate at the start of the block. A processor that drains live values reads under it and
-    /// drains once in every block, whether or not its audio is silent. A drain of a queue ignores
-    /// it until its lane moves to cells. A caller that renders a processor outside a plan names
+    /// drains once in every block, whether or not its audio is silent. An observation queue is a
+    /// FIFO and ignores it. A caller that renders a processor outside a plan names
     /// the snapshot it means; [`LiveSnapshot::ALL`] applies every value written.
     pub live_snapshot: LiveSnapshot,
 }
@@ -7411,6 +7411,48 @@ mod tests {
         );
     }
 
+    /// A per-node effect reads its cells under the block's live snapshot (#1504, #1345): a value
+    /// stamped with a revision the gate has not yet published is not applied by the block that
+    /// finds it, and is applied by the first block after its revision is published.
+    ///
+    /// Test value: red if the per-node effect's `stage` reads under `LiveSnapshot::ALL` (or any
+    /// snapshot but the block's own), which applies a transaction's value before the rest of it
+    /// can be seen; the bank path has its own test, and no other covers this path.
+    #[test]
+    fn a_per_node_effect_waits_for_the_revision_that_covers_its_value() {
+        let (writer, control) = control_pair();
+        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
+        let revision = producer.gate.last_published() + 1;
+        {
+            let stamp = producer.gate.stamp(revision).expect("a legal revision");
+            producer
+                .writer
+                .write(
+                    stamp,
+                    effect_contract::EffectControlRecord::Parameter {
+                        parameter_index: 0,
+                        channel: ParameterChannel::Left,
+                        value: 0.5,
+                    },
+                )
+                .expect("the fixture has a cell for the record");
+        }
+        let before = render_live_control_blocks(&mut plan, 0, 1);
+        assert_eq!(
+            &before[..4],
+            &[0.0, 1.0, 2.0, 3.0],
+            "the value is written but its revision is not published: the block leaves it alone"
+        );
+        producer.gate.publish(revision);
+        let after = render_live_control_blocks(&mut plan, 1, 1);
+        assert_eq!(
+            &after[..4],
+            &[2.0, 2.5, 3.0, 3.5],
+            "the first block after the publish carries it from its first sample"
+        );
+    }
+
     /// Live bypass returns the dry signal delayed by exactly the effect's declared latency, so
     /// every PDC route timing the compiler derived from that latency stays correct.
     ///
@@ -7483,7 +7525,7 @@ mod tests {
     /// Both of the gain fixture's cells are written and staged in one block: the window is the
     /// effect's automation capacity, which holds the lane's two cells.
     #[test]
-    fn the_live_control_effect_drops_nothing_within_its_prepared_capacity() {
+    fn the_live_control_effect_applies_every_cell_within_its_window() {
         let (writer, control) = control_pair();
         let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
         let mut producer = LiveControl::new(writer, &mut plan);

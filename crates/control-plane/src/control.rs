@@ -35,9 +35,9 @@ pub struct ProviderEpoch {
     pub(crate) strips: StripLanes,
     /// One live-control producer per prepared effect instance of this epoch's plan, console slots
     /// and inserts alike, in `HostLiveControlHandles::effect_controls` order (#1263 D2). A
-    /// parametric EQ's producer also owns its prepared-target owner. `commit_live` pushes a
-    /// value-only transaction's effect parameter records through them (#1264). As for the strip
-    /// producers, the rings are `Arc`s shared with the plan's lanes, so the epoch may drop after
+    /// parametric EQ's producer also owns its prepared-target owner. `commit_live` writes a
+    /// value-only transaction's effect values to their cells through them (#1264). As for the strip
+    /// producers, the cells are `Arc`s shared with the plan's lanes, so the epoch may drop after
     /// its plan, and does: `synchronize_plan_epochs` drops a reclaimed plan before its provider.
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).

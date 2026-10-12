@@ -347,7 +347,8 @@ mod mixing {
     /// `push_parameter` calls. Both landing before a block reads them keep the collapse, because
     /// the target cells hold the latest word per channel and the block sees two equal words
     /// (VERIFY-AUTOMATION F2, issue #1345). A block that runs between the two edits reads one
-    /// channel changed and retires the collapse of every bank it touches for that block.
+    /// channel changed and retires the three EQ cohorts, and they stay retired for the whole
+    /// preroll: the lane's words differ from then on, so no block of it runs collapsed.
     #[test]
     fn the_eq_lowering_keeps_the_collapse_when_a_pair_lands_in_one_block() {
         let backend = Backend::current();
@@ -414,9 +415,11 @@ mod mixing {
             apart.render(block).expect("render");
         }
         let [apart_kept, _] = apart.bank_collapse_counters();
-        assert!(
-            apart_kept < kept,
-            "a block between the edits retires a collapse ({apart_kept} of {kept} kept)"
+        assert_eq!(
+            apart_kept,
+            kept - 3 * mixing_automation::PREROLL_BLOCKS,
+            "a block between the edits retires the three EQ cohorts of the {cohorts} for the whole \
+             preroll"
         );
     }
 }

@@ -12,8 +12,8 @@ pub struct CompiledChildren<A: ControlAdapter> {
 
 /// The control-queue depth the C ABI passes to preparation (`Some` attaches live controls). It
 /// sizes no queue: every strip, effect and route lane is a set of latest-target cells with no
-/// depth (#1312, #1345, #1346, #1347), and an effect's observation queue holds one slot per
-/// declared tap.
+/// depth (#1312, #1345, #1346, #1347). An effect's observation queue would hold one slot per
+/// declared tap, and the C ABI binds none (it asks for no observation taps).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]

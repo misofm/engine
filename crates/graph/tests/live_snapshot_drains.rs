@@ -765,9 +765,11 @@ mod effect_bank {
     /// the un-bypass is written during block 3 but published only before block 5 (blocks 3 and 4
     /// snapshot below it); and block 6 is silent with the un-bypass long in effect.
     ///
-    /// Test value: a bank stage that skips a bypassed lane's drain, skips the drains of a silent
-    /// block, or reads the cells without the block's snapshot. Under `S` the first two make the
-    /// watermark early; the last applies a revision before the watermark reports it.
+    /// Test value: a bank stage that reads the cells without the block's snapshot, which applies a
+    /// revision before the watermark reports it; this is the test's unique catch (it alone goes
+    /// red). A stage that skips a bypassed lane's drain also turns it red, with rack's tests. A
+    /// stand-in for skipping the drains of a silent block was run against it and left it green, so
+    /// the silent blocks here are not claimed as a catch.
     #[test]
     fn a_live_bypassed_lane_is_drained_every_block_under_the_blocks_snapshot() {
         const SILENT: u32 = (1 << 2) | (1 << 4) | (1 << 6);

@@ -1353,7 +1353,7 @@ impl SessionRuntime {
             .expect("prepared console effects");
         // Both attaches are the production entry points, called in the order a host calls them.
         // The control channel is attached for every observation arm including `Absent`, so the
-        // paired delta between the arms is the observation lane and not the control queue drain.
+        // paired delta between the arms is the observation lane and not the cell reads.
         let superseded = LiveValuesSuperseded::new();
         let controls = if config.control {
             attach_effect_live_controls(

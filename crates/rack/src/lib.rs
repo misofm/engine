@@ -642,7 +642,8 @@ pub trait BankStage: Send {
     }
     // REALTIME_POLICY_END
 
-    /// Drain this stage's live-control queues, before any lane of the block is dispatched.
+    /// Read this stage's live cells and drain its observation queues, before any lane of the block
+    /// is dispatched.
     ///
     /// # Why the drain is a separate call and not the first paragraph of [`process`](Self::process)
     ///
@@ -662,9 +663,9 @@ pub trait BankStage: Send {
     /// # The block's live snapshot (#1504)
     ///
     /// `snapshot` is the revision `S` render read from the running plan's gate at the start of the
-    /// block. A drain that reads live cells reads under it; a drain of a queue ignores it until its
-    /// lane moves to cells. There is no default snapshot: [`BankChain::run`] hands the block's own to
-    /// every slot, and a direct caller names the one it means.
+    /// block. A drain that reads live cells reads under it; an observation queue is a FIFO and
+    /// ignores it. There is no default snapshot: [`BankChain::run`] hands the block's own to every
+    /// slot, and a direct caller names the one it means.
     ///
     /// # Every block, silence included
     ///
@@ -1562,7 +1563,7 @@ impl LiveControlEffectBankStage {
         // 1. The drain already ran, in `begin_block`, before the chain decided this block's mode.
         let packed = self.staged_spans;
         // The chain has already performed any collapsed-to-dual state restoration before it
-        // dispatches this stage. Apply each lane's retained FIFO target prefix at that boundary;
+        // dispatches this stage. Apply each lane's staged target prefix at that boundary;
         // applying in `begin_block` would let desymmetrization copy the old right state over a new
         // right-lane target.
         for lane in 0..lane_count {
@@ -2089,7 +2090,7 @@ impl<'a> ResidentOutputLane<'a> {
 ///    written a one-plane body, and every slot runs on exactly this chain's lanes.
 /// 2. **Bind time, again.** [`arm_mono_collapse`](BankChain::arm_mono_collapse) records the
 ///    *structural* half of the witness, which a chain cannot see for itself. Unarmed is declining.
-/// 3. **Per block, before a sample moves.** Every slot's live-control queue is drained
+/// 3. **Per block, before a sample moves.** Every slot's live cells are read and its queues drained
 ///    ([`BankStage::begin_block`]) and *then* the witness is read, in that order and for the
 ///    reason `begin_block` documents.
 /// 4. **The seam.** After the prefix, one copy of the resident block's left plane into its right.
@@ -2722,7 +2723,7 @@ impl BankChain {
                 && len <= self.scratch.left.len()
                 && len <= self.scratch.right.len()
         });
-        // Step 0: every slot's live-control queue, drained before anything else. See
+        // Step 0: every slot's live cells read and observation queue drained, before anything else. See
         // `BankStage::begin_block` for why this cannot be folded into `process`.
         for slot in &mut self.slots {
             // The same identity-slot guard `process` has always taken. A slot that is an identity

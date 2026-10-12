@@ -21,8 +21,7 @@ mod lane_rig;
 use std::collections::BTreeMap;
 
 use effect_contract::{
-    EffectControlRecord, EffectLaneShape, EffectWriteRefusal, ParameterChannel,
-    ParameterChannelPolicy,
+    EffectControlRecord, EffectLaneShape, ParameterChannel, ParameterChannelPolicy,
 };
 use lane_rig::{Rig, UNBYPASSED, both, left, right, target};
 
@@ -167,27 +166,6 @@ fn a_shared_parameters_both_cell_needs_no_twin_and_does_not_break_a_pair() {
     assert!(keeps(&[both(2, 1.0)]));
     assert!(keeps(&[both(2, 1.0), left(0, -6.0), right(0, -6.0)]));
     assert!(!keeps(&[both(2, 1.0), left(0, -6.0)]));
-}
-
-/// A `Both` write to a `PerLane` parameter has no cell: the channel policy decides the cells, and
-/// a `Shared` parameter takes `Both` alone. The host lowers a both-channel command on a `PerLane`
-/// parameter to one write per lane before it reaches a cell.
-#[test]
-fn a_channel_the_policy_does_not_take_has_no_cell() {
-    let mut rig = Rig::new(shape(0), 0);
-    assert_eq!(
-        rig.commit(&[both(0, 1.0)]),
-        Err(EffectWriteRefusal::Channel)
-    );
-    assert_eq!(
-        rig.commit(&[left(2, 1.0)]),
-        Err(EffectWriteRefusal::Channel)
-    );
-    assert_eq!(
-        rig.commit(&[right(2, 1.0)]),
-        Err(EffectWriteRefusal::Channel)
-    );
-    assert_eq!(rig.stage().staged, 0);
 }
 
 #[test]

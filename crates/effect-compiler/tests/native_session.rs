@@ -656,7 +656,7 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         );
         let mut attached =
             prepare_native_session_effects(&session, registry, small).expect("prepared again");
-        effect_compiler::attach_effect_live_controls(
+        let mut producers = effect_compiler::attach_effect_live_controls(
             &mut attached,
             &engine::realtime::LiveValuesSuperseded::new(),
             0,
@@ -667,6 +667,72 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
             lane.check_window(capacity),
             Ok(()),
             "{id}: the window is the capacity and holds the lane's cells"
+        );
+        // One transaction writes every live parameter cell of the instance (the two channels of a
+        // per-lane parameter apart, so no pair folds into fewer spans), and one block, staging into
+        // a window of exactly the prepared capacity, applies every one of them.
+        let (gate, mut pin) = engine::realtime::RevisionGate::pair(0);
+        let stamp = pin.stamp(1).expect("a legal revision");
+        let mut written = 0;
+        for (index, parameter) in descriptor.parameters.iter().enumerate() {
+            if !parameter.automatable || parameter.automation_rate != AutomationRate::Block {
+                continue;
+            }
+            let channels: &[effect_contract::ParameterChannel] = match parameter.channel_policy {
+                ParameterChannelPolicy::Shared => &[effect_contract::ParameterChannel::Both],
+                ParameterChannelPolicy::PerLane => &[
+                    effect_contract::ParameterChannel::Left,
+                    effect_contract::ParameterChannel::Right,
+                ],
+            };
+            for (offset, channel) in channels.iter().enumerate() {
+                // The EQ's parameters ride its prepared targets: its lane holds no parameter cell.
+                if lane.parameter_cells() == 0 {
+                    continue;
+                }
+                let value = parameter.default_value + 0.5 * offset as f32;
+                producers[0]
+                    .write(
+                        stamp,
+                        EffectControlRecord::Parameter {
+                            parameter_index: index as u32,
+                            channel: *channel,
+                            value,
+                        },
+                    )
+                    .unwrap_or_else(|refusal| panic!("{id}: parameter {index}: {refusal:?}"));
+                written += 1;
+            }
+        }
+        pin.publish(&gate, 1);
+        assert_eq!(
+            written,
+            if lane.parameter_cells() == 0 {
+                0
+            } else {
+                cells
+            }
+        );
+        let lane = attached.entries[0]
+            .control
+            .as_deref_mut()
+            .expect("a live lane");
+        let mut window = vec![
+            PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: effect_contract::ParameterChannel::Both,
+                parameter_index: u32::MAX,
+                start_sample: 0,
+                end_sample: 0,
+                start_value: 0.0,
+                end_value: 0.0,
+            };
+            capacity
+        ];
+        let staged = lane.stage(&mut window, 0, gate.snapshot());
+        assert_eq!(
+            staged.staged, written,
+            "{id}: every cell written in one transaction is staged in the one block that reads it"
         );
         let bigger = prepare_native_session_effects(&session, registry, large)
             .unwrap_or_else(|diagnostics| panic!("{id}: {:?}", diagnostics.0));

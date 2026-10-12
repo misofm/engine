@@ -940,7 +940,7 @@ pub fn prepare_host_runtime_with_live_controls(
 /// instance gets one, and whether each route into a submix gets one. [`HostLiveLanes::ALL`] is
 /// exactly [`prepare_host_runtime_with_live_controls`]. [`HostLiveLanes::FADER_AND_MATRIX`] leaves
 /// every strip's builtin tail at its chain's own value (only a live input lane can enable a
-/// filter), allocates no effect or route ring, and keeps every route's fold. Observation taps ride
+/// filter), attaches no effect or route lane, and keeps every route's fold. Observation taps ride
 /// the effect lanes, so `observation_taps > 0` with `effects: false` is refused with
 /// `host.observation.live_controls`.
 ///
@@ -1857,8 +1857,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let graph_route_controls = match live_controls.control_queue_depth {
         None => Vec::new(),
         Some(_) if !lanes.routes => Vec::new(),
-        // A route's lane is a latest-target cell with no depth (#1347); the request's depth sizes
-        // the effect queues only.
+        // A route's lane is a latest-target cell with no depth (#1347); the request's depth only
+        // says that live controls are attached.
         Some(_) => artifact
             .attach_route_live_controls(&live_superseded)
             .map_err(|error| match error {

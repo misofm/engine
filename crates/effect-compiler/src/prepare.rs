@@ -589,7 +589,10 @@ fn prepare_with_console_eligibility(
                         // Decision 15, D15-2 and #1345 D4: the window holds a span for every live
                         // parameter cell, so the effect accepts that many. The bound depends on the
                         // descriptor alone, so every instance of one effect has one capacity and
-                        // attaching a live lane changes no program key.
+                        // attaching a live lane changes no program key. The parametric EQ is
+                        // raised too, though its lane holds target cells in place of parameter
+                        // cells and so stages no parameter span: whether an instance is attached
+                        // to a lane, or to an owner, must not change its capacity.
                         maximum_automation_spans_per_block: caps
                             .maximum_automation_spans_per_block
                             .max(
@@ -956,7 +959,16 @@ impl EffectControlProducer {
             .owner
             .as_deref()
             .ok_or(EffectControlOwnerError::Unsupported)?;
-        owner.preflight_publication(base_revision, targets)
+        owner.preflight_publication(base_revision, targets)?;
+        // The publication writes each target to the cell the lane's writer addresses it by, so
+        // the preflight asks the writer about every one: a set the owner accepts and the lane has
+        // no cell for is refused here, before the first write (D7), not discovered by a write.
+        for target in targets {
+            self.writer
+                .check(&EffectControlRecord::PreparedTarget(*target))
+                .map_err(|_| EffectControlOwnerError::Shape)?;
+        }
+        Ok(())
     }
 
     /// Commits the candidate after successful complete publication.

@@ -305,7 +305,7 @@ impl LiveEditor {
     /// The next edit, in a cycle of [`LIVE_EDIT_KINDS`]: a mute toggle on `eq0`, a pan move on
     /// `eq1`, the compressor's threshold on `eq2`'s left lane, band 1's left gain on `eq0`'s
     /// console EQ (an enabled band, so it designs a target), and the compressor's bypass. Every
-    /// edit changes its value, so each one pushes a record or a target to a lane.
+    /// edit changes its value, so each one writes a value or a target to a lane's cells.
     fn next_edit(&mut self) -> SessionEdit {
         let track = |id: &str| StableId::parse(id).expect("fixture track");
         let edit = match self.edits % LIVE_EDIT_KINDS {

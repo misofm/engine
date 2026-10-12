@@ -316,15 +316,18 @@ Historical artifact and qualification records above retain their original identi
 ## Live fader and matrix lanes on every plan (#1256)
 
 Every C ABI plan, at compile and at every structural replacement, carries two live lanes per
-strip, tracks and submixes alike: a 16-record fader/mute ring and a 16-record matrix/pan ring
-(#1053 D4). The rings are charged in `builtin_retained_payload_bytes`. capi keeps the strips'
-producers with the plan's provider epoch, and that producer table (one producer per strip plus
-its strip ID bytes) is charged in `capi_retained_bytes`. On the nine-track EQ reference session the
+strip, tracks and submixes alike: a fader/mute lane and a matrix/pan lane (#1053 D4). #1256
+attached each as a 16-record ring, charged in `builtin_retained_payload_bytes`; since #1312 each
+is a set of latest-target cells (below), and the ring figures in this section are #1256's. capi
+keeps the strips' producers with the plan's provider epoch, and that producer table (one producer
+per strip plus its strip ID bytes) is charged in `capi_retained_bytes`. On the nine-track EQ
+reference session the
 two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
 `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
-must raise both. No input, effect or route lane is attached, so rendering, `latency_samples`,
-`tail_kind` and `tail_samples` do not change. #1257 delivers fader, mute and pan edits through
-them (next section).
+must raise both. #1256 attached no input, effect or route lane, so rendering, `latency_samples`,
+`tail_kind` and `tail_samples` did not change; the effect lanes follow (#1263), and the C ABI still
+attaches no input lane (#1261) and no route lane (#1225). #1257 delivers fader, mute and pan edits
+through them (next section).
 
 ## Value-only track edits on the running plan (#1257)
 
@@ -412,8 +415,8 @@ lane holds the effect's latest-target cells (#1345): one for the bypass, two per
 per shared `Block`-rate automatable parameter, and for a parametric EQ one per target slot and
 channel in place of the parameters; the render-side staging window is raised to hold every
 parameter cell. capi keeps the producers with the plan's provider epoch;
-each EQ's producer owns its prepared-target owner. #1264 pushes live effect parameter edits
-through them, and #1265 publishes live EQ targets through the owners (below). No input or route
+each EQ's producer owns its prepared-target owner. #1264 writes live effect parameter edits to
+their cells, and #1265 publishes live EQ targets through the owners (below). No input or route
 lane is attached.
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
@@ -474,9 +477,11 @@ lane is attached.
   | `capi_retained_bytes` | 277,481 | 281,513 |
   | `largest_named_allocation_bytes` | 90,720 | 90,720 |
 
-  Every other reference row is unchanged. The graph estimate charges exactly what a lane retains
-  (`EffectControlLane::retained_resources`, with the bank's observation-queue array), so the
-  estimate equals the prepared plan's observed bytes. The member and bank terms above no longer
+  Every other reference row is unchanged. The graph estimate charges what a lane retains
+  (`EffectControlLane::retained_resources`) and, in a bank, one `(lane index, queue)` table entry
+  for each lane that has an observation queue; the C ABI binds no observation queue, so it charges
+  none. `tests/bypass_resources.rs` holds the lane term and the queue table to the audited
+  allocator, exactly. The member and bank terms above no longer
   hold: a member's term is its cell arrays, which grow with the effect's live parameter cells and,
   for the parametric EQ, its target slots, and the staging window is `max(S, live parameter
   cells)` spans. A caller whose `maximum_graph_session_plus_plan_bytes` or
@@ -491,12 +496,12 @@ function preparation uses (unit, channel policy, defaults, `-0.0` to `+0.0`, dom
 and compares the resolved values bit by bit.
 
 - **Live.** A changed value of a parameter whose descriptor is automatable with
-  `automation_rate` `Block`. The engine pushes one parameter record per changed
-  `(parameter, lane)` -- `Both` for a shared parameter, `Left` and `Right` apart for a per-lane one
-  -- to that instance's lane in the newest plan, and the effect ramps it with the descriptor's own
-  smoothing. A removed entry returns to the default. Rewriting a value in another representation
-  (a `both` value as equal `left` and `right` values) pushes nothing. It may ride with fader, mute,
-  pan and model-only edits in one transaction.
+  `automation_rate` `Block`. The engine writes one value per changed `(parameter, lane)` -- the
+  one cell of a shared parameter, a `Left` and a `Right` cell apart for a per-lane one -- to that
+  instance's lane in the newest plan, under the commit's stamp, and the effect ramps it with the
+  descriptor's own smoothing. A removed entry returns to the default. Rewriting a value in another
+  representation (a `both` value as equal `left` and `right` values) writes nothing. It may ride
+  with fader, mute, pan and model-only edits in one transaction.
 - **Prepared, so a rebuild.** A changed value of a parameter that is not automatable or whose
   `automation_rate` is `None` (for example the gate/expander's attack, hold and release, and a
   parametric EQ band's `enabled` and `kind`). The parametric EQ's live parameters ride prepared
@@ -527,8 +532,8 @@ prepared targets through its owner, never as bare parameter records.
 - **Targets are designed on the control thread.** The classifier seeds host-core's
   `EqTargetPreparer` with the instance's pre-commit values, resolved by the one function
   preparation uses, passes the changed `(parameter, lane)` values as edits, and designs the
-  targets at the session's sample rate. Render only applies them, through the EQ's prepared-target
-  staging.
+  targets at the session's sample rate. Render only applies them, from the EQ's prepared-target
+  cells.
 - **All or nothing.** For each EQ instance, in the newest plan: `begin_owner` at the owner's
   committed revision, `edit_owner` for each edit, and `preflight_candidate_targets` (revision,
   and validation), before the preflights of #1264 and the protocol predicate. A refusal
@@ -546,9 +551,9 @@ prepared targets through its owner, never as bare parameter records.
 A transaction that switches the bypass of a track's console-slot entry or insert is live through
 the rack's latency-preserving bypass shunt (decision 14).
 
-- **Live.** One bypass record carrying the new bypass goes to the instance's lane in the newest
-  plan. It rides with the instance's parameter records or, for a parametric EQ, its targets, in the
-  one block that applies the transaction; the block applies the bypass first.
+- **Live.** The new bypass is written to the instance's bypass cell in the newest plan. It rides
+  with the instance's parameter values or, for a parametric EQ, its targets, in the one block that
+  applies the transaction; the block applies the bypass first.
   The shunt selects the latency-matched dry signal for the lane while the wet path keeps running,
   so the effect's state continues either way and prepared latency does not change. The switch is a
   step: there is no bypass crossfade (decision 14, F7). It may ride with every other live edit.

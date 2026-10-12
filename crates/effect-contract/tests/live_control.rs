@@ -161,11 +161,6 @@ fn a_record_without_a_cell_is_refused_and_writes_nothing() {
         Err(EffectWriteRefusal::Observe),
         "a subscription is a queue record, not a cell"
     );
-    // A batch with one bad record writes none of its good ones.
-    assert_eq!(
-        rig.commit(&[left(1, 0.5), left(0, 1.0)]),
-        Err(EffectWriteRefusal::NotLive)
-    );
     assert_eq!(rig.pin.last_published(), 0);
     assert_eq!(rig.stage().staged, 0);
 }

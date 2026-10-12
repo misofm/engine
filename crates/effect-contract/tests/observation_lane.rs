@@ -139,11 +139,31 @@ fn subscriptions_apply_in_order_and_a_full_queue_refuses_the_newest() {
     assert_eq!(rig.writer.observe_full_count(), 1);
     assert_eq!(rig.lane.drain_observations(0, Some(&mut observation)), 0);
     assert!(observation.is_armed(0), "arm, disarm, arm leaves it armed");
+    assert_eq!(
+        observation.window_blocks(0),
+        Some(7),
+        "the last record's window is the one in force"
+    );
     assert!(!observation.is_armed(1), "the refused record never applied");
     assert_eq!(
         rig.writer.observe_available_capacity(),
         3,
         "the drain emptied the queue"
+    );
+
+    // The same three records in another order end the other way: order is what decides.
+    rig.writer.try_push_observe(0, true, 5).expect("room");
+    rig.writer.try_push_observe(0, true, 0).expect("room");
+    rig.writer.try_push_observe(0, false, 9).expect("room");
+    assert_eq!(rig.lane.drain_observations(0, Some(&mut observation)), 0);
+    assert!(
+        !observation.is_armed(0),
+        "arm, arm, disarm leaves it disarmed"
+    );
+    assert_eq!(
+        observation.window_blocks(0),
+        Some(9),
+        "and the last record's window again, a disarm's included"
     );
 }
 

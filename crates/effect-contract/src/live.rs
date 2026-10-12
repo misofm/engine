@@ -1235,6 +1235,13 @@ impl ObservationLane {
         self.taps.get(tap_index).is_some_and(|tap| tap.armed)
     }
 
+    /// The window length `tap_index` is armed or was last armed with, or `None` for an index this
+    /// lane has no tap for. Off-thread introspection for the structural gates.
+    #[must_use]
+    pub fn window_blocks(&self, tap_index: usize) -> Option<u32> {
+        self.taps.get(tap_index).map(|tap| tap.window_blocks)
+    }
+
     /// The window length this lane would use for a request that names none.
     #[must_use]
     pub const fn default_window_blocks(&self) -> u32 {

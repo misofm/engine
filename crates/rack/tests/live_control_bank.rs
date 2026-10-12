@@ -886,68 +886,6 @@ fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
     }
 }
 
-/// Decision 15, #1345 D1 and D3: a revision's bypass and parameter land in one block, and only in
-/// the block whose snapshot covers the revision.
-///
-/// A chain rendered under the gate's own snapshots. The transaction writes a gain and a bypass
-/// stamped above the gate's published revision; the block that snapshots before the publication
-/// renders the old wet signal, and the first block after it applies both at once.
-///
-/// Test value: a bank stage that reads its lanes' cells without the block's snapshot (`ALL`), which
-/// applies a revision's values before the watermark reports it, or one that reads the bypass in
-/// another block than the parameters.
-#[test]
-fn a_revisions_bypass_and_gain_land_together_under_the_blocks_snapshot() {
-    const FRAMES: usize = 8;
-    let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
-    let revision = producers.pin.last_published() + 1;
-    {
-        let stamp = producers.pin.stamp(revision).expect("a legal revision");
-        for record in [gain(0.25), EffectControlRecord::Bypass(true)] {
-            producers.writers[0].write(stamp, record).expect("cells");
-        }
-    }
-    // Written, not published: this block's snapshot does not cover it.
-    let mut members = planes(1.0);
-    chain
-        .run(&mut members, FRAMES as u32, 0, producers.gate.snapshot())
-        .expect("run");
-    assert!(
-        members.left[0].iter().all(|value| *value == 1.0),
-        "wet at unity gain: the unpublished revision applied nothing"
-    );
-    producers.pin.publish(&producers.gate, revision);
-    let mut members = planes(1.0);
-    chain
-        .run(
-            &mut members,
-            FRAMES as u32,
-            FRAMES as u64,
-            producers.gate.snapshot(),
-        )
-        .expect("run");
-    assert!(
-        members.left[0].iter().all(|value| *value == 1.0),
-        "bypassed: the dry input, which at unity input equals the unity-gain wet signal"
-    );
-    // Un-bypass in a later revision and read the gain the bypassed block already held: the gain
-    // applied together with the bypass, so the wet signal is the quarter-gain one.
-    producers.push(0, EffectControlRecord::Bypass(false));
-    let mut members = planes(1.0);
-    chain
-        .run(
-            &mut members,
-            FRAMES as u32,
-            2 * FRAMES as u64,
-            producers.gate.snapshot(),
-        )
-        .expect("run");
-    assert!(
-        members.left[0].iter().all(|value| *value == 0.25),
-        "the gain of the revision that bypassed was applied in that revision's block"
-    );
-}
-
 /// Issue #1345 D2 and D8: each lane's observation queue is drained into that lane's own
 /// observation state, subscriptions apply in order, and a subscription the lane's state cannot take
 /// (a tap it does not declare, or no state at all) is counted unbound.

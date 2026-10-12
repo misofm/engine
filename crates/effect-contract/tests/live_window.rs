@@ -194,8 +194,11 @@ fn the_live_cell_count_is_one_per_shared_and_two_per_per_lane_block_parameter() 
 /// A window shorter than the lane's live cells is refused at bind, never discovered on the render
 /// thread: the lane reports how many spans it needs.
 ///
-/// Mutation (PR evidence): size the window to a small `automation_capacity` alone -> this and the
-/// next test turn red.
+/// Test value: red if `check_window` accepts a short window (a cell would then be dropped or
+/// deferred in a block). That preparation raises each instance's window to its live cells is held
+/// through preparation by effect-compiler's `native_session` test
+/// `every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells`, which also writes every
+/// cell of each prepared launch lane in one transaction and stages them in one block.
 #[test]
 fn a_window_shorter_than_the_live_cells_is_refused_with_the_count_it_needs() {
     let rig = Rig::new(EffectLaneShape::from_descriptor(&DESCRIPTOR, 0), 0);
@@ -210,8 +213,13 @@ fn a_window_shorter_than_the_live_cells_is_refused_with_the_count_it_needs() {
 /// capacity (and more than one dirty word of 64), and one block applies all of them, in canonical
 /// order, with none deferred or dropped.
 ///
-/// Test value: a window smaller than the live cell count, which would drop or defer a cell and so
-/// split a revision across blocks.
+/// The lane here has the window `check_window` demands, its cell count, built directly: this test
+/// does not go through preparation, so it does not hold the window's sizing (that is the
+/// preparation-level test named above).
+///
+/// Test value: red if the lane's dirty bookkeeping aliases or loses a cell past the first 64, or
+/// if a block stages the cells out of canonical order or applies one twice. No other test drives
+/// more cells than one dirty word through a block.
 #[test]
 fn one_block_applies_every_live_cell_of_one_transaction() {
     let shape = EffectLaneShape::from_descriptor(&DESCRIPTOR, 0);

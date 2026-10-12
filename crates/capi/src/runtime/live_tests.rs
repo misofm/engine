@@ -2739,6 +2739,141 @@ fn forty_effect_edits_of_each_kind_before_one_block_are_all_accepted_and_the_las
     assert_eq!(rig.counter(protocol::CounterId::LiveValuesSuperseded), 117);
 }
 
+/// The value each live, continuous parameter of `descriptor` is set to: its midpoint, or its
+/// minimum when the midpoint is its default.
+fn live_midpoints(
+    descriptor: &effect_contract::EffectDescriptor,
+) -> Vec<(u32, session::ParameterUnit, f32)> {
+    use effect_contract::{AutomationRate, ParameterDomain, ParameterUnit as Unit};
+    descriptor
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            parameter.automatable
+                && parameter.automation_rate == AutomationRate::Block
+                && parameter.domain == ParameterDomain::Continuous
+        })
+        .map(|parameter| {
+            let (minimum, maximum) = (
+                parameter.minimum.expect("continuous minimum"),
+                parameter.maximum.expect("continuous maximum"),
+            );
+            let middle = 0.5 * (minimum + maximum);
+            let value = if middle == parameter.default_value {
+                minimum
+            } else {
+                middle
+            };
+            let unit = match parameter.unit {
+                Unit::Db => session::ParameterUnit::Db,
+                Unit::Hz => session::ParameterUnit::Hz,
+                Unit::Milliseconds => session::ParameterUnit::Milliseconds,
+                Unit::Samples => session::ParameterUnit::Samples,
+                Unit::Linear => session::ParameterUnit::Linear,
+                Unit::Ratio => session::ParameterUnit::Ratio,
+            };
+            (parameter.id.0, unit, value)
+        })
+        .collect()
+}
+
+/// #1345 D5, the product outcome: a single transaction that writes more cells to one effect
+/// instance than the old 16-record queue held is live. It is not refused, and it is not turned
+/// into a rebuild because it outgrew a queue (the old `commit_live` rebuilt it).
+///
+/// Every live parameter of a multiband compressor is changed on both channels in one transaction:
+/// more cells than the old depth. The transaction commits one revision, no candidate plan is
+/// prepared, every cell of the instance took exactly one write, and the render equals a twin that
+/// received the same values one transaction at a time.
+///
+/// Test value: red if a transaction is rebuilt for being larger than some queue-like bound. A
+/// rebuild renders the same samples, so only the pending-candidate count and the per-cell write
+/// counts can tell; nothing else defends "none is turned into a rebuild".
+#[test]
+fn one_transaction_with_more_cells_than_the_old_queue_held_stays_live() {
+    let document = with_model(&long_session(10, 48_000), |model| {
+        let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        multiband.id = StableId::parse("mb").expect("multiband");
+        multiband.identity = session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband ID"),
+        };
+        multiband.params.clear();
+        multiband.bypass = false;
+        model.tracks[0].inserts.effects.push(multiband);
+    });
+    let descriptor = compile_children(&document, limits(), None)
+        .expect("multiband session")
+        .session
+        .test_providers()
+        .test_effects()
+        .iter()
+        .find(|producer| &*producer.effect_id == "mb")
+        .expect("multiband producer")
+        .descriptor;
+    let values = live_midpoints(descriptor);
+    let cells: usize = descriptor
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            parameter.automatable
+                && parameter.automation_rate == effect_contract::AutomationRate::Block
+                && parameter.domain == effect_contract::ParameterDomain::Continuous
+        })
+        .map(|parameter| match parameter.channel_policy {
+            effect_contract::ParameterChannelPolicy::Shared => 1,
+            effect_contract::ParameterChannelPolicy::PerLane => 2,
+        })
+        .sum();
+    assert!(
+        cells > LIVE_QUEUE_DEPTH.get(),
+        "the transaction writes more cells than the old queue held ({cells} cells)"
+    );
+    let edit = |&(parameter_id, unit, value): &(u32, session::ParameterUnit, f32)| {
+        upsert(
+            "eq0",
+            session::RackName::Inserts,
+            "mb",
+            parameter_id,
+            session::ParameterChannel::Both,
+            unit,
+            value,
+        )
+    };
+    let all: Vec<SessionEdit> = values.iter().map(edit).collect();
+
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    rig.step();
+    twin.step();
+    let (revision, _, epoch, _) = rig.summary();
+    assert_eq!(rig.apply(&all), crate::RESULT_OK);
+    assert_eq!(
+        rig.summary(),
+        (revision + 1, rig.summary().1, epoch, 0),
+        "one revision, the same plan epoch, no candidate prepared"
+    );
+    let writes = effect_writes(&rig, Epoch::Current, "eq0", "mb");
+    assert_eq!(
+        writes.iter().sum::<u64>(),
+        cells as u64,
+        "every cell of the instance took one write: {writes:?}"
+    );
+    for parameter in &all {
+        assert_eq!(
+            twin.apply(core::slice::from_ref(parameter)),
+            crate::RESULT_OK
+        );
+    }
+    let blocks = u64::from(rig.latency()) / rig.quantum as u64 + 4;
+    for block in 0..blocks {
+        assert_eq!(
+            bits(&rig.step()),
+            bits(&twin.step()),
+            "block {block}: one transaction renders what one-at-a-time renders"
+        );
+    }
+}
+
 /// Gate 2 of #1345: one transaction lifts a compressor's bypass and changes its threshold. Both
 /// are cells of one revision, so they land in one block: the C ABI plan renders, bit for bit, what
 /// a host-core plan with every live lane renders when it is given the bypass cell and the
@@ -2747,10 +2882,17 @@ fn forty_effect_edits_of_each_kind_before_one_block_are_all_accepted_and_the_las
 /// Two controls make the bits mean something: a plan given only the lifted bypass, and one given
 /// only the new threshold, each render differently from the plan that got both.
 ///
-/// Test value: an effect lane that applies the bypass cell and the parameter cells of one
-/// revision in different blocks, or ignores one of them (the output would equal a control's, or
-/// differ from the reference's, by the block of difference). Mutation (PR evidence): skip the
-/// bypass cell's read in `EffectControlLane::stage`.
+/// The reference is host-core's lane given the same cells, the convention of this file's #1264 and
+/// #1265 tests, not a rebuild of the committed model: a live edit keeps the effect's state, so a
+/// rebuilt plan matches it only after the settling window the #1266 section states, and a twin
+/// built that way would not catch more. The spec's "twin's rebuild" is not implemented; the
+/// reference shares the lane code, so the order and the block in which a revision's cells land are
+/// held at the lane, by effect-contract's `live_control` and `live_window` tests.
+///
+/// Test value: the C ABI dropping a `Bypass` that rides beside parameter records, or losing a
+/// parameter record beside a `Bypass` (the output would equal a control's). It does not catch a
+/// lane that defers the parameters a block after the bypass (the reference shares the lane).
+/// Mutation (PR evidence): skip the bypass cell's read in `EffectControlLane::stage`.
 #[test]
 fn a_bypass_lifted_beside_a_parameter_renders_like_the_browsers_lane() {
     use effect_contract::{
