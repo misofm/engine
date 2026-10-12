@@ -1423,10 +1423,11 @@ impl PcmSourceConsumer {
         // command is in the one-slot command queue now: observe it before judging the block
         // rather than discard accepted PCM (#1274 MINOR-3). Bounded: at most one command pop per
         // call. A counted block was published after its seek's command was pushed, so that
-        // command was pushed before the count too. Only this function pops the one-slot queue, so
-        // at the count at most one command is pushed and not yet popped, and at most one
-        // generation among the counted blocks is unobserved. This one pop observes it, and a
-        // later command's blocks were published after the count.
+        // command was pushed before the count too. Only `observe_seek_at_block_boundary` pops the
+        // one-slot queue (its callers are this acquire, `prepare_seek` and `begin_block_observe`,
+        // all on this consumer's thread), so at the count at most one command is pushed and not
+        // yet popped, and at most one generation among the counted blocks is unobserved. This one
+        // pop observes it, and a later command's blocks were published after the count.
         self.observe_seek_at_block_boundary(clock);
         if self.settle_block(block) {
             return;
@@ -2397,9 +2398,11 @@ mod tests {
     /// queued when it began: the next block takes the one the host published during it. Red if
     /// the acquire is bounded by the ring's capacity instead of the count at its entry: it then
     /// pops again whenever the host refills the queue between two passes, and chases the host.
+    /// The test races a real host thread, so it is red on most runs of that defect, not on every
+    /// run: a green run on a reverted bound is not proof the bound holds.
     #[test]
     fn the_acquire_does_not_pop_a_block_published_after_its_count() {
-        const BLOCKS: usize = 20_000;
+        const BLOCKS: usize = 200_000;
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
         assert!(consumer.transfer_block_count > 1);
         consumer.next_frame = SourceFrame(u64::MAX / 2);
