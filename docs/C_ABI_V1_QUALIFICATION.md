@@ -459,6 +459,29 @@ lane is attached.
   change must raise it; a structural replacement charges both plans' graph rows, so its peak grows
   by twice the graph move.
 
+- **Resource movement of the cells (#1345).** The lane's 16-record ring and target staging became
+  the latest-target cells and their dirty words; the producer's payload now holds the writer's
+  cell arrays. The figures above are #1263's; on the nine-track EQ reference session at the same
+  `limits()` (x86-64, eight lanes) the rows move, measured with
+  `cargo test --locked -p capi --test resource_lifecycle reference_session_retained -- --nocapture`
+  on the parent (`710f77df7`) and on this change:
+
+  | row | parent | cells |
+  |---|---|---|
+  | `graph_session_plus_plan_bytes` | 393,718 | 406,438 |
+  | `graph_incremental_plan_bytes` | 393,694 | 406,414 |
+  | `graph_metadata_bytes` | 185,521 | 198,241 |
+  | `capi_retained_bytes` | 277,481 | 281,513 |
+  | `largest_named_allocation_bytes` | 90,720 | 90,720 |
+
+  Every other reference row is unchanged. The graph estimate charges exactly what a lane retains
+  (`EffectControlLane::retained_resources`, with the bank's observation-queue array), so the
+  estimate equals the prepared plan's observed bytes. The member and bank terms above no longer
+  hold: a member's term is its cell arrays, which grow with the effect's live parameter cells and,
+  for the parametric EQ, its target slots, and the staging window is `max(S, live parameter
+  cells)` spans. A caller whose `maximum_graph_session_plus_plan_bytes` or
+  `maximum_capi_retained_bytes` was exact before this change must raise it.
+
 ## Value-only effect parameter edits on the running plan (#1264)
 
 A transaction that changes, adds or removes `params` of a track's native effect -- a console
