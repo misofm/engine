@@ -188,6 +188,118 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     }
   });
 
+  // #1345 gate 6. The effect's observation queue has one slot per declared tap and an `Observe`
+  // record overwrites its tap's whole state, so a submission names each tap once.
+  test("a window change on a one-tap effect is one re-arm record and lands", async () => {
+    const engine = await createOfflineEngine(observationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+    });
+    const submitted = [];
+    const submitCommands = engine.submitCommands.bind(engine);
+    engine.submitCommands = (bytes, count) => {
+      submitted.push(count);
+      return submitCommands(bytes, count);
+    };
+    try {
+      const handle = await engine.subscribeObservations({
+        selections: [selection("comp", "both")], windowBlocks: 2,
+      });
+      for (let block = 0; block < 2; block += 1) { feed(engine, block); engine.render(); }
+      await handle.pump();
+      assert.equal(handle.readLatest()[0].status, "ready");
+      assert.equal(handle.readLatest()[0].window.blocks, 2);
+      const submitsBefore = submitted.length;
+
+      const receipt = await handle.update({ selections: [selection("comp", "both")], windowBlocks: 4 });
+      assert.deepEqual(submitted.slice(submitsBefore), [1], "the update is one submission of one Observe edit");
+      assert.equal(receipt.configuration.windowBlocks, 4);
+      for (let block = 2; block < 6; block += 1) { feed(engine, block); engine.render(); }
+      await handle.pump();
+      const reading = handle.readLatest()[0];
+      assert.equal(reading.status, "ready");
+      assert.equal(reading.window.blocks, 4);
+      assert.ok(reading.window.firstSample >= receipt.appliedAtSample);
+      await handle.close();
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a submission naming one observation tap twice is refused whole as malformed", async () => {
+    const engine = await createOfflineEngine(observationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+    });
+    try {
+      const liveControls = engine.liveControls();
+      const edit = (on, window) => liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+        .observe("Gain Reduction", on, window);
+      assert.equal((await liveControls.submit(edit(true, 4))).ok, true);
+      feed(engine, 0); engine.render();
+      const refused = await liveControls.submit(edit(false, 2), edit(true, 4));
+      assert.equal(refused.ok, false);
+      assert.equal(refused.reason, 1);
+      assert.equal(refused.reasonName, "malformed");
+      assert.equal(refused.rejectedIndex, 1, "the second record of the tap is the one refused");
+      assert.equal(refused.admitted, 0);
+      for (let block = 1; block < 5; block += 1) { feed(engine, block); engine.render(); }
+      const reading = engine.readObservations([selection("comp", "both")])[0];
+      assert.equal(reading.status, "ready");
+      assert.equal(reading.window.blocks, 4, "nothing of the refused submission applied");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a close that follows a subscribe with no render between them waits for the render", async () => {
+    const engine = await createOfflineEngine(observationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+    });
+    try {
+      // The subscribe's record still holds the tap's one queue slot, so the close's disarm is
+      // refused for room. The owner holds it until a render drains the slot, then sends it.
+      const handle = await engine.subscribeObservations({
+        selections: [selection("comp", "both")], windowBlocks: 2,
+      });
+      let closed = false;
+      const closing = handle.close().then(() => { closed = true; });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(closed, false, "the close waits for a block, it is not dropped");
+      feed(engine, 0); engine.render();
+      await closing;
+      // The close's disarm now holds the slot in turn, so the next subscribe waits for a block too.
+      const subscribing = engine.subscribeObservations({
+        selections: [selection("comp", "both")], windowBlocks: 2,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      feed(engine, 1); engine.render();
+      const again = await subscribing;
+      feed(engine, 2); engine.render();
+      assert.notEqual(engine.readObservations([selection("comp", "both")])[0].status, "unarmed");
+      await again.close();
+      feed(engine, 3); engine.render();
+      assert.equal(engine.readObservations([selection("comp", "both")])[0].status, "unarmed");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a refused subscription that nothing renders for ends when the engine is disposed", async () => {
+    const engine = await createOfflineEngine(observationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
+    });
+    const handle = await engine.subscribeObservations({
+      selections: [selection("comp", "both")], windowBlocks: 2,
+    });
+    const closing = handle.close();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    engine.dispose();
+    await assert.rejects(closing, /owner changed|stale|closed/);
+  });
+
   test("invalidates a handle at headless replacement", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,

@@ -993,6 +993,17 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         observationMap,
         readObservations,
         liveControls: getLiveControls,
+        // The audio thread renders on its own, so a subscription refused because an earlier one is
+        // not yet drained waits for the host's render count to move and is sent again.
+        nextRender: async () => {
+          const started = (await host.status()).renderedQuanta;
+          for (;;) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 4));
+            if (closed) return;
+            const current = await host.status();
+            if (current.renderedQuanta > started) return;
+          }
+        },
         responseRead: readTrackResponse,
         ...(preparedSpectrum === undefined ? {} : {
           spectrumPrepared: () => preparedSpectrum,

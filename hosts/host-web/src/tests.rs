@@ -2999,7 +2999,9 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     feed_and_render(&mut host, 1, 7, 0.25);
     assert_eq!(admission_counter_clear_stats(), (0, 0));
 
-    // Malformed and backpressured submissions on an idle host cannot create pending ownership.
+    // Malformed submissions on an idle host cannot create pending ownership, a submission that
+    // names one observation tap twice included (a single submission cannot overfill the queue, so
+    // that is the only way for one to be refused here).
     let mut refused =
         observed_effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
     stage_command(
@@ -3034,7 +3036,9 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     for index in 0..=depth as usize {
         stage_observe_subscribe(&mut refused, index);
     }
-    assert_eq!(refused.submit_commands(depth + 1), RESULT_BACKPRESSURE);
+    assert_eq!(refused.submit_commands(depth + 1), RESULT_INVALID_ARGUMENT);
+    assert_eq!(refused.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(refused.command_report().rejected_index, depth);
     assert!(
         !refused
             .ready
@@ -4833,7 +4837,8 @@ fn an_effect_bypass_command_returns_the_dry_signal() {
 /// per *destination queue* -- one full queue refuses the whole batch, including the records bound
 /// for destinations that had room. The matrix record is a latest-target cell (#1312) and the flood
 /// is observation subscriptions, the one record kind that stays a queue (#1345 D2): the observed
-/// compressor declares one tap, so its queue holds one subscription.
+/// compressor declares one tap, so its queue holds one subscription; an earlier submission holds
+/// that slot, and a later one cannot name the same tap twice (it would be malformed, not full).
 ///
 /// Red mutation: make the free-room pass read `ready.command_wanted[0]` instead of
 /// `ready.command_wanted[slot]` -> the subscription flood is checked against another queue's
@@ -4873,15 +4878,22 @@ fn a_mixed_batch_is_one_transaction_across_every_queue() {
             [0.5, 0.0, 0.0, 1.0],
         );
     };
-    // One matrix record (a cell, no room to want), then one more subscription than the effect's
-    // queue can hold.
-    matrix(&mut flooded);
-    for index in 0..=depth as usize {
-        stage_observe_subscribe(&mut flooded, index + 1);
+    // An earlier submission takes the effect's one slot (the clean host takes it too, so the two
+    // hosts differ only by the refused batch). Then one matrix record (a cell, no room to want)
+    // rides with one more subscription than the queue has room for: refused whole.
+    for host in [&mut clean, &mut flooded] {
+        stage_observe_subscribe(host, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK);
     }
-    assert_eq!(flooded.submit_commands(depth + 2), RESULT_BACKPRESSURE);
+    matrix(&mut flooded);
+    stage_observe_subscribe(&mut flooded, 1);
+    assert_eq!(flooded.submit_commands(2), RESULT_BACKPRESSURE);
     let report = *flooded.command_report();
     assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(
+        report.rejected_index, 1,
+        "the subscription names the full queue"
+    );
     assert_eq!(report.admitted, 0, "a refused submission admits nothing");
 
     feed_and_render(&mut clean, 1, 1, 0.25);
@@ -4892,13 +4904,11 @@ fn a_mixed_batch_is_one_transaction_across_every_queue() {
         "not even the matrix record in the refused batch reached the engine",
     );
 
-    // The same batch, one record shorter, is admitted whole and moves the matrix.
+    // The same batch, once the block has drained the queue, is admitted whole and moves the matrix.
     matrix(&mut flooded);
-    for index in 0..depth as usize {
-        stage_observe_subscribe(&mut flooded, index + 1);
-    }
-    assert_eq!(flooded.submit_commands(depth + 1), RESULT_OK);
-    assert_eq!(flooded.command_report().admitted, depth + 1);
+    stage_observe_subscribe(&mut flooded, 1);
+    assert_eq!(flooded.submit_commands(2), RESULT_OK);
+    assert_eq!(flooded.command_report().admitted, 2);
     feed_and_render(&mut clean, 1, 2, 0.25);
     feed_and_render(&mut flooded, 1, 2, 0.25);
     assert_ne!(
@@ -4939,28 +4949,90 @@ fn a_live_control_free_host_refuses_every_live_kind_as_unsupported() {
     );
 }
 
-/// #137 E3: flooding past a bounded queue is a typed local rejection that admits nothing and
-/// disturbs no rendered sample. The flood is observation subscriptions: they stay a queue after
-/// the fader, mute and matrix lanes became latest-target cells with no room to overfill (#1312).
+/// #1345 D5: a flood of effect values is admitted. Bypass, parameter and prepared-target values are
+/// latest-target cells, so a batch of effect records that no queue could hold is `RESULT_OK` and
+/// admits every record; the last bypass is the one the engine heard.
 ///
-/// Red mutation: delete the free-room pre-check loop in `admit_commands` -> the flood is admitted
-/// record by record until `try_push` fails, the transaction is no longer all-or-nothing, and the
-/// flooded run's digest differs from the clean run's.
+/// Test value: red if an effect value is again counted against a room (the old browser refused the
+/// flood whole with backpressure), or if a later record of the batch is lost to an earlier one's.
+#[test]
+fn a_flood_of_effect_values_is_admitted_whole_and_the_last_is_heard() {
+    const QUANTUM: u32 = 128;
+    let records = 200_usize;
+    let mut flooded =
+        observed_effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS.into());
+    let mut last_only =
+        observed_effect_live_control_host(QUANTUM, DEFAULT_COMMAND_QUEUE_RECORDS.into());
+    feed_and_render(&mut flooded, 1, 0, 0.25);
+    feed_and_render(&mut last_only, 1, 0, 0.25);
+    let bypass = |host: &mut AudioWorkletEngineHost, index: usize, on: bool| {
+        stage_command(
+            host,
+            index,
+            COMMAND_EFFECT_BYPASS,
+            RACK_INSERTS,
+            255,
+            0,
+            0,
+            0,
+            0,
+            [if on { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        );
+    };
+    for index in 0..records {
+        bypass(&mut flooded, index, index % 2 == 0);
+    }
+    // 200 records: the last (index 199) lifts the bypass the first one set.
+    assert_eq!(flooded.submit_commands(records as u32), RESULT_OK);
+    assert_eq!(flooded.command_report().admitted, records as u32);
+    bypass(&mut last_only, 0, false);
+    assert_eq!(last_only.submit_commands(1), RESULT_OK);
+    for block in 1..4 {
+        feed_and_render(&mut flooded, 1, block, 0.25);
+        feed_and_render(&mut last_only, 1, block, 0.25);
+        assert_eq!(
+            flooded.output_pcm().expect("flooded"),
+            last_only.output_pcm().expect("last only"),
+            "block {block}: the flood renders what its last record alone renders"
+        );
+    }
+    // Now the flood ends on a set bypass: the render differs from the other.
+    for index in 0..records {
+        bypass(&mut flooded, index, index % 2 == 1);
+    }
+    assert_eq!(flooded.submit_commands(records as u32), RESULT_OK);
+    feed_and_render(&mut flooded, 1, 4, 0.25);
+    feed_and_render(&mut last_only, 1, 4, 0.25);
+    assert_ne!(
+        flooded.output_pcm().expect("flooded"),
+        last_only.output_pcm().expect("last only"),
+        "a flood whose last record sets the bypass is heard bypassed"
+    );
+}
+
+/// #137 E3: submitting into a full bounded queue is a typed local rejection that admits nothing and
+/// disturbs no rendered sample. The queue is the observation queue: subscriptions stay a queue
+/// after the fader, mute and matrix lanes became latest-target cells with no room to overfill
+/// (#1312). One submission cannot overfill it, since it names each tap once (#1345 D2); a second
+/// submission before the next block can.
+///
+/// Red mutation: delete the free-room pre-check loop in `admit_commands` -> the second submission
+/// reaches `try_push`, whose failure the admission treats as unreachable and panics on.
 #[test]
 fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
     const QUANTUM: u32 = 128;
-    let depth = DEFAULT_COMMAND_QUEUE_RECORDS;
 
     let mut clean = observation_host(QUANTUM, 1, None);
     let mut flooded = observation_host(QUANTUM, 1, None);
     for block in 0..4_u64 {
         feed_and_render_tracks(&mut clean, block, 0.25);
         feed_and_render_tracks(&mut flooded, block, 0.25);
-        // One more record than the queue can hold, submitted as one batch.
-        for index in 0..depth as usize + 1 {
+        // The queue holds one subscription per declared tap, so the first takes its one slot and
+        // a second submission before the next block finds none.
+        let subscribe = |host: &mut AudioWorkletEngineHost| {
             stage_command(
-                &mut flooded,
-                index,
+                host,
+                0,
                 COMMAND_OBSERVE_SUBSCRIBE,
                 1,
                 255,
@@ -4970,20 +5042,23 @@ fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
                 4,
                 [0.0; 4],
             );
-        }
-        assert_eq!(flooded.submit_commands(depth + 1), RESULT_BACKPRESSURE);
+            host.submit_commands(1)
+        };
+        assert_eq!(subscribe(&mut flooded), RESULT_OK);
+        let armed = flooded.observation_armed_taps();
+        assert_eq!(subscribe(&mut flooded), RESULT_BACKPRESSURE);
         let report = *flooded.command_report();
         assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
         assert_eq!(report.admitted, 0, "a refused submission admits nothing");
         assert_eq!(
+            flooded.observation_armed_taps(),
+            armed,
+            "block {block}: the refusal armed nothing and moved nothing"
+        );
+        assert_eq!(
             clean.output_pcm().expect("clean output"),
             flooded.output_pcm().expect("flooded output"),
             "block {block}: control traffic never disturbs a rendered sample",
-        );
-        assert_eq!(
-            flooded.observation_armed_taps(),
-            clean.observation_armed_taps(),
-            "block {block}: no subscription armed"
         );
     }
     assert_eq!(
@@ -6833,13 +6908,17 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     assert_eq!(host.meter_header().first_sample, 0);
     assert!(host.meter_frame().iter().all(|value| *value == 0.0));
 
-    // The flood: a batch larger than the queue can take is refused whole, nothing is armed, and
-    // the frame is untouched.
+    // A submission names each tap once: a record overwrites its tap's whole state and a
+    // submission drains in one block, so a second record for the tap is malformed at its own wire
+    // index, and nothing of the batch is armed or moved (#1345 D2). The queue's one slot is taken
+    // by an earlier submission, so the duplicate is refused before the room pass: had the room
+    // pass come first, the answer would be backpressure, which invites a retry that can never
+    // succeed.
     assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
     feed_and_render_tracks(&mut host, 11, 0.5);
     let before = host.meter_frame().to_vec();
-    let flood = 2;
-    for index in 0..flood {
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    for index in 0..2 {
         stage_command(
             &mut host,
             index,
@@ -6854,11 +6933,12 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
         );
     }
     assert_eq!(
-        host.submit_commands(flood as u32),
-        RESULT_BACKPRESSURE,
-        "a batch deeper than the queue is refused whole"
+        host.submit_commands(2),
+        RESULT_INVALID_ARGUMENT,
+        "a submission naming one tap twice is malformed, whatever room the queue has"
     );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(host.command_report().rejected_index, 1);
     assert_eq!(host.command_report().admitted, 0);
     assert_eq!(
         host.meter_frame(),
@@ -6866,12 +6946,104 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
         "nothing was armed or moved"
     );
 
+    // The same tap in a later submission, with the queue still full from the earlier one, is
+    // backpressure: records of earlier submissions are not yet drained, and a block clears it.
+    assert_eq!(
+        observe(&mut host, 0, 1, 0, 1, 2, true),
+        RESULT_BACKPRESSURE,
+        "the queue's one slot is taken until a block drains it"
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(host.command_report().admitted, 0);
+    feed_and_render_tracks(&mut host, 12, 0.5);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+
     // And a batch beyond the staging capacity is malformed before any queue is consulted.
     assert_eq!(
         host.submit_commands(MAXIMUM_COMMAND_RECORDS + 1),
         RESULT_INVALID_ARGUMENT
     );
     assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+}
+
+/// #1345 D2: a submission names each observation tap once. An `Observe` record overwrites its tap's
+/// whole state and one submission drains in one block, so the second record for a tap is malformed
+/// at its own wire index, before the room pass, any cell write or the stamp, whatever the queue's
+/// room. Two taps of different effects in one submission are fine.
+///
+/// Test value: red if the duplicate check goes (the second record then finds no room in the
+/// tap's one-slot queue and the answer is backpressure, which invites a retry that can never
+/// succeed), if it runs after the room pass or a cell write (the fader value or the bus below
+/// would move), or if it refuses taps of different effects.
+#[test]
+fn a_submission_names_each_observation_tap_once() {
+    const QUANTUM: u32 = 128;
+    let mut host = same_track_observation_host(QUANTUM);
+    let mut clean = same_track_observation_host(QUANTUM);
+    feed_and_render_tracks(&mut host, 0, 0.5);
+    feed_and_render_tracks(&mut clean, 0, 0.5);
+
+    // Two effects' taps, one record each, are admitted whole.
+    stage_observe_subscribe_at(&mut host, 0, 0, 0);
+    stage_observe_subscribe_at(&mut host, 1, 0, 1);
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    assert_eq!(host.command_report().admitted, 2);
+    feed_and_render_tracks(&mut host, 1, 0.5);
+    feed_and_render_tracks(&mut clean, 1, 0.5);
+    let armed = host.observation_armed_taps();
+    assert_eq!(armed, 2);
+
+    // A fader value (a cell), then the first effect's tap armed, then withdrawn: refused at the
+    // withdrawal, the third record, with the queue empty and the fader cell untouched.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    stage_observe_subscribe_at(&mut host, 1, 0, 0);
+    stage_command(
+        &mut host,
+        2,
+        COMMAND_OBSERVE_UNSUBSCRIBE,
+        RACK_INSERTS,
+        255,
+        0,
+        0,
+        1,
+        2,
+        [0.0; 4],
+    );
+    assert_eq!(host.submit_commands(3), RESULT_INVALID_ARGUMENT);
+    let report = *host.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_MALFORMED);
+    assert_eq!(report.rejected_index, 2, "the second record of the tap");
+    assert_eq!(report.admitted, 0);
+    let ready = host.ready.as_ref().expect("ready");
+    assert!(ready.in_flight.iter().all(|count| *count == 0));
+    assert_eq!(
+        ready.controls[0].fader.test_only_write_counts(),
+        [0; 4],
+        "the fader cell before the duplicate was not written"
+    );
+    assert_eq!(host.observation_armed_taps(), armed);
+    feed_and_render_tracks(&mut host, 2, 0.5);
+    feed_and_render_tracks(&mut clean, 2, 0.5);
+    assert_eq!(
+        host.output_pcm().expect("host output"),
+        clean.output_pcm().expect("clean output"),
+        "the refused batch moved no rendered sample"
+    );
+
+    // The refusal left the tap usable: the same tap alone is admitted.
+    stage_observe_subscribe_at(&mut host, 0, 0, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
 }
 
 /// A session with live controls but no observation capacity refuses a subscription with its own
@@ -7882,7 +8054,6 @@ fn mute_and_solo_are_separate_states() {
 fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
     const QUANTUM: u32 = 128;
     const TRACKS: usize = 4;
-    const DEPTH: u32 = DEFAULT_COMMAND_QUEUE_RECORDS;
     let mut refused = solo_host_with_insert(QUANTUM, TRACKS);
     let mut untouched = solo_host_with_insert(QUANTUM, TRACKS);
     render_pair_and_compare(
@@ -7894,15 +8065,18 @@ fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
         "before any command",
     );
 
-    // One batch: soloing track 1 (which pass one applies to the host's solo state, and which owes
-    // track 0 a gate value) behind one more observation subscription than track 0's insert queue
-    // can hold. The queue is a real one: a fader, mute or trim value is a cell with no room to
-    // overfill (#1312, #1346).
-    stage_solo(&mut refused, 0, 1, true, QUANTUM);
-    for index in 0..=DEPTH as usize {
-        stage_observe_subscribe(&mut refused, 1 + index);
+    // An earlier submission takes the one slot of track 0's insert queue (the other host takes it
+    // too, so the two differ only by the refused batch). The queue is a real one: a fader, mute or
+    // trim value is a cell with no room to overfill (#1312, #1346).
+    for host in [&mut refused, &mut untouched] {
+        stage_observe_subscribe(host, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK);
     }
-    assert_eq!(refused.submit_commands(DEPTH + 2), RESULT_BACKPRESSURE);
+    // One batch: soloing track 1 (which pass one applies to the host's solo state, and which owes
+    // track 0 a gate value) behind one more subscription than the queue has room for.
+    stage_solo(&mut refused, 0, 1, true, QUANTUM);
+    stage_observe_subscribe(&mut refused, 1);
+    assert_eq!(refused.submit_commands(2), RESULT_BACKPRESSURE);
     assert_eq!(refused.command_report().reason, COMMAND_REASON_BACKPRESSURE,);
     assert_eq!(refused.command_report().admitted, 0);
     {
@@ -10663,17 +10837,20 @@ fn a_bus_record_ahead_of_a_bad_track_record_is_never_pushed() {
     }
 }
 
-/// Issue #1213 gate 4(b): a batch that overfills one bus queue is typed backpressure at the first
+/// Issue #1213 gate 4(b): a batch that finds one bus queue full is typed backpressure at the first
 /// record that does not fit, and nothing -- the track record before it included -- is written. The
-/// overfilled queue is the bus compressor's observation queue, one slot for its one tap (#1345
-/// D2); the track record is a fader value, which is a latest-target cell with no room of its own
-/// to overfill (#1312).
+/// full queue is the bus compressor's observation queue, one slot for its one tap (#1345 D2), taken
+/// by an earlier submission; the track record is a fader value, which is a latest-target cell with
+/// no room of its own to overfill (#1312).
 ///
 /// Test value: red if the room check skips a bus queue, so admission pushes into it and fails
 /// half-way, or if the track's fader cell is written before the room check passes.
 #[test]
 fn overfilling_a_bus_queue_is_typed_backpressure_with_no_push() {
     let (mut a, _) = strip_pair(None, 4, 0);
+    stage_observe_subscribe_at(&mut a, 0, STRIP_BUS, 0);
+    assert_eq!(a.submit_commands(1), RESULT_OK);
+    let in_flight = a.ready.as_ref().expect("ready").in_flight.to_vec();
     stage_command(
         &mut a,
         0,
@@ -10686,20 +10863,19 @@ fn overfilling_a_bus_queue_is_typed_backpressure_with_no_push() {
         0,
         [-6.0, 0.0, 0.0, 0.0],
     );
-    for index in 1..3 {
-        stage_observe_subscribe_at(&mut a, index, STRIP_BUS, 0);
-    }
-    assert_eq!(a.submit_commands(3), RESULT_BACKPRESSURE);
+    stage_observe_subscribe_at(&mut a, 1, STRIP_BUS, 0);
+    assert_eq!(a.submit_commands(2), RESULT_BACKPRESSURE);
     let report = *a.command_report();
     assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
     assert_eq!(
         report.rejected_index, 1,
-        "the first bus record names the full queue"
+        "the bus record names the full queue"
     );
     let ready = a.ready.as_ref().expect("ready");
-    assert!(
-        ready.in_flight.iter().all(|count| *count == 0),
-        "nothing staged"
+    assert_eq!(
+        ready.in_flight.to_vec(),
+        in_flight,
+        "nothing more was staged"
     );
     for (strip, controls) in ready.controls.iter().enumerate() {
         assert_eq!(

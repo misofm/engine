@@ -291,13 +291,21 @@ describe("the writer contract -- paused", () => {
       const seed = await writer.flush();
       assert.equal(seed.refused, false);
 
-      for (const index of [0, 1, 2]) writer.stage(observeEdit(engine, index, false));
+      // The full queue's record is last, so everything the engine can take sits ahead of it.
+      for (const index of [1, 2, 0]) writer.stage(observeEdit(engine, index, false));
       assert.equal(writer.pending, 3, "three distinct addresses do not coalesce");
       const first = await writer.flush();
       assert.equal(first.refused, true, "the first compressor's queue is full");
       assert.equal(first.reason, "backpressure");
       assert.equal(first.pending, 3, "a refusal admits nothing and drops nothing");
       assert.ok(first.nextBatch < 3, "the writer narrows its next attempt");
+
+      // The narrowed batch is admitted while the host is paused: the writer was never told the
+      // boundary, it halved until the engine said yes, and the record whose queue is full waits.
+      const admittedBefore = writer.stats.admitted;
+      await writer.drain();
+      assert.ok(writer.stats.admitted > admittedBefore, "the split admitted part of the batch");
+      assert.ok(writer.pending > 0 && writer.pending < 3, "the blocked record is still pending");
 
       for (let block = 0; block < 8 && writer.pending > 0; block += 1) {
         feedAndRender(engine);

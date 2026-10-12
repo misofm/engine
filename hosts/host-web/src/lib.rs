@@ -1019,7 +1019,8 @@ fn strip_index(tracks: &[Box<str>], submixes: &[Box<str>], id: &str) -> Option<u
 
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
-/// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value.
+/// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value;
+/// or the submission names one observation tap more than once (#1345 D2).
 pub const COMMAND_REASON_MALFORMED: u32 = 1;
 /// `track_index` is not a track of the compiled session.
 pub const COMMAND_REASON_UNKNOWN_TRACK: u32 = 2;
@@ -1223,12 +1224,15 @@ pub struct WebBootOptions {
     pub reserved0: u32,
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
     pub maximum_memory_bytes: u64,
-    /// Per-track live-control queue depth in records, or `0` to accept no live command and
-    /// allocate no command staging (issue #137 D1).
+    /// Whether the plan accepts live commands: nonzero allocates the command staging and accepts
+    /// them, `0` accepts none and allocates no command staging (issue #137 D1). The number sizes
+    /// nothing in the plan: every fader, mute, matrix, input, send and effect value is a
+    /// latest-target cell (issues #1312, #1345, #1346, #1347), and an effect's observation queue
+    /// holds one subscription per declared tap (#1345 D2). Only the JS port's in-flight bound
+    /// reads it as a count. The word keeps its frozen name and offset in the boot options.
     ///
-    /// Zero still leaves every strip's fader/mute and matrix/pan cells on the plan (and its queues
-    /// at the engine's own depth, [`host_core::STRIP_LIVE_QUEUE_DEPTH`]): the engine ramps a
-    /// strip's mute for its own transitions, and no command can reach them (issues #1326, #1312).
+    /// Zero still leaves every strip's cells on the plan: the engine ramps a strip's mute for its
+    /// own transitions, and no command can reach them (issues #1326, #1312).
     pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -1241,7 +1245,7 @@ pub struct WebBootOptions {
     /// at all (issue #143 D3, level 1).
     ///
     /// Requires `live_control_command_queue_records != 0`: a subscription rides the effect's own
-    /// command queue, so observation without live controls has no delivery path.
+    /// observation queue, so observation without live controls has no delivery path.
     pub live_control_observation_taps: u64,
     /// The designated master strip index (tracks first, then submixes) **plus one**, or `0` for
     /// none (issue #143 D6). `T + j + 1` designates submix `j` (issue #1213 D5), so a mix bus
@@ -1565,6 +1569,12 @@ struct ReadyOwnership {
     /// subscriptions it queues on each effect (every other record is a cell write and wants none).
     /// Allocated at compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
     command_wanted: Box<[u32]>,
+    /// The observation taps the submission being validated has named, one bit per tap, one word per
+    /// effect instance (a session binds at most [`MAXIMUM_OBSERVATION_TAPS`] taps per effect).
+    /// An `Observe` record overwrites its tap's whole state at the block that drains it and one
+    /// submission drains in one block, so a submission names each tap once (#1345 D2). Cleared with
+    /// `command_wanted` at the top of every submission.
+    observe_named: Box<[u32]>,
     /// Decoded submission staging. Two entries per staged record, because one wire record
     /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
     /// plus `2 * strip_count` for the coalesced solo emission (issue #210 phase 1, per strip
@@ -4927,6 +4937,7 @@ fn admit_commands_staged(
         None => None,
     };
     ready.command_wanted.fill(0);
+    ready.observe_named.fill(0);
     let refuse = |reason: u32, index: usize| CommandRejection {
         result: match reason {
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
@@ -5331,6 +5342,27 @@ fn admit_commands_staged(
                     staged[0] = command
                         .into_observe_record(descriptor, observed)
                         .map_err(|reason| refuse(reason, index))?;
+                    // One submission names each tap once: a record overwrites its tap's whole
+                    // state and the submission drains in one block, so the second record would
+                    // be a supersession the engine must not make (D15-2: Observe records are
+                    // never superseded) and would not fit the tap's queue slot. Refused here,
+                    // at this record's wire index, before the room pass, any write or the stamp.
+                    let AdmittedCommand::Effect(EffectControlRecord::Observe { tap_index, .. }) =
+                        staged[0]
+                    else {
+                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                    };
+                    let bit = 1_u32
+                        .checked_shl(tap_index)
+                        .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
+                    let named = ready
+                        .observe_named
+                        .get_mut(effect)
+                        .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
+                    if *named & bit != 0 {
+                        return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                    }
+                    *named |= bit;
                     1
                 } else {
                     command
@@ -5892,12 +5924,15 @@ fn admit_commands_staged(
                 | AdmittedCommand::Input(_)
                 | AdmittedCommand::Route(_)
                 | AdmittedCommand::Effect(
-                    EffectControlRecord::Parameter { .. }
-                    | EffectControlRecord::PreparedTarget(_)
-                    | EffectControlRecord::Bypass(_),
+                    EffectControlRecord::Parameter { .. } | EffectControlRecord::Bypass(_),
                 ),
             )
             | StagedCommandKind::PreparedOwner(_) => {}
+            // A prepared target reaches a lane only through its owner's transaction, and
+            // `preflight_effect` refuses a raw one while staging.
+            StagedCommandKind::Command(AdmittedCommand::Effect(
+                EffectControlRecord::PreparedTarget(_),
+            )) => unreachable!("a raw prepared target was refused while staging"),
             // The only queue record: an observation subscription, in order (#1345 D2).
             StagedCommandKind::Command(record) => {
                 ready
@@ -6762,7 +6797,6 @@ fn prepare_caps(
             total.checked_add(u32::try_from(lane.segments.len()).ok()?)
         })
         .unwrap_or(u32::MAX)
-        .max(u32::try_from(options.live_control_command_queue_records).unwrap_or(u32::MAX))
         .max(1);
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
@@ -7379,6 +7413,7 @@ fn compile_ready(
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
+        observe_named: boxed_zero_u32(total_effects as usize)?,
         command_decoded: boxed_command_staging(
             strip_count,
             routes.len(),

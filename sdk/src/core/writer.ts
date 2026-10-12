@@ -31,13 +31,13 @@ import { MisoUsageError } from "./errors.ts";
  *
  * # Why the split is discovered rather than computed
  *
- * A batch too large for the queue must be broken up. The writer could compute the split if it knew
- * how many queue slots each record costs -- and it is not one: that cost is the engine's lowering
- * rule, and a copy of it here would be one more private constant to drift.
+ * A batch the engine refuses for room must be made smaller. The writer could compute the split if
+ * it knew how much room each record needs -- and it is not one: that cost is the engine's
+ * admission rule, and a copy of it here would be one more private constant to drift.
  *
  * So the writer discovers the boundary instead: a refusal halves the next attempt's size, and a
  * success grows it back toward the caller's ceiling. The engine's own answer drives the split,
- * which means the writer stays correct if the lowering rule ever changes.
+ * which means the writer stays correct if the admission rule ever changes.
  */
 
 /** One addressed live-control edit, in the wire's own vocabulary. */
@@ -99,8 +99,8 @@ export interface WriterOptions {
    */
   readonly submit: (records: Uint8Array, count: number) => CommandReport | Promise<CommandReport>;
   /**
-   * The largest batch to attempt. Defaults to the engine's default queue depth, which is the
-   * largest a single-lane batch can be from idle.
+   * The largest batch to attempt. Defaults to the engine's default command-record count
+   * (`defaultCommandQueueRecords`), the host's own bound on commands in flight.
    */
   readonly maximumBatch?: number;
 }
