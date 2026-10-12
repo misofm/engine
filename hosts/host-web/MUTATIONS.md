@@ -91,12 +91,13 @@ The row subscribes to the compressor's declared tap, renders sixteen blocks, and
 `trackGrDb` positive and finite, `masterGrDb` equal to the designated track's own reading,
 `firstSample` strictly monotonic with the windows tiling, an unsubscribe that actually stops the
 traffic, and the armed and unarmed renders of the same sixteen blocks producing **bit-identical
-audio**. Four self-test mutations run against every browser's real result:
+audio**. Self-test mutations run against every browser's real result (the unsubscribe gate's are
+listed under Amendment 6 below):
 
 | mutation | gate |
 |---|---|
 | `observation-armed` (the eval's named case, `observationArmed = 0`) | `an armed tap published no reduction at all` |
-| `observation-unsubscribe` | `an unsubscribed tap kept publishing` |
+| `observation-unsubscribe` | `an unsubscribed tap kept publishing, the signal under it stopped, or the run never exercised the armed tap` |
 | `observation-identity` | `arming a declared tap moved a rendered sample` |
 | `observation-window` | `observation windows did not advance monotonically and tile` |
 
@@ -131,11 +132,61 @@ removed too, `createHost` refuses the running context (`miso.error.v1`, result 1
 stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
 failed; with the unsubscribe sent, 0.
 
+*Note, 2026-10-12 (#1345 Amendment 6, root: one resume, no suspend after it).* This note supersedes the two
+notes above for the unsubscribe run: `runObservationUnsubscribeRun` resumes its real `AudioContext`
+once, through one trusted click, and never suspends it before the final close. The render between the
+subscribe and the unsubscribe is proved, not arranged: the host status read after the subscribe
+resolved (`R1`) must be exceeded by the status read just before the unsubscribe. The deleted
+`contextStateBeforeUnsubscribe` check and its `observation-unsubscribe-context-running` mutation went
+with the suspend. The run has its own session document, `unsubscribe-session.json`, with a 512-block
+source (the observation document's sixteen blocks cannot hold the armed blocks, a render and sixteen
+blocks after the acknowledgement; `observation-session.json` is unchanged and the run uses no seek). It
+feeds a +-0.5 square wave (a constant would be removed by the strip's input high-pass within a few
+blocks, so a later block could not tell signal from silence), boots the default 5,120-frame ring and a
+one-block meter window, and keeps the source twelve blocks ahead of the render: every meter frame tops
+the ring up to twelve blocks past the block the frame closed, with the blocks sent back to back
+(the feed asks the processor for nothing; a feed that read the status and awaited one acknowledgement
+per block starved on WebKit and Firefox and dropped the signal for several blocks). The gate
+(`unsubscribeVerdict`, shared with the page mutations) requires the armed tap to publish a positive
+reduction, `R2 > R1`, `trackGrDb == 0` on **every** frame the page received after the unsubscribe
+acknowledgement (the acknowledgement and the frames use one FIFO port, so those frames were polled
+after the tap was disarmed; no frame and no block after the boundary is excluded), at least sixteen
+blocks of such frames, and a track peak above 0.05 on every such frame. The host publishes no source
+underrun count, so the per-block peak is the evidence that no block of zeros was rendered. Under
+Amendment 6 `resume-clicks` declares two SDK clicks and one gate click.
+
+Result-field mutations (`mutate()` in `run.mjs`, each required to fail `<browser>: ...` on every
+browser's real result):
+
+| mutation | change | gate |
+|---|---|---|
+| `observation-unsubscribe` (a) | `maximumTrackGrDbAfterAcknowledgement = 1` | `observation-unsubscribe` |
+| `observation-unsubscribe-silent` (b) | `minimumPeakAfterAcknowledgement = 0` | the same gate: a zero from silence |
+| `observation-unsubscribe-short` (c) | `blocksAfterAcknowledgement = 15` | the same gate: fewer than sixteen blocks |
+| `observation-unsubscribe-norender` | `renderedBeforeUnsubscribe = renderedAfterSubscribe` | the same gate: no render between the two |
+
+Page mutations (`unsubscribePageMutationProofs` in `run.mjs`, under `--self-test-mutations`, a fresh
+page of every browser; each prints its numbers, requires the verdict to refuse them, and requires the
+verdict to accept them again when only the one field that should refuse them is repaired, so it proves
+which check turned red):
+
+| mutation | defect applied in the page | refused by |
+|---|---|---|
+| (d) `skip-unsubscribe` | the unsubscribe is never sent (a fabricated result 0 stands in) | `maximumTrackGrDbAfterAcknowledgement` > 0 on every frame after the "acknowledgement" |
+| (e) `feed-ends-at-boundary` | the source feed stops when the acknowledgement arrives | `minimumPeakAfterAcknowledgement` below the floor, with `maximumTrackGrDbAfterAcknowledgement` 0 and 16 or more blocks, so only the floor sees it |
+
+*Test value.* (a) defends the claim that an unsubscribed tap leaves the frame. (b) and (e): a zero
+reduction that comes from a source that stopped feeding, which the reduction check alone would pass.
+(c): a gate that proves nothing from a handful of frames. The `norender` mutation: an unsubscribe sent
+with no render beyond the subscribe, which the engine would refuse with backpressure and which the
+Amendment-5 suspend used to arrange by hand. (d): a gate whose reduction check cannot tell a disarmed
+tap from an armed one; no result-field mutation can show that, because it never touches the browser.
+
 *Note, 2026-10-12 (batch verdict 2, B2 diagnosis and second round).* Every `resume()` of a real
 `AudioContext` of the page now runs inside a trusted click. WebKit starts or restarts an
 `AudioContext` only inside a user activation and otherwise leaves `resume()` pending. The page
 declares its click plan (`resumeClickPlan`: the two SDK controls, when the SDK workloads run, and the
-two `data-qualification-resume` buttons of `resumeThroughClick`), `run.mjs` clicks exactly those
+two `data-qualification-resume` buttons (one since Amendment 6) of `resumeThroughClick`), `run.mjs` clicks exactly those
 controls, counts its clicks and runs the page under one 300 s deadline, and the page counts every
 `AudioContext.resume()` by whether `window.event` was a trusted click. The result carries
 `resumes: { declared, inClick, direct, planned, clicksPerformed }`; the `resume-clicks` gate requires

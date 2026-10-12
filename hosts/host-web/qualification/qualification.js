@@ -23,6 +23,20 @@ const OBSERVATION_TAPS = 4n;
 const OBSERVATION_MASTER_TRACK_PLUS_ONE = 1n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
+// #1345 Amendment 6: the real-context unsubscribe run, over its own session document
+// (`unsubscribe-session.json`, a 512-block source: the observation document's sixteen blocks cannot
+// hold the armed blocks, a render, and sixteen blocks after the acknowledgement). A one-block meter window, so each frame
+// carries one block's peak; a source fed twelve blocks ahead of the render (~32 ms, well inside the
+// 5,120-frame default ring) and no further; sixteen blocks of frames after the acknowledgement.
+const UNSUBSCRIBE_SOURCE_BLOCKS = 512;
+const UNSUBSCRIBE_METER_BLOCKS = 1n;
+const UNSUBSCRIBE_LEAD_BLOCKS = 12;
+const UNSUBSCRIBE_ARMED_FRAMES = 4;
+const UNSUBSCRIBE_MINIMUM_BLOCKS = 16;
+// The fed signal is a +-0.5 square wave; the compressor's reduction at that level (about 5 dB, in
+// the armed frames) leaves a track peak near 0.27, far above this floor, and a block of zeros (an
+// underrun) peaks at 0.
+const UNSUBSCRIBE_PEAK_FLOOR = 0.05;
 const MINIMUM_STALL_MS = 100;
 // Issue #1333 D3 / Amendment 1: the staging-read rows. One 2,048-frame spectrum window is sixteen
 // blocks, the observation session's whole declared source region.
@@ -118,6 +132,27 @@ function observationPlanes(_blockIndex) {
   );
   left.fill(OBSERVATION_LEVEL);
   right.fill(OBSERVATION_LEVEL);
+  return [left, right];
+}
+
+// The unsubscribe run's fed block: a square wave of +-0.5, sixteen samples per half period, on both
+// channels. It is not the constant of `observationPlanes`: the strip's input high-pass removes a
+// constant, so a fed DC level decays to nothing within a few blocks and a later block could not tell
+// signal from silence. Every block is identical (128 is four whole periods), the values are exact in
+// binary32, and `blockIndex` is unused, as in every fed-PCM generator here.
+function unsubscribePlanes(_blockIndex) {
+  const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
+  const right = new Float32Array(
+    storage,
+    QUANTUM_FRAMES * Float32Array.BYTES_PER_ELEMENT,
+    QUANTUM_FRAMES,
+  );
+  for (let frame = 0; frame < QUANTUM_FRAMES; frame += 1) {
+    const level = (frame >> 4) % 2 === 0 ? OBSERVATION_LEVEL : -OBSERVATION_LEVEL;
+    left[frame] = level;
+    right[frame] = level;
+  }
   return [left, right];
 }
 
@@ -527,8 +562,8 @@ async function bounded(kind, step, context, start) {
 /// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
 /// The first `suspend()` of a new context is not awaited (Firefox can create a later context already
 /// running, and the `suspend()` is only a request), so this poll is what keeps the
-/// gate from going on with a context that is still running: the "between" steps need a suspended
-/// context. Returns the state it saw, which the run records.
+/// gate from going on with a context that is still running: the boot needs a suspended context.
+/// Returns the state it saw, which the run records.
 async function requireSuspended(context, step) {
   const started = performance.now();
   while (context.state !== "suspended") {
@@ -542,22 +577,22 @@ async function requireSuspended(context, step) {
   return context.state;
 }
 
-/// The labels of the two trusted-click resumes `runObservationUnsubscribeRun` makes, in order. The
-/// click plan below names the buttons by these labels, so the gate and its plan cannot drift apart.
-const UNSUBSCRIBE_ARMED_RESUME = "a frame from the armed tap";
-const UNSUBSCRIBE_REPLAY_RESUME = "the replayed region to render";
+/// The label of the one trusted-click resume `runObservationUnsubscribeRun` makes (#1345 Amendment 6).
+/// The click plan below names the button by this label, so the gate and its plan cannot drift apart.
+const UNSUBSCRIBE_RESUME = "the armed tap to render";
+const UNSUBSCRIBE_AFTER_WAIT = "the blocks after the unsubscribe";
 
 /// Every control the page asks the harness to click, in the order the page offers them, as selectors
 /// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
 /// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
 /// when the page resumed a context any other way, offered another control, or did not offer one.
 /// The two SDK controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
-/// first; the other two are `resumeThroughClick`'s buttons.
+/// first; the last is `resumeThroughClick`'s button.
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
     ...(sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
-    ...[UNSUBSCRIBE_ARMED_RESUME, UNSUBSCRIBE_REPLAY_RESUME].map(resumeControlSelector),
+    resumeControlSelector(UNSUBSCRIBE_RESUME),
   ];
 }
 
@@ -671,16 +706,22 @@ async function boundedSample(describe) {
 }
 
 /// Resume `context` through a trusted click and wait until `condition` holds, for at most
+/// `AUDIO_STEP_TIMEOUT_MS`. See [`renderUntil`] for the wait; the click is the only resume.
+async function resumeUntil(context, condition, what, describe) {
+  await resumeThroughClick(context, what);
+  await renderUntil(context, condition, what, describe);
+}
+
+/// Wait, on a context that is already running, until `condition` holds, for at most
 /// `AUDIO_STEP_TIMEOUT_MS`. There is no recovery: a context that does not pull its graph is a named
 /// failure of the gate, never a retry (root, 2026-10-12; a script `suspend()` then `resume()` hung
 /// the whole page in 3 of 8 runs of the minimal repro, `/tmp/claude-1002/b2diag/drv5.out`). The
-/// failure carries `describe()` sampled twice across the window, right after the resume and at the
+/// failure carries `describe()` sampled twice across the window, at the start and at the
 /// timeout, so a stalled clock (`currentTime`) and a stalled render count (`renderedQuanta`) show as
 /// equal samples. While it waits it also asks for the host status every `STALL_POLL_INTERVAL_MS`
 /// (each request bounded), and the failure carries the `stallSignature` of
 /// [`classifyStallSignature`]. The polls change no pass condition and no bound.
-async function resumeUntil(context, condition, what, describe) {
-  await resumeThroughClick(context, what);
+async function renderUntil(context, condition, what, describe) {
   const started = performance.now();
   const atResume = await describe();
   let lastPoll = started;
@@ -721,29 +762,42 @@ async function sampleContext(context, step, host) {
   };
 }
 
-/// Issue #143 E12 and #1345 batch-verdict B1: subscribe -> frames -> unsubscribe -> no frames, in a
-/// real browser, on a real `AudioContext` held suspended between steps.
+/// Issue #143 E12 and #1345 Amendment 6: subscribe -> frames -> unsubscribe -> no reduction on any
+/// later frame, in a real browser, on one real `AudioContext` that is resumed once and never
+/// suspended again before the final close.
 ///
-/// A named #1345 exception (root, 2026-10-12, batch-verdict B1). This page calls the raw
-/// `host.observe`, and the engine admits one observation record per tap per render (#1345 D8, D2
-/// Amendments 1 and 2): a second record for the tap is refused with typed backpressure until a block
-/// has drained the first. The honest contract is the one the SDK keeps (`renderWait`): a render
-/// separates two operations on one tap. Admission itself still never coalesces. So the run renders
-/// between the subscribe and the unsubscribe:
+/// A named #1345 exception (root, 2026-10-12, batch-verdict B1; Amendment 6 replaced its suspend).
+/// This page calls the raw `host.observe`, and the engine admits one observation record per tap per
+/// render (#1345 D8, D2 Amendments 1 and 2): a second record for the tap is refused with typed
+/// backpressure until a block has drained the first. The honest contract is the one the SDK keeps
+/// (`renderWait`): a render separates two operations on one tap. Admission itself still never
+/// coalesces. The run therefore proves a render between the two, and does not suspend to get one:
 ///
-/// 1. suspended, it feeds the sixteen-block region, subscribes, and resumes (through a trusted click,
-///    see [`resumeThroughClick`]) until a frame arrives
-///    (the armed tap publishes real reduction), then suspends again;
-/// 2. it unsubscribes, which the engine admits because blocks have rendered since the subscribe,
-///    seeks the source back to its start and feeds the same region again, so the signal that
-///    published frames is under the tap once more;
-/// 3. it resumes until sixteen more blocks have rendered. Meter frames keep arriving (the meter
-///    lease is held), but none may carry a reduction: an unarmed tap publishes zero.
+/// 1. suspended, it feeds the source, subscribes, and reads the host status (`R1`, the rendered
+///    quanta after the subscribe resolved);
+/// 2. one trusted click resumes the context (see [`resumeThroughClick`]); the run keeps the source
+///    fed and waits until the rendered quanta exceed `R1` and armed frames have arrived;
+/// 3. it unsubscribes. The acknowledgement and the meter frames travel one FIFO port, so a frame
+///    the page receives after the acknowledgement resolved was polled after the tap was disarmed;
+/// 4. it keeps feeding and waits until the frames received after the acknowledgement cover at least
+///    [`UNSUBSCRIBE_MINIMUM_BLOCKS`] blocks.
 ///
-/// Nothing here depends on how many blocks run before a suspension takes effect: the replay makes
-/// the second pass carry the same signal as the first whatever the first consumed, and a pass that
-/// rendered fewer than sixteen blocks fails the run as vacuous.
-async function runObservationUnsubscribeRun(createHost, sessionDocument) {
+/// The gate then requires `trackGrDb == 0` on **every** frame received after the acknowledgement
+/// (the contract text: the gain-reduction section is recomputed from the taps armed when each frame
+/// is polled), no exclusion of the first frame or of any block after the boundary. A zero must not
+/// come from silence: the meter window is one block, so each frame carries one block's peak, and
+/// every frame after the acknowledgement must peak above [`UNSUBSCRIBE_PEAK_FLOOR`]. The page
+/// reads no source-underrun counter (the host publishes none), so the per-block peak of the fed
+/// signal is the evidence that no block of zeros was rendered.
+///
+/// The source streams just-in-time for the whole run: after every status read the page tops the ring
+/// up to [`UNSUBSCRIBE_LEAD_BLOCKS`] blocks ahead of the rendered quanta, never further. The
+/// lead is short enough that a feed which stops at the boundary underruns well inside the
+/// [`UNSUBSCRIBE_MINIMUM_BLOCKS`] the gate requires.
+///
+/// `mutation` is `null` for the gate itself; `"skip-unsubscribe"` and `"feed-ends-at-boundary"` are
+/// the page mutations `run.mjs` proves red in every browser (see MUTATIONS.md).
+async function runObservationUnsubscribeRun(createHost, sessionDocument, mutation = null) {
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
   // The first `suspend()` of a new context is not awaited, the way `sdk-response-entry.ts` keeps its
   // contexts suspended across addModule. The state poll below is the check that replaces the await:
@@ -756,9 +810,9 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     context,
     document: sessionDocument,
     options: bootOptions(
-      OBSERVATION_FRAMES,
+      DEFAULT_RING_FRAMES,
       LIVE_CONTROL_COMMAND_QUEUE_RECORDS,
-      LIVE_CONTROL_METER_BLOCKS,
+      UNSUBSCRIBE_METER_BLOCKS,
       OBSERVATION_TAPS,
       OBSERVATION_MASTER_TRACK_PLUS_ONE,
     ),
@@ -767,107 +821,153 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   }));
   host.node.connect(context.destination);
 
-  const feed = async (generation) => {
-    for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
-      const acknowledgement = await step("submitSource", () => host.submitSource({
+  // The source. `fed` counts the blocks submitted; the content is the level the armed tap needs,
+  // block after block, to the end of the document's source, for as long as `feeding` holds.
+  //
+  // The feed is driven by the meter frames themselves, not by status requests: a frame says which
+  // block the render has just closed, so every frame tops the ring up to `UNSUBSCRIBE_LEAD_BLOCKS`
+  // ahead of it, with the blocks sent back to back and their acknowledgements collected later. It
+  // asks the processor for nothing, so the processor answers only the submits and the run's own
+  // requests (the real browsers answer one request per quantum or fewer, and a feed that waits for a
+  // status read and then for an acknowledgement per block falls behind a render that consumes a
+  // block every 2.7 ms).
+  let fed = 0;
+  let feeding = true;
+  let feedFailure = null;
+  const inflight = [];
+  const submitBlocks = (target) => {
+    if (target > UNSUBSCRIBE_SOURCE_BLOCKS) {
+      feedFailure ??= new Error("observation unsubscribe source exhausted");
+      return;
+    }
+    for (; fed < target; fed += 1) {
+      const block = fed;
+      inflight.push(host.submitSource({
         sourceId: "live-control-source",
-        generation,
+        generation: 1n,
         startFrame: BigInt(block * QUANTUM_FRAMES),
         sampleRateHz: SAMPLE_RATE,
-        planes: observationPlanes(block),
+        planes: unsubscribePlanes(block),
         frames: QUANTUM_FRAMES,
-        endOfRegion: block === OBSERVATION_BLOCKS - 1,
+        endOfRegion: block === UNSUBSCRIBE_SOURCE_BLOCKS - 1,
+      }).then((acknowledgement) => {
+        if (acknowledgement.result !== 0) {
+          feedFailure ??= new Error(`observation unsubscribe feed rejected: ${acknowledgement.result} at block ${block}`);
+        }
+      }, (error) => {
+        feedFailure ??= error;
       }));
-      if (acknowledgement.result !== 0) throw new Error("observation unsubscribe feed rejected");
     }
   };
-  const renderedQuanta = async () => (await step("status", () => host.status())).renderedQuanta;
+  const requireFeed = () => {
+    if (feedFailure !== null) throw feedFailure;
+  };
   const frames = [];
   const meterLease = await step("meters", () => host.meters({
     enabled: true,
-    onFrame: (frame) => frames.push({
-      trackGrDb: Array.from(frame.trackGrDb),
-      firstSample: frame.firstSample.toString(),
-      endSample: frame.endSample.toString(),
-    }),
+    onFrame: (frame) => {
+      const closed = {
+        trackGrDb: frame.trackGrDb[0],
+        peak: Math.max(frame.peaks[0], frame.peaks[1]),
+        firstSample: frame.firstSample,
+        endSample: frame.endSample,
+      };
+      frames.push(closed);
+      if (feeding) submitBlocks(Number(closed.endSample / BigInt(QUANTUM_FRAMES)) + UNSUBSCRIBE_LEAD_BLOCKS);
+    },
   }));
-  await feed(1n);
+  const renderedQuanta = async () => (await step("status", () => host.status())).renderedQuanta;
+  const describe = () => sampleContext(context, step, host);
+
+  submitBlocks(UNSUBSCRIBE_LEAD_BLOCKS);
+  await step("submitSource", () => Promise.all(inflight));
+  requireFeed();
   const subscription = {
     trackIndex: 0,
     rack: 1,
     effectIndex: 0,
     tapId: OBSERVATION_TAP_ID,
-    windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+    windowBlocks: Number(UNSUBSCRIBE_METER_BLOCKS),
     armed: true,
   };
   const subscribed = await step("observe (subscribe)", () => host.observe({ subscriptions: [subscription] }));
+  // R1: read after the subscribe resolved. The unsubscribe goes out only after a render beyond it.
+  const renderedAfterSubscribe = await renderedQuanta();
 
+  let renderedBeforeUnsubscribe = renderedAfterSubscribe;
   await resumeUntil(
     context,
-    () => frames.length > 0,
-    UNSUBSCRIBE_ARMED_RESUME,
-    () => sampleContext(context, step, host),
+    async () => {
+      requireFeed();
+      if (frames.length < UNSUBSCRIBE_ARMED_FRAMES) return false;
+      renderedBeforeUnsubscribe = await renderedQuanta();
+      return renderedBeforeUnsubscribe > renderedAfterSubscribe;
+    },
+    UNSUBSCRIBE_RESUME,
+    describe,
   );
-  await bounded("suspend", "after the armed frames", context, () => context.suspend());
-  // Frames the render published before the suspension took effect may still be on their way.
-  await delay(100);
+  const maximumGrDb = (list) => list.reduce((highest, frame) => Math.max(highest, frame.trackGrDb), 0);
+  const minimumPeak = (list) => list.reduce((lowest, frame) => Math.min(lowest, frame.peak), Infinity);
   const armedFrames = frames.length;
-  const maximumGrDb = (list) => list.reduce(
-    (highest, frame) => Math.max(highest, frame.trackGrDb[0]),
+  const armedList = frames.slice();
+
+  const unsubscribed = mutation === "skip-unsubscribe"
+    ? { result: 0, bindings: [] }
+    : await step("observe (unsubscribe)", () => host.observe({
+      subscriptions: [{ ...subscription, armed: false }],
+    }));
+  // Everything received from here on was polled after the acknowledgement was sent: the same port,
+  // in order.
+  const acknowledgedAtFrame = frames.length;
+  if (mutation === "feed-ends-at-boundary") feeding = false;
+  const boundary = await renderedQuanta();
+
+  const blocksAfter = () => frames.slice(acknowledgedAtFrame).reduce(
+    (blocks, frame) => blocks + Number((frame.endSample - frame.firstSample) / BigInt(QUANTUM_FRAMES)),
     0,
   );
-  const armedMaximumTrackGrDb = maximumGrDb(frames);
-
-  // The render between the subscribe and the unsubscribe has happened and the context is held
-  // suspended for the unsubscribe: refuse to go on with a context that is not.
-  const stateBeforeUnsubscribe = await requireSuspended(context, "before the unsubscribe");
-  const unsubscribed = await step("observe (unsubscribe)", () => host.observe({
-    subscriptions: [{ ...subscription, armed: false }],
-  }));
-  const seeked = await step("seekSource", () => host.seekSource({
-    sourceId: "live-control-source",
-    generation: 2n,
-    sourceFrame: 0n,
-  }));
-  await feed(2n);
-  const renderedBefore = await renderedQuanta();
-  await resumeUntil(
+  await renderUntil(
     context,
-    async () => await renderedQuanta() >= renderedBefore + BigInt(OBSERVATION_BLOCKS),
-    UNSUBSCRIBE_REPLAY_RESUME,
-    async () => ({ renderedBefore, ...(await sampleContext(context, step, host)) }),
+    async () => {
+      requireFeed();
+      return blocksAfter() >= UNSUBSCRIBE_MINIMUM_BLOCKS;
+    },
+    UNSUBSCRIBE_AFTER_WAIT,
+    async () => ({ boundary: String(boundary), ...(await describe()) }),
   );
-  await bounded("suspend", "after the replayed region", context, () => context.suspend());
-  await delay(100);
-  const renderedAfter = await renderedQuanta();
-  const framesAfterUnsubscribe = frames.length - armedFrames;
-  const maximumTrackGrDbAfterUnsubscribe = maximumGrDb(frames.slice(armedFrames));
+  const afterList = frames.slice(acknowledgedAtFrame);
+  feeding = false;
+  await step("submitSource", () => Promise.all(inflight));
+  requireFeed();
 
   const renderAllocations = await step("renderAllocationCount", () => renderAllocationCount(host));
   await step("dispose", () => host.dispose());
   await step("close", () => context.close());
   return {
     contextStateBeforeBoot: stateBeforeBoot,
-    contextStateBeforeUnsubscribe: stateBeforeUnsubscribe,
     meterLeaseResult: meterLease.result,
     subscribeResult: subscribed.result,
     unsubscribeResult: unsubscribed.result,
     unsubscribeBindings: unsubscribed.bindings.length,
-    seekResult: seeked.result,
+    renderedAfterSubscribe: String(renderedAfterSubscribe),
+    renderedBeforeUnsubscribe: String(renderedBeforeUnsubscribe),
+    boundary: String(boundary),
+    fedBlocks: fed,
     armedFrames,
-    armedMaximumTrackGrDb,
-    replayedBlocks: Number(renderedAfter - renderedBefore),
-    framesAfterUnsubscribe,
-    maximumTrackGrDbAfterUnsubscribe,
+    armedMaximumTrackGrDb: maximumGrDb(armedList),
+    framesAfterAcknowledgement: afterList.length,
+    blocksAfterAcknowledgement: blocksAfter(),
+    maximumTrackGrDbAfterAcknowledgement: maximumGrDb(afterList),
+    minimumPeakAfterAcknowledgement: afterList.length === 0 ? 0 : minimumPeak(afterList),
     renderAllocations,
   };
 }
 
 /// Issue #143 E12: the observation row, its two offline runs and the real-context unsubscribe.
-async function runObservationQualification(createHost, sessionDocument) {
+async function runObservationQualification(createHost, sessionDocument, unsubscribeDocument) {
   const armed = await runObservationRun(createHost, sessionDocument, true);
   const disarmed = await runObservationRun(createHost, sessionDocument, false);
-  const unsubscribe = await runObservationUnsubscribeRun(createHost, sessionDocument);
+  const unsubscribe = await runObservationUnsubscribeRun(createHost, unsubscribeDocument);
   return {
     armed,
     disarmed,
@@ -1085,7 +1185,7 @@ export async function runQualification() {
   const resumeRecord = countResumes();
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
-    liveControlResponse, observationResponse,
+    liveControlResponse, observationResponse, unsubscribeResponse,
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
@@ -1095,9 +1195,10 @@ export async function runQualification() {
       fetch("/qualification/stall-session.json"),
       fetch("/qualification/live-control-session.json"),
       fetch("/qualification/observation-session.json"),
+      fetch("/qualification/unsubscribe-session.json"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
-      || !liveControlResponse.ok || !observationResponse.ok) {
+      || !liveControlResponse.ok || !observationResponse.ok || !unsubscribeResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
@@ -1110,6 +1211,8 @@ export async function runQualification() {
   // Issue #143 E12: the live-control session plus one compressor, so an armed tap has a real
   // reduction.
   const observationDocument = new TextEncoder().encode(await observationResponse.text());
+  // #1345 Amendment 6: the real-context unsubscribe run's own session, with a source long enough.
+  const unsubscribeDocument = new TextEncoder().encode(await unsubscribeResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
   const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
     ? await (await import("/sdk/sdk-response-client.js")).runSdkResponseQualification()
@@ -1177,6 +1280,7 @@ export async function runQualification() {
     observation = await runObservationQualification(
       createMisoAudioWorkletHost,
       observationDocument,
+      unsubscribeDocument,
     );
   } catch (error) {
     const diagnostic = await diagnoseReady(observationDocument);
@@ -1253,6 +1357,48 @@ export const qualificationConstants = Object.freeze({
   sourceBitDepth: "32f",
 });
 
+/// The `observation-unsubscribe` gate on the run's result (#1345 Amendment 6), shared by the gate
+/// in `run.mjs` and by the page-mutation proofs, so both judge by one predicate. `true` only if the
+/// armed tap published, the unsubscribe followed a render beyond the subscribe, and every frame
+/// received after the unsubscribe acknowledgement (at least sixteen blocks of them, none excluded)
+/// carried no reduction while still carrying the fed signal.
+export function unsubscribeVerdict(run) {
+  if (run === null || typeof run !== "object") return false;
+  const wholeNumber = (value) => typeof value === "string" && /^[0-9]+$/.test(value);
+  return run.contextStateBeforeBoot === "suspended"
+    && run.meterLeaseResult === RESULT_OK
+    && run.subscribeResult === RESULT_OK
+    && run.unsubscribeResult === RESULT_OK
+    && run.unsubscribeBindings === 0
+    && wholeNumber(run.renderedAfterSubscribe) && wholeNumber(run.renderedBeforeUnsubscribe)
+    && BigInt(run.renderedBeforeUnsubscribe) > BigInt(run.renderedAfterSubscribe)
+    && run.armedFrames >= UNSUBSCRIBE_ARMED_FRAMES
+    && run.armedMaximumTrackGrDb > 0
+    && run.blocksAfterAcknowledgement >= UNSUBSCRIBE_MINIMUM_BLOCKS
+    && run.framesAfterAcknowledgement >= 1
+    && run.maximumTrackGrDbAfterAcknowledgement === 0
+    && run.minimumPeakAfterAcknowledgement > UNSUBSCRIBE_PEAK_FLOOR;
+}
+
+/// The page-mutation seam (#1345 Amendment 6): the unsubscribe run alone, with one named defect
+/// applied in the page. `run.mjs` runs it in a fresh page of every browser under
+/// `--self-test-mutations` and requires [`unsubscribeVerdict`] to be false. `null` runs the gate
+/// unmutated. The click plan is the run's own single control.
+export const unsubscribePageMutations = Object.freeze(["skip-unsubscribe", "feed-ends-at-boundary"]);
+export const unsubscribePageClickPlan = Object.freeze([resumeControlSelector(UNSUBSCRIBE_RESUME)]);
+export async function runUnsubscribePageMutation(mutation) {
+  if (mutation !== null && !unsubscribePageMutations.includes(mutation)) throw new Error(`unknown page mutation: ${mutation}`);
+  const [{ createMisoAudioWorkletHost }, observationResponse] = await Promise.all([
+    import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
+    fetch("/qualification/unsubscribe-session.json"),
+  ]);
+  if (!observationResponse.ok) throw new Error("qualification fixture fetch failed");
+  const document = new TextEncoder().encode(await observationResponse.text());
+  const resumeRecord = countResumes();
+  const unsubscribe = await runObservationUnsubscribeRun(createMisoAudioWorkletHost, document, mutation);
+  return { unsubscribe, resumes: resumeRecord };
+}
+
 // Issue #288: these are the existing qualification call sites, exposed only to the hermetic
 // contract test. The browser runner continues to enter through runQualification below; keeping
 // the references here direct means the test executes the same boot objects that production uses.
@@ -1285,6 +1431,12 @@ export const qualificationSessionSources = Object.freeze([
     sourceId: "live-control-source",
     blocks: OBSERVATION_BLOCKS,
     planes: observationPlanes,
+  }),
+  Object.freeze({
+    document: "unsubscribe-session.json",
+    sourceId: "live-control-source",
+    blocks: UNSUBSCRIBE_SOURCE_BLOCKS,
+    planes: unsubscribePlanes,
   }),
   Object.freeze({
     document: "stall-session.json",

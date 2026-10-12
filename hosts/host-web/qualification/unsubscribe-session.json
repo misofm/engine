@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "session_id": "web-browser-unsubscribe",
+  "revision": "1",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [
+    {
+      "id": "live-control-source",
+      "content": "blake3:0d7939ec9eb26d3bda6a443fcf2136e93120d9ce8e63f5b38023f78461dc3cdf",
+      "channels": 2,
+      "bit_depth": "32f",
+      "frames": "65536"
+    }
+  ],
+  "console": {
+    "pre_insert": [
+      {
+        "slot": "eq-simd1",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.parametric-eq"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ],
+    "post_insert": [
+      {
+        "slot": "eq-simd2",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.parametric-eq"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ]
+  },
+  "tracks": [
+    {
+      "id": "track",
+      "source_id": "live-control-source",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 80.0,
+          "lpf_hz": 18000.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 120.0,
+          "lpf_hz": 12000.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "eq-simd1",
+          "bypass": false,
+          "params": [
+            {
+              "parameter_id": 1,
+              "channel": "both",
+              "unit": "linear",
+              "value": 1.0
+            },
+            {
+              "parameter_id": 2,
+              "channel": "both",
+              "unit": "linear",
+              "value": 1.0
+            },
+            {
+              "parameter_id": 3,
+              "channel": "left",
+              "unit": "hz",
+              "value": 120.0
+            },
+            {
+              "parameter_id": 3,
+              "channel": "right",
+              "unit": "hz",
+              "value": 2400.0
+            },
+            {
+              "parameter_id": 4,
+              "channel": "left",
+              "unit": "db",
+              "value": 6.0
+            },
+            {
+              "parameter_id": 4,
+              "channel": "right",
+              "unit": "db",
+              "value": -9.0
+            },
+            {
+              "parameter_id": 5,
+              "channel": "both",
+              "unit": "ratio",
+              "value": 0.70710677
+            },
+            {
+              "parameter_id": 6,
+              "channel": "both",
+              "unit": "ratio",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "slot": "eq-simd2",
+          "bypass": true,
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "comp",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 1,
+                "channel": "both",
+                "unit": "db",
+                "value": -30.0
+              },
+              {
+                "parameter_id": 2,
+                "channel": "both",
+                "unit": "ratio",
+                "value": 4.0
+              },
+              {
+                "parameter_id": 3,
+                "channel": "both",
+                "unit": "db",
+                "value": 6.0
+              },
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 10.0
+              },
+              {
+                "parameter_id": 5,
+                "channel": "both",
+                "unit": "milliseconds",
+                "value": 100.0
+              },
+              {
+                "parameter_id": 6,
+                "channel": "both",
+                "unit": "db",
+                "value": 0.0
+              },
+              {
+                "parameter_id": 7,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "submixes": [],
+  "vcas": [],
+  "outputs": [
+    {
+      "id": "main-out"
+    }
+  ],
+  "routes": [
+    {
+      "id": "track-main",
+      "source": {
+        "kind": "track",
+        "track_id": "track",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    }
+  ],
+  "automation": []
+}

@@ -8,6 +8,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
+import {
+  unsubscribePageClickPlan, unsubscribePageMutations, unsubscribeVerdict,
+} from "./qualification.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -27,8 +30,11 @@ const MUTATIONS = [
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
-  "observation-armed", "observation-unsubscribe", "observation-unsubscribe-context-running",
-  "observation-identity", "observation-window",
+  "observation-armed", "observation-identity", "observation-window",
+  // #1345 Amendment 6: the unsubscribe gate's result-field mutations (a)-(c) and the render proof;
+  // (d) and (e) are page mutations (`unsubscribePageMutations`), proved in each browser.
+  "observation-unsubscribe", "observation-unsubscribe-silent", "observation-unsubscribe-short",
+  "observation-unsubscribe-norender",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
@@ -228,27 +234,15 @@ function validate(browserName, result) {
   gate(browserName, "observation-window", observation?.armed?.firstSampleMonotonic === true
     && observation?.armed?.windowsTile === true,
   "observation windows did not advance monotonically and tile");
-  // The tap published while armed, the unsubscribe was admitted after a render (the engine admits
-  // one record per tap per render, #1345), and a replay of the same signal under the unsubscribed
-  // tap published no reduction. A never-armed tap publishes none either.
   const unsubscribe = observation?.unsubscribe;
-  // Both contexts the run held were suspended where the run needs them: the new context before
-  // boot (its first suspend is not awaited, so this is the check that replaces the await) and the
-  // context between the armed render and the unsubscribe. A run that went on with a running context
-  // is not the proof.
-  gate(browserName, "observation-unsubscribe", unsubscribe?.subscribeResult === 0
-    && unsubscribe?.contextStateBeforeBoot === "suspended"
-    && unsubscribe?.contextStateBeforeUnsubscribe === "suspended"
-    && unsubscribe?.unsubscribeResult === 0
-    && unsubscribe?.unsubscribeBindings === 0
-    && unsubscribe?.seekResult === 0
-    && unsubscribe?.armedFrames >= 1
-    && unsubscribe?.armedMaximumTrackGrDb > 0
-    && unsubscribe?.replayedBlocks >= 16
-    && unsubscribe?.framesAfterUnsubscribe >= 1
-    && unsubscribe?.maximumTrackGrDbAfterUnsubscribe === 0
+  // #1345 Amendment 6: one resume and no suspend after it. The new context was suspended before boot
+  // (its first suspend is not awaited, so a poll replaces the await), a render beyond the subscribe's
+  // status separated the subscribe from the unsubscribe, and every frame the page received after the
+  // unsubscribe acknowledgement (at least sixteen blocks, none excluded) carried no reduction while
+  // still carrying the fed signal. A never-armed tap publishes none either.
+  gate(browserName, "observation-unsubscribe", unsubscribeVerdict(unsubscribe)
     && observation?.disarmed?.maximumTrackGrDb === 0,
-  `an unsubscribed tap kept publishing, or the run never exercised the armed tap: ${JSON.stringify({
+  `an unsubscribed tap kept publishing, the signal under it stopped, or the run never exercised the armed tap: ${JSON.stringify({
     unsubscribe,
     disarmedMaximumTrackGrDb: observation?.disarmed?.maximumTrackGrDb,
   })}`);
@@ -259,11 +253,12 @@ function validate(browserName, result) {
   // `resume()`, no missing click, no extra one (batch-verdict 2, B2).
   const resumes = result.resumes;
   gate(browserName, "resume-clicks", resumes?.direct === 0
-    && Number.isInteger(resumes?.declared) && resumes.declared > 0
+    && Number.isInteger(resumes?.declared)
+    && resumes.declared === (result.sdkResponse === null ? 1 : 3)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
     && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+  `a real AudioContext was resumed outside a trusted click, the page did not declare its one gate click (plus the two SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -755,9 +750,15 @@ function mutate(result, mutation) {
   if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
-  if (mutation === "observation-unsubscribe") copy.observation.unsubscribe.maximumTrackGrDbAfterUnsubscribe = 1;
-  // The state check let a running context through before the unsubscribe.
-  if (mutation === "observation-unsubscribe-context-running") copy.observation.unsubscribe.contextStateBeforeUnsubscribe = "running";
+  if (mutation === "observation-unsubscribe") copy.observation.unsubscribe.maximumTrackGrDbAfterAcknowledgement = 1;
+  // (b) A zero from silence: a frame after the acknowledgement peaked below the floor.
+  if (mutation === "observation-unsubscribe-silent") copy.observation.unsubscribe.minimumPeakAfterAcknowledgement = 0;
+  // (c) Fewer than sixteen blocks of frames after the acknowledgement.
+  if (mutation === "observation-unsubscribe-short") copy.observation.unsubscribe.blocksAfterAcknowledgement = 15;
+  // The unsubscribe went out with no render beyond the subscribe's status.
+  if (mutation === "observation-unsubscribe-norender") {
+    copy.observation.unsubscribe.renderedBeforeUnsubscribe = copy.observation.unsubscribe.renderedAfterSubscribe;
+  }
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
   if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
@@ -953,6 +954,67 @@ function normalizedRow(browserName, browserVersion, outcome) {
   };
 }
 
+/// #1345 Amendment 6, mutations (d) and (e): the unsubscribe run in a fresh page of this browser with
+/// one defect applied in the page, which the gate's verdict must refuse. Each also proves *which*
+/// check refuses it: the verdict turns true again when only that one field is repaired. (d) skips the
+/// unsubscribe, so the tap keeps publishing reduction on every later frame; (e) ends the source feed
+/// at the boundary, so reduction stays zero and only the peak floor sees the silence.
+async function unsubscribePageMutationProofs(browserName, browser, origin) {
+  for (const mutation of unsubscribePageMutations) {
+    const page = await browser.newPage();
+    const diagnostics = [];
+    page.on("console", (message) => diagnostics.push(`console ${message.type()}: ${message.text()}`));
+    page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
+    try {
+      page.setDefaultTimeout(120000);
+      await page.goto(`${origin}/qualification/index.html`);
+      const execution = page.evaluate(async (name) => {
+        try {
+          const module = await import("/qualification/qualification.js");
+          return await module.runUnsubscribePageMutation(name);
+        } catch (error) {
+          return { qualificationError: { message: error?.message ?? String(error), stack: error?.stack } };
+        }
+      }, mutation);
+      const completion = execution.then((value) => ({ kind: "complete", value }));
+      let timer;
+      const expired = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "deadline" }), PAGE_DEADLINE_MS);
+      });
+      try {
+        for (const selector of unsubscribePageClickPlan) {
+          const click = page.locator(selector).first().click({ timeout: PAGE_DEADLINE_MS }).then(
+            () => ({ kind: "clicked" }),
+            (error) => ({ kind: "click-error", error }),
+          );
+          const outcome = await Promise.race([completion, click, expired]);
+          if (outcome.kind === "complete") break;
+          gate(browserName, "observation-unsubscribe-page-mutation", outcome.kind === "clicked",
+            `${mutation}: the page offered no control to click: ${outcome.error?.message ?? "deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
+        }
+        const outcome = await Promise.race([completion, expired]);
+        gate(browserName, "observation-unsubscribe-page-mutation", outcome.kind === "complete",
+          `${mutation}: the page did not finish within ${PAGE_DEADLINE_MS} ms; page diagnostics: ${diagnostics.join("; ")}`);
+      } finally {
+        clearTimeout(timer);
+      }
+      const { unsubscribe, qualificationError } = await execution;
+      gate(browserName, "observation-unsubscribe-page-mutation", qualificationError === undefined && unsubscribe !== undefined,
+        `${mutation}: the mutated run failed instead of reporting a result: ${JSON.stringify(qualificationError)}; page diagnostics: ${diagnostics.join("; ")}`);
+      const refused = !unsubscribeVerdict(unsubscribe);
+      const cause = mutation === "skip-unsubscribe"
+        ? { maximumTrackGrDbAfterAcknowledgement: 0 }
+        : { minimumPeakAfterAcknowledgement: 1 };
+      const onlyThatCheck = unsubscribeVerdict({ ...unsubscribe, ...cause });
+      process.stdout.write(`${browserName}: page-mutation ${mutation}: ${JSON.stringify(unsubscribe)}; refused=${refused}; accepted when only ${Object.keys(cause)[0]} is repaired=${onlyThatCheck}\n`);
+      gate(browserName, "observation-unsubscribe", refused && onlyThatCheck,
+        `red page mutation ${mutation} escaped the gate, or the gate refused it for another reason: ${JSON.stringify(unsubscribe)}`);
+    } finally {
+      await page.close();
+    }
+  }
+}
+
 async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled) {
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
@@ -1041,7 +1103,10 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     gate(browserName, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError)}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     const outcome = validate(browserName, result);
-    if (proveMutations) mutationProofs(browserName, result);
+    if (proveMutations) {
+      mutationProofs(browserName, result);
+      await unsubscribePageMutationProofs(browserName, browser, origin);
+    }
     if (Array.isArray(result.renderAllocations)) {
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations

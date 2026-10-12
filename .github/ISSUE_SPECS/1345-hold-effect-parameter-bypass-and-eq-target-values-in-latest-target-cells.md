@@ -432,6 +432,59 @@ all pass; firefox 5 + 5, all pass; webkit 6 unloaded pass, 10 loaded (32 busy lo
 to 36) all fail loudly at the first `resume()`. The leg is not green under full load. The run table
 and the open question are in the "Batch re-verify fixes" record below.
 
+## Amendment 6 (root, 2026-10-12): the unsubscribe gate resumes once and never suspends again
+
+Root's ruling on the stream B batch-3 gate stall. The two-resume design of Amendments 5 and the B2
+rounds stalls on Linux WebKit in a pre-existing WebKit and engine interaction (main 19 of 60 runs
+against B3's 22 of 60; `submix-verdicts/1531-evidence/`). Amendment 5 added the suspend only to put a
+render between the subscribe and the unsubscribe. Suspend and resume is not what this gate claims, so
+Amendment 5's `resumeUntil` paragraph (suspend, unsubscribe, seek, feed again, resume again) is
+superseded.
+
+**The gate.** One trusted click resumes the gate's real context; nothing suspends it before the final
+close. The render between the two operations is proved: the host status read after the subscribe
+resolves is `R1`, and the unsubscribe goes out only after a status read exceeds `R1`. The unsubscribe
+acknowledgement and the meter frames travel one FIFO port, so every frame the page receives after the
+acknowledgement was polled after the tap was disarmed. The gate asserts `trackGrDb == 0` on every such
+frame, excludes none (not the first frame, not block `B`, not the next `windowBlocks` blocks, which would
+test a weaker claim and hide an ageing defect), and requires at least sixteen blocks of such frames.
+`resume-clicks` declares two SDK clicks and one gate click. The `contextStateBeforeUnsubscribe` check and
+its mutation are deleted with the suspend.
+
+**What this documents (and does not change).** This amendment documents the existing #143 behaviour and
+changes none. The reviewer checked at `374d347c2`: the push clears the armed bit when the unsubscribe is
+admitted (`hosts/host-web/src/lib.rs:1879-1889`); each publishing `poll_meters` zeroes the whole
+gain-reduction section and folds only armed taps (`lib.rs:3727-3786`), and its early returns do not
+re-post an old value; the acknowledgement (`web/miso-engine-v1-audio-worklet.js:1561-1574`) and the
+frames (`:1871`) use one thread and one FIFO port. *Contract text* (to go into both `.d.ts` twins at
+`:96-99` and `:673`, byte-identical, and into the `lib.rs` docs at `:1125` and `:2361`): "The
+gain-reduction section is recomputed from the taps armed when each frame is polled. An unsubscribe
+disarms its tap when it is admitted, so every meter frame received after its `result === 0`
+acknowledgement leaves that tap out. A strip's slot (`trackGrDb`, `submixGrDb`) is the maximum over its
+still-armed taps' latest windows, and `0` when none is armed or none has published. `masterGrDb` is
+`null` when the designated strip has none." *Status:* the contract text and the Rust test that holds its
+two unique catches (zero on the first frame after the unsubscribe; with two reducing taps on one strip,
+disarming the larger leaves the slot bit-equal to the other tap's reading) wait on the user's answer on
+the shipped-file edits; this commit carries the gate only. The `poll_meters` `first_sample >= arm_sample`
+gap (`lib.rs:6083-6097`) is a successor issue and the contract does not describe it.
+**Reopening condition:** the shipped host has no Worker control plane; if control moves to a Worker
+(D15-10), the ordering that makes "received after the acknowledgement" mean "polled after the
+disarm" must be proved again.
+
+**Named exceptions (root, 2026-10-12).** (1) `hosts/host-web/qualification/qualification.js` and `run.mjs`
+(the ratified Amendment 5 exceptions) carry the gate. (2) One new qualification-only session document,
+`hosts/host-web/qualification/unsubscribe-session.json`, with a 512-block source, and one
+`qualificationSessionSources` row in `qualification.js`: the observation document's sixteen-block source
+cannot hold the armed blocks, a render and sixteen blocks after the acknowledgement (a block past the
+declared region is refused with result 1), and a seek back to the start cannot give a gapless loop
+(the web host exposes no anchored seek). `observation-session.json` is unchanged and the gate uses no
+seek. `session-identities.mjs` derives the new document's content identity from the generator, unchanged.
+(3) The underrun substitute (root, accepted): the host publishes no source-underrun count, so the gate
+boots a one-block meter window (`liveControlMeterBlocks = 1`), keeps the source twelve blocks ahead of
+the render on the default 5,120-frame ring, and requires every frame after the acknowledgement to peak
+above 0.05. Mutation (e) (the feed stops at the boundary) must be red in every browser, and the record
+must show that the floor check is what turns it red.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, on `codex/d15-stream-b3`; checkpoints `09190ea55`, `122bdbbc0`, `ba14de159` and the docs commit that follows them)
