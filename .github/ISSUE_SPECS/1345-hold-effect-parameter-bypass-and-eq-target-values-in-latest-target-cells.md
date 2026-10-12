@@ -805,3 +805,30 @@ the room pass, and the fader and armed-tap assertions state the all-or-nothing o
    with #1524.
 3. Attempt 2's open items 2 (STREAMS' "Watermark bound on `main` today"), 4 (the boot word and
    `control_queue_depth` remain) and 5 (AArch64 rows; Playwright legs not run) stand.
+
+### Follow-ups (verdict of attempt 3: m1, NIT 1, NIT 2, m3; Sonnet 5.5, on `codex/d15-stream-b3`)
+
+Verdict: `submix-verdicts/1345-attempt3.md`, PASS. No source behaviour moved; the follow-ups are two
+evals, two doc edits and one README paragraph.
+
+- **m1.** `sdk/test/observation-subscription-evals.mjs`, "renders that never free the slot end the
+  wait at one deadline from the first refusal": a scripted host renders every 60 ms and another writer
+  refills the slot after each render (`keepRefusing`), with `requestDeadlineMs` 150. The close must
+  reject with typed `backpressure` between 140 ms and 300 ms. Test value: a deadline fixed again per
+  resend lets the wait run to the cap of 8 resends (about 480 ms here, 45 s at the default); no other
+  eval renders during a refused wait without freeing the slot. Mutation: `deadline ??=` changed to
+  `deadline =` at `sdk/src/core/observation-subscriptions.ts` `#submit` is red on exactly this eval
+  (371 pass, 1 fail); reverted, 372 pass.
+- **NIT 2.** Same file, "closing the engine ends a pending wait at once with the stale-owner error":
+  `requestDeadlineMs` 3,000, `engine.close()` after 40 ms, the pending `handle.close()` must reject with
+  the "owner changed" usage error in under 1,000 ms. Test value: without the close resolution in the
+  browser wait the wait runs to the deadline. Mutation: deleting `if (closed) return finish(false);` in
+  `sdk/src/browser/engine.ts` is red on exactly this eval (371 pass, 1 fail); reverted, 372 pass.
+- **NIT 1.** The shared `ObservationSubscription.update` doc now says the headless engine refuses at
+  once (the caller renders and calls again) and the browser engine first waits for a render, up to
+  `requestDeadlineMs`.
+- **m3.** `sdk/README.md` (managed observation paragraph) now states the contract: two managed
+  operations on the same tap need a render between them; headless rejects at once with typed
+  `backpressure`, browser waits up to `requestDeadlineMs` and then ends in typed `backpressure`.
+  Named exception ratified by root, 2026-10-12, attempt-3 m3: `sdk/README.md`.
+- **m2** (the real-worklet browser case) is root's successor issue; not done here.

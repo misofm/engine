@@ -276,7 +276,10 @@ entries, with one active spectrum producer. It does not enable simultaneous inde
 Managed observation, response, and spectrum handles expose `readLatest()`, `update()`, and
 `close()`. Browser delivery progresses automatically; headless consumers call `pump()` between
 explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates
-preserve the prior configuration. Prepare `liveControls.observationTaps` for resident effect taps.
+preserve the prior configuration. Two managed operations (subscribe, update, close) on the same
+effect tap need a render between them. In a headless engine the second one rejects at once with
+typed `backpressure`: render, then retry. In a browser engine it waits for a render, up to
+`requestDeadlineMs`, and then ends in typed `backpressure`. Prepare `liveControls.observationTaps` for resident effect taps.
 
 Use the recorded sample spans to compare observations with `appliedAtSample`. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling

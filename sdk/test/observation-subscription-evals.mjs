@@ -486,6 +486,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     let rendered = 0n;
     let slotFull = false;
     let nextMalformed = false;
+    let sticky = false;
     const ack = (result, reason, admitted) => ({
       tag: "miso.ack.v1", requestId: 1, result, reason, rejectedIndex: 0, admitted,
       appliedAtSample: rendered * 128n, records: new Uint8Array(0),
@@ -500,7 +501,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       async command(request) {
         log.commands.push({ at: rendered, kinds: request.commands.map((command) => command.kind) });
         if (nextMalformed) { nextMalformed = false; return ack(1, 1, 0); }
-        if (slotFull) return ack(6, 8, 0);
+        if (slotFull || sticky) return ack(6, 8, 0);
         slotFull = true;
         return ack(0, 0, request.commands.length);
       },
@@ -533,6 +534,8 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       log,
       render() { rendered += 1n; slotFull = false; },
       refuseNextAsMalformed() { nextMalformed = true; },
+      // Another writer takes the slot again after every render, so no render ever frees it.
+      keepRefusing() { sticky = true; },
     };
   }
 
@@ -591,6 +594,51 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     } finally {
       await engine.close();
     }
+  });
+
+  test("renders that never free the slot end the wait at one deadline from the first refusal", async () => {
+    // A render lands every 60 ms and each one is followed by another refusal. A deadline fixed per
+    // resend would keep the wait going to the cap of 8 resends, about 480 ms here; one deadline
+    // from the first refusal ends it at 150 ms.
+    const rig = slotHost();
+    const engine = await browserEngine(rig, { requestDeadlineMs: 150 });
+    try {
+      const handle = await engine.subscribeObservations(request);
+      rig.keepRefusing();
+      const ticker = setInterval(() => rig.render(), 60);
+      const started = Date.now();
+      try {
+        await assert.rejects(() => handle.close(), (error) => {
+          assert.ok(error instanceof MisoEngineError);
+          assert.equal(error.code, "backpressure");
+          return true;
+        });
+      } finally {
+        clearInterval(ticker);
+      }
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed >= 140, `it waited for the deadline (${elapsed} ms)`);
+      assert.ok(elapsed < 300, `one deadline spans every resend (${elapsed} ms)`);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("closing the engine ends a pending wait at once with the stale-owner error", async () => {
+    const rig = slotHost();
+    const engine = await browserEngine(rig, { requestDeadlineMs: 3_000 });
+    const handle = await engine.subscribeObservations(request);
+    const closing = handle.close();
+    const started = Date.now();
+    setTimeout(() => { void engine.close(); }, 40);
+    const outcome = await Promise.race([
+      closing.then(() => "resolved", (error) => error),
+      new Promise((resolve) => setTimeout(() => resolve("still waiting"), 1_500)),
+    ]);
+    assert.ok(outcome instanceof Error, `ended with ${String(outcome)}`);
+    assert.match(outcome.message, /owner changed/);
+    assert.ok(Date.now() - started < 1_000, "the wait did not run to its deadline");
+    await engine.close();
   });
 
   test("a refusal that is not backpressure rejects at once and is never sent again", async () => {

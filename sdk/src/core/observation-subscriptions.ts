@@ -121,8 +121,10 @@ export interface ObservationSubscription {
   pump(): Promise<ObservationSubscriptionNotification | undefined>;
   /**
    * Replace the selections and the window. A window change on a tap this handle alone holds is one
-   * re-arm. Like `close()`, it is refused with a typed, retryable `backpressure` error when an
-   * earlier subscription still holds the tap's queue slot and no render has drained it yet.
+   * re-arm. Like `close()`, it meets a typed, retryable `backpressure` error when an earlier
+   * subscription still holds the tap's queue slot and no render has drained it yet. The headless
+   * engine refuses at once, so the caller renders and calls again. The browser engine first waits
+   * for a render, up to `requestDeadlineMs`, and ends in the same error when none comes.
    */
   update(request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt>;
   close(): Promise<void>;
