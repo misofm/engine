@@ -382,3 +382,17 @@ from the `[[bin]]` case (a TOML parser reads both as the same table). The claim 
 **Open items.** None for #1519's rules. Observation, not charged: manifests outside the scan roots (`fuzz/`, `docs/handoffs/...`)
 have target sources the realtime walk never reads; the new rule keeps their paths inside their own directories, which is all the
 amendment asks. Rule 1's limit 4 (a path attribute assembled by macro expansion) is unchanged.
+
+**Verdict follow-ups (doc only, 2026-10-12, root-approved wording).** MINOR-1 of the attempt-3 verdict: the #1438 D3 note and the
+`walk.rs` doc comment of `SKIPPED_DIRECTORIES` said that rustc reaches the skipped directories only through a `mod` item, which is
+false (Cargo target autodiscovery, `[[bin]] name` without `path`, and dependency or member paths reach them). Both now say that the
+walk reads no `.rs` file under them, that D1 (d) refuses a `mod` item that reaches them, and that the other routes are staged for
+#1527 (#1438 limit 3). NITs recorded, none fixed here:
+- The inline `bin = [{ .. }]` and `lib.path = ".."` self-tests, and tests for the drive-letter branch, the `\`-separator branch and
+  the fail-closed constant-read branch of the manifest target-path rule, are deferred to #1527, which replaces the manifest reader
+  (its Root Amendment 1 extends the one `tomllib` pass).
+- The `name ! group` list in `source_reads.rs` is not complete: `in !(..)` (`for _ in !(..)`) matches the macro shape too. Over-refusal
+  only; the module doc does not claim the list is complete.
+- APFS/HFS+ folds `ſ` (U+017F) to `s`, but `to_lowercase` keeps it, so the case-insensitive compare of D1 (a) and (d) misses
+  `mod node_moduleſ`. Not a hidden CI false pass: the walk skips only exact names and Linux CI has no folding, so the file there is
+  read. It matters only on a case-insensitive macOS dev build; a one-line fold would close it if root wants it.
