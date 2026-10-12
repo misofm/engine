@@ -308,3 +308,7 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
 - *Give every route whose tap precedes its strip's fader a live lane on every plan* (#1391) (the
   pre-fader route ducks, through #1325 D2).
+- *Carry live-controlled effect lanes across a plan swap* (#1280), *Carry an insert lane that moves
+  between a bank and a per-node instance* (#1281) and *Carry per-node effect instances across a plan
+  swap* (#1282): gates 5, 7(b) and 9 assume that an untouched insert carries. Until these land, a strip
+  that holds an insert is in `restarted_strips()` and is ducked (root, 2026-10-12).
