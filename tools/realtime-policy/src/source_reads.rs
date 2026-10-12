@@ -28,8 +28,10 @@
 //! The matching of `name ! group` as a macro also matches `if !(..)`. That can only over-refuse
 //! a condition that names `include`, `include_str` or `include_bytes`, and none exists.
 //!
-//! Root Amendment 1 rule 1 (any `path` identifier in a macro token tree, and any `#[$m]`) is not
-//! here: it refuses 132 lines of the real tree (see the #1519 spec).
+//! Rule 1 (root, 2026-10-12): inside a macro token tree, D1 (a) applies to written attributes. A
+//! written `#[..]` or `#![..]` that holds an identifier `path` is refused there, whatever its
+//! value. A `path` that is not inside a written attribute is not refused. A path attribute that
+//! a macro expansion assembles is a stated limit of the tool (#1438 Hazards, limit 4).
 
 use std::fs;
 use std::path::Path;
