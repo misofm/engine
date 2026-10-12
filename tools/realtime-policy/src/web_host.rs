@@ -7,7 +7,7 @@
 //! `render_locked` the rule never sees. Under `hosts/host-web/src` the tool refuses each written
 //! form (#1496 D2 Amendment 1, rules (a) to (d)). Rule (b) refuses only an `export_name` whose
 //! value starts with the prefix; that every exported name comes from a listed function's own
-//! identifier is not enforced (see the successor of #1496). A name or attribute that a macro
+//! identifier is not enforced (see #1528). A name or attribute that a macro
 //! expansion assembles from parts is #1438 limit 4.
 
 use syn::punctuated::Punctuated;
