@@ -422,13 +422,15 @@ pub(super) fn macro_key(call: &syn::Macro) -> Pos {
     pos(call.delimiter.span().open().start())
 }
 
-/// Whether `call` is `debug_assert!` (the last path segment, as the awk reads the word before the
-/// `!`).
+/// Whether `call` is `debug_assert!` spelled as the single identifier (B1a-D7 amended, root
+/// Amendment 4): a path (`math::debug_assert!`, `::debug_assert!`) can name another macro, so only
+/// the bare name is taken at its word.
 pub(super) fn is_debug_assert(call: &syn::Macro) -> bool {
-    call.path
-        .segments
-        .last()
-        .is_some_and(|segment| bare(&segment.ident) == "debug_assert")
+    call.path.leading_colon.is_none()
+        && call.path.segments.len() == 1
+        && call.path.segments.first().is_some_and(|segment| {
+            segment.arguments.is_none() && bare(&segment.ident) == "debug_assert"
+        })
 }
 
 /// The extent of a `let` initializer: from its `=` to the end of its expression or `else` block.

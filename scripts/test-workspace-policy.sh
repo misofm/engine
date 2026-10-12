@@ -361,6 +361,61 @@ mutate_sysroot_collision() {
     printf '//! fixture\n' >"$root/crates/core/src/lib.rs"
 }
 
+# #1442 (root Amendment 4): a dependency key (or a `[dependencies.core]` header) named `core`,
+# `std` or `alloc` makes Cargo pass `--extern core=..` and redirects the prelude's `core`. The
+# package-name rule does not see a dependency key. Each form is a separate mutation, so none hides
+# behind another.
+mutate_sysroot_dependency_key() {
+    local root="$1"
+    printf '\n[dependencies]\ncore = { package = "spin", version = "0.9" }\n' \
+        >>"$root/crates/library/Cargo.toml"
+}
+
+mutate_sysroot_dependency_header() {
+    local root="$1"
+    printf '\n[dependencies.std]\npackage = "spin"\nversion = "0.9"\n' \
+        >>"$root/crates/library/Cargo.toml"
+}
+
+mutate_sysroot_dev_dependency_dotted_key() {
+    local root="$1"
+    printf '\n[target.\x27cfg(unix)\x27.dev-dependencies]\nalloc.package = "spin"\n' \
+        >>"$root/crates/library/Cargo.toml"
+}
+
+mutate_sysroot_workspace_dependency() {
+    local root="$1"
+    printf '\n[workspace.dependencies]\n"core" = { package = "spin", version = "0.9" }\n' \
+        >>"$root/Cargo.toml"
+    mkdir -p "$root/crates/nested"
+    cp "$root/crates/library/Cargo.toml" "$root/crates/nested/Cargo.toml"
+    sed -i 's/library/nested/g' "$root/crates/nested/Cargo.toml"
+    printf '\n[dependencies]\ncore = { workspace = true }\n' >>"$root/crates/nested/Cargo.toml"
+}
+
+# Names that only look like the rule's: a `test = false` target flag (as `fuzz/Cargo.toml` has), a
+# dependency whose name starts with `core`, a `core` mention in a comment and a key outside every
+# dependency table must all pass.
+allow_sysroot_lookalikes() {
+    local root="$1"
+    create_valid_fixture "$root"
+    printf '%s\n' \
+        '' \
+        '# a dependency named core would redirect the prelude' \
+        '[[bin]]' \
+        'name = "library"' \
+        'test = false' \
+        '' \
+        '[package.metadata.notes]' \
+        'core = "documented"' \
+        '' \
+        '[dependencies]' \
+        'core_affinity = "0.8"' \
+        'standard = "1"' \
+        >>"$root/crates/library/Cargo.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
 # Issue #356/#359: the delivery-codec boundary folded from check-delivery-codec-boundary.py.
 mutate_retired_manifest_package_name() {
     local root="$1"
@@ -523,6 +578,14 @@ expect_failure host-package-prefix mutate_host_package_prefix
 expect_failure host-nested-directory-mismatch mutate_host_nested_directory_mismatch
 expect_failure sysroot-collision mutate_sysroot_collision
 expect_failure prelude-collision mutate_prelude_collision
+expect_failure_with_message sysroot-dependency-key \
+    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dependency_key
+expect_failure_with_message sysroot-dependency-header \
+    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dependency_header
+expect_failure_with_message sysroot-dev-dependency-dotted-key \
+    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dev_dependency_dotted_key
+expect_failure_with_message sysroot-workspace-dependency \
+    "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_workspace_dependency
 expect_failure retired-manifest-package-name mutate_retired_manifest_package_name
 expect_failure retired-stub-directory mutate_retired_stub_directory
 expect_failure retired-manifest-dependency mutate_retired_manifest_dependency
@@ -590,6 +653,7 @@ allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_host_valid "$scratch_root/host-valid"
 allow_retired_name_in_comment "$scratch_root/retired-name-comment"
+allow_sysroot_lookalikes "$scratch_root/sysroot-lookalikes"
 
 # Issue #404's finite producer table. Each row names one external stage and injects exit 73 after
 # either no output or the real tool's complete, policy-valid output. Unselected calls always run

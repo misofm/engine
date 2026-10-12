@@ -17,33 +17,30 @@
 //!   and [`shapes`]; D8b's per-queue form is [`per_queue`].
 //! - **Outer loops (D1)** are in [`outer`]: every other loop around a pop, inside its region,
 //!   must be finite. **Attributes and items (D2, D9)** are in [`count`], [`outer`], [`per_queue`]
-//!   and [`items`]: a count binding under a `cfg`-family attribute, and an item of any kind of the
-//!   region (`const`, `static`, `struct`, `enum`, `union`, `fn`, `type`, `trait`, `mod`, or a `use`)
-//!   that declares the name of any binding a rule read to bound the pop, are refused. The reads are
-//!   the count, its alias source, a slice parameter, the root of an outer loop's collection
-//!   (`controls` of `&controls`, `controls.iter_mut()`, `cfg` of `&cfg.controls`) and the roots
-//!   `<Q>` and `<K>` of a per-queue form. **Constructors (D3)** are in [`items`]: `from_fn`,
-//!   `repeat_with` and `successors` are refused anywhere in a region, except the token of
-//!   `core::array::from_fn` and `std::array::from_fn`. A pop in the closure of either is refused
-//!   like a pop in any closure (B2a-D1).
+//!   and [`items`]: a count binding under a `cfg`-family attribute, and an item of any kind
+//!   (`const`, `static`, `struct`, `enum`, `union`, `fn`, `type`, `trait`, `mod`, or a `use`) that
+//!   declares the name of any binding a rule read to bound the pop, anywhere in that binding's
+//!   scope, are refused. The reads are the count, its alias source, a slice parameter, the root of
+//!   an outer loop's collection (`controls` of `&controls`, `controls.iter_mut()`, `cfg` of
+//!   `&cfg.controls`) and the roots `<Q>` and `<K>` of a per-queue form. **Constructors (D3)** are
+//!   in [`items`]: `from_fn`, `repeat_with` and `successors` are refused anywhere in a region,
+//!   except the token of `core::array::from_fn` and `std::array::from_fn`. A pop in the closure of
+//!   either is refused like a pop in any closure (B2a-D1).
 //! - **Macros and attributes that can declare an item (D10).** An expansion is invisible to the
 //!   item scan, and an item declared in a block shadows a binding of an enclosing block, or a
 //!   function's parameter, for the whole block it lands in. So the drain is refused when it holds
 //!   a macro invocation in statement or item position (`name!(..);`, `name![..];`, `name! {..}`)
 //!   or an item with an attribute other than `cfg`, a lint level or `doc` (a derive and an
-//!   attribute macro emit items beside their item, and `cfg_attr` can expand to a derive) inside
-//!   the span of a binding the rules read. For a `let` (the count, its alias source, or a
-//!   collection root) the span runs from the `let` to the end of the statement, in the `let`'s own
-//!   block, that holds the pop: it runs past the loop, so an item declared after the loop in an
-//!   inner block reaches its header too. An item in the `let`'s own block cannot shadow it: the
-//!   `let` becomes refutable and does not compile for a `const` or a unit struct, and it wins over a
-//!   `fn`. For a parameter (a slice parameter, a collection root, a queue root) the span is the
-//!   whole `fn` body, because a parameter's block is the body, and an item anywhere in it, after
-//!   the loop included, shadows the parameter. For a pattern (the `for` that binds a collection
-//!   root) the span is the node that binds it. A `debug_assert!` is exempt while it is trusted
-//!   ([`trusted`]); a macro in expression position cannot declare an item and is not read.
-//!   `debug_assert_eq!` and `debug_assert_ne!` are not exempt: an accepted over-refusal (widening
-//!   the exemption needs a root ruling).
+//!   attribute macro emit items beside their item, and `cfg_attr` can expand to a derive) anywhere
+//!   in the scope of a binding the rules read (B2a-D9 amended, root Amendment 4). The scope of a
+//!   `let` (the count, its alias source, or a collection root) is the whole block that holds the
+//!   `let`, from its `{`, at any depth: an item before the `let`, after the loop or outside the
+//!   markers shadows it as well (`struct controls; let controls = controls;` binds nothing). The
+//!   scope of a parameter (a slice parameter, a collection root, a queue root) is the whole `fn`
+//!   body, and the scope of a pattern (the `for` that binds a collection root) is the node that
+//!   binds it. A `debug_assert!` is exempt while it is trusted ([`trusted`]); a macro in expression
+//!   position cannot declare an item and is not read. `debug_assert_eq!` and `debug_assert_ne!` are
+//!   not exempt: an accepted over-refusal (widening the exemption needs a root ruling).
 //! - **Region ends (B1b-D9)** are in [`crate::boundary`]: a region ends in the container of its
 //!   begin marker or in one that encloses it, so no block continues past the end marker with the
 //!   rest of its items unread.
@@ -62,16 +59,20 @@
 //!   meaning ([`trusted`]): a `debug_assert` identifier that a `!` does not directly follow is a
 //!   shadow, and then `debug_assert!` is any other macro, and a drain that names its count in one
 //!   is refused in every file.
-//! - **Function values (D3).** A path expression whose last segment is `try_pop` is allowed only as
-//!   the callee of a call (`Consumer::try_pop(control)`) or as the only argument of a `.map(..)`
-//!   method call whose receiver is `<fields>.as_mut()` (`self.control.as_mut().map(Consumer::try_pop)`):
-//!   `Option::map` runs it at most once, and the loops around it bound it. On any other receiver
-//!   `.map` may be an iterator adapter that pops once per item with no count. Any other use
-//!   (`let pop = Consumer::try_pop;`, an argument, a field) is refused.
-//! - **Trusted names (D2, D3).** The rule trusts `map`, `as_mut`, `try_pop` and `debug_assert`
-//!   to mean what they mean in the standard library and in `Consumer`. [`trusted`] reads every
-//!   `.rs` file under the roots and refuses a definition, import, rename or macro-emitted use of
-//!   one of them in a form that the rule does not allow, and any `proc_macro` identifier.
+//! - **Function values (D3, root Amendment 4).** A path expression whose last segment is `try_pop`
+//!   is allowed only as the callee of a call (`Consumer::try_pop(control)`). Any other use
+//!   (`let pop = Consumer::try_pop;`, an argument, a field, the operand of `.map(..)`) is refused:
+//!   the value can be called from a place the walk does not see, and `.map` can be a user trait
+//!   method that loops or an iterator adapter that pops once per item. A count is
+//!   `<recv>.available_at_entry()[.min(<cap>)]` and a pop is `<recv>.try_pop()`: the
+//!   `<recv>.map_or(0, <Type>::available_at_entry)` count form is withdrawn for the same reason.
+//! - **Trusted names (D2, D3).** The rule trusts `try_pop`, `available_at_entry` and
+//!   `debug_assert!` to mean what they mean in the queue and in the standard library. [`trusted`]
+//!   reads every `.rs` file under the roots and refuses a written definition, import or rename of
+//!   the two queue names outside the one `fn` of each in `crates/engine/src/realtime/spsc.rs`, a
+//!   `debug_assert` that withdraws the trust, `macro_use` (except `#[macro_use] mod`),
+//!   `no_implicit_prelude`, `feature(..)`, a `${..}` metavariable expression and any `proc_macro`
+//!   identifier.
 //!
 //! What stays outside the rule (D4): recursion; a pop in a helper function (`begin_block` calling
 //! `drain_controls` is one); a loop in a caller, outside the region (a loop that encloses the
@@ -79,22 +80,28 @@
 //! that expands to a loop.
 //!
 //! The limits of the tool's threat model (#1438 Hazards): code outside the workspace source, which
-//! the tool cannot read, and type-level behaviour, because the rule reads syntax and not types.
-//! The tool judges the workspace's own source, so:
+//! the tool cannot read, type-level behaviour, because the rule reads syntax and not types, and
+//! names or paths that a macro expansion builds from parts. The tool judges the workspace's own
+//! written source, token by token and inside macro token trees too, so:
 //!
 //! - **An iterator that never ends, borrowed from a field or a local (type-level).** `for _ in
 //!   &mut rounds` and `rounds.iter_mut()` are finite outer loops by their form (D1), so `let mut
 //!   rounds = 0_u32..; for _ in &mut rounds { <counted drain> }` passes, and runs without end. The
 //!   `main` gate documented the same hole. Restructure so that no unbounded iterator is reachable
-//!   by that name; a ruling is needed to refuse these forms. For the same reason a field whose
-//!   type has an `as_mut` or a `map` of its own that loops is outside the check when the type is
-//!   not defined in the workspace.
-//! - **A registry crate (code outside the workspace).** One that exports a trait or type method
-//!   named `map` or `as_mut`, or a `debug_assert` macro imported with `#[macro_use] extern crate`
-//!   or a glob `use`, or a proc macro, is outside the scan of [`trusted`]. No crate of the
-//!   workspace does this.
+//!   by that name; a ruling is needed to refuse these forms. For the same reason a `let` of a unit
+//!   struct's name (`let controls = controls;` with `struct controls;` at module level) binds
+//!   nothing, and its value has that item's type: limit 2, as for a `let` of any type.
+//! - **A registry crate (code outside the workspace).** One that exports a macro named
+//!   `debug_assert`, a proc macro, or a trait or type with a looping method, is outside the scan
+//!   of [`trusted`]. No crate of the workspace does this.
 //! - **Auto-deref and impl resolution (type-level).** Which `Deref` target or which impl a method
 //!   call resolves to is not read.
+//! - **Macro metaprogramming (owner decision of 2026-10-11, limit 4).** An identifier, item name,
+//!   path, attribute or file path that a macro expansion builds from parts (a `macro_rules!` or
+//!   `macro` fragment or `tt` substituted into an item, attribute, `use` or call position, an
+//!   attribute or derive macro) is not modelled. `mkp!(fn x.try_pop())` that expands to a looping
+//!   `try_pop` passes. Every direct written form is refused; the written gates `${`, `feature(` and
+//!   `proc_macro*` stay refused; the runtime audits (0 allocations, 0 syscalls) are the backstop.
 //!
 //! It refuses these bounded drains (D7; restructure the drain to pass): a count used other than as
 //! the left operand of a comparison before its loop (`0 == available`, `apply(available)`,
@@ -117,7 +124,6 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use crate::boundary::{Boundaries, RegionNodes};
-use crate::leaf::Leaf;
 use crate::markers::Region;
 use crate::report::{Class, Finding};
 use crate::source::Source;
@@ -132,8 +138,6 @@ struct Ctx<'f> {
     tree: &'f Tree<'f>,
     facts: &'f Facts,
     region: &'f RegionNodes,
-    /// The leaves between the pop's region's markers.
-    leaves: &'f [Leaf],
     pops: &'f [PopSite],
     /// The names, with their bindings, that the rules judged so far read to bound the pop: the
     /// count, its alias source, a slice parameter, the root of an outer loop's collection, the
@@ -169,11 +173,6 @@ impl<'f> Ctx<'f> {
     /// Forget the reads noted after `mark`: the rule that noted them did not hold.
     fn rewind(&self, mark: usize) {
         self.reads.borrow_mut().truncate(mark);
-    }
-
-    /// Whether an item of the pop's region can name `name` (D2, D9).
-    fn names_item(&self, name: &str) -> bool {
-        items::names_item(self.leaves, name)
     }
 
     /// The uses of `name` in `from..to` that resolve to `binding`. A use that sits where the walk
@@ -230,13 +229,11 @@ pub(crate) fn check(
             .map(|(index, region)| boundaries.region_nodes(index, region))
             .collect();
         for (index, site) in placed {
-            let (from, to) = nodes[index].bounds();
             let ctx = Ctx {
                 boundaries,
                 tree: &tree,
                 facts: &facts,
                 region: &nodes[index],
-                leaves: boundaries.leaves_between(from, to),
                 pops: &sites,
                 reads: RefCell::new(Vec::new()),
             };
@@ -303,55 +300,56 @@ fn bounded<'f>(ctx: &Ctx<'f>, site: &PopSite) -> bool {
 
 /// D9, D10: whether an item, a macro or an attribute can rebind a name that the rules read.
 ///
-/// - **D9.** An item of the region of any kind (`const`, `static`, `struct`, `enum`, `union`, `fn`,
-///   `type`, `trait`, `mod`) that declares the name of a binding the rules read, or a `use` that can
-///   name it, shadows that binding for the whole block it lands in, wherever it stands. The reads
-///   are the count, its alias source, a slice parameter, the root of an outer loop's collection and
+/// - **D9.** An item of any kind (`const`, `static`, `struct`, `enum`, `union`, `fn`, `type`,
+///   `trait`, `mod`) that declares the name of a binding the rules read, or a `use` that can name
+///   it, shadows that binding for the whole block it lands in, wherever it stands. The reads are
+///   the count, its alias source, a slice parameter, the root of an outer loop's collection and
 ///   the roots of a per-queue form.
 /// - **D10.** A macro in statement or item position, or an item with an attribute that can emit
-///   items, within the span of a read binding can declare such an item (see [`read_span`] for the
-///   span of a `let`, a parameter and a pattern).
+///   items, can declare such an item.
+///
+/// Both are refused anywhere in the scope of the read binding (root Amendment 4, R3): see
+/// [`read_scope`]. The scope is the binding's own, not the region's: an item outside the markers
+/// but in the same block shadows the count, the parameter or the root just the same.
 fn shadowed_by_an_item<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>]) -> bool {
     let reads = ctx.reads.borrow();
     let mut span: Option<(Pos, Pos)> = None;
     for (name, binding) in reads.iter() {
-        if ctx.names_item(name) {
-            return true;
-        }
-        let Some((from, to)) = read_span(ctx, steps, binding) else {
+        let Some((from, to)) = read_scope(ctx, steps, binding) else {
             // A binding that cannot be placed is refused: only a fail-closed answer is safe.
             return true;
         };
+        if items::names_item(ctx.boundaries.leaves_between(from, to), name) {
+            return true;
+        }
         span = Some(span.map_or((from, to), |(first, last)| (first.min(from), last.max(to))));
     }
     span.is_some_and(|(from, to)| ctx.facts.declares_items_in(from, to))
 }
 
-/// The span of one read binding (D10).
+/// The scope of one read binding (D9, D10; root Amendment 4, R3).
 ///
-/// - A `let`: from the `let` to the end of the statement of its block that holds the pop. An item
-///   declared in an inner block after the loop shadows the `let` at the loop's header, so the span
-///   runs to the end of that statement. An item in the `let`'s own block cannot shadow it.
-/// - A parameter: the whole `fn` body. A parameter's block is the body, and an item anywhere in the
-///   body shadows the parameter: a `const` or a macro that declares one, after the loop, at the
+/// - A `let`: the whole block that holds the `let`, from its `{`, at any depth, the statements
+///   before the `let` included. An item of that block shadows the `let`'s name wherever it stands:
+///   `struct controls; let controls = controls;` binds nothing (the `let` is a unit-struct
+///   pattern), and `let controls = ..` is the unit struct's value. A `let` whose identifier
+///   pattern names a unit struct or unit variant that is in scope binds nothing, and its value has
+///   that item's type: that is the type-level limit of the threat model, as for a `let` of any
+///   type.
+/// - A parameter: the whole `fn` body. A parameter's block is the body, and an item anywhere in
+///   the body shadows the parameter: a `const` or a macro that declares one, after the loop, at the
 ///   body's level included.
 /// - A pattern (a `for`, `if let`, `while let`, `match` arm or closure): the whole node that binds
 ///   it.
-fn read_span<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], binding: &Binding<'f>) -> Option<(Pos, Pos)> {
+fn read_scope<'f>(ctx: &Ctx<'f>, steps: &[Step<'f>], binding: &Binding<'f>) -> Option<(Pos, Pos)> {
     match binding.kind {
         BindingKind::Let { stmt, .. } => {
             let at = steps.iter().position(|step| {
                 matches!((step.node, step.via), (Node::Block(block), Some(Via::Stmt(index)))
                     if block.stmts[..index].iter().any(|before| std::ptr::eq(before, stmt)))
             })?;
-            let from = ctx.tree.extent(Node::Stmt(stmt))?.full;
-            let to = match (steps[at].node, steps[at].via) {
-                (Node::Block(body), Some(Via::Stmt(index))) => {
-                    ctx.tree.extent(Node::Stmt(&body.stmts[index]))?.end
-                }
-                (node, _) => ctx.tree.extent(node)?.end,
-            };
-            Some((from, to))
+            let block = ctx.tree.extent(steps[at].node)?;
+            Some((block.full, block.end))
         }
         BindingKind::Param { .. } => {
             let function = steps.iter().rposition(|step| step.node.is_function())?;
@@ -374,23 +372,17 @@ fn in_closure(steps: &[Step<'_>]) -> bool {
         .any(|step| matches!(step.node, Node::Expr(syn::Expr::Closure(_))))
 }
 
-/// Whether the path expression that ends `steps` stands where it is called at once (B2a-D3): as
-/// the callee of a call, or as the only argument of `.map(..)` on `<fields>.as_mut()`.
+/// Whether the path expression that ends `steps` stands where it is called at once (B2a-D3, root
+/// Amendment 4): as the callee of a call. A function value anywhere else (an argument, a `.map(..)`
+/// operand, a `let`, a field) can be called from a place the walk does not see.
 fn called_in_place(steps: &[Step<'_>]) -> bool {
     let Some(parent) = steps.len().checked_sub(2).map(|at| steps[at]) else {
         return false;
     };
-    match (parent.node, parent.via) {
-        (Node::Expr(syn::Expr::Call(_)), Some(Via::Operand(0))) => true,
-        (Node::Expr(syn::Expr::MethodCall(call)), Some(Via::Operand(1))) => {
-            names::bare(&call.method) == "map"
-                && call.turbofish.is_none()
-                && call.args.len() == 1
-                && shapes::method0(&call.receiver, "as_mut")
-                    .is_some_and(|inner| shapes::Place::of(&inner.receiver).is_some())
-        }
-        _ => false,
-    }
+    matches!(
+        (parent.node, parent.via),
+        (Node::Expr(syn::Expr::Call(_)), Some(Via::Operand(0)))
+    )
 }
 
 /// Whether the last node of the path is the pop itself, or the macro call that holds it.

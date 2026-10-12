@@ -28,7 +28,7 @@ const NAMING_ITEMS: [&str; 9] = [
     "const", "static", "struct", "enum", "union", "fn", "type", "trait", "mod",
 ];
 
-/// D2, D9: whether an item among `leaves` can name `name`, a binding that a rule read: an item of any kind that declares it as
+/// D2, D9: whether an item among `leaves` (the scope of a read binding) can name `name`, a binding that a rule read: an item of any kind that declares it as
 /// its own name (`const`, `static [mut]`, `struct`, `enum`, `union`, `fn`, `type`, `trait`,
 /// `mod`), or a `use` whose tokens up to its `;` hold `name` or a glob `*`. A block item shadows a
 /// `let` of an enclosing block for its whole block, wherever it is declared, so the position of

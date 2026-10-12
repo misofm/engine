@@ -5,8 +5,8 @@
 //! path goes through, the pattern of a `for` loop or a closure for its body, the patterns of an
 //! `if let` or `while let` chain for its body, an arm's pattern, and a function's parameters, where
 //! the search ends. Items declared in a block do not shadow here: the drain rule asks
-//! [`super::items::names_item`] whether an item of the region can name each binding that a rule read
-//! (D9).
+//! [`super::items::names_item`] whether an item in the scope of each binding that a rule read can name it
+//! (D9, root Amendment 4).
 
 use syn::visit::{self, Visit};
 

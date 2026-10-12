@@ -1,55 +1,56 @@
-//! The trusted-name scan (B2a-D2 F2, B2a-D3 SP-A): the names that the drain rule takes at their
+//! The trusted-name scan (B2a-D2 F2, root Amendment 4): the names that the drain rule takes at their
 //! word, and every place under the scan roots that could give one of them another meaning.
 //!
-//! The drain rule trusts four names. `debug_assert!` is the standard macro, so a count named in
-//! its arguments is a read and not a rebinding (B1a-D7). `.map(<path>)` on `<fields>.as_mut()` is
-//! `Option::map`, which runs its argument at most once (B2a-D3). `try_pop` is the one pop. A
-//! definition, an import, a rename or a macro-emitted use of one of these names can reach any file
-//! (`#[macro_use] mod`, a glob `use`, a trait that is in scope), so the scan reads the tokens of
-//! every `.rs` file under the roots, at any depth, and refuses:
+//! The drain rule trusts three things. `debug_assert!` is the standard macro, so a count named in
+//! its arguments is a read and not a rebinding (B1a-D7). `try_pop` is the one pop, and
+//! `available_at_entry` is the one count (`Q` below). A definition, an import, a rename or a
+//! metaprogramming escape for one of them can reach any file (`#[macro_use] mod`, a glob `use`, a
+//! trait that is in scope, the implicit prelude), so the scan reads the tokens of every `.rs` file
+//! under the roots, at any depth, and refuses:
 //!
-//! - **F2.** A `debug_assert` identifier (bare or `r#`) that a `!` does not directly follow. It is
-//!   a shadow: no file's `debug_assert!` is then taken at its word, and a count named in one is
+//! - **(q)** A `Q` identifier (`try_pop`, `available_at_entry`; bare or `r#`) that does not directly
+//!   follow `.` or `::`, except exactly one written `fn` token for each of the two, in
+//!   `crates/engine/src/realtime/spsc.rs`. A second definition in that file is refused, and so is
+//!   every other written definition, import, binding or field.
+//! - **(s)** A `debug_assert` identifier (bare or `r#`) that a `!` does not directly follow (F2). It
+//!   is a shadow: no file's `debug_assert!` is then taken at its word, and a count named in one is
 //!   refused everywhere, as in any other macro. One rule covers `macro_rules! debug_assert`,
 //!   `macro debug_assert`, `use .. as debug_assert`, `use x::debug_assert` and a proc macro's
-//!   `fn debug_assert`.
-//! - **(a)** An identifier `map` or `as_mut` that does not directly follow `.` or `::`, where it
-//!   defines or imports a name: after `fn`, `const`, `static`, `struct`, `enum`, `union`, `type`,
-//!   `trait`, `mod`, `macro`, `as` or `macro_rules!`, or anywhere in a `use` item. (Root's text
-//!   refuses every such identifier, a local variable included. The workspace holds 17 local
-//!   variables named `map`, in `tools/console-workload/tests/paired_spans.rs` and
-//!   `tools/session-validator/src/lib.rs`, so the text cannot pass the real tree as worded; a
-//!   local variable cannot change what `.map(..)` resolves to. The attempt record of #1442 names
-//!   this deviation for root's ruling.)
-//! - **(b)** An identifier `try_pop` that does not directly follow `.` or `::`, except in
-//!   `fn try_pop(&mut self`, with the receiver tokens exactly `&`, `mut`, `self`.
-//! - **(c)** An identifier `map`, `as_mut`, `try_pop` or `debug_assert` in the token tree of an
-//!   invocation of a name-emitting macro. A name-emitting macro is a `macro_rules!` or `macro`
-//!   under the roots whose body holds `fn` directly followed by `$`, or that invokes a
-//!   name-emitting macro (the set is closed transitively). An invocation is matched by its last
-//!   path segment, and an invocation through a name that a `use` item renames (`as n`) counts.
-//! - **(d)** Any identifier `proc_macro`, `proc_macro_attribute` or `proc_macro_derive`. A
-//!   workspace proc macro can emit any name, pop or shadow, and the scan cannot see it.
+//!   `fn debug_assert`. It is not generalized to other assert macros: nothing else consumes that
+//!   trust. Separately, only a single-identifier `debug_assert!` is taken at its word (a path,
+//!   `math::debug_assert!`, can be any macro).
+//! - **(u)** A `macro_use` identifier, except the whole attribute `#[macro_use]` directly followed by
+//!   `mod`. An attribute on `extern crate` brings a registry crate's macros into every module, and
+//!   `#[macro_use] mod` is the only form the workspace uses.
+//! - **(n)** Any `no_implicit_prelude` identifier. It changes what the implicit prelude (and so
+//!   `debug_assert!`) names in its module.
+//! - **(d)** Any identifier `proc_macro`, `proc_macro_attribute` or `proc_macro_derive`. A workspace
+//!   proc macro can emit any name, pop or shadow, and the scan cannot see it.
+//! - **(f)** An identifier `feature` directly followed by a `(` group, and a `$` directly followed by
+//!   a `{` group (a metavariable expression, so that a stabilized `${concat(..)}` is still refused
+//!   after a toolchain bump). `#![feature(..)]` and `#![cfg_attr(x, feature(..))]` enable the
+//!   nightly features that build names from parts.
 //!
-//! A hit of (a) to (d) is a finding of the drain class at the line of the identifier. A registry
-//! trait or type method named `map` or `as_mut`, a registry crate's macros and proc macros, and
-//! the standard library are outside the scan: the threat-model limits of #1438.
+//! A hit is a finding of the drain class at the line of the identifier. Names and paths that a
+//! macro expansion builds from parts (a `fn $n` made by a `macro_rules!` fragment, a `tt` that
+//! carries `fn`, a macro made by a macro) are limit 4 of the threat model (#1438 Hazards, owner
+//! decision of 2026-10-11): the scan judges every written token and does not model an expansion. A
+//! registry crate's macros and proc macros, and the standard library, are limit 3 (code outside the
+//! workspace).
 
 use std::collections::BTreeSet;
 
-use proc_macro2::{Delimiter, Spacing, TokenTree};
+use proc_macro2::{Delimiter, Span, TokenTree};
 
 use super::names::bare;
 use crate::report::{Class, Finding};
 use crate::source::Source;
 
-/// The names that (c) looks for in a name-emitting macro's invocation.
-const TRUSTED: [&str; 4] = ["map", "as_mut", "try_pop", "debug_assert"];
+/// The names that only the queue's own definition may spell: the pop and the count.
+const Q: [&str; 2] = ["try_pop", "available_at_entry"];
 
-/// The words after which an identifier is the name of an item, a macro or a rename.
-const ITEM_KEYWORDS: [&str; 11] = [
-    "fn", "const", "static", "struct", "enum", "union", "type", "trait", "mod", "macro", "as",
-];
+/// The one file that defines them.
+const DEFINING_FILE: &str = "crates/engine/src/realtime/spsc.rs";
 
 /// The identifiers of (d).
 const PROC_MACRO: [&str; 3] = ["proc_macro", "proc_macro_attribute", "proc_macro_derive"];
@@ -59,27 +60,10 @@ const PROC_MACRO: [&str; 3] = ["proc_macro", "proc_macro_attribute", "proc_macro
 pub(crate) struct NameScan {
     /// F2: a `debug_assert` that no `!` follows was found.
     shadowed: bool,
-    /// The hits of (a), (b) and (d).
+    /// The hits of (q), (u), (n), (d) and (f).
     findings: Vec<Finding>,
-    /// Every `macro_rules!` and `macro` definition.
-    macros: Vec<MacroDef>,
-    /// Every `x as y` of a `use` item, as (`y`, `x`).
-    renames: Vec<(String, String)>,
-    /// Every invocation whose token tree holds a trusted name, with that name's hits.
-    invocations: Vec<Invocation>,
-}
-
-struct MacroDef {
-    name: String,
-    /// The body holds `fn` directly followed by `$`.
-    emits_names: bool,
-    /// The names of the macros that the body invokes.
-    invokes: Vec<String>,
-}
-
-struct Invocation {
-    name: String,
-    hits: Vec<Finding>,
+    /// The names of `Q` that `DEFINING_FILE` has defined so far: one written `fn` each.
+    defined: BTreeSet<&'static str>,
 }
 
 impl NameScan {
@@ -89,42 +73,8 @@ impl NameScan {
         self.walk(source, &trees);
     }
 
-    /// The end of the walk: whether no file shadows `debug_assert` (F2), and the findings of
-    /// (a) to (d), sorted.
+    /// The end of the walk: whether no file shadows `debug_assert` (F2), and the findings, sorted.
     pub(crate) fn finish(mut self) -> (bool, Vec<Finding>) {
-        let mut emitting: BTreeSet<String> = self
-            .macros
-            .iter()
-            .filter(|definition| definition.emits_names)
-            .map(|definition| definition.name.clone())
-            .collect();
-        // The set is closed: a macro that invokes a name-emitting macro emits names too, and so
-        // does a name that renames one.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for definition in &self.macros {
-                if !emitting.contains(&definition.name)
-                    && definition
-                        .invokes
-                        .iter()
-                        .any(|name| emitting.contains(name))
-                {
-                    emitting.insert(definition.name.clone());
-                    changed = true;
-                }
-            }
-            for (alias, original) in &self.renames {
-                if emitting.contains(original) && emitting.insert(alias.clone()) {
-                    changed = true;
-                }
-            }
-        }
-        for invocation in self.invocations {
-            if emitting.contains(&invocation.name) {
-                self.findings.extend(invocation.hits);
-            }
-        }
         self.findings.sort();
         self.findings.dedup();
         (!self.shadowed, self.findings)
@@ -134,93 +84,50 @@ impl NameScan {
         for (at, tree) in trees.iter().enumerate() {
             match tree {
                 TokenTree::Group(group) => {
-                    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-                    self.walk(source, &inner);
+                    if !is_macro_use_on_a_module(trees, at) {
+                        let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                        self.walk(source, &inner);
+                    }
                 }
-                TokenTree::Ident(word) => self.word(source, trees, at, &bare(word), word),
+                TokenTree::Ident(word) => self.word(source, trees, at, &bare(word), word.span()),
+                TokenTree::Punct(punct)
+                    if punct.as_char() == '$' && is_group(trees.get(at + 1), Delimiter::Brace) =>
+                {
+                    self.findings.push(hit(source, punct.span()));
+                }
                 _ => {}
             }
         }
     }
 
-    fn word(
-        &mut self,
-        source: &Source,
-        trees: &[TokenTree],
-        at: usize,
-        name: &str,
-        word: &proc_macro2::Ident,
-    ) {
-        let hit = || hit(source, word);
+    fn word(&mut self, source: &Source, trees: &[TokenTree], at: usize, name: &str, span: Span) {
+        if let Some(trusted) = Q.iter().find(|trusted| **trusted == name) {
+            if follows_path(trees, at) {
+                return;
+            }
+            let written_fn = at.checked_sub(1).is_some_and(
+                |before| matches!(&trees[before], TokenTree::Ident(word) if word == "fn"),
+            );
+            // The first written `fn` of each name in the defining file is the one definition.
+            if !(written_fn && source.path == DEFINING_FILE && self.defined.insert(trusted)) {
+                self.findings.push(hit(source, span));
+            }
+            return;
+        }
         match name {
-            "map" | "as_mut" if !follows_path(trees, at) && defines_a_name(trees, at) => {
-                self.findings.push(hit());
+            "debug_assert" if !is_punct(trees.get(at + 1), '!') => self.shadowed = true,
+            "macro_use" | "no_implicit_prelude" => self.findings.push(hit(source, span)),
+            "feature" if is_group(trees.get(at + 1), Delimiter::Parenthesis) => {
+                self.findings.push(hit(source, span));
             }
-            "try_pop" if !follows_path(trees, at) && !pop_definition(trees, at) => {
-                self.findings.push(hit());
-            }
-            "debug_assert" if !is_bang(trees.get(at + 1)) => self.shadowed = true,
-            other if PROC_MACRO.contains(&other) => self.findings.push(hit()),
-            "macro_rules" if is_bang(trees.get(at + 1)) => self.define(trees, at + 2),
-            "macro" => self.define(trees, at + 1),
-            "use" => self.import(source, &trees[at + 1..]),
+            other if PROC_MACRO.contains(&other) => self.findings.push(hit(source, span)),
             _ => {}
         }
-        if is_bang(trees.get(at + 1))
-            && let Some(TokenTree::Group(group)) = trees.get(at + 2)
-        {
-            let mut hits = Vec::new();
-            trusted_names(source, group, &mut hits);
-            if !hits.is_empty() {
-                self.invocations.push(Invocation {
-                    name: name.to_owned(),
-                    hits,
-                });
-            }
-        }
-    }
-
-    /// Record the definition whose name is `trees[at]` and whose body groups follow.
-    fn define(&mut self, trees: &[TokenTree], at: usize) {
-        let Some(TokenTree::Ident(name)) = trees.get(at) else {
-            return;
-        };
-        let mut definition = MacroDef {
-            name: bare(name),
-            emits_names: false,
-            invokes: Vec::new(),
-        };
-        // `macro_rules! m { .. }` has one group, and `macro m($x:ident) { .. }` has an argument
-        // group and then the brace group of the body: read groups up to the first brace group.
-        for tree in &trees[at + 1..] {
-            let TokenTree::Group(group) = tree else {
-                break;
-            };
-            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-            definition.emits_names |= holds_fn_dollar(&inner);
-            invoked(&inner, &mut definition.invokes);
-            if group.delimiter() == Delimiter::Brace {
-                break;
-            }
-        }
-        self.macros.push(definition);
-    }
-
-    /// Read the `use` item whose tokens follow its keyword: its renames (`x as y`), and a `map` or
-    /// `as_mut` that it brings into scope under a name of its own (`use x::{map, y};`).
-    fn import(&mut self, source: &Source, after: &[TokenTree]) {
-        let item: Vec<TokenTree> = after
-            .iter()
-            .take_while(|tree| !matches!(tree, TokenTree::Punct(punct) if punct.as_char() == ';'))
-            .cloned()
-            .collect();
-        renames(&item, &mut self.renames);
-        imported_names(source, &item, &mut self.findings);
     }
 }
 
-fn hit(source: &Source, word: &proc_macro2::Ident) -> Finding {
-    let line = word.span().start().line;
+fn hit(source: &Source, span: Span) -> Finding {
+    let line = span.start().line;
     Finding::at_line(
         Class::UnboundedTryPop,
         &source.path,
@@ -233,8 +140,8 @@ fn is_punct(tree: Option<&TokenTree>, character: char) -> bool {
     matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == character)
 }
 
-fn is_bang(tree: Option<&TokenTree>) -> bool {
-    is_punct(tree, '!')
+fn is_group(tree: Option<&TokenTree>, delimiter: Delimiter) -> bool {
+    matches!(tree, Some(TokenTree::Group(group)) if group.delimiter() == delimiter)
 }
 
 /// Whether the identifier at `trees[at]` directly follows a single `.` or `::`.
@@ -247,111 +154,21 @@ fn follows_path(trees: &[TokenTree], at: usize) -> bool {
     }
 }
 
-/// Whether the identifier at `trees[at]` stands where an item takes its name: after `fn`, `const`,
-/// `static`, `struct`, `enum`, `union`, `type`, `trait`, `mod`, `macro`, `as` or `macro_rules!`.
-fn defines_a_name(trees: &[TokenTree], at: usize) -> bool {
-    let before = |back: usize| at.checked_sub(back).and_then(|index| trees.get(index));
-    match before(1) {
-        Some(TokenTree::Ident(word)) => ITEM_KEYWORDS.iter().any(|keyword| word == keyword),
-        Some(TokenTree::Punct(punct)) if punct.as_char() == '!' => {
-            matches!(before(2), Some(TokenTree::Ident(word)) if word == "macro_rules")
-        }
-        _ => false,
-    }
-}
-
-/// Whether `trees[at]`, a `try_pop`, is the name in `fn try_pop(&mut self`.
-fn pop_definition(trees: &[TokenTree], at: usize) -> bool {
-    let keyword = at
-        .checked_sub(1)
-        .is_some_and(|before| matches!(&trees[before], TokenTree::Ident(word) if word == "fn"));
-    let Some(TokenTree::Group(parameters)) = trees.get(at + 1) else {
+/// Whether `trees[at]` is the bracket group of the whole attribute `#[macro_use]` (an outer
+/// attribute: `#` directly before it, no `!`) and `mod` directly follows it. (u) leaves that one
+/// attribute alone and reads every other group.
+fn is_macro_use_on_a_module(trees: &[TokenTree], at: usize) -> bool {
+    let Some(TokenTree::Group(group)) = trees.get(at) else {
         return false;
     };
-    if !keyword || parameters.delimiter() != Delimiter::Parenthesis {
+    if group.delimiter() != Delimiter::Bracket
+        || !at
+            .checked_sub(1)
+            .is_some_and(|before| is_punct(trees.get(before), '#'))
+        || !matches!(trees.get(at + 1), Some(TokenTree::Ident(word)) if word == "mod")
+    {
         return false;
     }
-    let tokens: Vec<TokenTree> = parameters.stream().into_iter().take(3).collect();
-    matches!(
-        tokens.as_slice(),
-        [TokenTree::Punct(and), TokenTree::Ident(mutable), TokenTree::Ident(this)]
-            if and.as_char() == '&' && and.spacing() == Spacing::Alone && mutable == "mut" && this == "self"
-    )
-}
-
-/// Whether the tokens hold `fn` directly followed by `$`, at any depth.
-fn holds_fn_dollar(trees: &[TokenTree]) -> bool {
-    trees.iter().enumerate().any(|(at, tree)| match tree {
-        TokenTree::Ident(word) => word == "fn" && is_punct(trees.get(at + 1), '$'),
-        TokenTree::Group(group) => holds_fn_dollar(&group.stream().into_iter().collect::<Vec<_>>()),
-        _ => false,
-    })
-}
-
-/// The names of the macros invoked in the tokens, at any depth.
-fn invoked(trees: &[TokenTree], names: &mut Vec<String>) {
-    for (at, tree) in trees.iter().enumerate() {
-        match tree {
-            TokenTree::Ident(word)
-                if is_bang(trees.get(at + 1))
-                    && matches!(trees.get(at + 2), Some(TokenTree::Group(_))) =>
-            {
-                names.push(bare(word));
-            }
-            TokenTree::Group(group) => {
-                invoked(&group.stream().into_iter().collect::<Vec<_>>(), names);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// The trusted names in an invocation's token tree, at any depth.
-fn trusted_names(source: &Source, group: &proc_macro2::Group, hits: &mut Vec<Finding>) {
-    for tree in group.stream() {
-        match tree {
-            TokenTree::Ident(word) if TRUSTED.contains(&bare(&word).as_str()) => {
-                hits.push(hit(source, &word));
-            }
-            TokenTree::Group(inner) => trusted_names(source, &inner, hits),
-            _ => {}
-        }
-    }
-}
-
-/// The `map` and `as_mut` identifiers of a `use` item, at any depth, that do not follow `.` or `::`.
-fn imported_names(source: &Source, trees: &[TokenTree], out: &mut Vec<Finding>) {
-    for (at, tree) in trees.iter().enumerate() {
-        match tree {
-            TokenTree::Ident(word)
-                if matches!(bare(word).as_str(), "map" | "as_mut") && !follows_path(trees, at) =>
-            {
-                out.push(hit(source, word));
-            }
-            TokenTree::Group(group) => {
-                imported_names(source, &group.stream().into_iter().collect::<Vec<_>>(), out);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// The `x as y` pairs in the tokens of a `use` item, at any depth, as (`y`, `x`).
-fn renames(trees: &[TokenTree], out: &mut Vec<(String, String)>) {
-    for (at, tree) in trees.iter().enumerate() {
-        match tree {
-            TokenTree::Ident(word) if word == "as" => {
-                if let (Some(TokenTree::Ident(original)), Some(TokenTree::Ident(alias))) = (
-                    at.checked_sub(1).and_then(|before| trees.get(before)),
-                    trees.get(at + 1),
-                ) {
-                    out.push((bare(alias), bare(original)));
-                }
-            }
-            TokenTree::Group(group) => {
-                renames(&group.stream().into_iter().collect::<Vec<_>>(), out);
-            }
-            _ => {}
-        }
-    }
+    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+    matches!(inner.as_slice(), [TokenTree::Ident(word)] if word == "macro_use")
 }

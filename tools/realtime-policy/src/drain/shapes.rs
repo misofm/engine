@@ -97,8 +97,9 @@ pub(super) fn is_int(expr: &syn::Expr, value: &str) -> bool {
     )
 }
 
-/// D6: the entry count `<recv>.available_at_entry()` or `<recv>.map_or(0, <Type>::available_at_entry)`,
-/// optionally capped by `.min(<cap>)`.
+/// D6 (D3, root Amendment 4): the entry count `<recv>.available_at_entry()`, optionally capped by
+/// `.min(<cap>)`. A function value of `available_at_entry` counts nothing: the
+/// `<recv>.map_or(0, <Type>::available_at_entry)` form is withdrawn.
 pub(super) fn entry_count(expr: &syn::Expr) -> bool {
     direct_entry(uncapped(expr))
 }
@@ -112,30 +113,7 @@ pub(super) fn uncapped(expr: &syn::Expr) -> &syn::Expr {
 }
 
 fn direct_entry(expr: &syn::Expr) -> bool {
-    if let Some(call) = method0(expr, "available_at_entry") {
-        return receiver(&call.receiver);
-    }
-    if let Some(call) = method(expr, "map_or")
-        && call.args.len() == 2
-        && is_int(&call.args[0], "0")
-        && type_entry(&call.args[1])
-    {
-        return receiver(&call.receiver);
-    }
-    false
-}
-
-/// `<Type>::available_at_entry`, a two-segment path.
-fn type_entry(expr: &syn::Expr) -> bool {
-    let syn::Expr::Path(path) = expr else {
-        return false;
-    };
-    let segments: Vec<_> = path.path.segments.iter().collect();
-    path.qself.is_none()
-        && path.path.leading_colon.is_none()
-        && segments.len() == 2
-        && segments.iter().all(|segment| segment.arguments.is_none())
-        && bare(&segments[1].ident) == "available_at_entry"
+    method0(expr, "available_at_entry").is_some_and(|call| receiver(&call.receiver))
 }
 
 /// The receiver of an entry count: an identifier, then fields, zero-argument method calls, and

@@ -259,7 +259,32 @@ while IFS= read -r manifest_path; do
         print out
     }' "$manifest_path"
     (( CAPTURE_STATUS == 0 )) || execution_failure "comment stripping $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
-    capture retired-scan rg -n "$retired_delivery_codec_pattern" "$CAPTURE_OUT"
+    stripped_manifest="$CAPTURE_OUT"
+    # #1442 (root Amendment 4): a dependency key `core`, `std` or `alloc` (or a table header
+    # `[dependencies.core]`) makes Cargo pass `--extern core=..`, which redirects the prelude's
+    # `core` for the whole crate. The package-name rule above does not see it. Only dependency
+    # tables are read: `test = false` in a `[[bin]]` table is no dependency.
+    capture sysroot-dependency-scan awk '
+        /^[[:space:]]*\[/ {
+            header = $0
+            sub(/^[[:space:]]*\[+[[:space:]]*/, "", header)
+            sub(/[[:space:]]*\]+[[:space:]]*$/, "", header)
+            in_dependencies = (header ~ /(^|\.)(dev-|build-)?dependencies$/)
+            if (header ~ /(^|\.)(dev-|build-)?dependencies\.["\x27]?(core|std|alloc)["\x27]?$/) {
+                printf "%d: %s\n", NR, $0
+            }
+            next
+        }
+        in_dependencies && /^[[:space:]]*["\x27]?(core|std|alloc)["\x27]?[[:space:]]*[.=]/ {
+            printf "%d: %s\n", NR, $0
+        }
+    ' "$stripped_manifest"
+    (( CAPTURE_STATUS == 0 )) || execution_failure "sysroot dependency scan $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    if [[ -s "$CAPTURE_OUT" ]]; then
+        printf '%s\n' "$(<"$CAPTURE_OUT")" >&2
+        fail "dependency key 'core', 'std' or 'alloc' redirects the sysroot crate and is forbidden: $manifest_path"
+    fi
+    capture retired-scan rg -n "$retired_delivery_codec_pattern" "$stripped_manifest"
     case "$CAPTURE_STATUS" in
       0) printf '%s\n' "$(<"$CAPTURE_OUT")" >&2; fail "retired delivery-codec Cargo identity is forbidden: $manifest_path";;
       1) ;;

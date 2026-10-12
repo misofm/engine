@@ -110,14 +110,14 @@ fn a_pop_in_a_macro_token_tree_is_refused() {
     each_row(rows, refuses);
 }
 
-/// D3: a path whose last segment is `try_pop` is a pop only where it is called at once: as the
-/// callee of a call, or as the only argument of `.map(..)` on `<fields>.as_mut()`, which is
-/// `Option::map` and runs it at most once. Anywhere else the value can be called from a place the
-/// walk does not see, and on any other receiver `.map` may be an iterator adapter that pops once
-/// per item with no count (root Amendment 1, iv).
+/// D3 (root Amendment 4): a path whose last segment is `try_pop` is a pop only as the callee of a
+/// call. Anywhere else the value can be called from a place the walk does not see: an argument, a
+/// `let`, a field, a parenthesised value, and the operand of `.map(..)` on any receiver, the
+/// `Option` of `<fields>.as_mut()` included (C1: `live.rs:366`'s form, withdrawn because `.map` can
+/// be a user trait method that loops, or an iterator adapter that pops once per item).
 #[test]
-fn a_function_value_that_pops_is_refused_unless_it_is_called_in_place() {
-    let rows: [(&str, &str); 12] = [
+fn a_function_value_that_pops_is_refused_unless_it_is_a_callee() {
+    let rows: [(&str, &str); 7] = [
         (
             "function-value-in-a-let",
             "fn drain(control: &mut Consumer<Record>) {\n    let pop = Consumer::try_pop;\n    let _ = pop(control);\n}",
@@ -135,35 +135,6 @@ fn a_function_value_that_pops_is_refused_unless_it_is_called_in_place() {
             "fn drain(control: &mut Consumer<Record>) {\n    let _ = Some(control).and_then(Consumer::try_pop);\n}",
         ),
         (
-            "function-value-in-map-with-another-argument",
-            "fn drain(control: &mut Consumer<Record>) {\n    let _ = pool.map(Consumer::try_pop, 4);\n}",
-        ),
-        (
-            // Root Amendment 1, iv. Red if `.map(<path>)` is allowed on a receiver other than
-            // `<fields>.as_mut()`.
-            "function-value-in-map-on-an-iterator",
-            "fn drain(qs: &mut [Consumer<Record>]) {\n    let _ = qs.iter_mut().map(Consumer::try_pop).count();\n}",
-        ),
-        (
-            // Root Amendment 1, iv. Red if the restriction is a blacklist of collection receivers
-            // and not an allow-list.
-            "function-value-in-map-on-repeat",
-            "fn drain(q: &Queue) {\n    let _ = std::iter::repeat(q).map(Queue::try_pop).take_while(Result::is_ok).count();\n}",
-        ),
-        (
-            // The attempt-1 verdict's `cycle` shape: it pops 500 of 500 with a `try_pop(&self)`.
-            "function-value-in-map-on-cycle",
-            "fn drain(q: &Queue) {\n    let _ = [q].into_iter().cycle().map(Queue::try_pop).take_while(Result::is_ok).count();\n}",
-        ),
-        (
-            "function-value-in-map-on-as-ref",
-            "impl Drain {\n    fn run(&mut self) {\n        let _ = self.control.as_ref().map(Consumer::try_pop);\n    }\n}",
-        ),
-        (
-            "function-value-in-map-on-a-call-result",
-            "impl Drain {\n    fn run(&mut self) {\n        let _ = self.controls().as_mut().map(Consumer::try_pop);\n    }\n}",
-        ),
-        (
             "function-value-in-a-field",
             "fn drain(control: &mut Consumer<Record>) {\n    let _ = Popper {\n        pop: Consumer::try_pop,\n    };\n}",
         ),
@@ -171,29 +142,38 @@ fn a_function_value_that_pops_is_refused_unless_it_is_called_in_place() {
             "function-value-in-parentheses",
             "fn drain(control: &mut Consumer<Record>) {\n    let _ = (Consumer::try_pop)(control);\n}",
         ),
+        (
+            // C1 (k0). A counted drain that pops through `.map(Consumer::try_pop)` on
+            // `<fields>.as_mut()`. Red if `.map(<path>)` on that receiver is accepted again.
+            "map-path-on-as-mut",
+            "impl Drain {\n    fn run(&mut self) {\n        let available = self.control.available_at_entry();\n        for _ in 0..available {\n            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}",
+        ),
     ];
     each_row(rows, refuses);
 }
 
-/// D3: the callee of a call and the only argument of `.map(..)` stand where they are called, so
-/// the loops around them bound them.
+/// C2 (t5): `<recv>.map_or(0, <Type>::available_at_entry)` is not an entry count. A user trait
+/// `map_or` that returns `usize::MAX` makes the count unbounded, and the tool cannot see which
+/// `map_or` the receiver has. A count is `<recv>.available_at_entry()[.min(<cap>)]`. Red if the
+/// `map_or(0, <Type>::available_at_entry)` count form is accepted again.
+#[test]
+fn the_map_or_count_form_is_not_a_count() {
+    refuses(
+        "map-or-count-form",
+        "impl Drain {\n    fn run(&mut self) {\n        let available = self\n            .control\n            .as_ref()\n            .map_or(0, Consumer::available_at_entry);\n        for _ in 0..available {\n            let Ok(record) = self.control.try_pop() else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}",
+    );
+}
+
+/// D3: the callee of a call stands where it is called, so the loops around it bound it.
 #[test]
 fn a_function_value_called_in_place_is_judged_by_its_loops() {
     accepts(
         "callee-in-a-counted-loop",
         "fn drain(control: &mut Consumer<Record>) {\n    let available = control.available_at_entry();\n    for _ in 0..available {\n        let Ok(record) = Consumer::try_pop(control) else {\n            break;\n        };\n        apply(record);\n    }\n}",
     );
-    accepts(
-        "map-argument-in-a-counted-loop",
-        "impl Drain {\n    fn run(&mut self) {\n        let available = self\n            .control\n            .as_ref()\n            .map_or(0, Consumer::available_at_entry);\n        for _ in 0..available {\n            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}",
-    );
     refuses(
         "callee-in-an-unbounded-loop",
         "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        let Ok(record) = Consumer::try_pop(control) else {\n            break;\n        };\n        apply(record);\n    }\n}",
-    );
-    refuses(
-        "map-argument-in-an-unbounded-loop",
-        "impl Drain {\n    fn run(&mut self) {\n        loop {\n            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}",
     );
 }
 
@@ -316,6 +296,25 @@ fn text_that_does_not_shadow_debug_assert_leaves_it_trusted() {
         }]);
         assert_classes(&tree, &[]);
     });
+}
+
+/// C10 (t6): only the single identifier `debug_assert!` is taken at its word (B1a-D7, root
+/// Amendment 4). A path (`math::debug_assert!`, `::debug_assert!`) can name any macro, so a count
+/// named in it is read as in any other macro and the drain is refused. Red if the exemption matches
+/// by the last path segment. The bare `debug_assert!` stays accepted.
+#[test]
+fn a_debug_assert_spelled_as_a_path_is_not_taken_at_its_word() {
+    let drain = |spelling: &str| {
+        format!(
+            "fn drain(control: &mut Consumer<Record>) {{\n    let available = control.available_at_entry();\n    {spelling}(available <= 64);\n    for _ in 0..available {{\n        let Ok(record) = control.try_pop() else {{\n            break;\n        }};\n        apply(record);\n    }}\n}}"
+        )
+    };
+    let rows: [(&str, String); 2] = [
+        ("path-debug-assert", drain("math::debug_assert!")),
+        ("rooted-debug-assert", drain("::math::debug_assert!")),
+    ];
+    each_row(rows, |name, text| refuses(name, &text));
+    accepts("bare-debug-assert", &drain("debug_assert!"));
 }
 
 /// D2: e07's escape across files. `lib.rs` defines `macro_rules! debug_assert` and then declares

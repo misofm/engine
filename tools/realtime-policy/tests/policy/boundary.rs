@@ -248,13 +248,33 @@ fn a_region_that_ends_in_another_block_is_refused() {
 }
 
 /// The first verdict's probe: a `const` after the end marker, in the block that holds the loop,
-/// shadows the count for the whole block. Nothing but the boundary rule can see it.
+/// shadows the count for the whole block. The boundary rule refuses the region for where it ends,
+/// and since root Amendment 4 (R3) the drain rule reads the whole block of the count and refuses
+/// the `const` as well. Red if the boundary rule stops refusing a region that ends in a deeper
+/// block (the drain finding does not stand in for it: a region that pops nothing is refused too).
 #[test]
 fn a_region_that_ends_in_a_deeper_block_is_refused() {
     let text = format!(
         "fn probe(q: &mut Consumer) {{\n    // {BEGIN}\n    let available = q.available_at_entry();\n    {{\n        for _ in 0..available {{ let _ = q.try_pop(); }}\n    // {END}\n        const available: usize = usize::MAX;\n    }}\n}}\n"
     );
-    expect_end_refused("region-ends-in-a-deeper-block", &text);
+    let report = expect_failure(
+        "region-ends-in-a-deeper-block",
+        &append(&text),
+        &[Class::RegionEndsInsideAContainer, Class::UnboundedTryPop],
+    );
+    let end_line = 3 + text.lines().position(|line| line.contains(END)).unwrap() + 1;
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.class == Class::RegionEndsInsideAContainer && finding.line == Some(end_line)
+        }),
+        "{:#?}",
+        report.findings
+    );
+    // The same region with nothing to pop: only the boundary rule can refuse it.
+    let quiet = format!(
+        "fn probe() {{\n    // {BEGIN}\n    let available = 1;\n    {{\n        work(available);\n    // {END}\n        const available: usize = usize::MAX;\n    }}\n}}\n"
+    );
+    expect_end_refused("region-ends-in-a-deeper-block-with-no-pop", &quiet);
 }
 
 /// The shape of the real `gate-expander`: a region inside a `macro_rules!` body.

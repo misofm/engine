@@ -3,7 +3,7 @@
 //! A loop bounds the pops in its body when its whole header is `for P in 0..<count>`,
 //! `for P in 0..<recv>.available_at_entry()`, or `while <count> != 0` (or `> 0`) with a body that
 //! opens with `<count> -= 1;`. `<count>` is the nearest binding of its name (D2): a `let` that
-//! reads `available_at_entry` in one of D6's forms, or one plain alias of such a `let`, with
+//! is `<recv>.available_at_entry()[.min(<cap>)]` (D6), or one plain alias of such a `let`, with
 //! nothing between the binding and the loop but comparisons of the count.
 
 use super::Ctx;

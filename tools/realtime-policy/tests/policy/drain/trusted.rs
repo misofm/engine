@@ -1,41 +1,34 @@
-//! The trusted-name scan (B2a-D3, root Amendment 2, SP-A): a name that the drain rule takes at its
-//! word is refused wherever a file under the roots gives it another meaning, in a form the rule's
-//! text does not allow.
+//! The trusted-name scan (B2a-D3, root Amendment 4): a name that the drain rule takes at its word
+//! is refused wherever a file under the roots gives it another meaning, in a form the rule's text
+//! does not allow, and the written escapes (`#[macro_use]`, `no_implicit_prelude`, `feature(..)`,
+//! `proc_macro*`) that could rebind a name without a written definition.
 //!
 //! Every case puts the second meaning in a file with no marker (or in the nested module of one),
-//! beside the drain that the rule would accept without it: the counted drain of
-//! `self.control.as_mut().map(Consumer::try_pop)`, which is `live.rs:366`'s form. Each case then
-//! fails with the drain class, at the line of the offending name.
+//! beside the base tree's valid drains. Each case then fails with the drain class, in the
+//! offending file, at the line of the offending name. Names that a macro expansion builds from
+//! parts are limit 4 of the threat model and have no case here.
 
 use realtime_policy::Finding;
 
 use super::super::common::{Edit, Tree, assert_classes};
-use super::{ANCHOR, BUILTINS_COMPILER, DRAIN, each_row};
-
-/// A counted drain that pops through `.map(Consumer::try_pop)` on `<fields>.as_mut()`: accepted.
-const DRAIN_THROUGH_MAP: &str = "impl Drain {\n    fn run(&mut self) {\n        let available = self\n            .control\n            .as_ref()\n            .map_or(0, Consumer::available_at_entry);\n        for _ in 0..available {\n            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {\n                break;\n            };\n            apply(record);\n        }\n    }\n}";
+use super::{DRAIN, each_row};
 
 const SHADOWING: &str = "crates/shadowing/src/lib.rs";
+/// The one file that defines the pop and the count (the base tree's copy holds `fn try_pop`).
+const SPSC: &str = "crates/engine/src/realtime/spsc.rs";
 
-/// The base tree with `text` in a file with no marker, and the drain through `.map` in its second
-/// region. Returns the findings, after asserting that all are of the drain class.
+/// The base tree with `text` in a file with no marker. Returns the findings, after asserting that
+/// all are of the drain class.
 fn findings_of(name: &str, text: &str) -> Vec<Finding> {
     let tree = Tree::base(name);
-    tree.apply(&[
-        Edit::ReplaceLine {
-            path: BUILTINS_COMPILER,
-            old: ANCHOR,
-            new: DRAIN_THROUGH_MAP,
-        },
-        Edit::Create {
-            path: SHADOWING,
-            text,
-        },
-    ]);
+    tree.apply(&[Edit::Create {
+        path: SHADOWING,
+        text,
+    }]);
     assert_classes(&tree, &[DRAIN]).findings
 }
 
-/// Assert that the case is refused, with every finding in the shadowing file, the first at a line
+/// Assert that the case is refused with every finding in the shadowing file, the first at a line
 /// that holds `needle`.
 fn refused(name: &str, text: &str, needle: &str) {
     let findings = findings_of(name, text);
@@ -54,110 +47,178 @@ fn refused(name: &str, text: &str, needle: &str) {
     );
 }
 
-/// The drain through `.map` passes beside text that holds the trusted names in their allowed forms.
+/// The base tree beside `text` in a file with no marker passes.
 fn accepted(name: &str, text: &str) {
     let tree = Tree::base(name);
-    tree.apply(&[
-        Edit::ReplaceLine {
-            path: BUILTINS_COMPILER,
-            old: ANCHOR,
-            new: DRAIN_THROUGH_MAP,
-        },
-        Edit::Create {
-            path: SHADOWING,
-            text,
-        },
-    ]);
+    tree.apply(&[Edit::Create {
+        path: SHADOWING,
+        text,
+    }]);
     assert_classes(&tree, &[]);
 }
 
-/// (a): F1's reproducer. A user trait `Spin` has a `map` whose `impl` calls its argument in a
-/// `while f(self).is_ok() {}` loop; it pops 1000 of 1000 records through `Consumer::try_pop`. It
-/// sits in `mod a { mod b { .. } }` of another file. Red if the scan reads only the top-level items
-/// of a file, or one file, or drops (a): this shape passes without it.
+/// C4 (t2): a written `fn try_pop` outside `spsc.rs`, with a body that loops, is a pop the rule
+/// would take as the one pop. Red if a definition of `try_pop` outside `spsc.rs` is allowed, for
+/// example if (q) keeps the old rule that allowed any `fn try_pop(&mut self`.
 #[test]
-fn a_user_trait_with_a_map_in_a_nested_module_is_refused() {
-    let text = "mod a {\n    mod b {\n        trait Spin<T> {\n            fn map<R, E>(self, f: fn(&mut T) -> Result<R, E>) -> usize;\n        }\n        impl<T> Spin<T> for &mut T {\n            fn map<R, E>(self, f: fn(&mut T) -> Result<R, E>) -> usize {\n                let mut n = 0;\n                while f(self).is_ok() {\n                    n += 1;\n                }\n                n\n            }\n        }\n    }\n}\n";
-    refused("user-map-trait-in-a-nested-module", text, "fn map");
-}
-
-/// (a): the other trusted method name (red if (a) names only `map`), the other keywords that give
-/// an item its name (red if (a) looks only after `fn`), and a `use` item that brings a `map` into
-/// scope (red if the `use` items are not read).
-#[test]
-fn a_definition_import_or_rename_of_map_or_as_mut_is_refused() {
-    let rows: [(&'static str, &'static str); 5] = [
-        ("fn-as-mut", "trait Spin {\n    fn as_mut(&mut self);\n}\n"),
-        ("fn-map-in-an-impl", "impl Q {\n    fn map(self) {}\n}\n"),
-        ("use-of-map-in-a-group", "use other::{map, Thing};\n"),
-        ("const-named-as-mut", "const as_mut: u8 = 0;\n"),
-        ("macro-named-map", "macro_rules! map {\n    () => {};\n}\n"),
+fn a_definition_of_try_pop_outside_the_queue_is_refused() {
+    let rows: [(&'static str, &'static str, &'static str); 4] = [
+        (
+            "try-pop-looping-on-a-ring",
+            "trait Spin {\n    fn try_pop(&mut self) -> Result<u32, ()>;\n}\nimpl Spin for Ring {\n    fn try_pop(&mut self) -> Result<u32, ()> {\n        while self.n > 0 {\n            self.n -= 1;\n        }\n        Ok(1)\n    }\n}\n",
+            "fn try_pop",
+        ),
+        (
+            "try-pop-by-value-on-a-reference-impl",
+            "impl Pop for &Queue {\n    fn try_pop(self) -> Result<u8, ()> {\n        Err(())\n    }\n}\n",
+            "fn try_pop",
+        ),
+        (
+            "try-pop-as-a-free-fn",
+            "fn try_pop(queue: &mut Q) {}\n",
+            "fn try_pop",
+        ),
+        (
+            "try-pop-imported-in-a-group",
+            "use other::{try_pop, Thing};\n",
+            "use other",
+        ),
     ];
-    each_row(rows, |name, text| {
-        let findings = findings_of(name, text);
-        assert!(!findings.is_empty(), "case {name}");
-    });
+    each_row(
+        rows.map(|(name, text, needle)| (name, (text, needle))),
+        |name, (text, needle)| {
+            refused(name, text, needle);
+        },
+    );
 }
 
-/// (b): `impl Pop for &Q { fn try_pop(self) }`. The receiver is `self`, by value on a reference
-/// type, so a check for `&self` alone does not see it. Red if (b) allows any `fn try_pop` with a
-/// receiver other than `&mut self`.
+/// C5 (t7): a written `fn available_at_entry` outside `spsc.rs` that returns `usize::MAX` makes
+/// every counted drain unbounded. Red if `available_at_entry` is not one of the trusted names.
 #[test]
-fn a_try_pop_taken_by_value_on_a_reference_impl_is_refused() {
-    let text = "trait Pop {\n    fn try_pop(self) -> Result<u8, ()>;\n}\nimpl Pop for &Queue {\n    fn try_pop(self) -> Result<u8, ()> {\n        Err(())\n    }\n}\n";
-    refused("try-pop-by-value-on-a-reference-impl", text, "fn try_pop");
+fn a_definition_of_available_at_entry_outside_the_queue_is_refused() {
+    let text = "trait Spin {\n    fn available_at_entry(&self) -> usize;\n}\nimpl Spin for Ring {\n    fn available_at_entry(&self) -> usize {\n        usize::MAX\n    }\n}\n";
+    refused(
+        "available-at-entry-returning-max",
+        text,
+        "fn available_at_entry",
+    );
+}
+
+/// (q), second definition in `spsc.rs`: the file that defines the pop and the count gets exactly
+/// one written `fn` token for each name, and no second one. Red if the allowance is not one per
+/// name: a looping `fn try_pop` or `fn available_at_entry` added to `spsc.rs` beside the real one
+/// passes. The first `fn available_at_entry` of the file is the definition (accepted); the second
+/// is refused at its own line.
+#[test]
+fn a_second_definition_in_the_defining_file_is_refused() {
+    let define = |name: &str| format!("fn {name}(&self) -> usize {{ 0 }}\n");
+    let appended = |case: &str, text: &str| {
+        let tree = Tree::base(case);
+        tree.apply(&[Edit::Append { path: SPSC, text }]);
+        tree
+    };
+    // The base copy of `spsc.rs` holds one `fn try_pop`: a second is refused, at its line.
+    let tree = appended("second-try-pop", &define("try_pop"));
+    let line = tree.read(SPSC).lines().count();
+    let findings = assert_classes(&tree, &[DRAIN]).findings;
+    let [finding] = findings.as_slice() else {
+        panic!("one finding expected: {findings:#?}");
+    };
+    assert_eq!(finding.path.as_deref(), Some(SPSC));
+    assert_eq!(finding.line, Some(line));
+    // The first `fn available_at_entry` is the definition; the second is not.
+    assert_classes(
+        &appended("first-available-at-entry", &define("available_at_entry")),
+        &[],
+    );
+    let both = format!(
+        "{}{}",
+        define("available_at_entry"),
+        define("available_at_entry")
+    );
+    let tree = appended("second-available-at-entry", &both);
+    let line = tree.read(SPSC).lines().count();
+    let findings = assert_classes(&tree, &[DRAIN]).findings;
+    let [finding] = findings.as_slice() else {
+        panic!("one finding expected: {findings:#?}");
+    };
+    assert_eq!(finding.line, Some(line));
+}
+
+/// C11: `#[macro_use] extern crate x;` brings a registry crate's macros, `debug_assert` among
+/// them, into every module. Red if (u) is dropped. Its accepted half, `#[macro_use] mod` (the real
+/// `crates/math/src/lib.rs:52`), is red if the exemption is dropped.
+#[test]
+fn macro_use_is_refused_except_on_a_module() {
     let rows: [(&'static str, &'static str); 3] = [
         (
-            "try-pop-by-shared-reference",
-            "impl Q {\n    fn try_pop(&self) {}\n}\n",
+            "macro-use-on-extern-crate",
+            "#[macro_use]\nextern crate shadowing_macros;\n",
         ),
-        ("try-pop-as-a-free-fn", "fn try_pop(queue: &mut Q) {}\n"),
+        ("inner-macro-use", "#![macro_use]\n"),
         (
-            "use-of-try-pop-in-a-group",
-            "use other::{try_pop, Thing};\n",
+            "macro-use-on-another-item",
+            "#[macro_use]\nuse other::thing;\n",
         ),
     ];
+    each_row(rows, |name, text| refused(name, text, "macro_use"));
+    accepted("macro-use-on-a-module", "#[macro_use]\nmod vendored;\n");
+}
+
+/// C12: `#[no_implicit_prelude]` changes what the implicit prelude names in its module, so a
+/// `debug_assert!` there may be another crate's. Red if (n) is dropped.
+#[test]
+fn no_implicit_prelude_is_refused() {
+    let rows: [(&'static str, &'static str); 2] = [
+        (
+            "no-implicit-prelude-on-a-module",
+            "#[no_implicit_prelude]\nmod quiet {}\n",
+        ),
+        ("inner-no-implicit-prelude", "#![no_implicit_prelude]\n"),
+    ];
     each_row(rows, |name, text| {
-        let findings = findings_of(name, text);
-        assert!(!findings.is_empty(), "case {name}");
+        refused(name, text, "no_implicit_prelude")
     });
 }
 
-/// (c): `mk!(x.map)` where `mk!` emits `fn $n`: a trait whose `map` loops. The text `fn map` is not
-/// in the file, and `.map` follows a `.`. It pops 1000 of 1000. Red if (c) is dropped or matches
-/// only the text `fn map`.
+/// C13: `feature(..)` enables the nightly features that build names from parts, and
+/// `#![cfg_attr(x, feature(..))]` does it with no `#![feature(` in a row. A `$` followed by a
+/// `{` group is a metavariable expression (`${concat(..)}`). Red if the rule matches only the token
+/// sequence `#![feature(`.
 #[test]
-fn a_map_name_that_a_macro_makes_is_refused() {
-    let text = "macro_rules! mk {\n    ($a:ident . $n:ident) => {\n        trait Spin<T> {\n            fn $n<R, E>(self, f: fn(&mut T) -> Result<R, E>) -> usize;\n        }\n        impl<T> Spin<T> for &mut T {\n            fn $n<R, E>(self, f: fn(&mut T) -> Result<R, E>) -> usize {\n                let mut n = 0;\n                while f(self).is_ok() {\n                    n += 1;\n                }\n                n\n            }\n        }\n    };\n}\nmk!(x.map);\n";
-    refused("macro-made-map-name", text, "mk!(x.map)");
-}
-
-/// (c): an outer macro passes `$n` to an inner macro that emits `fn $n`. Red if the set of
-/// name-emitting macros is not closed transitively.
-#[test]
-fn a_name_passed_to_an_inner_name_emitting_macro_is_refused() {
-    let text = "macro_rules! inner {\n    ($a:ident . $n:ident) => {\n        trait Spin {\n            fn $n(self);\n        }\n    };\n}\nmacro_rules! outer {\n    ($a:ident . $n:ident) => {\n        inner!($a . $n);\n    };\n}\nouter!(x.map);\n";
-    refused(
-        "macro-passes-name-to-an-inner-name-emitting-macro",
-        text,
-        "outer!(x.map)",
+fn feature_enabling_and_metavariable_expressions_are_refused() {
+    let rows: [(&'static str, &'static str, &'static str); 3] = [
+        (
+            "feature-attribute",
+            "#![feature(macro_metavar_expr_concat)]\n",
+            "feature",
+        ),
+        (
+            "cfg-attr-feature",
+            "#![cfg_attr(nightly, feature(macro_metavar_expr_concat))]\n",
+            "feature",
+        ),
+        (
+            "metavariable-expression",
+            "macro_rules! mk {\n    ($a:ident) => {\n        fn ${concat($a, _x)}() {}\n    };\n}\n",
+            "${concat",
+        ),
+    ];
+    each_row(
+        rows.map(|(name, text, needle)| (name, (text, needle))),
+        |name, (text, needle)| {
+            refused(name, text, needle);
+        },
+    );
+    // A word `feature` that no group follows, and a `$` metavariable, are not features.
+    accepted(
+        "feature-as-a-word",
+        "fn describe(feature: &str) -> &str {\n    feature\n}\nmacro_rules! keep {\n    ($feature:expr) => {\n        $feature\n    };\n}\n",
     );
 }
 
-/// (c): an invocation through a name that a `use` item renames counts as an invocation. Red if the
-/// renames are not followed.
-#[test]
-fn a_name_emitting_macro_invoked_through_a_rename_is_refused() {
-    let text = "macro_rules! mk {\n    ($a:ident . $n:ident) => {\n        trait Spin {\n            fn $n(self);\n        }\n    };\n}\nuse crate::mk as spin;\nspin!(x.as_mut);\n";
-    refused(
-        "name-emitting-macro-through-a-rename",
-        text,
-        "spin!(x.as_mut)",
-    );
-}
-
-/// (d): a `#[proc_macro]` that a macro makes. The name `emit` is no trusted name, so (c) is silent.
-/// A workspace proc macro can emit any name, pop or shadow. Red if (d) is dropped.
+/// (d): a `#[proc_macro]` that a macro makes. The name `emit` is no trusted name. A workspace proc
+/// macro can emit any name, pop or shadow, and the scan cannot see it. Red if (d) is dropped.
 #[test]
 fn a_proc_macro_that_a_macro_makes_is_refused() {
     let text = "macro_rules! mk {\n    ($n:ident !) => {\n        #[proc_macro]\n        pub fn $n(input: TokenStream) -> TokenStream {\n            input\n        }\n    };\n}\nmk!(emit !);\n";
@@ -178,11 +239,12 @@ fn a_proc_macro_that_a_macro_makes_is_refused() {
     });
 }
 
-/// The trusted names in the forms the rule allows are not findings: `.map` and `.as_mut` calls, a
-/// path that ends in `map`, the real `try_pop` definition, a call through `Consumer::try_pop`, a
-/// macro that emits no name, and a local variable called `map`.
+/// The trusted names in the forms the rule allows are not findings: `.try_pop()` and
+/// `.available_at_entry()` calls, `Consumer::try_pop(c)` as a callee, a longer name that starts
+/// like a trusted one, `#[macro_use] mod`, a word `feature` that no group follows, a `$` that
+/// opens no brace group, and a macro that emits no name.
 #[test]
 fn the_trusted_names_in_their_allowed_forms_pass() {
-    let text = "impl Consumer {\n    pub fn try_pop(&mut self) -> Result<u8, ()> {\n        Err(())\n    }\n}\nfn forms(v: Vec<u8>, o: Option<u8>, c: &mut Consumer) {\n    let _ = v.iter().map(|x| x + 1).count();\n    let _ = o.as_ref().map(|x| x + 1);\n    let _ = Option::map(o, |x| x + 1);\n    let _ = Consumer::try_pop(c);\n    let map = 3;\n    let _ = map + 1;\n}\nmacro_rules! twice {\n    ($e:expr) => {\n        ($e, $e)\n    };\n}\nfn macros(v: Vec<u8>) {\n    let _ = twice!(v.iter().map(|x| x + 1).count());\n}\n";
+    let text = "fn forms(c: &mut Consumer, o: Option<u8>) {\n    let _ = c.try_pop();\n    let _ = c.available_at_entry();\n    let _ = Consumer::try_pop(c);\n    let _ = Consumer::available_at_entry(c);\n    let _ = o.map(|x| x + 1);\n    let try_pop_count = 3;\n    let feature = try_pop_count + 1;\n    let _ = feature;\n}\n#[macro_use]\nmod vendored;\nmacro_rules! twice {\n    ($e:expr) => {\n        ($e, $e)\n    };\n}\n";
     accepted("trusted-names-in-their-allowed-forms", text);
 }

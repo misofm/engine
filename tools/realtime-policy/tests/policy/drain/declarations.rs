@@ -5,13 +5,15 @@
 //! count, its alias source or the slice parameter for the whole block it lands in. D2's item scan
 //! reads the tokens of the region and cannot see an expansion. The cases below put the macro
 //! outside the region, as the production shape would, and a pop in a loop whose bound the rule can
-//! prove from the syntax alone. A `let` is shadowed from inside its own block only through a
-//! deeper block, so its span ends with the statement that holds the pop; a parameter's block is
-//! the whole `fn` body, so its span is the body.
+//! prove from the syntax alone. The scope of a read binding is its own, wherever the item stands
+//! in it (root Amendment 4, R3): the whole block of a `let`, from its `{`; the whole `fn` body of a
+//! parameter; the whole node of a pattern.
 
 use realtime_policy::Finding;
 
-use super::super::common::{Edit, Tree, assert_classes, expect_failure, expect_valid, region};
+use super::super::common::{
+    BEGIN, END, Edit, Tree, assert_classes, expect_failure, expect_valid, region,
+};
 use super::{DRAIN, each_row};
 
 const BUFFER: &str = "crates/engine/src/realtime/buffer.rs";
@@ -228,9 +230,8 @@ fn an_attribute_that_can_emit_an_item_refuses_the_drain() {
 }
 
 /// What is not a statement or item macro, or lies outside the span, is not refused: a macro in
-/// expression position (also a trailing one with no `;`, which cannot expand to an item), a macro
-/// before the count (an item there cannot shadow a `let` that follows in its block), a `fn`
-/// signature's neighbour, and a trusted `debug_assert!`.
+/// expression position (also a trailing one with no `;`, which cannot expand to an item), a macro in
+/// another function, and a trusted `debug_assert!`.
 #[test]
 fn a_macro_that_cannot_declare_an_item_in_the_span_is_not_refused() {
     let rows: Vec<(&'static str, String)> = vec![
@@ -241,15 +242,6 @@ fn a_macro_that_cannot_declare_an_item_in_the_span_is_not_refused() {
         (
             "trailing-macro-expression-in-the-drain",
             appended(SHADOWS_COUNT, &counted("", "        shadow!()\n")),
-        ),
-        (
-            "item-macro-before-the-count",
-            appended(
-                SHADOWS_COUNT,
-                &format!(
-                    "fn drain(control: &mut Consumer<Record>) {{\n    shadow!();\n    let available = control.available_at_entry();\n    for _ in 0..available {{\n        {POP}\n    }}\n}}"
-                ),
-            ),
         ),
         (
             "item-macro-in-another-function",
@@ -347,5 +339,89 @@ fn an_untrusted_debug_assert_in_the_loop_refuses_the_drain() {
             .as_deref()
             .is_some_and(|line| line.contains("try_pop")),
         "{ours:#?}"
+    );
+}
+
+/// R3 (C14): the scope of a binding that a rule read, not the region, is where an item or a macro
+/// that can declare one shadows it. Each case puts the item outside the markers, in the scope.
+///
+/// - `r04`, `r07`, `r09`: the root is destructured by a `let` of the function body, and a
+///   `struct` of the same name stands in the inner block before the begin marker.
+/// - `r05`, `r11`: the root is a slice parameter, and a `struct` or a `use` follows the end marker
+///   at the body's level.
+/// - `pq_norounds_2`: a per-queue form whose root parameter `ready` is shadowed by a `static`
+///   before the begin marker.
+/// - `r13`, `r14`: `struct controls; let controls = controls;`, the struct written or made by a
+///   macro (invoked before the `let`), so the `let` binds nothing and the loop runs over the unit struct's
+///   endless iterator.
+///
+/// Red if the scan stops at the region (r04, r05, r07, r09, r11, `pq_norounds_2`), or if the scope
+/// of a `let` starts at the `let` and not at its block (r13, r14). Their controls pass: the same
+/// forms with no item.
+#[test]
+fn an_item_or_macro_in_the_scope_of_a_read_binding_refuses_the_drain() {
+    let drain = "let available = control.available_at_entry();\n            for _ in 0..available { let Ok(record) = control.try_pop() else { break; }; apply(record); }";
+    let over_roots = |struct_line: &str, root: &str, loop_head: &str| {
+        format!(
+            "fn probe(state: &mut State) {{\n    let State {{ {root}, .. }} = state;\n    {{\n        {struct_line}\n        // {BEGIN}\n        for control in {loop_head} {{\n            {drain}\n        }}\n        // {END}\n    }}\n}}\n"
+        )
+    };
+    let over_parameter = |after: &str| {
+        format!(
+            "fn probe(controls: &mut [Consumer<Record>]) {{\n    // {BEGIN}\n    for control in controls.iter_mut() {{\n        {drain}\n    }}\n    // {END}\n    {after}\n}}\n"
+        )
+    };
+    let per_queue = |before: &str| {
+        format!(
+            "fn poll(ready: &mut Ready, rounds: &[u8]) -> u32 {{\n{before}    // {BEGIN}\n    {{\n        for (lane, left) in ready.lanes.iter().zip(&mut ready.remaining) {{\n            *left = lane.consumer.available_at_entry().min(DEPTH);\n        }}\n        let mut passes = 1_usize;\n        for left in ready.remaining.iter() {{\n            passes = passes.saturating_add(*left as usize);\n        }}\n        for _ in 0..passes {{\n            for ((lane, slot), left) in ready.lanes.iter_mut().zip(&mut ready.slots).zip(&mut ready.remaining) {{\n                if slot.is_some() || *left == 0 {{\n                    continue;\n                }}\n                *left -= 1;\n                if let Ok(record) = lane.consumer.try_pop() {{\n                    *slot = Some(record);\n                }}\n            }}\n            if ready.slots.iter().any(Option::is_none) {{\n                break;\n            }}\n            return 0;\n        }}\n    }}\n    // {END}\n    0\n}}\n"
+        )
+    };
+    let unit_root = |before: &str| {
+        format!(
+            "fn probe() {{\n{before}    let controls = controls;\n    // {BEGIN}\n    for control in controls.iter_mut() {{\n        {drain}\n    }}\n    // {END}\n}}\n"
+        )
+    };
+    let rows: Vec<(&'static str, String)> = vec![
+        (
+            "r04-struct-before-the-region-let-outside",
+            over_roots("struct controls;", "controls", "controls.iter_mut()"),
+        ),
+        (
+            "r07-reference-root-struct-before-the-region",
+            over_roots("struct controls;", "controls", "&controls"),
+        ),
+        (
+            "r09-queue-root-struct-before-the-region",
+            over_roots("struct queues;", "queues", "queues.iter_mut()"),
+        ),
+        (
+            "r05-struct-after-the-region-slice-parameter",
+            over_parameter("struct controls;"),
+        ),
+        (
+            "r11-use-after-the-region-slice-parameter",
+            over_parameter("use spin::controls;"),
+        ),
+        (
+            "pq-norounds-2-static-before-the-region",
+            per_queue("    static ready: Ready = Ready::NEW;\n"),
+        ),
+        (
+            "r13-unit-struct-before-the-let",
+            unit_root(
+                "    struct controls;\n    impl controls {\n        fn iter_mut(&self) -> Spin {\n            Spin\n        }\n    }\n",
+            ),
+        ),
+        (
+            "r14-macro-made-struct-before-the-let",
+            format!("{SHADOWS_ROOT}{}", unit_root("    shadow!();\n")),
+        ),
+    ];
+    each_row(rows, |name, text| refused(name, &text));
+    // The controls: the same forms with no item are bounded.
+    accepted("pq-norounds-1-no-static", &per_queue(""));
+    accepted(
+        "r04-no-struct",
+        &over_roots("", "controls", "controls.iter_mut()"),
     );
 }

@@ -138,11 +138,6 @@ pub(crate) struct RegionNodes {
 }
 
 impl RegionNodes {
-    /// The positions of the begin and end markers.
-    pub(crate) fn bounds(&self) -> ((usize, usize), (usize, usize)) {
-        (self.begin, self.end)
-    }
-
     /// Whether `start..end` is one of the region's maximal nodes.
     pub(crate) fn is_node(&self, start: (usize, usize), end: (usize, usize)) -> bool {
         self.nodes

@@ -18,8 +18,8 @@
 //! call and a bracket index (`0..self.controls.len()`, `0..a[i]`): both run code this rule cannot
 //! see, so both are refused, and widening that needs a ruling (B1b-D1).
 //!
-//! The root of `<fields>` is a read (D9): it must resolve to a binding, and no item of the region
-//! may declare its name (see [`super::shadowed_by_an_item`]).
+//! The root of `<fields>` is a read (D9): it must resolve to a binding, and no item in the
+//! binding's scope may declare its name (see [`super::shadowed_by_an_item`]).
 //!
 //! Not checked: a collection whose type never ends. `&mut <fields>` and `<fields>.iter_mut()` are
 //! finite by their form, so a field or a local that holds an unbounded iterator (`0..`) passes.
@@ -92,8 +92,8 @@ fn collection<'f>(
     }
 }
 
-/// D9: the loop reads the root of the collection `place` to be finite, so an item of the region
-/// that declares the root's name (a unit struct with an `iter_mut` that repeats) redirects it. The
+/// D9: the loop reads the root of the collection `place` to be finite, so an item in the
+/// root's scope that declares its name (a unit struct with an `iter_mut` that repeats) redirects it. The
 /// root must resolve to a binding, which the item rule and D10's span then cover. `self` is a
 /// keyword: nothing can shadow it.
 fn read_root<'f>(ctx: &Ctx<'f>, place: &Place<'f>) -> bool {
@@ -122,8 +122,9 @@ fn zip_argument(expr: &syn::Expr) -> bool {
 /// Whether `name`, used at `name_at` as the iterator of the loop at `steps[at]`, is a slice or
 /// array parameter of the enclosing `fn`: the parameter is a plain name of type `&[T]`, `&mut [T]`,
 /// `&[T; N]` or `[T; N]`; the signature and the loop lie in the pop's region; nothing names it
-/// between the `fn`'s body and the loop (a rebinding would); and no `static`, `const` or `use` of
-/// the region can name it (a block item shadows the parameter for its whole block).
+/// between the `fn`'s body and the loop (a rebinding would); and no item or `use` anywhere in the
+/// function body can name it (a block item shadows the parameter for its whole block, see
+/// [`super::shadowed_by_an_item`]).
 fn slice_parameter<'f>(
     ctx: &Ctx<'f>,
     steps: &[Step<'f>],

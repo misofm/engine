@@ -142,19 +142,20 @@ fn a_count_that_the_rule_cannot_prove_is_refused() {
     each_row(rows, |name, text| refuses(name, &text));
 }
 
-/// Root Amendment 1 (i): `u19-swapped`. The probe `u19` decrements the outer `remaining` and only
-/// then declares `let remaining = 5;`, which shadows the rest of the body, so it is bounded and
-/// accepted (`the_bounded_probes_pass`). With the inner `let mut remaining = 5;` first, the
-/// decrement counts the inner binding down and the loop runs until the queue is empty. Red if the
-/// resolver accepts a decrement that a body `let` has rebound, which would make `u19`'s acceptance
-/// blind to order.
+/// C15 (root Amendment 4, R5): `decrement-after-a-continue`. The decrement is not the first
+/// statement of the body, so a `continue` before it skips the decrement and the loop pops without
+/// bound. Red if `while_bounds` accepts a decrement that is not the body's first statement (for
+/// example the first binary statement). `while-decrement-not-first` puts the decrement in an `if`,
+/// so it stays green under that defect. The control, with the decrement first, is accepted.
 #[test]
-fn a_decrement_that_a_body_let_has_rebound_is_refused() {
+fn a_decrement_after_a_continue_is_refused() {
     refuses(
-        "u19-swapped",
-        &format!(
-            "fn drain(control: &mut Consumer<Record>) {{\n    let available = control.available_at_entry();\n    let mut remaining = available;\n    while remaining != 0 {{\n        let mut remaining = 5;\n        remaining -= 1;\n        {POP}\n    }}\n}}"
-        ),
+        "decrement-after-a-continue",
+        "fn drain(control: &mut Consumer<Record>, skip: bool) {\n    let mut remaining = control.available_at_entry();\n    while remaining != 0 {\n        let Ok(record) = control.try_pop() else {\n            break;\n        };\n        if skip {\n            continue;\n        }\n        remaining -= 1;\n        apply(record);\n    }\n}",
+    );
+    accepts(
+        "decrement-first",
+        "fn drain(control: &mut Consumer<Record>, skip: bool) {\n    let mut remaining = control.available_at_entry();\n    while remaining != 0 {\n        remaining -= 1;\n        let Ok(record) = control.try_pop() else {\n            break;\n        };\n        if skip {\n            continue;\n        }\n        apply(record);\n    }\n}",
     );
 }
 

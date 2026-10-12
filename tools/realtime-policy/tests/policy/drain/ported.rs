@@ -154,17 +154,17 @@ fn drain_fader_tail(control: &mut Consumer<Record>, available: usize) {
         name: "while-without-decrement",
         kind: "edit",
         path: "crates/effect-contract/src/live.rs",
-        anchor: r#"            remaining -= 1;"#,
+        anchor: r#"                remaining -= 1;"#,
         text: r#""#,
     },
     Ported {
         name: "while-decrement-not-first",
         kind: "edit",
         path: "crates/effect-contract/src/live.rs",
-        anchor: r#"            remaining -= 1;"#,
-        text: r#"            if staged == 0 {
-                remaining -= 1;
-            }"#,
+        anchor: r#"                remaining -= 1;"#,
+        text: r#"                if staged == 0 {
+                    remaining -= 1;
+                }"#,
     },
     Ported {
         name: "labelled-loop",
