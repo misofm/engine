@@ -1188,8 +1188,9 @@ fn first_direct_difference(left: &DirectRun, right: &DirectRun) -> Option<usize>
 
 /// Gate 2 of #1276, first case: a trim record admitted to A after block 5, committed in the model
 /// B is prepared from, is pending in A's queue at the swap. The carry drains it into the lane
-/// before copying, so B's first block starts the trim ramp exactly where A would have.
-fn a_pending_trim_record_survives_the_swap(backend: Backend) {
+/// before copying, so B's first block starts the trim ramp exactly where A would have. `strip` is
+/// the written strip: the first bank's `eq2`, or a strip in a later predecessor bank.
+fn a_pending_trim_record_survives_the_swap(backend: Backend, strip: &'static str) {
     const NEW_TRIM_DB: f32 = 4.5;
     let record = builtins_compiler::TrackInputRecord::TrimDb {
         lanes: builtins::BuiltinLaneSelector::Both,
@@ -1198,18 +1199,18 @@ fn a_pending_trim_record_survives_the_swap(backend: Backend) {
     };
     let write = |block| LiveWrite {
         block,
-        strip: "eq2",
+        strip,
         record,
     };
     let a = Session::compile(filtered_session(false));
     let mut committed = filtered_session(false);
-    let strip = committed
+    let track = committed
         .tracks
         .iter_mut()
-        .find(|track| track.id.as_str() == "eq2")
-        .expect("eq2");
-    strip.builtins.left.trim_db = NEW_TRIM_DB;
-    strip.builtins.right.trim_db = NEW_TRIM_DB;
+        .find(|track| track.id.as_str() == strip)
+        .expect("the written strip");
+    track.builtins.left.trim_db = NEW_TRIM_DB;
+    track.builtins.right.trim_db = NEW_TRIM_DB;
     let b = Session::compile(with_muted_track(committed.clone()));
     let reference_session = Session::compile(with_muted_track(filtered_session(false)));
     let feed = Feed::new(SOURCE, 5);
@@ -1236,7 +1237,7 @@ fn a_pending_trim_record_survives_the_swap(backend: Backend) {
     assert_eq!(
         first_direct_difference(&run, &reference),
         None,
-        "{backend:?}: the record takes effect on the swap block's first sample"
+        "{backend:?}: the record to {strip} takes effect on the swap block's first sample"
     );
     // The record moved the output: without it the swap block differs.
     let unwritten = direct_run(
@@ -1336,13 +1337,29 @@ fn a_restarting_input_lane_does_not_count_its_replaced_writes_at_four_lanes() {
 #[cfg(target_feature = "avx2")]
 #[test]
 fn a_pending_trim_record_survives_the_swap_at_eight_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd8);
+    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq2");
 }
 
 /// Gate 2 at four lanes.
 #[test]
 fn a_pending_trim_record_survives_the_swap_at_four_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd4);
+    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq2");
+}
+
+/// Gate 2 on a carried strip in the second predecessor bank (`eq8` is lane 0 of it at eight lanes).
+/// Red if the input drain's lane mask is built from the first bank's moves instead of the moves of
+/// the bank being drained: the pending trim write of a strip in a later bank is lost at the swap,
+/// and the first-bank tests above cannot see it.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_pending_trim_record_in_a_later_bank_survives_the_swap_at_eight_lanes() {
+    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq8");
+}
+
+/// Gate 2 on a carried strip in the second predecessor bank (`eq5` is lane 1 of it at four lanes).
+#[test]
+fn a_pending_trim_record_in_a_later_bank_survives_the_swap_at_four_lanes() {
+    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq5");
 }
 
 /// Gate 2 of #1276, second case: at a 32-frame quantum, a high-pass target admitted before block
@@ -3075,9 +3092,10 @@ const CARRIED: &str = "eq1";
 
 /// #1312 D2: `live_values_superseded` counts the writes a carry drain replaces on lanes that
 /// carry, and none on a lane the swap restarts, whichever lanes share their bank. B adds a VCA
-/// over [`MOVED`], a prepared difference that restarts its fader stage and leaves its matrix
-/// stage carrying, and [`CARRIED`] carries both stages from the same predecessor bank at four and
-/// at eight lanes. Three fader writes sit unread in [`MOVED`]'s cells and three fader and three
+/// over [`MOVED`], a prepared difference that restarts its fader stage. In the split form the
+/// matrix stage of [`MOVED`] still carries; in the fused form the strip carries neither stage.
+/// [`CARRIED`] carries both stages from the same predecessor bank at four and at eight lanes.
+/// Three fader writes sit unread in [`MOVED`]'s cells and three fader and three
 /// pan writes in [`CARRIED`]'s when the swap block hands over.
 fn a_restarting_lane_does_not_count_its_replaced_writes(backend: Backend, form: Form) {
     let a = Session::compile(strip_state_session());

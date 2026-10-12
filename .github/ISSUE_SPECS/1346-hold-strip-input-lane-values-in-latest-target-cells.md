@@ -456,3 +456,26 @@ three browsers, 14 times on webkit and 4 times on chromium and firefox with 24 b
 cores: no failure after the `resumeUntil` retry. AArch64 and the artifact-identity report run only
 in CI.
 
+
+### Batch re-verify fixes (stream B batch 3; batch verdict 2; Sonnet 5.5, on `codex/d15-stream-b3`)
+
+B2 (the WebKit unsubscribe gate) belongs to #1345 Amendment 5: see its "Batch re-verify fixes" record
+for the change, the run table and the open WebKit failure under full load.
+
+**MINOR 1:** `a_pending_trim_record_in_a_later_bank_survives_the_swap_at_{four,eight}_lanes`
+(`crates/host-core/tests/successor_swap.rs`; `eq5` is lane 1 of the second predecessor bank at four
+lanes, `eq8` lane 0 of it at eight). *Test value:* red if the input drain's lane mask is built from
+the first bank's moves instead of the drained bank's, which loses a later bank's pending trim write
+at the swap and which the first-bank tests (`eq2`) cannot see. *Mutation (apply: red; revert:
+green):* `moves.get(first)` -> `moves.get(0)` in `carried_input_lane_mask`: the two new tests red
+(70 other tests green); reverted: 72 passed.
+
+**NITs.** `lane_bit` (`crates/graph/src/runtime.rs`) carries a `debug_assert!` for a lane beyond the
+mask width and keeps `checked_shl(..).unwrap_or(0)` in release, so the Wasm call graph gains no
+panic edge. The fused-form doc of the strip test is corrected. `hosts/host-web/MUTATIONS.md` row 20
+names the tests that now hold the deleted flood test's claim.
+**Known gaps (recorded, not closed):** (1) the owner filter in `carried_strip_lane_mask` is defence
+in depth: host-core always carries both owners of a fused bank or neither
+(`host-core/src/prepare.rs`), so no test reaches it and removing it leaves every test green. (2) No
+SDK eval sends fader edits through `LiveControlWriter` to a real engine; `faderEdit` is used only in
+an engine-free coalescing test (`sdk/test/writer-evals.mjs`) since the deleted "playing" eval.

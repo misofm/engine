@@ -27,7 +27,8 @@ const MUTATIONS = [
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
-  "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
+  "observation-armed", "observation-unsubscribe", "observation-unsubscribe-context-running",
+  "observation-identity", "observation-window",
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
@@ -223,7 +224,13 @@ function validate(browserName, result) {
   // one record per tap per render, #1345), and a replay of the same signal under the unsubscribed
   // tap published no reduction. A never-armed tap publishes none either.
   const unsubscribe = observation?.unsubscribe;
+  // Both contexts the run held were suspended where the run needs them: the new context before
+  // boot (its first suspend is not awaited, so this is the check that replaces the await) and the
+  // context between the armed render and the unsubscribe. A run that went on with a running context
+  // is not the proof.
   gate(browserName, "observation-unsubscribe", unsubscribe?.subscribeResult === 0
+    && unsubscribe?.contextStateBeforeBoot === "suspended"
+    && unsubscribe?.contextStateBeforeUnsubscribe === "suspended"
     && unsubscribe?.unsubscribeResult === 0
     && unsubscribe?.unsubscribeBindings === 0
     && unsubscribe?.seekResult === 0
@@ -731,6 +738,8 @@ function mutate(result, mutation) {
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
   if (mutation === "observation-unsubscribe") copy.observation.unsubscribe.maximumTrackGrDbAfterUnsubscribe = 1;
+  // The state check let a running context through before the unsubscribe.
+  if (mutation === "observation-unsubscribe-context-running") copy.observation.unsubscribe.contextStateBeforeUnsubscribe = "running";
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   if (mutation === "sdk-observation-window-reversed") {

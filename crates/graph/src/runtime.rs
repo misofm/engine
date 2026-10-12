@@ -4181,6 +4181,17 @@ fn builtin_processor_mut(
     Some(stage.0.as_mut())
 }
 
+/// Bit `lane` of a carry mask. A bank has at most eight lanes, the width of the `u8` mask: debug
+/// builds refuse a lane beyond it, and a release build drops it from the mask rather than adding a
+/// panic edge to the realtime path.
+fn lane_bit(lane: u16) -> u8 {
+    debug_assert!(
+        u32::from(lane) < u8::BITS,
+        "a bank lane beyond the carry mask width"
+    );
+    1_u8.checked_shl(u32::from(lane)).unwrap_or(0)
+}
+
 /// The lanes of the predecessor bank of `moves[first]` that the input moves from `first` on carry:
 /// bit `n` is lane `n`. `moves` is sorted by predecessor location, so a bank's moves are
 /// adjacent. Bounded by the bank's move count; allocation-free.
@@ -4195,11 +4206,7 @@ fn carried_input_lane_mask(moves: &[crate::GraphLaneMove], first: usize) -> u8 {
             step.predecessor.unit == head.predecessor.unit
                 && step.predecessor.slot == head.predecessor.slot
         })
-        .fold(0, |mask, step| {
-            mask | 1_u8
-                .checked_shl(u32::from(step.predecessor.lane))
-                .unwrap_or(0)
-        })
+        .fold(0, |mask, step| mask | lane_bit(step.predecessor.lane))
 }
 
 /// [`carried_input_lane_mask`] for the strip moves of `moves[first]`'s owner.
@@ -4215,11 +4222,7 @@ fn carried_strip_lane_mask(moves: &[crate::GraphStripMove], first: usize) -> u8 
                 && step.predecessor.slot == head.predecessor.slot
         })
         .filter(|step| step.owner == head.owner)
-        .fold(0, |mask, step| {
-            mask | 1_u8
-                .checked_shl(u32::from(step.predecessor.lane))
-                .unwrap_or(0)
-        })
+        .fold(0, |mask, step| mask | lane_bit(step.predecessor.lane))
 }
 
 /// The populated lane at `at` of a builtin bank whose input lanes carry: its chain and processor.

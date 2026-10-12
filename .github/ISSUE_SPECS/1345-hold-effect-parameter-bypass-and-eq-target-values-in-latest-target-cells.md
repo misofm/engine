@@ -417,6 +417,15 @@ under a saturated machine left a resumed context running without pulling its gra
 five runs with 24 busy loops on 32 cores, none in 14 runs with the retry).
 STREAMS.md carries the file's hot-file row.
 
+*Batch verdict 2, B2 (2026-10-12).* On WebKit 26.5 with every CPU busy the gate's first
+`suspend()` of a new context never settled and the leg hung. The gate now bounds every wait at 10 s
+and fails with a named location, does not await a new context's first suspend, and requires
+`context.state === "suspended"` before boot and before the unsubscribe. Measured runs (the counts the
+amendment asks for: at least 10 per browser, at least half loaded): chromium 5 unloaded + 5 loaded,
+all pass; firefox 5 + 5, all pass; webkit 6 unloaded pass, 10 loaded (32 busy loops, load average 23
+to 36) all fail loudly at the first `resume()`. The leg is not green under full load. The run table
+and the open question are in the "Batch re-verify fixes" record below.
+
 ## Attempt record
 
 ### Attempt 1 (implementer, on `codex/d15-stream-b3`; checkpoints `09190ea55`, `122bdbbc0`, `ba14de159` and the docs commit that follows them)
@@ -861,3 +870,63 @@ evals, two doc edits and one README paragraph.
   `backpressure`, browser waits up to `requestDeadlineMs` and then ends in typed `backpressure`.
   Named exception ratified by root, 2026-10-12, attempt-3 m3: `sdk/README.md`.
 - **m2** (the real-worklet browser case) is root's successor issue; not done here.
+
+### Batch re-verify fixes (stream B batch 3; batch verdict 2, `submix-verdicts/stream-b3-batch-verdict-2.md`; Sonnet 5.5, on `codex/d15-stream-b3`)
+
+**B2: the unsubscribe gate hung WebKit with every CPU busy. Not closed: a bounded stall still fails
+the WebKit leg under full load.**
+- *Change* (`hosts/host-web/qualification/qualification.js`, `run.mjs`, the named exception of
+  Amendment 5): every wait in `runObservationUnsubscribeRun` is bounded at 10 s, the bound
+  `sdk-response-entry.ts` uses (`bounded(kind, step, context, start)`): each `resume()` and
+  `suspend()` (including `resumeUntil`'s kick), `createHost`, `submitSource`, `meters`, `observe`,
+  `seekSource`, `status`, the allocation read, `dispose` and `close`. A stall throws
+  `<suspend|resume|await> timeout at <step> after 10000 ms: state=... currentTime=...`; a timeout is
+  never a pass, a skip or a retry. The first `suspend()` of the new context is no longer awaited
+  (the SDK harness's pattern); `requireSuspended` polls (bounded) for `context.state === "suspended"`
+  before boot and again before the unsubscribe, and the run records both states
+  (`contextStateBeforeBoot`, `contextStateBeforeUnsubscribe`). The gate requires both to be
+  `"suspended"`; the new `observation-unsubscribe-context-running` mutation (in `--self-test-mutations`,
+  run by every browser run below) sets the second to `"running"` and turns the gate red. Page-level
+  checks (stubbed `suspend`, check removed or kept) are in `hosts/host-web/MUTATIONS.md`.
+- *Runs* (SDK source-bundle mode, `sdk/dist` deleted, the CI command with `--check-matrix
+  --self-test-mutations`, private pulseaudio null sink per run; this machine has 32 CPUs and was
+  not otherwise idle: the 1-minute load average before the unloaded runs was 1.4 to 6.9; another
+  verifier's browser run overlapped the end of the loaded phase):
+
+  | browser | unloaded | 32 busy loops on 32 CPUs (load average 23 to 36) |
+  |---|---|---|
+  | chromium | 5 of 5 pass | 5 of 5 pass |
+  | firefox | 5 of 5 pass | 5 of 5 pass |
+  | webkit | 6 of 6 pass | **0 of 10 pass**: every run fails in 30 to 32 s |
+
+  Every WebKit failure is the same and is a loud one, not a hang:
+  `resume timeout at a frame from the armed tap after 10000 ms: state=suspended currentTime=0`. That
+  is the first `context.resume()` of the new real `AudioContext`, after the earlier SDK phase of the
+  same page; the promise never settles and the context never leaves `suspended` or advances its
+  clock. The new context's creation, the state poll and `createHost` before it passed. Before the
+  change the same load hung at the first `suspend()`. So the unbounded wait is gone, but WebKit
+  26.5 under full CPU load also does not service a fresh context's `resume()`. No retry and no
+  looser bound was added. STOPPED per root's rule: the next step needs a ruling (for example, not
+  running the real-context gate under the SDK phase's leftover contexts, or running the gate
+  before the SDK phase), because it changes what the gate tests.
+- The re-verify's counts (batch verdict 2): chromium 18 of 18 and firefox 18 of 18 (7 unloaded, 11 at
+  32 loops); webkit 8 of 8 unloaded, 4 of 4 at 24 loops, 3 of 3 at 30 loops, 12 of 12 hung at 32 loops
+  before this change.
+
+**MINOR 1:** `a_pending_trim_record_in_a_later_bank_survives_the_swap_at_{four,eight}_lanes`
+(`crates/host-core/tests/successor_swap.rs`; `eq5` is lane 1 of the second predecessor bank at four
+lanes, `eq8` lane 0 of it at eight). *Test value:* red if the input drain's lane mask is built from
+the first bank's moves instead of the drained bank's, which loses a later bank's pending trim write
+at the swap and which the first-bank tests (`eq2`) cannot see. *Mutation (apply: red; revert:
+green):* `moves.get(first)` -> `moves.get(0)` in `carried_input_lane_mask`: the two new tests red
+(70 other tests green); reverted: 72 passed.
+
+**NITs.** `lane_bit` (`crates/graph/src/runtime.rs`) carries a `debug_assert!` for a lane beyond the
+mask width and keeps `checked_shl(..).unwrap_or(0)` in release, so the Wasm call graph gains no
+panic edge. The fused-form doc of the strip test is corrected. `hosts/host-web/MUTATIONS.md` row 20
+names the tests that now hold the deleted flood test's claim.
+**Known gaps (recorded, not closed):** (1) the owner filter in `carried_strip_lane_mask` is defence
+in depth: host-core always carries both owners of a fused bank or neither
+(`host-core/src/prepare.rs`), so no test reaches it and removing it leaves every test green. (2) No
+SDK eval sends fader edits through `LiveControlWriter` to a real engine; `faderEdit` is used only in
+an engine-free coalescing test (`sdk/test/writer-evals.mjs`) since the deleted "playing" eval.

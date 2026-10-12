@@ -502,11 +502,52 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+/// The bound on every wait that depends on an audio context or on a host reply in the real-context
+/// run, the same 10 s as `sdk-response-entry.ts` uses for its `suspend()` and `resume()` bounds.
+const AUDIO_STEP_TIMEOUT_MS = 10_000;
+
+/// Await `start()`, failing with `<kind> timeout at <step>` and the context's state if it has not
+/// settled within `AUDIO_STEP_TIMEOUT_MS`. A timeout is a failure of the gate: never a pass, a skip
+/// or a retry. WebKit 26.5 with every CPU busy never settles a `suspend()` of a fresh context
+/// (batch-verdict 2, B2); an unbounded wait there hangs the page until CI kills the job.
+async function bounded(kind, step, context, start) {
+  let timer;
+  const stalled = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(
+      `${kind} timeout at ${step} after ${AUDIO_STEP_TIMEOUT_MS} ms: state=${context.state} currentTime=${context.currentTime}`,
+    )), AUDIO_STEP_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([start(), stalled]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
+/// The first `suspend()` of a new context is not awaited (WebKit may not settle it on a saturated
+/// machine, and Firefox can create a later context already running), so this poll is what keeps the
+/// gate from going on with a context that is still running: the "between" steps need a suspended
+/// context. Returns the state it saw, which the run records.
+async function requireSuspended(context, step) {
+  const started = performance.now();
+  while (context.state !== "suspended") {
+    if (performance.now() - started > AUDIO_STEP_TIMEOUT_MS) {
+      throw new Error(
+        `suspend timeout at ${step} after ${AUDIO_STEP_TIMEOUT_MS} ms: state=${context.state} currentTime=${context.currentTime}`,
+      );
+    }
+    await delay(4);
+  }
+  return context.state;
+}
+
 /// Resume `context` and wait until `condition` holds. A resumed context can sit running without
 /// pulling its graph (WebKit on a loaded machine does), so a second without progress suspends and
-/// resumes it again. Fails loudly, naming `describe()`'s state, after `milliseconds`.
+/// resumes it again. Every wait is bounded and names `what`; the loop fails loudly, naming
+/// `describe()`'s state, after `milliseconds`.
 async function resumeUntil(context, condition, milliseconds, what, describe) {
-  await context.resume();
+  await bounded("resume", what, context, () => context.resume());
   const started = performance.now();
   let kicked = started;
   while (!(await condition())) {
@@ -515,8 +556,8 @@ async function resumeUntil(context, condition, milliseconds, what, describe) {
       throw new Error(`timed out waiting for ${what}: ${diagnosticJson(await describe())}`);
     }
     if (now - kicked > 1000) {
-      await context.suspend();
-      await context.resume();
+      await bounded("suspend", `${what} (kick)`, context, () => context.suspend());
+      await bounded("resume", `${what} (kick)`, context, () => context.resume());
       kicked = performance.now();
     }
     await delay(4);
@@ -546,8 +587,14 @@ async function resumeUntil(context, condition, milliseconds, what, describe) {
 /// rendered fewer than sixteen blocks fails the run as vacuous.
 async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
-  await context.suspend();
-  const host = await createHost({
+  // The first `suspend()` of a new context is not awaited, the way `sdk-response-entry.ts` keeps its
+  // contexts suspended across addModule: WebKit 26.5 never settles it when every CPU is busy
+  // (batch-verdict 2, B2). The state poll below is the check that replaces the await: the run goes
+  // on only with a context that reports "suspended", and fails with a named location otherwise.
+  void context.suspend().catch(() => {});
+  const stateBeforeBoot = await requireSuspended(context, "the new context before boot");
+  const step = (name, work) => bounded("await", name, context, work);
+  const host = await step("createHost", () => createHost({
     context,
     document: sessionDocument,
     options: bootOptions(
@@ -559,12 +606,12 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
-  });
+  }));
   host.node.connect(context.destination);
 
   const feed = async (generation) => {
     for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
-      const acknowledgement = await host.submitSource({
+      const acknowledgement = await step("submitSource", () => host.submitSource({
         sourceId: "live-control-source",
         generation,
         startFrame: BigInt(block * QUANTUM_FRAMES),
@@ -572,20 +619,20 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
         planes: observationPlanes(block),
         frames: QUANTUM_FRAMES,
         endOfRegion: block === OBSERVATION_BLOCKS - 1,
-      });
+      }));
       if (acknowledgement.result !== 0) throw new Error("observation unsubscribe feed rejected");
     }
   };
-  const renderedQuanta = async () => (await host.status()).renderedQuanta;
+  const renderedQuanta = async () => (await step("status", () => host.status())).renderedQuanta;
   const frames = [];
-  const meterLease = await host.meters({
+  const meterLease = await step("meters", () => host.meters({
     enabled: true,
     onFrame: (frame) => frames.push({
       trackGrDb: Array.from(frame.trackGrDb),
       firstSample: frame.firstSample.toString(),
       endSample: frame.endSample.toString(),
     }),
-  });
+  }));
   await feed(1n);
   const subscription = {
     trackIndex: 0,
@@ -595,16 +642,16 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
   };
-  const subscribed = await host.observe({ subscriptions: [subscription] });
+  const subscribed = await step("observe (subscribe)", () => host.observe({ subscriptions: [subscription] }));
 
   await resumeUntil(
     context,
     () => frames.length > 0,
     10_000,
     "a frame from the armed tap",
-    async () => ({ contextState: context.state, status: await host.status() }),
+    async () => ({ contextState: context.state, status: await step("status", () => host.status()) }),
   );
-  await context.suspend();
+  await bounded("suspend", "after the armed frames", context, () => context.suspend());
   // Frames the render published before the suspension took effect may still be on their way.
   await delay(100);
   const armedFrames = frames.length;
@@ -614,14 +661,17 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   );
   const armedMaximumTrackGrDb = maximumGrDb(frames);
 
-  const unsubscribed = await host.observe({
+  // The render between the subscribe and the unsubscribe has happened and the context is held
+  // suspended for the unsubscribe: refuse to go on with a context that is not.
+  const stateBeforeUnsubscribe = await requireSuspended(context, "before the unsubscribe");
+  const unsubscribed = await step("observe (unsubscribe)", () => host.observe({
     subscriptions: [{ ...subscription, armed: false }],
-  });
-  const seeked = await host.seekSource({
+  }));
+  const seeked = await step("seekSource", () => host.seekSource({
     sourceId: "live-control-source",
     generation: 2n,
     sourceFrame: 0n,
-  });
+  }));
   await feed(2n);
   const renderedBefore = await renderedQuanta();
   await resumeUntil(
@@ -629,18 +679,24 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     async () => await renderedQuanta() >= renderedBefore + BigInt(OBSERVATION_BLOCKS),
     10_000,
     "the replayed region to render",
-    async () => ({ contextState: context.state, renderedBefore, status: await host.status() }),
+    async () => ({
+      contextState: context.state,
+      renderedBefore,
+      status: await step("status", () => host.status()),
+    }),
   );
-  await context.suspend();
+  await bounded("suspend", "after the replayed region", context, () => context.suspend());
   await delay(100);
   const renderedAfter = await renderedQuanta();
   const framesAfterUnsubscribe = frames.length - armedFrames;
   const maximumTrackGrDbAfterUnsubscribe = maximumGrDb(frames.slice(armedFrames));
 
-  const renderAllocations = await renderAllocationCount(host);
-  await host.dispose();
-  await context.close();
+  const renderAllocations = await step("renderAllocationCount", () => renderAllocationCount(host));
+  await step("dispose", () => host.dispose());
+  await step("close", () => context.close());
   return {
+    contextStateBeforeBoot: stateBeforeBoot,
+    contextStateBeforeUnsubscribe: stateBeforeUnsubscribe,
     meterLeaseResult: meterLease.result,
     subscribeResult: subscribed.result,
     unsubscribeResult: unsubscribed.result,

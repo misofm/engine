@@ -17,7 +17,7 @@
 | `web-audioworklet-identity.py` artifact lineage rule (#338; moved from `run.mjs --check-matrix` by #1061, release changes only) | record another module's `wasmSha256` in a release change | `--self-test`: `**FAIL** artifact-lineage` |
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `drain_controls` call in `LiveControlMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
-| `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test was deleted: an observation subscription never changes audio, so the flood's PCM equality could not fail, and the fader, matrix and effect values it once flooded are cells with no queue to fill (#1312, #1345). The typed backpressure of a second operation on one tap is asserted by `tests::observation_misuse_is_typed_and_all_or_nothing`, `tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit` and `tests::overfilling_a_bus_queue_is_typed_backpressure_with_no_push`)* |
+| `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's *(note, 2026-10-12, stream B batch 3 verdict MINOR 6: the test was deleted: an observation subscription never changes audio, so the flood's PCM equality could not fail, and the fader, matrix and effect values it once flooded are cells with no queue to fill (#1312, #1345). The typed backpressure of a second operation on one tap is asserted by `tests::observation_misuse_is_typed_and_all_or_nothing`, `tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit` and `tests::overfilling_a_bus_queue_is_typed_backpressure_with_no_push`). Batch verdict 2 NIT, same date: the claim "arming a tap never changes audio" is now held by host-core `effect_observation.rs::every_observation_leg_renders_the_corpus_to_the_same_bytes` (E1: the armed render equals the unarmed render bit for bit) and by the browser `observation-identity` gate (armed and disarmed offline renders have one digest)* |
 | `tests::unknown_targets_are_typed_and_leave_the_engine_untouched` (#137 E4) | delete the `track >= track_count` leg in `admit_commands` | the unknown-track record is refused as `UNSUPPORTED` instead of `INVALID_ARGUMENT`/`UNKNOWN_TRACK` |
 | `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
 | `tests::native_command_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runCommandTimeline` (#137 E2) | change the matrix retarget's expected `applied_at_sample` to `2 * QUANTUM` | the native assertion fails; moving the drain in `LiveControlMatrixProcessor::process` instead moves both digests together, which is the point |
@@ -111,6 +111,22 @@ now sets `observation.unsubscribe.maximumTrackGrDbAfterUnsubscribe = 1`, and the
 reads `an unsubscribed tap kept publishing, or the run never exercised the armed tap` followed by
 the run's numbers. The offline "disarmed" run never subscribes; it still feeds the identity gate
 and must report no reduction. A render-allocation row, `observation-unsubscribe`, makes eleven.
+
+*Note, 2026-10-12 (batch verdict 2, B2).* Every wait of `runObservationUnsubscribeRun` is bounded
+at 10 s, the bound `sdk-response-entry.ts` uses, and a stall fails the gate as `<kind> timeout at
+<step>` (kind `suspend`, `resume` or `await`) with the context state; a timeout is never a pass, a
+skip or a retry. The first `suspend()` of the new context is not awaited (WebKit 26.5 never settles
+it with every CPU busy); a bounded poll requires `context.state` to be `suspended` before boot and
+again before the unsubscribe, and the run records both states. New mutation
+`observation-unsubscribe-context-running` sets the second recorded state to `running`; the
+`observation-unsubscribe` gate must then fail (the same gate, the same message). *Page-level checks
+(not committed; chromium, firefox and webkit, one run each):* with `context.suspend` stubbed to
+resolve without suspending after boot and the "before the unsubscribe" check replaced by
+`context.state`, the recorded state is `running` and the `observation-unsubscribe` gate is red in
+all three browsers; with the check in place the same stub fails the run as `suspend timeout at
+before the unsubscribe`. With the stub from the start, the check in place fails as `suspend timeout
+at the new context before boot` (chromium creates its context running; run on chromium only); with that first check
+removed too, `createHost` refuses the running context (`miso.error.v1`, result 1) in all three.
 *Engine-side red check (not a committed mutation):* with the page's unsubscribe replaced by a
 stub that sends nothing, chromium reported `maximumTrackGrDbAfterUnsubscribe` 5.38 and the gate
 failed; with the unsubscribe sent, 0.
