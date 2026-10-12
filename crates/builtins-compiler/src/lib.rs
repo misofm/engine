@@ -1111,6 +1111,17 @@ struct BuiltinBankProcessor {
 /// Widest bank any backend selects (`BankWidth::Eight`), as a plain array bound.
 const MAXIMUM_BANK_LANES: usize = 8;
 
+/// The lane mask of a drain that visits every lane of a bank: the block drain's.
+const EVERY_LANE: u8 = u8::MAX;
+
+// REALTIME_POLICY_BEGIN
+/// Whether bit `lane` of `lanes` is set. A bank has at most [`MAXIMUM_BANK_LANES`] lanes.
+const fn lane_selected(lanes: u8, lane: usize) -> bool {
+    debug_assert!(lane < MAXIMUM_BANK_LANES);
+    (lanes >> (lane % MAXIMUM_BANK_LANES)) & 1 != 0
+}
+// REALTIME_POLICY_END
+
 /// The mask [`GraphPreparedBuiltinBankProcessor::live_lanes`] reports: bit `n` is set when lane
 /// `n` of a bank holds a live reader. A bank has at most [`MAXIMUM_BANK_LANES`] lanes.
 fn live_lane_mask(present: impl Iterator<Item = bool>) -> u8 {
@@ -1126,6 +1137,9 @@ impl BuiltinBankProcessor {
     /// (#1346 D2, D3): the body of [`GraphPreparedBuiltinBankProcessor::begin_block`], and of the
     /// plan-swap drain.
     ///
+    /// `lanes` names the lanes that drain (bit `n` is lane `n`): every lane for the block drain,
+    /// the carried lanes for the plan-swap drain.
+    ///
     /// `carry` picks what a refused apply does. The block drain (`false`) applies everything it
     /// read and returns the first refusal after the last lane, as the fader's drain does. The
     /// carry drain (`true`) counts each refusal and goes on, because this bank never drains again:
@@ -1134,6 +1148,7 @@ impl BuiltinBankProcessor {
     fn drain_controls(
         &mut self,
         snapshot: LiveSnapshot,
+        lanes: u8,
         carry: bool,
     ) -> Result<usize, BuiltinParameterError> {
         let Self {
@@ -1145,6 +1160,9 @@ impl BuiltinBankProcessor {
         let mut refused = 0_usize;
         let mut first_error = Ok(());
         for (lane, control) in controls.iter_mut().enumerate() {
+            if !lane_selected(lanes, lane) {
+                continue;
+            }
             let Some(control) = control.as_mut() else {
                 continue;
             };
@@ -1214,7 +1232,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         snapshot: LiveSnapshot,
     ) -> Result<(), RenderError> {
         let _ = first_sample;
-        self.drain_controls(snapshot, false)
+        self.drain_controls(snapshot, EVERY_LANE, false)
             .map(|_| ())
             .map_err(render_error)
     }
@@ -1284,10 +1302,11 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     /// applied, so the carry loses none of them. It reads with [`LiveSnapshot::ALL`], which on the
     /// quiescent predecessor equals the adoption block's snapshot (#1312 D6): every value the
     /// predecessor holds was written before the successor's publication.
-    fn drain_for_carry(&mut self) -> usize {
+    fn drain_for_carry(&mut self, lanes: u8) -> usize {
         // The carry drain counts a refused apply instead of returning it, so `Err` is not
         // produced; were it, it is reported as one refused value, never as none.
-        self.drain_controls(LiveSnapshot::ALL, true).unwrap_or(1)
+        self.drain_controls(LiveSnapshot::ALL, lanes, true)
+            .unwrap_or(1)
     }
     // REALTIME_POLICY_END
 
@@ -1423,16 +1442,17 @@ impl FaderBankProcessor {
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let Self { bank, controls, .. } = self;
-        drain_fader_controls(bank, controls, snapshot)
+        drain_fader_controls(bank, controls, snapshot, EVERY_LANE)
     }
 
-    /// Apply every pending value of every lane's cells, whatever its revision: the block drain
-    /// with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls it on a
-    /// quiescent predecessor before it exports a lane (#1277); no production render path takes
-    /// `ALL`.
+    /// Apply every pending value of the cells of the lanes in `lanes`, whatever its revision: the
+    /// block drain with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls
+    /// it on a quiescent predecessor, for the lanes it exports (#1277); no production render path
+    /// takes `ALL`.
     // REALTIME_POLICY_BEGIN
-    fn apply_pending(&mut self) -> Result<(), RenderError> {
-        self.drain(LiveSnapshot::ALL)
+    fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
+        let Self { bank, controls, .. } = self;
+        drain_fader_controls(bank, controls, LiveSnapshot::ALL, lanes)
     }
 
     /// Whether `predecessor` is a fader bank of this bank's width with lane `predecessor_lane`
@@ -1490,7 +1510,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     }
 
     /// Issue #1277 D8. The cell reader stays: every value the predecessor's cells held was
-    /// applied to lane state by [`Self::drain_for_carry`], and the successor's own cells take
+    /// applied to lane state by [`Self::drain_strip_for_carry`], and the successor's own cells take
     /// every later one.
     fn adopt_strip_lane(
         &mut self,
@@ -1506,10 +1526,11 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
                 .is_some_and(|predecessor| self.adopt_lane(lane, predecessor, predecessor_lane))
     }
 
-    /// Issue #1277 D8: apply every pending cell value with every revision, as the block drain
-    /// would at the next block. A value the apply refuses is counted, and the rest still apply.
-    fn drain_for_carry(&mut self) -> usize {
-        usize::from(self.apply_pending().is_err())
+    /// Issue #1277 D8: apply every pending cell value of the carried lanes with every revision,
+    /// as the block drain would at the next block. A value the apply refuses is counted, and the
+    /// rest still apply. A lane that restarts is not read, so its replaced writes are not counted.
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        usize::from(owner == BuiltinStripOwner::Fader && self.apply_pending(lanes).is_err())
     }
     // REALTIME_POLICY_END
     /// The fader and mute cells' drain, before any lane of the block is dispatched (#1312 D12).
@@ -1576,13 +1597,14 @@ impl MatrixBankProcessor {
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let Self { bank, controls, .. } = self;
-        drain_matrix_controls(bank, controls, snapshot)
+        drain_matrix_controls(bank, controls, snapshot, EVERY_LANE)
     }
 
     /// The matrix cells' counterpart of [`FaderBankProcessor::apply_pending`].
     // REALTIME_POLICY_BEGIN
-    fn apply_pending(&mut self) -> Result<(), RenderError> {
-        self.drain(LiveSnapshot::ALL)
+    fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
+        let Self { bank, controls, .. } = self;
+        drain_matrix_controls(bank, controls, LiveSnapshot::ALL, lanes)
     }
 
     /// The matrix bank's counterpart of [`FaderBankProcessor::can_adopt_lane`].
@@ -1650,8 +1672,8 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     }
 
     /// Issue #1277 D8: the fader bank's counterpart, on the matrix cell.
-    fn drain_for_carry(&mut self) -> usize {
-        usize::from(self.apply_pending().is_err())
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        usize::from(owner == BuiltinStripOwner::Matrix && self.apply_pending(lanes).is_err())
     }
     // REALTIME_POLICY_END
     /// The matrix cell's drain, before any lane of the block is dispatched (#1312 D12).
@@ -1995,16 +2017,21 @@ fn scalar_owner_id(track_id: &StableGraphId) -> u16 {
 }
 
 // REALTIME_POLICY_BEGIN
-/// Drain every lane's fader and mute cells into `bank` under the block's `snapshot` (#1312 D4,
-/// D12). Each lane reads and applies in the canonical order, an applied value is never lost to a
+/// Drain the fader and mute cells of the lanes in `lanes` into `bank` under the block's `snapshot`
+/// (#1312 D4, D12): every lane for the block drain, the carried lanes for the plan-swap drain.
+/// Each lane reads and applies in the canonical order, an applied value is never lost to a
 /// refusal of another, and the first refusal is returned after the last lane.
 fn drain_fader_controls(
     bank: &mut BuiltinFaderBank,
     controls: &mut [Option<FaderReader>],
     snapshot: LiveSnapshot,
+    lanes: u8,
 ) -> Result<(), RenderError> {
     let mut result = Ok(());
     for (lane, control) in controls.iter_mut().enumerate() {
+        if !lane_selected(lanes, lane) {
+            continue;
+        }
         let Some(control) = control.as_mut() else {
             continue;
         };
@@ -2034,9 +2061,13 @@ fn drain_matrix_controls(
     bank: &mut BuiltinMatrixBank,
     controls: &mut [Option<MatrixReader>],
     snapshot: LiveSnapshot,
+    lanes: u8,
 ) -> Result<(), RenderError> {
     let mut result = Ok(());
     for (lane, control) in controls.iter_mut().enumerate() {
+        if !lane_selected(lanes, lane) {
+            continue;
+        }
         let Some(control) = control.as_mut() else {
             continue;
         };
@@ -2098,13 +2129,6 @@ impl FaderMatrixBankProcessor {
         let matrix = self.matrix.drain(snapshot);
         fader.and(matrix)
     }
-
-    /// Both stages' [`FaderBankProcessor::apply_pending`] and its matrix counterpart.
-    // REALTIME_POLICY_BEGIN
-    fn apply_pending(&mut self) -> Result<(), RenderError> {
-        self.drain(LiveSnapshot::ALL)
-    }
-    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
@@ -2174,9 +2198,16 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
             })
     }
 
-    /// Issue #1277 D8: both halves apply every pending value; the first refusal is counted.
-    fn drain_for_carry(&mut self) -> usize {
-        usize::from(self.apply_pending().is_err())
+    /// Issue #1277 D8: `owner`'s half applies every pending value of the carried lanes; the first
+    /// refusal is counted. The other half is not read: it has its own moves.
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        usize::from(
+            match owner {
+                BuiltinStripOwner::Fader => self.fader.apply_pending(lanes),
+                BuiltinStripOwner::Matrix => self.matrix.apply_pending(lanes),
+            }
+            .is_err(),
+        )
     }
     // REALTIME_POLICY_END
     /// Both stages' drains, fader first (#1312 D12). Each stage applies everything it read; the
@@ -11220,12 +11251,14 @@ mod tests {
                 &mut fixture.paired.fader.bank,
                 &mut fixture.paired.fader.controls,
                 snapshot,
+                EVERY_LANE,
             )
             .unwrap();
             drain_matrix_controls(
                 &mut fixture.paired.matrix.bank,
                 &mut fixture.paired.matrix.controls,
                 snapshot,
+                EVERY_LANE,
             )
             .unwrap();
             let before_fader =
@@ -11418,7 +11451,8 @@ mod tests {
                 builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
             let matrix_before =
                 builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
-            fixture.paired.apply_pending().unwrap();
+            fixture.paired.fader.apply_pending(EVERY_LANE).unwrap();
+            fixture.paired.matrix.apply_pending(EVERY_LANE).unwrap();
             // `apply_pending` alone has moved the paired side to where the separate stages' block
             // drain moves theirs, in every bank word.
             let snapshot = fixture.snapshot();
@@ -14395,13 +14429,13 @@ mod tests {
 
         if carry {
             assert_eq!(
-                processor.drain_for_carry(),
+                processor.drain_for_carry(EVERY_LANE),
                 1,
                 "the NaN trim is refused and counted"
             );
         } else {
             assert_eq!(
-                processor.drain_controls(gate.snapshot(), false),
+                processor.drain_controls(gate.snapshot(), EVERY_LANE, false),
                 Err(BuiltinParameterError::GainDomain),
                 "the block drain returns the first refusal"
             );
@@ -14925,7 +14959,7 @@ mod tests {
             "a `Both` retarget is symmetry-preserving on the per-node arm too"
         );
 
-        // A prepared filter target uses the same frozen queue and preserves the same witness
+        // A prepared filter target uses the same cells and preserves the same witness
         // rule. The first sample is the old current coefficient; sample A+64 reaches the target.
         let ((mut cells, mut gate), mut processor) = build();
         let prepared = builtins::prepare_input_filter_pair(48_000, 120.0, 8_000.0).expect("pair");

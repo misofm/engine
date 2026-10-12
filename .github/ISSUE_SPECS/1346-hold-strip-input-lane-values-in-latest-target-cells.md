@@ -388,3 +388,50 @@ the witness test does catch.
 names #1346 in the rows for `crates/graph/src/{lib,runtime}.rs` (the `live_lanes` forward),
 `crates/graph-compiler/src/*` (`lib.rs` test literals for the removed `queue_capacity`) and
 `crates/host-core/src/prepare.rs`.
+
+### Batch-verdict fixes (stream B batch 3; Sonnet 5.5, on `codex/d15-stream-b3`)
+
+Verdict: `submix-verdicts/stream-b3-batch-verdict.md`, on `7c5b8099d`.
+
+**M1: the intermediate commits that do not compile (root, 2026-10-12; process finding, no history
+rewrite).** Commits `65c51ab41` (#1346 checkpoint 1) through `c0f825939` (the #1345 attempt-2 record),
+25 commits, do not compile `crates/host-core/tests/successor_swap.rs` under
+`cargo check --workspace --all-targets --all-features`: stream A2's `CellPlan` helper builds a
+`LivePlan` literal, and `65c51ab41` adds `LivePlan::gate` (E0063 at the two literals). The rebase onto
+A2 caused the gap. `cffc3006f` ("Reconcile batch 3 with stream A2") fixes it, and every commit after it
+and every commit before `65c51ab41` compiles. At every commit every library and binary compiles.
+`71b4ecdb8` (#1345 checkpoint 1) additionally fails nine test units, as its message says ("the
+workspace tests are not green until then"). To bisect on this branch, use `git bisect --first-parent`
+on the merged history, or skip `65c51ab41..c0f825939`. The batch's SHAs are cited by
+specs and verdicts, so the branch is not rewritten.
+
+**MINOR 1: `live_values_superseded` must not depend on bank packing (#1312 D2, the header's "a value
+on a lane that a swap restarts is not counted").** The swap carry drained whole predecessor banks
+(`drain_for_carry` over every lane), so a strip that restarts but shares a predecessor bank with a
+strip that carries had its replaced writes counted, and bank membership depends on lane width. Now:
+- `GraphPreparedBuiltinBankProcessor::drain_for_carry(lanes)` (input cells) and the new
+  `drain_strip_for_carry(owner, lanes)` (fader, mute and matrix cells; a fused bank drains only
+  `owner`'s half) read only the lanes in the `lanes` mask. `crates/graph/src/runtime.rs`'s
+  `carry_input_lanes` and `carry_strip_lanes` build the mask from the moves of the bank, which are
+  adjacent because the program is sorted by predecessor location. The block drain passes every lane.
+  Cells are still read with `CellReader::read_counted`; render stays allocation-, lock- and
+  syscall-free.
+- Tests (`crates/host-core/tests/successor_swap.rs`, each at four and at eight lanes, the strip one in
+  the split and the fused form):
+  `a_restarting_lane_does_not_count_its_replaced_writes_at_{four,eight}_lanes` (B adds a VCA over
+  `eq0`, so its fader stage restarts; three fader writes sit unread in `eq0`'s cells, and in
+  `eq1`'s, which carries from the same bank, three fader and three pan writes) and
+  `a_restarting_input_lane_does_not_count_its_replaced_writes_at_{four,eight}_lanes` (the committed
+  model differs from B's in `eq0`'s trim, so its input section restarts; three trim writes sit unread
+  in each of `eq0`'s and `eq1`'s cells). Each asserts the predecessor's count after the hand-over:
+  0 with only the restarting strip written, the carried strip's own count (6 for the strip case, 4
+  for the input case) alone and with the restarting strip written too.
+  *Test value:* turns red if the swap counts a restarting lane's replaced writes (the count then
+  changes with which lanes share a bank, so with the lane width); no other test reads the count
+  across a swap.
+  *Mutations (apply: red; revert: green):* `carried_input_lane_mask` returning every lane turns red the
+  two input tests (left 4, right 0) and leaves the strip tests green; `carried_strip_lane_mask`
+  returning every lane turns red the two strip tests (left 4, right 0) and leaves the input tests
+  green.
+- `drain_for_carry`, the builtins-compiler drain tests and `apply_pending_equals_the_block_drain` follow
+  the new signatures.

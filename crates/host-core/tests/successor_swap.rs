@@ -1089,6 +1089,8 @@ struct DirectRun {
     collapses: [[u64; 2]; 2],
     /// `bank_collapse_transitions()` of the last plan at the end.
     transitions: [u64; 3],
+    /// The predecessor's `live_values_superseded` count after the hand-over (#1312 D2).
+    carry_superseded: u64,
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks of `quantum` frames, then -- when `b` is given -- prepare
@@ -1110,6 +1112,7 @@ fn direct_run(
     let mut carry = CarryOutcome::NotRequested;
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut collapses = [[0; 2]; 2];
+    let mut carry_superseded = 0;
     plan.submit(feed, quantum, 0);
     for block in 0..BLOCKS {
         for write in writes.iter().filter(|write| write.block == block) {
@@ -1148,6 +1151,7 @@ fn direct_run(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (audit.allocations, audit.deallocations),
             );
+            carry_superseded = plan.handles.live_values_superseded.get();
             blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
@@ -1164,6 +1168,7 @@ fn direct_run(
         swap_allocator,
         collapses,
         transitions: plan.prepared.plan.bank_collapse_transitions(),
+        carry_superseded,
     }
 }
 
@@ -1247,6 +1252,83 @@ fn a_pending_trim_record_survives_the_swap(backend: Backend) {
         first_direct_difference(&unwritten, &reference),
         Some(SWAP_BLOCK)
     );
+}
+
+/// #1312 D2 on the input cells: `live_values_superseded` counts the writes the carry drain
+/// replaces on input lanes that carry, and none on an input lane the swap restarts, whichever
+/// lanes share their bank. The committed model differs from B's in the first strip's trim, so
+/// that strip's input section restarts (#1276 D1) while the strip beside it, in the same
+/// predecessor bank at four and at eight lanes, carries. Three trim writes sit unread in each
+/// strip's cells at the hand-over.
+fn a_restarting_input_lane_does_not_count_its_replaced_writes(backend: Backend) {
+    const RESTARTING: &str = "eq0";
+    const CARRYING: &str = "eq1";
+    let a = Session::compile(filtered_session(false));
+    let b = Session::compile(with_muted_track(filtered_session(false)));
+    let mut committed = filtered_session(false);
+    let strip = committed
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == RESTARTING)
+        .expect("the restarting strip");
+    strip.builtins.left.trim_db = 3.0;
+    strip.builtins.right.trim_db = 3.0;
+    let feed = Feed::new(SOURCE, 5);
+    let run = |strips: &[&'static str]| {
+        let writes: Vec<LiveWrite> = strips
+            .iter()
+            .flat_map(|&strip| {
+                [1.0_f32, 2.0, 3.0].map(|db| LiveWrite {
+                    block: SWAP_BLOCK,
+                    strip,
+                    record: builtins_compiler::TrackInputRecord::TrimDb {
+                        lanes: builtins::BuiltinLaneSelector::Both,
+                        db,
+                        smoothing_samples: 0,
+                    },
+                })
+            })
+            .collect();
+        let run = direct_run(
+            &a,
+            Some((&b, &committed)),
+            &feed,
+            QUANTUM,
+            &writes,
+            backend,
+            false,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+        run
+    };
+    let restarting = run(&[RESTARTING]);
+    let carrying = run(&[CARRYING]);
+    let both = run(&[RESTARTING, CARRYING]);
+    assert_eq!(
+        restarting.carry_superseded, 0,
+        "{backend:?}: writes to a restarting input lane are not counted"
+    );
+    // Three writes to a cell replace two, and a Both trim write fills the left and the right cell.
+    assert_eq!(
+        carrying.carry_superseded,
+        2 * 2,
+        "{backend:?}: a carried input lane counts the writes its drain replaced"
+    );
+    assert_eq!(
+        both.carry_superseded, carrying.carry_superseded,
+        "{backend:?}: the restarting lane adds nothing to its bank-mate's count"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_restarting_input_lane_does_not_count_its_replaced_writes_at_eight_lanes() {
+    a_restarting_input_lane_does_not_count_its_replaced_writes(Backend::Simd8);
+}
+
+#[test]
+fn a_restarting_input_lane_does_not_count_its_replaced_writes_at_four_lanes() {
+    a_restarting_input_lane_does_not_count_its_replaced_writes(Backend::Simd4);
 }
 
 /// Gate 2 at eight lanes. Red if the carry exports a lane before draining its queue: the record
@@ -2548,6 +2630,10 @@ struct CellRun {
     /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
     /// deallocations)` over the hand-over plus the successor's first block.
     swap_allocator: ((u64, u64, u64), (u64, u64)),
+    /// The predecessor's `live_values_superseded` count after the hand-over: the writes its
+    /// cells held unread that the carry drain replaced (#1312 D2). Zero for a run without a swap
+    /// that rendered no block after its writes.
+    carry_superseded: u64,
 }
 
 /// Render `a` and write `writes` to the plan that renders their block next; with a `swap`, prepare
@@ -2568,6 +2654,7 @@ fn cell_run(
     let mut carry = CarryOutcome::NotRequested;
     let mut restarted = Vec::new();
     let mut swap_allocator = ((0, 0, 0), (0, 0));
+    let mut carry_superseded = 0;
     plan.live.submit(feed, QUANTUM, 0);
     for block in 0..BLOCKS {
         plan.write_block(writes, block);
@@ -2607,6 +2694,7 @@ fn cell_run(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (audit.allocations, audit.deallocations),
             );
+            carry_superseded = plan.live.handles.live_values_superseded.get();
             blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
@@ -2621,6 +2709,7 @@ fn cell_run(
         carry,
         restarted,
         swap_allocator,
+        carry_superseded,
     }
 }
 
@@ -2979,6 +3068,98 @@ fn with_vca(mut model: SessionModel, track: &str, db: f32) -> SessionModel {
         members: vec![id(track)],
     });
     model
+}
+
+/// The strip beside [`MOVED`] in the predecessor's first bank at either width, which carries.
+const CARRIED: &str = "eq1";
+
+/// #1312 D2: `live_values_superseded` counts the writes a carry drain replaces on lanes that
+/// carry, and none on a lane the swap restarts, whichever lanes share their bank. B adds a VCA
+/// over [`MOVED`], a prepared difference that restarts its fader stage and leaves its matrix
+/// stage carrying, and [`CARRIED`] carries both stages from the same predecessor bank at four and
+/// at eight lanes. Three fader writes sit unread in [`MOVED`]'s cells and three fader and three
+/// pan writes in [`CARRIED`]'s when the swap block hands over.
+fn a_restarting_lane_does_not_count_its_replaced_writes(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_vca(
+        with_muted_track(strip_state_session()),
+        MOVED,
+        3.0,
+    ));
+    let feed = feed_for_strips();
+    let run = |strips: &[&'static str]| {
+        let faders = |strip| {
+            [-3.0, -4.0, -5.0].map(|db| CellWrite {
+                block: SWAP_BLOCK,
+                strip,
+                record: CellRecord::Fader(fader_both(db, 0)),
+            })
+        };
+        let mut writes = Vec::new();
+        for &strip in strips {
+            writes.extend(faders(strip));
+            if strip == CARRIED {
+                writes.extend([0.9, 0.8, 0.7].map(|pan| CellWrite {
+                    block: SWAP_BLOCK,
+                    strip,
+                    record: CellRecord::Matrix(pan_record([pan, 0.5], 0)),
+                }));
+            }
+        }
+        let run = cell_run(
+            &a,
+            form,
+            Some(Swap {
+                to: &b,
+                committed: &a.model,
+                form,
+                successor_writes: &[],
+            }),
+            &feed,
+            &writes,
+            backend,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?} {form:?}");
+        assert_eq!(
+            run.restarted,
+            vec![Box::<str>::from(MOVED)],
+            "{backend:?} {form:?}: exactly the moved strip restarts"
+        );
+        run
+    };
+    let restarting = run(&[MOVED]);
+    let carried = run(&[CARRIED]);
+    let both = run(&[MOVED, CARRIED]);
+    assert_eq!(
+        restarting.carry_superseded, 0,
+        "{backend:?} {form:?}: writes to a restarting lane are not counted"
+    );
+    // Three writes to a cell replace two; a Both fader write fills the left and the right cell,
+    // and the pan write fills the one matrix cell: two cells of the fader and one of the pan.
+    assert_eq!(
+        carried.carry_superseded,
+        2 * 2 + 2,
+        "{backend:?} {form:?}: a carried lane counts the writes its drain replaced"
+    );
+    assert_eq!(
+        both.carry_superseded, carried.carry_superseded,
+        "{backend:?} {form:?}: the restarting lane adds nothing to its bank-mate's count"
+    );
+}
+
+#[test]
+fn a_restarting_lane_does_not_count_its_replaced_writes_at_four_lanes() {
+    for form in forms() {
+        a_restarting_lane_does_not_count_its_replaced_writes(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_restarting_lane_does_not_count_its_replaced_writes_at_eight_lanes() {
+    for form in forms() {
+        a_restarting_lane_does_not_count_its_replaced_writes(Backend::Simd8, form);
+    }
 }
 
 /// Gate 5: B adds a VCA with a +3 dB offset over X. A VCA is a prepared difference until #1247, so

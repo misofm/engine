@@ -1439,7 +1439,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     }
     /// Copy `predecessor`'s lane `predecessor_lane` -- its whole input-section state and its live
     /// channel-symmetry terms -- into this bank's lane `lane`, at the swap block (issue #1276
-    /// D2). The caller has drained `predecessor`'s live queues first
+    /// D2). The caller has drained `predecessor`'s live cells first
     /// ([`Self::drain_for_carry`]). `false` (the default) copies nothing. Render-thread code:
     /// allocation-free and bounded.
     fn adopt_input_lane(
@@ -1451,16 +1451,30 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         let _ = (lane, predecessor, predecessor_lane);
         false
     }
-    /// Apply every live-control record waiting at entry to lane state, exactly as
-    /// [`Self::begin_block`] would at the next block, before a plan swap exports this bank's
-    /// lanes (issue #1276 D4). A record drained here takes effect on the successor's first
-    /// sample, the sample it would have reached without the swap.
+    /// Apply every live-control record waiting at entry in the input cells of the lanes in
+    /// `lanes` (bit `n` is lane `n`) to lane state, exactly as [`Self::begin_block`] would at the
+    /// next block, before a plan swap exports those lanes (issue #1276 D4). A record drained here
+    /// takes effect on the successor's first sample, the sample it would have reached without the
+    /// swap.
     ///
-    /// Every record present at entry is consumed: one whose apply is refused is counted and the
-    /// drain goes on, so no later record of the lane or the bank stays behind in a queue that
-    /// never renders again. Returns the refused count, which admission validation makes zero.
-    /// The default drains nothing and returns zero.
-    fn drain_for_carry(&mut self) -> usize {
+    /// `lanes` names the lanes the swap carries, and only those. A lane the swap restarts is not
+    /// read, so the writes its cells replaced are not counted in `live_values_superseded` (#1312
+    /// D2): the count does not depend on which lanes share a bank, and so not on the lane width.
+    ///
+    /// Every record of a named lane present at entry is consumed: one whose apply is refused is
+    /// counted and the drain goes on, so no later record of the lane or the bank stays behind in
+    /// a queue that never renders again. Returns the refused count, which admission validation
+    /// makes zero. The default drains nothing and returns zero.
+    fn drain_for_carry(&mut self, lanes: u8) -> usize {
+        let _ = lanes;
+        0
+    }
+    /// [`Self::drain_for_carry`] for the strip stage `owner`: apply every pending fader, mute or
+    /// matrix value of the lanes in `lanes` to lane state (issue #1277 D8). Only the cells of
+    /// `owner`'s half are read: in a fused bank the other owner's half is another call. The
+    /// default drains nothing and returns zero.
+    fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
+        let _ = (owner, lanes);
         0
     }
     /// Which strip stage this bank is and how many populated lanes it can hand over or take at a
@@ -1486,7 +1500,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// Copy `predecessor`'s lane `predecessor_lane` -- the whole state of `owner`'s stage: its
     /// gains, mutes or matrix and any ramp in flight -- into this bank's lane `lane`, at the swap
     /// block (issue #1277 D8). The caller has applied `predecessor`'s pending live values first
-    /// ([`Self::drain_for_carry`]). `false` (the default) copies nothing. Render-thread code:
+    /// ([`Self::drain_strip_for_carry`]). `false` (the default) copies nothing. Render-thread code:
     /// allocation-free and bounded.
     fn adopt_strip_lane(
         &mut self,
