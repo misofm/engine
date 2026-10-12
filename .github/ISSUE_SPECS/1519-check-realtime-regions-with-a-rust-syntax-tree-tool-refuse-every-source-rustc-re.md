@@ -108,7 +108,7 @@ manifest-target-path rule only, and the one #1438 sentence it corrects.
 - `use std::include as inc;` with `inc!("z.txt")`: red if (c) is dropped.
 - Placement (Root Amendment 1; the case list follows the amendment's rules, not rule text of this spec). Each is
   refused, each has a one-sentence test value and a mutation in the Attempt record:
-  - Rule 1 (root ruling rj3-e, 2026-10-12; implemented at `source_reads.rs:200-216`): a written `#[..]` or `#![..]` inside a macro
+  - Rule 1 (root ruling rj3-e, 2026-10-12; implemented in `Scan::stream` (attribute detection) and `Scan::attribute`/`attribute_tokens` of `source_reads.rs`): a written `#[..]` or `#![..]` inside a macro
     token tree (a `macro_rules!` or `macro` body, or a macro invocation's token tree) that holds an identifier `path` (also
     `r#path`) at any depth is refused, whatever follows it and whatever its value: `macro_rules! m { () => { #[path = "ok.rs"] mod x; } } m!();`,
     `m!(#[path = "ok.rs"] mod x;);`, and `#[cfg_attr(.., path = ..)]` there. A `path` identifier that is not inside a written
@@ -120,7 +120,26 @@ manifest-target-path rule only, and the one #1438 sentence it corrects.
   - Rule 4 (only if the measurement of the real tree finds no `include_str!`/`include_bytes!` inside a macro
     token tree): both refused inside a macro token tree, still allowed outside. If a real site exists, rule 4 is
     not implemented and the sites go to root.
-  - Recorded as harmless over-refusal: `if !(..)` matches the macro shape `name ! group`.
+  - D1 (d) (Root Amendment 2; each refused, in `a_module_named_like_a_skipped_directory_is_a_finding` unless noted):
+    `mod target { #[path = "x.rs"] mod y; }` (test value: a (d) dropped lets the plain `.rs` literal that (a) accepts read
+    `target/x.rs`, the attempt-2 false pass), `mod r#target;` (a name compared without `r#`), `mod node_modules { mod y; }`
+    and `mod target;` (the same gap with no `#[path]`), the forms in a macro body and a macro call and in a function (a check
+    that skips macro token trees or function bodies), and in `a_skipped_directory_name_is_matched_ignoring_case` the case
+    variants `mod Target;`, `mod Node_Modules {..}` and `mod r#TARGET;` (a case-sensitive compare: `Target` is the directory
+    `target` on a case-insensitive file system). `the_finding_names_the_line_of_the_module`: a finding placed on the `mod`
+    keyword's line instead of the name's. The accepted forms gain `mod targets;`, `mod target_dir;`, `mod node_modules_x;`,
+    `mod my_target;`, `use crate::target;`, `fn target()`, `struct Target;` and a local `target` (a substring or non-`mod`
+    match) and, for MINOR-1, `assert_eq!(entry.path, path)`, `json!({"path": path})` and `($path:literal)` in a macro body.
+    The `#[path]` table of (a) gains the case variants `Target/x.rs` and `a/Node_Modules/x.rs`.
+  - Manifest target paths (Root Amendment 2; `scripts/check-workspace-policy.sh`, self-tests in
+    `scripts/test-workspace-policy.sh`): one self-test per table kind, each red when that kind is dropped from the check, each with a
+    different violation (`[lib]` with `..`, `[[bin]]` with `target`, `[[test]]` absolute, `[[example]]` with `node_modules`,
+    `[[bench]]` with the case variant `Target`, `[package] build = "../build.rs"`), and one accepted case: a dependency `path`
+    that leaves the package, `./src/lib.rs`, a single-quoted `tests/targets/node_modules_x.rs`, `build = "build.rs"`.
+  - Recorded as over-refusal (corrected in attempt 3; the verifier measured the earlier "harmless" wording false): the macro shape `name ! group` is
+    purely syntactic, so it also matches `if !(..)`, `while !(..)`, `match !(..)`, `return !(..)` and `break !(..)`; the group is then judged as a
+    macro token tree, which over-refuses a written `#[path]` (whatever its value) and every `include`, `include_str` or `include_bytes` word inside
+    the parentheses. Only over-refusal, and the real tree has no such form.
 
 ## Gates
 
@@ -202,6 +221,11 @@ tests of `tests/policy/source_reads.rs`, abbreviated by the claim they defend):
 | V `use` scan runs past the `;` | accepted-forms test (a `use` is followed by a legitimate `include!`); the real tree fails too |
 | (X, `=` spacing check) | no red: the check was dead (rustc rejects `path ==`); removed |
 
+Corrections after attempt 2 (re-run by the attempt-2 verifier; each mutation is still red, but on more tests than the rows above
+say, because attempt 2 added tests that use the same code): D is red on 6 tests (adds `an_absolute_include_is_a_finding`), L on 4
+(the `r#` rows of the rule 2/3/4 tests), M on 4 (adds the raw-identifier test), P and R on 3 and Q on 2 (the `include` rows in macro
+bodies). The "only" in the rows P/Q/R above means the macro-tree tests, not one test.
+
 **Test value** (which defect turns each red that no existing test catches): the `.txt`/table tests, a path
 check that tests the suffix only or misses a component; cfg_attr and macro tests, the SP-1 false pass (a plain
 `.rs` literal accepted where #1443's resolver cannot see the declaration, rustc then building `tests.rs` as
@@ -230,8 +254,8 @@ Attempt 1 got no separate verdict: root ordered Root Amendment 1 carried in atte
 **Measured first (root's rule 4 condition).** `include_str!`/`include_bytes!` (or their identifiers) inside a macro
 token tree: none on the real tree. The measurement ran the new walk with those identifiers refused in macro trees
 over `crates hosts tools`; the only two findings were the tool's own method named `include` (rule 2, renamed
-`judge_include`). So rule 4 is implemented. The 223 `include_str`/`include_bytes` lines of the tree all stand
-outside macro token trees (argument of a call, a `const` initialiser).
+`judge_include`). So rule 4 is implemented. The 223 `include_str`/`include_bytes` lines of the tree (at `d6b1d1e35`; 233 at `09edb4bb8`, of which 220 are outside
+`tools/realtime-policy`) all stand outside macro token trees (argument of a call, a `const` initialiser).
 
 **Rules 2, 3 and 4 are built** in `tools/realtime-policy/src/source_reads.rs` (and one new class,
 `RefusedIncludeLiteralInMacro`, plus a wider `RefusedInclude` message, in `report.rs`):
@@ -242,12 +266,13 @@ outside macro token trees (argument of a call, a `const` initialiser).
 - Rule 4: inside a macro token tree `include_str` and `include_bytes` (r# included) are refused in any form, class
   `RefusedIncludeLiteralInMacro`; outside a macro tree they stay allowed.
 - The `use` scan now marks the item's tokens (up to its `;`, carried into groups) instead of a second walk.
-- `if !(..)` matches the macro shape `name ! group`. This is harmless over-refusal: it can only refuse a condition
-  that names `include`, `include_str` or `include_bytes` inside the parentheses, and none exists on the tree.
-  Recorded here and in the module comment; not pinned by a test.
+- `if !(..)` matches the macro shape `name ! group`. (This bullet said "harmless over-refusal: it can only refuse a
+  condition that names `include`, `include_str` or `include_bytes`". Attempt 3 corrects it: the shape also matches
+  `return`, `while`, `match` and `break` before `!(..)`, and it also refuses a written `#[path]` inside the
+  parentheses. Over-refusal only; none on the tree.)
 
 (Superseded by root's ruling rj3-e, 2026-10-12: rule 1 is now the written-attribute rule stated in Root Amendment 1 above, and
-`source_reads.rs:200-216` implements it with 0 real refusals. The paragraph below is the attempt-2 record of the withdrawn text.)
+`Scan::attribute` and `attribute_tokens` of `source_reads.rs` implement it with 0 real refusals. The paragraph below is the attempt-2 record of the withdrawn text.)
 
 **Rule 1 (the withdrawn text) is NOT built: it fails its own gate on the real tree.** Root Amendment 1 rule 1 refuses any identifier `path`
 in any macro token tree, "whatever follows it", and any `#[$m]`/`#![$m]` there. Measured over the J3 branch tree
@@ -296,3 +321,64 @@ dependent crate; no artifact built.
 
 **Open items.** Rule 1 (above): a root ruling is needed. (Closed by root's ruling rj3-e, 2026-10-12: see Root Amendment 1, rule 1.) Of attempt 1's open items, 2 (`inc!(include)`) and 3
 (`include!` in a macro body read relative to the expanding file) are closed by rules 2 and 3; 1 stays open.
+
+## Attempt 3 (J batch branch `codex/d15-stream-j3`, base `7d586f674`; spec commit `1ce10f872` records Root Amendment 2)
+
+Closes the attempt-2 verdict (FAIL: MAJOR-1, MINOR-1, MINOR-2, NITs) and builds root's Amendment 2.
+
+**Built.**
+- D1 (d), `tools/realtime-policy/src/source_reads.rs`: a `mod` item (keyword `mod`, then an identifier) whose name, `r#`
+  stripped and lower-cased, equals a name in the walk's own constant is class `RefusedSkippedModule`, wherever the tokens
+  are (inline or out of line, macro token trees, function bodies). `walk.rs` exports `SKIPPED_DIRECTORIES` (`pub(crate)`);
+  nothing is copied. D1 (a)'s component check now reads the same constant and compares ignoring case (the verifier's
+  case-insensitive-file-system NIT: `#[path = "Target/x.rs"]` is refused). The walk's doc comment no longer says "Neither
+  holds a compiled `.rs` file".
+- Manifest target paths, `scripts/check-workspace-policy.sh` (named exception): one `python3` (`tomllib`) pass over the tracked
+  manifests. It reads `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]`, `[[bench]]` `path` and `[package] build` as TOML
+  tables, so the inline and dotted spellings are the same tables. A path must be a string, relative, with no `..` component and
+  no component (compared ignoring case, `/` and `\` both separators) in the skipped list; `build = false` is accepted.
+  Dependency `path` keys are not target paths and are not read. **Single source (choice):** the script reads
+  `SKIPPED_DIRECTORIES` from `tools/realtime-policy/src/walk.rs` with one regex and fails closed (execution failure, not a
+  pass) if the constant is not found or empty, so the list is not duplicated and no agreement test is needed. The price is a
+  source read in a policy script; the alternatives were a copied list plus a pinning test (a test that reads source), or a
+  new tool command (a new public surface). `scripts/test-workspace-policy.sh` copies `walk.rs` beside its `mutants/scripts/`
+  copies, because they run from another directory. Status 3 is a violation; any other non-zero status is an execution failure.
+- MINOR-1: `the_accepted_forms_pass` gains `assert_eq!(entry.path, path)`, `json!({"path": path})` and `($path:literal)`.
+- MINOR-2 and NITs: the module doc, the Cases bullet and the attempt-2 bullet now state what the tool does (`name ! group`
+  also matches `if`, `while`, `match`, `return` and `break` before `!(..)`; it over-refuses a written `#[path]` and the
+  `include*` words there; over-refusal only, none on the tree). The attempt-1 mutation table has a correction note (D 6 tests, L 4,
+  M 4, P/R 3, Q 2). The include counts read 223 at `d6b1d1e35`, 233 at `09edb4bb8` (220 outside the tool). The rule 1 line
+  references are function names. The case-insensitive-FS limit is in the module doc (Unicode lower-casing, not the full
+  folding of APFS/HFS+; Linux CI has none).
+
+**Real tree.** `./target/release/realtime_policy .` refuses `crates/effect-contract/src/live.rs:366` and nothing else
+(expected pre-#1345, from #1442 attempt 3); (d) refuses nothing (no `mod target`/`mod node_modules` on the tree). The manifest
+rule reads 20 target `path =` keys and no `build =` in the 43 tracked manifests: the 13 under the roots plus 7 outside them
+(`fuzz/Cargo.toml` 6, `docs/handoffs/control-smoothing-defaults/measure/Cargo.toml` 1), all accepted.
+
+**Gates.** `cargo test --locked -p realtime-policy`: 186 passed. `cargo fmt --check`, `cargo clippy --locked -p realtime-policy
+--all-targets -- -D warnings` clean. `scripts/check-workspace-policy.sh` ok; `scripts/test-workspace-policy.sh` ok;
+`scripts/check-realtime-policy.sh` ok (94 marked regions in 26 files); `scripts/test-realtime-policy.sh` ok. Shipped artifacts:
+`realtime-policy` has no dependent crate, and the commit touches only the tool, two scripts and specs.
+
+**Tests and mutations** (each alone; red = tests / self-test cases that fail; the real tree stays at live.rs:366 only under all D
+mutations):
+| Test | Test value (which defect turns it red that no other test catches) | Mutation | Red |
+|---|---|---|---|
+| `a_module_named_like_a_skipped_directory_is_a_finding` | (d) dropped, or limited to out-of-line modules, outside macro trees or function bodies, or comparing `r#target` raw | D-drop (3 tests: this, the case test, the line test); D-not-in-macro; D-raw | D-not-in-macro: this test only; D-raw: this and the case test (its `r#TARGET` row) |
+| `a_skipped_directory_name_is_matched_ignoring_case` | a case-sensitive compare at the `mod` site (`Target` is `target` on APFS) | D-case-sensitive | this test only |
+| `the_finding_names_the_line_of_the_module` | the finding on the `mod` keyword's line | D-line | this test only |
+| `a_path_to_a_file_outside_the_workspace_is_a_finding` (rows `Target/x.rs`, `a/Node_Modules/x.rs`) | a case-sensitive component check in (a) | A-case-helper (also turns the case test red, which shares the helper) | this test and the case test |
+| `the_accepted_forms_pass` (MINOR-1 rows) | a rule refusing every `path` identifier in a macro token tree (the attempt-2 mutation PATHALL, 180/180 green then) | PATHALL | `the_accepted_forms_pass` only; the real tree fails at `builtins-compiler/src/lib.rs:12468` and more |
+| self-test `target-path-lib` | `[lib]` not read | lib-dropped | `target-path-lib` only |
+| `target-path-bin`, `-test`, `-example`, `-bench`, `-build` | the kind not read (`bin`, `test`, `example`, `bench`, `package.build`) | one drop each | its own case only |
+| (violation rows) | `..`, absolute, skipped component, case-insensitive | dotdot-dropped | `target-path-lib`, `-build` (both use `..`); absolute-dropped: `-test` only; skipped-dropped: `-bin`, `-example`, `-bench`; case-sensitive: `-bench` only |
+| `allow_target_path_lookalikes` (accepted) | a check that reads dependency `path` keys, or matches skipped names as substrings | dependencies-scanned; substring | red at the accepted case only (all refusal cases stay red-for-the-right-reason) |
+
+The inline-table spelling has no self-test of its own: it was written and removed, because no mutation of this checker separates it
+from the `[[bin]]` case (a TOML parser reads both as the same table). The claim "an inline table is the same table" rests on
+`tomllib`, not on a test.
+
+**Open items.** None for #1519's rules. Observation, not charged: manifests outside the scan roots (`fuzz/`, `docs/handoffs/...`)
+have target sources the realtime walk never reads; the new rule keeps their paths inside their own directories, which is all the
+amendment asks. Rule 1's limit 4 (a path attribute assembled by macro expansion) is unchanged.

@@ -11,8 +11,10 @@ use crate::report::{Class, Finding};
 /// The directories the walk visits under the workspace root.
 pub(crate) const SCAN_ROOTS: [&str; 3] = ["crates", "hosts", "tools"];
 
-/// The only directories the walk skips, at any depth. Neither holds a compiled `.rs` file.
-const SKIPPED_DIRECTORIES: [&str; 2] = ["target", "node_modules"];
+/// The only directories the walk skips, at any depth. The walk reads no `.rs` file under them, so
+/// a `mod` item named like one is refused (#1519 D1 (d)), which keeps rustc out of them too. The
+/// manifest-target-path rule of `scripts/check-workspace-policy.sh` reads this constant.
+pub(crate) const SKIPPED_DIRECTORIES: [&str; 2] = ["target", "node_modules"];
 
 /// A `.rs` file found by the walk.
 pub(crate) struct RustFile {

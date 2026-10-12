@@ -292,6 +292,86 @@ while IFS= read -r manifest_path; do
     esac
 done <"$tracked_manifest_paths"
 
+# #1519 (root Amendment 2): rustc also reads source named by a Cargo target: `path =` under `[lib]`,
+# `[[bin]]`, `[[test]]`, `[[example]]` and `[[bench]]`, and `build =` under `[package]`. The
+# realtime-policy walk reads only the files under `crates`, `hosts` and `tools`, and skips the
+# directories it lists in `SKIPPED_DIRECTORIES` (tools/realtime-policy/src/walk.rs), so a target
+# path must be relative, stay inside its package directory (no `..`) and name no skipped directory
+# (compared ignoring case, for case-insensitive file systems). A TOML parser reads the manifests, so
+# an inline table (`lib = { path = ".." }`), a dotted key or an array of inline tables is read as the
+# table it is. The skipped names are read from walk.rs itself, so the rule follows it by
+# construction; the read fails closed if the constant cannot be found. Status 3 is a violation; any
+# other non-zero status (an unreadable constant, a Python error) is an execution failure.
+manifest_target_checker=$(cat <<'PY'
+import re
+import sys
+import tomllib
+
+walk_source, manifest_list = sys.argv[1], sys.argv[2]
+
+with open(walk_source, encoding="utf-8") as handle:
+    constant = re.search(r"const\s+SKIPPED_DIRECTORIES\b[^=]*=\s*\[(.*?)\]\s*;", handle.read(), re.S)
+skipped = [name.lower() for name in re.findall(r'"([^"]+)"', constant.group(1))] if constant else []
+if not skipped:
+    sys.exit(f"cannot read SKIPPED_DIRECTORIES from {walk_source}")  # status 1: not a violation
+
+
+def refusal(value):
+    if not isinstance(value, str) or not value:
+        return "is not a non-empty string"
+    if value.startswith(("/", "\\")) or re.match(r"[A-Za-z]:", value):
+        return "is not a relative path"
+    for component in re.split(r"[/\\]", value):
+        if component == "..":
+            return "has a '..' component"
+        if component.lower() in skipped:
+            return f"names the directory '{component}', which the realtime walk skips"
+    return None
+
+
+bad = []
+with open(manifest_list, encoding="utf-8") as handle:
+    manifests = [line.rstrip("\n") for line in handle if line.strip()]
+for manifest in manifests:
+    try:
+        with open(manifest, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        bad.append(f"{manifest}: cannot be read as TOML: {error}")
+        continue
+    targets = []
+    if "lib" in data:
+        targets.append(("lib", data["lib"]))
+    for kind in ("bin", "test", "example", "bench"):
+        if kind in data:
+            if not isinstance(data[kind], list):
+                bad.append(f"{manifest}: [{kind}] is not an array of tables")
+                continue
+            targets.extend((kind, table) for table in data[kind])
+    for kind, table in targets:
+        if not isinstance(table, dict):
+            bad.append(f"{manifest}: [{kind}] is not a table")
+        elif "path" in table and (why := refusal(table["path"])):
+            bad.append(f"{manifest}: [{kind}] path = {table['path']!r} {why}")
+    package = data.get("package", {})
+    if not isinstance(package, dict):
+        bad.append(f"{manifest}: [package] is not a table")
+    elif "build" in package and not isinstance(package["build"], bool) and (why := refusal(package["build"])):
+        bad.append(f"{manifest}: [package] build = {package['build']!r} {why}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(3)
+PY
+)
+capture manifest-target-paths python3 -c "$manifest_target_checker" \
+    "$script_directory/../tools/realtime-policy/src/walk.rs" "$tracked_manifest_paths"
+case "$CAPTURE_STATUS" in
+  0) ;;
+  3) printf '%s\n' "$(<"$CAPTURE_OUT")" >&2
+     fail "a Cargo target path (path under lib, bin, test, example or bench; package build) must be relative, inside its package directory, with no '..' component and no component the realtime walk skips";;
+  *) execution_failure 'manifest target path scan' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR";;
+esac
+
 scan_forbidden "retired delivery-codec Cargo identity is forbidden in the lockfile" \
     "$retired_delivery_codec_pattern" 'Cargo.lock' \
     Cargo.lock

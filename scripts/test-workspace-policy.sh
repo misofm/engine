@@ -393,6 +393,84 @@ mutate_sysroot_workspace_dependency() {
     printf '\n[dependencies]\ncore = { workspace = true }\n' >>"$root/crates/nested/Cargo.toml"
 }
 
+# #1519 (root Amendment 2): a Cargo target path that leaves the package directory or names a
+# directory the realtime walk skips makes rustc read source the walk does not. One mutation per
+# table kind, each with a different violation, so a check that handles one kind cannot cover
+# another. `tools/realtime-policy/src/walk.rs` lists the skipped names (`target`, `node_modules`).
+write_library_manifest() {
+    local root="$1"
+    shift
+    printf '%s\n' \
+        '[package]' \
+        'name = "library"' \
+        'license.workspace = true' \
+        '' \
+        "$@" \
+        >"$root/crates/library/Cargo.toml"
+}
+
+mutate_target_path_lib() {
+    write_library_manifest "$1" '[lib]' 'name = "library"' 'path = "../outside/lib.rs"'
+}
+
+mutate_target_path_bin() {
+    write_library_manifest "$1" '[lib]' 'name = "library"' '' \
+        '[[bin]]' 'name = "library"' 'path = "src/target/main.rs"'
+}
+
+mutate_target_path_test() {
+    write_library_manifest "$1" '[lib]' 'name = "library"' '' \
+        '[[test]]' 'name = "cases"' 'path = "/tmp/cases.rs"'
+}
+
+mutate_target_path_example() {
+    write_library_manifest "$1" '[lib]' 'name = "library"' '' \
+        '[[example]]' 'name = "demo"' 'path = "examples/node_modules/demo.rs"'
+}
+
+# The case-variant row: on a case-insensitive file system `Target` is the skipped directory.
+mutate_target_path_bench() {
+    write_library_manifest "$1" '[lib]' 'name = "library"' '' \
+        '[[bench]]' 'name = "speed"' 'path = "benches/Target/speed.rs"'
+}
+
+mutate_target_path_build() {
+    local root="$1"
+    printf '%s\n' \
+        '[package]' \
+        'name = "library"' \
+        'license.workspace = true' \
+        'build = "../build.rs"' \
+        '' \
+        '[lib]' \
+        'name = "library"' \
+        >"$root/crates/library/Cargo.toml"
+}
+
+# Paths and keys that only look like the rule's: a dependency `path` may leave the package, and a
+# target path may name a directory that only contains or starts like a skipped name.
+allow_target_path_lookalikes() {
+    local root="$1"
+    create_valid_fixture "$root"
+    write_library_manifest "$root" \
+        'build = "build.rs"' \
+        '' \
+        '[lib]' \
+        'name = "library"' \
+        'path = "./src/lib.rs"' \
+        '' \
+        '[[test]]' \
+        'name = "cases"' \
+        "path = 'tests/targets/node_modules_x.rs'" \
+        '' \
+        '[dependencies]' \
+        'sibling = { path = "../../hosts/binary" }' \
+        '' \
+        '[dependencies.other]' \
+        'path = "../../hosts/binary"'
+    bash "$policy_script" "$root" >/dev/null
+}
+
 # Names that only look like the rule's: a `test = false` target flag (as `fuzz/Cargo.toml` has), a
 # dependency whose name starts with `core`, a `core` mention in a comment and a key outside every
 # dependency table must all pass.
@@ -586,6 +664,13 @@ expect_failure_with_message sysroot-dev-dependency-dotted-key \
     "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_dev_dependency_dotted_key
 expect_failure_with_message sysroot-workspace-dependency \
     "dependency key 'core', 'std' or 'alloc'" mutate_sysroot_workspace_dependency
+expect_failure_with_message target-path-lib "has a '..' component" mutate_target_path_lib
+expect_failure_with_message target-path-bin "names the directory 'target'" mutate_target_path_bin
+expect_failure_with_message target-path-test "is not a relative path" mutate_target_path_test
+expect_failure_with_message target-path-example "names the directory 'node_modules'" \
+    mutate_target_path_example
+expect_failure_with_message target-path-bench "names the directory 'Target'" mutate_target_path_bench
+expect_failure_with_message target-path-build "[package] build = '../build.rs'" mutate_target_path_build
 expect_failure retired-manifest-package-name mutate_retired_manifest_package_name
 expect_failure retired-stub-directory mutate_retired_stub_directory
 expect_failure retired-manifest-dependency mutate_retired_manifest_dependency
@@ -654,6 +739,7 @@ allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_host_valid "$scratch_root/host-valid"
 allow_retired_name_in_comment "$scratch_root/retired-name-comment"
 allow_sysroot_lookalikes "$scratch_root/sysroot-lookalikes"
+allow_target_path_lookalikes "$scratch_root/target-path-lookalikes"
 
 # Issue #404's finite producer table. Each row names one external stage and injects exit 73 after
 # either no output or the real tool's complete, policy-valid output. Unselected calls always run
@@ -951,6 +1037,10 @@ output="$(GIT_DIR="$invalid_git" bash "$policy_script" "$valid_root" 2>&1)" && r
 production_policy="$policy_script"
 mkdir -p "$scratch_root/mutants/scripts/lib"
 cp "$script_directory/lib/gate.sh" "$scratch_root/mutants/scripts/lib/gate.sh"
+# The policy reads the skipped directory names from the walk's source, beside its own scripts/.
+mkdir -p "$scratch_root/mutants/tools/realtime-policy/src"
+cp "$script_directory/../tools/realtime-policy/src/walk.rs" \
+    "$scratch_root/mutants/tools/realtime-policy/src/walk.rs"
 population_mutant="$scratch_root/mutants/scripts/check-workspace-population-mutant.sh"
 cp "$production_policy" "$population_mutant"
 sed -i "s/(( CAPTURE_STATUS == 0 )) || execution_failure \"find \$label\" \"\$CAPTURE_STATUS\" \"\$CAPTURE_OUT\" \"\$CAPTURE_ERR\"/: # MUTANT swallow selected population failure/" "$population_mutant"

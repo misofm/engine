@@ -5,10 +5,10 @@
 //! rule. This scan runs over the tokens of every file and refuses each such form except two
 //! that read nothing a rule needs to judge (#1519 D1):
 //!
-//! - a `#[path = "x.rs"]` that names a relative `.rs` file with no `..`, `target` or
-//!   `node_modules` component, in an attribute that is neither inside `cfg_attr` arguments nor
-//!   inside a macro token tree (a later rule resolves these declarations, and can resolve only
-//!   a declaration it sees whole);
+//! - a `#[path = "x.rs"]` that names a relative `.rs` file with no `..` component and no
+//!   component the walk skips (`target`, `node_modules`, compared ignoring case), in an attribute
+//!   that is neither inside `cfg_attr` arguments nor inside a macro token tree (a later rule
+//!   resolves these declarations, and can resolve only a declaration it sees whole);
 //! - an `include!("file")` of a file that holds literals and punctuation only, such as a digest
 //!   array.
 //!
@@ -25,13 +25,25 @@
 //! and everywhere outside a `use` item, an identifier `include` that is not directly followed by
 //! `!` is refused, because a macro can splice the `!` on (`inc!(include)`, rule 2).
 //!
-//! The matching of `name ! group` as a macro also matches `if !(..)`. That can only over-refuse
-//! a condition that names `include`, `include_str` or `include_bytes`, and none exists.
+//! The matching of `name ! group` as a macro is purely syntactic, so it also matches `if !(..)`,
+//! `while !(..)`, `match !(..)`, `return !(..)` and `break !(..)`. The group is then marked a macro
+//! token tree and judged by the macro rules: it over-refuses a written `#[path]` (whatever its
+//! value) and every `include`, `include_str` or `include_bytes` word inside the parentheses. That
+//! is only over-refusal, and the real tree has no such form.
 //!
 //! Rule 1 (root, 2026-10-12): inside a macro token tree, D1 (a) applies to written attributes. A
 //! written `#[..]` or `#![..]` that holds an identifier `path` is refused there, whatever its
 //! value. A `path` that is not inside a written attribute is not refused. A path attribute that
 //! a macro expansion assembles is a stated limit of the tool (#1438 Hazards, limit 4).
+//!
+//! A `mod` item named like a directory the walk skips (`target`, `node_modules`, compared
+//! ignoring case, `r#` included) is refused wherever it is written, macro token trees included
+//! (root Amendment 2, D1 (d)): rustc resolves that module's child modules and `#[path]` values
+//! inside the skipped directory, which the walk does not read. The names are the walk's own
+//! constant, so the rule follows it. The case comparison is for case-insensitive file systems
+//! (macOS APFS and HFS+ by default), where `Target` is the directory `target`. It is Unicode
+//! lower-casing, not the full folding of such a file system (`ſ` folds to `s` there), and a Linux
+//! build, which CI uses, has no such file system.
 
 use std::fs;
 use std::path::Path;
@@ -41,6 +53,7 @@ use proc_macro2::{Delimiter, Group, Ident, TokenStream, TokenTree};
 
 use crate::report::{Class, Finding};
 use crate::source::Source;
+use crate::walk::SKIPPED_DIRECTORIES;
 
 /// Where a token stream stands.
 #[derive(Clone, Copy)]
@@ -170,6 +183,14 @@ impl Scan<'_> {
             }
             _ => {}
         }
+        // `mod target { .. }`, `mod r#node_modules;`: rustc resolves the module's children and
+        // `#[path]` values inside a directory the walk skips (#1519 D1 (d)).
+        if ident == "mod"
+            && let Some(TokenTree::Ident(module)) = after(1)
+            && is_skipped_directory(&name(module))
+        {
+            self.refuse(module, Class::RefusedSkippedModule);
+        }
         if word == "use"
             && !matches!(after(1), Some(TokenTree::Punct(open)) if open.as_char() == '<')
         {
@@ -250,6 +271,14 @@ impl Scan<'_> {
     }
 }
 
+/// True when `component` names a directory the walk skips, ignoring case: on a case-insensitive
+/// file system `Target` is the directory `target`. The names are the walk's own constant.
+fn is_skipped_directory(component: &str) -> bool {
+    SKIPPED_DIRECTORIES
+        .iter()
+        .any(|skipped| component.to_lowercase() == *skipped)
+}
+
 /// An identifier's name without a raw-identifier prefix: rustc reads `r#path` as `path`.
 fn name(ident: &Ident) -> String {
     let text = ident.to_string();
@@ -277,7 +306,7 @@ fn names_a_plain_file(equals: Option<&TokenTree>, value: Option<&TokenTree>) -> 
     let mut components = value.split(['/', '\\']);
     value.ends_with(".rs")
         && !value.starts_with(['/', '\\'])
-        && components.all(|component| !matches!(component, ".." | "target" | "node_modules"))
+        && components.all(|component| component != ".." && !is_skipped_directory(component))
 }
 
 /// The value of `stream` when it is exactly one string literal.

@@ -39,6 +39,8 @@ pub enum Class {
     RefusedIncludeLiteralInMacro,
     /// An identifier `include` in a `use` item, which renames the macro past the `include!` rule.
     RefusedIncludeImport,
+    /// A `mod` item named like a directory the walk skips, case-insensitively.
+    RefusedSkippedModule,
     /// Unsafe code outside the allowlisted ownership files.
     UnsafeOutsideOwnership,
     /// A line mentions a region marker but is not a valid marker line.
@@ -93,6 +95,9 @@ impl fmt::Display for Class {
                 out.write_str("include_str or include_bytes inside a macro token tree")
             }
             Self::RefusedIncludeImport => out.write_str("include named in a use item"),
+            Self::RefusedSkippedModule => out.write_str(
+                "mod item named like a directory the walk skips (rustc would read files the walk does not)",
+            ),
             Self::UnsafeOutsideOwnership => {
                 out.write_str("unsafe code exists outside the issue-approved ownership/audit files")
             }

@@ -12,6 +12,7 @@ const PATH: Class = Class::RefusedPathAttribute;
 const INCLUDE: Class = Class::RefusedInclude;
 const INCLUDE_IMPORT: Class = Class::RefusedIncludeImport;
 const LITERAL_IN_MACRO: Class = Class::RefusedIncludeLiteralInMacro;
+const SKIPPED_MODULE: Class = Class::RefusedSkippedModule;
 
 const READS: &str = "crates/lane/src/reads.rs";
 
@@ -126,6 +127,9 @@ fn a_path_to_a_file_outside_the_workspace_is_a_finding() {
         ("reads-path-target-first", "target/x.rs"),
         ("reads-path-node-modules", "node_modules/x.rs"),
         ("reads-path-absolute", "/etc/x.rs"),
+        // On a case-insensitive file system these read `target/x.rs` and `node_modules/x.rs`.
+        ("reads-path-target-case", "Target/x.rs"),
+        ("reads-path-node-modules-case", "a/Node_Modules/x.rs"),
         ("reads-path-no-suffix", "x"),
         ("reads-path-rs-directory-name", "x.rs/"),
     ];
@@ -465,6 +469,73 @@ fn naming_include_in_a_use_item_is_a_finding() {
     }
 }
 
+/// The walk skips `target` and `node_modules`, so the files rustc resolves from a `mod` named like
+/// one are never read. The first row is the false pass of attempt 2: its `#[path = "x.rs"]` is a
+/// plain literal that (a) accepts, and rustc reads `target/x.rs`.
+#[test]
+fn a_module_named_like_a_skipped_directory_is_a_finding() {
+    let rows = [
+        (
+            "reads-mod-target-path",
+            "mod target {\n    #[path = \"x.rs\"]\n    mod y;\n}\n",
+        ),
+        ("reads-mod-raw-target", "mod r#target;\n"),
+        (
+            "reads-mod-node-modules",
+            "mod node_modules {\n    mod y;\n}\n",
+        ),
+        ("reads-mod-out-of-line", "mod target;\n"),
+        ("reads-mod-pub", "pub(crate) mod node_modules;\n"),
+        (
+            "reads-mod-nested",
+            "mod a {\n    mod b {\n        mod target;\n    }\n}\n",
+        ),
+        (
+            "reads-mod-in-macro-body",
+            "macro_rules! m { () => { mod target; } }\nm!();\n",
+        ),
+        (
+            "reads-mod-in-macro-call",
+            "m!(mod node_modules { mod y; });\n",
+        ),
+        ("reads-mod-in-fn", "fn f() {\n    mod target {}\n}\n"),
+    ];
+    for (name, text) in rows {
+        expect_failure(name, &[create(READS, text)], &[SKIPPED_MODULE]);
+    }
+}
+
+/// On a case-insensitive file system `mod Target;` reads `target/mod.rs`.
+#[test]
+fn a_skipped_directory_name_is_matched_ignoring_case() {
+    let rows = [
+        ("reads-mod-case-target", "mod Target;\n"),
+        (
+            "reads-mod-case-node-modules",
+            "mod Node_Modules {\n    mod y;\n}\n",
+        ),
+        ("reads-mod-case-raw", "mod r#TARGET;\n"),
+    ];
+    for (name, text) in rows {
+        expect_failure(name, &[create(READS, text)], &[SKIPPED_MODULE]);
+    }
+}
+
+/// The finding sits on the module's name.
+#[test]
+fn the_finding_names_the_line_of_the_module() {
+    let report = expect_failure(
+        "reads-mod-line",
+        &[create(
+            READS,
+            "// one\n#[allow(dead_code)]\nmod\n    target;\n",
+        )],
+        &[SKIPPED_MODULE],
+    );
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].line, Some(4));
+}
+
 /// Every form here reads nothing a rule needs to judge, or reads a literal only.
 #[test]
 fn the_accepted_forms_pass() {
@@ -494,6 +565,12 @@ fn the_accepted_forms_pass() {
                 "fn l() -> &'static str { g(include_str!(\"looping.in\")) }\n",
                 // A word that only starts with `include`.
                 "fn include_nothing() {}\nmacro_rules! include_more { () => {} }\n",
+                // A `path` or `include` word that is not in a written attribute or an include call.
+                "fn m(entry: &E, path: &P) {\n    assert_eq!(entry.path, path);\n    let _ = json!({\"path\": path});\n}\n",
+                "macro_rules! n { ($path:literal) => { f($path) } }\n",
+                // Names that only contain or start like a skipped directory, and uses of one.
+                "mod targets;\nmod target_dir;\nmod node_modules_x;\nmod my_target;\n",
+                "use crate::target;\nfn target() {}\nstruct Target;\nfn o() { let target = 1; let _ = target; }\n",
             ),
         ),
         create(
