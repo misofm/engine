@@ -89,6 +89,11 @@ Mono-source chains keep collapsing after the swap.
 - `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`,
   `crates/host-core/tests/support/successor.rs`
 - `crates/effect-contract/src/lib.rs` (docs only)
+- `crates/effect-contract/src/symmetry.rs`: the one doc line of `payload_sections_agree` (root
+  ruling, 2026-10-12; see the Amendment).
+- Named exception (root ruling, 2026-10-12): `crates/capi/tests/resource_lifecycle.rs`, only the 7
+  lines of commit `7852f0a25`. The double-live oracle's inventory bytes include the successor's
+  restart set.
 
 ## Non-goals
 
@@ -105,9 +110,10 @@ Mono-source chains keep collapsing after the swap.
    Session B adds a muted track whose ID sorts first, so every lane shifts. The swapped run (swap
    after block 6) and a fresh B fed from frame 0 are bit-identical in every block.
    `carry_refusal_count()` is 0. With this slice's section of the program disabled, block 7 differs.
-2. **Collapse kept.** On a mono-source session with the same console, the successor's chains
-   collapse in the blocks after the swap (`bank_collapse_counters` grows), and the output stays
-   bit-identical.
+2. **Collapse kept.** On a mono-source session with the collapse-capable console effects (EQ,
+   compressor, limiter; gate/expander, soft-clip and transient shaper keep the trait default and
+   never collapse), the successor's chains collapse in the blocks after the swap
+   (`bank_collapse_counters` grows), and the output stays bit-identical.
 3. **Prepared change restarts.** B changes one strip's compressor threshold. On this owner it is
    prepared: an `EffectBankStage` has no live lane. That slot does not carry, its other slots do,
    and `restarted_strips()` is exactly that strip. A second case adds a compressor insert to one
@@ -126,8 +132,10 @@ Mono-source chains keep collapsing after the swap.
 
 - Gate 1: a lane restored to its old lane index instead of its strip's new lane, or an effect whose
   restore misses a derived word, turns it red.
-- Gate 2: a stale `designed` cache, or an agreement flag cleared for good, either collapses on
-  asymmetric words (bits move) or never collapses again. One of gates 1-2 turns red.
+- Gate 2: an agreement flag cleared for good never collapses again. A flag wrongly set on
+  asymmetric words, and a stale `designed` (DESIGNED) term, are not caught here: no session reaches
+  them (attempt 1 verdict, mutation M10), and only the `rack` unit tests catch them (root ruling,
+  2026-10-12).
 - Gate 3: a rule that carries an owner whose prepared value changed keeps the old threshold. A
   restart set that misses effect owners fails the exact list. Either turns it red.
 - Gate 4: a payload call that still allocates on any console effect turns it red.
@@ -326,6 +334,24 @@ the test-support features (`successor_swap`: 65 passed, 9 ignored), `cargo test 
 browser-compiled code): named-twin build, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
 `test-web-audioworklet.sh` with a private TMPDIR (empty afterwards), the V8 spill gate.
+
+### Amendment (root, 2026-10-12)
+
+Root rulings on the attempt 2 verdict. Each is a root ruling, 2026-10-12.
+
+1. **Named exception.** `crates/capi/tests/resource_lifecycle.rs`, the 7 lines of commit
+   `7852f0a25` (the double-live oracle's inventory bytes include the successor's restart set), is
+   ratified and added to the Authorized paths. The other named exception on this branch, the two
+   `stamp_held_gate` tests in `crates/engine/src/realtime/mod.rs` (commit `7cfcb20dc`), is #1277's.
+2. **Gate 2.** It names the collapse-capable console effects (EQ, compressor, limiter).
+   Gate/expander, soft-clip and transient shaper keep the trait default and never collapse. Its Test value line no
+   longer claims a stale `designed` cache: only the `rack` unit tests catch a stale DESIGNED term
+   (attempt 2, NIT 5).
+3. **Doc edit.** The one doc line of `payload_sections_agree` in
+   `crates/effect-contract/src/symmetry.rs` is authorized (attempt 2, NIT 2): it must also say that
+   the function runs in the swap block, for a console lane's carry.
+4. **Carry refusal count.** `graph::carry_refusal_count` has no production reader yet (attempt 2,
+   NIT 4). #1286 reports it in the swap block's cost record and owns surfacing it.
 
 ### Batch follow-ups
 

@@ -18,9 +18,11 @@ never leaves it muted.
 
 - D15-7: a changed prepared (rule-3) value restarts its owner behind a D15-9 transition; an owner
   carries only when the join of stream A's carry slices (#1277, #1279-#1284) finds its values and
-  layout equal. Successor preparation: `SuccessorBase { inventory, committed }`
+  layout equal. Successor preparation: `SuccessorBase { inventory, committed, revision }`
   (`crates/host-core/src/prepare.rs:641-647`), `prepare_host_runtime_with_live_lanes_successor`
   (`:818`).
+- Until #1281 and #1282, an insert starts at rest on every swap, and its strip is not in
+  `restarted_strips()` (#1277 D6; root ruling, 2026-10-12).
 - The classifier sends these edits to a rebuild: `LiveRebuild::Structure` for insert order,
   identity, quality, link mode and every other non-value field, `Prepared` for a non-`Block`
   parameter, `PreparedBypass` for the delay and the multiband (`crates/host-core/src/live_delta.rs:118-147`,

@@ -59,6 +59,8 @@ whole-bank move (#1269, Deferred) earns a brief.
   and render fills the claim lines from the predecessor's pending frames and the prime (#1287 L2,
   L3). #1354 D3's `prime_bytes()` is the exact byte count of that work. Nothing is rendered ahead
   and nothing is copied.
+- The swap block's cost record reports the carry refusal count (`graph::carry_refusal_count`,
+  #1279 D6), so this issue owns surfacing it (root ruling, 2026-10-12).
 - AGENTS.md: benchmarks are descriptive. Freeze the workload and the validator before timing. One
   invocation, one warmup, two measured rounds, no tuning and no retry. A runner defect moves to a
   tooling issue.

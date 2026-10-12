@@ -122,6 +122,11 @@ then structural edit" (D15-7, carry then retarget).
   - `crates/capi/src/runtime/live_tests.rs`: gate 8 only.
   - Host-core test support: it must publish `r` on the successor's handle before
     `reserve_replacement`. Otherwise the stamped retarget is never covered and is never heard.
+- Named exception (root ruling, 2026-10-12): `crates/engine/src/realtime/mod.rs`, only the two
+  `stamp_held_gate` tests of commit `7cfcb20dc`
+  (`a_held_gate_stamps_on_the_pin_the_handle_inherits` and
+  `the_handle_inherits_the_open_stamp_of_a_held_gate`). They test D11's method, whose home is
+  `plan.rs`.
 
 ## Non-goals
 
@@ -415,6 +420,15 @@ clippy; also `check-capi-abi.sh`, `target/release/audit capi` (0 allocations, 0 
 worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
 `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
 `test-web-audioworklet.sh` with a private TMPDIR, empty afterwards). AArch64 runs in CI only.
+
+### Named exception (root ruling, 2026-10-12)
+
+Root ratified one write outside the authorized paths: the two `stamp_held_gate` tests in
+`crates/engine/src/realtime/mod.rs` (commit `7cfcb20dc`):
+`a_held_gate_stamps_on_the_pin_the_handle_inherits` and
+`the_handle_inherits_the_open_stamp_of_a_held_gate`. They are added to the Authorized paths above as
+a named exception. The other named exception on this branch, the 7 lines of
+`crates/capi/tests/resource_lifecycle.rs` in commit `7852f0a25`, belongs to #1279.
 
 ### Follow-ups (verdict of attempt 3)
 

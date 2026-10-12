@@ -15,7 +15,7 @@ a block and no return path: render adopts the warm successor in move mode (#1355
 
 ## Context
 
-- The successor entry points take a `SuccessorBase { inventory, committed }`
+- The successor entry points take a `SuccessorBase { inventory, committed, revision }`
   (`crates/host-core/src/prepare.rs:641-647`). `PlanStateInventory` (`:558-564`) is the
   predecessor's control-side record; every successor is prepared from it
   (`prepare_host_runtime_successor`, `:909`).
@@ -154,7 +154,9 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   - `SuccessorBase::new` (*Reset latency floors at a host-declared discontinuity*, #1323 D3) sets
     it to `None`, and no construction site changes. A warm successor sets its field on the value
     `new` returns (`SuccessorBase { warm: Some(&lead), ..SuccessorBase::new(inventory,
-    committed) }`).
+    committed, revision) }`).
+  - `SuccessorBase::new` takes three arguments, `(inventory, committed, revision)`: `revision` is
+    the `r` the successor commits as (#1277 D10; #1323 D3). Root ruling, 2026-10-12.
   - With `Some`, preparation compiles with D2's floors, marks every node of each `restart_whole`
     strip not carried (its source-claim lines still carry, #1402 D1), and adds those strips to
     `restarted_strips()`, so #1324 ducks them. It installs the carry program in move mode.
