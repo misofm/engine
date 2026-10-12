@@ -688,8 +688,8 @@ const COMPRESSOR_SESSION: &str =
 
 /// Twin `Parameter` spans keep the lane; a lone half, or a twin one ulp apart, declines it.
 ///
-/// The span half of the contract `two_per_lane_writes_that_agree_still_decline_the_lane` states
-/// for targets (issue #1004, issue #1012). A `Left` record and a `Right` record of the same
+/// The span half of the contract `two_per_lane_target_writes_that_agree_in_one_block_keep_the_lane`
+/// states for targets (issue #1004, issue #1012). A `Left` record and a `Right` record of the same
 /// parameter and the same value, drained in one block, stage as adjacent twin spans; the
 /// compressor validates and applies `pending[0][p]` and `pending[1][p]` by the same code from the
 /// same value, so the two channels stay in bit-equal state and `LIVE` is kept. Any one-channel

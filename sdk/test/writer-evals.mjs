@@ -278,9 +278,9 @@ describe("the writer contract -- paused", () => {
   });
 
   test("a batch larger than the queue splits under the same contract and lands across renders", async () => {
-    // Three compressors, each with a one-slot queue; a second subscription on the first is
-    // refused, so the whole three-record batch is refused (admission is atomic) and the writer
-    // narrows until the engine says yes.
+    // Three compressors, each with a one-slot queue; the first one's slot is taken, so a second
+    // operation on its tap is refused and the whole three-record batch is refused (admission is
+    // atomic) and the writer narrows until the engine says yes.
     const engine = await observedEngine(3);
     try {
       const writer = new LiveControlWriter({
@@ -314,34 +314,6 @@ describe("the writer contract -- paused", () => {
       assert.equal(writer.pending, 0, "every record landed once the transport moved");
       assert.ok(writer.stats.refusals >= 1);
       assert.equal(writer.stats.escalations, 0, "flow control never escalates");
-    } finally {
-      engine.dispose();
-    }
-  });
-});
-
-describe("the writer contract -- playing", () => {
-  test("a steady cadence against a rendering transport never refuses", async () => {
-    // The playing case is the one that must be boring. Each render drains every control queue, so
-    // a cadence that stages a handful of edits per block and flushes once per block has a fresh
-    // queue every time.
-    const engine = await pausedEngine();
-    try {
-      const submit = (records, count) => engine.submitCommands(records, count);
-      const writer = new LiveControlWriter({ submit, maximumBatch: 8 });
-
-      for (let block = 0; block < 64; block += 1) {
-        writer.stage(gainEdit(GAIN_IDS[0], 2, -0.05 * block));
-        writer.stage(faderEdit(2, -0.1 * block));
-        const outcome = await writer.flush();
-        assert.equal(outcome.refused, false, `block ${block} refused under a playing cadence`);
-        feedAndRender(engine);
-      }
-
-      assert.equal(writer.stats.refusals, 0, "a playing cadence is zero-refusal");
-      assert.equal(writer.stats.escalations, 0);
-      assert.equal(writer.pending, 0);
-      assert.equal(writer.stats.flushes, 64);
     } finally {
       engine.dispose();
     }

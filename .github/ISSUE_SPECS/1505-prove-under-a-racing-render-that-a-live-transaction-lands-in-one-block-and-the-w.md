@@ -291,3 +291,23 @@ conclusion stands: the lock defends the races from starving each other.
 --all-features -- -D warnings`, `bash scripts/check-workspace-policy.sh`, `cargo test --locked -p
 capi`, `cargo test --locked --release -p capi --test plan_swap_race`: all green on the final code (debug `capi`
 suites 80, 5, 4, 13, 0 and 4 tests; release `plan_swap_race` 4 tests; load average 2.9 to 5.2).
+
+#### Batch-verdict MINOR 4 (stream B batch 3; Sonnet 5.5): the one-way test is deleted
+
+`a_watermark_advance_names_a_block_that_applied_the_edit` and its helpers (`fader_command`,
+`live_levels`) are deleted from `crates/capi/tests/plan_swap_race.rs`, as `AGENTS.md` asks for a
+superseded test. `a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it` asserts the
+same thing (an advance to `r` names this block's first sample and the block shows `r`'s state) over
+the same race, with the thin sweep added; its doc comment, `PHASES` and `LiveControl` no longer name
+the deleted test.
+
+*Defect only the old test could catch: none found.* Mutations in `Plan::render_inner`
+(`crates/engine/src/realtime/plan.rs`), each run with both tests (debug, `plan_swap_race`):
+- snapshot taken after the executor rendered (#1314 M14; the render uses an earlier snapshot, the
+  report the later one): both tests red at block 0 (the old one "advanced to edit 1 in a block that
+  did not apply it", the new one "in a block that does not show it"), three runs of three;
+- the block renders under `LiveSnapshot::ALL`: the old test stayed green in both runs, the new one
+  red ("block 14 shows a new state, but the watermark (revision 53) did not advance at it"; block 230
+  in the second run).
+Reverted, both are green. The `#1502` spec's gate 3 and its mutation row for the M14 snapshot name
+the deleted test; the new test is red on the same mutation.

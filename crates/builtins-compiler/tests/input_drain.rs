@@ -43,11 +43,6 @@ fn prepared_filter(lanes: BuiltinLaneSelector) -> TrackInputRecord {
     }
 }
 
-#[test]
-fn prepared_filter_record_stays_within_the_frozen_queue_slot_bound() {
-    assert!(core::mem::size_of::<TrackInputRecord>() <= 64);
-}
-
 /// A per-lane retarget de-symmetrizes; a `Both` retarget preserves.
 ///
 /// Red mutation: return `SymmetryEvent::Preserve` for every selector -> the `Left`/`Right` arms

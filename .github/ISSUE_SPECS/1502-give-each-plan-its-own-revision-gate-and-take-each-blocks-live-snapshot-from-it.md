@@ -201,7 +201,9 @@ This slice changes no rendered bit. It provides the snapshot.
    - `a_live_edit_on_a_pending_candidate_completes_at_the_swap`.
    - `a_live_edit_completes_in_the_next_block`.
    - `a_watermark_advance_names_a_block_that_applied_the_edit` (`crates/capi/tests/plan_swap_race.rs`):
-     mutation M14 (the snapshot taken after `render_inner`) still turns it red.
+     mutation M14 (the snapshot taken after `render_inner`) still turns it red. (Deleted 2026-10-12,
+     stream B batch-3 verdict MINOR 4: `a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it`
+     subsumes it and is red on M14; see #1505's record.)
 4. **Loom.**
    - Every `spsc_loom_plan_mailbox_*` model stays green with the revision words removed.
    - `spsc_loom_plan_mailbox_revision_follows_the_pending_candidate` (`spsc.rs:1261`) is replaced
@@ -327,7 +329,7 @@ the tests that failed.
 | `begin_live_block` receives `LiveSnapshot::ALL` | `each_block_takes_its_snapshot_from_its_own_plans_gate`, `the_direct_render_paths_take_their_own_gates_snapshot`, `a_block_the_executor_fails_after_the_snapshot_is_counted` |
 | `begin_live_block` never called | the same three |
 | snapshot (and the call) before the shape check | `a_block_that_errors_publishes_nothing`, `each_block_takes_its_snapshot_from_its_own_plans_gate` |
-| snapshot after the executor rendered (#1314 M14) | the same three as the `ALL` row; and `a_watermark_advance_names_a_block_that_applied_the_edit` (capi, release) |
+| snapshot after the executor rendered (#1314 M14) | the same three as the `ALL` row; and `a_watermark_advance_names_a_block_that_applied_the_edit` (capi, release; deleted 2026-10-12, subsumed by `a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it`, see #1505) |
 | a pre-snapshot failure counted as a live-block error | `a_block_that_errors_publishes_nothing` |
 | a post-snapshot failure not counted | `a_block_the_executor_fails_after_the_snapshot_is_counted` |
 | the initial revision not published on the initial gate | `each_block_takes_its_snapshot_from_its_own_plans_gate` |

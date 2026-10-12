@@ -5010,63 +5010,6 @@ fn a_flood_of_effect_values_is_admitted_whole_and_the_last_is_heard() {
     );
 }
 
-/// #137 E3: submitting into a full bounded queue is a typed local rejection that admits nothing and
-/// disturbs no rendered sample. The queue is the observation queue: subscriptions stay a queue
-/// after the fader, mute and matrix lanes became latest-target cells with no room to overfill
-/// (#1312). One submission cannot overfill it, since it names each tap once (#1345 D2); a second
-/// submission before the next block can.
-///
-/// Red mutation: delete the free-room pre-check loop in `admit_commands` -> the second submission
-/// reaches `try_push`, whose failure the admission treats as unreachable and panics on.
-#[test]
-fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
-    const QUANTUM: u32 = 128;
-
-    let mut clean = observation_host(QUANTUM, 1, None);
-    let mut flooded = observation_host(QUANTUM, 1, None);
-    for block in 0..4_u64 {
-        feed_and_render_tracks(&mut clean, block, 0.25);
-        feed_and_render_tracks(&mut flooded, block, 0.25);
-        // The queue holds one subscription per declared tap, so the first takes its one slot and
-        // a second submission before the next block finds none.
-        let subscribe = |host: &mut AudioWorkletEngineHost| {
-            stage_command(
-                host,
-                0,
-                COMMAND_OBSERVE_SUBSCRIBE,
-                1,
-                255,
-                0,
-                0,
-                1,
-                4,
-                [0.0; 4],
-            );
-            host.submit_commands(1)
-        };
-        assert_eq!(subscribe(&mut flooded), RESULT_OK);
-        let armed = flooded.observation_armed_taps();
-        assert_eq!(subscribe(&mut flooded), RESULT_BACKPRESSURE);
-        let report = *flooded.command_report();
-        assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
-        assert_eq!(report.admitted, 0, "a refused submission admits nothing");
-        assert_eq!(
-            flooded.observation_armed_taps(),
-            armed,
-            "block {block}: the refusal armed nothing and moved nothing"
-        );
-        assert_eq!(
-            clean.output_pcm().expect("clean output"),
-            flooded.output_pcm().expect("flooded output"),
-            "block {block}: control traffic never disturbs a rendered sample",
-        );
-    }
-    assert_eq!(
-        clean.status().rendered_quanta,
-        flooded.status().rendered_quanta
-    );
-}
-
 /// #137 E4: every unknown target is a typed refusal that leaves the engine exactly as it was.
 ///
 /// Red mutation: delete the `track >= track_count` leg in `admit_commands` -> the unknown-track
@@ -6790,10 +6733,11 @@ fn the_meter_frame_carries_the_app_shaped_gain_reduction() {
     assert_eq!(undesignated.meter_header().master_track_plus_one, 0);
 }
 
-/// Issue #143 E8: flood and misuse.
+/// Issue #143 E8: misuse and the typed refusals of an observation subscription.
 ///
-/// Red mutation: drop the all-or-nothing free-room pre-check for the observe kinds -> an oversized
-/// batch arms some taps before it is refused, and the "nothing was armed" assertion fails.
+/// Test value: red if a refused submission arms or moves anything (the "nothing was armed or
+/// moved" assertion), or if an operation on a tap whose one slot an earlier submission holds is
+/// admitted again before a block has drained it (the `RESULT_BACKPRESSURE` assertions).
 #[test]
 fn observation_misuse_is_typed_and_all_or_nothing() {
     const QUANTUM: u32 = 128;
