@@ -11,10 +11,12 @@ use effect_contract::{
     NativeEffectFactory, ParameterChannel, ParameterChannelPolicy, PreparedEffectTarget,
     normalize_zero, parameter_value_valid, validate_initial_values,
 };
+use effect_contract::{EffectCellWriter, EffectControlRecord};
 use engine::is_launch_sample_rate;
+use engine::realtime::LiveStamp;
 use std::sync::Arc;
 
-use crate::{EffectBankPreparation, EffectControlProducerHandle};
+use crate::EffectBankPreparation;
 
 /// State of one owner transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,7 +27,7 @@ pub enum EffectControlOwnerPhase {
     Open,
     /// An invalid edit poisoned this candidate; only discard is allowed.
     Poisoned,
-    /// Queue publication violated its prefix invariant; this owner cannot be reused.
+    /// Publication violated its invariant; this owner cannot be reused.
     Faulted,
     /// All targets were published; exactly one commit is allowed.
     Published,
@@ -48,11 +50,9 @@ pub enum EffectControlOwnerError {
     Domain,
     /// The transaction revision or phase does not permit this operation.
     Revision,
-    /// The queue cannot hold the complete target prefix.
-    Capacity,
     /// The capability rejected a candidate or target prefix.
     Target(EffectTargetError),
-    /// The checked queue publication unexpectedly became full after the prefix check.
+    /// A target the preflight accepted had no cell to take it.
     Invariant,
 }
 
@@ -348,10 +348,10 @@ impl EffectControlOwner {
         Ok(())
     }
 
-    /// Validates the candidate, revision and complete queue capacity without mutation.
+    /// Validates the candidate, the revision and the target set without mutation. The targets
+    /// are cells: they want no room, so there is no capacity to check (decision 15, D15-2).
     pub(crate) fn preflight_publication(
         &self,
-        producer: &EffectControlProducerHandle,
         base_revision: u64,
         targets: &[PreparedEffectTarget],
     ) -> Result<(), EffectControlOwnerError> {
@@ -371,27 +371,27 @@ impl EffectControlOwner {
             return Err(EffectControlOwnerError::Shape);
         }
         self.validate_targets(targets)?;
-        let available = producer.available_capacity();
-        if targets.len() > available {
-            return Err(EffectControlOwnerError::Capacity);
-        }
         Ok(())
     }
 
-    /// Publishes a completely validated target prefix through the private producer.
+    /// Writes a completely validated target set into the writer's target cells under `stamp`.
     pub(crate) fn publish(
         &mut self,
-        producer: &mut EffectControlProducerHandle,
+        writer: &mut EffectCellWriter,
+        stamp: LiveStamp<'_>,
         base_revision: u64,
         targets: &[PreparedEffectTarget],
     ) -> Result<(), EffectControlOwnerError> {
-        self.preflight_publication(producer, base_revision, targets)?;
+        self.preflight_publication(base_revision, targets)?;
         let next_revision = self
             .committed_revision
             .checked_add(1)
             .ok_or(EffectControlOwnerError::Revision)?;
         for target in targets {
-            if producer.try_push_prepared(*target).is_err() {
+            if writer
+                .write(stamp, EffectControlRecord::PreparedTarget(*target))
+                .is_err()
+            {
                 self.phase = EffectControlOwnerPhase::Faulted;
                 self.pending_revision = None;
                 return Err(EffectControlOwnerError::Invariant);

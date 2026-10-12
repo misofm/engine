@@ -7336,31 +7336,56 @@ mod tests {
         collected
     }
 
-    fn control_pair(
-        depth: usize,
-    ) -> (
-        engine::realtime::Producer<effect_contract::EffectControlRecord>,
-        Box<EffectControlLane>,
-    ) {
-        let (producer, consumer) =
-            engine::realtime::bounded_spsc::<effect_contract::EffectControlRecord>(
-                core::num::NonZeroUsize::new(depth).expect("depth"),
-                engine::realtime::QueueGeneration(0),
-            )
-            .expect("queue");
-        (producer, Box::new(EffectControlLane::new(consumer, false)))
+    /// The gain fixture's lane: one `PerLane` parameter, so a `Left` and a `Right` cell.
+    fn control_pair() -> (effect_contract::EffectCellWriter, Box<EffectControlLane>) {
+        let (writer, lane) = effect_contract::effect_control_lane(
+            effect_contract::EffectLaneSpec {
+                shape: effect_contract::EffectLaneShape::from_descriptor(&GAIN_DESCRIPTOR, 0),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &engine::realtime::LiveValuesSuperseded::new(),
+        )
+        .expect("the gain fixture's lane");
+        (writer, Box::new(lane))
+    }
+
+    /// Control's end of the fixture: its cell writer and the plan's gate handle. A push is one
+    /// transaction: stamp the next revision, write the cell, publish the revision.
+    struct LiveControl {
+        writer: effect_contract::EffectCellWriter,
+        gate: engine::realtime::PlanRevisionGate,
+    }
+
+    impl LiveControl {
+        fn new(writer: effect_contract::EffectCellWriter, plan: &mut PreparedRenderPlan) -> Self {
+            Self {
+                writer,
+                gate: plan.take_revision_gate().expect("the plan's gate handle"),
+            }
+        }
+
+        fn push(&mut self, record: effect_contract::EffectControlRecord) {
+            let revision = self.gate.last_published() + 1;
+            let stamp = self.gate.stamp(revision).expect("a legal revision");
+            self.writer
+                .write(stamp, record)
+                .expect("the fixture has a cell for the record");
+            self.gate.publish(revision);
+        }
     }
 
     /// #140 A / E1 for the dynamic rack: an admitted parameter command takes effect on the first
     /// sample of the next rendered block, and not one sample before.
     ///
-    /// Red mutation: move the `live.stage(..)` drain in `execute_op`'s `LiveControlEffect`
+    /// Red mutation: move the `live.stage(..)` call in `execute_op`'s `LiveControlEffect`
     /// arm to *after* `effect.processor.process(block)` -> the command lands one block late and
     /// the `block 1` assertion below fails on its first sample.
     #[test]
     fn a_live_control_parameter_command_applies_at_the_next_block_boundary() {
-        let (mut producer, control) = control_pair(4);
+        let (writer, control) = control_pair();
         let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
         let block0 = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(
             &block0[..4],
@@ -7368,13 +7393,11 @@ mod tests {
             "unity before any command"
         );
 
-        producer
-            .try_push(effect_contract::EffectControlRecord::Parameter {
-                parameter_index: 0,
-                channel: ParameterChannel::Left,
-                value: 0.5,
-            })
-            .expect("room");
+        producer.push(effect_contract::EffectControlRecord::Parameter {
+            parameter_index: 0,
+            channel: ParameterChannel::Left,
+            value: 0.5,
+        });
         let block1 = render_live_control_blocks(&mut plan, 1, 1);
         assert_eq!(
             &block1[..4],
@@ -7396,16 +7419,15 @@ mod tests {
     #[test]
     fn live_bypass_is_latency_preserving_and_reversible() {
         const LATENCY: u64 = 2;
-        let (mut producer, control) = control_pair(4);
+        let (writer, control) = control_pair();
         let mut plan =
             live_control_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
-        producer
-            .try_push(effect_contract::EffectControlRecord::Parameter {
-                parameter_index: 0,
-                channel: ParameterChannel::Left,
-                value: 0.0,
-            })
-            .expect("room");
+        let mut producer = LiveControl::new(writer, &mut plan);
+        producer.push(effect_contract::EffectControlRecord::Parameter {
+            parameter_index: 0,
+            channel: ParameterChannel::Left,
+            value: 0.0,
+        });
         let wet = render_live_control_blocks(&mut plan, 0, 2);
         // Latency 2 with a zero gain: the first two samples are the line's zeros, then zeros.
         assert!(
@@ -7413,9 +7435,7 @@ mod tests {
             "a zero gain silences the wet path"
         );
 
-        producer
-            .try_push(effect_contract::EffectControlRecord::Bypass(true))
-            .expect("room");
+        producer.push(effect_contract::EffectControlRecord::Bypass(true));
         let bypassed = render_live_control_blocks(&mut plan, 2, 1);
         assert_eq!(
             &bypassed[..4],
@@ -7424,9 +7444,7 @@ mod tests {
         );
         assert_eq!(&bypassed[4..], &[-6.0, -7.0, -8.0, -9.0]);
 
-        producer
-            .try_push(effect_contract::EffectControlRecord::Bypass(false))
-            .expect("room");
+        producer.push(effect_contract::EffectControlRecord::Bypass(false));
         let restored = render_live_control_blocks(&mut plan, 3, 1);
         assert!(
             restored[..4].iter().all(|value| *value == 0.0),
@@ -7449,7 +7467,7 @@ mod tests {
     fn idle_live_controls_change_no_rendered_bit() {
         for latency in [0_u64, 3] {
             let mut without = live_control_effect_plan(latency, None, Box::new(SampleIndexSource));
-            let (_producer, control) = control_pair(4);
+            let (_writer, control) = control_pair();
             let mut with =
                 live_control_effect_plan(latency, Some(control), Box::new(SampleIndexSource));
             let plain = render_live_control_blocks(&mut without, 0, 4);
@@ -7462,20 +7480,19 @@ mod tests {
         }
     }
 
-    /// The staging window cannot overflow, because preparation caps the queue at the effect's
-    /// automation capacity; a violated cap would be counted here rather than written past the end.
+    /// Both of the gain fixture's cells are written and staged in one block: the window is the
+    /// effect's automation capacity, which holds the lane's two cells.
     #[test]
     fn the_live_control_effect_drops_nothing_within_its_prepared_capacity() {
-        let (mut producer, control) = control_pair(2);
+        let (writer, control) = control_pair();
         let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-            producer
-                .try_push(effect_contract::EffectControlRecord::Parameter {
-                    parameter_index: 0,
-                    channel,
-                    value: 2.0,
-                })
-                .expect("room");
+            producer.push(effect_contract::EffectControlRecord::Parameter {
+                parameter_index: 0,
+                channel,
+                value: 2.0,
+            });
         }
         let block = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(&block[..4], &[0.0, 2.0, 4.0, 6.0]);

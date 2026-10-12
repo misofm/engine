@@ -35,12 +35,13 @@
 
 use effect_compiler::{NEVER_BANKED_EFFECTS, launch_native_effect_registry};
 use effect_contract::{
-    BankWidth, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, ParameterChannelPolicy,
-    ParameterDomain, ParameterUnit, PortRole, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
+    BankWidth, EffectControlLane, EffectControlRecord, EffectDescriptor, EffectLaneShape,
+    EffectLaneSpec, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
+    ParameterChannel, ParameterChannelPolicy, ParameterDomain, ParameterUnit, PortRole,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect,
+    PreparedPorts, PreparedSidechainPort, effect_control_lane,
 };
-use engine::realtime::{LiveSnapshot, QueueGeneration, bounded_spsc};
+use engine::realtime::{LiveSnapshot, LiveValuesSuperseded, RevisionGate};
 use graph_compiler::Backend;
 use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
 
@@ -653,18 +654,21 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
             .expect("a bankable effect binds at the host width");
         let latency = usize::try_from(bank.metadata.program_key.latency.0).expect("latency fits");
         // Lane 1 is session-bypassed with a live channel; lane 2 is session-bypassed without one.
-        let (mut producer, consumer) = bounded_spsc::<EffectControlRecord>(
-            core::num::NonZeroUsize::new(4).expect("depth"),
-            QueueGeneration(0),
+        let (mut producer, live_lane) = effect_control_lane(
+            EffectLaneSpec {
+                // A bypass cell alone: this lane's only live value is the shunt switch.
+                shape: EffectLaneShape::from_live_parameters([], 0),
+                bypass: true,
+                observation_depth: 0,
+            },
+            &LiveValuesSuperseded::new(),
         )
-        .expect("queue");
-        let mut consumer = Some(consumer);
+        .expect("the live lane");
+        let (gate, mut pin) = RevisionGate::pair(0);
+        let mut live_lane = Some(live_lane);
         let controls: Vec<Option<EffectControlLane>> = (0..lanes)
             .map(|lane| match lane {
-                1 => Some(EffectControlLane::new(
-                    consumer.take().expect("one live lane"),
-                    true,
-                )),
+                1 => Some(live_lane.take().expect("one live lane")),
                 2 => Some(EffectControlLane::without_channel(true)),
                 _ => None,
             })
@@ -708,9 +712,12 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
                 _ => None,
             };
             if let Some(value) = toggle {
+                let revision = pin.last_published() + 1;
+                let stamp = pin.stamp(revision).expect("a legal revision");
                 producer
-                    .try_push(EffectControlRecord::Bypass(value))
-                    .expect("room");
+                    .write(stamp, EffectControlRecord::Bypass(value))
+                    .expect("a bypass cell");
+                pin.publish(&gate, revision);
                 live_bypassed = value;
             }
             let mut members = Planes {
@@ -732,7 +739,7 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
                     &mut members,
                     QUANTUM,
                     block * u64::from(QUANTUM),
-                    LiveSnapshot::ALL,
+                    gate.snapshot(),
                 )
                 .expect("bank render");
             for lane in 0..lanes {

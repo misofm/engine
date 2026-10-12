@@ -52,7 +52,8 @@ use effect_contract::{
     BankWidth, ChannelSymmetryWitness, EffectControlRecord, ParameterChannel, PreparedEffectTarget,
 };
 use engine::realtime::{
-    PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
+    LiveStamp, LiveValuesSuperseded, PlanRevisionGate, PlanUnitEligibility, PlanarBufferMut,
+    PreparedRenderPlan, RenderError, RenderIo, RenderTime,
 };
 use graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphPreparedSourceSet,
@@ -1151,6 +1152,9 @@ const _: () = assert!((QUANTUM * core::mem::size_of::<f32>()).is_multiple_of(64)
 /// evidence collection and belongs outside it.
 pub struct SessionRuntime {
     plan: PreparedRenderPlan,
+    /// The plan's gate handle: every live value is a latest-target cell, written under a stamp
+    /// of this gate and revealed by publishing the stamp's revision on it (decision 15, D15-2).
+    gate: PlanRevisionGate,
     /// Boxed so the render loop reads its planes through one stable, 64-byte-aligned pointer.
     output: Box<OutputPlanes>,
     /// Control-side halves, held for the arms that attached them. Never touched inside the clock.
@@ -1173,6 +1177,16 @@ pub struct SessionRuntime {
     structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitness)>,
     /// Which tracks the compiled session bypasses, taken at compile time (issue #1085).
     bypass: BypassCensus,
+}
+
+/// One transaction of live writes, as a host makes it: stamp the next revision on the plan's gate,
+/// run `write` with the stamp, then publish that revision (decision 15, D15-2).
+fn write_published<R>(gate: &mut PlanRevisionGate, write: impl FnOnce(LiveStamp<'_>) -> R) -> R {
+    let revision = gate.last_published() + 1;
+    let stamp = gate.stamp(revision).expect("a legal revision");
+    let result = write(stamp);
+    gate.publish(revision);
+    result
 }
 
 /// Which tracks of a compiled session bypass their rack effects, and the pattern they form
@@ -1340,10 +1354,15 @@ impl SessionRuntime {
         // Both attaches are the production entry points, called in the order a host calls them.
         // The control channel is attached for every observation arm including `Absent`, so the
         // paired delta between the arms is the observation lane and not the control queue drain.
+        let superseded = LiveValuesSuperseded::new();
         let controls = if config.control {
             attach_effect_live_controls(
                 &mut effects,
-                NonZeroUsize::new(CONTROL_QUEUE_DEPTH).expect("nonzero depth"),
+                &superseded,
+                match config.observation {
+                    ObservationArm::Absent => 0,
+                    ObservationArm::Unarmed | ObservationArm::Armed => MAXIMUM_OBSERVATION_TAPS,
+                },
             )
             .expect("live-control channels")
         } else {
@@ -1469,8 +1488,10 @@ impl SessionRuntime {
         // makes the paired delta the collapse and nothing else -- so the difference between them
         // has to be this switch and cannot be a fixture edit.
         plan.force_mono_collapse_off(workload.collapse_forced_off());
+        let gate = plan.take_revision_gate().expect("the plan's gate handle");
         let mut runtime = Self {
             plan,
+            gate,
             output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
             meter_consumers,
             controls,
@@ -1486,19 +1507,15 @@ impl SessionRuntime {
 
     /// Arms every declared tap of every prepared effect, the way a subscribing console does.
     ///
-    /// Off the clock, and through the same bounded control queue a host pushes: the records are
+    /// Off the clock, and through the same observation queue a host pushes: the records are
     /// drained by the render thread at the top of the next block, so the arm must render at least
     /// one untimed block after this before it is actually armed. Its warmup does.
     fn arm_observation(&mut self) {
         for producer in &mut self.controls {
             for tap_index in 0..producer.descriptor.observations.len() as u32 {
                 producer
-                    .try_push(EffectControlRecord::Observe {
-                        tap_index,
-                        armed: true,
-                        window_blocks: WINDOW_BLOCKS,
-                    })
-                    .expect("room in the bounded control queue");
+                    .try_push_observe(tap_index, true, WINDOW_BLOCKS)
+                    .expect("room in the observation queue");
             }
         }
     }
@@ -1545,10 +1562,10 @@ impl SessionRuntime {
         (&producer.track_id, &producer.effect_id)
     }
 
-    /// Pushes one live-control bypass record into one prepared effect's bounded queue.
+    /// Writes one live-control bypass value into one prepared effect's bypass cell.
     ///
-    /// The production control path, like [`SessionRuntime::push_parameter`]: the record is drained
-    /// by the render thread at the top of the next block, and it moves the channel-symmetry
+    /// The production control path, like [`SessionRuntime::push_parameter`]: the value is read by
+    /// the render thread at the top of the next block, and it moves the channel-symmetry
     /// witness' `UNBYPASSED` term at the same boundary it takes effect on.
     ///
     /// It is here because bypass is the transition the mono collapse is hardest on and the one no
@@ -1557,17 +1574,19 @@ impl SessionRuntime {
     /// reads samples the collapsed blocks put into that line. Nothing else in this harness can set
     /// that sequence up.
     ///
-    /// Returns `false` when the bounded queue was full, which a caller counts rather than ignores.
-    /// Off the clock.
+    /// Returns `false` when the lane refused the record, which a caller counts rather than
+    /// ignores. Off the clock.
     pub fn push_bypass(&mut self, channel: usize, bypassed: bool) -> bool {
-        self.controls[channel]
-            .try_push(EffectControlRecord::Bypass(bypassed))
-            .is_ok()
+        let Self { controls, gate, .. } = self;
+        let producer = &mut controls[channel];
+        let record = EffectControlRecord::Bypass(bypassed);
+        producer.preflight(record).is_ok()
+            && write_published(gate, |stamp| producer.write(stamp, record).is_ok())
     }
 
-    /// Pushes one live-control parameter retarget into one prepared effect's bounded queue.
+    /// Writes one live-control parameter retarget into one prepared effect's cell.
     ///
-    /// This is the production control path and nothing else: the record is drained by the render
+    /// This is the production control path and nothing else: the value is read by the render
     /// thread at the top of the next block and staged as a single
     /// [`AutomationSpanKind::Point`](effect_contract::AutomationSpanKind) span at that
     /// block's first sample. One call per block therefore *is* "one Point span per block", by the
@@ -1575,9 +1594,9 @@ impl SessionRuntime {
     /// equivalent.
     ///
     /// Off the clock, like the observation arming and every other control-side method on this
-    /// type. Returns `false` when the bounded queue was full, which a driver counts
-    /// rather than ignores -- a silently refused push would report the cost of automation that
-    /// never happened.
+    /// type. Returns `false` when the lane refused the record, which a driver counts rather than
+    /// ignores -- a silently refused write would report the cost of automation that never
+    /// happened.
     pub fn push_parameter(
         &mut self,
         channel: usize,
@@ -1610,9 +1629,15 @@ impl SessionRuntime {
                 self.controls[channel]
                     .preflight_candidate_targets(base_revision, &targets[..count])
                     .map_err(|_| ())?;
-                self.controls[channel]
-                    .publish_candidate_targets(base_revision, &targets[..count])
-                    .map_err(|_| ())?;
+                let Self { controls, gate, .. } = &mut *self;
+                write_published(gate, |stamp| {
+                    controls[channel].publish_candidate_targets(
+                        stamp,
+                        base_revision,
+                        &targets[..count],
+                    )
+                })
+                .map_err(|_| ())?;
                 self.controls[channel].commit_owner().map_err(|_| ())?;
                 Ok::<(), ()>(())
             })();
@@ -1622,13 +1647,15 @@ impl SessionRuntime {
             }
             return true;
         }
-        self.controls[channel]
-            .try_push(EffectControlRecord::Parameter {
-                parameter_index,
-                channel: parameter_channel,
-                value,
-            })
-            .is_ok()
+        let Self { controls, gate, .. } = self;
+        let producer = &mut controls[channel];
+        let record = EffectControlRecord::Parameter {
+            parameter_index,
+            channel: parameter_channel,
+            value,
+        };
+        producer.preflight(record).is_ok()
+            && write_published(gate, |stamp| producer.write(stamp, record).is_ok())
     }
 
     /// Prepared observation lanes. Zero for an `Absent` arm.

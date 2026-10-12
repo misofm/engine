@@ -1,147 +1,55 @@
-//! Issue #1004: a both-channel write that arrives as two one-channel records keeps `LIVE`.
+//! Issue #1004, on decision 15's cells (issue #1345): a both-channel write that arrives as two
+//! one-channel writes keeps `LIVE`.
 //!
-//! These are the drain-level gates of the pairing rule in `EffectControlLane::stage`: which
-//! drains keep the witness' `LIVE` term, and that the drain's *other* outputs -- the staged spans,
-//! the target FIFO, `dropped`, `unbound`, `target_error` -- are exactly what they were before the
-//! rule existed. The rendered consequences (collapsed output and state against a forced-dual
+//! These are the drain-level gates of the pairing rule in `EffectControlLane::stage`: which drains
+//! keep the witness' `LIVE` term, and that the drain's *other* outputs -- the staged spans and the
+//! target prefix -- are exactly what a sorted, last-wins window holds. The pairing is structural
+//! now: the witness folds from the cells' final contents, so two cells that were both applied in
+//! one block with equal words are one both-channel write, however the writes were spread across
+//! transactions. The rendered consequences (collapsed output and state against a forced-dual
 //! reference, on the real effects) are `tools/console-workload/tests/paired_spans.rs`.
 //!
-//! The oracle here is deliberately **not** the rule's own shape. The rule walks adjacent spans of
-//! the sorted, deduplicated staging window; the model below replays the records into a map of
-//! final values per `(parameter, channel)` and asks the question the collapse actually rests on --
-//! does every parameter that was written on one channel end with the same bits on the other --
-//! so an implementation that got adjacency, ordering or last-wins wrong disagrees with it.
+//! The oracle here is deliberately **not** the lane's own shape. The lane reads cells in a fixed
+//! order; the model below replays the writes into a map of final values per `(parameter,
+//! channel)` and asks the question the collapse actually rests on -- does every parameter that was
+//! written on one channel end with the same bits on the other -- so an implementation that got
+//! pairing, ordering or last-wins wrong disagrees with it.
+
+#[path = "support/lane_rig.rs"]
+mod lane_rig;
 
 use std::collections::BTreeMap;
 
 use effect_contract::{
-    AutomationSpanKind, ChannelSymmetryWitness, EffectControlLane, EffectControlRecord,
-    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
-    Staged,
+    EffectControlRecord, EffectLaneShape, EffectWriteRefusal, ParameterChannel,
+    ParameterChannelPolicy,
 };
-use engine::realtime::{Producer, QueueGeneration, bounded_spsc};
+use lane_rig::{Rig, UNBYPASSED, both, left, right, target};
 
-const LIVE: u8 = ChannelSymmetryWitness::LIVE;
-const UNBYPASSED: u8 = ChannelSymmetryWitness::UNBYPASSED;
-
-fn depth(value: usize) -> core::num::NonZeroUsize {
-    core::num::NonZeroUsize::new(value).expect("nonzero queue depth")
+/// Parameters 0, 1 and 3 are `PerLane` (a `Left` and a `Right` cell); 2 is `Shared` (one `Both`
+/// cell).
+fn shape(target_slots: usize) -> EffectLaneShape {
+    EffectLaneShape::from_live_parameters(
+        [
+            (0, ParameterChannelPolicy::PerLane),
+            (1, ParameterChannelPolicy::PerLane),
+            (2, ParameterChannelPolicy::Shared),
+            (3, ParameterChannelPolicy::PerLane),
+        ],
+        target_slots,
+    )
 }
 
-fn idle() -> PreparedAutomationSpan {
-    PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
-        channel: ParameterChannel::Both,
-        parameter_index: u32::MAX,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: 0.0,
-        end_value: 0.0,
-    }
-}
-
-fn parameter(index: u32, channel: ParameterChannel, value: f32) -> EffectControlRecord {
-    EffectControlRecord::Parameter {
-        parameter_index: index,
-        channel,
-        value,
-    }
-}
-
-fn left(index: u32, value: f32) -> EffectControlRecord {
-    parameter(index, ParameterChannel::Left, value)
-}
-
-fn right(index: u32, value: f32) -> EffectControlRecord {
-    parameter(index, ParameterChannel::Right, value)
-}
-
-fn both(index: u32, value: f32) -> EffectControlRecord {
-    parameter(index, ParameterChannel::Both, value)
-}
-
-fn target(slot: u32, channel: ParameterChannel, marker: u32) -> EffectControlRecord {
-    EffectControlRecord::PreparedTarget(PreparedEffectTarget {
-        slot,
-        channel,
-        words: [marker; PREPARED_EFFECT_TARGET_WORDS],
-    })
-}
-
-/// One lane under test: a queue of `capacity` records and a staging window of `window` spans.
-struct Lane {
-    producer: Producer<EffectControlRecord>,
-    lane: EffectControlLane,
-    staging: Vec<PreparedAutomationSpan>,
-    block: u64,
-}
-
-impl Lane {
-    fn new(capacity: usize, window: usize) -> Self {
-        let (producer, consumer) =
-            bounded_spsc::<EffectControlRecord>(depth(capacity), QueueGeneration(0))
-                .expect("queue");
-        Self {
-            producer,
-            lane: EffectControlLane::new(consumer, false),
-            staging: vec![idle(); window],
-            block: 0,
-        }
-    }
-
-    fn with_targets(capacity: usize) -> Self {
-        let (producer, consumer) =
-            bounded_spsc::<EffectControlRecord>(depth(capacity), QueueGeneration(0))
-                .expect("queue");
-        Self {
-            producer,
-            lane: EffectControlLane::new_with_target_staging(consumer, false),
-            staging: vec![idle(); capacity],
-            block: 0,
-        }
-    }
-
-    fn push(&mut self, records: &[EffectControlRecord]) {
-        for record in records {
-            self.producer.try_push(*record).expect("room in the queue");
-        }
-    }
-
-    /// One drain at the top of the next block.
-    fn drain(&mut self) -> Staged {
-        let first_sample = self.block * 128;
-        self.block += 1;
-        self.lane.stage(&mut self.staging, first_sample, None)
-    }
-
-    fn live(&self) -> bool {
-        self.lane.symmetry().holds(LIVE)
-    }
-
-    fn staged_spans(&self, staged: Staged) -> Vec<(u32, ParameterChannel, u32)> {
-        self.staging[..staged.staged]
-            .iter()
-            .map(|span| {
-                (
-                    span.parameter_index,
-                    span.channel,
-                    span.start_value.to_bits(),
-                )
-            })
-            .collect()
-    }
-}
-
-/// Drain `records` into a fresh lane in one block and report whether `LIVE` survived.
+/// Write `records` into a fresh lane, each as a transaction of its own, drain one block and report
+/// whether `LIVE` survived.
 fn keeps(records: &[EffectControlRecord]) -> bool {
-    let mut lane = Lane::new(records.len().max(1), records.len().max(1));
-    lane.push(records);
-    let staged = lane.drain();
-    assert_eq!(staged.dropped, 0);
-    lane.live()
+    let mut rig = Rig::new(shape(0), 0);
+    rig.commit_each(records);
+    rig.stage();
+    rig.live()
 }
 
-/// The independent oracle: replay one drain's parameter records into final values per
+/// The independent oracle: replay one block's parameter writes into final values per
 /// `(parameter, channel)` and ask whether every parameter written on one channel ends with the
 /// same bits on the other. `Both` writes are not one-channel writes and need no twin.
 fn model_pairs(records: &[EffectControlRecord]) -> bool {
@@ -176,11 +84,11 @@ fn base_keeps(records: &[EffectControlRecord]) -> bool {
 }
 
 #[test]
-fn a_twin_pair_keeps_live_in_either_queue_order() {
+fn a_twin_pair_keeps_live_in_either_write_order() {
     assert!(keeps(&[left(0, -12.0), right(0, -12.0)]));
     assert!(
         keeps(&[right(0, -12.0), left(0, -12.0)]),
-        "the staging sorts the window, so queue order does not matter"
+        "the cells are read in a fixed order, so write order does not matter"
     );
     assert!(keeps(&[
         left(0, -12.0),
@@ -195,7 +103,7 @@ fn a_twin_pair_keeps_live_in_either_queue_order() {
             right(3, 40.0),
             right(0, -12.0)
         ]),
-        "two pairs interleaved in the queue are still two pairs"
+        "two pairs interleaved in the writes are still two pairs"
     );
 }
 
@@ -222,7 +130,7 @@ fn near_pairs_clear_live() {
     );
     assert!(
         !keeps(&[left(0, value), right(1, value)]),
-        "the same value on two parameters is not a pair, although the spans are adjacent"
+        "the same value on two parameters is not a pair"
     );
     assert!(
         !keeps(&[
@@ -236,12 +144,12 @@ fn near_pairs_clear_live() {
 }
 
 #[test]
-fn last_wins_staging_decides_the_pair() {
-    // [L v1, L v2, R v2]: the staged window is L v2, R v2.
+fn last_wins_decides_the_pair() {
+    // [L v1, L v2, R v2]: the cells end at L v2, R v2.
     assert!(keeps(&[left(0, -6.0), left(0, -9.0), right(0, -9.0)]));
     // [L v1, R v2, L v2]: L is replaced by v2, which R already holds.
     assert!(keeps(&[left(0, -6.0), right(0, -9.0), left(0, -9.0)]));
-    // [L v1, R v1, L v2]: the pair came apart again before the drain ended.
+    // [L v1, R v1, L v2]: the pair came apart again before the block.
     assert!(!keeps(&[left(0, -6.0), right(0, -6.0), left(0, -9.0)]));
     // One channel written twice, the other once to the *first* value.
     assert!(!keeps(&[left(0, -6.0), left(0, -9.0), right(0, -6.0)]));
@@ -255,198 +163,168 @@ fn last_wins_staging_decides_the_pair() {
 }
 
 #[test]
-fn both_spans_need_no_twin_and_do_not_break_a_pair() {
-    assert!(keeps(&[both(0, 1.0)]));
-    assert!(keeps(&[both(1, 1.0), left(0, -6.0), right(0, -6.0)]));
-    // A `Both` span on the same parameter sits after the pair (`Left < Right < Both`). A
-    // `PerLane` effect refuses it on both channels and a `Shared` one refuses the pair on both
-    // channels, so either way the two channels end equal.
-    assert!(keeps(&[left(0, -6.0), both(0, -3.0), right(0, -6.0)]));
-    assert!(!keeps(&[left(0, -6.0), both(0, -6.0)]));
+fn a_shared_parameters_both_cell_needs_no_twin_and_does_not_break_a_pair() {
+    assert!(keeps(&[both(2, 1.0)]));
+    assert!(keeps(&[both(2, 1.0), left(0, -6.0), right(0, -6.0)]));
+    assert!(!keeps(&[both(2, 1.0), left(0, -6.0)]));
+}
+
+/// A `Both` write to a `PerLane` parameter has no cell: the channel policy decides the cells, and
+/// a `Shared` parameter takes `Both` alone. The host lowers a both-channel command on a `PerLane`
+/// parameter to one write per lane before it reaches a cell.
+#[test]
+fn a_channel_the_policy_does_not_take_has_no_cell() {
+    let mut rig = Rig::new(shape(0), 0);
+    assert_eq!(
+        rig.commit(&[both(0, 1.0)]),
+        Err(EffectWriteRefusal::Channel)
+    );
+    assert_eq!(
+        rig.commit(&[left(2, 1.0)]),
+        Err(EffectWriteRefusal::Channel)
+    );
+    assert_eq!(
+        rig.commit(&[right(2, 1.0)]),
+        Err(EffectWriteRefusal::Channel)
+    );
+    assert_eq!(rig.stage().staged, 0);
 }
 
 #[test]
-fn a_pair_split_across_two_drains_clears_live() {
+fn a_pair_split_across_two_blocks_clears_live() {
     for (first, second) in [
         (left(0, -6.0), right(0, -6.0)),
         (right(0, -6.0), left(0, -6.0)),
     ] {
-        let mut lane = Lane::new(4, 4);
-        lane.push(&[first]);
-        lane.drain();
-        assert!(!lane.live(), "the first half alone is a one-channel write");
-        lane.push(&[second]);
-        lane.drain();
-        assert!(!lane.live(), "and nothing re-earns the term");
+        let mut rig = Rig::new(shape(0), 0);
+        rig.commit_each(&[first]);
+        rig.stage();
+        assert!(!rig.live(), "the first half alone is a one-channel write");
+        rig.commit_each(&[second]);
+        rig.stage();
+        assert!(!rig.live(), "and nothing re-earns the term");
     }
-    // The other way round: a kept pair, then a lone write in the next drain.
-    let mut lane = Lane::new(4, 4);
-    lane.push(&[left(0, -6.0), right(0, -6.0)]);
-    lane.drain();
-    assert!(lane.live());
-    lane.push(&[left(0, -9.0)]);
-    lane.drain();
-    assert!(!lane.live());
+    // The other way round: a kept pair, then a lone write in the next block.
+    let mut rig = Rig::new(shape(0), 0);
+    rig.commit_each(&[left(0, -6.0), right(0, -6.0)]);
+    rig.stage();
+    assert!(rig.live());
+    rig.commit_each(&[left(0, -9.0)]);
+    rig.stage();
+    assert!(!rig.live());
 }
 
 #[test]
 fn a_pair_whose_second_half_never_arrives_clears_live() {
-    let mut lane = Lane::new(4, 4);
-    lane.push(&[left(2, 0.5)]);
-    lane.drain();
-    assert!(!lane.live());
+    let mut rig = Rig::new(shape(0), 0);
+    rig.commit_each(&[left(3, 0.5)]);
+    rig.stage();
+    assert!(!rig.live());
     for _ in 0..4 {
-        lane.drain();
-        assert!(!lane.live(), "empty drains never restore the term");
+        rig.stage();
+        assert!(!rig.live(), "empty blocks never restore the term");
     }
 }
 
+/// Targets: equal words on a slot's two channel cells are one `Both` target (the structural form
+/// of a symmetric both-channel edit), and any other applied target is a lone channel write.
+///
+/// Test value: the witness folded per write instead of from the cells' final contents, which
+/// retires a mono collapse on a both-channel target edit (the F1 shape `[Left A, Both C, Right A]`
+/// ends with the channels at C and A, and a lone write clears the term).
 #[test]
-fn one_channel_targets_fold_as_before_in_every_order() {
-    // VERIFY-AUTOMATION F1: `[Left A, Both C, Right A]` leaves the channels at C and A although
-    // the last target per channel agrees. Every order of those three, and every one-channel
-    // target anywhere in a drain, clears the term: targets are never deferred.
-    let atoms = [
+fn targets_fold_from_the_final_cell_contents() {
+    // `[Left A, Both C, Right A]`: the left cell ends at C and the right at A.
+    let mut rig = Rig::new(shape(2), 0);
+    rig.commit_each(&[
         target(1, ParameterChannel::Left, 0xA),
         target(1, ParameterChannel::Both, 0xC),
         target(1, ParameterChannel::Right, 0xA),
-    ];
-    for order in permutations(&atoms) {
-        let mut lane = Lane::with_targets(4);
-        lane.push(&order);
-        let staged = lane.drain();
-        assert_eq!(staged.staged_targets, 3);
-        assert!(!staged.target_error);
-        assert!(!lane.live(), "{order:?} kept LIVE");
-    }
-    let mut lane = Lane::with_targets(4);
-    lane.push(&[
+    ]);
+    let staged = rig.stage();
+    assert_eq!(staged.staged_targets, 2, "two cells, two lone targets");
+    assert!(
+        !rig.live(),
+        "C on the left and A on the right: not symmetric"
+    );
+
+    // Equal final words on the two cells are one `Both` target, and keep the term.
+    let mut rig = Rig::new(shape(2), 0);
+    rig.commit_each(&[
         target(1, ParameterChannel::Left, 0xA),
         target(1, ParameterChannel::Right, 0xA),
     ]);
-    lane.drain();
-    assert!(
-        !lane.live(),
-        "a per-channel target pair with equal words still clears: the rule is spans only"
+    let staged = rig.stage();
+    assert_eq!(staged.staged_targets, 1);
+    assert_eq!(
+        rig.lane.prepared_targets()[0].channel,
+        ParameterChannel::Both
     );
-    let mut lane = Lane::with_targets(4);
-    lane.push(&[target(1, ParameterChannel::Both, 0xC)]);
-    lane.drain();
-    assert!(lane.live(), "a Both target preserves, as it always did");
-}
+    assert!(
+        rig.live(),
+        "a per-channel pair with equal words is a both-channel write"
+    );
 
-#[test]
-fn a_parameter_pair_refused_by_a_target_owner_still_errors_and_moves_nothing() {
-    // A prepared-target owner refuses raw parameter records (`target_error`). The pair is never
-    // staged, so it writes nothing on either channel; the drain's error is what the render path
-    // surfaces.
-    let mut lane = Lane::with_targets(4);
-    lane.push(&[left(3, 6.0), right(3, 6.0)]);
-    let staged = lane.drain();
-    assert!(staged.target_error);
-    assert_eq!(staged.staged, 0);
-    assert_eq!(staged.staged_targets, 0);
+    // A `Both` target preserves, as it always did.
+    let mut rig = Rig::new(shape(2), 0);
+    rig.commit_each(&[target(1, ParameterChannel::Both, 0xC)]);
+    assert_eq!(rig.stage().staged_targets, 1);
+    assert!(rig.live());
+
+    // A one-channel target clears.
+    let mut rig = Rig::new(shape(2), 0);
+    rig.commit_each(&[target(1, ParameterChannel::Left, 0xA)]);
+    assert_eq!(rig.stage().staged_targets, 1);
+    assert!(!rig.live());
+
+    // Two slots: one pair and one lone write clear the term; the pair applies once.
+    let mut rig = Rig::new(shape(2), 0);
+    rig.commit_each(&[
+        target(0, ParameterChannel::Both, 0x1),
+        target(1, ParameterChannel::Right, 0x2),
+    ]);
+    assert_eq!(rig.stage().staged_targets, 2);
+    assert!(!rig.live());
 }
 
 #[test]
 fn bypass_and_observe_records_fold_in_place_around_a_pair() {
-    let mut lane = Lane::new(8, 8);
-    lane.push(&[
+    let mut rig = Rig::new(shape(0), 4);
+    rig.commit_each(&[
         EffectControlRecord::Bypass(true),
         left(0, -6.0),
-        EffectControlRecord::Observe {
-            tap_index: 0,
-            armed: true,
-            window_blocks: 4,
-        },
         right(0, -6.0),
     ]);
-    let staged = lane.drain();
+    rig.writer.try_push_observe(0, true, 4).expect("room");
+    rig.stage();
     assert_eq!(
-        staged.unbound, 1,
+        rig.lane.drain_observations(0, None),
+        1,
         "a plan with no observation lane refuses the subscription"
     );
     assert!(
-        lane.live(),
+        rig.live(),
         "the pair is still a pair across unrelated records"
     );
     assert!(
-        !lane.lane.symmetry().holds(UNBYPASSED),
+        !rig.lane.symmetry().holds(UNBYPASSED),
         "the bypass folded as ever"
     );
-    lane.push(&[left(0, -9.0), EffectControlRecord::Bypass(false)]);
-    lane.drain();
-    assert!(lane.lane.symmetry().holds(UNBYPASSED));
+    rig.commit_each(&[left(0, -9.0), EffectControlRecord::Bypass(false)]);
+    rig.stage();
+    assert!(rig.lane.symmetry().holds(UNBYPASSED));
     assert!(
-        !lane.live(),
+        !rig.live(),
         "a lone write clears LIVE even when a record after it re-earns UNBYPASSED"
     );
 }
 
+/// Every order of a mixed set of writes: the lane's `LIVE` answer equals the model's, and its
+/// staged window equals the sorted last-wins window.
 #[test]
-fn a_queue_at_capacity_drains_what_was_admitted_and_nothing_else() {
-    // Capacity two: both halves fit, a third record is refused at the producer, and the drain
-    // pairs what was admitted.
-    let mut lane = Lane::new(2, 2);
-    lane.push(&[left(0, -6.0), right(0, -6.0)]);
-    assert!(
-        lane.producer.try_push(left(1, 4.0)).is_err(),
-        "the queue is full"
-    );
-    let staged = lane.drain();
-    assert_eq!((staged.staged, staged.dropped), (2, 0));
-    assert!(lane.live());
-
-    // Capacity three: the second half of the second pair is refused at the producer, so the drain
-    // sees a pair and a lone write, and clears. The refusal is the producer's, before any ack.
-    let mut lane = Lane::new(3, 3);
-    lane.push(&[left(0, -6.0), right(0, -6.0), left(1, 4.0)]);
-    assert!(lane.producer.try_push(right(1, 4.0)).is_err());
-    let staged = lane.drain();
-    assert_eq!((staged.staged, staged.dropped), (3, 0));
-    assert!(!lane.live());
-}
-
-#[test]
-fn a_window_smaller_than_the_drain_drops_exactly_as_before_and_never_keeps_a_half() {
-    // Unreachable in a prepared plan (preparation refuses a queue deeper than the automation
-    // capacity), and pinned anyway: `dropped` counts exactly what the pre-#1004 drain counted, a
-    // dropped half leaves its twin unpaired, and a pair dropped whole wrote nothing.
-    let mut lane = Lane::new(4, 1);
-    lane.push(&[left(0, -6.0), right(0, -6.0)]);
-    let staged = lane.drain();
-    assert_eq!((staged.staged, staged.dropped), (1, 1));
-    assert!(
-        !lane.live(),
-        "the staged Left lost its twin to the full window"
-    );
-
-    let mut lane = Lane::new(4, 2);
-    lane.push(&[left(0, -6.0), right(0, -6.0), left(1, 4.0), right(1, 4.0)]);
-    let staged = lane.drain();
-    assert_eq!((staged.staged, staged.dropped), (2, 2));
-    assert_eq!(
-        lane.staged_spans(staged),
-        vec![
-            (0, ParameterChannel::Left, (-6.0_f32).to_bits()),
-            (0, ParameterChannel::Right, (-6.0_f32).to_bits())
-        ]
-    );
-    assert!(
-        lane.live(),
-        "parameter 1 reached neither channel, so the channels still agree"
-    );
-}
-
-/// Every order of a mixed drain: one-channel, `Both` and paired writes, one record at a time.
-///
-/// The drain's `LIVE` answer must equal the model's, and its staging output must equal the
-/// staging a pre-#1004 drain produced -- which, since the rule touches only the witness, is the
-/// same function of the records: a sorted, last-wins window.
-#[test]
-fn every_order_of_a_mixed_drain_agrees_with_the_model() {
-    let atom_sets: [&[EffectControlRecord]; 6] = [
-        // A pair, a lone Left on another parameter, and a Both.
+fn every_order_of_a_mixed_block_agrees_with_the_model() {
+    let atom_sets: [&[EffectControlRecord]; 5] = [
+        // A pair, a lone Left on another parameter, and a Shared `Both`.
         &[left(0, -6.0), right(0, -6.0), left(1, 4.0), both(2, 0.5)],
         // Two pairs, one of them one ulp apart.
         &[
@@ -455,8 +333,8 @@ fn every_order_of_a_mixed_drain_agrees_with_the_model() {
             left(1, 4.0),
             right(1, f32::from_bits(4.0_f32.to_bits() + 1)),
         ],
-        // Last-wins across a pair: L v1, L v2, R v2, Both.
-        &[left(0, -6.0), left(0, -9.0), right(0, -9.0), both(1, 0.25)],
+        // Last-wins across a pair: L v1, L v2, R v2, a `Both`.
+        &[left(0, -6.0), left(0, -9.0), right(0, -9.0), both(2, 0.25)],
         // Two pairs and a restatement.
         &[
             left(0, -6.0),
@@ -465,26 +343,29 @@ fn every_order_of_a_mixed_drain_agrees_with_the_model() {
             right(1, 4.0),
             left(0, -6.0),
         ],
-        // The F1 shape, in spans: L a, Both c, R a on one parameter.
-        &[left(0, -6.0), both(0, -3.0), right(0, -6.0)],
-        // A pair and a Both on the same parameter, plus a lone Right elsewhere.
-        &[left(0, -6.0), right(0, -6.0), both(0, -3.0), right(3, 1.0)],
+        // A pair and a lone Right elsewhere.
+        &[left(0, -6.0), right(0, -6.0), both(2, -3.0), right(3, 1.0)],
     ];
     let mut kept = 0;
     let mut cleared = 0;
     for atoms in atom_sets {
         for order in permutations(atoms) {
             let expected = model_pairs(&order);
-            let mut lane = Lane::new(order.len(), order.len());
-            lane.push(&order);
-            let staged = lane.drain();
-            assert_eq!(staged.dropped, 0);
+            let mut rig = Rig::new(shape(0), 0);
+            rig.commit_each(&order);
+            let staged = rig.stage();
             assert_eq!(
-                lane.staged_spans(staged),
+                rig.staged_spans(staged),
                 model_window(&order),
                 "{order:?}: the staged window is the sorted last-wins window"
             );
-            assert_eq!(lane.live(), expected, "{order:?}");
+            assert_eq!(rig.live(), expected, "{order:?}");
+            let writes = order.len() as u64;
+            assert_eq!(
+                rig.superseded.get(),
+                writes - staged.staged as u64,
+                "{order:?}: each write a later one replaced is counted once"
+            );
             if expected {
                 kept += 1;
             } else {
@@ -498,25 +379,24 @@ fn every_order_of_a_mixed_drain_agrees_with_the_model() {
     );
 }
 
-/// Every sequence of up to four records over a small alphabet, drained in one block and split
+/// Every sequence of up to four writes over a small alphabet, drained in one block and split
 /// across two blocks at every point, against the model.
 ///
-/// The alphabet has two parameters, all three channels and two values, so it reaches every
-/// adjacency the sorted window can form: twins, near twins, a Left next to another parameter's
-/// Right, lone halves at either end, and `Both` spans between and after.
+/// The alphabet has two `PerLane` parameters and the `Shared` one, two values each, so it reaches
+/// every adjacency the cells can form: twins, near twins, a Left next to another parameter's
+/// Right, and lone halves at either end.
 #[test]
-fn exhaustive_short_sequences_agree_with_the_model_in_one_drain_and_split_across_two() {
+fn exhaustive_short_sequences_agree_with_the_model_in_one_block_and_split_across_two() {
     let mut alphabet = Vec::new();
     for index in 0..2 {
-        for channel in [
-            ParameterChannel::Left,
-            ParameterChannel::Right,
-            ParameterChannel::Both,
-        ] {
+        for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             for value in [-6.0_f32, -9.0] {
-                alphabet.push(parameter(index, channel, value));
+                alphabet.push(lane_rig::parameter(index, channel, value));
             }
         }
+    }
+    for value in [-6.0_f32, -9.0] {
+        alphabet.push(both(2, value));
     }
     let mut sequences: Vec<Vec<EffectControlRecord>> = vec![Vec::new()];
     let mut frontier: Vec<Vec<EffectControlRecord>> = vec![Vec::new()];
@@ -534,26 +414,26 @@ fn exhaustive_short_sequences_agree_with_the_model_in_one_drain_and_split_across
     }
     let mut counts = [0_u64; 3];
     for sequence in &sequences {
-        let one_drain = model_pairs(sequence);
-        assert_eq!(keeps(sequence), one_drain, "{sequence:?}");
+        let one_block = model_pairs(sequence);
+        assert_eq!(keeps(sequence), one_block, "{sequence:?}");
         assert!(
-            !base_keeps(sequence) || one_drain,
+            !base_keeps(sequence) || one_block,
             "{sequence:?}: the rule may only keep more than the base drain, never less"
         );
-        counts[usize::from(one_drain)] += 1;
+        counts[usize::from(one_block)] += 1;
         for split in 1..sequence.len() {
             let (first, second) = sequence.split_at(split);
-            let mut lane = Lane::new(4, 4);
-            lane.push(first);
-            lane.drain();
-            let after_first = lane.live();
-            lane.push(second);
-            lane.drain();
+            let mut rig = Rig::new(shape(0), 0);
+            rig.commit_each(first);
+            rig.stage();
+            let after_first = rig.live();
+            rig.commit_each(second);
+            rig.stage();
             assert_eq!(after_first, model_pairs(first), "{first:?} | {second:?}");
             assert_eq!(
-                lane.live(),
+                rig.live(),
                 model_pairs(first) && model_pairs(second),
-                "{first:?} | {second:?}: each drain is judged alone and LIVE never returns"
+                "{first:?} | {second:?}: each block is judged alone and LIVE never returns"
             );
             counts[2] += 1;
         }
@@ -564,7 +444,7 @@ fn exhaustive_short_sequences_agree_with_the_model_in_one_drain_and_split_across
     );
 }
 
-/// The sorted, last-wins window a drain stages, computed independently of the drain.
+/// The sorted, last-wins window a block stages, computed independently of the lane.
 fn model_window(records: &[EffectControlRecord]) -> Vec<(u32, ParameterChannel, u32)> {
     let mut last: BTreeMap<(u32, u32), (ParameterChannel, u32)> = BTreeMap::new();
     for record in records {

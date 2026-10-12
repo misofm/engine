@@ -307,11 +307,13 @@ pub struct HostPrepareReport {
     pub largest_engine_allocation_bytes: u64,
 }
 
-/// The depth of every effect's queue when the caller names no depth of its own: 16 records
-/// (#1053 D4). The C ABI always uses it; the browser uses it for a session that did not opt in to
-/// live commands (#1326 D2), so both hosts read one number. The strip's input, fader/mute and
-/// matrix/pan lanes and every route's lane are latest-target cells with no depth (#1312, #1346,
-/// #1347).
+/// The control-queue depth a caller that names none passes to
+/// [`HostLiveControlRequest::control_queue_depth`]: the C ABI always passes it, and the browser
+/// passes it for a session that did not opt in to live commands (#1326 D2). It sizes no queue: the
+/// strip's input, fader/mute and matrix/pan lanes, every route's lane and every effect's
+/// parameter, bypass and target lane are latest-target cells with no depth (#1312, #1345, #1346,
+/// #1347), and an effect's observation queue holds one slot per declared tap. Only `Some` matters:
+/// it asks for live controls.
 pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("sixteen is nonzero");
 
 /// What live controls ask preparation to attach (issue #137 D1/D2).
@@ -321,19 +323,17 @@ pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize = NonZeroUsize::new(16).expect("s
 /// &Default::default())` and a host that wants no live controls allocates nothing extra.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostLiveControlRequest {
-    /// Bounded per-channel control-queue depth, or `None` for no live control channel.
+    /// Whether to attach live controls, and the depth the request names: `None` attaches none,
+    /// `Some` attaches them. The depth sizes no queue. Every lane a strip, an effect or a route
+    /// owns is a set of latest-target cells with no depth (#1312, #1345, #1346, #1347), and an
+    /// effect's observation queue holds one slot per tap it declares, so only `Some` matters.
     ///
-    /// Issue #140 turns this into the depth of every live *queue* a strip owns (a submix too,
-    /// issue #1211 D1): one queue per prepared effect instance. The input, fader/mute and
-    /// matrix/pan lanes are latest-target cells with no depth (#1312, #1346); they are attached
-    /// whenever this is `Some`, except that the input cells need [`HostLiveLanes::strip_input`].
-    /// Which of the others are attached is the caller's [`HostLiveLanes`] (issue #1254 D2): the
-    /// input cells when [`HostLiveLanes::strip_input`] is set, the effect queues when
+    /// Which lanes are attached is the caller's [`HostLiveLanes`] (issue #1254 D2): the input
+    /// cells when [`HostLiveLanes::strip_input`] is set, the effect cells when
     /// [`HostLiveLanes::effects`] is set, and the route cells when [`HostLiveLanes::routes`] is
-    /// set. Every entry takes the selection from its caller, except the ones with no `lanes`
-    /// argument, which attach [`HostLiveLanes::ALL`]. Each
-    /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
-    /// the render-side staging window unable to overflow.
+    /// set. A strip's fader/mute and matrix/pan cells are always attached (a submix's too, issue
+    /// #1211 D1). Every entry takes the selection from its caller, except the ones with no `lanes`
+    /// argument, which attach [`HostLiveLanes::ALL`].
     pub control_queue_depth: Option<NonZeroUsize>,
     /// Meter window in frames for every meter (default or selected), or `None` for no meters.
     pub meter_period_frames: Option<NonZeroU32>,
@@ -1658,15 +1658,18 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let control_catalog = crate::SessionControlProvider::prepare_session(&effects.entries)
         .map_err(|_| resource("host.control_provider.allocation"))?;
 
-    // Issue #140 A: one bounded live-control channel per prepared strip effect instance (a submix
-    // strip's included, #1207 D5), at the same depth the builtin channels use and
-    // capped at each effect's own automation capacity. This is the only thing that creates one; a
-    // host that asks for no live controls attaches nothing and the plan renders the byte-identical
-    // live-control-free path.
+    // Issue #140 A: one live-control lane per prepared strip effect instance (a submix strip's
+    // included, #1207 D5): its latest-target cells and, for an effect that declares taps when the
+    // host asked for observation capacity, its observation queue (decision 15, D15-2). This is
+    // the only thing that creates one; a host that asks for no live controls attaches nothing and
+    // the plan renders the byte-identical live-control-free path.
     let effect_controls: Vec<EffectControlProducer> = match live_controls.control_queue_depth {
-        Some(depth) if lanes.effects => {
-            attach_effect_live_controls(&mut effects, depth).map_err(effect_diagnostics)?
-        }
+        Some(_) if lanes.effects => attach_effect_live_controls(
+            &mut effects,
+            &live_superseded,
+            live_controls.observation_taps,
+        )
+        .map_err(effect_diagnostics)?,
         _ => Vec::new(),
     };
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and

@@ -498,3 +498,334 @@ fn every_live_drain_runs_once_in_every_block_silent_or_not() {
         assert_eq!(drains, BLOCKS as u64);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Decision 15, #1345: an effect bank with one live-bypassed lane (deferred from #1504, m1).
+// ---------------------------------------------------------------------------------------------
+
+mod effect_bank {
+    use super::*;
+    use effect_contract::{
+        BankProcessReport, EffectBankProcessBlock, EffectCellWriter, EffectControlRecord, EffectId,
+        EffectLaneShape, EffectLaneSpec, EffectProgramKey, EffectQuality, LinkMode,
+        PreparedBankMetadata, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+        ResetKind, RestBound, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+        StatePayloadSizes, effect_control_lane,
+    };
+
+    /// Frames of latency the mock bank declares: the bypass shunt delays the dry signal by it, so
+    /// a bypassed lane and a wet lane differ in the first `LATENCY` samples of a *silent* block.
+    const LATENCY: usize = 2;
+    /// The mock bank's gain, so wet and dry differ.
+    const GAIN: f32 = 0.5;
+    /// The lane that carries the live bypass.
+    const LIVE_LANE: usize = 1;
+
+    /// A bank that gains every lane by `GAIN` and delays it by `LATENCY` frames, per lane.
+    struct GainBank {
+        width: usize,
+        line: Vec<[f32; 2]>,
+    }
+
+    impl PreparedNativeEffectBank for GainBank {
+        fn reset(&mut self, _: ResetKind) {}
+        fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+            for frame in 0..block.frames as usize {
+                for lane in 0..self.width {
+                    let index = frame * self.width + lane;
+                    let wet = [block.left[index] * GAIN, block.right[index] * GAIN];
+                    let slot = &mut self.line[(frame % LATENCY) * self.width + lane];
+                    let held = *slot;
+                    *slot = wet;
+                    block.left[index] = held[0];
+                    block.right[index] = held[1];
+                }
+            }
+            BankProcessReport::empty(block.width)
+        }
+        fn snapshot_track_state_payload(
+            &self,
+            _: u32,
+            _: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_track_state_payload(
+            &mut self,
+            _: u32,
+            _: u32,
+            _: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+    }
+
+    fn program_key() -> EffectProgramKey {
+        EffectProgramKey {
+            effect_id: EffectId::parse("fixture.gain").expect("id"),
+            contract_major: 1,
+            state_layout_version: 1,
+            sample_rate: 48_000,
+            quantum: FRAMES as u32,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            latency: LatencySamples(LATENCY as u64),
+            tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+            state_sizes: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_bytes: 0,
+            automation_capacity: 1,
+        }
+    }
+
+    /// `LANES` tracks of source -> gain bank -> output, the bank one slot of width `width`, and a
+    /// live control lane (a bypass cell) on `LIVE_LANE` only.
+    fn plan(width: BankWidth, silent: u32) -> (PreparedRenderPlan, EffectCellWriter) {
+        let envelope = RenderEnvelope {
+            sample_rate: SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let track = |name: &str| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(name).expect("track"),
+            stage: TrackStage::Input,
+        };
+        let member = |name: &str| EffectNodeId {
+            track_id: StableGraphId::parse(name).expect("track"),
+            rack: RackId::Dynamic,
+            effect_id: StableGraphId::parse("gain").expect("effect"),
+        };
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output"),
+        };
+        let names: Vec<String> = (0..LANES).map(|lane| format!("track{lane}")).collect();
+        let inputs: Vec<GraphNodeId> = names.iter().map(|name| track(name)).collect();
+        let members: Vec<EffectNodeId> = names.iter().map(|name| member(name)).collect();
+        let effect_nodes: Vec<GraphNodeId> =
+            members.iter().cloned().map(GraphNodeId::Effect).collect();
+        let mut schedule: Vec<GraphNodeId> = inputs.clone();
+        schedule.extend(effect_nodes.iter().cloned());
+        schedule.push(output.clone());
+        let mut nodes: Vec<GraphNode> = schedule
+            .iter()
+            .cloned()
+            .map(|id| GraphNode {
+                id,
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        let edge = |source: &GraphNodeId, destination: &GraphNodeId, id: GraphEdgeId| GraphEdge {
+            id,
+            source: GraphPortId {
+                node: source.clone(),
+                kind: GraphPortKind::MainOutput,
+                effect_port: None,
+            },
+            destination: GraphPortId {
+                node: destination.clone(),
+                kind: GraphPortKind::MainInput,
+                effect_port: None,
+            },
+            path: "$.effect_bank".to_owned(),
+        };
+        let mut edges = Vec::new();
+        for lane in 0..LANES {
+            edges.push(edge(
+                &inputs[lane],
+                &effect_nodes[lane],
+                GraphEdgeId::TrackMain {
+                    target: effect_nodes[lane].clone(),
+                },
+            ));
+            edges.push(edge(
+                &effect_nodes[lane],
+                &output,
+                GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse(&format!("main{lane}")).expect("route"),
+                },
+            ));
+        }
+        let width_lanes = width.lanes() as usize;
+        let mut active_mask = vec![false; width_lanes];
+        active_mask[..LANES].fill(true);
+        let superseded = realtime::LiveValuesSuperseded::new();
+        let (writer, control) = effect_control_lane(
+            EffectLaneSpec {
+                shape: EffectLaneShape::from_live_parameters([], 0),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &superseded,
+        )
+        .expect("a bypass-only lane");
+        let bank = GraphPreparedEffectBank {
+            members: members.clone().into_boxed_slice(),
+            active_mask: active_mask.into_boxed_slice(),
+            processor: Box::new(GainBank {
+                width: width_lanes,
+                line: vec![[0.0; 2]; LATENCY * width_lanes],
+            }),
+            metadata: PreparedBankMetadata {
+                width,
+                program_key: program_key(),
+            },
+            response_snapshot_declared: false,
+            native_id: "fixture.gain",
+            scratch: rack::AoSoaScratch::new(width, FRAMES as u32).expect("scratch"),
+            cohort: GraphBankCohort { group: 0, slot: 0 },
+        };
+        let mut required = inputs.clone();
+        required.push(output.clone());
+        let mut levels = vec![DependencyLevel {
+            level: 0,
+            nodes: inputs.clone(),
+        }];
+        levels.push(DependencyLevel {
+            level: 1,
+            nodes: effect_nodes.clone(),
+        });
+        levels.push(DependencyLevel {
+            level: 2,
+            nodes: vec![output.clone()],
+        });
+        let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 1345,
+            spec: GraphSpec {
+                nodes,
+                ports: vec![],
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels,
+            route_timings: vec![],
+            inserted_delays: vec![],
+            buffer_assignments: vec![],
+            estimate: estimate(),
+            envelope,
+            required_bindings: required,
+            routes: vec![],
+            track_delays: vec![],
+            effects: vec![],
+            effect_controls: vec![GraphEffectControlBinding {
+                node: members[LIVE_LANE].clone(),
+                control: Box::new(control),
+            }],
+            effect_observations: vec![],
+            banks: vec![bank],
+            builtin_banks: vec![],
+            observers: vec![],
+        });
+        let mut bindings: Vec<_> = inputs
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(lane, node)| GraphNodeBinding::new(node, Box::new(Source { lane, silent })))
+            .collect();
+        bindings.push(GraphNodeBinding::identity(output));
+        let plan = graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bindings,
+                observers: vec![],
+            })
+            .unwrap_or_else(|failure| panic!("bind {}", failure.code));
+        (plan, writer)
+    }
+
+    /// What `Source` writes into sample `n` of `lane` (the left plane), `0.0` in a silent block.
+    fn input(lane: usize, silent: u32, n: usize) -> f32 {
+        if silent & (1 << (n / FRAMES)) != 0 {
+            0.0
+        } else {
+            (lane + n % FRAMES + 1) as f32 * 0.125
+        }
+    }
+
+    /// Gate 2 of #1504, with the live bypassed lane the batch note deferred to #1345: a lane whose
+    /// bypass is a cell is drained in every block, silent or not, under the block's snapshot, so a
+    /// bypass lands in exactly the block whose snapshot covers its revision.
+    ///
+    /// The plan is a partial bank (three of its lanes populated) rendered through the exchange.
+    /// Lane 1 is the live lane. A bypassed and an un-bypassed lane differ in the first `LATENCY`
+    /// samples of a *silent* block (the dry line holds the previous block's input at unity, the wet
+    /// line the same input at `GAIN`), so a drain that runs only on audible blocks, or reads
+    /// without the snapshot, changes the rendered bits. The timeline: bypass lands before block 1;
+    /// the un-bypass is written during block 3 but published only before block 5 (blocks 3 and 4
+    /// snapshot below it); and block 6 is silent with the un-bypass long in effect.
+    ///
+    /// Test value: a bank stage that skips a bypassed lane's drain, skips the drains of a silent
+    /// block, or reads the cells without the block's snapshot. Under `S` the first two make the
+    /// watermark early; the last applies a revision before the watermark reports it.
+    #[test]
+    fn a_live_bypassed_lane_is_drained_every_block_under_the_blocks_snapshot() {
+        const SILENT: u32 = (1 << 2) | (1 << 4) | (1 << 6);
+        const TOTAL: usize = 8;
+        for &width in BankWidth::ALL {
+            let (plan, mut writer) = plan(width, SILENT);
+            let (mut gate, mut owner, _exchange) = exchange(plan);
+            // The bypass is in effect from the first block whose snapshot covers its revision, and
+            // the un-bypass from the first block after its publication.
+            let bypassed_blocks: [bool; TOTAL] =
+                core::array::from_fn(|block| (1..5).contains(&block));
+            let mut observed: Vec<Vec<f32>> = Vec::new();
+            // The revision of the un-bypass, written during block 3 and published before block 5.
+            let mut unpublished = None;
+            for block in 0..TOTAL {
+                let mut write = |gate: &mut realtime::PlanRevisionGate, bypass: bool| {
+                    let revision = gate.last_published() + 1;
+                    let stamp = gate.stamp(revision).expect("a legal revision");
+                    writer
+                        .write(stamp, EffectControlRecord::Bypass(bypass))
+                        .expect("a bypass cell");
+                    revision
+                };
+                if block == 1 {
+                    let revision = write(&mut gate, true);
+                    gate.publish(revision);
+                }
+                // Written during block 3, published before block 5: blocks 3 and 4 snapshot
+                // below its revision.
+                if block == 3 {
+                    unpublished = Some(write(&mut gate, false));
+                }
+                if block == 5 {
+                    gate.publish(unpublished.take().expect("written during block 3"));
+                }
+                observed.push(render(&mut owner, block).1);
+            }
+            for (block, pcm) in observed.iter().enumerate() {
+                for frame in 0..FRAMES {
+                    let n = block * FRAMES + frame;
+                    let mut expected = 0.0_f32;
+                    for lane in 0..LANES {
+                        let delayed = if n >= LATENCY {
+                            input(lane, SILENT, n - LATENCY)
+                        } else {
+                            0.0
+                        };
+                        let bypassed = lane == LIVE_LANE && bypassed_blocks[block];
+                        expected += if bypassed { delayed } else { delayed * GAIN };
+                    }
+                    assert_eq!(
+                        pcm[frame].to_bits(),
+                        expected.to_bits(),
+                        "{width:?} block {block} frame {frame}: lane {LIVE_LANE} is {}",
+                        if bypassed_blocks[block] { "dry" } else { "wet" }
+                    );
+                }
+            }
+        }
+    }
+}

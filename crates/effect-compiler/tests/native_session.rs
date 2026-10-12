@@ -582,7 +582,8 @@ fn a_live_control_lane_starts_from_the_session_bypass() {
         prepare_native_session_effects(&bypassed_console(), registry, caps()).expect("prepared");
     let producers = effect_compiler::attach_effect_live_controls(
         &mut prepared,
-        core::num::NonZeroUsize::new(8).expect("depth"),
+        &engine::realtime::LiveValuesSuperseded::new(),
+        0,
     )
     .expect("live controls attached");
     assert_eq!(producers.len(), prepared.entries.len());
@@ -607,6 +608,98 @@ fn a_live_control_lane_starts_from_the_session_bypass() {
             "{track} {effect}: starts bypassed"
         );
     }
+}
+
+/// A one-insert session of the launch effect `effect_id` at its default parameters.
+fn insert_session(effect_id: &str) -> session::CompiledSession {
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+        .expect("canonical session fixture");
+    model.automation.clear();
+    model.tracks[0].inserts.effects[0].identity = session::EffectIdentity::Native {
+        effect_id: session::StableId::parse(effect_id).expect("effect ID"),
+    };
+    model.tracks[0].inserts.effects[0].params.clear();
+    compile_model(&model).expect("the insert session compiles")
+}
+
+/// Decision 15, D15-2 and #1345 D4: whatever automation capacity the caller asks for, every
+/// launch effect is prepared with a window for every one of its live parameter cells, so a block
+/// stages every cell it reads and none is deferred or dropped. The bound depends on the descriptor
+/// alone, so a larger request stays and a live lane changes no program key.
+///
+/// Mutation (PR evidence): pass the caller's capacity through unraised -> every effect with more
+/// live cells than one is red.
+#[test]
+fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let small = EffectCompileCaps {
+        maximum_automation_spans_per_block: 1,
+        ..caps()
+    };
+    let large = EffectCompileCaps {
+        maximum_automation_spans_per_block: 4_096,
+        ..caps()
+    };
+    let mut checked = 0;
+    let mut with_many_cells = 0;
+    for descriptor in registry.descriptors() {
+        let id = descriptor.id.as_str();
+        let cells = EffectLaneShape::live_parameter_cells(descriptor);
+        assert!(cells > 0, "{id}: every launch effect has a live parameter");
+        let session = insert_session(id);
+        let prepared = prepare_native_session_effects(&session, registry, small)
+            .unwrap_or_else(|diagnostics| panic!("{id}: {:?}", diagnostics.0));
+        let capacity = prepared.entries[0].metadata.automation_capacity as usize;
+        assert_eq!(
+            capacity, cells,
+            "{id}: a request of 1 is raised to the live cells"
+        );
+        let mut attached =
+            prepare_native_session_effects(&session, registry, small).expect("prepared again");
+        effect_compiler::attach_effect_live_controls(
+            &mut attached,
+            &engine::realtime::LiveValuesSuperseded::new(),
+            0,
+        )
+        .unwrap_or_else(|diagnostics| panic!("{id}: {:?}", diagnostics.0));
+        let lane = attached.entries[0].control.as_deref().expect("a live lane");
+        assert_eq!(
+            lane.check_window(capacity),
+            Ok(()),
+            "{id}: the window is the capacity and holds the lane's cells"
+        );
+        let bigger = prepare_native_session_effects(&session, registry, large)
+            .unwrap_or_else(|diagnostics| panic!("{id}: {:?}", diagnostics.0));
+        assert_eq!(
+            bigger.entries[0].metadata.automation_capacity, 4_096,
+            "{id}: a larger request is kept"
+        );
+        checked += 1;
+        with_many_cells += usize::from(cells > 1);
+    }
+    assert_eq!(checked, 8, "the eight launch effects");
+    assert!(with_many_cells > 0);
+}
+
+/// An instance whose automation capacity is below its lane's live cells is refused at attach, not
+/// discovered by a render block. Preparation makes this unreachable; a hand-built entry reaches
+/// it.
+#[test]
+fn an_entry_whose_capacity_is_below_its_live_cells_is_refused_at_attach() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let mut prepared =
+        prepare_native_session_effects(&insert_session("miso.compressor"), registry, caps())
+            .expect("prepared");
+    prepared.entries[0].metadata.automation_capacity = 1;
+    let refusal = effect_compiler::attach_effect_live_controls(
+        &mut prepared,
+        &engine::realtime::LiveValuesSuperseded::new(),
+        0,
+    )
+    .err()
+    .expect("a window of one span cannot hold the compressor's cells");
+    assert_eq!(refusal.0[0].code, "effect.control.capacity");
+    assert!(prepared.entries[0].control.is_none());
 }
 
 /// One stored automation, a single step segment in `unit`.

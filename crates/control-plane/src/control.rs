@@ -266,9 +266,10 @@ pub struct TestTransactionSnapshot<Row> {
     /// pending candidate: `(epoch, strip ID, fader left, fader right, mute left, mute right,
     /// matrix)`. A cell's count is its write sequence (#1312 D3).
     pub strip_cells: Vec<(u64, Box<str>, [u64; 4], u64)>,
-    /// Every effect producer's free room, current epoch first, then each pending candidate:
-    /// `(epoch, strip ID, effect instance ID, room)`.
-    pub effect_rooms: Vec<(u64, Box<str>, Box<str>, usize)>,
+    /// How many writes every effect producer's parameter cells, then target cells, have taken,
+    /// current epoch first, then each pending candidate: `(epoch, strip ID, effect instance ID,
+    /// writes per cell)`. A cell's count is its write sequence (#1345 D1).
+    pub effect_cells: Vec<(u64, Box<str>, Box<str>, Vec<u64>)>,
     /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
     /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value
     /// bits)`.
@@ -522,9 +523,6 @@ pub enum CommandError {
     },
     /// A plan replacement or a queue has no room now; retry.
     Backpressure,
-    /// A live lane of the newest plan has too little room for a value-only transaction's records
-    /// (#1257 D8). capi reports it as `RESULT_BACKPRESSURE` with `control.live.backpressure`.
-    LiveBackpressure,
     /// The prospective session does not prepare or is not admitted.
     CompileRejected(CompileFailure),
     /// The control plane's own bookkeeping failed.
@@ -831,7 +829,7 @@ where
                     })
                 })
                 .collect(),
-            effect_rooms: core::iter::once(&self.providers)
+            effect_cells: core::iter::once(&self.providers)
                 .chain(&self.pending_providers)
                 .flat_map(|provider| {
                     provider.effects.iter().map(|producer| {
@@ -839,7 +837,7 @@ where
                             provider.epoch,
                             producer.track_id.clone(),
                             producer.effect_id.clone(),
-                            producer.producer().available_capacity(),
+                            producer.writer().test_only_write_counts(),
                         )
                     })
                 })
@@ -1328,27 +1326,23 @@ where
     /// producer resolution by strip ID, and by strip ID and live address for an effect, in the
     /// newest epoch (#1053 D7), each EQ owner's transaction -- `begin_owner`, `edit_owner` per
     /// edit and `preflight_candidate_targets` for the classifier's designed targets (#1265 D2) --
-    /// the room check on every effect queue the delta touches, every pushed effect record's
-    /// preflight and every changed value's readback handle (#1264 D3, D4), and the protocol's own
-    /// commit predicate. Each of them refuses before any cell, queue or the model changes, and a
-    /// refusal after an owner was begun discards every begun owner (`OpenOwners`). An effect
-    /// instance whose records, or an EQ's targets, outnumber its queue's whole capacity could
-    /// never fit, so the token goes back for a rebuild instead of an endless `BACKPRESSURE`
-    /// (#1264 D3, #1265 D2). An instance's `Bypass` record (#1266 D2) is an ordinary pushed record
-    /// on every instance, the EQ's included, where it rides with the targets (no order is
-    /// promised to the host, under #1053 D2) and counts toward their room.
+    /// every effect record's preflight and every changed value's readback handle (#1264 D3, D4),
+    /// and the protocol's own commit predicate. Each of them refuses before any cell or the model
+    /// changes, and a refusal after an owner was begun discards every begun owner (`OpenOwners`).
     ///
-    /// A strip's fader, mute and matrix/pan values are latest-target cells (#1312): a write needs
-    /// no room, so no strip term refuses a delta for `LIVE_BACKPRESSURE`. After the predicate and
-    /// the test fault hook, the commit takes its stamp from the newest epoch's gate as its last
-    /// fallible step (D7). Only then does it write every strip cell, push every effect record,
-    /// publish every EQ owner's targets, commit the token and every owner, and publish the stamped
-    /// revision on the gate, and none of them can fail: the cells have no room to want, the queue
-    /// room was checked, every effect record passed its producer's preflight and every target
-    /// prefix its owner's, the control thread is the only producer, a render pop only grows the
-    /// room, and the predicate is the commit's own under this `&mut` borrow. So no acked edit is
-    /// ever dropped, and no refused edit leaves a cell write, a record, a target, an open stamp
-    /// or an open owner behind.
+    /// Every live value is a latest-target cell (#1312, #1345): a strip's fader, mute and
+    /// matrix/pan values, an effect's parameter values, its bypass and an EQ's targets. A write
+    /// needs no room, so nothing refuses a delta for room and nothing turns it into a rebuild
+    /// because it outgrew a queue. After the predicate and the test fault hook, the commit takes
+    /// its stamp from the newest epoch's gate as its last fallible step (D7). Only then does it
+    /// write every strip cell, every effect cell and every EQ owner's target cells, commit the
+    /// token and every owner, and publish the stamped revision on the gate, and none of them can
+    /// fail: a cell has no room to want, every effect record passed its producer's preflight and
+    /// every target set its owner's, and the predicate is the commit's own under this `&mut`
+    /// borrow. So no acked edit is ever dropped, and no refused edit leaves a cell write, a
+    /// target, an open stamp or an open owner behind. An instance's `Bypass` record (#1266 D2) is
+    /// a cell write on every instance, the EQ's included: render reads the bypass cell first and
+    /// the parameter and target cells after it (#1345 D3).
     ///
     /// It never reserves a plan, adds a report row or replaces the provider catalog. After the
     /// commit it sets each live effect value in the catalog in place, so the parameter readback
@@ -1402,9 +1396,7 @@ where
             cursor = index + 1;
         }
 
-        // The effect instances, by strip ID and live address (#1264 D3). An instance whose
-        // queue records -- its records, or an EQ's targets (#1265 D2) -- outnumber its queue's
-        // whole capacity could never fit: rebuild instead.
+        // The effect instances, by strip ID and live address (#1264 D3).
         let mut resolved_effects = Vec::new();
         let mut begun = Vec::new();
         if resolved_effects
@@ -1420,25 +1412,17 @@ where
             }) else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
-            let producer = &effects[index];
-            let queued = match &instance.targets {
-                // An EQ's `Bypass` record (#1266 D2) is pushed ahead of its targets.
-                Some(targets) if producer.has_owner() => {
-                    bypass_records(&instance.records) + targets.len()
-                }
-                Some(_) => return LiveCommit::Done(Err(CommandError::Internal)),
-                None => instance.records.len(),
-            };
-            if queued > producer.capacity() {
-                drop(delta);
-                return LiveCommit::Rebuild(prepared);
+            // A delta that carries targets addresses an instance that owns them (#1265 D2).
+            if instance.targets.is_some() && !effects[index].has_owner() {
+                return LiveCommit::Done(Err(CommandError::Internal));
             }
             resolved_effects.push(index);
         }
 
         // 3. Each EQ owner's transaction (#1265 D2): begin at its committed revision, apply the
-        // edits, and preflight the designed targets (revision, validation and complete queue
-        // room). From here on, every refusal discards every owner begun, as `OpenOwners` drops.
+        // edits, and preflight the designed targets (revision and validation; the targets are
+        // cells and want no room). From here on, every refusal discards every owner begun, as
+        // `OpenOwners` drops.
         let mut owners = OpenOwners { effects, begun };
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
             let Some(targets) = &instance.targets else {
@@ -1471,34 +1455,19 @@ where
                     return LiveCommit::Done(Err(CommandError::Internal));
                 }
             }
-            match producer.preflight_candidate_targets(base_revision, targets) {
-                Ok(()) => {}
-                Err(host_core::EffectControlOwnerError::Capacity) => {
-                    return LiveCommit::Done(Err(CommandError::LiveBackpressure));
-                }
-                Err(_) => return LiveCommit::Done(Err(CommandError::Internal)),
+            if producer
+                .preflight_candidate_targets(base_revision, targets)
+                .is_err()
+            {
+                return LiveCommit::Done(Err(CommandError::Internal));
             }
         }
 
-        // 4. Room on every queue the delta touches. Each effect instance appears once in the
-        // delta, so a queue's need is its own record count. A strip's fader, mute and matrix
-        // values are latest-target cells (#1312): a write needs no room.
-        // An EQ owner's preflight checked room for its targets alone; its `Bypass` record is
-        // pushed ahead of them, so their sum must fit (#1266 D2).
-        for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
-            let pushed = match &instance.targets {
-                None => instance.records.len(),
-                Some(targets) => bypass_records(&instance.records) + targets.len(),
-            };
-            if owners.effects[index].producer().available_capacity() < pushed {
-                return LiveCommit::Done(Err(CommandError::LiveBackpressure));
-            }
-        }
-
-        // Every pushed effect record passes its producer's preflight, and each changed value's
-        // readback row exists, before the first push (#1264 D3, D4). The classifier refuses
-        // every record a producer would, so a refusal here is an internal fault. An EQ's records
-        // are its owner's edits, never pushed: its targets were preflighted above.
+        // 4. Every written effect record passes its producer's preflight, and each changed
+        // value's readback row exists, before the first write (#1264 D3, D4). The classifier
+        // refuses every record a producer would, so a refusal here is an internal fault. An EQ's
+        // parameter records are its owner's edits, never written: its targets were preflighted
+        // above.
         let record_count = delta
             .effects
             .iter()
@@ -1522,7 +1491,7 @@ where
                         channel,
                         value,
                     } => (parameter_index, channel, value),
-                    // Pushed on every instance, the EQ's too; no parameter row reads it.
+                    // Written on every instance, the EQ's too; no parameter row reads it.
                     effect_contract::EffectControlRecord::Bypass(_) => {
                         if producer.preflight(record).is_err() {
                             return LiveCommit::Done(Err(CommandError::Internal));
@@ -1573,17 +1542,17 @@ where
 
         // 6. The stamp is the last fallible step (#1312 D7): the revision this transaction commits
         // as, from the gate of the newest epoch, whose producers the writes below target. A
-        // refusal writes and pushes nothing and uses no revision. Every step from here to the
-        // revision's publication cannot fail: a cell write has no room to want, the pushes' room
-        // was checked, and the commit's predicate held under this borrow.
+        // refusal writes nothing and uses no revision. Every step from here to the revision's
+        // publication cannot fail: a cell write has no room to want, every record passed its
+        // preflight, and the commit's predicate held under this borrow.
         let revision = prepared.get().prospective_session().revision().0;
         let Ok(stamp) = revision_gate.stamp(revision) else {
             drop(owners);
             drop(prepared);
             return LiveCommit::Done(Err(CommandError::Internal));
         };
-        // Write the strips' cells, then push each effect's records and publish each EQ owner's
-        // targets. Nothing above changed anything but the owners' open candidates.
+        // Write the strips' cells, then each effect's cells and each EQ owner's target cells.
+        // Nothing above changed anything but the owners' open candidates.
         for (strip, &index) in delta.strips.iter().zip(&resolved) {
             let producer = &mut tracks[index];
             for record in strip.fader_records() {
@@ -1598,18 +1567,16 @@ where
             match &instance.targets {
                 None => {
                     for &record in &instance.records {
-                        producer.try_push(record).unwrap_or_else(|_| {
-                            unreachable!("the effect queue's room and the preflight were checked")
+                        producer.write(stamp, record).unwrap_or_else(|_| {
+                            unreachable!("every effect record passed its producer's preflight")
                         });
                     }
                 }
                 Some(targets) => {
                     for &record in &instance.records {
                         if matches!(record, effect_contract::EffectControlRecord::Bypass(_)) {
-                            producer.try_push(record).unwrap_or_else(|_| {
-                                unreachable!(
-                                    "the effect queue's room and the preflight were checked"
-                                )
+                            producer.write(stamp, record).unwrap_or_else(|_| {
+                                unreachable!("every effect record passed its producer's preflight")
                             });
                         }
                     }
@@ -1618,7 +1585,7 @@ where
                         .map(|owner| owner.committed_revision())
                         .expect("an owner was begun");
                     producer
-                        .publish_candidate_targets(base_revision, targets)
+                        .publish_candidate_targets(stamp, base_revision, targets)
                         .expect("the owner's targets were preflighted");
                 }
             }
@@ -1860,12 +1827,4 @@ pub enum SourceFailure {
     Control(SourceControlError),
     /// The control plane could not synchronise its plan epochs.
     Internal,
-}
-
-/// How many of an instance's records are `Bypass` records: none or one (#1266 D2).
-fn bypass_records(records: &[effect_contract::EffectControlRecord]) -> usize {
-    records
-        .iter()
-        .filter(|record| matches!(record, effect_contract::EffectControlRecord::Bypass(_)))
-        .count()
 }

@@ -9,13 +9,14 @@
 use std::sync::{Arc, Mutex};
 
 use effect_contract::{
-    AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectControlLane,
-    EffectControlRecord, EffectId, EffectProgramKey, EffectQuality, LatencySamples, LinkMode,
-    ParameterChannel, PreparedBankMetadata, PreparedEffectBank, PreparedNativeEffectBank,
+    AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectCellWriter,
+    EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
+    EffectProgramKey, EffectQuality, LatencySamples, LinkMode, ParameterChannel,
+    ParameterChannelPolicy, PreparedBankMetadata, PreparedEffectBank, PreparedNativeEffectBank,
     PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, effect_control_lane,
 };
-use engine::realtime::{LiveSnapshot, QueueGeneration, RenderError, RevisionGate, bounded_spsc};
+use engine::realtime::{GatePin, LiveSnapshot, LiveValuesSuperseded, RenderError, RevisionGate};
 use rack::{
     AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage,
     LiveControlEffectBankStage,
@@ -23,10 +24,6 @@ use rack::{
 
 const LANES: usize = 4;
 const CAPACITY: u32 = 4;
-
-fn depth(value: usize) -> core::num::NonZeroUsize {
-    core::num::NonZeroUsize::new(value).expect("nonzero")
-}
 
 fn program_key(latency: u64) -> EffectProgramKey {
     EffectProgramKey {
@@ -158,21 +155,58 @@ impl BankMembers for Planes {
     }
 }
 
-type Producers = Vec<engine::realtime::Producer<EffectControlRecord>>;
+/// The control side of a chain: the writers of the controlled lanes in lane order, and the plan's
+/// gate they stamp and publish on.
+struct Producers {
+    gate: RevisionGate,
+    pin: GatePin,
+    writers: Vec<EffectCellWriter>,
+}
+
+impl Producers {
+    /// Write `record` to the `index`-th controlled lane as a transaction of its own.
+    fn push(&mut self, index: usize, record: EffectControlRecord) {
+        let revision = self.pin.last_published() + 1;
+        let stamp = self.pin.stamp(revision).expect("a legal revision");
+        self.writers[index]
+            .write(stamp, record)
+            .expect("the lane has a cell for the record");
+        self.pin.publish(&self.gate, revision);
+    }
+}
+
+/// One lane of the mock bank: parameter 0 is a `PerLane` gain, so it has a `Left` and a `Right`
+/// cell, and the bank's capacity of four spans holds both.
+fn lane_pair(
+    bypass: bool,
+    superseded: &LiveValuesSuperseded,
+) -> (EffectCellWriter, EffectControlLane) {
+    effect_control_lane(
+        EffectLaneSpec {
+            shape: EffectLaneShape::from_live_parameters([(0, ParameterChannelPolicy::PerLane)], 0),
+            bypass,
+            observation_depth: 0,
+        },
+        superseded,
+    )
+    .expect("lane")
+}
 
 fn live_control_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Producers) {
-    let mut producers = Vec::new();
+    let (gate, pin) = RevisionGate::pair(0);
+    let mut producers = Producers {
+        gate,
+        pin,
+        writers: Vec::new(),
+    };
+    let superseded = LiveValuesSuperseded::new();
     let lanes: Vec<Option<EffectControlLane>> = controlled
         .iter()
         .map(|wanted| {
             wanted.then(|| {
-                let (producer, consumer) = bounded_spsc::<EffectControlRecord>(
-                    depth(CAPACITY as usize),
-                    QueueGeneration(0),
-                )
-                .expect("queue");
-                producers.push(producer);
-                EffectControlLane::new(consumer, false)
+                let (writer, lane) = lane_pair(false, &superseded);
+                producers.writers.push(writer);
+                lane
             })
         })
         .collect();
@@ -222,12 +256,12 @@ fn each_lane_receives_only_its_own_commands() {
     let mut members = planes(1.0);
     // Lanes 0 and 2 are commanded with different values; lane 1 stays silent so isolation is
     // observable in both directions.
-    producers[0].try_push(gain(0.25)).expect("room");
-    producers[2].try_push(gain(4.0)).expect("room");
+    producers.push(0, gain(0.25));
+    producers.push(2, gain(4.0));
     // The FINAL lane is commanded too: the drain loop's boundary lane is exactly where a
     // truncated iteration or off-by-one offset silently drops spans (verifier-added coverage,
     // #140 review — a mutation skipping the last lane's drain survived the original pair).
-    producers[3].try_push(gain(8.0)).expect("room");
+    producers.push(3, gain(8.0));
     chain
         .run(&mut members, 8, 0, LiveSnapshot::ALL)
         .expect("run");
@@ -253,7 +287,7 @@ fn a_command_applies_at_the_block_boundary_and_persists() {
         .expect("run");
     assert_eq!(members.left[0][0], 1.0, "no command yet");
 
-    producers[0].try_push(gain(0.5)).expect("room");
+    producers.push(0, gain(0.5));
     let mut members = planes(1.0);
     chain
         .run(&mut members, 8, 8, LiveSnapshot::ALL)
@@ -281,11 +315,9 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
     const LATENCY: usize = 2;
     let (mut chain, mut producers) = live_control_chain(LATENCY, [true, true, false, false]);
     // Lane 0 is bypassed and gained; lane 1 is only gained.
-    producers[0].try_push(gain(0.5)).expect("room");
-    producers[0]
-        .try_push(EffectControlRecord::Bypass(true))
-        .expect("room");
-    producers[1].try_push(gain(0.5)).expect("room");
+    producers.push(0, gain(0.5));
+    producers.push(0, EffectControlRecord::Bypass(true));
+    producers.push(1, gain(0.5));
 
     let mut seen_left: Vec<Vec<f32>> = vec![Vec::new(); LANES];
     for block in 0..4_u64 {
@@ -339,19 +371,15 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
 #[test]
 fn un_bypassing_returns_the_current_wet_signal() {
     let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
-    producers[0].try_push(gain(0.25)).expect("room");
-    producers[0]
-        .try_push(EffectControlRecord::Bypass(true))
-        .expect("room");
+    producers.push(0, gain(0.25));
+    producers.push(0, EffectControlRecord::Bypass(true));
     let mut members = planes(1.0);
     chain
         .run(&mut members, 8, 0, LiveSnapshot::ALL)
         .expect("run");
     assert!(members.left[0].iter().all(|value| *value == 1.0), "dry");
 
-    producers[0]
-        .try_push(EffectControlRecord::Bypass(false))
-        .expect("room");
+    producers.push(0, EffectControlRecord::Bypass(false));
     let mut members = planes(1.0);
     chain
         .run(&mut members, 8, 8, LiveSnapshot::ALL)
@@ -368,8 +396,8 @@ fn un_bypassing_returns_the_current_wet_signal() {
 fn a_command_timeline_is_partition_invariant() {
     let whole = {
         let (mut chain, mut producers) = live_control_chain(2, [true, true, true, true]);
-        producers[0].try_push(gain(0.5)).expect("room");
-        producers[3].try_push(gain(2.0)).expect("room");
+        producers.push(0, gain(0.5));
+        producers.push(3, gain(2.0));
         let mut members = planes(1.0);
         chain
             .run(&mut members, 8, 0, LiveSnapshot::ALL)
@@ -378,8 +406,8 @@ fn a_command_timeline_is_partition_invariant() {
     };
     let split = {
         let (mut chain, mut producers) = live_control_chain(2, [true, true, true, true]);
-        producers[0].try_push(gain(0.5)).expect("room");
-        producers[3].try_push(gain(2.0)).expect("room");
+        producers.push(0, gain(0.5));
+        producers.push(3, gain(2.0));
         let mut first = Planes {
             left: vec![vec![1.0; 4]; LANES],
             right: vec![vec![1.0; 4]; LANES],
@@ -436,18 +464,10 @@ fn a_command_timeline_is_partition_invariant() {
 #[test]
 fn a_live_control_stage_reports_the_lanes_that_hold_a_channel() {
     let stage_of = |controlled: [bool; LANES]| {
+        let superseded = LiveValuesSuperseded::new();
         let lanes = controlled
             .iter()
-            .map(|wanted| {
-                wanted.then(|| {
-                    let (_producer, consumer) = bounded_spsc::<EffectControlRecord>(
-                        depth(CAPACITY as usize),
-                        QueueGeneration(0),
-                    )
-                    .expect("queue");
-                    EffectControlLane::new(consumer, false)
-                })
-            })
+            .map(|wanted| wanted.then(|| lane_pair(false, &superseded).1))
             .collect();
         LiveControlEffectBankStage::new(
             MockGainBank::new(0).bound(),
@@ -680,7 +700,7 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
     const LATENCY: usize = 2;
     const FRAMES: usize = 8;
     let (mut chain, mut producers) = live_control_chain(LATENCY, [true, false, false, false]);
-    producers[0].try_push(gain(0.5)).expect("room");
+    producers.push(0, gain(0.5));
 
     let input = |block: usize, frame: usize| (block * FRAMES + frame + 1) as f32;
     let mut seen: Vec<f32> = Vec::new();
@@ -689,9 +709,7 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
         // first bypassed one. Its dry signal is input the shunt could only hold if the capture ran
         // during the wet blocks.
         if block == 2 {
-            producers[0]
-                .try_push(EffectControlRecord::Bypass(true))
-                .expect("room");
+            producers.push(0, EffectControlRecord::Bypass(true));
         }
         let mut members = Planes {
             left: (0..LANES)
@@ -747,7 +765,7 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
 fn a_zero_latency_bypass_emits_the_current_block_dry() {
     const FRAMES: usize = 8;
     let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
-    producers[0].try_push(gain(0.25)).expect("room");
+    producers.push(0, gain(0.25));
 
     let mut members = planes(3.0);
     chain
@@ -758,9 +776,7 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
         "block 0 renders wet"
     );
 
-    producers[0]
-        .try_push(EffectControlRecord::Bypass(true))
-        .expect("room");
+    producers.push(0, EffectControlRecord::Bypass(true));
     let mut members = planes(5.0);
     chain
         .run(
@@ -868,4 +884,219 @@ fn a_channel_less_bypassed_lane_is_shunted_without_a_staging_window() {
             );
         }
     }
+}
+
+/// Decision 15, #1345 D1 and D3: a revision's bypass and parameter land in one block, and only in
+/// the block whose snapshot covers the revision.
+///
+/// A chain rendered under the gate's own snapshots. The transaction writes a gain and a bypass
+/// stamped above the gate's published revision; the block that snapshots before the publication
+/// renders the old wet signal, and the first block after it applies both at once.
+///
+/// Test value: a bank stage that reads its lanes' cells without the block's snapshot (`ALL`), which
+/// applies a revision's values before the watermark reports it, or one that reads the bypass in
+/// another block than the parameters.
+#[test]
+fn a_revisions_bypass_and_gain_land_together_under_the_blocks_snapshot() {
+    const FRAMES: usize = 8;
+    let (mut chain, mut producers) = live_control_chain(0, [true, false, false, false]);
+    let revision = producers.pin.last_published() + 1;
+    {
+        let stamp = producers.pin.stamp(revision).expect("a legal revision");
+        for record in [gain(0.25), EffectControlRecord::Bypass(true)] {
+            producers.writers[0].write(stamp, record).expect("cells");
+        }
+    }
+    // Written, not published: this block's snapshot does not cover it.
+    let mut members = planes(1.0);
+    chain
+        .run(&mut members, FRAMES as u32, 0, producers.gate.snapshot())
+        .expect("run");
+    assert!(
+        members.left[0].iter().all(|value| *value == 1.0),
+        "wet at unity gain: the unpublished revision applied nothing"
+    );
+    producers.pin.publish(&producers.gate, revision);
+    let mut members = planes(1.0);
+    chain
+        .run(
+            &mut members,
+            FRAMES as u32,
+            FRAMES as u64,
+            producers.gate.snapshot(),
+        )
+        .expect("run");
+    assert!(
+        members.left[0].iter().all(|value| *value == 1.0),
+        "bypassed: the dry input, which at unity input equals the unity-gain wet signal"
+    );
+    // Un-bypass in a later revision and read the gain the bypassed block already held: the gain
+    // applied together with the bypass, so the wet signal is the quarter-gain one.
+    producers.push(0, EffectControlRecord::Bypass(false));
+    let mut members = planes(1.0);
+    chain
+        .run(
+            &mut members,
+            FRAMES as u32,
+            2 * FRAMES as u64,
+            producers.gate.snapshot(),
+        )
+        .expect("run");
+    assert!(
+        members.left[0].iter().all(|value| *value == 0.25),
+        "the gain of the revision that bypassed was applied in that revision's block"
+    );
+}
+
+/// Issue #1345 D2 and D8: each lane's observation queue is drained into that lane's own
+/// observation state, subscriptions apply in order, and a subscription the lane's state cannot take
+/// (a tap it does not declare, or no state at all) is counted unbound.
+///
+/// The lanes' menus differ (two taps, one tap, none) so that a drain that applies queue `k` to
+/// another lane's state changes the armed and unbound counts.
+///
+/// Test value: a drain that applies lane `k`'s queue to another lane's taps, applies a lane's
+/// records out of order, or loses the unbound count.
+#[test]
+fn each_lanes_subscriptions_reach_that_lanes_taps_in_order() {
+    use effect_contract::{
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+        ObservationFold, ObservationKind, ObservationLane, ObservationTapId, ParameterUnit,
+    };
+    use engine::realtime::observation_slot;
+
+    const fn tap(id: u32) -> ObservationDescriptor {
+        ObservationDescriptor {
+            id: ObservationTapId(id),
+            display_name: "Gain Reduction",
+            display_unit: "dB",
+            kind: ObservationKind::GainReductionDb,
+            unit: ParameterUnit::Db,
+            cost: ObservationCost::Resident,
+            cadence: ObservationCadence::PerBlock,
+            fold: ObservationFold::PeakMagnitude,
+            channels: ObservationChannels::PerLane,
+            minimum: 0.0,
+            maximum: 100.0,
+        }
+    }
+    static TWO_TAPS: [ObservationDescriptor; 2] = [tap(1), tap(2)];
+    static ONE_TAP: [ObservationDescriptor; 1] = [tap(1)];
+
+    let observation = |menu: &'static [ObservationDescriptor]| {
+        let publishers = menu.iter().map(|_| observation_slot().0).collect();
+        ObservationLane::new(menu, publishers, 4).expect("one publisher per tap")
+    };
+    let superseded = LiveValuesSuperseded::new();
+    let mut writers = Vec::new();
+    let mut lanes = Vec::new();
+    for _ in 0..LANES {
+        let (writer, control) = effect_control_lane(
+            EffectLaneSpec {
+                shape: EffectLaneShape::from_live_parameters(
+                    [(0, ParameterChannelPolicy::PerLane)],
+                    0,
+                ),
+                bypass: false,
+                observation_depth: 2,
+            },
+            &superseded,
+        )
+        .expect("lane");
+        writers.push(writer);
+        lanes.push(Some(control));
+    }
+    let mut stage = LiveControlEffectBankStage::new(
+        MockGainBank::new(0).bound(),
+        BankWidth::Four,
+        8,
+        lanes,
+        vec![
+            Some(observation(&TWO_TAPS)),
+            Some(observation(&ONE_TAP)),
+            Some(observation(&TWO_TAPS)),
+            None,
+        ],
+        0,
+    )
+    .expect("stage");
+    assert_eq!(stage.observation_tap_counts(), (5, 0));
+    // Lane 0 arms its second tap. Lane 1 names a second tap it does not declare. Lane 2 arms its
+    // first tap, disarms it and arms its second (in that order). Lane 3 has no state at all.
+    writers[0].try_push_observe(1, true, 0).expect("room");
+    writers[1].try_push_observe(1, true, 0).expect("room");
+    writers[2].try_push_observe(0, true, 0).expect("room");
+    writers[2].try_push_observe(0, false, 0).expect("room");
+    assert!(
+        writers[2].try_push_observe(1, true, 0).is_err(),
+        "a queue holds one slot per declared tap: the third record is refused, not dropped later"
+    );
+    writers[3].try_push_observe(0, true, 0).expect("room");
+    stage.begin_block(0, LiveSnapshot::ALL).expect("drain");
+    assert_eq!(
+        stage.observation_tap_counts(),
+        (5, 1),
+        "lane 0's second tap is the only armed tap: lane 2's arm was disarmed in order"
+    );
+    assert_eq!(
+        stage.unbound_observations(),
+        2,
+        "lane 1's undeclared tap and lane 3's missing state"
+    );
+    for (lane, writer) in writers.iter().enumerate() {
+        assert_eq!(
+            writer.observe_available_capacity(),
+            2,
+            "lane {lane}: the drain emptied its queue"
+        );
+    }
+}
+
+/// Issue #1345 D4: a bank whose automation capacity is below a lane's live parameter cells is
+/// refused at bind, never discovered on the render thread.
+///
+/// Test value: a stage that accepts a window shorter than a lane's cells, which would drop or
+/// defer a cell of a committed revision.
+#[test]
+fn a_bank_window_below_a_lanes_live_cells_is_refused_at_bind() {
+    let superseded = LiveValuesSuperseded::new();
+    let wide = || {
+        effect_control_lane(
+            EffectLaneSpec {
+                // Three `PerLane` parameters: six cells, in a bank that declares four spans.
+                shape: EffectLaneShape::from_live_parameters(
+                    [
+                        (0, ParameterChannelPolicy::PerLane),
+                        (1, ParameterChannelPolicy::PerLane),
+                        (2, ParameterChannelPolicy::PerLane),
+                    ],
+                    0,
+                ),
+                bypass: false,
+                observation_depth: 0,
+            },
+            &superseded,
+        )
+        .expect("lane")
+        .1
+    };
+    let refused = LiveControlEffectBankStage::new(
+        MockGainBank::new(0).bound(),
+        BankWidth::Four,
+        8,
+        vec![Some(wide()), None, None, None],
+        vec![None, None, None, None],
+        0,
+    );
+    assert!(matches!(refused, Err(rack::RackError::AutomationWindow)));
+    // The same bank takes a lane of two cells.
+    LiveControlEffectBankStage::new(
+        MockGainBank::new(0).bound(),
+        BankWidth::Four,
+        8,
+        vec![Some(lane_pair(false, &superseded).1), None, None, None],
+        vec![None, None, None, None],
+        0,
+    )
+    .expect("a lane whose cells fit the window");
 }

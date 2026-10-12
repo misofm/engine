@@ -11,11 +11,12 @@
 
 use effect_contract::{
     BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
-    EffectId, EffectProgramKey, LatencySamples, ObservationLane, ObservationSample,
-    PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffectBank, PreparedSidechainPort,
-    SeamSide, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, transpose_tile_4,
+    EffectControlRecord, EffectId, EffectProgramKey, LatencySamples, ObservationLane,
+    ObservationSample, PreparedAutomationSpan, PreparedEffectBank, PreparedNativeEffectBank,
+    PreparedSidechainPort, SeamSide, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    apply_observe, transpose_tile_4,
 };
-use engine::realtime::{LiveSnapshot, RenderError};
+use engine::realtime::{Consumer, LiveSnapshot, RenderError};
 
 /// Sub-phase timing inside [`BankChain::run`] for the gain/pan phase profile (issue #960).
 ///
@@ -1130,10 +1131,11 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 ///
 /// # What one block does, in order
 ///
-/// 1. Drain every lane's bounded queue into that lane's window of the packed span array, in
-///    canonical order (`EffectControlLane::stage`). This happens **before** any audio is touched,
-///    so an admitted record takes effect on the first sample of this block -- the same
-///    block-boundary rule the matrix stage proved for #137's E1.
+/// 1. Read every lane's pending cells under the block's snapshot into that lane's window of the
+///    packed span array, in canonical order (`EffectControlLane::stage`), then drain every
+///    lane's observation queue. This happens **before** any audio is touched, so a committed
+///    value takes effect on the first sample of this block -- the same block-boundary rule the
+///    matrix stage proved for #137's E1.
 /// 2. Capture the dry AoSoA block into the latency shunt, if any lane can be bypassed.
 /// 3. Run the bank once with the packed spans and the per-lane offsets the effect contract
 ///    already defines (`EffectBankProcessBlock::automation_offsets`).
@@ -1141,8 +1143,8 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 ///
 /// # Partition invariance and `to_bits` identity extend to command timelines
 ///
-/// The spans a lane receives are a pure function of that lane's own queue and the block's
-/// `first_sample`, and every lane is staged independently into a disjoint window. A bank therefore
+/// The spans a lane receives are a pure function of that lane's own cells, the block's snapshot
+/// and `first_sample`, and every lane is staged independently into a disjoint window. A bank therefore
 /// applies a command timeline to lane `l` exactly as the per-node scalar path applies it to the
 /// same effect: same spans, same block, same order.
 pub struct LiveControlEffectBankStage {
@@ -1154,6 +1156,9 @@ pub struct LiveControlEffectBankStage {
     /// One control lane per bank lane: a live channel, a channel-less lane that carries a
     /// session bypass (issue #1087), or `None` for a lane neither applies to.
     lanes: Box<[Option<EffectControlLane>]>,
+    /// The observation queue of each lane, taken out of its lane at bind so that the drain loop
+    /// holds each pop in its own body (decision 15, #1345 D8). `None` for a lane without one.
+    observe_queues: Box<[Option<Consumer<EffectControlRecord>>]>,
     /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
     /// lane has a live channel (issue #1087).
     ///
@@ -1184,8 +1189,6 @@ pub struct LiveControlEffectBankStage {
     /// [`LiveControlEffectBankStage::drain`], read by the process body that follows it in the same
     /// block.
     staged_spans: usize,
-    /// Records dropped because a lane's window was full of distinct targets. Zero by construction.
-    dropped: u64,
     /// `Observe` records this slot had no capacity to apply. Zero by construction.
     unbound: u64,
 }
@@ -1203,8 +1206,9 @@ impl LiveControlEffectBankStage {
     /// [`RackError::WidthMismatch`] if the processor is not this width or the lane count disagrees,
     /// [`RackError::ZeroQuantum`] for a zero quantum, and [`RackError::AutomationWindow`] if the
     /// staging window is not exactly the bank's automation capacity -- the precondition of the
-    /// live drain's pairing rule, refused here, at bind, rather than discovered on the render
-    /// thread.
+    /// live drain's pairing rule -- or holds fewer spans than a lane has live parameter cells
+    /// (#1345 D4: a block stages every cell it reads, with no deferral), refused here, at bind,
+    /// rather than discovered on the render thread.
     pub fn new(
         bank: PreparedEffectBank,
         width: BankWidth,
@@ -1213,6 +1217,7 @@ impl LiveControlEffectBankStage {
         observations: Vec<Option<ObservationLane>>,
         latency: usize,
     ) -> Result<Self, RackError> {
+        let mut lanes = lanes;
         // Issue #1461: the bank's metadata is read here, at bind, and none of it is kept; the
         // render path reads the width, quantum and window this builds.
         let PreparedEffectBank {
@@ -1276,6 +1281,22 @@ impl LiveControlEffectBankStage {
             EffectBankProcessBlock::check_automation_window(&staging, &metadata)
                 .map_err(|_| RackError::AutomationWindow)?;
         }
+        // The window holds a span for every live parameter cell of every lane: a block stages
+        // each cell it reads, so none is deferred or dropped (#1345 D4).
+        if lanes
+            .iter()
+            .flatten()
+            .any(|lane| lane.check_window(staging.len()).is_err())
+        {
+            return Err(RackError::AutomationWindow);
+        }
+        let observe_queues: Box<[Option<Consumer<EffectControlRecord>>]> = lanes
+            .iter_mut()
+            .map(|lane| {
+                lane.as_mut()
+                    .and_then(EffectControlLane::take_observe_queue)
+            })
+            .collect();
         Ok(Self {
             processor,
             designed,
@@ -1283,13 +1304,13 @@ impl LiveControlEffectBankStage {
             quantum,
             offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
             lanes: lanes.into_boxed_slice(),
+            observe_queues,
             staging,
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
             observations: observed.then(|| observations.into_boxed_slice()),
             samples,
             staged_spans: 0,
-            dropped: 0,
             unbound: 0,
         })
     }
@@ -1344,12 +1365,6 @@ impl LiveControlEffectBankStage {
                 observation.disarm_all();
             }
         }
-    }
-
-    /// Records refused because a lane's staging window was full. Read only off the render thread.
-    #[must_use]
-    pub const fn dropped_records(&self) -> u64 {
-        self.dropped
     }
 }
 
@@ -1482,29 +1497,22 @@ impl BankStage for LiveControlEffectBankStage {
 }
 
 impl LiveControlEffectBankStage {
+    // REALTIME_POLICY_BEGIN
     /// Step 1 of the block, hoisted out of [`Self::process_inner`] so that it runs before the
     /// chain's collapse dispatch reads the witness. See [`BankStage::begin_block`].
     ///
-    /// The queue lanes ignore `snapshot`: it is the block's `S`, handed here so the cell lanes that
-    /// replace them (#1345) read under it.
+    /// Two loops, and the split is the shape the realtime gate accepts (decision 15, #1345 D8,
+    /// #1418 Amendment 1): the first reads each lane's cells under the block's snapshot `S` and
+    /// pops nothing; the second drains each lane's observation queue, each pop counted at entry in
+    /// the loop that holds it, and hands each record to the slot's observation lanes by the lane's
+    /// index. The loop that stages and the loop that pops are not one loop because a queue drain
+    /// inside a loop that also calls a method of the lane would need the lane named in the drain.
     fn drain(&mut self, first_sample: u64, snapshot: LiveSnapshot) -> Result<(), RenderError> {
-        let _ = snapshot;
-        let lane_count = self.width.lanes() as usize;
         let mut packed = 0_usize;
         self.offsets[0] = 0;
-        for lane in 0..lane_count {
-            if let Some(channel) = self.lanes[lane].as_mut() {
-                let observation = self
-                    .observations
-                    .as_deref_mut()
-                    .and_then(|lanes| lanes.get_mut(lane))
-                    .and_then(Option::as_mut);
-                let staged = channel.stage(&mut self.staging, first_sample, observation);
-                if staged.target_error {
-                    return Err(RenderError::InvalidEnvelope);
-                }
-                self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
-                self.unbound = self.unbound.saturating_add(u64::from(staged.unbound));
+        for (lane, channel) in self.lanes.iter_mut().enumerate() {
+            if let Some(channel) = channel.as_mut() {
+                let staged = channel.stage(&mut self.staging, first_sample, snapshot);
                 // Packed at this lane's own offset, immediately: that offset is what makes the
                 // window reusable and what gives the lane its private partition of `packed`.
                 self.packed[packed..packed + staged.staged]
@@ -1514,8 +1522,30 @@ impl LiveControlEffectBankStage {
             self.offsets[lane + 1] = packed as u32;
         }
         self.staged_spans = packed;
+        let mut observations = self.observations.as_deref_mut();
+        let mut unbound = 0_u64;
+        for (index, queue) in self.observe_queues.iter_mut().enumerate() {
+            let mut available = queue.as_ref().map_or(0, Consumer::available_at_entry);
+            while available != 0 {
+                available -= 1;
+                let Some(Ok(record)) = queue.as_mut().map(Consumer::try_pop) else {
+                    // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep
+                    // the drain bounded if a malformed test double violates that invariant.
+                    break;
+                };
+                let observation = observations
+                    .as_deref_mut()
+                    .and_then(|lanes| lanes.get_mut(index))
+                    .and_then(Option::as_mut);
+                if !apply_observe(record, first_sample, observation) {
+                    unbound = unbound.saturating_add(1);
+                }
+            }
+        }
+        self.unbound = self.unbound.saturating_add(unbound);
         Ok(())
     }
+    // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
     /// The one live-control slot body, dual or collapsed.

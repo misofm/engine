@@ -9,7 +9,11 @@ mod prepared_target;
 mod response;
 mod step;
 mod symmetry;
-pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
+pub use live::{
+    BypassShunt, EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources,
+    EffectLaneShape, EffectLaneSpec, EffectWriteRefusal, ObservationLane, ObservePushError, Staged,
+    apply_observe, effect_control_lane,
+};
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,
     PREPARED_EFFECT_TARGET_WORDS, PreparedEffectTarget,

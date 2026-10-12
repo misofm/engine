@@ -1241,19 +1241,20 @@ pub(crate) struct LiveControlEffect {
 }
 
 impl LiveControlEffect {
-    /// Drain this effect's live-control lane and stage the block's spans (issue #143 D3, #1504).
+    // REALTIME_POLICY_BEGIN
+    /// Read this effect's live-control cells under the block's live snapshot `S`, stage the
+    /// block's spans, and drain its observation queue (issue #143 D3, #1504, #1345).
     ///
-    /// `snapshot` is the block's live snapshot `S`: the queue lane ignores it until the lane moves
-    /// to cells (#1345). Called once in every block, before a sample of the block is touched.
+    /// Called once in every block, before a sample of the block is touched, in no loop (#1345
+    /// D10): the lane's own queue drain is the per-node path's drain.
     #[inline]
     fn stage(&mut self, snapshot: LiveSnapshot, first_sample: u64) -> effect_contract::Staged {
-        let _ = snapshot;
-        self.control.stage(
-            &mut self.spans,
-            first_sample,
-            self.observation.as_deref_mut(),
-        )
+        let staged = self.control.stage(&mut self.spans, first_sample, snapshot);
+        self.control
+            .drain_observations(first_sample, self.observation.as_deref_mut());
+        staged
     }
+    // REALTIME_POLICY_END
 
     fn new(
         effect: GraphPreparedEffect,
@@ -1288,12 +1289,17 @@ impl LiveControlEffect {
         ]
         .into_boxed_slice();
         // The live drain's pairing rule needs the window to be exactly the effect's automation
-        // capacity (issue #1012). Checked here, at bind, off the render thread; this node builder
-        // is infallible, so a violation is a bind-time panic, as `stage_for`'s validated width is.
-        // A channel-less lane stages nothing.
+        // capacity (issue #1012), and a block stages one span for every live parameter cell it
+        // reads, with no deferral (#1345 D4), so the window holds the lane's cells. Checked here,
+        // at bind, off the render thread; this node builder is infallible, so a violation is a
+        // bind-time panic, as `stage_for`'s validated width is. A channel-less lane stages
+        // nothing.
         if live {
             effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
                 .expect("a live-control effect's staging window is its automation capacity");
+            control
+                .check_window(spans.len())
+                .expect("a live-control effect's staging window holds every live parameter cell");
         }
         Self {
             observation,
@@ -3612,13 +3618,6 @@ fn execute_op(
             // call, so a batch that changes a threshold and arms its tap lands on one sample
             // timeline by construction rather than by two clocks agreeing.
             let staged = live.stage(snapshot, first_sample);
-            // Preparation refuses a queue deeper than the effect's automation capacity, so a full
-            // drain can never produce more distinct spans than the window holds. This is the
-            // invariant, not a runtime policy: in release it costs nothing.
-            debug_assert_eq!(staged.dropped, 0, "live-control staging window overflowed");
-            if staged.target_error {
-                return Err(RenderError::InvalidEnvelope);
-            }
             let automation = &live.spans[..staged.staged];
             let bypassed = live.control.bypassed();
             // Issue #163 phase 4 item 4: the dry staging is read only by the `apply` below, and

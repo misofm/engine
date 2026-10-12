@@ -1,19 +1,23 @@
 //! Issue #143 P2: the arm/disarm seam and the window accumulator.
 //!
 //! What is gated here is everything about a subscription that does **not** need a plan: that an
-//! `Observe` record rides the parameter queue and emits no span, that arming is a flag rather than
-//! an allocation, that windows tile exactly, that the declared fold is what produces a non-negative
-//! magnitude, and that an unarmed tap is never read. The binding to a running plan is P3's.
+//! `Observe` record rides the lane's observation queue, in order, beside the cells and emits no
+//! span, that arming is a flag rather than an allocation, that windows tile exactly, that the
+//! declared fold is what produces a non-negative magnitude, and that an unarmed tap is never
+//! read. The binding to a running plan is P3's.
 
 #![allow(missing_docs)]
 
+#[path = "support/lane_rig.rs"]
+mod lane_rig;
+
 use effect_contract::{
-    AutomationSpanKind, EffectControlLane, EffectControlRecord, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationLane, ObservationSample, ObservationTapId, ParameterChannel, ParameterUnit,
-    PreparedAutomationSpan,
+    EffectLaneShape, ObservationCadence, ObservationChannels, ObservationCost,
+    ObservationDescriptor, ObservationFold, ObservationKind, ObservationLane, ObservationSample,
+    ObservationTapId, ObservePushError, ParameterChannelPolicy, ParameterUnit,
 };
-use engine::realtime::{ObservationReader, QueueGeneration, bounded_spsc, observation_slot};
+use engine::realtime::{ObservationReader, observation_slot};
+use lane_rig::{Rig, both};
 
 const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {
     ObservationDescriptor {
@@ -50,66 +54,38 @@ fn lane(default_window_blocks: u32) -> (ObservationLane, Vec<ObservationReader>)
     )
 }
 
-fn idle() -> PreparedAutomationSpan {
-    PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
-        channel: ParameterChannel::Both,
-        parameter_index: u32::MAX,
-        start_sample: 0,
-        end_sample: 0,
-        start_value: 0.0,
-        end_value: 0.0,
-    }
-}
-
-fn depth(value: usize) -> core::num::NonZeroUsize {
-    core::num::NonZeroUsize::new(value).expect("nonzero")
-}
-
 fn sample(left: f32, right: f32) -> ObservationSample {
     ObservationSample { left, right }
 }
 
+/// A shape with one `Shared` parameter, so a block has one span to stage beside the observations.
+fn one_shared_parameter() -> EffectLaneShape {
+    EffectLaneShape::from_live_parameters([(0, ParameterChannelPolicy::Shared)], 0)
+}
+
 /// An `Observe` record emits no span and does not consume staging capacity.
 ///
-/// Red mutation: make the `Observe` arm fall through to the span builder -> `staged` becomes 3 and
-/// a parameter is displaced from a full window.
+/// Red mutation: make `drain_observations` stage a span for the subscription -> the lane's span
+/// count moves, or its staging window overflows.
 #[test]
-fn an_observe_record_rides_the_parameter_queue_and_emits_no_span() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
-    let mut control = EffectControlLane::new(consumer, false);
+fn an_observe_record_rides_the_observation_queue_and_emits_no_span() {
+    let mut rig = Rig::new(one_shared_parameter(), 2);
     let (mut observation, _readers) = lane(4);
 
-    producer
-        .try_push(EffectControlRecord::Parameter {
-            parameter_index: 0,
-            channel: ParameterChannel::Both,
-            value: 0.25,
-        })
-        .expect("room");
-    producer
-        .try_push(EffectControlRecord::Observe {
-            tap_index: 0,
-            armed: true,
-            window_blocks: 3,
-        })
-        .expect("room");
-    producer
-        .try_push(EffectControlRecord::Observe {
-            tap_index: 1,
-            armed: true,
-            window_blocks: 0,
-        })
-        .expect("room");
+    rig.commit(&[both(0, 0.25)]).expect("a cell");
+    rig.writer.try_push_observe(0, true, 3).expect("room");
+    rig.writer.try_push_observe(1, true, 0).expect("room");
 
-    // Exactly one span of capacity: an `Observe` that consumed staging would overflow it.
-    let mut staging = [idle(); 1];
-    let staged = control.stage(&mut staging, 512, Some(&mut observation));
+    // Exactly one span of capacity: the parameter's cell is the only span a block stages.
+    let staged = rig.stage();
     assert_eq!(staged.staged, 1, "one parameter, no observation spans");
-    assert_eq!(staged.dropped, 0, "the observations did not crowd it out");
-    assert_eq!(staged.unbound, 0);
-    assert_eq!(staging[0].parameter_index, 0);
+    assert_eq!(rig.staging[0].parameter_index, 0);
+    assert!(
+        !observation.any_armed(),
+        "the queue drains apart from the cells"
+    );
+    let unbound = rig.lane.drain_observations(512, Some(&mut observation));
+    assert_eq!(unbound, 0);
     assert!(observation.is_armed(0) && observation.is_armed(1));
     assert!(observation.any_armed());
     // `window_blocks == 0` takes the plan default.
@@ -119,33 +95,67 @@ fn an_observe_record_rides_the_parameter_queue_and_emits_no_span() {
 /// A plan with no observation capacity refuses the record instead of applying it silently.
 #[test]
 fn an_observe_record_against_an_incapable_plan_is_reported_unbound() {
-    let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
-    let mut control = EffectControlLane::new(consumer, false);
-    producer
-        .try_push(EffectControlRecord::Observe {
-            tap_index: 0,
-            armed: true,
-            window_blocks: 1,
-        })
-        .expect("room");
-    let mut staging = [idle(); 4];
-    let staged = control.stage(&mut staging, 0, None);
-    assert_eq!(staged.staged, 0);
-    assert_eq!(staged.unbound, 1, "no capacity is refused, never ignored");
+    let mut rig = Rig::new(one_shared_parameter(), 4);
+    rig.writer.try_push_observe(0, true, 1).expect("room");
+    assert_eq!(
+        rig.lane.drain_observations(0, None),
+        1,
+        "no capacity is refused, never ignored"
+    );
 
     // And so is a tap index the menu does not have.
     let (mut observation, _readers) = lane(2);
-    producer
-        .try_push(EffectControlRecord::Observe {
-            tap_index: 7,
-            armed: true,
-            window_blocks: 1,
-        })
-        .expect("room");
-    let staged = control.stage(&mut staging, 0, Some(&mut observation));
-    assert_eq!(staged.unbound, 1);
+    rig.writer.try_push_observe(7, true, 1).expect("room");
+    assert_eq!(rig.lane.drain_observations(0, Some(&mut observation)), 1);
     assert!(!observation.any_armed());
+}
+
+/// Subscriptions are a FIFO, not a level: a later one never replaces an earlier one, they apply in
+/// order, and a full queue refuses the newest and returns it, dropping nothing.
+///
+/// Test value: observation records collapsed like cell values (arm, disarm, re-arm folding to one
+/// arm with the first window), or a full queue that overwrites its oldest record.
+#[test]
+fn subscriptions_apply_in_order_and_a_full_queue_refuses_the_newest() {
+    let mut rig = Rig::new(one_shared_parameter(), 3);
+    let (mut observation, _readers) = lane(4);
+    assert_eq!(rig.writer.observe_capacity(), 3);
+    rig.writer.try_push_observe(0, true, 2).expect("room");
+    rig.writer.try_push_observe(0, false, 0).expect("room");
+    rig.writer.try_push_observe(0, true, 7).expect("room");
+    assert_eq!(rig.writer.observe_available_capacity(), 0);
+    match rig.writer.try_push_observe(1, true, 1) {
+        Err(ObservePushError::Full(full)) => assert_eq!(
+            full.value,
+            effect_contract::EffectControlRecord::Observe {
+                tap_index: 1,
+                armed: true,
+                window_blocks: 1,
+            },
+            "the refused record is handed back"
+        ),
+        other => panic!("expected a full queue, got {other:?}"),
+    }
+    assert_eq!(rig.writer.observe_full_count(), 1);
+    assert_eq!(rig.lane.drain_observations(0, Some(&mut observation)), 0);
+    assert!(observation.is_armed(0), "arm, disarm, arm leaves it armed");
+    assert!(!observation.is_armed(1), "the refused record never applied");
+    assert_eq!(
+        rig.writer.observe_available_capacity(),
+        3,
+        "the drain emptied the queue"
+    );
+}
+
+/// A lane with no observation queue answers a subscription with a typed error.
+#[test]
+fn a_lane_without_an_observation_queue_refuses_a_subscription() {
+    let mut rig = Rig::new(one_shared_parameter(), 0);
+    assert!(matches!(
+        rig.writer.try_push_observe(0, true, 1),
+        Err(ObservePushError::Unbound)
+    ));
+    assert_eq!(rig.writer.observe_capacity(), 0);
 }
 
 /// An unarmed tap is never read: `wants` is the whole of level-2 zero.

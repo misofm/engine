@@ -162,10 +162,12 @@ pub(crate) fn resource_estimate(
 /// Exact retained storage for attached effect control lanes and the live-control owners they
 /// create.
 ///
-/// Queue payload is charged from the SPSC layout helper using each lane's actual capped capacity.
-/// The lane-owned target FIFO is charged once when present. Scalar lanes retain one boxed lane;
-/// banked lanes are moved into one boxed `Option<EffectControlLane>` array per bank, so this
-/// helper does not count the pre-bank scalar boxes a bank later consumes.
+/// A lane's cells, dirty words, readers, target staging and observation queue are charged from
+/// the lane's own accounting (`EffectControlLane::retained_resources`), each allocation once; the
+/// cells replace the queue and the target FIFO the lane held before decision 15's D15-2. Scalar
+/// lanes retain one boxed lane; banked lanes are moved into one boxed `Option<EffectControlLane>`
+/// array per bank, with an array of their observation queues beside it, so this helper does not
+/// count the pre-bank scalar boxes a bank later consumes.
 ///
 /// # The live-control owners (issue #1100)
 ///
@@ -219,14 +221,9 @@ pub(crate) fn effect_control_resource(
         let Some(control) = entry.control.as_deref() else {
             continue;
         };
-        let queue = control.retained_queue_payload()?;
-        let queue_header = u64::try_from(queue.ring_header_bytes).ok()?;
-        let queue_slots = u64::try_from(queue.slot_payload_bytes).ok()?;
-        total = total.checked_add(queue_header)?.checked_add(queue_slots)?;
-        largest = largest.max(queue_header).max(queue_slots);
-        let target = u64::try_from(control.target_staging_retained_bytes()).ok()?;
-        total = total.checked_add(target)?;
-        largest = largest.max(target);
+        let lane = control.retained_resources();
+        total = total.checked_add(lane.total_bytes)?;
+        largest = largest.max(lane.largest_allocation_bytes);
         let key = (
             entry.track_id.as_str(),
             entry.rack,
@@ -303,8 +300,14 @@ pub(crate) fn effect_control_resource(
                 >())
                 .ok()?,
             )?;
-            total = total.checked_add(lane_array)?;
-            largest = largest.max(lane_array);
+            let queue_array = lanes.checked_mul(
+                u64::try_from(core::mem::size_of::<
+                    Option<engine::realtime::Consumer<effect_contract::EffectControlRecord>>,
+                >())
+                .ok()?,
+            )?;
+            total = total.checked_add(lane_array)?.checked_add(queue_array)?;
+            largest = largest.max(lane_array).max(queue_array);
             // The banked live-control owner: `rack::LiveControlEffectBankStage::new`, which
             // `graph`'s `stage_for` builds in place of a plain `EffectBankStage` for any slot with
             // a lane.

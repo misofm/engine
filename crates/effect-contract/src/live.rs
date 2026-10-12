@@ -1,4 +1,4 @@
-//! The live-control seam: admitted records in, prepared automation spans out.
+//! The live-control seam: committed live values in, prepared automation spans out.
 //!
 //! # Why this lives in the contract crate
 //!
@@ -14,42 +14,87 @@
 //! internals, and both already depend on this one, so the staging is written **once**, here, and
 //! the two racks differ only in how many lanes they stage.
 //!
+//! # Latest-target cells (decision 15, D15-2; issue #1345)
+//!
+//! An effect's live parameter values, its bypass and a prepared-target owner's targets are held in
+//! latest-target cells ([`engine::realtime::LatestCell`]), not in a queue. Control writes a cell
+//! with [`EffectCellWriter::write`], and a write cannot fail on a value and never waits, however
+//! many edits arrive between two render calls. Render reads each pending cell under the block's
+//! live snapshot `S` and applies the newest write whose revision is at or below it; the writes it
+//! replaced before any snapshot covered them are added to the session's `live_values_superseded`
+//! (`CellReader::read_counted`). One lane holds
+//!
+//! - one **bypass** cell (one word);
+//! - one **parameter** cell per `(parameter_index, channel)` of every `Block`-rate parameter: a
+//!   `Shared` parameter has one `Both` cell, a `PerLane` one a `Left` and a `Right` cell (one
+//!   word, the value's bits). A lane whose effect owns prepared targets (the parametric EQ) has
+//!   none: its parameters ride its targets, and a bare parameter write is refused;
+//! - one **target** cell per `(target slot, channel)` of a prepared-target owner
+//!   ([`PREPARED_EFFECT_TARGET_WORDS`] words; a `Both` target writes both channel cells).
+//!
+//! The cell's index is its dirty bit and its place in the canonical drain order (D3): bypass, then
+//! the parameter cells in `(parameter_index, channel)` order, then the target cells in `(slot,
+//! channel)` order. Where both channel cells of one parameter or target were applied in a block
+//! with equal words, the channels are a pair: the channel-symmetry witness keeps its `LIVE` term
+//! and a target is applied once, as `Both`. Every other applied cell is a lone channel write and
+//! clears `LIVE`. So the witness is folded from the cells' final contents, and the pairing rule of
+//! issue #1004 is structural.
+//!
 //! # The frozen application rule
 //!
-//! A drained record takes effect at the **first sample of the next rendered block**, exactly as
+//! A drained value takes effect at the **first sample of the next rendered block**, exactly as
 //! #137's matrix retarget does: [`EffectControlLane::stage`] runs at the top of the block, before
-//! a single sample is touched, and emits `AutomationSpanKind::Point` spans whose `start_sample`
-//! and `end_sample` are that block's `first_sample`. Every launch effect accepts precisely that
-//! shape (a `Point` at `first_sample` with bit-identical endpoints) and rejects anything else into
+//! a single sample is touched, and emits `AutomationSpanKind::Point` spans whose `start_sample` and
+//! `end_sample` are that block's `first_sample`. Every launch effect accepts precisely that shape
+//! (a `Point` at `first_sample` with bit-identical endpoints) and rejects anything else into
 //! `ProcessReport::invalid_spans`, so the block boundary is proven by the effect contract rather
 //! than asserted by the host.
 //!
+//! # The window holds every live cell (D4)
+//!
+//! A block stages one span for every parameter cell it reads, in the block that reads it: there is
+//! no deferral and no drop. So the staging window is at least [`EffectControlLane::parameter_cells`]
+//! spans, and every effect accepts that many: preparation raises an instance's
+//! `automation_capacity` to at least [`EffectLaneShape::live_parameter_cells`] of its descriptor,
+//! the window is exactly that capacity (the pairing rule of issue #1012), and a window shorter than
+//! the lane needs is refused at bind ([`EffectControlLane::check_window`]).
+//!
+//! # Observation subscriptions stay a FIFO (D2)
+//!
+//! An [`EffectControlRecord::Observe`] arms or disarms a tap and is not a level: a later one never
+//! replaces an earlier one. It rides a small bounded queue beside the cells, with one slot per
+//! tap the effect declares, drained after the cells. Its writer reports a full queue as a typed
+//! error and drops nothing.
+//!
 //! # Allocation-free by construction
 //!
-//! Every buffer here is sized at prepare from the effect's own
-//! [`PreparedEffectMetadata::automation_capacity`](crate::PreparedEffectMetadata). Draining moves
-//! `Copy` records out of a bounded queue into that buffer; there is no allocation, no lock, no
-//! drop and no unbounded loop -- the drain is bounded by the queue capacity, which preparation
-//! refuses to make larger than the automation capacity.
+//! Every buffer here is sized at preparation. Reading cells and draining the queue move `Copy`
+//! values into those buffers; there is no allocation, no lock, no drop and no unbounded loop.
 
+use core::alloc::Layout;
 use core::num::NonZeroUsize;
 use engine::realtime::{
-    Consumer, ObservationPublisher, ObservationWindow, SpscRetainedPayload,
-    bounded_spsc_retained_payload, observation_slot_retained_bytes,
+    CellRead, CellReader, CellWriter, Consumer, DirtyReader, DirtyWord, LatestCell, LiveSnapshot,
+    LiveStamp, LiveValuesSuperseded, ObservationPublisher, ObservationWindow, Producer, QueueFull,
+    QueueGeneration, SharedAllocation, bounded_spsc, bounded_spsc_retained_payload,
+    observation_slot_retained_bytes,
 };
 use lane::kernels::pdc_delay_block;
+use std::sync::Arc;
 
 use crate::{
-    AutomationSpanKind, ChannelSymmetryWitness, ObservationDescriptor, ObservationFold,
-    ObservationSample, ParameterChannel, PreparedAutomationSpan, PreparedEffectTarget,
+    AutomationRate, AutomationSpanKind, ChannelSymmetryWitness, EffectDescriptor,
+    ObservationDescriptor, ObservationFold, ObservationSample, PREPARED_EFFECT_TARGET_WORDS,
+    ParameterChannel, ParameterChannelPolicy, PreparedAutomationSpan, PreparedEffectTarget,
 };
 
-/// One admitted, still-unapplied live control event for one prepared effect instance.
+/// One admitted live control event for one prepared effect instance.
 ///
-/// It is `Copy` and fixed-size so the channel is a plain
-/// [`bounded_spsc`](engine::realtime::bounded_spsc) and the render-side drain allocates
-/// nothing. Addressing is *not* carried: a channel belongs to exactly one effect instance (or, in
-/// a bank, to exactly one lane of one slot), so the record only says what to change.
+/// It is `Copy` and fixed-size. Addressing is *not* carried: a lane belongs to exactly one effect
+/// instance (or, in a bank, to exactly one lane of one slot), so the record only says what to
+/// change. [`EffectCellWriter::write`] puts a [`Parameter`](Self::Parameter),
+/// [`PreparedTarget`](Self::PreparedTarget) or [`Bypass`](Self::Bypass) value into its cell, and
+/// [`EffectCellWriter::try_push_observe`] queues an [`Observe`](Self::Observe).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EffectControlRecord {
     /// Retarget one declared parameter of one channel.
@@ -72,12 +117,9 @@ pub enum EffectControlRecord {
     PreparedTarget(PreparedEffectTarget),
     /// Arm or disarm one declared observation tap (issue #143 D3, level 2).
     ///
-    /// It rides this queue rather than a queue of its own for one reason: a subscription and a
-    /// parameter command that arrive in the same submission are drained by the same call at the
-    /// top of the same block, so STATE and IMPACT land on one sample timeline **by construction**
-    /// rather than by two clocks agreeing. `tap_index` is the index into the descriptor's
-    /// observation table, never the wire `tap_id`; `window_blocks` of `0` means "the plan's
-    /// default".
+    /// It rides the lane's observation queue, in order, beside the cells. `tap_index` is the index
+    /// into the descriptor's observation table, never the wire `tap_id`; `window_blocks` of `0`
+    /// means "the plan's default".
     Observe {
         /// Index into the descriptor's observation table.
         tap_index: u32,
@@ -95,58 +137,591 @@ pub enum EffectControlRecord {
     Bypass(bool),
 }
 
-/// The sort key the contract's canonical span order uses, for spans that share a start sample.
-///
-/// [`validate_automation_block`](crate::validate_automation_block) orders by
-/// `(start_sample, parameter_index, channel)`; every span this module stages carries the same
-/// `start_sample`, so the key collapses to this pair. A parameter's channel policy is fixed, so a
-/// single parameter never mixes [`ParameterChannel::Both`] with the per-lane values and the order
-/// this produces is exactly the strictly-increasing order every effect's own validator demands.
-const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32) {
-    (parameter_index, channel as u32)
+/// Marks a parameter that has no live cell in [`EffectLaneShape::first`].
+const NOT_LIVE: u32 = u32::MAX;
+
+/// One live parameter cell: the `(parameter_index, channel)` it holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParameterCell {
+    parameter_index: u32,
+    channel: ParameterChannel,
 }
 
-/// One prepared live-control channel for one effect instance, or one lane of one bank slot.
+/// One drain unit of the parameter cells: a `Shared` parameter's one `Both` cell, or a `PerLane`
+/// parameter's `Left` cell with its `Right` twin at `first + 1`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParameterGroup {
+    first: u32,
+    pair: bool,
+}
+
+/// The cells one lane holds: which parameters are live, how many target slots there are, and the
+/// cell index of each. Built once, at preparation, from the effect's descriptor.
 ///
-/// The consumer half of a [`bounded_spsc`](engine::realtime::bounded_spsc); the producer
-/// stays with the host's control plane. The ring is shared, so either half may drop first and the
-/// last owner frees it; the C ABI drops a reclaimed plan before its producers, on the control thread.
+/// Cell indices run bypass (`0`), the parameter cells (`1..=P`), then the target cells (`1 + P ..`,
+/// slot-major, `Left` before `Right`).
+#[derive(Debug, Eq, PartialEq)]
+pub struct EffectLaneShape {
+    cells: Box<[ParameterCell]>,
+    groups: Box<[ParameterGroup]>,
+    /// The first parameter cell of each descriptor parameter up to the last live one, or
+    /// [`NOT_LIVE`].
+    first: Box<[u32]>,
+    target_slots: usize,
+}
+
+impl EffectLaneShape {
+    /// A shape with one cell group per `(parameter index, channel policy)` of `live`, which must
+    /// be strictly increasing in the index, and `target_slots` target slots (`0` for an effect
+    /// that owns no prepared targets).
+    ///
+    /// # Panics
+    ///
+    /// When `live` is not strictly increasing in the parameter index. Construction is a
+    /// control-plane operation and the table is a compiler product.
+    #[must_use]
+    pub fn from_live_parameters(
+        live: impl IntoIterator<Item = (u32, ParameterChannelPolicy)>,
+        target_slots: usize,
+    ) -> Self {
+        let mut cells = Vec::new();
+        let mut groups = Vec::new();
+        let mut firsts: Vec<(u32, u32)> = Vec::new();
+        let mut previous: Option<u32> = None;
+        for (parameter_index, policy) in live {
+            assert!(
+                previous.is_none_or(|previous| parameter_index > previous),
+                "live parameters are strictly increasing in the parameter index"
+            );
+            previous = Some(parameter_index);
+            let first = u32::try_from(cells.len()).expect("a lane's parameter cells fit u32");
+            firsts.push((parameter_index, first));
+            match policy {
+                ParameterChannelPolicy::Shared => {
+                    cells.push(ParameterCell {
+                        parameter_index,
+                        channel: ParameterChannel::Both,
+                    });
+                    groups.push(ParameterGroup { first, pair: false });
+                }
+                ParameterChannelPolicy::PerLane => {
+                    cells.push(ParameterCell {
+                        parameter_index,
+                        channel: ParameterChannel::Left,
+                    });
+                    cells.push(ParameterCell {
+                        parameter_index,
+                        channel: ParameterChannel::Right,
+                    });
+                    groups.push(ParameterGroup { first, pair: true });
+                }
+            }
+        }
+        let table = firsts.last().map_or(0, |(index, _)| *index as usize + 1);
+        let mut first = vec![NOT_LIVE; table];
+        for (parameter_index, cell) in firsts {
+            first[parameter_index as usize] = cell;
+        }
+        Self {
+            cells: cells.into_boxed_slice(),
+            groups: groups.into_boxed_slice(),
+            first: first.into_boxed_slice(),
+            target_slots,
+        }
+    }
+
+    /// The shape of `descriptor`'s lane: one cell group per `Block`-rate parameter when the effect
+    /// owns no prepared targets (`target_slots == 0`), and none when it does, because a
+    /// prepared-target owner's parameters ride its targets (D1).
+    #[must_use]
+    pub fn from_descriptor(descriptor: &EffectDescriptor, target_slots: usize) -> Self {
+        if target_slots != 0 {
+            return Self::from_live_parameters(core::iter::empty(), target_slots);
+        }
+        Self::from_live_parameters(live_parameters(descriptor), 0)
+    }
+
+    /// The live parameter cell count of `descriptor`: one per `Shared` `Block`-rate parameter and
+    /// two per `PerLane` one, whether or not the effect's lane holds them or its parameters ride
+    /// targets. This is the least `automation_capacity` an instance of the effect is prepared with
+    /// (D4). It depends on the descriptor alone, so every instance of one effect has one capacity,
+    /// a live lane changes no program key, and no bank cohort splits.
+    #[must_use]
+    pub fn live_parameter_cells(descriptor: &EffectDescriptor) -> usize {
+        live_parameters(descriptor)
+            .map(|(_, policy)| match policy {
+                ParameterChannelPolicy::Shared => 1,
+                ParameterChannelPolicy::PerLane => 2,
+            })
+            .sum()
+    }
+
+    /// The parameter cells this lane holds: the most spans a block stages.
+    #[must_use]
+    pub fn parameter_cells(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// The target slots this lane holds cells for (`0` for an effect without prepared targets).
+    #[must_use]
+    pub const fn target_slots(&self) -> usize {
+        self.target_slots
+    }
+
+    /// Every cell of the lane: bypass, parameters and targets. Also the dirty bit count.
+    fn cell_count(&self) -> usize {
+        1 + self.cells.len() + 2 * self.target_slots
+    }
+
+    /// The dirty bit (and cell index) of target cell `index`.
+    fn target_bit(&self, index: usize) -> usize {
+        1 + self.cells.len() + index
+    }
+
+    /// The parameter cell of `(parameter_index, channel)`, or why there is none.
+    fn locate(
+        &self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+    ) -> Result<usize, EffectWriteRefusal> {
+        let first = *self
+            .first
+            .get(parameter_index as usize)
+            .filter(|first| **first != NOT_LIVE)
+            .ok_or(EffectWriteRefusal::NotLive)? as usize;
+        let paired = self.cells[first].channel == ParameterChannel::Left;
+        match (paired, channel) {
+            (false, ParameterChannel::Both) | (true, ParameterChannel::Left) => Ok(first),
+            (true, ParameterChannel::Right) => Ok(first + 1),
+            _ => Err(EffectWriteRefusal::Channel),
+        }
+    }
+}
+
+/// The `Block`-rate parameters of `descriptor`, as `(index, channel policy)`.
+fn live_parameters(
+    descriptor: &EffectDescriptor,
+) -> impl Iterator<Item = (u32, ParameterChannelPolicy)> + '_ {
+    descriptor
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| {
+            parameter.automatable && parameter.automation_rate == AutomationRate::Block
+        })
+        .map(|(index, parameter)| {
+            (
+                u32::try_from(index).expect("a descriptor's parameters fit u32"),
+                parameter.channel_policy,
+            )
+        })
+}
+
+/// Why a record has no cell on a lane. Nothing was written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectWriteRefusal {
+    /// The parameter has no live cell on this lane: it is not a `Block`-rate parameter, the index
+    /// is outside the descriptor, or the lane's effect owns prepared targets (its parameters ride
+    /// its targets).
+    NotLive,
+    /// The channel does not match the parameter's policy: a `Shared` parameter takes `Both` alone,
+    /// a `PerLane` one `Left` or `Right`.
+    Channel,
+    /// The target's slot is outside the lane's target slots, or the lane holds no target cells.
+    Target,
+    /// The record is an observation subscription, which the queue takes
+    /// ([`EffectCellWriter::try_push_observe`]).
+    Observe,
+}
+
+/// Why an observation subscription was not queued. Nothing was queued.
+#[derive(Debug)]
+pub enum ObservePushError {
+    /// The lane has no observation queue: its effect declares no tap, or the plan named no
+    /// observation capacity.
+    Unbound,
+    /// The queue holds as many records as the effect has taps. The record is returned.
+    Full(QueueFull<EffectControlRecord>),
+}
+
+/// What one lane shares between its writer (control) and its reader (render): the cells and their
+/// dirty words.
+struct EffectCells {
+    shape: EffectLaneShape,
+    bypass: LatestCell<1>,
+    parameters: Box<[LatestCell<1>]>,
+    targets: Box<[LatestCell<PREPARED_EFFECT_TARGET_WORDS>]>,
+    /// One word per 64 cells.
+    dirty: Box<[DirtyWord]>,
+}
+
+impl EffectCells {
+    fn new(shape: EffectLaneShape) -> Self {
+        let dirty_words = shape.cell_count().div_ceil(64);
+        Self {
+            parameters: (0..shape.parameter_cells())
+                .map(|_| LatestCell::new())
+                .collect(),
+            targets: (0..2 * shape.target_slots())
+                .map(|_| LatestCell::new())
+                .collect(),
+            dirty: (0..dirty_words).map(|_| DirtyWord::new()).collect(),
+            bypass: LatestCell::new(),
+            shape,
+        }
+    }
+}
+
+/// The heap an effect lane or writer retains: every allocation, summed, and the largest one (a
+/// zero-length array allocates nothing and counts as nothing).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EffectLaneResources {
+    /// Every allocation, summed.
+    pub total_bytes: u64,
+    /// The largest single allocation.
+    pub largest_allocation_bytes: u64,
+}
+
+impl EffectLaneResources {
+    fn add(&mut self, bytes: usize) {
+        if bytes != 0 {
+            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+            self.total_bytes = self.total_bytes.saturating_add(bytes);
+            self.largest_allocation_bytes = self.largest_allocation_bytes.max(bytes);
+        }
+    }
+
+    fn add_array<T>(&mut self, length: usize) {
+        self.add(length.saturating_mul(core::mem::size_of::<T>()));
+    }
+}
+
+/// Where a record lands on a lane, with the words it writes there.
+enum Address {
+    Bypass(bool),
+    /// A parameter cell and the value's bits.
+    Parameter(usize, u32),
+    /// The first and last target cell of a target (a `Both` target addresses two) and its words.
+    Targets(usize, usize, [u32; PREPARED_EFFECT_TARGET_WORDS]),
+}
+
+/// Control's write end of one effect lane: the cell writers and the observation queue's producer.
 ///
-/// # A lane without a channel (issue #1087)
+/// A write cannot fail on a value and never waits. The caller publishes the stamp's revision on
+/// the plan's gate after every write of its transaction (#1312 D7); a value is not applied before
+/// that.
+pub struct EffectCellWriter {
+    cells: Arc<EffectCells>,
+    bypass: CellWriter<1>,
+    parameters: Box<[CellWriter<1>]>,
+    targets: Box<[CellWriter<PREPARED_EFFECT_TARGET_WORDS>]>,
+    observe: Option<Producer<EffectControlRecord>>,
+}
+
+impl EffectCellWriter {
+    fn address(&self, record: &EffectControlRecord) -> Result<Address, EffectWriteRefusal> {
+        match *record {
+            EffectControlRecord::Parameter {
+                parameter_index,
+                channel,
+                value,
+            } => self
+                .cells
+                .shape
+                .locate(parameter_index, channel)
+                .map(|index| Address::Parameter(index, value.to_bits())),
+            EffectControlRecord::PreparedTarget(target) => {
+                let slot = target.slot as usize;
+                if slot >= self.cells.shape.target_slots {
+                    return Err(EffectWriteRefusal::Target);
+                }
+                let (first, last) = match target.channel {
+                    ParameterChannel::Left => (2 * slot, 2 * slot),
+                    ParameterChannel::Right => (2 * slot + 1, 2 * slot + 1),
+                    ParameterChannel::Both => (2 * slot, 2 * slot + 1),
+                };
+                Ok(Address::Targets(first, last, target.words))
+            }
+            EffectControlRecord::Bypass(bypass) => Ok(Address::Bypass(bypass)),
+            EffectControlRecord::Observe { .. } => Err(EffectWriteRefusal::Observe),
+        }
+    }
+
+    /// Why `record` has no cell on this lane, without writing: `Ok` when [`Self::write`] would
+    /// write it. An [`EffectControlRecord::Observe`] is refused here, because it is not a cell.
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal`].
+    pub fn check(&self, record: &EffectControlRecord) -> Result<(), EffectWriteRefusal> {
+        self.address(record).map(|_| ())
+    }
+
+    /// Write `record` as the newest value of the cell(s) it addresses, stamped with the revision of
+    /// the transaction that commits it. A `Both` target writes the left and the right cell.
+    ///
+    /// # Errors
+    ///
+    /// [`EffectWriteRefusal`], with nothing written. The caller has checked the record
+    /// ([`Self::check`]) before the first write of its transaction, so a value is never dropped
+    /// for want of a cell.
+    pub fn write(
+        &mut self,
+        stamp: LiveStamp<'_>,
+        record: EffectControlRecord,
+    ) -> Result<(), EffectWriteRefusal> {
+        let cells = &*self.cells;
+        match self.address(&record)? {
+            Address::Bypass(bypass) => {
+                self.bypass.write(
+                    &cells.bypass,
+                    &cells.dirty[0],
+                    0,
+                    stamp,
+                    [u32::from(bypass)],
+                );
+            }
+            Address::Parameter(index, bits) => {
+                let bit = 1 + index;
+                self.parameters[index].write(
+                    &cells.parameters[index],
+                    &cells.dirty[bit / 64],
+                    (bit % 64) as u32,
+                    stamp,
+                    [bits],
+                );
+            }
+            Address::Targets(first, last, words) => {
+                for index in first..=last {
+                    let bit = cells.shape.target_bit(index);
+                    self.targets[index].write(
+                        &cells.targets[index],
+                        &cells.dirty[bit / 64],
+                        (bit % 64) as u32,
+                        stamp,
+                        words,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Queue one observation subscription, in order, for the lane's next drain.
+    ///
+    /// # Errors
+    ///
+    /// [`ObservePushError::Unbound`] for a lane with no queue, [`ObservePushError::Full`] when the
+    /// queue holds as many records as the effect has taps. Nothing is queued: the host checks the
+    /// room of a whole submission before it writes anything, so an acked batch is never partly
+    /// queued.
+    pub fn try_push_observe(
+        &mut self,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+    ) -> Result<(), ObservePushError> {
+        let queue = self.observe.as_mut().ok_or(ObservePushError::Unbound)?;
+        queue
+            .try_push(EffectControlRecord::Observe {
+                tap_index,
+                armed,
+                window_blocks,
+            })
+            .map_err(ObservePushError::Full)
+    }
+
+    /// The observation queue's capacity, `0` for a lane without one.
+    #[must_use]
+    pub fn observe_capacity(&self) -> usize {
+        self.observe.as_ref().map_or(0, Producer::capacity)
+    }
+
+    /// Free slots of the observation queue, `0` for a lane without one.
+    #[must_use]
+    pub fn observe_available_capacity(&self) -> usize {
+        self.observe
+            .as_ref()
+            .map_or(0, Producer::available_capacity)
+    }
+
+    /// Producer-local count of observation records queued.
+    #[must_use]
+    pub fn observe_success_count(&self) -> u64 {
+        self.observe.as_ref().map_or(0, Producer::success_count)
+    }
+
+    /// Producer-local count of observation records refused because the queue was full.
+    #[must_use]
+    pub fn observe_full_count(&self) -> u64 {
+        self.observe.as_ref().map_or(0, Producer::full_count)
+    }
+
+    /// The lane's cell table.
+    #[must_use]
+    pub fn shape(&self) -> &EffectLaneShape {
+        &self.cells.shape
+    }
+
+    /// Heap this writer owns beyond the lane's shared storage: its cell writers.
+    #[must_use]
+    pub fn retained_resources(&self) -> EffectLaneResources {
+        let mut resources = EffectLaneResources::default();
+        resources.add_array::<CellWriter<1>>(self.parameters.len());
+        resources.add_array::<CellWriter<PREPARED_EFFECT_TARGET_WORDS>>(self.targets.len());
+        resources
+    }
+
+    /// Test-only: how many writes each parameter cell has taken, then each target cell, in cell
+    /// order. Valid while no write is in flight, which a quiescent test thread guarantees.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_counts(&self) -> Vec<u64> {
+        fn count<const N: usize>(peek: Option<([u32; N], u64)>) -> u64 {
+            peek.map_or(0, |(_, sequence)| sequence)
+        }
+        let reader = CellReader::new();
+        let cells = &*self.cells;
+        cells
+            .parameters
+            .iter()
+            .map(|cell| count(reader.peek_unread(cell)))
+            .chain(
+                cells
+                    .targets
+                    .iter()
+                    .map(|cell| count(reader.peek_unread(cell))),
+            )
+            .collect()
+    }
+}
+
+/// What an effect lane is built from.
+#[derive(Debug)]
+pub struct EffectLaneSpec {
+    /// The lane's cell table.
+    pub shape: EffectLaneShape,
+    /// The instance's bypass when the lane is built: the session's, for an effect that lowers it.
+    pub bypass: bool,
+    /// The observation queue's depth: the effect's declared tap count, or `0` for no queue (an
+    /// effect without taps, or a plan with no observation capacity).
+    pub observation_depth: usize,
+}
+
+/// The cells and observation queue of one effect instance, as its two ends: control's writer and
+/// render's lane.
+///
+/// Off the render thread: this allocates the shared cells, both ends' arrays and the queue.
+/// `superseded` is the session's `live_values_superseded` count the lane's reader adds the writes
+/// it replaces to. `None` only if the observation queue cannot be built.
+#[must_use]
+pub fn effect_control_lane(
+    spec: EffectLaneSpec,
+    superseded: &LiveValuesSuperseded,
+) -> Option<(EffectCellWriter, EffectControlLane)> {
+    let EffectLaneSpec {
+        shape,
+        bypass,
+        observation_depth,
+    } = spec;
+    let (producer, consumer) = match NonZeroUsize::new(observation_depth) {
+        Some(depth) => {
+            let (producer, consumer) =
+                bounded_spsc::<EffectControlRecord>(depth, QueueGeneration(0)).ok()?;
+            (Some(producer), Some(consumer))
+        }
+        None => (None, None),
+    };
+    let parameter_cells = shape.parameter_cells();
+    let target_cells = 2 * shape.target_slots();
+    let dirty_words = shape.cell_count().div_ceil(64);
+    let cells = Arc::new(EffectCells::new(shape));
+    let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
+    symmetry.set(ChannelSymmetryWitness::UNBYPASSED, !bypass);
+    let writer = EffectCellWriter {
+        cells: Arc::clone(&cells),
+        bypass: CellWriter::new(),
+        parameters: (0..parameter_cells).map(|_| CellWriter::new()).collect(),
+        targets: (0..target_cells).map(|_| CellWriter::new()).collect(),
+        observe: producer,
+    };
+    let lane = EffectControlLane {
+        cells: Some(cells),
+        bypass_reader: CellReader::new(),
+        parameter_readers: (0..parameter_cells).map(|_| CellReader::new()).collect(),
+        target_readers: (0..target_cells).map(|_| CellReader::new()).collect(),
+        dirty: (0..dirty_words).map(|_| DirtyReader::new()).collect(),
+        pending: vec![0; dirty_words].into_boxed_slice(),
+        superseded: Some(superseded.clone()),
+        targets: vec![
+            PreparedEffectTarget {
+                slot: 0,
+                channel: ParameterChannel::Both,
+                words: [0; PREPARED_EFFECT_TARGET_WORDS],
+            };
+            target_cells
+        ]
+        .into_boxed_slice(),
+        staged_targets: 0,
+        observe: consumer,
+        bypass,
+        symmetry,
+    };
+    Some((writer, lane))
+}
+
+/// One prepared live-control lane for one effect instance, or one lane of one bank slot: render's
+/// end of the cells and the observation queue.
+///
+/// The shared cells are an `Arc`, so either end may drop first and the last owner frees them; the
+/// C ABI drops a reclaimed plan before its writers, on the control thread.
+///
+/// # A lane without cells (issue #1087)
 ///
 /// A session `bypass` is per-lane state, not a prepared program, for every effect whose bypass
 /// `effect_compiler::lowers_session_bypass` (all but the delay and the multiband): preparation
-/// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track keeps its place
-/// in its effect bank and the rack's [`BypassShunt`] selects the dry signal for exactly that lane.
-/// A session with no live controls still needs somewhere to hold that bit, so
-/// [`without_channel`](Self::without_channel) builds a lane with no queue: nothing can ever be
-/// admitted to it, its drain stages nothing, and its bypass is the prepared one for the life of
-/// the plan. Live controls replace it with a channel seeded from the same bit.
+/// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track
+/// keeps its place in its effect bank and the rack's [`BypassShunt`] selects the dry signal for
+/// exactly that lane. A session with no live controls still needs somewhere to hold that bit, so
+/// [`without_channel`](Self::without_channel) builds a lane with no cells and no queue: nothing
+/// can ever be written to it, its drain stages nothing, and its bypass is the prepared one for the
+/// life of the plan. Live controls replace it with a lane built by [`effect_control_lane`], seeded
+/// from the same bit.
 pub struct EffectControlLane {
     /// `None` for a lane that only carries a prepared bypass ([`Self::without_channel`]).
-    control: Option<Consumer<EffectControlRecord>>,
-    /// Optional FIFO target storage for an owner that has a prepared-target capability.
-    ///
-    /// This is deliberately lane-owned and sized from the queue's actual capacity. It is absent
-    /// for ordinary effects, so unsupported owners do not retain an EQ-specific side buffer.
-    targets: Option<Box<[PreparedEffectTarget]>>,
+    cells: Option<Arc<EffectCells>>,
+    bypass_reader: CellReader,
+    parameter_readers: Box<[CellReader]>,
+    target_readers: Box<[CellReader]>,
+    /// Render's half of each dirty word: the cells whose newest write was above the snapshot that
+    /// last read them.
+    dirty: Box<[DirtyReader]>,
+    /// This block's pending cells, one word per 64 cells; scratch, rewritten every block.
+    pending: Box<[u64]>,
+    /// The session's count of replaced writes; `None` exactly when `cells` is.
+    superseded: Option<LiveValuesSuperseded>,
+    /// The targets applied by the last [`Self::stage`], at most one per target cell.
+    targets: Box<[PreparedEffectTarget]>,
     /// Number of valid entries in the retained target prefix from the last stage call.
     staged_targets: usize,
+    /// The observation queue, if the lane has one and a rack has not taken it
+    /// ([`Self::take_observe_queue`]).
+    observe: Option<Consumer<EffectControlRecord>>,
     /// Live bypass state, retained across blocks so a rendered block always knows it.
     bypass: bool,
     /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
-    /// is, and for the same reason: the terms describe what the *drained* records did, so they
-    /// have to survive the block that drained them.
+    /// is, and for the same reason: the terms describe what the *drained* values did, so
+    /// they have to survive the block that drained them.
     ///
     /// # Why the witness is maintained here and not at the host's admission call
     ///
-    /// The queue **is** the admission boundary. A record is admitted into the rendered state at
+    /// The cells **are** the admission boundary. A value is admitted into the rendered state at
     /// the drain, on the render thread, at the top of the block that first applies it -- so a
     /// witness folded in here cannot disagree with the state it describes, and it needs no
     /// atomic and no second channel to reach the collapse dispatch. A host-side bit could not:
     /// `PreparedRenderPlan` is `Send` and **not** `Sync`, so a value the control thread owns is
-    /// unreadable from the render thread by construction, and the record it would have been
-    /// derived from is already crossing this queue.
+    /// unreadable from the render thread by construction.
     ///
     /// Only the two live terms move here. `SOURCE`, `DESIGNED` and `RESTORED` are decided off
     /// render, at preparation and at restore, and are conjoined by the stage that owns this lane.
@@ -154,78 +729,112 @@ pub struct EffectControlLane {
 }
 
 impl EffectControlLane {
-    /// Binds the consumer half of one prepared channel.
-    #[must_use]
-    pub fn new(control: Consumer<EffectControlRecord>, bypass: bool) -> Self {
-        Self::with_target_staging(control, bypass, false)
-    }
-
-    /// A lane with no live channel that carries only this instance's prepared bypass (issue
-    /// #1087).
+    /// A lane with no cells that carries only this instance's prepared bypass (issue #1087).
     ///
     /// Off the render thread, and it allocates nothing. It exists so that a session-bypassed
     /// instance reaches the rack's latency-preserving [`BypassShunt`] whether or not live
     /// controls are attached: the rack builds a shunt for an instance or a bank slot that holds any
     /// lane, and restores the dry signal into every lane whose [`bypassed`](Self::bypassed) is
-    /// true. The witness' `UNBYPASSED` term is seeded from `bypass` exactly as [`Self::new`]
-    /// seeds it, so a statically bypassed lane declines the collapse from the plan's first block.
+    /// true. The witness' `UNBYPASSED` term is seeded from `bypass` exactly as
+    /// [`effect_control_lane`] seeds it, so a statically bypassed lane declines the collapse from
+    /// the plan's first block.
     #[must_use]
     pub fn without_channel(bypass: bool) -> Self {
         let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
         symmetry.set(ChannelSymmetryWitness::UNBYPASSED, !bypass);
         Self {
-            control: None,
-            targets: None,
+            cells: None,
+            bypass_reader: CellReader::new(),
+            parameter_readers: Box::default(),
+            target_readers: Box::default(),
+            dirty: Box::default(),
+            pending: Box::default(),
+            superseded: None,
+            targets: Box::default(),
             staged_targets: 0,
+            observe: None,
             bypass,
             symmetry,
         }
     }
 
-    /// Binds a prepared-target lane and allocates its FIFO backing off the render thread.
-    ///
-    /// The backing is exactly the queue's logical capacity. Admission guarantees that every
-    /// published target has a slot, so the render path never needs a fallback allocation or a
-    /// drop policy for a valid target record.
-    #[must_use]
-    pub fn new_with_target_staging(control: Consumer<EffectControlRecord>, bypass: bool) -> Self {
-        Self::with_target_staging(control, bypass, true)
-    }
-
-    fn with_target_staging(
-        control: Consumer<EffectControlRecord>,
-        bypass: bool,
-        target_staging: bool,
-    ) -> Self {
-        let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
-        symmetry.set(ChannelSymmetryWitness::UNBYPASSED, !bypass);
-        let targets = target_staging.then(|| {
-            vec![
-                PreparedEffectTarget {
-                    slot: 0,
-                    channel: ParameterChannel::Both,
-                    words: [0; crate::PREPARED_EFFECT_TARGET_WORDS],
-                };
-                control.capacity()
-            ]
-            .into_boxed_slice()
-        });
-        Self {
-            control: Some(control),
-            targets,
-            staged_targets: 0,
-            bypass,
-            symmetry,
-        }
-    }
-
-    /// Whether this lane has a live channel a control plane can publish to.
+    /// Whether this lane has cells a control plane can write.
     ///
     /// `false` only for a [`without_channel`](Self::without_channel) lane, whose bypass is fixed
     /// at preparation.
     #[must_use]
     pub const fn has_channel(&self) -> bool {
-        self.control.is_some()
+        self.cells.is_some()
+    }
+
+    /// The parameter cells of this lane: the least staging window it needs.
+    #[must_use]
+    pub fn parameter_cells(&self) -> usize {
+        self.cells
+            .as_ref()
+            .map_or(0, |cells| cells.shape.parameter_cells())
+    }
+
+    /// Check, at bind, that a staging window of `window` spans holds every live parameter cell
+    /// (D4): a block stages one span per parameter cell it reads, and none is ever deferred or
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// The number of spans the lane needs, when `window` is shorter.
+    pub fn check_window(&self, window: usize) -> Result<(), usize> {
+        let needed = self.parameter_cells();
+        if window >= needed {
+            Ok(())
+        } else {
+            Err(needed)
+        }
+    }
+
+    /// Whether this lane still holds an observation queue (a rack has not taken it).
+    #[must_use]
+    pub fn has_observe_queue(&self) -> bool {
+        self.observe.is_some()
+    }
+
+    /// Move the observation queue's consumer out of the lane. The racks hold the consumers of all
+    /// their lanes in one array and drain them in a loop of their own, so each pop sits in its own
+    /// loop body (D8). Off the render thread.
+    #[must_use]
+    pub fn take_observe_queue(&mut self) -> Option<Consumer<EffectControlRecord>> {
+        self.observe.take()
+    }
+
+    /// Exact heap this lane and its shared cells retain, each allocation counted once, including
+    /// the observation queue if the lane still holds it. The lane's own struct is charged by its
+    /// owner. The writer's arrays are [`EffectCellWriter::retained_resources`].
+    ///
+    /// This is a control-plane accounting query; it is never called from a realtime-marked method.
+    #[must_use]
+    pub fn retained_resources(&self) -> EffectLaneResources {
+        let mut resources = EffectLaneResources::default();
+        if let Some(cells) = self.cells.as_deref() {
+            resources.add(Layout::new::<SharedAllocation<EffectCells>>().size());
+            resources.add_array::<ParameterCell>(cells.shape.cells.len());
+            resources.add_array::<ParameterGroup>(cells.shape.groups.len());
+            resources.add_array::<u32>(cells.shape.first.len());
+            resources.add_array::<LatestCell<1>>(cells.parameters.len());
+            resources.add_array::<LatestCell<PREPARED_EFFECT_TARGET_WORDS>>(cells.targets.len());
+            resources.add_array::<DirtyWord>(cells.dirty.len());
+        }
+        resources.add_array::<CellReader>(self.parameter_readers.len());
+        resources.add_array::<CellReader>(self.target_readers.len());
+        resources.add_array::<DirtyReader>(self.dirty.len());
+        resources.add_array::<u64>(self.pending.len());
+        resources.add_array::<PreparedEffectTarget>(self.targets.len());
+        if let Some(queue) = self.observe.as_ref()
+            && let Some(capacity) = NonZeroUsize::new(queue.capacity())
+            && let Ok(payload) = bounded_spsc_retained_payload::<EffectControlRecord>(capacity)
+        {
+            resources.add(payload.ring_header_bytes);
+            resources.add(payload.slot_payload_bytes);
+        }
+        resources
     }
 
     // REALTIME_POLICY_BEGIN
@@ -246,293 +855,258 @@ impl EffectControlLane {
         self.bypass
     }
 
-    /// Exact queue-owned payload layout, including the sentinel slot and shared header.
-    ///
-    /// A [`without_channel`](Self::without_channel) lane owns no queue, so its layout is the empty
-    /// one: no slots and no bytes, which an accounting caller charges as nothing.
-    ///
-    /// This is a control-plane accounting query; it is never called from `stage` or any other
-    /// realtime-marked method.
-    #[must_use]
-    pub fn retained_queue_payload(&self) -> Option<SpscRetainedPayload> {
-        let Some(control) = self.control.as_ref() else {
-            return Some(SpscRetainedPayload {
-                slot_count: 0,
-                ring_header_bytes: 0,
-                ring_header_align: 1,
-                slot_payload_bytes: 0,
-                slot_payload_align: 1,
-            });
-        };
-        let capacity = NonZeroUsize::new(control.capacity())?;
-        bounded_spsc_retained_payload::<EffectControlRecord>(capacity).ok()
-    }
-
-    /// Exact target FIFO backing bytes, or zero for an unsupported owner.
-    #[must_use]
-    pub fn target_staging_retained_bytes(&self) -> usize {
-        self.targets.as_ref().map_or(0, |targets| {
-            targets.len() * core::mem::size_of::<PreparedEffectTarget>()
-        })
-    }
-
-    /// Whether this lane owns optional prepared-target staging.
-    #[must_use]
-    pub fn has_target_staging(&self) -> bool {
-        self.targets.is_some()
-    }
-
-    /// The retained FIFO target prefix produced by the most recent [`stage`](Self::stage).
+    /// The targets applied by the most recent [`stage`](Self::stage), in `(slot, channel)` order.
     #[must_use]
     pub fn prepared_targets(&self) -> &[PreparedEffectTarget] {
-        self.targets
-            .as_deref()
-            .map_or(&[], |targets| &targets[..self.staged_targets])
+        &self.targets[..self.staged_targets]
     }
 
-    /// Drain every queued record into `staging`, in canonical span order, and return the count.
+    /// Read every pending cell under the block's snapshot `snapshot` and stage what they hold: the
+    /// bypass first, then the parameter spans into `staging` in canonical `(parameter_index,
+    /// channel)` order, then the prepared targets in `(slot, channel)` order (D3). It pops
+    /// nothing: the observation queue is drained apart ([`drain_observations`](Self::drain_observations)
+    /// per node, the rack's own loop per bank).
     ///
-    /// `observation` is this instance's tap state when the plan is observation-capable and `None`
-    /// otherwise. An [`EffectControlRecord::Observe`] emits **no span**: it changes what is read
-    /// after the block, never what the block renders, so it does not touch the staging window and
-    /// cannot make it overflow. A plan with no observation capacity applies nothing and reports the
-    /// record as refused, which is what the control plane turns into `ObservationUnbound`.
+    /// Each applied cell adds the writes it replaced to the session count. When both channel
+    /// cells of one parameter or target were applied with equal words, the channels are a pair and
+    /// the witness keeps `LIVE` (a target is applied once, as `Both`); any other applied cell is a
+    /// lone channel write and clears it. Every value is admitted into the witness through
+    /// [`ChannelSymmetryWitness::admit`], so a record kind cannot reach render state without
+    /// declaring what it does to the witness.
     ///
-    /// `staging` is the caller's preallocated window for this lane. Records are collapsed
-    /// last-wins per `(parameter_index, channel)` and inserted in canonical order, so the emitted
-    /// slice is already the strictly increasing, non-overlapping block the effect contract
-    /// requires -- a caller never has to sort or deduplicate on the render thread.
-    ///
-    /// A record that cannot fit (`staging` full of *distinct* targets) is dropped and counted in
-    /// the returned overflow. Preparation makes that unreachable by refusing a queue deeper than
-    /// the effect's automation capacity; the count exists so a violated invariant is observable
-    /// rather than silent.
-    ///
-    /// `staging` must be exactly the effect's `automation_capacity` spans long. A caller that
-    /// allocates it checks that once, at preparation, with
-    /// [`EffectProcessBlock::check_automation_window`](crate::EffectProcessBlock::check_automation_window)
-    /// or
-    /// [`EffectBankProcessBlock::check_automation_window`](crate::EffectBankProcessBlock::check_automation_window);
-    /// the pairing rule below depends on it.
-    ///
-    /// # The witness, and the one record kind it is folded late for (issue #1004)
-    ///
-    /// Every drained record is folded into this lane's channel-symmetry witness through
-    /// [`ChannelSymmetryWitness::admit`], in FIFO order, with one exception: a one-channel
-    /// [`EffectControlRecord::Parameter`] is **deferred** to the end of the drain. It is folded
-    /// then (clearing `LIVE`, as it always did) unless the drain's staged spans *pair*: every
-    /// `Left` span is immediately followed by its `Right` twin -- same parameter, same kind, same
-    /// samples, `start_value` and `end_value` equal by bits -- and every `Right` span is
-    /// immediately preceded by its `Left` twin (`spans_pair`). That is the shape the web host's
-    /// both-channel command on a `PerLane` parameter lowers to, and without the deferral the first
-    /// knob touch on a mono stem retires its bank's mono collapse for the rest of the plan.
-    ///
-    /// Why a pair leaves the two channels in bit-equal state, which is the only premise the
-    /// collapse rests on: the staging below is last-wins per `(parameter_index, channel)`, so the
-    /// staged pair *is* the final value of each channel; an effect validates `pending[0][p]` and
-    /// `pending[1][p]` by the same checks from the same value (kind, samples, value, parameter,
-    /// order and capacity -- and the window is the capacity, so a twin is never cut off), and
-    /// applies them by the same code onto channels the witness already holds equal. Every other
-    /// record folds in FIFO order exactly as before. In particular a one-channel
-    /// [`EffectControlRecord::PreparedTarget`] is **not** deferred: a target FIFO has no last-wins
-    /// staging, and a `[Left A, Both C, Right A]` drain leaves the channels at `C` and `A` although
-    /// its last one-channel targets agree. The rule never sets `LIVE`; it only declines to clear
-    /// it, and a pair split across two drains is two lone writes, which clear it as before.
+    /// `staging` is the caller's preallocated window for this lane, at least
+    /// [`Self::parameter_cells`] spans long (checked at bind with [`Self::check_window`]) and
+    /// exactly the effect's `automation_capacity`, which the pairing rule depends on
+    /// ([`EffectProcessBlock::check_automation_window`](crate::EffectProcessBlock::check_automation_window)):
+    /// a staged twin pair is never cut off by the effect's `span_index < automation_capacity`
+    /// limit.
     pub fn stage(
         &mut self,
         staging: &mut [PreparedAutomationSpan],
         first_sample: u64,
-        observation: Option<&mut ObservationLane>,
+        snapshot: LiveSnapshot,
     ) -> Staged {
-        // A lane without a channel has nothing to drain: the loop below never runs, and the
-        // window, the target prefix and the witness stay exactly as the last block left them.
+        let Self {
+            cells,
+            bypass_reader,
+            parameter_readers,
+            target_readers,
+            dirty,
+            pending,
+            superseded,
+            targets,
+            staged_targets,
+            bypass,
+            symmetry,
+            ..
+        } = self;
+        *staged_targets = 0;
+        // A lane without cells has nothing to read: the window, the target prefix and the
+        // witness stay exactly as the last block left them.
+        let (Some(cells), Some(superseded)) = (cells.as_deref(), superseded.as_ref()) else {
+            return Staged::default();
+        };
+        // After the snapshot: a write at or below `S` whose bit was set between a take and the
+        // snapshot would otherwise wait a block. The deferred mask of an earlier block joins.
+        let mut any = 0_u64;
+        for ((mask, reader), word) in pending.iter_mut().zip(dirty.iter_mut()).zip(&cells.dirty) {
+            *mask = reader.pending(word);
+            any |= *mask;
+        }
+        if any == 0 {
+            return Staged::default();
+        }
+        let mut reads = Reads {
+            pending,
+            dirty,
+            snapshot,
+            superseded,
+        };
+        if let Some([word]) = reads.read(0, &cells.bypass, bypass_reader) {
+            let value = word != 0;
+            *bypass = value;
+            symmetry.admit(&EffectControlRecord::Bypass(value));
+        }
+        let mut staged = 0_usize;
+        for group in cells.shape.groups.iter() {
+            let first = group.first as usize;
+            let parameter_index = cells.shape.cells[first].parameter_index;
+            let mut applied = [None; 2];
+            for (offset, slot) in applied
+                .iter_mut()
+                .enumerate()
+                .take(1 + usize::from(group.pair))
+            {
+                *slot = reads
+                    .read(
+                        1 + first + offset,
+                        &cells.parameters[first + offset],
+                        &mut parameter_readers[first + offset],
+                    )
+                    .map(|[bits]| bits);
+            }
+            // A pair whose final values are bit-equal is one both-channel write that arrived as
+            // two cells (issue #1004): the channels stay where a `Both` would leave them.
+            let paired = group.pair && applied[0].is_some() && applied[0] == applied[1];
+            for (offset, bits) in applied.into_iter().enumerate() {
+                let Some(bits) = bits else {
+                    continue;
+                };
+                let channel = if group.pair {
+                    [ParameterChannel::Left, ParameterChannel::Right][offset]
+                } else {
+                    ParameterChannel::Both
+                };
+                let value = f32::from_bits(bits);
+                staging[staged] = PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel,
+                    parameter_index,
+                    start_sample: first_sample,
+                    end_sample: first_sample,
+                    start_value: value,
+                    end_value: value,
+                };
+                staged += 1;
+                // The one hook: a record kind cannot reach the render state without declaring
+                // what it does to the witness (`symmetry::LiveControlRecord`).
+                symmetry.admit(&EffectControlRecord::Parameter {
+                    parameter_index,
+                    channel: if paired {
+                        ParameterChannel::Both
+                    } else {
+                        channel
+                    },
+                    value,
+                });
+            }
+        }
+        for slot in 0..cells.shape.target_slots {
+            let mut applied = [None; 2];
+            for (channel, words) in applied.iter_mut().enumerate() {
+                let index = 2 * slot + channel;
+                *words = reads.read(
+                    cells.shape.target_bit(index),
+                    &cells.targets[index],
+                    &mut target_readers[index],
+                );
+            }
+            let slot = slot as u32;
+            let target = |channel, words| PreparedEffectTarget {
+                slot,
+                channel,
+                words,
+            };
+            let records = match applied {
+                [Some(left), Some(right)] if left == right => {
+                    [Some(target(ParameterChannel::Both, left)), None]
+                }
+                [left, right] => [
+                    left.map(|words| target(ParameterChannel::Left, words)),
+                    right.map(|words| target(ParameterChannel::Right, words)),
+                ],
+            };
+            for record in records.into_iter().flatten() {
+                symmetry.admit(&EffectControlRecord::PreparedTarget(record));
+                targets[*staged_targets] = record;
+                *staged_targets += 1;
+            }
+        }
+        Staged {
+            staged,
+            staged_targets: *staged_targets,
+        }
+    }
+
+    /// Drain this lane's observation queue and apply each subscription to `observation`, in order.
+    /// Returns the subscriptions the plan had no capacity to apply (`observation` was `None`, or
+    /// the tap is not declared), which the control plane refuses before they reach a queue: zero
+    /// by construction.
+    ///
+    /// For a per-node effect, which calls it once per block, in no loop. The racks drain their
+    /// lanes' queues in a loop of their own ([`take_observe_queue`](Self::take_observe_queue)).
+    pub fn drain_observations(
+        &mut self,
+        first_sample: u64,
+        mut observation: Option<&mut ObservationLane>,
+    ) -> u32 {
         let available = self
-            .control
+            .observe
             .as_ref()
             .map_or(0, Consumer::available_at_entry);
-        let mut staged = 0_usize;
-        self.staged_targets = 0;
-        let mut target_error = false;
-        let mut dropped = 0_u32;
         let mut unbound = 0_u32;
-        let mut observation = observation;
         let mut remaining = available;
-        // The first one-channel parameter record of this drain, held back from the witness until
-        // the drain's staged spans can say whether it was paired (issue #1004). It is folded
-        // through the same `admit` as every other record, so the hook stays the one path.
-        let mut deferred: Option<EffectControlRecord> = None;
         while remaining != 0 {
             remaining -= 1;
-            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {
+            let Some(Ok(record)) = self.observe.as_mut().map(Consumer::try_pop) else {
                 // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
                 // drain bounded if a malformed test double violates that invariant.
                 break;
             };
-            // The one hook. `admit` takes the record by trait, not by kind, so a record type
-            // added to this queue later cannot reach the render state without declaring what it
-            // does to the witness (`symmetry::LiveControlRecord`). The deferral beside it is the
-            // one exception, and it is by record *shape*, not a second path: a one-channel
-            // `Parameter` is admitted at the end of the drain unless its span pairs.
-            if matches!(
-                record,
-                EffectControlRecord::Parameter { channel, .. } if channel.writes_one_channel()
-            ) {
-                deferred = deferred.or(Some(record));
-            } else {
-                self.symmetry.admit(&record);
+            if !apply_observe(record, first_sample, observation.as_deref_mut()) {
+                unbound = unbound.saturating_add(1);
             }
-            let (parameter_index, channel, value) = match record {
-                EffectControlRecord::PreparedTarget(target) => {
-                    let Some(targets) = self.targets.as_mut() else {
-                        target_error = true;
-                        continue;
-                    };
-                    if self.staged_targets == targets.len() {
-                        target_error = true;
-                        continue;
-                    }
-                    targets[self.staged_targets] = target;
-                    self.staged_targets += 1;
-                    continue;
-                }
-                EffectControlRecord::Bypass(value) => {
-                    self.bypass = value;
-                    continue;
-                }
-                EffectControlRecord::Observe {
-                    tap_index,
-                    armed,
-                    window_blocks,
-                } => {
-                    let applied = observation.as_deref_mut().is_some_and(|lane| {
-                        lane.arm(tap_index, armed, window_blocks, first_sample)
-                    });
-                    if !applied {
-                        unbound = unbound.saturating_add(1);
-                    }
-                    continue;
-                }
-                EffectControlRecord::Parameter {
-                    parameter_index,
-                    channel,
-                    value,
-                } => {
-                    if self.targets.is_some() {
-                        // A prepared-target owner must never silently fall back to render-time
-                        // semantic design. Its checked admission path supplies a companion target
-                        // for every EQ edit; a missing one is an invariant failure.
-                        //
-                        // A one-channel record refused here was deferred above and is never
-                        // staged, so when nothing else in the drain is staged the empty window
-                        // pairs and `LIVE` survives it; before #1004 it cleared `LIVE`. That is
-                        // not the pairing rule firing, and it is sound: the record reaches neither
-                        // channel, and `target_error` fails this block's render
-                        // (`RenderError::InvalidEnvelope` in both racks) before any sample moves
-                        // (issue #1004 finding 4).
-                        target_error = true;
-                        continue;
-                    }
-                    (parameter_index, channel, value)
-                }
-            };
-            let key = order_key(parameter_index, channel);
-            // Bounded linear placement over the already-sorted window: at most `staging.len()`
-            // comparisons, which preparation bounds by the effect's automation capacity.
-            let mut position = staged;
-            let mut replace = false;
-            for (index, span) in staging[..staged].iter().enumerate() {
-                let existing = order_key(span.parameter_index, span.channel);
-                if existing == key {
-                    position = index;
-                    replace = true;
-                    break;
-                }
-                if existing > key {
-                    position = index;
-                    break;
-                }
-            }
-            let span = PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
-                channel,
-                parameter_index,
-                start_sample: first_sample,
-                end_sample: first_sample,
-                start_value: value,
-                end_value: value,
-            };
-            if replace {
-                staging[position] = span;
-                continue;
-            }
-            if staged == staging.len() {
-                dropped = dropped.saturating_add(1);
-                continue;
-            }
-            staging[position..=staged].rotate_right(1);
-            staging[position] = span;
-            staged += 1;
         }
-        // `staged <= staging.len()` by construction, and the window is exactly the effect's
-        // `automation_capacity`: every caller that allocates one refuses any other size at
-        // preparation (`EffectProcessBlock::check_automation_window`,
-        // `EffectBankProcessBlock::check_automation_window`; issue #1012). So every staged span
-        // sits below the effect's `span_index < automation_capacity` cut-off, and that cut-off
-        // cannot separate a twin that `spans_pair` counts as paired. (The assertion that stood here
-        // restated the loop bound and could not fire; the bound it meant is enforced where both
-        // numbers are known.)
-        if let Some(record) = deferred
-            && !spans_pair(&staging[..staged])
-        {
-            self.symmetry.admit(&record);
+        unbound
+    }
+}
+
+/// One block's reads of a lane's pending cells: the pending mask, render's half of each dirty
+/// word, the block's snapshot and the session count.
+struct Reads<'a> {
+    pending: &'a [u64],
+    dirty: &'a mut [DirtyReader],
+    snapshot: LiveSnapshot,
+    superseded: &'a LiveValuesSuperseded,
+}
+
+impl Reads<'_> {
+    /// Read the cell at dirty bit `bit` if it is pending: the newest write at or below the
+    /// snapshot, if it was not applied before. The writes it replaced join the session count.
+    fn read<const N: usize>(
+        &mut self,
+        bit: usize,
+        cell: &LatestCell<N>,
+        reader: &mut CellReader,
+    ) -> Option<[u32; N]> {
+        if self.pending[bit / 64] & (1 << (bit % 64)) == 0 {
+            return None;
         }
-        Staged {
-            staged,
-            staged_targets: self.staged_targets,
-            target_error,
-            dropped,
-            unbound,
+        match reader.read_counted(
+            cell,
+            self.snapshot,
+            &mut self.dirty[bit / 64],
+            (bit % 64) as u32,
+            self.superseded,
+        ) {
+            CellRead::Applied { words, .. } => Some(words),
+            CellRead::Unchanged => None,
         }
     }
 }
 
-/// Whether every one-channel span of one drain's staged window has its other-channel twin.
+/// Apply one drained [`EffectControlRecord::Observe`] to `observation`, the instance's tap state
+/// when the plan is observation-capable and `None` otherwise. Returns `false` when it could not be
+/// applied -- the plan has no observation capacity, or the tap is not declared -- which the
+/// control plane turns into `ObservationUnbound` before a record reaches a queue.
 ///
-/// The window is strictly increasing in `(parameter_index, channel)` with `Left < Right < Both`
-/// ([`order_key`]), so a parameter's `Left` and `Right` spans, when both are present, are
-/// **adjacent**, `Left` first. The rule is therefore local: a `Left` span must be immediately
-/// followed by its twin `Right` span, and a `Right` span immediately preceded by its twin `Left`
-/// span. `Both` spans need no twin. One pass over adjacent pairs, no indexing, no allocation:
-/// O(n) in a window the effect's automation capacity bounds.
-fn spans_pair(spans: &[PreparedAutomationSpan]) -> bool {
-    let unpaired_end = spans
-        .first()
-        .is_some_and(|span| span.channel == ParameterChannel::Right)
-        || spans
-            .last()
-            .is_some_and(|span| span.channel == ParameterChannel::Left);
-    !unpaired_end
-        && spans
-            .iter()
-            .zip(spans.iter().skip(1))
-            .all(|(earlier, later)| {
-                let twins = twin_spans(earlier, later);
-                (earlier.channel != ParameterChannel::Left || twins)
-                    && (later.channel != ParameterChannel::Right || twins)
-            })
-}
-
-/// Whether `left` and `right` are one write's two halves: the same parameter, kind and samples,
-/// and values equal by bits (so `-0.0` does not twin `+0.0`, and NaN payloads must match).
-fn twin_spans(left: &PreparedAutomationSpan, right: &PreparedAutomationSpan) -> bool {
-    left.channel == ParameterChannel::Left
-        && right.channel == ParameterChannel::Right
-        && left.parameter_index == right.parameter_index
-        && left.kind == right.kind
-        && left.start_sample == right.start_sample
-        && left.end_sample == right.end_sample
-        && left.start_value.to_bits() == right.start_value.to_bits()
-        && left.end_value.to_bits() == right.end_value.to_bits()
+/// An `Observe` record emits **no span**: it changes what is read after the block, never what the
+/// block renders, so it does not touch the staging window. Any other record kind is not an
+/// observation and is reported as not applied.
+pub fn apply_observe(
+    record: EffectControlRecord,
+    first_sample: u64,
+    observation: Option<&mut ObservationLane>,
+) -> bool {
+    let EffectControlRecord::Observe {
+        tap_index,
+        armed,
+        window_blocks,
+    } = record
+    else {
+        return false;
+    };
+    observation.is_some_and(|lane| lane.arm(tap_index, armed, window_blocks, first_sample))
 }
 // REALTIME_POLICY_END
 
@@ -541,17 +1115,8 @@ fn twin_spans(left: &PreparedAutomationSpan, right: &PreparedAutomationSpan) -> 
 pub struct Staged {
     /// Spans written to the front of the staging window, in canonical order.
     pub staged: usize,
-    /// Prepared targets retained in the lane-owned FIFO prefix.
+    /// Prepared targets retained in the lane-owned prefix.
     pub staged_targets: usize,
-    /// A prepared target reached an owner without target staging or exceeded its FIFO backing.
-    /// Production admission rejects this before publication; render callers must surface this as
-    /// an invariant failure rather than treating the record as a successful no-op.
-    pub target_error: bool,
-    /// Records refused because the window was full of distinct targets. Zero by construction.
-    pub dropped: u32,
-    /// [`EffectControlRecord::Observe`] records this plan had no capacity to apply. Zero by
-    /// construction: the control plane refuses them before they reach a queue.
-    pub unbound: u32,
 }
 
 /// One declared tap's arm state and open window, for one prepared instance or one bank lane.

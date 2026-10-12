@@ -18,8 +18,6 @@
 //! always banks on a vector backend (#1098), so a case that needs a per-node instance there folds the
 //! strip into every track's inserts ([`inserts`]), whose remainder renders per node.
 
-use core::num::NonZeroUsize;
-
 use bench_support::alloc::{
     self as bench_alloc, Mode, assert_installed, current_thread_counters,
     current_thread_delta_since,
@@ -229,13 +227,14 @@ fn bind(model: &SessionModel, dispatch: Backend, spans: u32, live_controls: bool
         })
         .collect();
     assert_installed();
+    // The session's `live_values_superseded` count is one allocation the host charges once per
+    // session, not an owner of any lane: it is made before the measured window.
+    let superseded = engine::realtime::LiveValuesSuperseded::new();
     let mark = current_thread_counters();
     let mut effects =
         prepare_native_session_effects(&session, registry, effect_caps(spans)).expect("effects");
-    let producers = live_controls.then(|| {
-        attach_effect_live_controls(&mut effects, NonZeroUsize::new(8).expect("depth"))
-            .expect("live controls")
-    });
+    let producers = live_controls
+        .then(|| attach_effect_live_controls(&mut effects, &superseded, 0).expect("live controls"));
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         plan_id: 1100,
