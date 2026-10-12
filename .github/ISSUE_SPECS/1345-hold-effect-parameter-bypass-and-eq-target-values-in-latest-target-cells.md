@@ -467,6 +467,14 @@ two unique catches (zero on the first frame after the unsubscribe; with two redu
 disarming the larger leaves the slot bit-equal to the other tap's reading) wait on the user's answer on
 the shipped-file edits; this commit carries the gate only. The `poll_meters` `first_sample >= arm_sample`
 gap (`lib.rs:6083-6097`) is a successor issue and the contract does not describe it.
+**Stated limit (root, 2026-10-12).** In Firefox and WebKit one meter frame can cover more than one
+block even with a one-block meter window (a dev run gave 28 frames for 42 blocks), so a single-block
+dropout inside such a frame can be masked by the other block's peak. This does not make the gate
+vacuous. The gain-reduction proof takes its non-vacuity from mutation (d): with the unsubscribe skipped
+the tap stays armed and the frames after the acknowledgement carry about 18 dB, and an armed tap would
+still show reduction from the other block of such a frame. The peak floor is there to catch a feed that
+stops, which gives consecutive zero frames, and mutation (e) proves that it does: only the floor check
+refuses that run.
 **Reopening condition:** the shipped host has no Worker control plane; if control moves to a Worker
 (D15-10), the ordering that makes "received after the acknowledgement" mean "polled after the
 disarm" must be proved again.

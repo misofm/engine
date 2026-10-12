@@ -102,6 +102,7 @@ No other slice builds on `store_revision`, `active_revision`, `RevisionTarget` o
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
 | `sdk/src/browser/engine.ts` | B #1345 (the `renderWait` hook) → H #1532 (the close-path bounds) → H #1332 (root, 2026-10-12) |
+| `hosts/host-web/qualification/unsubscribe-session.json` | created by B #1345 (Amendment 6, root 2026-10-12); stream H owns later edits |
 | `tools/parameter-metadata/src/abi_layout.rs` | H (#1333, #1380, #1332, #1381, #1293, #1386) and B (#1399, #1349) → C #1406 (the `sourceRing` rule only); B #1524 after B (#1399, #1349), before C #1406 |
 | `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only); B #1524 after B #1349, before C #1406 |
 | `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit; B #1524 and B #1525 in any order with the rest, the later slice rebases, both before H #1332; B #1534 in any order with the rest, before H #1332 |
