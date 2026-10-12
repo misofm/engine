@@ -407,10 +407,19 @@ Root names each cross-stream exception in STREAMS.md (D15-0). The rows are in
 - **Over-refusal is acceptable, a false pass is not.** Where the tool cannot classify something,
   it refuses (D3, D6).
 - **(root Amendment 2, 2026-10-11; the "Amendment (root, 2026-10-08)" below is Amendment 1.)** The text that follows is root's final ruling, adopted verbatim from an adversarial review, and #1440 to #1446 refer to it.
-  **Threat model (root ruling 2026-10-11).** The tool judges the workspace's own source: every token of every `.rs` file under the scan roots, and every file rustc reads as source from them. The walk refuses a `#[path]`, an `include!` or a proc macro that would put source where it cannot read it. Over that source it fails closed: a form outside its accepted grammar is refused. Over-refusal is acceptable; a false pass is not. Where a rule trusts a name (`map`, `as_mut`, `try_pop`, `debug_assert`), the trusted-name scan refuses every definition, import, rename or macro-emitted use of that name under the roots that the rule's text does not allow. The limits are exactly these:
+  **Threat model (root ruling 2026-10-11).** The tool judges the workspace's own source: every token of every `.rs` file under the scan roots, and every file rustc reads as source from them. The walk refuses a `#[path]`, an `include!` or a proc macro that would put source where it cannot read it. Over that source it fails closed: a form outside its accepted grammar is refused. Over-refusal is acceptable; a false pass is not. Where a rule trusts a name (Q and `debug_assert`), the trusted-name scan refuses every definition, import, rename or macro-emitted use of that name under the roots that the rule's text does not allow. The limits are exactly these:
   1. code outside the workspace source: registry crates as `Cargo.lock` pins them (their macros, proc macros, traits and types), the compiler and the standard library;
   2. type-level behaviour the tool cannot read, wherever the type is defined: auto-deref through a `Deref`/`DerefMut` impl (#1440 Hazards, a.3), and which impl a method call resolves to;
   3. a limit that a slice's spec lists for a later slice of this program to close (#1441 D4), until that slice lands.
+  4. Macro metaprogramming (owner decision, 2026-10-11): an identifier, item name, path, attribute or
+file path that a macro expansion builds from parts — a `macro_rules!`/`macro` fragment or `tt`
+substituted into an item, attribute, `use` or call position, a metavariable expression (`${..}`),
+an attribute or derive macro. The tool judges every written token, inside macro token trees too, by
+the rules the tool applies to written tokens in that place, and refuses each direct form those rules
+name: D1 (a) (#1519) refuses every `path` in a written attribute inside a macro token tree, whatever
+its value; B2a-D2 refuses every `try_pop` token in a macro token tree in a region. It does not model what
+an expansion assembles; the written gates `${`, `feature(` and `proc_macro*` stay refused. Code written to defeat the tool this way is outside its claim.
+  (Placement: item 4 was added by root's ruling of 2026-10-12 (rj3-e), which records the owner's decision of 2026-10-11. Q is the pair `try_pop`, `available_at_entry`, defined in #1442 root Amendment 4. The other three limits are unchanged.)
   A verifier finding inside one of these limits is recorded in the issue's evidence and is not a FAIL. Only a root ruling adds or widens a limit; an implementer or a verifier cannot. A documentation or record sentence that claims more than the tool does is a finding as usual.
 
 ## Objective gates

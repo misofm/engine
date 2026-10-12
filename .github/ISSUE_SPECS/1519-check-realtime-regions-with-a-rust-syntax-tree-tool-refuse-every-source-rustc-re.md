@@ -58,10 +58,8 @@ Root's text, verbatim (it closes the three open items that attempt 1 reproduced;
 
 >
 > They apply the threat model (fail closed, a false pass is not acceptable) to the three gaps.
-> 1. Inside any macro token tree (a macro_rules! or macro body, or any macro invocation's tokens), refuse:
->    - any identifier `path` (r# forms included), whatever follows it;
->    - any attribute whose content starts with a `$` metavariable (`#[$m]`, `#![$m]`).
->    This closes `m!(path = "y.rs")` through a `$m:meta` splice.
+> 1. (Replaced by root's ruling rj3-e, 2026-10-12; the earlier text of this rule 1, which refused any identifier `path` in a macro token tree and any attribute whose content starts with a `$` metavariable, is withdrawn. The rule now reads:)
+>    Inside macro token trees the tool applies D1 (a) to WRITTEN attributes: a written `#[..]`/`#![..]` whose content holds the identifier `path` is refused (inside a macro token tree, whatever its value, as D1 (a) already says). A `path` identifier that is not inside a written attribute is not refused (limit 4 covers a path attribute assembled by expansion). Amendment 1 rule 1's second bullet (`#[$m]`/`#![$m]`) is withdrawn too (limit 4). Rules 2-4 (d5b26071f) stand; source_reads.rs:200-216 already implements this rule (0 real refusals).
 > 2. Outside a `use` item, an identifier `include` (r# included) not directly followed by `!` is refused, anywhere. This is the same idea as F2 for debug_assert, and it closes `inc!(include)`.
 > 3. Inside any macro token tree, refuse `include!` (any path prefix). Its file is read relative to the expanding file, which the tool cannot judge. Also refuse an `include` identifier there in any form.
 > 4. include_str!/include_bytes! stay allowed outside macro token trees. Inside a macro token tree, refuse them too, but only after the implementer measures the real tree. If any real site has include_str!/include_bytes! (or their identifiers) inside a macro token tree, do NOT refuse them. Report the sites to me first.
@@ -85,8 +83,12 @@ Root's text, verbatim (it closes the three open items that attempt 1 reproduced;
 - `use std::include as inc;` with `inc!("z.txt")`: red if (c) is dropped.
 - Placement (Root Amendment 1; the case list follows the amendment's rules, not rule text of this spec). Each is
   refused, each has a one-sentence test value and a mutation in the Attempt record:
-  - Rule 1 (NOT implemented in attempt 2: it refuses the real tree, see the Attempt 2 section): `macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path = "y.rs");` and a `path` (also `r#path`)
-    followed by anything in a macro token tree; `#[$m]` and `#![$m]` in a macro token tree.
+  - Rule 1 (root ruling rj3-e, 2026-10-12; implemented at `source_reads.rs:200-216`): a written `#[..]` or `#![..]` inside a macro
+    token tree (a `macro_rules!` or `macro` body, or a macro invocation's token tree) that holds an identifier `path` (also
+    `r#path`) at any depth is refused, whatever follows it and whatever its value: `macro_rules! m { () => { #[path = "ok.rs"] mod x; } } m!();`,
+    `m!(#[path = "ok.rs"] mod x;);`, and `#[cfg_attr(.., path = ..)]` there. A `path` identifier that is not inside a written
+    attribute is not refused (for example `assert_eq!(entry.path, x)`, `json!({"path": path})` and a `$path:literal` metavariable).
+    A path attribute that an expansion assembles (`m!(path = "y.rs")` into `#[$m]`) is limit 4 (#1438 Hazards), not refused here.
   - Rule 2: `macro_rules! inc { ($i:ident) => { $i!("z.txt") } } inc!(include);` and `r#include` not followed by
     `!` outside a `use` item.
   - Rule 3: `include!` (any path prefix) and an `include` identifier in any form inside a macro token tree.
@@ -103,8 +105,8 @@ Root's text, verbatim (it closes the three open items that attempt 1 reproduced;
 3. Mutations (PR evidence), each alone, with the real tree still passing; each turns red only the case
    named for it: (a) dropped; the (a) exception applied inside `cfg_attr`; the (a) exception applied inside
    macro token trees; (b) dropped; (c) dropped.
-   Placement (Root Amendment 1): one mutation per amendment rule (1: `path` in a macro tree, and the `$`-metavariable
-   attribute; 2: bare `include`; 3: `include!` and `include` in a macro tree; 4 if implemented), each alone, red only
+   Placement (Root Amendment 1): one mutation per amendment rule (1: a written attribute inside a macro token tree
+   no longer refuses its `path`, which turns the rule 1 case red; 2: bare `include`; 3: `include!` and `include` in a macro tree; 4 if implemented), each alone, red only
    on its own case.
 4. Shipped artifacts unchanged, as A1's gate 6 (`.so` identical; `.a` members identical once `.llvmbc` is
    removed; the worklet module UNCHANGED).
@@ -219,7 +221,10 @@ outside macro token trees (argument of a call, a `const` initialiser).
   that names `include`, `include_str` or `include_bytes` inside the parentheses, and none exists on the tree.
   Recorded here and in the module comment; not pinned by a test.
 
-**Rule 1 is NOT built: it fails its own gate on the real tree.** Root Amendment 1 rule 1 refuses any identifier `path`
+(Superseded by root's ruling rj3-e, 2026-10-12: rule 1 is now the written-attribute rule stated in Root Amendment 1 above, and
+`source_reads.rs:200-216` implements it with 0 real refusals. The paragraph below is the attempt-2 record of the withdrawn text.)
+
+**Rule 1 (the withdrawn text) is NOT built: it fails its own gate on the real tree.** Root Amendment 1 rule 1 refuses any identifier `path`
 in any macro token tree, "whatever follows it", and any `#[$m]`/`#![$m]` there. Measured over the J3 branch tree
 (`crates hosts tools`): 132 refused lines in 54 files (103 outside `tools/realtime-policy`, 29 inside). 124 are an
 ordinary identifier `path` in a macro invocation or definition (`assert_eq!(entry.path, ..)`, `write!`,
@@ -264,5 +269,5 @@ regions in 26 files)`. `cargo test --locked -p realtime-policy` 180 passed. `car
 `scripts/test-realtime-policy.sh` (`ok`) exit 0. Gate 4 (shipped artifacts): as attempt 1, `realtime-policy` has no
 dependent crate; no artifact built.
 
-**Open items.** Rule 1 (above): a root ruling is needed. Of attempt 1's open items, 2 (`inc!(include)`) and 3
+**Open items.** Rule 1 (above): a root ruling is needed. (Closed by root's ruling rj3-e, 2026-10-12: see Root Amendment 1, rule 1.) Of attempt 1's open items, 2 (`inc!(include)`) and 3
 (`include!` in a macro body read relative to the expanding file) are closed by rules 2 and 3; 1 stays open.

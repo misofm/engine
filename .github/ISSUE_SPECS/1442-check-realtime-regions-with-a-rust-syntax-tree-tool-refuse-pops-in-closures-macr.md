@@ -95,6 +95,8 @@ the self-test's lines from `:440` on are one lower.
 
 ## Decisions
 
+(Placement, root Amendment 4, 2026-10-12: Amendment 4 below supersedes D3's `.map(<path>)` allowance, root Amendment 1 (iv) and root Amendment 2 SP-A (a), (b) and (c) with their D6 cases and gate 5 mutations, `u19-swapped`, and D10's span for a `let`; D9, F2 and B1a-D7 are amended there. Where an older bullet below disagrees, Amendment 4 governs.)
+
 - **D1. Closures.**
   - (root Amendment 3, MAJOR-1; replaces the former first bullet, "A pop inside a closure body is
     refused, except in an `array::from_fn` closure, where B1b-D1 and B1b-D3 apply") "A pop inside a
@@ -318,10 +320,121 @@ text. Each item is placed where it belongs and marked "(root Amendment 3)":
   (`tools/realtime-policy`, drain rule) is updated in attempt 2 so that it does not overclaim: the
   collection-root hole is a known false pass until D9 lands (rj3-c R1).
 
+### Root Amendment 4 (2026-10-12): attempt 3 (the last), the owner's limit 4, and the retired trust rules
+
+Authority: root ruling rj3-e (2026-10-12), after a fresh adversarial review of the attempt-2 head `d5b26071f`
+(`rj3-d-review`), under the owner's decision of 2026-10-11 ("Add one stated limit": the tool refuses every
+direct form, and names and file paths built by macro metaprogramming become one written limit, like registry
+crates; runtime audits (0 allocations, 0 syscalls) stay the backstop). The limit is item 4 of the threat model
+in #1438 Hazards. Root adopted the review's texts, with the cuts that limit 4 allows. This spec-only commit
+comes before attempt 3; the implementer does not write rule text. Phrases marked "(placement)" only connect
+root's text to this spec.
+
+**Superseded by this amendment (placement).**
+- D3's `.map(<path>)` allowance and the `<recv>.map_or(0, <Type>::available_at_entry)` count form (R1, R1b).
+- Root Amendment 1 (iv), and root Amendment 2's SP-A (a), (b) and (c) (the earlier D3 (a) ratification is withdrawn),
+  with their D6 cases and gate 5 mutations; SP-A (d) stays.
+- D10's span for a `let` (R3), and `u19-swapped` (R5).
+- The name-emitting set, its transitive closure and the rename tracking: delete that code.
+
+**R1 and R1b. Text.**
+> **D3 (root Amendment 4).** Function values: a path whose last segment is `try_pop` or `available_at_entry` is allowed only as the callee of a call. The `.map(<path>)` allowance and the `<recv>.map_or(0, <Type>::available_at_entry)` count form are withdrawn (root, 2026-10-11, #1442 attempt-2 F1, t5). A count is `<recv>.available_at_entry()[.min(<cap>)]`, and a pop is `<recv>.try_pop()`.
+
+Facts the review measured: with R1 applied, `.map(|c| c.try_pop())` is refused by D1; the real tree refuses only
+`crates/effect-contract/src/live.rs:366`; the 17 `let map` locals and F1a-c become moot; `per_width!`
+(`crates/builtins/src/lib.rs:5851`) is not affected. Probe `t5` is a user trait `map_or` that returns `usize::MAX`;
+the attempt-2 tool passes it.
+
+**The `live.rs` rewrite belongs to #1345.** #1345 D8 is amended in the same commit with a pointer; #1426 D2 keeps
+only `<recv>.try_pop()` and its `pop_receiver_differs_map` case is deleted in the same commit. J does not touch
+`live.rs`. J's gate 1 refuses exactly `live.rs:366` until J rebases onto #1345, and the batch-merge gate then passes
+with no exception. (Placement: the real-tree claim of gate 1 and of the rows below is measured on the tree rebased onto #1345.)
+
+**Trusted names.** Q = {`try_pop`, `available_at_entry`}. The scan reads the tokens of every `.rs` file under the roots and refuses:
+- (q) a Q identifier (bare or `r#`) that does not directly follow `.` or `::`, except exactly one written `fn` token each for `try_pop` and `available_at_entry`, in `crates/engine/src/realtime/spsc.rs` (a second one, in `spsc.rs` too, is refused; every other written definition is refused; a definition built by expansion is limit 4; t2, t7);
+- (s) F2 for `debug_assert` only: a `debug_assert` identifier (bare or `r#`) not directly followed by `!` withdraws the trust from that name everywhere, and also withdraws B1a-D7. It is not generalized to other assert macros: with (m) cut, nothing consumes that trust. (Placement: this is the review's (s) with its set S reduced to `debug_assert`.)
+- (u) a `macro_use` identifier, except the whole attribute `#[macro_use]` directly followed by `mod`;
+- (n) any `no_implicit_prelude` identifier;
+- (d) unchanged.
+
+**B1a-D7 (amended):** only a single-identifier `debug_assert!` (no path, no leading `::`) is taken at its word (t6).
+
+Macro-made shadows inside one crate, and globs under the implicit prelude, are E0659 (built). A Cargo dependency key or rename to `core`, `std` or `alloc` is closed by the manifest rule below. (Placement: in #1438 Hazards the trusted-name parenthetical reads "Q and `debug_assert`".)
+
+**Manifest rule (named exception to this spec's authorized paths).** `scripts/check-workspace-policy.sh:161` refuses only package names `core|std|alloc|proc_macro|test`. It does not refuse dependency keys. No Cargo.toml has such a key. A naive regex hits `test = false` in `fuzz/Cargo.toml`, so restrict the rule to dependency tables. Close it with a rule in that script for dependency-table keys and `[*dependencies.core|std|alloc]` headers, by this named exception. No other edit to that script.
+
+**R3. Text.**
+> **D9 (amended).** For each binding a drain rule reads (count, alias source, slice parameter, collection root, `<Q>`, `<K>`), an item of any kind or a `use` that names it, and D10's statement or item macro or attributed item, is refused anywhere in its scope: for a `let`, the whole block that holds the `let`, from its `{`, at any depth; for a parameter, the whole function body; for a pattern, the whole node that binds it. This replaces D10's span for a `let`. A `let` whose identifier pattern names a unit struct or unit variant in scope binds nothing. Its value then has that item's type, which is limit 2 (as for a `let` of that type).
+
+Measured by the review: with the scopes above, r04, r05, r07, r09 (also a head false pass), r11 and `pq_norounds_2` are refused;
+`pq_norounds_1` stays accepted; real tree 0. D10's comment "An item in the let's own block cannot shadow it" is false for r13
+(`struct controls; impl..; let controls = controls;`, region after) and r14 (the same struct made by a `mk!()` before the `let`):
+both compile, loop 5001 times at the review's cap, pop 1000, and passed the attempt-2 tool. r15 (a unit struct at module level) is limit 2 in effect.
+
+**R4. Text.** Refuse an identifier `feature` directly followed by a `(` group anywhere under the roots. Also refuse `$` directly followed by a `{` group (a metavariable expression), so that a later stabilization of `${concat}` on a toolchain bump is still refused.
+The review confirmed that `scripts/check-workspace-policy.sh` does not forbid `#![feature`, and that `#![feature(` as a token sequence misses `#![cfg_attr(x, feature(..))]`. Real tree: 0 for both.
+
+**R5. Case `decrement-after-a-continue`** (refused):
+`let mut remaining = control.available_at_entry(); while remaining != 0 { let Ok(record) = control.try_pop() else { break; }; if skip { continue; } remaining -= 1; apply(record); }`
+The attempt-2 tool refuses it. Under the mutation "first binary statement" it is accepted (built). The control form, with the decrement first, is accepted.
+Test value: red if `while_bounds` accepts a decrement that is not the body's first statement, which lets a `continue` before it skip the decrement and pop without bound. The existing `while-decrement-not-first` puts the decrement in an `if`, so it stays green under that mutation.
+Delete `u19-swapped`, because this case supersedes it.
+
+**Spec items to delete or replace.**
+- The accepted D6 `.map` case flips to refused.
+- Delete the (a) tests, the (c) name-emitting and rename tests, `try-pop-by-value-on-a-reference-impl` (superseded by (q)), and the (a), (b) and (c) mutations, plus gate 5's ".map refused" and "any .map receiver".
+- Rewrite `the_trusted_names_in_their_allowed_forms_pass`: drop its `impl Consumer { fn try_pop }`, `.map` and `let map`.
+- Keep the 8 F2 shadow rows and `proc-macro-fn`.
+- Delete the name-emitting set, the transitive closure and the rename tracking.
+
+**New D6 cases.** Each is refused unless it says "accepted". Each has its test value.
+- **C1** `map-path-on-as-mut` (k0): red if `.map(<path>)` on `<fields>.as_mut()` is accepted again.
+- **C2** `map-or-count-form`: red if the `map_or(0, <Type>::available_at_entry)` count is accepted again.
+- **C4 / C5** (t2 / t7): red if a definition of `try_pop` / `available_at_entry` outside spsc.rs is allowed.
+- **C10** (t6): red if D7 matches by the last segment.
+- **C11** `#[macro_use] extern crate x;` is refused. Red if (u) is dropped. Its accepted half, `#[macro_use] mod`, is red if the exemption is dropped (the real tree, `crates/math/src/lib.rs:52`).
+- **C12** `#[no_implicit_prelude]` is refused. Red if (n) is dropped.
+- **C13** the `cfg_attr` form of `feature(..)` is refused. Red if the rule matches only `#![feature(`.
+- **C14** r04, r05, r07, r09, r11 and `pq_norounds_2`. Red if the scan stops at the region. r13 and r14 are red if a `let`'s scope starts at the `let`.
+- **C15** the R5 case above.
+
+**Gate 5 mutations (amended).** Apply each alone. The real tree must pass, measured on the tree rebased onto #1345. (The numbers are the review's; 5-8 are cut with their cases.)
+1. Restore `.map(<path>)`: C1 goes red.
+2. Restore the `map_or` count form: C2 goes red.
+3. (q) allows any `fn try_pop(&mut self`: C4 goes red.
+4. `available_at_entry` is not in Q: C5 goes red.
+9. D7 matches the last segment: C10 goes red.
+10. (u) is dropped: C11's refused half goes red. The exemption dropped: C11's accepted half goes red, and so does the real tree at `math:52`.
+11. (n) is dropped: C12 goes red.
+12. `#![feature(` matched only as a token sequence: C13 goes red.
+13. The `let` scope runs from the `let` (today's D10 span): r13 and r14 go red. Region leaves only: r04, r05, r07, r09, r11 and `pq_norounds_2` go red.
+14. The first-statement rule relaxed to the first binary statement: C15 goes red.
+
+**Real tree, measured** (the review's rows, on the attempt-2 head; the implementer re-measures on the rebased tree, gate 1).
+| Rule | Refusals |
+|---|---|
+| Head tool (`d5b26071f`) | 0 (94 regions in 26 files) |
+| R1 alone | 1 (`live.rs:366`); 0 after #1345's rewrite |
+| R1b (`map_or` withdrawn) | 0 after #1345's rewrite |
+| Replacement R2 ((q), (s), (u), (n), the single-segment D7) | 0 |
+| R3 (whole scope) | 0 |
+| R4 | 0 |
+| R5 | 0 |
+
+Also measured: only 1 `fn try_pop` (`spsc.rs:441`) and 1 `fn available_at_entry` (`spsc.rs:421`) exist; there are 0 `macro_rules! $`, 0 `#![feature`, 0 `no_implicit_prelude` and 0 `${`.
+
+**Limit 4 evidence (recorded; none of these is a FAIL).** These probes build a name or a path by expansion, and the owner's limit 4 (#1438 Hazards, item 4) puts that outside the tool's claim:
+- t1: `mkp!(fn x.try_pop());` with `($k:tt $x:ident . $n:ident ()) => { .. $k $n(&mut self) {while ..} }`: a looping `try_pop` made by expansion (rustc pops 1000 of 1000).
+- t3a: `mk!($ ::debug_assert!)`, then `#[macro_export] macro_rules! $n`.
+- t4: a macro made by `make!($ innocent)`, whose name is in no set the scan reads (rustc pops 1000 of 1000).
+- The stable `path` splice vectors of the #1519 rule-1 review: V3 `m!(path, =, "y.rs")` into `#[$a $b $c]`; V4 `outer!(path, "y.rs")` with `inner!($p = $l)` into `#[$m]`; V8 `m!(#, [path = "y.rs"])` into `$h $g mod x;`; W3 a transcriber `$h [path = "y.rs"] mod x;` with `m!(#)`; R1/R2 a group first in a repetition, `# $( [path = "y.rs"] mod $a; )*`.
+- The nightly vectors N1 to N3 of the same review (`${concat(..)}`, `macro_attr`, `macro_derive`) are refused by R4: each needs `${` or `#![feature(..)]`.
+
 ## Authorized paths
 
 - `tools/realtime-policy/**`
 - This spec
+- `scripts/check-workspace-policy.sh`, for the manifest rule only (named exception, root Amendment 4)
 
 ## Non-goals
 

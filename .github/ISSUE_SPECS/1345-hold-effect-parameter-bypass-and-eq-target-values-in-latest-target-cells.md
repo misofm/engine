@@ -191,12 +191,13 @@ on `6b9067ede`).
   the render path whose body pops a queue holds that pop in its own body, in the counted form that
   the realtime drain rule accepts:
   - the count is read once at entry, `let available = <recv>.available_at_entry()[.min(<cap>)];`
-    or the `map_or(0, <Type>::available_at_entry)` form, and the pop's innermost loop is
+    (the `map_or(0, <Type>::available_at_entry)` form is withdrawn: root ruling rj3-e, 2026-10-12), and the pop's innermost loop is
     `for _ in 0..available` or the `while available != 0 { available -= 1; .. }` form (tool slices
     B1a-D6 and B1a-D8);
   - every loop around it is a finite form (tool slice B1b-D1) that selects a different lane's queue
     on each pass (#1418 Amendment 1, D1), as `for lane in self.lanes.iter_mut()` does;
   - the pop's receiver is the counted receiver (#1426 Amendment 1, D1).
+  - (Pointer, root ruling rj3-e, 2026-10-12.) The `live.rs:366` rewrite to a direct `<recv>.try_pop()` call, and the count to `<recv>.available_at_entry()`, belongs to this issue. Tool slice B2a (#1442, its root Amendment 4) withdraws the `.map(<path>)` pop and the `map_or` count; J's gate 1 refuses exactly `live.rs:366` until J rebases onto this issue.
 
   **The shape (fourth review, MAJOR-5).** #1418's invariance rule lets the selecting loop name the
   lane only in its binding and in the receivers of `available_at_entry` and `try_pop`. So:
