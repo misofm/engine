@@ -347,7 +347,8 @@ pub struct HostLiveControlRequest {
     /// Zero is the honest form of "observation off": `attach_effect_observation` is never
     /// called, so the compiled plan holds no lane, no accumulator and no conflating cell — not a
     /// disabled one, none — and `observation_retained_bytes` is zero. Nonzero requires a control
-    /// channel, because a subscription rides the effect's existing command queue.
+    /// channel, because a subscription is a record in the effect's own observation queue, which only
+    /// the effect's control lane drains.
     ///
     /// The default observation period is derived from `meter_period_frames`; individual taps
     /// can use other periods. Latest gain-reduction observations can be independently aged,
@@ -1673,8 +1674,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         _ => Vec::new(),
     };
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
-    // only alongside a control channel: a subscription rides the effect's own command queue, so
-    // "observe without live controls" has no delivery path and is a rejection rather than a silent
+    // only alongside a control channel: a subscription is a record in the effect's own observation
+    // queue, which only the effect's control lane drains, so "observe without live controls" has
+    // no delivery path and is a rejection rather than a silent
     // half-attach. The published window is the meter window, derived rather than configured.
     let observation_window_blocks = match (live_controls.meter_period_frames, compiled.quantum().0)
     {

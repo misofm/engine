@@ -6971,10 +6971,11 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
 /// at its own wire index, before the room pass, any cell write or the stamp, whatever the queue's
 /// room. Two taps of different effects in one submission are fine.
 ///
-/// Test value: red if the duplicate check goes (the second record then finds no room in the
-/// tap's one-slot queue and the answer is backpressure, which invites a retry that can never
-/// succeed), if it runs after the room pass or a cell write (the fader value or the bus below
-/// would move), or if it refuses taps of different effects.
+/// Test value: red if the duplicate check goes, or runs after the room pass (the second record then
+/// finds no room in the tap's one-slot queue and the answer is backpressure, which invites a retry
+/// that can never succeed; the reason code is what catches it, and the fader and armed-tap
+/// assertions state the all-or-nothing outcome beside it), or if it refuses taps of different
+/// effects.
 #[test]
 fn a_submission_names_each_observation_tap_once() {
     const QUANTUM: u32 = 128;

@@ -59,9 +59,9 @@ pub struct EffectPreparedEntry {
     /// [`lowers_session_bypass`] and `None` on every other, and [`attach_effect_live_controls`]
     /// replaces it with a live channel seeded from [`Self::initial_bypass`]; nothing else creates
     /// one. It travels with the entry into `GraphPreparedEffect`, so the plan that renders the
-    /// effect is the one that drains its queue and applies its shunt, and a session with no live
-    /// controls and no bypassed instance carries a `None` that the runtime turns back into the
-    /// byte-identical live-control-free path.
+    /// effect is the one that reads its cells, drains its observation queue and applies its shunt,
+    /// and a session with no live controls and no bypassed instance carries a `None` that the
+    /// runtime turns back into the byte-identical live-control-free path.
     pub control: Option<Box<EffectControlLane>>,
     /// This instance's observation taps (issue #143 D3, level 1).
     ///
