@@ -76,8 +76,10 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
     `SESSION_DEFAULT_RAMP`" and "`trackEdit`'s default stays 0"): `smoothing()` returns the checked
     explicit length or undefined. An absent length becomes `SESSION_DEFAULT_RAMP` (12 ramped kinds) or
     0 (others) only in the encoder helper, the one source of truth. An explicit `u32::MAX` throws.
-    In the `beforeSubmit` hook, a builder edit with no explicit length shows `smoothingSamples` as
-    undefined, and the encoder resolves it. (The sentence is in the TSDoc of `LiveControlBeforeSubmit`
+    In the `beforeSubmit` hook, a ramped-kind builder edit with no explicit length shows
+    `smoothingSamples` as undefined, and the encoder resolves it. (Batch verdict n3: a bypass or
+    input-filter edit also shows undefined and encodes 0; an effect-parameter edit shows its given
+    length or 0; an observation edit shows its window.) (The sentence is in the TSDoc of `LiveControlBeforeSubmit`
     in `sdk/src/core/live-controls.ts`; the hook is not declared in the shipped `.d.ts` pair, so
     that pair is unchanged.)
   - `runtimeSmoothing` (effect parameters) is unchanged.
@@ -119,6 +121,10 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 - Root ruling (2026-10-12): `sdk/src/internal/ramp.ts` (new; the encoder helpers
   `checkedRampLength` and `laneEditSmoothingWord`, kept out of the package's public exports) and
   `sdk/README.md`
+- Root ruling (2026-10-12), batch verdict m3 and m4 (see "Batch verdict follow-ups"):
+  `sdk/src/internal/validation.ts` and `sdk/src/internal/control-smoothing.ts` (new; `core/session.ts`'s
+  validators and the `controlSmoothing` bounds helper, moved unchanged, in no export map or barrel), and
+  `sdk/test/package-tarball-smoke.mjs`
 
 ## Non-goals
 
@@ -430,7 +436,8 @@ below. #1382 must drop or refresh `SessionRamps` (Amendment 1 note; now a duty i
   `DataView.setUint32` wraps `-1` to `0xFFFFFFFF` and `1.5` to `1`; the browser host's `validU32` refuses both.
   The bytes are the same before and after #1364 and the engine refuses a non-zero bypass or input-filter word as
   `MALFORMED`, so nothing is lost silently. A u32 check on every kind would be a separate small fix; no issue
-  filed here.
+  filed here. *Resolved by Root ruling (2026-10-12), batch verdict m4:* see "Batch verdict follow-ups" below;
+  the shared helper now refuses a non-`u32` on an unramped kind.
 - *n2, resolved:* `sdk/README.md` now states the absent-length default (an absent `smoothingSamples` ramps over
   the session's `controlSmoothing` or the default table; an explicit `0` steps), `controlSmoothing` authoring and
   bounds, and the `LaneEdit` rule (a hand-written `LaneEdit` resolves the same way through the encoder).
@@ -456,3 +463,41 @@ below. #1382 must drop or refresh `SessionRamps` (Amendment 1 note; now a duty i
   build: the batch's Rust edits (a test, a `match` listing, comments) did not move it); `check-sdk-generated.sh` (ok), `check-sdk-deletions.py` (ok),
   `check-sdk-types.sh` (after an offline `npm ci`, `node_modules` deleted again), `check-sdk-headless.sh`
   (374 evals), `sdk-package.sh check` (ok).
+
+**Batch verdict follow-ups** (stream E2 batch verdict, head `29bd7f3ca`, 2026-10-12).
+
+- *m1:* `sdk/README.md` said the parameter and bypass edits of its example take the session's lengths, and
+  that `4294967295` is refused on every kind. It now says the parameter edit writes its given length or `0`,
+  the bypass writes `0`, and only a ramped kind refuses the marker.
+- *n3:* the TSDoc of `LiveControlBeforeSubmit` names which builder edits show `undefined` (ramped kinds,
+  bypass, input filters) and which show a length (effect parameters: given or `0`; observation: the
+  window). The `smoothing()` doc points `laneEditSmoothingWord` at `src/internal/ramp.ts`, not "the writer
+  module". D3's sentence above is corrected the same way.
+- *n4:* `sdk/test/package-tarball-smoke.mjs` (run by `sdk-package.sh check`, in the SDK job) now refuses
+  `checkedRampLength`, `laneEditSmoothingWord`, `normalizeControlSmoothing`, `knownKeys` and `nameList` on
+  every packed subpath (`.`, `./headless`, `./browser`, `./assets`), beside its existing serializer checks.
+  Mutation: `export { laneEditSmoothingWord } from "../internal/ramp.ts";` appended to
+  `sdk/src/browser/live-controls.ts` (reaches `./browser` through `export *`): RED, `AssertionError: ./browser
+  must not expose the internal laneEditSmoothingWord`, exit 1; restored: `sdk-package.sh check` green. The
+  source-root eval `the package root exports the marker and none of the encoder's ramp helpers` stays: it
+  also defends that `SESSION_DEFAULT_RAMP` stays public, which the smoke does not.
+- *m3 (Root ruling (2026-10-12)), the helper #1385 reuses:* `normalizeControlSmoothing`, its bounds and its
+  `f32` check moved from `core/session.ts` to the new `sdk/src/internal/control-smoothing.ts` and take a
+  `path` parameter (the builder passes `session().controlSmoothing`, so its texts do not change). The module
+  needs `fail`, `knownKeys`, `freeze`, `f32` and `CODE`, which `session.ts` held privately, so they moved
+  unchanged to the new `sdk/src/internal/validation.ts` and `session.ts` imports them; nothing else in
+  `session.ts` changed. Both modules are in no export map or barrel. Checked: `Object.keys` of the source
+  root, `browser/index.ts` and `headless/index.ts` are identical before and after; the new tarball smoke
+  covers the packed dist. The builder evals are unchanged and green.
+- *m4 (Root ruling (2026-10-12)), the item n1 above:* `laneEditSmoothingWord` range-checks an unramped
+  kind's word in `src/internal/ramp.ts` (one shared `requireU32`, also used by `checkedRampLength`), so the
+  headless encoder refuses `-1`, `1.5`, `2^32`, `NaN` and `Infinity` with `MisoUsageError` ("smoothingSamples
+  must be a u32"), as the browser does. Any `u32` stays a valid word on an unramped kind, `4294967295`
+  included; the marker rule on ramped kinds is unchanged (the existing eval `explicit marker` still passes).
+  New eval `a literal LaneEdit of an unramped kind with a non-u32 length is refused, as the browser refuses
+  it` (`sdk/test/live-controls-evals.mjs`, 375 evals). Test value: a headless `observeSubscribe` with
+  `smoothingSamples: 1.5` silently became a 1-block window; no eval caught it. Mutation: the check removed
+  from the unramped branch: RED (1 failure of 375); restored: 375 pass.
+- *Gates:* `check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh` (offline `npm ci`,
+  `node_modules` deleted afterwards), `check-sdk-headless.sh` (375 evals) and `sdk-package.sh check` pass on
+  the shipped module `1e2175365b3de67dee196cc73bfdb2e9f037ac67a467505dcffa0af50afc6c93`.

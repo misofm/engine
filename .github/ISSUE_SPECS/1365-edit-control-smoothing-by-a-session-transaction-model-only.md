@@ -253,7 +253,7 @@ intended files); the full suites below ran after the last revert.
 
 **Open items.** None for this slice. The browser has no transaction API for the edit (non-goal; #1309).
 
-## Amendment 1 note (attempt 2, under root's 2026-10-12 ruling)
+## Amendment 1 note (#1364 attempt 2, under root's 2026-10-12 ruling)
 
 Stream E2 asked whether host-web's cached ramp table must be refreshed when this edit lands. The
 table is `SessionRamps` (`LiveRamps::for_session` plus one pan window per strip), built once in
@@ -277,10 +277,15 @@ red without that. Until then a cached table cannot go stale.
 - *NIT 1:* three over-long lines are wrapped (`crates/capi/src/runtime/live_tests.rs` doc of
   `model_only_edits_commit_without_a_plan_rebuild`; `crates/host-core/src/live_delta.rs` step 3 of the
   classifier doc; `docs/C_ABI_V1_QUALIFICATION.md` the model-only item). Comments and prose only.
-- The Amendment 1 note about `SessionRamps` is relabelled "Amendment 1 note (attempt 2, under root's
+- The Amendment 1 note about `SessionRamps` is relabelled "Amendment 1 note (#1364 attempt 2, under root's
   2026-10-12 ruling)"; root confirms its content. The duty it names is now in #1382's spec.
 - *Mutation run* (the sentence's claim, tested): `commit_live` builds `LiveRamps::for_session` from the
   pre-commit model. RED: `a_control_smoothing_edit_makes_the_next_mute_a_step` and
   `a_control_smoothing_edit_gives_the_next_unmute_its_ramp` (gate 4, `-p capi`); GREEN: gate 5's
   `a_control_smoothing_edit_is_live_and_its_lengths_govern_the_same_transactions_records`. File restored.
   The doc wraps change no code.
+
+**Batch verdict follow-ups** (stream E2 batch verdict, head `29bd7f3ca`, 2026-10-12).
+
+- *n7:* the Amendment 1 note above named "attempt 2". #1365 had attempt 1 only; the note is #1364's
+  attempt 2. Its heading now reads "Amendment 1 note (#1364 attempt 2, under root's 2026-10-12 ruling)".

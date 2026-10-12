@@ -164,6 +164,13 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 - Root ruling (2026-10-12), a named exception: `crates/capi/tests/resource_lifecycle.rs` (the race
   settle of `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`;
   Attempt record, "Where the spec and the tree differed", item 7)
+- Named exceptions, batch follow-ups, recorded after the fact (each necessary or mechanical; the
+  Attempt record's "Batch verdict follow-ups" says why):
+  - `crates/host-core/src/lib.rs` (the `LiveRampRow` re-export that D4 needs)
+  - `crates/host-core/tests/launch_registry_once.rs` (the `LiveRamps` literal gains two fields)
+  - `.claude/skills/author-session/SKILL.md` (the root-key list and a `control_smoothing` section)
+  - `scripts/check-browser-expected-resources.py` (the self-test's one-byte mutation, the companion of
+    the gate 7 re-pin)
 
 ## Non-goals
 
@@ -430,3 +437,14 @@ anything AArch64-only.
   - polarity row at the plain mute length (`saturating_mul(2)` removed): RED
     `for_row_returns_the_key_field_of_every_row`; green after the revert.
   - The NIT 2 edit is a comment move; no test applies.
+
+**Batch verdict follow-ups** (stream E2 batch verdict, head `29bd7f3ca`, 2026-10-12).
+
+- *n5 (MINOR 2 of the #1054 verdict):* the four out-of-path edits the Attempt record named under "MINOR 2"
+  are now named exceptions in Authorized paths (label: "batch follow-ups, recorded after the fact"):
+  `crates/host-core/src/lib.rs`, `crates/host-core/tests/launch_registry_once.rs`,
+  `.claude/skills/author-session/SKILL.md` and `scripts/check-browser-expected-resources.py`.
+- *n2:* the comment on `next_row` in `for_row_returns_the_key_field_of_every_row` said a new row "cannot be
+  left out of the test unnoticed". The `match` forces a new row to get an arm, but an arm of `None`, or a
+  row no arm chains to, compiles and is never visited. The comment now says that; the NIT 1 record above
+  already says the walk is a chain. Comment only.

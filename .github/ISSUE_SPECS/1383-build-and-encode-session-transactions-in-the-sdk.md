@@ -89,7 +89,7 @@ transaction format.
 ## Non-goals
 
 - No `engine.apply` (#1296). No decoder in the SDK.
-- Opcodes `0x0001`-`0x0007` and `0x0300`-`0x0702`: *Encode the session, submix, output, route,
+- Opcodes `0x0001`-`0x0008` and `0x0300`-`0x0702`: *Encode the session, submix, output, route,
   automation and VCA edits in the SDK* (#1385), on the same writer and oracle.
 
 ## Objective gates
@@ -126,3 +126,10 @@ transaction format.
 
 - *Carry an optional per-edit ramp length on live session edits* (#1394), for the
   `ramp_samples` field. #1296 and #1385 depend on this issue.
+
+## Batch verdict follow-ups (stream E2 batch, 2026-10-12)
+
+- *m3, Root ruling (2026-10-12):* the non-goal's opcode range read `0x0001`-`0x0007`, which was stale:
+  #1385's Amendment 1 adds `SetControlSmoothing` (`0x0008`) to the opcodes that slice encodes, so the range
+  now reads `0x0001`-`0x0008`. (#1385's Amendment 1 also says #1383 must encode `0x0008`; this spec carries no
+  such amendment. That open question is root's.)

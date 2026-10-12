@@ -565,8 +565,9 @@ impl SessionEdit {
             | Self::SetRouteMute { ramp_samples, .. }
             | Self::SetRouteFollowsMute { ramp_samples, .. }
             | Self::SetVcaFader { ramp_samples, .. } => *ramp_samples,
-            // Listed one by one on purpose: a new edit must be classified here, as in
-            // `record_edit_ramps`, so a variant that gains a `ramp_samples` field cannot lose it.
+            // Listed one by one on purpose, with no wildcard: a new variant must be classified
+            // here, as in `record_edit_ramps`. An existing arm that gains a `ramp_samples` field
+            // still compiles, so a reviewer checks the arm of any variant that gains one.
             Self::SetSessionId { .. }
             | Self::SetSampleRateHz { .. }
             | Self::SetQuantumFrames { .. }

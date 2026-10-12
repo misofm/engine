@@ -889,7 +889,8 @@ fn for_row_returns_the_key_field_of_every_row() {
             Pan | Matrix | SendMatrix => PAN,
         }
     }
-    /// The next row in the walk. Exhaustive, so a new row cannot be left out of the test unnoticed.
+    /// The next row in the walk. Exhaustive, so a new row must be given an arm; the walk visits it
+    /// only if some arm chains to it, and `None` ends the walk.
     fn next_row(row: LiveRampRow) -> Option<LiveRampRow> {
         match row {
             Fader => Some(InputTrim),

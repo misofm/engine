@@ -94,8 +94,9 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   `SetTrackRack` follows D3's own rule, because both rewrite the effect's `link_mode` with no
   length; the clearing on the five removals (`RemoveTrack`, `RemoveSubmix`, `RemoveRoute`,
   `RemoveVca`, `RemoveTrackEffect`) is ratified (behaviour-neutral hygiene: no record length reads
-  it today). `SessionEdit::ramp_samples()` is exhaustive too, so a variant that gains a length
-  field cannot lose it.
+  it today). `SessionEdit::ramp_samples()` is exhaustive too (no wildcard arm), so a new variant must
+  be classified. An existing `=> None` arm that gains a length field still compiles, so a reviewer
+  checks the arm of any variant that gains one.
 - **D4. Transaction.** `prepare_transaction` builds `EditRamps` beside the candidate model and
   stores it in `PreparedSessionTransaction`, exposed as `edit_ramps(&self) -> &EditRamps`. A value
   above the candidate's `sample_rate_hz` (1000 ms, the bound of #1054 D1) refuses the transaction
@@ -404,3 +405,10 @@ and `1394-attempt2.md` (PASS) and the probe `1394-attempt1-probe.rs`).
     before this follow-up the same mutation was green in the whole crate); green after the revert.
   - remove the `RemoveVca` arm from `ramp_samples()`: `protocol` fails to compile (`E0004`,
     `RemoveVca` not covered); green after the revert.
+
+**Batch verdict follow-ups** (stream E2 batch verdict, head `29bd7f3ca`, 2026-10-12).
+
+- *n1:* D6's sentence and the comment in `SessionEdit::ramp_samples()` claimed a variant that gains a
+  `ramp_samples` field cannot lose it. The match has no wildcard, so a new *variant* must be classified
+  (47 variants: 11 return their field, 36 return `None`); an existing `=> None` arm that gains a field still
+  compiles. Both now say so. Comment and prose only; no code path changed.
