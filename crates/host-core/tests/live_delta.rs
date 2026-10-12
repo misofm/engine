@@ -871,7 +871,9 @@ fn a_raw_matrix_without_a_window_takes_the_session_pan_ramp() {
 
 /// Gate 3, the row table. Red if a row reads another row's key, or the polarity row gets the plain
 /// mute length instead of twice it. The expected values are written from `docs/SESSION_SCHEMA_V1.md`'s
-/// table, one per row, and the exhaustive `match` fails to compile when a row is added without one.
+/// table, one per row. The rows come from walking `next_row`, so the test visits every row it can
+/// reach from `Fader`; a new row fails to compile in both exhaustive `match`es (`expected` and
+/// `next_row`) until someone classifies it and chains it in.
 #[test]
 fn for_row_returns_the_key_field_of_every_row() {
     use LiveRampRow::*;
@@ -887,23 +889,26 @@ fn for_row_returns_the_key_field_of_every_row() {
             Pan | Matrix | SendMatrix => PAN,
         }
     }
-    let rows = [
-        Fader,
-        InputTrim,
-        SendGain,
-        VcaOffset,
-        LinkGlide,
-        Mute,
-        Solo,
-        PolarityInvert,
-        SendMute,
-        SendFollowsMute,
-        VcaMute,
-        BypassCrossfade,
-        Pan,
-        Matrix,
-        SendMatrix,
-    ];
+    /// The next row in the walk. Exhaustive, so a new row cannot be left out of the test unnoticed.
+    fn next_row(row: LiveRampRow) -> Option<LiveRampRow> {
+        match row {
+            Fader => Some(InputTrim),
+            InputTrim => Some(SendGain),
+            SendGain => Some(VcaOffset),
+            VcaOffset => Some(LinkGlide),
+            LinkGlide => Some(Mute),
+            Mute => Some(Solo),
+            Solo => Some(PolarityInvert),
+            PolarityInvert => Some(SendMute),
+            SendMute => Some(SendFollowsMute),
+            SendFollowsMute => Some(VcaMute),
+            VcaMute => Some(BypassCrossfade),
+            BypassCrossfade => Some(Pan),
+            Pan => Some(Matrix),
+            Matrix => Some(SendMatrix),
+            SendMatrix => None,
+        }
+    }
     let explicit = with_smoothing(
         &two_tracks(),
         Some(ControlSmoothing {
@@ -922,8 +927,10 @@ fn for_row_returns_the_key_field_of_every_row() {
         ),
         (MUTE, FADER, PAN, FADER)
     );
-    for row in rows {
-        assert_eq!(ramps.for_row(row), expected(row), "{row:?}");
+    let mut row = Some(Fader);
+    while let Some(current) = row {
+        assert_eq!(ramps.for_row(current), expected(current), "{current:?}");
+        row = next_row(current);
     }
     // The default table: polarity is 20 ms, twice the mute's 10 ms.
     let defaults = LiveRamps::for_session(&two_tracks());

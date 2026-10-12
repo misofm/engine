@@ -5312,9 +5312,6 @@ mod tests {
             // else moved.
             // Re-pinned by issue #1240: root key `vcas` added, empty, so `canonical.json` and the
             // two `prepare_256_tracks` workloads naming it move; nothing else moved.
-            // Re-pinned by issue #1054 (D1a): root key `control_smoothing` added, `default`, so
-            // `canonical.json` and the two `prepare_256_tracks` workloads naming it move; nothing
-            // else moved.
             // Re-pinned by issue #1328 amendment A9: `resources.jsonl` moves by the input
             // section's two `f32` silence counters and its four carried `f32` constants (+24
             // bytes per input stage, counted in the preparation strip and in the bound
@@ -5356,9 +5353,10 @@ mod tests {
             // of the 40-byte input ring consumer). The allocation counts do not move. No PCM,
             // meter, response or benchmark fixture moved.
             //
-            // Re-pinned by issue #1054 (D1a): the two `prepare_256_tracks` rows move, by the
-            // `session_template_sha256` of `canonical.json` and its new `control_smoothing` key.
-            // No PCM, meter, response or resource fixture moved.
+            // Re-pinned by issue #1054 (D1a): root key `control_smoothing` added, `default`, so
+            // `canonical.json` and the two `prepare_256_tracks` workloads naming it move, by the
+            // `session_template_sha256` of `canonical.json`. No PCM, meter, response or resource
+            // fixture moved.
             "3e151a3c0744742330d44d4a6d22ea0f11886b1892ad3266325ec23d93b9e108",
             "accepted joined-corpus manifest identity"
         );

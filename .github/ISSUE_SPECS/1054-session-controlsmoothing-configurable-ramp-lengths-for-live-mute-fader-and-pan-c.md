@@ -161,6 +161,9 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 - `crates/host-core/src/live_delta.rs` (stream B owns it), `crates/host-core/tests/live_delta.rs`
 - `crates/capi/src/runtime/live_tests.rs` (tests only), `docs/C_ABI_V1_QUALIFICATION.md`
 - Struct-literal additions only (deliverable 2), in any file that builds a `SessionModel`
+- Root ruling (2026-10-12), a named exception: `crates/capi/tests/resource_lifecycle.rs` (the race
+  settle of `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`;
+  Attempt record, "Where the spec and the tree differed", item 7)
 
 ## Non-goals
 
@@ -210,13 +213,16 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 4. **C ABI, the ramp is heard** (`crates/capi/src/runtime/live_tests.rs`, new). A playing session
    with `"control_smoothing": { "kind": "default" }` takes a mute transaction. The first block after the commit equals
    neither the unmuted nor the muted control; from the first block after the ramp, the output is
-   bit-identical to a control booted muted. The commit and the ramp blocks allocate nothing
-   (`bench_support::alloc` thread counters, process statics warmed).
+   bit-identical to a control booted muted. Every render call that carries the commit and the ramp
+   allocates nothing (`bench_support::alloc` thread counters, process statics warmed). Root ruling
+   (2026-10-12): the commit itself is control-plane work and is not counted; this replaces "The
+   commit and the ramp blocks allocate nothing".
 5. **C ABI, explicit 0** (same file). The same edit with all session keys at 0 is bit-identical to
    the muted control from the first block.
 6. **Commands:**
    - `cargo test --locked -p session`, `cargo test --locked -p protocol --features test-support`,
-     `cargo test --locked -p host-core --features test-support --test live_delta`,
+     `cargo test --locked -p host-core --features test-support,control-provider --test live_delta`
+     (root ruling, 2026-10-12: without `control-provider` the test file is `cfg`ed out and the command runs 0 tests),
      `cargo test --locked -p capi`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `cargo build --locked --release -p audit && ./target/release/audit capi`
@@ -231,7 +237,9 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
    moves: preparation is unchanged and `default` gives the lengths today's key-less sessions prepare with. A
    digest of session-document bytes moves by the key; each is listed with its file and the reason
    "D1a adds the required `control_smoothing` key" and re-pinned on its own, never in bulk
-   (decision 15, risk 4). Any other digest that moves is a defect.
+   (decision 15, risk 4). Root ruling (2026-10-12): any pinned digest other than these moves is a
+   defect; the unpinned audit capi pcm_digest moves at D4 (cb10fbface44a3a4 -> a9738fa800afcab3)
+   because live edits now ramp.
 
 ## Test value
 
@@ -324,9 +332,14 @@ submix tests use the ramp in `window`); the carrying-swap test, whose claim is b
 swap block, authors `control_smoothing` at 0 (D6).
 
 **Digests that moved (gate 7), each re-pinned on its own, reason "D1a adds the required
-`control_smoothing` key"; no render digest moved** (`ACCEPTED_GRAPH_PCM_SHA256`, `_METERS_`,
-`audit capi` `pcm_digest a9738fa800afcab3`, the browser module's render digests and the builtins
-`resources.jsonl` all unchanged):
+`control_smoothing` key"; no pinned render digest moved** (`ACCEPTED_GRAPH_PCM_SHA256`, `_METERS_`,
+the browser module's render digests and the builtins `resources.jsonl` all unchanged). The unpinned
+`audit capi` `pcm_digest` did move, at D4 (`a575e74fd`), on purpose: `cb10fbface44a3a4` at the base and
+after the D1a migration, `a9738fa800afcab3` after D4, because `tools/audit/src/capi.rs` commits a live
+fader/mute/pan edit every 64 calls on a `default` session and those edits now ramp where they stepped
+(verified by the verifier at the three commits; no gate pins this digest, and the audit still reports 0
+allocations and 0 syscalls). The earlier wording "`audit capi` `pcm_digest a9738fa800afcab3` unchanged"
+was wrong and is corrected here (batch follow-up, MINOR 1):
 
 | pin | file | old -> new |
 |---|---|---|
@@ -386,3 +399,34 @@ syscalls); `cargo test --locked --release -p audit -p bench -p console-workload`
 `check-realtime-policy.sh`, `check-cross-targets.sh`; `cargo clippy --locked --workspace --all-targets
 --all-features -- -D warnings`; `cargo fmt --all -- --check`. Not run: the browser (Chromium) legs and
 anything AArch64-only.
+
+**Batch follow-ups** (stream E2 batch, after the attempt-1 PASS verdict
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1054-attempt1.md`).
+
+- *Root rulings (2026-10-12), recorded in the spec text above:* gate 4 counts the render calls that carry
+  the commit and the ramp; gate 7 names the unpinned `audit capi` `pcm_digest` move at D4; gate 6's
+  host-core command carries `control-provider`; `crates/capi/tests/resource_lifecycle.rs` is a named
+  exception in Authorized paths.
+- *MINOR 1:* the `audit capi` claim above is corrected.
+- *MINOR 2, out-of-path edits the first record left out* (each necessary or mechanical, none weakens a
+  check):
+  - `crates/host-core/src/lib.rs`: the `LiveRampRow` re-export that D4 needs.
+  - `crates/host-core/tests/launch_registry_once.rs`: the `LiveRamps` literal gains `pan_samples` and
+    `link_samples`, which the compiler forces.
+  - `.claude/skills/author-session/SKILL.md`: the root-key list and a short `control_smoothing` section.
+  - `scripts/check-browser-expected-resources.py`: the self-test's one-byte mutation, the companion of the
+    `sessionDocumentBytes` re-pin (gate 7).
+- *NIT 1:* `for_row_returns_the_key_field_of_every_row` listed its rows by hand, so its doc claim (a new
+  row fails to compile) held for `expected()` but not for the list. The rows now come from walking
+  `next_row`, an exhaustive `match` beside `expected()`; the doc says exactly that. A row added to
+  `LiveRampRow` fails to compile in both. The walk is a chain, so a row nobody links in is still
+  untested; that residue needs a person to chain it, and the compile error asks for it.
+- *NIT 2:* `tools/audit/src/fixture_builtins.rs`: the #1054 note sat between the #1240 and #1328 notes. The
+  two #1054 notes are one note now, after the #1312 note, in the order of the pins.
+- *Mutation runs for the changed test* (`-p host-core --features test-support,control-provider --test
+  live_delta`; defect applied, run, restored):
+  - add a `LiveRampRow::Probe` variant with its `for_row` arm: the test target fails to compile
+    (`E0004`, `Probe` not covered, in `expected` and `next_row`); green after the revert (35 passed).
+  - polarity row at the plain mute length (`saturating_mul(2)` removed): RED
+    `for_row_returns_the_key_field_of_every_row`; green after the revert.
+  - The NIT 2 edit is a comment move; no test applies.
