@@ -45,7 +45,7 @@ impl Policy {
                 .map(|path| (*path).to_owned())
                 .collect(),
             marked_files_floor: 26,
-            marked_regions_floor: 94,
+            marked_regions_floor: 95,
         }
     }
 }

@@ -307,6 +307,32 @@ this slice's first commit, after C2, and is judged in this slice's verdict.
 change that restores the capacity bound or the minimum form is refused, which no host-web test
 can show on today's thread layout (no producer runs during the call).
 
+### Attempt record: the guard commit (stream J3, 2026-10-12, on `a37144f24`)
+
+- **Markers.** `hosts/host-web/src/lib.rs:3438` (blank line before `poll_meters`'s doc comment) and
+  `:3789` (blank line after its closing brace) became the BEGIN and END comments. Both blanks were
+  present; the diff is two lines replaced, no line moves.
+- **Floors (G-D2).** Re-measured by raising each floor until the tool fired: 95 regions, 26 files.
+  The region floor in `Policy::workspace()` is 94 -> 95; the file floor stays 26 (`lib.rs` was
+  already marked). `tests/policy` fixtures keep `BASE_REGIONS = 94`: they are the base fixture
+  tree's own count, not the workspace's.
+- **Gate 1.** `cargo run --locked --release -p realtime-policy` on the real tree: the only finding
+  is `crates/effect-contract/src/live.rs:366` (pre-#1345, expected); nothing for
+  `hosts/host-web/src/lib.rs`, so the tool accepts `poll_meters`.
+- **Gate 2.** Scratch export with `98d4a1534^`'s `lib.rs`, `poll_meters` marked by name: the tool
+  refuses `hosts/host-web/src/lib.rs:3466: && let Ok(snapshot) = meter.consumer.try_pop()` (drain
+  class, "bound it with available_at_entry").
+- **Gate 3.** Scratch export with the markers around the minimum-bound mutant (mode 1: `available =
+  METER_QUEUE_DEPTH` folded by `available.min(count + usize::from(pending.is_some()))`, `passes =
+  available`, no per-queue count): refused at `lib.rs:3497: if let Ok(snapshot) =
+  meter.consumer.try_pop()` (drain class).
+- **Gate 4.** `scripts/build-web-audioworklet.sh --module-only` with the markers: shipped module
+  `9784d3509dba6bfd8188b00fc48f9ae4f20020ef9583cbc409cea1d079878d9c`, the digest recorded in #1446
+  at the parent: UNCHANGED.
+- **Gate 5.** `cargo fmt --all -- --check`, `bash scripts/check-workspace-policy.sh`, clippy for
+  `host-web` (`--all-targets -D warnings`) and `cargo test --locked -p realtime-policy` (186
+  passed) exit 0.
+
 ### Root Amendment 1 (2026-10-11): gate 5 and `.llvmbc`
 
 Authority: root decision under the owner's delegation, after the #1441 attempt-1 verdict (SP-1) and
