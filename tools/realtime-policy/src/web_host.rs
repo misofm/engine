@@ -2,11 +2,13 @@
 //!
 //! The wrap rule reads `hosts/host-web/src/ffi.rs`. That proves nothing if the build can compile
 //! something else: a `#[cfg]` that drops the wrapped export or the import and puts an unwrapped
-//! twin in its place, an `#[export_name]` that exports a function the table never listed, a
+//! twin in its place, an `#[export_name]` that gives a function a `miso_engine_web_v1_` name, a
 //! `#[path]` that points `mod ffi;` at another file, or a glob `use` that supplies a pass-through
 //! `render_locked` the rule never sees. Under `hosts/host-web/src` the tool refuses each written
-//! form (#1496 D2 Amendment 1, rules (a) to (d)). A name or attribute that a macro expansion
-//! assembles from parts is #1438 limit 4.
+//! form (#1496 D2 Amendment 1, rules (a) to (d)). Rule (b) refuses only an `export_name` whose
+//! value starts with the prefix; that every exported name comes from a listed function's own
+//! identifier is not enforced (see the successor of #1496). A name or attribute that a macro
+//! expansion assembles from parts is #1438 limit 4.
 
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};

@@ -231,16 +231,16 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
 
 1. **The exports either worklet calls on its AudioWorklet thread after boot.** The engine worklet
    (`hosts/host-web/web/miso-engine-v1-audio-worklet.js`, `process()` and its port handlers)
-   calls `render`, `command_submit`, `prepared_command_submit`, `meter_lease`, `meter_poll`,
-   `eq_target_config_copy`, `eq_target_config_ptr`, `input_filters_config_copy`, `source_submit`,
-   `source_seek`, `observation_read`, `observation_result_ptr`, `observation_result_bytes`,
-   `track_response_capture`, `track_response_result_ptr`, `track_response_result_bytes`,
-   `spectrum_arm`, `spectrum_cancel`, `spectrum_read`, `spectrum_select`,
-   `spectrum_stream_select`, `spectrum_stream_start`, `spectrum_stream_stop`,
-   `spectrum_stream_read`, `spectrum_target_id_ptr`, `spectrum_target_id_capacity`,
-   `spectrum_capture_ptr`, `spectrum_capture_bytes`, `spectrum_capture_capacity`,
-   `spectrum_stream_metadata_ptr`, `spectrum_stream_metadata_bytes`, `dispose` and
-   `render_allocation_count` (each `miso_engine_web_v1_`-prefixed). The SDK's PCM-feed worklet
+   calls the exports that the table `tools/realtime-policy/render-thread-exports.json` lists.
+   The table is the one list of set 1. Each entry names an export without its
+   `miso_engine_web_v1_` prefix, the worklet handlers that call it after boot, and whether its
+   body is one `render_locked` call (`wrapped`). It has two `wrapped: false` entries, `dispose`
+   and `render_allocation_count`, each with its reason. `tools/realtime-policy` proves that every
+   `wrapped` entry's body is that call. The harnesses `scripts/test-web-audioworklet.mjs` and
+   `sdk/test/browser-pcm-evals.mjs` fail when a worklet calls an export that the table does not
+   list. This document does not repeat the names, so that they cannot drift from the table.
+   The table lists the PCM-feed worklet's calls too (worklet `feed`); their sites are below.
+   The SDK's PCM-feed worklet
    (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`) calls `source_submit` (`:386`)
    and `source_seek` (`:445`) at the top of its `process()` (`:306-328`) before it renders, and
    `source_seek` again from its attach node's `prepare-seek` handler (`:539`).

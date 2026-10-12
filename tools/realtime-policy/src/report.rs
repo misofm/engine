@@ -176,7 +176,7 @@ impl fmt::Display for Class {
                 "#[cfg] or #[cfg_attr] on the render_locked import, a render-thread export, its wrap call or a guarded module (hosts/host-web/src/ffi.rs, render_lock.rs)",
             ),
             Self::ExportNameOnWebExport => out.write_str(
-                "#[export_name] with the miso_engine_web_v1_ prefix (every exported name comes from a listed function's own identifier)",
+                "#[export_name] whose value starts with the miso_engine_web_v1_ prefix under hosts/host-web/src",
             ),
             Self::PathOnWebModule => out.write_str(
                 "#[path] on `mod ffi;` or `mod render_lock;`, which would move the shipped module away from the file the wrap rule reads",
