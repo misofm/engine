@@ -435,3 +435,24 @@ strip that carries had its replaced writes counted, and bank membership depends 
   green.
 - `drain_for_carry`, the builtins-compiler drain tests and `apply_pending_equals_the_block_drain` follow
   the new signatures.
+
+**Gates on the final tree** (x86_64 Linux, toolchain 1.97.1, Node 22.23.2; each job with its own target
+directory, as CI runs them). Every step of: `fmt`; `clippy --workspace --all-targets --all-features -D
+warnings`; `cargo doc`; the workspace, session, env, bench, test-support, scalar-oracle, script-reach,
+host-core, protocol-control, realtime (118 marked regions in 27 files, with its audit-leak and
+evidence-leak checks), lane, unfused-seal, rack, builtins, graph and effect-runtime policies and
+their self-tests; `test-debug-a` (133 suites, 1,616 passed, 0 failed, 20 ignored; doctests);
+`test-debug-b` (163 suites, 916 passed, 26 ignored); the `test-release` steps including loom
+(13 passed); `audit-native` (all 20 steps: `audit capi` 0 allocations, 0 syscalls; `check-capi-abi.sh`
+and its self-test); `wasm-guests`; `check-cross-targets.sh`; `check-release-shape.py` and the unwind
+check; the worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh` with
+`check-abi-layout-v1.py`, `check-browser-expected-resources.py --artifacts`, scalar-oracle-absent,
+`test-web-audioworklet.sh`, the V8 spill gate); the `sdk` job's checks (`check-sdk-generated`,
+`check-sdk-deletions`, `check-sdk-types`, `check-sdk-headless`, `sdk-package.sh check`). All pass.
+The browser legs, `npm run qualify -- --check-matrix --self-test-mutations` in SDK source-bundle mode
+with `sdk/dist` deleted first: chromium 151.0.7922.34, firefox 153.0 and webkit 26.5 each print
+"all qualification gates passed". The unsubscribe gate was also run 3 more times unloaded on all
+three browsers, 14 times on webkit and 4 times on chromium and firefox with 24 busy loops on 32
+cores: no failure after the `resumeUntil` retry. AArch64 and the artifact-identity report run only
+in CI.
+
