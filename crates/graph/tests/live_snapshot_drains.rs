@@ -806,7 +806,7 @@ mod effect_bank {
                 observed.push(render(&mut owner, block).1);
             }
             for (block, pcm) in observed.iter().enumerate() {
-                for frame in 0..FRAMES {
+                for (frame, sample) in pcm.iter().enumerate().take(FRAMES) {
                     let n = block * FRAMES + frame;
                     let mut expected = 0.0_f32;
                     for lane in 0..LANES {
@@ -819,7 +819,7 @@ mod effect_bank {
                         expected += if bypassed { delayed } else { delayed * GAIN };
                     }
                     assert_eq!(
-                        pcm[frame].to_bits(),
+                        sample.to_bits(),
                         expected.to_bits(),
                         "{width:?} block {block} frame {frame}: lane {LIVE_LANE} is {}",
                         if bypassed_blocks[block] { "dry" } else { "wet" }

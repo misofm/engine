@@ -203,12 +203,12 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             1,
             "`factory.descriptor()` on the owner's `Arc<dyn NativeEffectFactory>`",
         ),
-        "_RNvMs2_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer25publish_candidate_targets": (
+        "_RNvMs1_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer25publish_candidate_targets": (
             4,
             "the owner's `Arc<dyn NativeEffectFactory>`: `target_preparation()` and the "
             "capability's target-count and validation calls, inlined from `publish`",
         ),
-        "_RNvMs2_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer27preflight_candidate_targets": (
+        "_RNvMs1_NtCs_15effect_compiler7prepareNtB5_21EffectControlProducer27preflight_candidate_targets": (
             4,
             "the same factory and target-preparation capability calls, inlined from "
             "`preflight_publication`",

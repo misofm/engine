@@ -228,6 +228,11 @@ pub struct TestOwnerCounters {
     pub reservation_committed: u64,
 }
 
+/// One effect producer's row of [`SessionControlSnapshot::effect_cells`]: `(epoch, strip ID,
+/// effect instance ID, writes per cell)`.
+#[cfg(feature = "test-support")]
+pub type EffectCellRow = (u64, Box<str>, Box<str>, Vec<u64>);
+
 /// Everything a transaction may change, so a test can prove a refusal changed none of it.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -269,7 +274,7 @@ pub struct TestTransactionSnapshot<Row> {
     /// How many writes every effect producer's bypass cell, parameter cells, then target cells,
     /// have taken, current epoch first, then each pending candidate: `(epoch, strip ID, effect
     /// instance ID, writes per cell)`. A cell's count is its write sequence (#1345 D1).
-    pub effect_cells: Vec<(u64, Box<str>, Box<str>, Vec<u64>)>,
+    pub effect_cells: Vec<EffectCellRow>,
     /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
     /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value
     /// bits)`.

@@ -92,7 +92,7 @@ const PARAMETERS: [ParameterDescriptor; TOTAL] = {
                     false,
                 ),
             }
-        } else if (index - NOT_LIVE) % 9 == 0 {
+        } else if (index - NOT_LIVE).is_multiple_of(9) {
             parameter_descriptor(
                 id,
                 AutomationRate::Block,
@@ -215,10 +215,8 @@ fn a_window_shorter_than_the_live_cells_is_refused_with_the_count_it_needs() {
 #[test]
 fn one_block_applies_every_live_cell_of_one_transaction() {
     let shape = EffectLaneShape::from_descriptor(&DESCRIPTOR, 0);
-    assert!(
-        CELLS > 64,
-        "the synthetic effect spans more than one dirty word"
-    );
+    // The synthetic effect spans more than one dirty word.
+    const { assert!(CELLS > 64) };
     let mut rig = Rig::new(shape, 0);
     let mut records = Vec::new();
     for (index, descriptor) in PARAMETERS.iter().enumerate() {

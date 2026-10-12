@@ -169,15 +169,22 @@ describe("issue 777 -- selected resident observations", () => {
       assert.deepEqual(repeated, first);
 
       // The prior resident cell survives a re-arm, but is historical for that new arm.
-      await liveControls.submit(
+      // One slot per declared tap: the withdrawal is drained by a block before the re-arm is
+      // admitted (#1345 D2).
+      const withdrawn = await liveControls.submit(
         liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", false, 2),
+      );
+      assert.equal(withdrawn.ok, true);
+      feed(engine, 2); engine.render();
+      const rearmed = await liveControls.submit(
         liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", true, 2),
       );
+      assert.equal(rearmed.ok, true);
       assert.equal(engine.readObservations([comp])[0].status, "pending");
-      feed(engine, 2); engine.render();
       feed(engine, 3); engine.render();
+      feed(engine, 4); engine.render();
       const fresh = engine.readObservations([comp])[0];
       assert.equal(fresh.status, "ready");
       assert.ok(fresh.window && first[0].window);
