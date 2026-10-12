@@ -720,8 +720,10 @@ impl LiveValuesSuperseded {
 impl LiveValuesSuperseded {
     /// Render: add `count` replaced writes. Saturating. A load and a store, not a read-modify-write,
     /// because render is the count's only writer. The method is private to this module, so the only
-    /// caller is [`CellReader::read_counted`], which render's drains call; no other crate or
-    /// control path can write the count (#1347 attempt 2, m2).
+    /// caller is [`CellReader::read_counted`], which render's drains call: only a cell read writes
+    /// the count. `read_counted` is public, so a reader built over a stamped cell could call it
+    /// elsewhere; the rule rests on who holds the readers, not on a type barrier (#1347 attempt 2,
+    /// n1).
     fn add(&self, count: u64) {
         if count != 0 {
             let now = self.0.load(core::sync::atomic::Ordering::Relaxed);

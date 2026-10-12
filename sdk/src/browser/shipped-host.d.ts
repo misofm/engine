@@ -340,8 +340,13 @@ export const enum MisoCommandReason {
   Domain = 6,
   /// Well formed and correctly addressed; this ABI version cannot apply that kind.
   UnsupportedKind = 7,
-  /// An effect's bounded control queue had no room; nothing was admitted. Fader, mute, pan or
-  /// matrix, input trim, polarity and filter, and live-send values are cells and never return it.
+  /// An effect's bounded observation queue had no room for the `ObserveSubscribe` records the
+  /// submission queues; nothing was admitted. The reason is also returned with the internal result
+  /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
+  /// revision past the gate's ceiling); that batch wrote nothing. Fader, mute, pan or matrix,
+  /// input trim, polarity and filter, live-send, and effect parameter and bypass values are
+  /// cells, and so are the member values a `VcaFaderDb` or `VcaMute` writes: none of them returns
+  /// it for want of room.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,

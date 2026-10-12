@@ -34,8 +34,9 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
   mute, ramp length), one dirty bit per route. The ring, the `depth` argument of
   `attach_route_controls` and `free()` go; the cells' rows replace the ring rows in
   `route_control_resources`. The route-activity table rows are unchanged.
-- **D2. Producer.** `GraphRouteControlProducer::write(record)` is infallible; validation stays in
-  `RouteControlRecord::new`, before any write.
+- **D2. Producer.** `GraphRouteControlProducer::write(stamp, record)` is infallible; validation
+  stays in `RouteControlRecord::new`, before any write. Amendment (root, 2026-10-12): D2's producer
+  write is `write(stamp, record)`, per #1312 D7.
 - **D3. Render.** At block entry the route op applies its cell if dirty, under the block's live
   snapshot (#1312 D12; Amendment 1): one retarget from the coefficients it is at to the cell's
   target over its ramp, exactly as one drained record does today. Its drain runs every block,
@@ -281,8 +282,10 @@ which is `read` plus the add of an `Applied` read's replaced writes. The four re
 (`FaderReader`, `MatrixReader`, `InputReader` through `read_input_cell`, and `LiveRoute::drain`)
 call it; their local sums and `.add` calls are gone (the saturating sum of the fader and input
 drains became one saturating add per applied read, the same result). Control cannot reach the
-count's write, and no `CellReader` exists on the control side, so the single-writer rule is
-enforced by the type system and the reader's own one-reader rule, not by prose. Mutation: the
+count's write, and no `CellReader` exists on the control side. Only a cell read writes the count:
+`CellReader::read_counted` is public, so a reader built over a stamped cell could call it from any
+thread, and the single-writer rule rests on who holds the readers (render's drains do) and on the
+reader's own one-reader rule, not on a type barrier (verdict n1). Mutation: the
 `add` in `read_counted` removed turns red builtins-compiler
 `a_matrix_drain_counts_the_replaced_writes_and_applies_only_what_its_snapshot_covers`,
 `a_drain_applies_the_newest_value_its_snapshot_covers_and_counts_the_rest` and
@@ -322,3 +325,29 @@ pass. SDK job (source-bundle mode, `sdk/dist` removed afterwards): `check-sdk-ge
 **Open items.** STREAMS hot-file rows for `crates/builtins-compiler/src/lib.rs`,
 `crates/host-core/src/prepare.rs` and now `crates/engine/src/realtime/latest_cell.rs` do not name
 #1347 (n4, root's). The spec's D2 still reads `write(record)` (n5, root's).
+
+### Follow-ups 2 (Sonnet 5.5, on `codex/d15-stream-b3`; the attempt 2 verdict, PASS)
+
+- **n1.** The `LiveValuesSuperseded::add` doc in `crates/engine/src/realtime/latest_cell.rs` and the
+  m2 paragraph above no longer say "no other crate or control path can write the count" or
+  "enforced by the type system". They say only a cell read (`CellReader::read_counted`) writes the
+  count, and that the rule rests on who holds the readers.
+- **n2.** The `Backpressure` doc in `sdk/src/browser/shipped-host.d.ts` and its twin
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` (byte-identical;
+  `check-sdk-types.sh` pins the mirror) names the reasons `hosts/host-web/src/lib.rs` can return it
+  for: an effect's observation queue without room for the `ObserveSubscribe` records a submission
+  queues (the room pass); and the revision gate refusing the batch's stamp, returned with
+  `RESULT_INTERNAL` and the backpressure reason (`write_strip_cells`). The VCA kinds 16 and 17 write
+  member strips' fader and mute cells, which the room pass skips, so they never return it for want
+  of room; the doc says so.
+- **Amendment (root, 2026-10-12).** D2's producer write is `write(stamp, record)`, per #1312 D7.
+  D2's text above is updated to match (n5 of attempt 1).
+- **STREAMS hot-file rows.** `docs/handoffs/decision-15-2026-10-05/STREAMS.md` names #1347 in the
+  rows for `crates/builtins-compiler/src/lib.rs` and `crates/host-core/src/prepare.rs`, and has a
+  new row for `crates/engine/src/realtime/latest_cell.rs` (no row named it; stream B owns
+  `crates/engine/src/realtime`) (n4 of attempt 1, n3 of attempt 2).
+- **Gates (this follow-up).** `cargo fmt --all -- --check`, `cargo clippy --locked -p engine
+  --all-targets -- -D warnings`, `cargo test --locked -p engine`, `scripts/check-realtime-policy.sh`
+  (106 marked regions) and `scripts/check-sdk-types.sh` (the mirror pin holds for both `.d.ts`
+  copies) pass. The changes are comments, typings docs and prose; the series' worklet and SDK chain
+  runs once on its head (recorded in the #1399 follow-ups).
