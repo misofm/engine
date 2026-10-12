@@ -374,8 +374,8 @@ attempts touched, now part of its decision record:
   command holds it, and a render, `renderedQuanta` moving, frees it). With the context rendering
   within the deadline, the close resolves after the render and the same record is sent again; with
   the context suspended and `requestDeadlineMs: 80` it rejects with `backpressure` after the
-  deadline, and the engine stops polling the host. The CI browser legs exercise the same owner
-  against the worklet (see Attempt 3, open item 1).
+  deadline, and the engine stops polling the host. The CI browser legs do not run this case against
+  the real worklet yet; #1530 adds it (root, 2026-10-12, batch-verdict B1 follow-up).
 - m1: a `malformed` refusal on the browser engine rejects at once (`invalidArgument`), with no
   resend and no wait for a render.
 
@@ -387,6 +387,20 @@ attempts touched, now part of its decision record:
   polling), or if the resend does not follow a render.
 - Browser malformed: turns red if the retry runs on any reason other than `backpressure` (the
   mutation that drops the reason check left all 367 attempt-2 evals green).
+
+## Amendment 5 (root, 2026-10-12): the qualification page's unsubscribe (batch-verdict B1)
+
+Root's ruling on the stream B batch-3 verdict's B1 (`submix-verdicts/stream-b3-batch-verdict.md`):
+all three browser qualification legs failed the `observation-unsubscribe` gate, because the page's
+raw `host.observe` unsubscribe came before any render and Amendment 3 refuses a second record for one
+tap until a render drains the first.
+
+**Named exception (root, 2026-10-12, batch-verdict B1).** `hosts/host-web/qualification/qualification.js`
+(`runObservationRun`) is outside this issue's path lists. Under D2 Amendments 1 and 2 the honest
+contract is that a render separates two operations on one tap, so the disarmed run renders one
+quantum between the raw subscribe and the unsubscribe: the offline context suspends after one
+quantum, the page unsubscribes, and the context resumes. Admission still never coalesces, and the
+gate and its mutation proof are unchanged. STREAMS.md carries the file's hot-file row.
 
 ## Attempt record
 

@@ -457,13 +457,27 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   };
   const subscribed = await host.observe({ subscriptions: [subscription] });
   let unsubscribed = null;
-  if (!armed) {
+  let rendering;
+  if (armed) {
+    rendering = context.startRendering();
+  } else {
+    // A named #1345 exception (root, 2026-10-12, batch-verdict B1): this page calls the raw
+    // `host.observe`, and the engine admits one observation record per tap per render (#1345 D8,
+    // D2 Amendments 1 and 2), so the unsubscribe is refused with typed backpressure until a block
+    // has drained the subscribe. The honest contract is the one the SDK keeps (`renderWait`): a
+    // render separates two operations on one tap. The offline context suspends after one quantum,
+    // which is shorter than the tap's two-block window, so no frame can have published when the
+    // unsubscribe is admitted; admission itself still never coalesces.
+    const suspended = context.suspend(QUANTUM_FRAMES / SAMPLE_RATE);
+    rendering = context.startRendering();
+    await suspended;
     unsubscribed = await host.observe({
       subscriptions: [{ ...subscription, armed: false }],
     });
+    await context.resume();
   }
 
-  const rendered = await context.startRendering();
+  const rendered = await rendering;
   for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
     await new Promise((resolve) => setTimeout(resolve, 4));
   }
