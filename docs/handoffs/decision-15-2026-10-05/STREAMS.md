@@ -105,8 +105,8 @@ No other slice builds on `store_revision`, `active_revision`, `RevisionTarget` o
 | `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only); B #1524 after B #1349, before C #1406 |
 | `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit; B #1524 and B #1525 in any order with the rest, the later slice rebases, both before H #1332 |
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them); B #1524 (the command arm of `#saturated`) before C #1406 (the ring arm of the same function); the two changes are independent |
-| `hosts/host-web/qualification/sdk-response-entry.ts`, `hosts/host-web/qualification/run.mjs` | H #1476 (the SDK instances' allocation reads and the `sdk-render-allocations` gate) and J #1480 (the continuous-spectrum probe and its predicates) in any order; the later slice rebases |
-| `hosts/host-web/MUTATIONS.md` | H #1476, H #1477, A #1479 (row `:563` only), J #1480, H #1491 and H #1492, each adding or editing its own rows, in any order; the later slice rebases. H #1492 also edited A #1479's row `:563` (its count, 4 to 6), ratified by root 2026-10-09 |
+| `hosts/host-web/qualification/sdk-response-entry.ts`, `hosts/host-web/qualification/run.mjs` | H #1476 (the SDK instances' allocation reads and the `sdk-render-allocations` gate) and J #1480 (the continuous-spectrum probe and its predicates) in any order; the later slice rebases; H #1522 and H #1530 (two SDK instances, the `sdk-observation-wait` gate and its mutations) in any order with each other and the rest, the later slice rebases |
+| `hosts/host-web/MUTATIONS.md` | H #1476, H #1477, A #1479 (row `:563` only), J #1480, H #1491 and H #1492, each adding or editing its own rows, in any order; the later slice rebases. H #1492 also edited A #1479's row `:563` (its count, 4 to 6), ratified by root 2026-10-09; H #1530 (its own rows) in any order, the later slice rebases |
 | `scripts/test-web-audioworklet.mjs`, `sdk/test/browser-pcm-evals.mjs` | B #1399 (`scripts/test-web-audioworklet.mjs` only: the fake status reply and gate 3's case) in any order with stream H's slices and J #1496, the later slice rebases; stream H's slices (#1491: `testQualificationBoot` only) and J #1496 (`testProcessor`'s and the feed harness's recording checks only) in any order; the later slice rebases; B #1524 in any order with stream H and J #1496, the later slice rebases |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
@@ -502,6 +502,8 @@ hot-file row above). #1345's row does not change; its Amendment 1 adds J #1444 a
 | 26 | #1488 | Bring the PCM-feed worklet's source submit and seek under the render-locked allocation count | — | — |
 | 27 | #1491 | Make the boot contract red when the worklet skips spectrum collection staging | #1477 | — |
 | 28 | #1492 | Select a spectrum collection entry without allocating on the browser audio thread | #1488 | A #1479 |
+| 29 | #1522 | Find and fix the intermittent Firefox SDK spectrum gate failures | — | — |
+| 30 | #1530 | Qualify the browser observation wait against the real AudioWorklet in three browsers | — | B #1345 on `main`; before H #1332 and #1382 |
 
 #1448's markers are not in its row: stream J lands them as "H #1448's guard, landed by J after C2"
 (stream J's table).
