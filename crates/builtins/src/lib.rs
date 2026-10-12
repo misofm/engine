@@ -833,6 +833,16 @@ fn lane_read<L: Lane>(value: L) -> [f32; MAX_BANK_LANES] {
     words
 }
 
+// REALTIME_POLICY_BEGIN
+/// Overwrites lane `lane` of `value` with `word`, leaving every other lane alone (issue #1277 D7).
+#[inline]
+fn put_lane<L: Lane>(value: &mut L, lane: usize, word: f32) {
+    let mut words = lane_read::<L>(*value);
+    words[lane] = word;
+    *value = lane_words::<L>(&words);
+}
+// REALTIME_POLICY_END
+
 /// Widest bank this crate builds. `BankWidth` is four or eight (D4).
 const MAX_BANK_LANES: usize = 8;
 
@@ -2744,6 +2754,52 @@ struct InputSectionState {
     integrators: [f32; 2],
 }
 
+/// One fader bank lane's whole state, both channels: what a plan swap hands from the
+/// predecessor's lane to the successor's (issue #1277 D7).
+///
+/// Plain data, fixed size, no heap: per channel the gain in use, the ramp's target and per-sample
+/// step, the authoritative countdown, the gain the fader holds independent of mute, and the mute
+/// flag. In-memory state handed across a plan replacement, never persisted (AGENTS.md, R6b).
+#[derive(Clone, Copy, Debug)]
+pub struct FaderLaneState {
+    channels: [FaderChannelState; 2],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FaderChannelState {
+    /// `ramp.current`: the gain the next frame applies.
+    current: f32,
+    /// `ramp.target`: the gain assigned exactly on the last ramping frame.
+    target: f32,
+    /// `ramp.step`: the per-sample increment.
+    step: f32,
+    /// The authoritative countdown, in frames.
+    remaining: u32,
+    /// The fader gain independent of mute, which an unmute retargets back to.
+    fader_gain: f32,
+    /// Whether the lane is muted.
+    muted: bool,
+}
+
+/// One matrix bank lane's whole state: what a plan swap hands from the predecessor's lane to the
+/// successor's (issue #1277 D7).
+///
+/// Plain data, fixed size, no heap: the four coefficients in use, their ramp target and
+/// per-sample step, the lane's smoothing window and the authoritative countdown.
+#[derive(Clone, Copy, Debug)]
+pub struct MatrixLaneState {
+    /// `ramp.current`, `[ll, lr, rl, rr]`.
+    current: [f32; 4],
+    /// `ramp.target`, same order.
+    target: [f32; 4],
+    /// `ramp.step`, same order.
+    step: [f32; 4],
+    /// The lane's smoothing window, in sample updates.
+    smoothing_samples: u32,
+    /// The authoritative countdown, in frames.
+    remaining: u32,
+}
+
 /// The fader and mute stage at one width: one multiply and one mask clear per sample.
 pub(crate) struct FaderStage<L: Lane> {
     /// Prepared gain per channel, `[left, right]`.
@@ -3026,6 +3082,44 @@ impl<L: Lane> FaderRampStage<L> {
                 self.ramp[channel].current,
                 self.ramp[channel].mute,
             );
+        }
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
+    /// One populated lane's whole per-lane state ([`FaderLaneState`], issue #1277 D7).
+    fn export_lane(&self, lane: usize) -> FaderLaneState {
+        debug_assert!(lane < L::WIDTH);
+        FaderLaneState {
+            channels: core::array::from_fn(|channel| FaderChannelState {
+                current: lane_read::<L>(self.ramp[channel].current)[lane],
+                target: lane_read::<L>(self.ramp[channel].target)[lane],
+                step: lane_read::<L>(self.ramp[channel].step)[lane],
+                remaining: self.remaining[channel][lane],
+                fader_gain: self.fader_gain[channel][lane],
+                muted: self.muted[channel][lane],
+            }),
+        }
+    }
+
+    /// Overwrite one populated lane with `state`, word for word, and re-derive the two words the
+    /// kernel loads from them: the lane's bit of the mute mask and the countdown the ramp kernel
+    /// reads. The lane then renders exactly what the lane it was exported from would have.
+    fn import_lane(&mut self, lane: usize, state: &FaderLaneState) {
+        debug_assert!(lane < L::WIDTH);
+        for (channel, carried) in state.channels.iter().enumerate() {
+            put_lane::<L>(&mut self.ramp[channel].current, lane, carried.current);
+            put_lane::<L>(&mut self.ramp[channel].target, lane, carried.target);
+            put_lane::<L>(&mut self.ramp[channel].step, lane, carried.step);
+            put_lane::<L>(
+                &mut self.ramp[channel].remaining,
+                lane,
+                carried.remaining.min(FADER_RAMP_COUNTDOWN_MAXIMUM) as f32,
+            );
+            self.remaining[channel][lane] = carried.remaining;
+            self.fader_gain[channel][lane] = carried.fader_gain;
+            self.muted[channel][lane] = carried.muted;
+            self.sync_mute(channel);
         }
     }
     // REALTIME_POLICY_END
@@ -3322,6 +3416,41 @@ impl<L: Lane> MatrixStage<L> {
                 frames - ramp_frames,
             );
         }
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
+    /// One populated lane's whole per-lane state ([`MatrixLaneState`], issue #1277 D7).
+    fn export_lane(&self, lane: usize) -> MatrixLaneState {
+        debug_assert!(lane < L::WIDTH);
+        let word = |words: &[L; 4], index: usize| lane_read::<L>(words[index])[lane];
+        MatrixLaneState {
+            current: core::array::from_fn(|index| word(&self.ramp.current, index)),
+            target: core::array::from_fn(|index| word(&self.ramp.target, index)),
+            step: core::array::from_fn(|index| word(&self.ramp.step, index)),
+            smoothing_samples: self.smoothing_samples[lane],
+            remaining: self.remaining[lane],
+        }
+    }
+
+    /// Overwrite one populated lane with `state`, word for word, and re-derive what those words
+    /// feed: the countdown the ramp kernel reads and the settled coefficients with their identity
+    /// mask. The lane then renders exactly what the lane it was exported from would have.
+    fn import_lane(&mut self, lane: usize, state: &MatrixLaneState) {
+        debug_assert!(lane < L::WIDTH);
+        for index in 0..4 {
+            put_lane::<L>(&mut self.ramp.current[index], lane, state.current[index]);
+            put_lane::<L>(&mut self.ramp.target[index], lane, state.target[index]);
+            put_lane::<L>(&mut self.ramp.step[index], lane, state.step[index]);
+        }
+        put_lane::<L>(
+            &mut self.ramp.remaining,
+            lane,
+            state.remaining.min(MATRIX_RAMP_COUNTDOWN_MAXIMUM) as f32,
+        );
+        self.smoothing_samples[lane] = state.smoothing_samples;
+        self.remaining[lane] = state.remaining;
+        self.sync_settled();
     }
     // REALTIME_POLICY_END
 
@@ -4249,6 +4378,37 @@ impl BuiltinFaderBank {
         true
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// Populated lane `lane`'s whole state (issue #1277 D7), or `None` for a padding lane or one
+    /// past the bank. Allocation-free; bounded by the lane's fixed word count.
+    #[must_use]
+    pub fn export_lane(&self, lane: usize) -> Option<FaderLaneState> {
+        if lane >= self.members {
+            return None;
+        }
+        Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.export_lane(lane)))
+    }
+
+    /// Overwrite populated lane `lane` with `state` (issue #1277 D7): every word verbatim, then
+    /// the derived words re-synced, so the lane renders bit-exactly what the exported lane would
+    /// have. Refused, changing nothing, for a padding lane or one past the bank. Allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member.
+    pub fn import_lane(
+        &mut self,
+        lane: usize,
+        state: &FaderLaneState,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        per_width!(FaderStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
+        Ok(())
+    }
+    // REALTIME_POLICY_END
+
     fn remaining_nonzero(&self) -> bool {
         per_width!(FaderStageKernel(stage) in &self.stage => {
             stage.remaining.iter().flatten().any(|v| *v != 0)
@@ -4376,6 +4536,37 @@ impl BuiltinMatrixBank {
         });
         BuiltinProcessReport::default()
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Populated lane `lane`'s whole state (issue #1277 D7), or `None` for a padding lane or one
+    /// past the bank. Allocation-free; bounded by the lane's fixed word count.
+    #[must_use]
+    pub fn export_lane(&self, lane: usize) -> Option<MatrixLaneState> {
+        if lane >= self.members {
+            return None;
+        }
+        Some(per_width!(MatrixStageKernel(stage) in &self.stage => stage.export_lane(lane)))
+    }
+
+    /// Overwrite populated lane `lane` with `state` (issue #1277 D7): every word verbatim, then
+    /// the derived words re-synced, so the lane renders bit-exactly what the exported lane would
+    /// have. Refused, changing nothing, for a padding lane or one past the bank. Allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member.
+    pub fn import_lane(
+        &mut self,
+        lane: usize,
+        state: &MatrixLaneState,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        per_width!(MatrixStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
+        Ok(())
+    }
+    // REALTIME_POLICY_END
 
     fn remaining_nonzero(&self) -> bool {
         per_width!(MatrixStageKernel(stage) in &self.stage => {
@@ -5988,3 +6179,172 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests;
+
+/// Issue #1277 D7: a fader or matrix lane's exported state, imported into another bank's lane,
+/// renders exactly what the exported lane renders next, ramp in flight or not.
+#[cfg(test)]
+mod lane_state {
+    use super::*;
+
+    fn banks() -> impl Iterator<Item = (Backend, BankWidth)> {
+        BankWidth::ALL.iter().map(|&width| (width.backend(), width))
+    }
+
+    const FRAMES: usize = 64;
+
+    /// Process `blocks` blocks of constant input on every lane of the banks and return lane
+    /// `lane`'s left and right output words of each, as bits.
+    fn run_fader(bank: &mut BuiltinFaderBank, lane: usize, blocks: usize, input: f32) -> Vec<u32> {
+        let lanes = bank.width().lanes() as usize;
+        let mut words = Vec::new();
+        for _ in 0..blocks {
+            let mut left = vec![input; FRAMES * lanes];
+            let mut right = vec![input * 0.5; FRAMES * lanes];
+            bank.process(&mut left, &mut right, FRAMES as u32);
+            for frame in 0..FRAMES {
+                words.push(left[frame * lanes + lane].to_bits());
+                words.push(right[frame * lanes + lane].to_bits());
+            }
+        }
+        words
+    }
+
+    fn run_matrix(bank: &mut BuiltinMatrixBank, lane: usize, blocks: usize) -> Vec<u32> {
+        let lanes = bank.width().lanes() as usize;
+        let mut words = Vec::new();
+        for _ in 0..blocks {
+            let mut left = vec![-0.5_f32; FRAMES * lanes];
+            let mut right = vec![0.25_f32; FRAMES * lanes];
+            bank.process(&mut left, &mut right, FRAMES as u32);
+            for frame in 0..FRAMES {
+                words.push(left[frame * lanes + lane].to_bits());
+                words.push(right[frame * lanes + lane].to_bits());
+            }
+        }
+        words
+    }
+
+    fn fader_params(db: [f32; 2], muted: bool) -> BuiltinParameters {
+        let mut parameters = BuiltinParameters::default();
+        parameters.left.fader_db = db[0];
+        parameters.right.fader_db = db[1];
+        parameters.left.muted = muted;
+        parameters.right.muted = muted;
+        parameters
+    }
+
+    /// A lane in the middle of a mute fade-out, with a fader move remembered while it fades, is
+    /// imported into a lane of a bank prepared with other values (unmuted, another gain). Both
+    /// then render the rest of the fade, a settled mute that is exactly `+0.0` on a negative
+    /// input, and the unmute, which returns to the remembered gain. Red if the countdown, the
+    /// ramp words, the mute flag or the remembered gain is not imported.
+    #[test]
+    fn a_fader_lane_imported_mid_fade_renders_what_the_exported_lane_renders() {
+        for (backend, width) in banks() {
+            let members = 3;
+            let mut source = BuiltinFaderBank::new(
+                backend,
+                width,
+                (0..members)
+                    .map(|index| fader_params([-3.0 - index as f32, -6.0], false))
+                    .collect(),
+            )
+            .expect("source bank");
+            let mut destination = BuiltinFaderBank::new(
+                backend,
+                width,
+                (0..members)
+                    .map(|_| fader_params([0.0, 0.0], false))
+                    .collect(),
+            )
+            .expect("destination bank");
+            source
+                .set_mute(0, BuiltinLaneSelector::Both, true, 150)
+                .expect("lane");
+            // A fader move on the right channel while it fades: the lane remembers -9 dB for the
+            // unmute, and the right channel's fade restarts over 40 frames; the left one's goes on.
+            source
+                .set_fader_db(0, BuiltinLaneSelector::Right, -9.0, 40)
+                .expect("lane");
+            run_fader(&mut source, 0, 1, -0.5);
+            let state = source.export_lane(0).expect("a member lane");
+            destination.import_lane(2, &state).expect("a member lane");
+            for step in 0..2 {
+                let before = run_fader(&mut source, 0, 2, -0.5);
+                let after = run_fader(&mut destination, 2, 2, -0.5);
+                assert_eq!(before, after, "{backend:?}: fade block pair {step}");
+            }
+            // The mute has settled on both. The unmute retargets to the gain the lane remembers.
+            source
+                .set_mute(0, BuiltinLaneSelector::Both, false, 20)
+                .expect("lane");
+            destination
+                .set_mute(2, BuiltinLaneSelector::Both, false, 20)
+                .expect("lane");
+            assert_eq!(
+                run_fader(&mut source, 0, 2, -0.5),
+                run_fader(&mut destination, 2, 2, -0.5),
+                "{backend:?}: the unmute returns to the remembered gain"
+            );
+            // A padding lane or one past the bank is refused.
+            assert!(destination.export_lane(members).is_none());
+            assert!(destination.import_lane(members, &state).is_err());
+        }
+    }
+
+    /// The matrix counterpart: a lane in the middle of a pan ramp is imported into a settled lane
+    /// of another bank. Red if the countdown, the ramp words or the settled flags are not
+    /// imported.
+    #[test]
+    fn a_matrix_lane_imported_mid_ramp_renders_what_the_exported_lane_renders() {
+        for (backend, width) in banks() {
+            let members = 3;
+            let target = Matrix2x2 {
+                ll: 0.3,
+                lr: 0.1,
+                rl: 0.2,
+                rr: 0.9,
+            };
+            let mut source =
+                BuiltinMatrixBank::new(backend, width, vec![(Matrix2x2::IDENTITY, 0); members])
+                    .expect("source bank");
+            let mut destination = BuiltinMatrixBank::new(
+                backend,
+                width,
+                vec![
+                    (
+                        Matrix2x2 {
+                            ll: 0.5,
+                            lr: 0.0,
+                            rl: 0.0,
+                            rr: 0.5,
+                        },
+                        0
+                    );
+                    members
+                ],
+            )
+            .expect("destination bank");
+            source.set_target_smoothed(0, target, 200).expect("lane");
+            run_matrix(&mut source, 0, 1);
+            let state = source.export_lane(0).expect("a member lane");
+            destination.import_lane(1, &state).expect("a member lane");
+            assert_eq!(
+                run_matrix(&mut source, 0, 4),
+                run_matrix(&mut destination, 1, 4),
+                "{backend:?}: the pan ramp finishes the same"
+            );
+            // A settled lane carries too: the imported matrix, not the destination's own, is the
+            // one the next settled block applies.
+            let settled = source.export_lane(0).expect("a member lane");
+            destination.import_lane(2, &settled).expect("a member lane");
+            assert_eq!(
+                run_matrix(&mut source, 0, 1),
+                run_matrix(&mut destination, 2, 1),
+                "{backend:?}: a settled lane"
+            );
+            assert!(destination.export_lane(members).is_none());
+            assert!(destination.import_lane(members, &state).is_err());
+        }
+    }
+}

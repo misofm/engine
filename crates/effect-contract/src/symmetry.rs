@@ -380,7 +380,8 @@ impl LiveControlRecord for EffectControlRecord {
 /// length (`StateLayout::lane_words` is one number for both), so a length mismatch is a corrupt
 /// payload and declines.
 ///
-/// Off the render thread, at restore time, once per restored instance or bank lane.
+/// Once per restored instance or bank lane: at restore time off the render thread, and in the swap
+/// block for a console lane's carry (#1279). It allocates nothing.
 #[must_use]
 pub fn payload_sections_agree(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left == right

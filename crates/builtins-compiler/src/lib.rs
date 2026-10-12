@@ -40,11 +40,11 @@ use engine::realtime::{
     bounded_spsc, bounded_spsc_retained_payload,
 };
 use graph::{
-    BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, DependencyLevel,
-    GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
-    GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedSourceSet, GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan,
-    StableGraphId, TrackStage,
+    BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, BuiltinStripOwner,
+    BuiltinStripStage, DependencyLevel, GraphBuiltinBankResourceEstimate, GraphNodeId,
+    GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
+    GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
+    GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan, StableGraphId, TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
@@ -1121,10 +1121,28 @@ impl FaderBankProcessor {
     /// with [`LiveSnapshot::ALL`], the same code (#1312 D6). The plan-swap carry calls it on a
     /// quiescent predecessor before it exports a lane (#1277); no production render path takes
     /// `ALL`.
-    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    // REALTIME_POLICY_BEGIN
     fn apply_pending(&mut self) -> Result<(), RenderError> {
         self.drain(LiveSnapshot::ALL)
     }
+
+    /// Whether `predecessor` is a fader bank of this bank's width with lane `predecessor_lane`
+    /// populated, and `lane` is populated here (#1277 D1).
+    fn can_adopt_lane(&self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
+        predecessor.bank.width() == self.bank.width()
+            && lane < self.bank.active_lanes()
+            && predecessor_lane < predecessor.bank.active_lanes()
+    }
+
+    /// Copy `predecessor`'s lane `predecessor_lane` into lane `lane` (#1277 D7, D8). The cell
+    /// reader stays: the successor's own cells take every later value.
+    fn adopt_lane(&mut self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
+        predecessor
+            .bank
+            .export_lane(predecessor_lane)
+            .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok())
+    }
+    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
@@ -1134,12 +1152,57 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
     }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
     fn pair_factory(&self) -> Option<BuiltinPairFactory> {
         Some(make_fader_matrix)
     }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
+    // REALTIME_POLICY_BEGIN
+    fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
+        Some((BuiltinStripStage::Fader, self.bank.active_lanes()))
+    }
+
+    fn can_adopt_strip_lane(
+        &self,
+        owner: BuiltinStripOwner,
+        lane: usize,
+        predecessor: &dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        owner == BuiltinStripOwner::Fader
+            && predecessor
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|predecessor| self.can_adopt_lane(lane, predecessor, predecessor_lane))
+    }
+
+    /// Issue #1277 D8. The cell reader stays: every value the predecessor's cells held was
+    /// applied to lane state by [`Self::drain_for_carry`], and the successor's own cells take
+    /// every later one.
+    fn adopt_strip_lane(
+        &mut self,
+        owner: BuiltinStripOwner,
+        lane: usize,
+        predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        owner == BuiltinStripOwner::Fader
+            && predecessor
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<Self>())
+                .is_some_and(|predecessor| self.adopt_lane(lane, predecessor, predecessor_lane))
+    }
+
+    /// Issue #1277 D8: apply every pending cell value with every revision, as the block drain
+    /// would at the next block. A value the apply refuses is counted, and the rest still apply.
+    fn drain_for_carry(&mut self) -> usize {
+        usize::from(self.apply_pending().is_err())
+    }
+    // REALTIME_POLICY_END
     /// The fader and mute cells' drain, before any lane of the block is dispatched (#1312 D12).
     fn begin_block(
         &mut self,
@@ -1205,10 +1268,26 @@ impl MatrixBankProcessor {
     }
 
     /// The matrix cells' counterpart of [`FaderBankProcessor::apply_pending`].
-    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    // REALTIME_POLICY_BEGIN
     fn apply_pending(&mut self) -> Result<(), RenderError> {
         self.drain(LiveSnapshot::ALL)
     }
+
+    /// The matrix bank's counterpart of [`FaderBankProcessor::can_adopt_lane`].
+    fn can_adopt_lane(&self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
+        predecessor.bank.width() == self.bank.width()
+            && lane < self.bank.active_lanes()
+            && predecessor_lane < predecessor.bank.active_lanes()
+    }
+
+    /// The matrix bank's counterpart of [`FaderBankProcessor::adopt_lane`].
+    fn adopt_lane(&mut self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
+        predecessor
+            .bank
+            .export_lane(predecessor_lane)
+            .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok())
+    }
+    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
@@ -1218,9 +1297,51 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
     }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
+    // REALTIME_POLICY_BEGIN
+    fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
+        Some((BuiltinStripStage::Matrix, self.bank.active_lanes()))
+    }
+
+    fn can_adopt_strip_lane(
+        &self,
+        owner: BuiltinStripOwner,
+        lane: usize,
+        predecessor: &dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        owner == BuiltinStripOwner::Matrix
+            && predecessor
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|predecessor| self.can_adopt_lane(lane, predecessor, predecessor_lane))
+    }
+
+    /// Issue #1277 D8: the fader bank's counterpart, on the matrix cell.
+    fn adopt_strip_lane(
+        &mut self,
+        owner: BuiltinStripOwner,
+        lane: usize,
+        predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        owner == BuiltinStripOwner::Matrix
+            && predecessor
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<Self>())
+                .is_some_and(|predecessor| self.adopt_lane(lane, predecessor, predecessor_lane))
+    }
+
+    /// Issue #1277 D8: the fader bank's counterpart, on the matrix cell.
+    fn drain_for_carry(&mut self) -> usize {
+        usize::from(self.apply_pending().is_err())
+    }
+    // REALTIME_POLICY_END
     /// The matrix cell's drain, before any lane of the block is dispatched (#1312 D12).
     fn begin_block(
         &mut self,
@@ -1664,10 +1785,11 @@ impl FaderMatrixBankProcessor {
     }
 
     /// Both stages' [`FaderBankProcessor::apply_pending`] and its matrix counterpart.
-    #[allow(dead_code, reason = "called by the swap carry of #1277")]
+    // REALTIME_POLICY_BEGIN
     fn apply_pending(&mut self) -> Result<(), RenderError> {
         self.drain(LiveSnapshot::ALL)
     }
+    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
@@ -1677,9 +1799,71 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
     }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::BetweenRenderCalls
     }
+    // REALTIME_POLICY_BEGIN
+    fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
+        Some((
+            BuiltinStripStage::FaderMatrix,
+            self.fader.bank.active_lanes(),
+        ))
+    }
+
+    fn can_adopt_strip_lane(
+        &self,
+        owner: BuiltinStripOwner,
+        lane: usize,
+        predecessor: &dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        predecessor
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|predecessor| match owner {
+                BuiltinStripOwner::Fader => {
+                    self.fader
+                        .can_adopt_lane(lane, &predecessor.fader, predecessor_lane)
+                }
+                BuiltinStripOwner::Matrix => {
+                    self.matrix
+                        .can_adopt_lane(lane, &predecessor.matrix, predecessor_lane)
+                }
+            })
+    }
+
+    /// Issue #1277 D8, D9: the fused stage's two halves carry from a fused predecessor only; a
+    /// split predecessor is another concrete type and does not downcast.
+    fn adopt_strip_lane(
+        &mut self,
+        owner: BuiltinStripOwner,
+        lane: usize,
+        predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+            .is_some_and(|predecessor| match owner {
+                BuiltinStripOwner::Fader => {
+                    self.fader
+                        .adopt_lane(lane, &predecessor.fader, predecessor_lane)
+                }
+                BuiltinStripOwner::Matrix => {
+                    self.matrix
+                        .adopt_lane(lane, &predecessor.matrix, predecessor_lane)
+                }
+            })
+    }
+
+    /// Issue #1277 D8: both halves apply every pending value; the first refusal is counted.
+    fn drain_for_carry(&mut self) -> usize {
+        usize::from(self.apply_pending().is_err())
+    }
+    // REALTIME_POLICY_END
     /// Both stages' drains, fader first (#1312 D12). Each stage applies everything it read; the
     /// first refusal is returned after both.
     fn begin_block(

@@ -1245,6 +1245,76 @@ fn a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone() {
     }
 }
 
+/// #1277 gate 8 (Amendment 2, strengthened by Amendment 3). A rebuild whose successor retargets a
+/// carried strip (track `eq0` gains -6 dB while a track is added) writes the retarget into the
+/// candidate's cells, stamped with the structural revision, inside preparation. It is then refused
+/// at `BeforeProtocolCommit`, which drops the candidate, its provider epoch, its gate handle and
+/// its cells. A refused attempt uses no revision, so the next one stamps the same revision again.
+/// That next attempt is the same structural change *without* `eq0`'s fader change, committed on the
+/// twin as well: if the first candidate, a cell of it or its stamp were kept and reused, its -6 dB
+/// would be heard or a debug assertion would fire. The output is the twin's, which never saw the
+/// fader change, in every block. (Were the accepted rebuild the same edit, a kept retarget would
+/// be inaudible.) A third rig accepts the first transaction, so the retarget is audible.
+///
+/// Red mutation: the refused candidate's plan, cells or stamp kept and reused by the next
+/// rebuild; the control plane takes the revision again for the same plan.
+#[test]
+fn a_refused_rebuild_with_a_carry_retarget_is_never_reused() {
+    let mut model = super::tests::stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    model.sources[0].frames = SOURCE_FRAMES;
+    let fader = model.tracks[0].fader.clone();
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let structural = super::tests::add_muted_track(&model, "a-muted");
+    let retargeted = [
+        structural[0].clone(),
+        structural[1].clone(),
+        fader_edit(
+            "eq0",
+            DualMonoFader {
+                left_db: -6.0,
+                right_db: -6.0,
+                ..fader
+            },
+        ),
+    ];
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    let mut accepted = Rig::new(&document);
+    for _ in 0..4 {
+        rig.step();
+        twin.step();
+        accepted.step();
+    }
+    let before = refusal_state(&rig);
+    crate::ffi::test_set_structural_faults(
+        rig.session,
+        [Some(TestStructuralFaultPhase::BeforeProtocolCommit), None],
+    );
+    assert_eq!(rig.apply(&retargeted), crate::RESULT_BACKPRESSURE);
+    assert_eq!(refusal_state(&rig), before, "the refusal changed nothing");
+    assert_eq!(rig.summary().3, 0, "no candidate is pending");
+
+    assert_eq!(rig.apply(&structural), crate::RESULT_OK);
+    assert_eq!(twin.apply(&structural), crate::RESULT_OK);
+    assert_eq!(accepted.apply(&retargeted), crate::RESULT_OK);
+    let mut audible = false;
+    for block in 0..8 {
+        let rendered = rig.step();
+        assert_eq!(
+            bits(&rendered),
+            bits(&twin.step()),
+            "block {block}: the output is the twin's, which never saw the fader change"
+        );
+        audible |= bits(&rendered) != bits(&accepted.step());
+    }
+    assert!(
+        audible,
+        "vacuous: the retarget the refused attempt wrote is audible when accepted"
+    );
+}
+
 /// Gate 1 on a session with a submix strip: the producer table holds the tracks, then the
 /// submixes, and a live track edit there still reaches its track by ID and renders like a rebuild.
 #[test]

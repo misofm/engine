@@ -4180,6 +4180,59 @@ fn input_lane_mut(
         crate::runtime::RuntimeUnit::Op(_) => None,
     }
 }
+
+/// The populated lane at `at` of a builtin bank that holds `owner`'s strip state: its chain, slot
+/// and lane (issue #1277 D1).
+fn strip_lane_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    owner: crate::BuiltinStripOwner,
+    at: crate::GraphLaneLocation,
+) -> Option<(&mut BankChain, usize, usize)> {
+    match units.get_mut(at.unit as usize)? {
+        crate::runtime::RuntimeUnit::Bank { chain, .. } => {
+            let slot = usize::from(at.slot);
+            let lane = usize::from(at.lane);
+            let (stage, lanes) = builtin_processor_mut(chain, slot)?.carried_strip_lanes()?;
+            (stage.holds(owner) && lane < lanes).then_some((chain, slot, lane))
+        }
+        crate::runtime::RuntimeUnit::Op(_) => None,
+    }
+}
+
+/// The effect bank stage slot `slot` of `chain` holds, if that slot is one with no live control
+/// lane (issue #1279). Allocation-free: a slot borrow and one downcast.
+fn effect_stage_mut(chain: &mut BankChain, slot: usize) -> Option<&mut rack::EffectBankStage> {
+    chain
+        .slot_stage_mut(slot)?
+        .as_any_mut()?
+        .downcast_mut::<rack::EffectBankStage>()
+}
+
+/// The populated lane at `at` of an effect bank stage with no live control lane: its chain, slot
+/// and lane (issue #1279 D1). A padded lane is not populated: it has no member.
+fn effect_lane_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    at: crate::GraphLaneLocation,
+) -> Option<(&mut BankChain, usize, usize)> {
+    match units.get_mut(at.unit as usize)? {
+        crate::runtime::RuntimeUnit::Bank {
+            chain,
+            lanes: width,
+            members,
+            ..
+        } => {
+            let slot = usize::from(at.slot);
+            let lane = usize::from(at.lane);
+            let populated = slot
+                .checked_mul(*width)
+                .and_then(|first| first.checked_add(lane))
+                .is_some_and(|member| lane < *width && member < members.len());
+            let stage = effect_stage_mut(chain, slot)?;
+            (populated && lane < stage.lanes()).then_some((chain, slot, lane))
+        }
+        crate::runtime::RuntimeUnit::Op(_) => None,
+    }
+}
 // REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
@@ -4221,6 +4274,138 @@ impl crate::runtime::Runtime {
     /// Whether `at` names a populated, carrying input lane of this runtime.
     pub(crate) fn has_input_lane(&mut self, at: crate::GraphLaneLocation) -> bool {
         input_lane_mut(&mut self.units, at).is_some()
+    }
+
+    /// Every strip stage lane of this runtime: `(strip ID, lane)`, in program order (issue #1277
+    /// D1). A fused bank lists both owners at its one location. Read off the render thread, after
+    /// bind.
+    pub(crate) fn builtin_strip_lanes(&mut self) -> Vec<(Box<str>, crate::GraphStripLane)> {
+        let mut lanes = Vec::new();
+        for (unit, row) in self.identity.iter().enumerate() {
+            let (Some(crate::runtime::RuntimeUnit::Bank { chain, .. }), Ok(unit)) =
+                (self.units.get_mut(unit), u32::try_from(unit))
+            else {
+                continue;
+            };
+            // A chain slot that is not a builtin stage (an effect between the input section and
+            // the fader, say) is skipped; the walk ends at the first slot the chain does not have.
+            let mut slot = 0_usize;
+            while chain.slot_stage_mut(slot).is_some() {
+                let carried = builtin_processor_mut(chain, slot)
+                    .and_then(|processor| processor.carried_strip_lanes());
+                if let (Some((stage, count)), Ok(slot)) = (carried, u16::try_from(slot)) {
+                    for (lane, id) in row.lane_tracks.iter().enumerate().take(count) {
+                        let Ok(lane) = u16::try_from(lane) else {
+                            continue;
+                        };
+                        for owner in [
+                            crate::BuiltinStripOwner::Fader,
+                            crate::BuiltinStripOwner::Matrix,
+                        ] {
+                            if stage.holds(owner) {
+                                lanes.push((
+                                    id.clone(),
+                                    crate::GraphStripLane {
+                                        owner,
+                                        stage,
+                                        location: crate::GraphLaneLocation { unit, slot, lane },
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+                slot += 1;
+            }
+        }
+        lanes
+    }
+
+    /// Every banked effect lane of this runtime whose stage has no live control lane:
+    /// `(strip ID, lane)`, in program order (issue #1279 D1). Read off the render thread, after
+    /// bind.
+    pub(crate) fn bank_effect_lanes(&mut self) -> Vec<(Box<str>, crate::GraphEffectLane)> {
+        let mut lanes = Vec::new();
+        for binding in &self.response_bindings {
+            if binding.stable_id.as_ref() == "input-filters" {
+                continue;
+            }
+            let rack = match binding.rack {
+                1 => crate::RackId::Simd1,
+                2 => crate::RackId::Dynamic,
+                3 => crate::RackId::Simd2,
+                _ => continue,
+            };
+            let Some(crate::runtime::RuntimeUnit::Bank { lanes: width, .. }) =
+                self.units.get(binding.unit)
+            else {
+                continue;
+            };
+            if *width == 0 {
+                continue;
+            }
+            let (Ok(unit), Ok(slot), Ok(lane)) = (
+                u32::try_from(binding.unit),
+                u16::try_from(binding.member / *width),
+                u16::try_from(binding.member % *width),
+            ) else {
+                continue;
+            };
+            let location = crate::GraphLaneLocation { unit, slot, lane };
+            let Some((chain, slot, _)) = effect_lane_mut(&mut self.units, location) else {
+                continue;
+            };
+            let Some(stage) = effect_stage_mut(chain, slot) else {
+                continue;
+            };
+            lanes.push((
+                binding.track_id.clone(),
+                crate::GraphEffectLane {
+                    rack,
+                    effect_id: binding.stable_id.clone(),
+                    location,
+                    layout: stage.layout(),
+                },
+            ));
+        }
+        lanes
+    }
+
+    /// The layout of the populated effect lane at `at`, if it names one (issue #1279 D3).
+    pub(crate) fn effect_lane_layout(
+        &mut self,
+        at: crate::GraphLaneLocation,
+    ) -> Option<rack::EffectLaneLayout> {
+        let (chain, slot, _) = effect_lane_mut(&mut self.units, at)?;
+        Some(effect_stage_mut(chain, slot)?.layout())
+    }
+
+    /// Restores the console-effect carry refused, summed over every effect bank stage of this
+    /// runtime (issue #1279 D6). Saturating.
+    pub(crate) fn carry_refusal_count(&mut self) -> u64 {
+        let mut refused = 0_u64;
+        for unit in &mut self.units {
+            let crate::runtime::RuntimeUnit::Bank { chain, .. } = unit else {
+                continue;
+            };
+            let mut slot = 0_usize;
+            while chain.slot_stage_mut(slot).is_some() {
+                if let Some(stage) = effect_stage_mut(chain, slot) {
+                    refused = refused.saturating_add(stage.carry_refused());
+                }
+                slot += 1;
+            }
+        }
+        refused
+    }
+
+    /// Whether `at` names a populated lane of this runtime's bank that holds `owner`'s state.
+    pub(crate) fn has_strip_lane(
+        &mut self,
+        owner: crate::BuiltinStripOwner,
+        at: crate::GraphLaneLocation,
+    ) -> bool {
+        strip_lane_mut(&mut self.units, owner, at).is_some()
     }
 
     // REALTIME_POLICY_BEGIN
@@ -4294,6 +4479,152 @@ impl crate::runtime::Runtime {
                 continue;
             };
             if into.adopt_input_lane(lane, from, predecessor_lane) {
+                chain.inherit_channel_agreement(agree);
+            }
+        }
+    }
+
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to two lanes [`GraphPreparedBuiltinBankProcessor::adopt_strip_lane`] would join. Checked
+    /// before anything moves, so the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_strip_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphStripMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            let Some((chain, slot, lane)) =
+                strip_lane_mut(&mut self.units, step.owner, step.successor)
+            else {
+                return false;
+            };
+            let Some(successor) = builtin_processor_mut(chain, slot) else {
+                return false;
+            };
+            let Some((chain, slot, predecessor_lane)) =
+                strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)
+            else {
+                return false;
+            };
+            builtin_processor_mut(chain, slot).is_some_and(|from| {
+                successor.can_adopt_strip_lane(step.owner, lane, from, predecessor_lane)
+            })
+        })
+    }
+
+    /// Run the strip section of a carry program at the swap block (issue #1277 D8).
+    ///
+    /// `moves` is sorted by predecessor location. Each predecessor bank applies every pending
+    /// live value once ([`GraphPreparedBuiltinBankProcessor::drain_for_carry`], the block drain
+    /// under `LiveSnapshot::ALL`) before any lane of it is copied. Then every lane is copied. The
+    /// caller has checked [`Self::can_carry_strip_lanes`]. Bounded by `moves.len()`;
+    /// allocation-free.
+    pub(crate) fn carry_strip_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphStripMove],
+    ) {
+        let mut drained: Option<(u32, u16)> = None;
+        for step in moves {
+            let Some((chain, slot, predecessor_lane)) =
+                strip_lane_mut(&mut predecessor.units, step.owner, step.predecessor)
+            else {
+                continue;
+            };
+            let Some(from) = builtin_processor_mut(chain, slot) else {
+                continue;
+            };
+            if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
+                // Admission validated every value, so none is refused; a refused one is still
+                // consumed, and the rest of the bank's values with it.
+                let refused = from.drain_for_carry();
+                debug_assert_eq!(
+                    refused, 0,
+                    "an admitted strip value was refused at the carry"
+                );
+                drained = Some((step.predecessor.unit, step.predecessor.slot));
+            }
+            let Some((chain, slot, lane)) =
+                strip_lane_mut(&mut self.units, step.owner, step.successor)
+            else {
+                continue;
+            };
+            let Some(into) = builtin_processor_mut(chain, slot) else {
+                continue;
+            };
+            let adopted = into.adopt_strip_lane(step.owner, lane, from, predecessor_lane);
+            debug_assert!(adopted, "a checked strip move is adopted");
+        }
+    }
+
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to two effect lanes [`rack::EffectBankStage::carry_lane_from`] would join, with a scratch
+    /// of `scratch_bytes` (issue #1279 D3). Checked before anything moves, so the carry is all or
+    /// nothing. Allocation-free.
+    pub(crate) fn can_carry_effect_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphEffectMove],
+        scratch_bytes: usize,
+    ) -> bool {
+        moves.iter().all(|step| {
+            let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, step.successor) else {
+                return false;
+            };
+            let Some(into) = effect_stage_mut(chain, slot) else {
+                return false;
+            };
+            let Some((chain, slot, predecessor_lane)) =
+                effect_lane_mut(&mut predecessor.units, step.predecessor)
+            else {
+                return false;
+            };
+            effect_stage_mut(chain, slot).is_some_and(|from| {
+                into.can_carry_lane_from(lane, from, predecessor_lane, scratch_bytes)
+            })
+        })
+    }
+
+    /// Run the console-effect section of a carry program at the swap block (issue #1279 D3-D6).
+    ///
+    /// `moves` is sorted by predecessor location. Each predecessor chain is disengaged once, when
+    /// it rendered its last block collapsed (D3 step 1, D4), so every bank's right channel holds
+    /// the state a dual run would. Then, for each lane, the predecessor lane's payload goes
+    /// through `scratch` into the successor lane (step 2-3), the successor stage recomputes the
+    /// witness it holds for the lane (D5), and its chain inherits the predecessor chain's channel
+    /// agreement as the input carry does (#1276 D5). A lane whose restore refuses stays as
+    /// prepared and is counted by its stage (D6); it carries no agreement, being at rest. The
+    /// caller has checked [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()` and the
+    /// prepared state sizes; allocation-free, and never panics.
+    pub(crate) fn carry_effect_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphEffectMove],
+        scratch: &mut [u8],
+    ) {
+        let mut disengaged: Option<u32> = None;
+        for step in moves {
+            let Some((chain, slot, predecessor_lane)) =
+                effect_lane_mut(&mut predecessor.units, step.predecessor)
+            else {
+                continue;
+            };
+            if disengaged != Some(step.predecessor.unit) {
+                chain.disengage_for_carry();
+                disengaged = Some(step.predecessor.unit);
+            }
+            let agree = chain.carried_channel_agreement();
+            let Some(from) = effect_stage_mut(chain, slot) else {
+                continue;
+            };
+            let from: &rack::EffectBankStage = from;
+            let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, step.successor) else {
+                continue;
+            };
+            let Some(into) = effect_stage_mut(chain, slot) else {
+                continue;
+            };
+            if into.carry_lane_from(lane, from, predecessor_lane, scratch) {
                 chain.inherit_channel_agreement(agree);
             }
         }

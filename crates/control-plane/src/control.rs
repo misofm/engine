@@ -1129,6 +1129,15 @@ where
                     drop(prepared);
                     return Err(CommandError::Backpressure);
                 }
+                // #1277 D10: `r`, the revision this rebuild commits as, is read once, here: the
+                // successor's base carries it, the preparation stamps its carry retargets with it
+                // on the candidate's own gate pin, and the stamp below is the same value again.
+                // #1503 D1 holds a prepared transaction's revision in range, so this cannot
+                // refuse; were it to, nothing has been built.
+                let revision = prepared.get().prospective_session().revision().0;
+                if !(1..=engine::realtime::GATE_REVISION_MAX).contains(&revision) {
+                    return Err(CommandError::Internal);
+                }
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
                 // transaction leaves unchanged is prepared to carry that plan's ring.
                 // #1471 Amendment 2: the preparation reads the newest epoch's design-bound seed
@@ -1140,6 +1149,7 @@ where
                     Some(SuccessorBase {
                         inventory: &self.newest_providers().inventory,
                         committed: self.controller.session().compiled().normalized_model(),
+                        revision,
                     }),
                     &mut InputBoundCache::with_seed(&self.newest_providers().bound_seed),
                     &self.live_values_superseded,
@@ -1259,8 +1269,9 @@ where
                 // in `1..=GATE_REVISION_MAX`, which #1503 holds for a prepared transaction, so
                 // this cannot refuse; were it to, the candidate and its handle are dropped here
                 // with nothing published. Nothing else is stamped on the handle before the
-                // publication below.
-                let revision = prepared.get().prospective_session().revision().0;
+                // publication below. The handle inherits the open stamp of the carry retargets
+                // preparation wrote (#1277 D5), so this is the same revision again, which the pin
+                // allows.
                 if candidate_provider.revision_gate.stamp(revision).is_err() {
                     drop(reports);
                     drop(reservation);

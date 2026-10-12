@@ -437,14 +437,16 @@ create_fixture() {
     # The floors rose with #1269 phase 1 (the swap carry and effect-restore regions) and #1053
     # (#1253's drains) to the merged tree's 25 files and 89 regions, and with decision-15 stream B
     # batch 1 (#1314 Amendment 1) to 26 files and 93 regions, and with #1432's `latest_cell.rs` to
-    # 27 files and 96 regions. The thirteen files and forty-three regions above keep the shapes the
-    # mutations below exercise; these fourteen files hold the other fifty-three regions (one file
-    # of fourteen, thirteen of three), so the fixture again sits exactly on both floors.
+    # 27 files and 96 regions, with #1277's strip-stage carry to 27 files and 111 regions, and with
+    # #1279's console effect lane carry to 27 files and 112 regions. The thirteen files and
+    # forty-three regions above keep the shapes the mutations below exercise; these fourteen files
+    # hold the other sixty-nine regions (one file of thirty, thirteen of three), so the fixture
+    # again sits exactly on both floors.
     mkdir -p "$root/crates/floor/src"
     local pad region regions
     for pad in $(seq 1 14); do
         regions=3
-        [[ "$pad" -eq 1 ]] && regions=14
+        [[ "$pad" -eq 1 ]] && regions=30
         for region in $(seq 1 "$regions"); do
             printf '%s\n' \
                 '// REALTIME_POLICY_BEGIN' \
@@ -1411,7 +1413,7 @@ expect_failure no-marked-files-uses-floor 'expected at least twenty-seven marked
     'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
-expect_failure marked-region-count-floor 'expected at least ninety-six marked realtime regions' \
+expect_failure marked-region-count-floor 'expected at least one hundred and twelve marked realtime regions' \
     'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
 # The unmatched-marker check reaches files outside the old root too: the region keeps its
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.

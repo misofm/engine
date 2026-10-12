@@ -947,6 +947,59 @@ mod tests {
             assert!(plan.take_revision_gate().is_none());
         }
 
+        /// A plan stamps on its own pin while it holds its handle, and the open stamp moves with
+        /// the pin into the handle (#1277 D11): the holder stamps the same revision again and
+        /// publishes it, the plan's next block covers it, and once the handle is out the plan
+        /// stamps nothing.
+        #[test]
+        fn a_held_gate_stamps_on_the_pin_the_handle_inherits() {
+            let mut plan = prepared(1);
+            assert!(
+                plan.stamp_held_gate(0).expect("held").is_err(),
+                "0 is not above 0"
+            );
+            assert!(
+                plan.stamp_held_gate(GATE_REVISION_MAX + 1)
+                    .expect("held")
+                    .is_err()
+            );
+            let stamp = plan
+                .stamp_held_gate(5)
+                .expect("the pin is held")
+                .expect("legal");
+            assert_eq!(stamp.revision(), 5);
+            let mut gate = plan.take_revision_gate().expect("the handle");
+            assert!(
+                plan.stamp_held_gate(5).is_none(),
+                "the pin left with the handle"
+            );
+            gate.stamp(5).expect("the open revision stamps again");
+            gate.publish(5);
+            let mut output = [0.0_f32; 2];
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let report = plan
+                .render(io, RenderTime { absolute_sample: 0 })
+                .expect("render");
+            assert_eq!(report.live_snapshot.revision(), 5);
+        }
+
+        /// The stamp a plan took before hand-out is open on the handle's pin: a different revision
+        /// stamped on the handle while it is open breaks the publish-before-stamp rule (#1432).
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic(expected = "while revision Some(5) is stamped")]
+        fn the_handle_inherits_the_open_stamp_of_a_held_gate() {
+            let mut plan = prepared(1);
+            let _ = plan
+                .stamp_held_gate(5)
+                .expect("the pin is held")
+                .expect("legal");
+            let mut gate = plan.take_revision_gate().expect("the handle");
+            let _ = gate.stamp(6);
+        }
+
         /// The initial revision is published on the initial plan's own gate: a handle of another
         /// plan is refused (#1502 D5).
         #[test]

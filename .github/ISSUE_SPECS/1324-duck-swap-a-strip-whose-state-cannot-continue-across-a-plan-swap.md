@@ -18,9 +18,12 @@ never leaves it muted.
 
 - D15-7: a changed prepared (rule-3) value restarts its owner behind a D15-9 transition; an owner
   carries only when the join of stream A's carry slices (#1277, #1279-#1284) finds its values and
-  layout equal. Successor preparation: `SuccessorBase { inventory, committed }`
+  layout equal. Successor preparation: `SuccessorBase { inventory, committed, revision }`
   (`crates/host-core/src/prepare.rs:641-647`), `prepare_host_runtime_with_live_lanes_successor`
   (`:818`).
+- Until #1281 and #1282, a strip whose surviving insert lane cannot carry is in
+  `restarted_strips()`: its insert restarts at rest on the swap and D1 ducks it (#1277 D6, #1279;
+  root amendment, 2026-10-12).
 - The classifier sends these edits to a rebuild: `LiveRebuild::Structure` for insert order,
   identity, quality, link mode and every other non-value field, `Prepared` for a non-`Block`
   parameter, `PreparedBypass` for the delay and the multiband (`crates/host-core/src/live_delta.rs:118-147`,
@@ -305,3 +308,7 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
 - *Give every route whose tap precedes its strip's fader a live lane on every plan* (#1391) (the
   pre-fader route ducks, through #1325 D2).
+- *Carry live-controlled effect lanes across a plan swap* (#1280), *Carry an insert lane that moves
+  between a bank and a per-node instance* (#1281) and *Carry per-node effect instances across a plan
+  swap* (#1282): gates 5, 7(b) and 9 assume that an untouched insert carries. Until these land, a strip
+  that holds an insert is in `restarted_strips()` and is ducked (root, 2026-10-12).

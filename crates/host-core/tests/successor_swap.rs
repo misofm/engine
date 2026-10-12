@@ -39,6 +39,12 @@ const SOURCE: &str = "fixture-source";
 const AUX_SOURCE: &str = "aux-source";
 const MUTED_TRACK: &str = "a-muted";
 
+/// Bytes of `moves` strip-stage moves in a carry program (#1277 D8): one per carried fader or
+/// matrix stage.
+fn strip_moves(moves: u64) -> u64 {
+    moves * core::mem::size_of::<graph::GraphStripMove>() as u64
+}
+
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("stable ID")
 }
@@ -189,8 +195,10 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     assert_eq!(
         report.carry_program_retained_bytes,
         core::mem::size_of::<(u32, u32)>() as u64
-            + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
-        "one (u32, u32) source move and the two unchanged input sections (#1276)"
+            + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+            + strip_moves(4),
+        "one (u32, u32) source move, the two unchanged input sections (#1276) and the fader and \
+         matrix stage of both kept strips (#1277)"
     );
 
     // The oracle can fail: today's fresh rebuild leaves the swap block silent.
@@ -282,8 +290,9 @@ fn a_changed_source_gets_its_own_ring() {
         assert_eq!(prepared.report.carried_source_total_bytes, 0);
         assert_eq!(
             prepared.report.carry_program_retained_bytes,
-            2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
-            "no source move; only the two unchanged input sections (#1276)"
+            2 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(4),
+            "no source move; the two unchanged input sections (#1276) and the fader and matrix \
+             stage of both strips (#1277)"
         );
         assert_eq!(
             prepared.report.source_total_bytes, fresh.source_total_bytes,
@@ -918,11 +927,12 @@ fn filtered_strips_keep_their_state(backend: Backend) {
         "{backend:?}: every block equals the post-edit session rendered from frame 0"
     );
     assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
-    // Nine input sections recorded, and all nine carry: one source move and nine lane moves.
+    // Nine input sections recorded, and all nine carry: one source move and nine lane moves, and
+    // (#1277) the fader and matrix stage of each of the nine strips.
     assert_eq!(a.prepare(backend).inventory.input_section_count(), 9);
     assert_eq!(
         run.successor.carry_program_retained_bytes,
-        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(18)
     );
 }
 
@@ -987,6 +997,7 @@ impl LivePlan {
                 host_core::SuccessorBase {
                     inventory: predecessor,
                     committed,
+                    revision: successor::SUCCESSOR_REVISION,
                 },
                 backend,
             )
@@ -1402,8 +1413,9 @@ fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoB
         assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
         assert_eq!(
             run.successor.carry_program_retained_bytes,
-            core::mem::size_of::<(u32, u32)>() as u64,
-            "{name}, {backend:?}: the source moves, the changed section does not"
+            core::mem::size_of::<(u32, u32)>() as u64 + strip_moves(2),
+            "{name}, {backend:?}: the source moves, the changed section does not; the strip's \
+             fader and matrix stage still do (#1277)"
         );
         for block in 0..BLOCKS {
             let expected = if block < SWAP_BLOCK {
@@ -1475,7 +1487,7 @@ fn a_changed_control_kind_carries_no_input_section_at(a: &Session, b: &Session, 
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
     assert_eq!(
         plain.report.carry_program_retained_bytes,
-        source_only + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+        source_only + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(18)
     );
 }
 
@@ -1530,8 +1542,9 @@ fn a_track_replaced_by_a_submix_of_its_name_does_not_carry() {
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
         assert_eq!(
             prepared.report.carry_program_retained_bytes,
-            8 + core::mem::size_of::<graph::GraphLaneMove>() as u64,
-            "{backend:?}: the source and eq1's section move, the submix's section does not"
+            8 + core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(2),
+            "{backend:?}: the source and eq1's section move, the submix's section does not; eq1's \
+             fader and matrix stage move, the submix's do not (#1277)"
         );
     }
 }
@@ -2215,4 +2228,2262 @@ fn a_collapsed_chain_renders_the_forced_dual_bits_at_four_lanes() {
 #[test]
 fn a_collapsed_chain_renders_the_forced_dual_bits_at_eight_lanes() {
     a_collapsed_chain_renders_the_forced_dual_bits(Backend::Simd8);
+}
+
+// Issue #1277 (slice 8 of #1269): a strip keeps its fader, mute and pan or matrix state through a
+// plan swap, a ramp in flight at the swap block included, and a structural transaction that also
+// changes a carried strip's live values sounds like "live edit, then structural edit" (D15-7).
+//
+// The cases run on live plans: every strip has latest-target cells, written with records stamped
+// from the plan's own gate handle, as the C ABI does. A swap hands the predecessor's lane state to
+// the successor, applies the predecessor's pending cells first (D8), and the successor applies its
+// own dirty cells at its first block (D5).
+
+use builtins::BuiltinLaneSelector;
+use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
+use session::{DualMonoFader, MatrixOrPan, Vca};
+
+/// The strip the ramp and retarget cases move: the first lane of the first bank of the predecessor
+/// at either width, so a carry that exports a lane before its bank's pending cells apply loses it.
+const MOVED: &str = "eq0";
+/// The strip the mute cases fade: the only lane of the last bank at either width.
+const FADED: &str = "eq8";
+
+/// The nine-track session of gate 1 of #1276 with non-unity faders and non-centre pans, per track
+/// and per channel.
+fn strip_state_session() -> SessionModel {
+    let mut model = filtered_session(false);
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        let step = index as f32;
+        track.fader.left_db = -1.0 - 0.5 * step;
+        track.fader.right_db = -2.0 + 0.25 * step;
+        track.matrix_or_pan = MatrixOrPan::Pan {
+            left: 0.95 - 0.05 * step,
+            right: 0.5 + 0.04 * step,
+            smoothing_samples: 16,
+        };
+    }
+    model
+}
+
+fn track_mut<'a>(model: &'a mut SessionModel, track: &str) -> &'a mut session::Track {
+    model
+        .tracks
+        .iter_mut()
+        .find(|candidate| candidate.id.as_str() == track)
+        .expect("track")
+}
+
+/// `model` with `track`'s fader dB set per channel.
+fn with_fader(mut model: SessionModel, track: &str, db: [f32; 2]) -> SessionModel {
+    let fader = &mut track_mut(&mut model, track).fader;
+    fader.left_db = db[0];
+    fader.right_db = db[1];
+    model
+}
+
+/// `model` with `track`'s pan set, over `smoothing_samples`.
+fn with_pan(
+    mut model: SessionModel,
+    track: &str,
+    pan: [f32; 2],
+    smoothing_samples: u32,
+) -> SessionModel {
+    track_mut(&mut model, track).matrix_or_pan = MatrixOrPan::Pan {
+        left: pan[0],
+        right: pan[1],
+        smoothing_samples,
+    };
+    model
+}
+
+/// `model` with `track`'s mute set on both channels.
+fn with_mute(mut model: SessionModel, track: &str, muted: bool) -> SessionModel {
+    let fader = &mut track_mut(&mut model, track).fader;
+    fader.left_mute = muted;
+    fader.right_mute = muted;
+    model
+}
+
+fn fader_both(db: f32, smoothing_samples: u32) -> TrackFaderRecord {
+    TrackFaderRecord::FaderDb {
+        lanes: BuiltinLaneSelector::Both,
+        db,
+        smoothing_samples,
+    }
+}
+
+fn mute_both(muted: bool, smoothing_samples: u32) -> TrackFaderRecord {
+    TrackFaderRecord::Mute {
+        lanes: BuiltinLaneSelector::Both,
+        muted,
+        smoothing_samples,
+    }
+}
+
+/// The record that moves a strip's pan to `pan` over `smoothing_samples`, as the classifier
+/// derives it.
+fn pan_record(pan: [f32; 2], smoothing_samples: u32) -> TrackControlRecord {
+    let (matrix, _) = builtins_compiler::lower_matrix_or_pan(&MatrixOrPan::Pan {
+        left: pan[0],
+        right: pan[1],
+        smoothing_samples,
+    })
+    .expect("a pan in domain");
+    TrackControlRecord {
+        matrix,
+        smoothing_samples,
+    }
+}
+
+/// How a plan's fader and matrix banks are built: one bank each, or the fused stage the browser's
+/// plans prepared between render calls get.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Form {
+    Split,
+    Fused,
+}
+
+/// One value written to a strip's cells.
+#[derive(Clone, Copy, Debug)]
+enum CellRecord {
+    Fader(TrackFaderRecord),
+    Matrix(TrackControlRecord),
+}
+
+/// A record written to `strip`'s cells before block `block` renders.
+#[derive(Clone, Copy, Debug)]
+struct CellWrite {
+    block: usize,
+    strip: &'static str,
+    record: CellRecord,
+}
+
+/// A live plan with the handle that stamps and publishes its writes.
+struct CellPlan {
+    live: LivePlan,
+    gate: engine::realtime::PlanRevisionGate,
+    /// The next revision a transaction stamps.
+    next: u64,
+}
+
+impl CellPlan {
+    fn prepared(
+        prepared: Result<
+            (host_core::PreparedHost, host_core::HostLiveControlHandles),
+            host_core::PrepareDiagnostics,
+        >,
+    ) -> (host_core::PreparedHost, host_core::HostLiveControlHandles) {
+        prepared.unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
+    }
+
+    fn fresh(session: &Session, backend: Backend, form: Form) -> Self {
+        let (mut prepared, handles) = Self::prepared(match form {
+            Form::Split => host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                &session.compiled,
+                &caps(),
+                &LivePlan::request(),
+                backend,
+            ),
+            Form::Fused => {
+                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
+                    &session.compiled,
+                    &caps(),
+                    &LivePlan::request(),
+                    backend,
+                )
+            }
+        });
+        let gate = prepared
+            .plan
+            .take_revision_gate()
+            .expect("a fresh plan's handle");
+        Self {
+            live: LivePlan { prepared, handles },
+            gate,
+            next: 1,
+        }
+    }
+
+    /// `session` prepared as the successor of the plan `inventory` describes, committing as
+    /// `revision`, with the commit's gate steps a host takes: stamp `revision` again on the
+    /// handle, which inherits the preparation's open stamp, and publish it.
+    fn successor_at(
+        session: &Session,
+        base: host_core::SuccessorBase<'_>,
+        backend: Backend,
+        form: Form,
+    ) -> Result<Self, host_core::PrepareDiagnostics> {
+        let revision = base.revision;
+        let (mut prepared, handles) = match form {
+            Form::Split => {
+                host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                    &session.compiled,
+                    &caps(),
+                    &LivePlan::request(),
+                    base,
+                    backend,
+                )
+            }
+            Form::Fused => {
+                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_successor_on(
+                    &session.compiled,
+                    &caps(),
+                    &LivePlan::request(),
+                    base,
+                    backend,
+                )
+            }
+        }?;
+        let mut gate = prepared
+            .plan
+            .take_revision_gate()
+            .expect("the successor's handle");
+        let _ = gate
+            .stamp(revision)
+            .expect("the open revision stamps again");
+        gate.publish(revision);
+        Ok(Self {
+            live: LivePlan { prepared, handles },
+            gate,
+            next: revision + 1,
+        })
+    }
+
+    fn successor(
+        session: &Session,
+        predecessor: &host_core::PlanStateInventory,
+        committed: &SessionModel,
+        backend: Backend,
+        form: Form,
+    ) -> Self {
+        Self::successor_at(
+            session,
+            host_core::SuccessorBase {
+                inventory: predecessor,
+                committed,
+                revision: successor::SUCCESSOR_REVISION,
+            },
+            backend,
+            form,
+        )
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"))
+    }
+
+    /// One transaction: every record stamped with one revision, then published.
+    fn write_all(&mut self, writes: &[(&str, CellRecord)]) {
+        if writes.is_empty() {
+            return;
+        }
+        let revision = self.next;
+        let stamp = self.gate.stamp(revision).expect("a legal revision");
+        for (strip, record) in writes {
+            let index = self
+                .live
+                .handles
+                .strips
+                .iter()
+                .position(|candidate| &**candidate == *strip)
+                .expect("strip");
+            let producer = &mut self.live.handles.strip_controls[index];
+            match *record {
+                CellRecord::Fader(record) => producer.fader.write(stamp, record),
+                CellRecord::Matrix(record) => producer.producer.write(stamp, record),
+            }
+        }
+        self.gate.publish(revision);
+        self.next = revision + 1;
+    }
+
+    fn write_block(&mut self, writes: &[CellWrite], block: usize) {
+        let now: Vec<(&str, CellRecord)> = writes
+            .iter()
+            .filter(|write| write.block == block)
+            .map(|write| (write.strip, write.record))
+            .collect();
+        self.write_all(&now);
+    }
+}
+
+/// The successor of a [`cell_run`] swap.
+struct Swap<'a> {
+    /// The post-edit session.
+    to: &'a Session,
+    /// The predecessor's base: the model it was prepared from plus every record written to it.
+    committed: &'a SessionModel,
+    form: Form,
+    /// Records written to the successor's cells after it is prepared, before it is swapped in.
+    successor_writes: &'a [(&'static str, CellRecord)],
+}
+
+struct CellRun {
+    blocks: Vec<Vec<u32>>,
+    carry: CarryOutcome,
+    /// The successor's `restarted_strips()`.
+    restarted: Vec<Box<str>>,
+    /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
+    /// deallocations)` over the hand-over plus the successor's first block.
+    swap_allocator: ((u64, u64, u64), (u64, u64)),
+}
+
+/// Render `a` and write `writes` to the plan that renders their block next; with a `swap`, prepare
+/// its successor at [`SWAP_BLOCK`], hand over and render on. Without one this is the reference
+/// run: `a` rendered from frame 0 to [`BLOCKS`], the post-edit session fed the same records at the
+/// same blocks.
+fn cell_run(
+    a: &Session,
+    form: Form,
+    swap: Option<Swap<'_>>,
+    feed: &Feed,
+    writes: &[CellWrite],
+    backend: Backend,
+) -> CellRun {
+    use bench_support::alloc as bench_alloc;
+    let mut plan = CellPlan::fresh(a, backend, form);
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut carry = CarryOutcome::NotRequested;
+    let mut restarted = Vec::new();
+    let mut swap_allocator = ((0, 0, 0), (0, 0));
+    plan.live.submit(feed, QUANTUM, 0);
+    for block in 0..BLOCKS {
+        plan.write_block(writes, block);
+        if let (SWAP_BLOCK, Some(swap)) = (block, &swap) {
+            let mut successor = CellPlan::successor(
+                swap.to,
+                &plan.live.prepared.inventory,
+                swap.committed,
+                backend,
+                swap.form,
+            );
+            restarted = successor.live.prepared.restarted_strips().to_vec();
+            successor.write_all(swap.successor_writes);
+            assert_eq!(
+                successor
+                    .live
+                    .prepared
+                    .sources
+                    .adopt_persisting(&mut plan.live.prepared.sources),
+                1
+            );
+            if block + 1 < BLOCKS {
+                successor.live.submit(feed, QUANTUM, block + 1);
+            }
+            let mut output = vec![f32::NAN; QUANTUM * 2];
+            engine::realtime::audit::reset();
+            let mark = bench_alloc::current_thread_counters();
+            carry = successor
+                .live
+                .prepared
+                .plan
+                .adopt_predecessor_plan(&mut plan.live.prepared.plan);
+            successor.live.render_into(&mut output, QUANTUM);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            let audit = engine::realtime::audit::snapshot();
+            swap_allocator = (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            );
+            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            plan = successor;
+            continue;
+        }
+        if block + 1 < BLOCKS {
+            plan.live.submit(feed, QUANTUM, block + 1);
+        }
+        blocks.push(plan.live.render(QUANTUM));
+    }
+    CellRun {
+        blocks,
+        carry,
+        restarted,
+        swap_allocator,
+    }
+}
+
+fn first_cell_difference(left: &CellRun, right: &CellRun) -> Option<usize> {
+    assert_eq!(left.blocks.len(), right.blocks.len());
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
+}
+
+fn forms() -> Vec<Form> {
+    vec![Form::Split, Form::Fused]
+}
+
+fn assert_swapped_like(run: &CellRun, reference: &CellRun, what: &str) {
+    assert_eq!(run.carry, CarryOutcome::Carried, "{what}: the swap block");
+    assert_eq!(
+        first_cell_difference(run, reference),
+        None,
+        "{what}: every block equals the reference"
+    );
+}
+
+/// Gate 1: nine tracks with non-unity faders and non-centre pans, plus #1276's input settings; B
+/// adds a muted track whose ID sorts first. Every block of the swapped run equals a fresh B fed
+/// from frame 0, nothing restarts, and all eighteen strip stages move.
+fn strip_state_survives_a_swap(backend: Backend) {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    assert_eq!(
+        b.compiled.normalized_model().tracks[0].id.as_str(),
+        MUTED_TRACK
+    );
+    let feed = Feed::new(SOURCE, 5);
+    let reference = reference_run(&b, &[&feed], backend);
+    let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+    assert_eq!(
+        (run.blocks[SWAP_BLOCK].swap, run.blocks[SWAP_BLOCK].carry),
+        (SwapOutcome::Applied, CarryOutcome::Carried),
+        "{backend:?}: the swap block"
+    );
+    assert_eq!(
+        first_difference(&run.blocks, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session rendered from frame 0"
+    );
+    assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
+    assert!(run.restarted.is_empty(), "{backend:?}: {:?}", run.restarted);
+    // Nine strips: one source move, nine input lanes, and a fader and a matrix move each.
+    assert_eq!(a.prepare(backend).inventory.strip_stage_count(), 18);
+    assert_eq!(
+        run.successor.carry_program_retained_bytes,
+        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+            + 18 * core::mem::size_of::<graph::GraphStripMove>() as u64
+    );
+}
+
+/// Red if a stage is keyed by lane or index, not strip ID (the added track sorts first, so every
+/// kept lane moves and two cross into the next bank), if a stage is left out of the program, or
+/// if the join lists a strip that carried.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn strip_state_survives_a_swap_at_eight_lanes() {
+    strip_state_survives_a_swap(Backend::Simd8);
+}
+
+#[test]
+fn strip_state_survives_a_swap_at_four_lanes() {
+    strip_state_survives_a_swap(Backend::Simd4);
+}
+
+/// A strip whose chain has an effect between its input section and its fader still carries its
+/// fader and matrix stage: the fixture's nine tracks keep their console slots and inserts, so the
+/// builtin stages sit behind effect slots of the same bank chain. Red if the walk over a chain's
+/// slots stops at the first slot that is not a builtin stage: no row is recorded, nothing carries,
+/// and every strip is listed as restarted.
+#[cfg(target_feature = "avx2")]
+fn a_strip_behind_an_effect_still_carries(backend: Backend) {
+    let mut model = parse_session_json(FIXTURE).expect("fixture parses");
+    for track in &mut model.tracks {
+        assert!(
+            !track.console.is_empty() || !track.inserts.effects.is_empty(),
+            "the fixture's tracks carry effects"
+        );
+    }
+    let a = Session::compile(model.clone());
+    add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
+    let b = Session::compile(model);
+    assert_eq!(a.prepare(backend).inventory.strip_stage_count(), 18);
+    let feed = Feed::new(SOURCE, 15);
+    let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+    assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+    assert!(run.restarted.is_empty(), "{backend:?}: {:?}", run.restarted);
+    assert!(
+        run.successor.carry_program_retained_bytes >= strip_moves(18),
+        "{backend:?}: all eighteen strip stages move"
+    );
+}
+
+/// Eight lanes only: the fixture's console equalizer is not banked at four
+/// (`console.slot.unbanked`).
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_strip_behind_an_effect_still_carries_at_eight_lanes() {
+    a_strip_behind_an_effect_still_carries(Backend::Simd8);
+}
+
+/// The model, the records and the sessions of gate 2: a fader ramp over `RAMP_FRAMES` frames, a
+/// pan ramp and a mute fade, all in flight across the swap.
+const RAMP_FRAMES: u32 = 400;
+
+fn ramp_writes() -> Vec<CellWrite> {
+    [
+        (MOVED, CellRecord::Fader(fader_both(-12.0, RAMP_FRAMES))),
+        (MOVED, CellRecord::Matrix(pan_record([0.2, 0.9], 300))),
+        (FADED, CellRecord::Fader(mute_both(true, 350))),
+    ]
+    .into_iter()
+    .map(|(strip, record)| CellWrite {
+        block: SWAP_BLOCK,
+        strip,
+        record,
+    })
+    .collect()
+}
+
+/// A's model after [`ramp_writes`]: the base a structural transaction commits over.
+fn ramped_model() -> SessionModel {
+    let model = with_fader(strip_state_session(), MOVED, [-12.0, -12.0]);
+    let model = with_pan(model, MOVED, [0.2, 0.9], 300);
+    with_mute(model, FADED, true)
+}
+
+fn feed_for_strips() -> Feed {
+    Feed::new(SOURCE, 7)
+}
+
+/// Gate 2/3, first case: the records are written to A's cells between blocks 5 and 6, committed in
+/// the base, and A is swapped out at block 6 before it renders again, so they are still dirty in
+/// A's cells and only the carry's `apply_pending` applies them. The reference is A plus the muted
+/// track, fed the same records at the same blocks.
+fn a_ramp_in_flight_finishes_after_the_swap(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b_after = Session::compile(with_muted_track(ramped_model()));
+    let b_before = Session::compile(with_muted_track(strip_state_session()));
+    let committed = ramped_model();
+    let feed = feed_for_strips();
+    let writes = ramp_writes();
+    let reference = cell_run(&b_before, form, None, &feed, &writes, backend);
+    let silent = cell_run(&b_before, form, None, &feed, &[], backend);
+    assert!(
+        reference.blocks[SWAP_BLOCK..SWAP_BLOCK + 3]
+            .iter()
+            .zip(&silent.blocks[SWAP_BLOCK..SWAP_BLOCK + 3])
+            .all(|(moved, rest)| moved != rest),
+        "{backend:?} {form:?}: the ramp is audible in the three blocks after the swap"
+    );
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b_after,
+            committed: &committed,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &writes,
+        backend,
+    );
+    assert_swapped_like(&run, &reference, &format!("{backend:?} {form:?}"));
+    assert!(run.restarted.is_empty(), "{:?}", run.restarted);
+}
+
+/// Gate 2/3, second case: the records are written to the pending successor's cells (a live edit
+/// committed after the structural transaction, #1053 D7), so the carry's lane state is at rest and
+/// the successor applies the records at its first block.
+fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    let committed = strip_state_session();
+    let feed = feed_for_strips();
+    let writes = ramp_writes();
+    let reference = cell_run(&b, form, None, &feed, &writes, backend);
+    let successor_writes: Vec<(&'static str, CellRecord)> = writes
+        .iter()
+        .map(|write| (write.strip, write.record))
+        .collect();
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &committed,
+            form,
+            successor_writes: &successor_writes,
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_swapped_like(&run, &reference, &format!("{backend:?} {form:?}"));
+}
+
+#[test]
+fn a_ramp_in_flight_finishes_after_the_swap_at_four_lanes() {
+    for form in forms() {
+        a_ramp_in_flight_finishes_after_the_swap(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
+    for form in forms() {
+        a_ramp_in_flight_finishes_after_the_swap(Backend::Simd8, form);
+    }
+}
+
+#[test]
+fn records_in_the_pending_successor_apply_at_its_first_block_at_four_lanes() {
+    for form in forms() {
+        records_in_the_pending_successor_apply_at_its_first_block(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn records_in_the_pending_successor_apply_at_its_first_block_at_eight_lanes() {
+    for form in forms() {
+        records_in_the_pending_successor_apply_at_its_first_block(Backend::Simd8, form);
+    }
+}
+
+/// Gate 4: B also changes strip X's fader and pan, live values. Run 1 prepares B from A's base and
+/// X's stage carries, then D5's records retarget it. Run 2 writes the same records to A just
+/// before the swap and prepares B from a base that already holds them. The runs are bit-identical
+/// in every block, and X is not in the restart set.
+fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
+    let after = |model: SessionModel| {
+        let model = with_fader(model, MOVED, [-4.0, -6.0]);
+        with_pan(model, MOVED, [0.8, 0.6], 300)
+    };
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(after(strip_state_session())));
+    let before = strip_state_session();
+    let moved = after(strip_state_session());
+    let feed = feed_for_strips();
+    let records = [
+        CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -4.0,
+            smoothing_samples: 0,
+        }),
+        CellRecord::Fader(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Right,
+            db: -6.0,
+            smoothing_samples: 0,
+        }),
+        CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
+    ];
+    let writes: Vec<CellWrite> = records
+        .iter()
+        .map(|record| CellWrite {
+            block: SWAP_BLOCK,
+            strip: MOVED,
+            record: *record,
+        })
+        .collect();
+    let retargeted = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    let written = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &moved,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &writes,
+        backend,
+    );
+    assert_eq!(retargeted.carry, CarryOutcome::Carried);
+    assert_eq!(written.carry, CarryOutcome::Carried);
+    assert!(
+        retargeted.restarted.is_empty() && written.restarted.is_empty(),
+        "{backend:?} {form:?}: {:?} {:?}",
+        retargeted.restarted,
+        written.restarted
+    );
+    assert_eq!(
+        first_cell_difference(&retargeted, &written),
+        None,
+        "{backend:?} {form:?}: carry then retarget sounds like live edit then structural edit"
+    );
+    // Not vacuous: the pan ramp is audible after the swap, so a retarget that is dropped or a
+    // stage that restarts at the new values differs from the written run.
+    let unmoved = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &Session::compile(with_muted_track(strip_state_session())),
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_ne!(
+        unmoved.blocks[SWAP_BLOCK + 1],
+        retargeted.blocks[SWAP_BLOCK + 1]
+    );
+}
+
+#[test]
+fn a_live_difference_retargets_the_carried_stage_at_four_lanes() {
+    for form in forms() {
+        a_live_difference_retargets_the_carried_stage(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_live_difference_retargets_the_carried_stage_at_eight_lanes() {
+    for form in forms() {
+        a_live_difference_retargets_the_carried_stage(Backend::Simd8, form);
+    }
+}
+
+/// `model` with a VCA over `track`, offset `db` on both channels.
+fn with_vca(mut model: SessionModel, track: &str, db: f32) -> SessionModel {
+    model.vcas.push(Vca {
+        id: id("trim-group"),
+        fader: DualMonoFader {
+            left_db: db,
+            right_db: db,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: vec![id(track)],
+    });
+    model
+}
+
+/// Gate 5: B adds a VCA with a +3 dB offset over X. A VCA is a prepared difference until #1247, so
+/// X's stage starts at rest at the new effective value and `restarted_strips()` is exactly `[X]`,
+/// on a live plan, which has the cells a live difference would retarget. #1247 rewrites this gate
+/// when VCA changes become live.
+fn a_prepared_change_restarts_the_stage(backend: Backend, form: Form) {
+    let a = Session::compile(strip_state_session());
+    let b_model = with_vca(with_muted_track(strip_state_session()), MOVED, 3.0);
+    let b = Session::compile(b_model);
+    let feed = feed_for_strips();
+    let reference = cell_run(&b, form, None, &feed, &[], backend);
+    let without = cell_run(
+        &Session::compile(with_muted_track(strip_state_session())),
+        form,
+        None,
+        &feed,
+        &[],
+        backend,
+    );
+    assert!(
+        first_cell_difference(&reference, &without).is_some(),
+        "{backend:?} {form:?}: the offset is audible"
+    );
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &a.model,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?} {form:?}: exactly X restarts"
+    );
+    // The blocks before the swap are A's, without the offset; from the swap block on, X's stage
+    // renders exactly what B's fresh plan does.
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: X's stage starts at rest at the new effective value"
+    );
+}
+
+#[test]
+fn a_prepared_change_restarts_the_stage_at_four_lanes() {
+    for form in forms() {
+        a_prepared_change_restarts_the_stage(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_prepared_change_restarts_the_stage_at_eight_lanes() {
+    for form in forms() {
+        a_prepared_change_restarts_the_stage(Backend::Simd8, form);
+    }
+}
+
+/// `model` with `track`'s main route sent through a new submix, `follows_mute` set as given.
+fn with_send_through_submix(
+    mut model: SessionModel,
+    track: &str,
+    follows_mute: bool,
+) -> SessionModel {
+    let main = format!("{track}-main");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == main)
+        .expect("the track's main route");
+    let mut onward = route.clone();
+    route.destination = session::RouteDestination::SubmixInput {
+        submix_id: id("bus"),
+    };
+    route.follows_mute = follows_mute;
+    let RouteSource::Track { tap, .. } = onward.source.clone() else {
+        panic!("a track route");
+    };
+    onward.id = id("bus-main");
+    onward.source = RouteSource::Submix {
+        submix_id: id("bus"),
+        tap,
+    };
+    onward.follows_mute = false;
+    model.routes.push(onward);
+    model
+        .submixes
+        .push(session::Submix::unity(id("bus"), &model.console));
+    model
+}
+
+/// A mute change on a track that a `follows_mute` route follows is refused by the classifier
+/// (`LiveRebuild::FollowedMute`), so by D3 it is a prepared difference: the strip's stage does not
+/// carry, starts at rest at the new mute, and the strip is exactly the restart set. The same
+/// change with no route that follows it is live and carries. Red if the join treats the followed
+/// mute as live: X would carry, be written a mute retarget and drop out of the restart set (then
+/// the carried stage ramps the mute while the following route, prepared fresh, steps, once #1054
+/// gives mutes a ramp).
+fn a_followed_mute_change_restarts_the_stage(backend: Backend, form: Form) {
+    let a_model =
+        |follows_mute| with_send_through_submix(strip_state_session(), MOVED, follows_mute);
+    let b_model = |follows_mute| with_mute(with_muted_track(a_model(follows_mute)), MOVED, true);
+    let feed = feed_for_strips();
+    let run_for = |follows_mute| {
+        let (a, b) = (
+            Session::compile(a_model(follows_mute)),
+            Session::compile(b_model(follows_mute)),
+        );
+        let reference = cell_run(&b, form, None, &feed, &[], backend);
+        let run = cell_run(
+            &a,
+            form,
+            Some(Swap {
+                to: &b,
+                committed: &a.model,
+                form,
+                successor_writes: &[],
+            }),
+            &feed,
+            &[],
+            backend,
+        );
+        (run, reference)
+    };
+    let (run, reference) = run_for(true);
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?} {form:?}: exactly the followed strip restarts"
+    );
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: the followed strip starts at rest at its new mute"
+    );
+    // The control: with no route following the mute, the same change is live and carries.
+    let (run, reference) = run_for(false);
+    assert!(
+        run.restarted.is_empty(),
+        "{backend:?} {form:?}: {:?}",
+        run.restarted
+    );
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?} {form:?}: a live mute carries and retargets"
+    );
+}
+
+/// D4 decides per stage: when X's followed mute changes and X's pan changes too, the fader/mute
+/// stage restarts (X is in the restart set, at rest at the new mute) and the matrix stage still
+/// carries and is retargeted. The reference writes the pan record to A just before the swap, as
+/// gate 4 does, so the fader/mute stage restarts identically in both runs and only the matrix
+/// carry is compared. Split form only: the fused stage carries both halves or neither (D9).
+/// Red if the followed mute also makes the matrix family prepared: the matrix stage then restarts
+/// at the new pan, and the pan ramp the carry continues is lost.
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
+    let form = Form::Split;
+    let before = with_send_through_submix(strip_state_session(), MOVED, true);
+    let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
+    // Only the left channel mutes, so X's right channel stays audible and its pan ramp is heard.
+    let after = |base: &SessionModel| {
+        let mut model = with_muted_track(base.clone());
+        track_mut(&mut model, MOVED).fader.left_mute = true;
+        model
+    };
+    let (a, b) = (
+        Session::compile(before.clone()),
+        Session::compile(after(&moved)),
+    );
+    let feed = feed_for_strips();
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    let written = [CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record: CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
+    }];
+    let reference = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &moved,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &written,
+        backend,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(reference.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?}: the followed mute restarts X's fader/mute stage"
+    );
+    assert_eq!(
+        reference.restarted, run.restarted,
+        "{backend:?}: the reference restarts the same stage"
+    );
+    assert_eq!(
+        first_cell_difference(&run, &reference),
+        None,
+        "{backend:?}: X's matrix stage carries and is retargeted"
+    );
+    // Not vacuous: the pan ramp is audible after the swap, so a matrix stage that restarts at the
+    // new pan sounds different.
+    let unmoved = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &Session::compile(after(&before)),
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_ne!(unmoved.blocks[SWAP_BLOCK + 1], run.blocks[SWAP_BLOCK + 1]);
+}
+
+/// The fused form of the second case: the fused stage is one unit (D9), so when X's followed
+/// mute changes and X's pan changes too, the whole stage restarts. X is exactly the restart set
+/// and every block from the swap on equals a fresh B (X at rest at the new mute and the new pan).
+/// Red if the matrix half of the fused stage carries while its fader half restarts: the carried
+/// half ramps to the new pan where a fresh B starts at it.
+fn a_followed_mute_change_restarts_the_fused_stage_whole(backend: Backend) {
+    let form = Form::Fused;
+    let before = with_send_through_submix(strip_state_session(), MOVED, true);
+    let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
+    let mut model = with_muted_track(moved);
+    track_mut(&mut model, MOVED).fader.left_mute = true;
+    let (a, b) = (Session::compile(before.clone()), Session::compile(model));
+    let feed = feed_for_strips();
+    let reference = cell_run(&b, form, None, &feed, &[], backend);
+    let run = cell_run(
+        &a,
+        form,
+        Some(Swap {
+            to: &b,
+            committed: &before,
+            form,
+            successor_writes: &[],
+        }),
+        &feed,
+        &[],
+        backend,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from(MOVED)],
+        "{backend:?}: the followed mute restarts X's whole fused stage"
+    );
+    assert_eq!(
+        run.blocks[SWAP_BLOCK..],
+        reference.blocks[SWAP_BLOCK..],
+        "{backend:?}: X's fused stage starts at rest, both halves"
+    );
+}
+
+#[test]
+fn a_followed_mute_change_restarts_the_fused_stage_whole_at_four_lanes() {
+    a_followed_mute_change_restarts_the_fused_stage_whole(Backend::Simd4);
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_followed_mute_change_restarts_the_fused_stage_whole_at_eight_lanes() {
+    a_followed_mute_change_restarts_the_fused_stage_whole(Backend::Simd8);
+}
+
+#[test]
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_four_lanes() {
+    a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd4);
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_eight_lanes() {
+    a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd8);
+}
+
+#[test]
+fn a_followed_mute_change_restarts_the_stage_at_four_lanes() {
+    for form in forms() {
+        a_followed_mute_change_restarts_the_stage(Backend::Simd4, form);
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_followed_mute_change_restarts_the_stage_at_eight_lanes() {
+    for form in forms() {
+        a_followed_mute_change_restarts_the_stage(Backend::Simd8, form);
+    }
+}
+
+/// Gate 6: with a ramp in flight, a pending cell value in the predecessor and a retarget in the
+/// successor, the swap block makes no allocator call and no audited allocation.
+#[test]
+fn the_strip_carry_allocates_and_frees_nothing() {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let a = Session::compile(strip_state_session());
+    let committed = with_fader(strip_state_session(), MOVED, [-12.0, -12.0]);
+    let b_model = with_pan(
+        with_muted_track(with_fader(committed.clone(), MOVED, [-12.0, -12.0])),
+        FADED,
+        [0.3, 0.7],
+        200,
+    );
+    let b = Session::compile(b_model);
+    let feed = feed_for_strips();
+    let writes = [CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record: CellRecord::Fader(fader_both(-12.0, RAMP_FRAMES)),
+    }];
+    for backend in backends() {
+        for form in forms() {
+            let run = cell_run(
+                &a,
+                form,
+                Some(Swap {
+                    to: &b,
+                    committed: &committed,
+                    form,
+                    successor_writes: &[],
+                }),
+                &feed,
+                &writes,
+                backend,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried);
+            assert_eq!(
+                run.swap_allocator,
+                ((0, 0, 0), (0, 0)),
+                "{backend:?} {form:?}: allocator calls and audited allocations at the swap block"
+            );
+        }
+    }
+}
+
+/// D9: a fused stage and a split one do not pair. Every strip present in both starts at rest and
+/// is listed, the hand-over still reports `Carried`, and the successor sounds like a fresh one.
+#[test]
+fn a_cross_form_pair_does_not_carry() {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    let feed = feed_for_strips();
+    for backend in backends() {
+        for (from, to) in [(Form::Split, Form::Fused), (Form::Fused, Form::Split)] {
+            let reference = cell_run(&b, to, None, &feed, &[], backend);
+            let run = cell_run(
+                &a,
+                from,
+                Some(Swap {
+                    to: &b,
+                    committed: &a.model,
+                    form: to,
+                    successor_writes: &[],
+                }),
+                &feed,
+                &[],
+                backend,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried);
+            assert_eq!(run.restarted.len(), 9, "{backend:?} {from:?} to {to:?}");
+            assert_eq!(first_cell_difference(&run, &reference), None);
+        }
+    }
+}
+
+/// D4: a stage carries only between plans that attach the same control kind. A plan without live
+/// controls has no cells to retarget, so the successor's stages start at rest and every strip is
+/// listed.
+#[test]
+fn a_changed_control_kind_carries_no_strip_stage() {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    for backend in backends() {
+        let predecessor = a.prepare(backend);
+        let successor =
+            CellPlan::successor(&b, &predecessor.inventory, &a.model, backend, Form::Split);
+        assert_eq!(successor.live.prepared.restarted_strips().len(), 9);
+        assert_eq!(
+            successor.live.prepared.report.carry_program_retained_bytes,
+            // The source only: the control kind differs, so no input lane and no strip stage moves.
+            8,
+            "{backend:?}"
+        );
+    }
+}
+
+/// D10: a successor's revision is one its gate can stamp. Refused before anything is built.
+#[test]
+fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(with_muted_track(strip_state_session()));
+    let backend = Backend::current();
+    let predecessor = a.prepare(backend);
+    for revision in [0, engine::realtime::GATE_REVISION_MAX + 1, u64::MAX] {
+        let refused = CellPlan::successor_at(
+            &b,
+            host_core::SuccessorBase {
+                inventory: &predecessor.inventory,
+                committed: &a.model,
+                revision,
+            },
+            backend,
+            Form::Split,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("revision {revision} was accepted"));
+        assert_eq!(refused.kind(), PrepareRejection::Session);
+        assert_eq!(
+            refused.as_bytes(),
+            b"host.successor.revision\t$\n",
+            "revision {revision}"
+        );
+    }
+    let accepted = engine::realtime::GATE_REVISION_MAX;
+    assert!(
+        CellPlan::successor_at(
+            &b,
+            host_core::SuccessorBase {
+                inventory: &predecessor.inventory,
+                committed: &a.model,
+                revision: accepted,
+            },
+            backend,
+            Form::Split,
+        )
+        .is_ok()
+    );
+}
+
+/// The revision-gate handle of a successor of the nine-track session, prepared with live cells
+/// from `committed` to `next`.
+fn successor_handle(
+    committed: &SessionModel,
+    next: SessionModel,
+) -> engine::realtime::PlanRevisionGate {
+    let a = Session::compile(strip_state_session());
+    let b = Session::compile(next);
+    let backend = Backend::current();
+    let predecessor = CellPlan::fresh(&a, backend, Form::Split);
+    let (mut prepared, _handles) =
+        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &b.compiled,
+            &caps(),
+            &LivePlan::request(),
+            host_core::SuccessorBase {
+                inventory: &predecessor.live.prepared.inventory,
+                committed,
+                revision: successor::SUCCESSOR_REVISION,
+            },
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+    prepared
+        .plan
+        .take_revision_gate()
+        .expect("the successor's handle")
+}
+
+/// D5: a preparation that writes no retarget does not stamp. Red if every successor stamps its
+/// revision: the handle would hold it open, and a debug build refuses another revision stamped
+/// before it is published.
+#[test]
+fn a_preparation_without_a_retarget_stamps_nothing() {
+    let a = strip_state_session();
+    let mut gate = successor_handle(&a, with_muted_track(strip_state_session()));
+    gate.stamp(successor::SUCCESSOR_REVISION + 5)
+        .expect("a different revision stamps on a handle with no open stamp");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1279: a console effect lane keeps its state through a plan swap.
+//
+// A console slot with no live control lane is an `EffectBankStage`; the carry moves each lane
+// through the payload calls (D3), recomputes the witness the stage caches for it (D5) and counts a
+// refusal (D6). These cases prepare their plans with no live controls, the form that stage has.
+// A slot with live controls is #1280's.
+
+use session::{
+    ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode,
+    ParameterChannel, ParameterUnit, SidechainDeclaration,
+};
+
+/// One slot of the console the cases build.
+struct ConsoleEffect {
+    slot: &'static str,
+    effect: &'static str,
+    /// In `post_insert`; else in `pre_insert`.
+    post: bool,
+    link_mode: LinkMode,
+}
+
+/// All six console-eligible effects: the EQ, compressor, gate/expander and transient shaper
+/// before the inserts, the soft-clip and the true-peak limiter after them.
+const CONSOLE_EFFECTS: [ConsoleEffect; 6] = [
+    ConsoleEffect {
+        slot: "eq",
+        effect: "miso.parametric-eq",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "comp",
+        effect: "miso.compressor",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "gate",
+        effect: "miso.gate-expander",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "transient",
+        effect: "miso.transient-shaper",
+        post: false,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "clip",
+        effect: "miso.soft-clip",
+        post: true,
+        link_mode: LinkMode::DualMono,
+    },
+    ConsoleEffect {
+        slot: "limiter",
+        effect: "miso.true-peak-limiter",
+        post: true,
+        link_mode: LinkMode::Maximum,
+    },
+];
+
+fn param(parameter_id: u32, unit: ParameterUnit, value: f32) -> EffectParam {
+    EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    }
+}
+
+fn param_on(
+    parameter_id: u32,
+    channel: ParameterChannel,
+    unit: ParameterUnit,
+    value: f32,
+) -> EffectParam {
+    EffectParam {
+        channel,
+        ..param(parameter_id, unit, value)
+    }
+}
+
+/// Strip `index`'s knobs for console slot `slot`: every strip differs, so a lane carried to the
+/// wrong strip is heard. `mono` makes the two channels' values equal, so the chain can collapse.
+fn console_params(slot: &str, index: usize, mono: bool) -> Vec<EffectParam> {
+    use ParameterChannel::{Left, Right};
+    use ParameterUnit::{Db, Hz, Linear, Milliseconds, Ratio};
+    let step = index as f32;
+    match slot {
+        "eq" => vec![
+            param(1, Linear, 1.0),
+            param(2, Linear, 1.0),
+            param_on(3, Left, Hz, 90.0 + 10.0 * step),
+            param_on(
+                3,
+                Right,
+                Hz,
+                if mono { 90.0 + 10.0 * step } else { 2_400.0 },
+            ),
+            param_on(4, Left, Db, 5.0 - 0.5 * step),
+            param_on(4, Right, Db, if mono { 5.0 - 0.5 * step } else { -4.0 }),
+            param(5, Ratio, 0.7),
+            param(6, Ratio, 1.0),
+        ],
+        "comp" => vec![
+            param(1, Db, -14.0 - 0.5 * step),
+            param(2, Ratio, 4.0),
+            param(3, Db, 3.0),
+            param(4, Milliseconds, 2.0),
+            param(5, Milliseconds, 40.0),
+            param(6, Db, 0.0),
+            param(7, Linear, 1.0),
+        ],
+        "gate" => vec![
+            param(1, Db, -14.0 - 0.25 * step),
+            param(2, Ratio, 4.0),
+            param(3, Db, 30.0),
+            param(4, Db, 3.0),
+            param(5, Milliseconds, 1.0),
+            param(6, Milliseconds, 5.0),
+            param(7, Milliseconds, 20.0),
+        ],
+        "transient" => vec![
+            param(1, Linear, 0.6 - 0.05 * step),
+            param(2, Linear, -0.4),
+            param(3, Linear, 1.0),
+        ],
+        "clip" => vec![
+            param(1, Db, 9.0 + 0.5 * step),
+            param(2, Db, -3.0),
+            param(3, Linear, 1.0),
+        ],
+        "limiter" => vec![
+            param(1, Db, -8.0 - 0.25 * step),
+            param(2, Milliseconds, 60.0),
+            param(3, Milliseconds, 5.0),
+        ],
+        other => panic!("no parameters for slot {other}"),
+    }
+}
+
+fn console_slot_declaration(effect: &ConsoleEffect) -> ConsoleSlot {
+    ConsoleSlot {
+        slot: id(effect.slot),
+        identity: EffectIdentity::Native {
+            effect_id: id(effect.effect),
+        },
+        quality: EffectQuality::Normal,
+        link_mode: effect.link_mode,
+    }
+}
+
+/// [`filtered_session`] with the console slots named in `slots` (in [`CONSOLE_EFFECTS`] order)
+/// declared and every track configured for them.
+fn console_session(mono: bool, slots: &[&str]) -> SessionModel {
+    let mut model = filtered_session(mono);
+    let chosen: Vec<&ConsoleEffect> = CONSOLE_EFFECTS
+        .iter()
+        .filter(|effect| slots.contains(&effect.slot))
+        .collect();
+    assert_eq!(chosen.len(), slots.len(), "every named slot exists");
+    model.console.pre_insert = chosen
+        .iter()
+        .filter(|effect| !effect.post)
+        .map(|effect| console_slot_declaration(effect))
+        .collect();
+    model.console.post_insert = chosen
+        .iter()
+        .filter(|effect| effect.post)
+        .map(|effect| console_slot_declaration(effect))
+        .collect();
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.console = chosen
+            .iter()
+            .map(|effect| ConsoleEntry {
+                slot: id(effect.slot),
+                bypass: false,
+                params: console_params(effect.slot, index, mono),
+            })
+            .collect();
+    }
+    model
+}
+
+/// [`Feed::new`] with an envelope: loud over frames 0..300, 500..740 and from 1100, quiet (a
+/// fiftieth of the level) between, so a gate opens and closes and a dynamics effect has an
+/// envelope in flight when the swap block renders (frame 768). The gate is in its release at the
+/// swap, not fully open, so its state there differs from its state at rest.
+fn bursty_feed(id: &'static str, seed: u32) -> Feed {
+    let mut feed = Feed::new(id, seed);
+    for plane in &mut feed.planes {
+        for (frame, sample) in plane.iter_mut().enumerate() {
+            if !(frame < 300 || (500..740).contains(&frame) || frame >= 1100) {
+                *sample *= 0.02;
+            }
+        }
+    }
+    feed
+}
+
+const ALL_SLOTS: [&str; 6] = ["eq", "comp", "gate", "transient", "clip", "limiter"];
+
+/// What a plain run (plans prepared with no live controls, the successor adopting its predecessor
+/// itself) hands back.
+struct PlainRun {
+    blocks: Vec<Vec<u32>>,
+    carry: CarryOutcome,
+    restarted: Vec<Box<str>>,
+    /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
+    /// deallocations)` over the hand-over plus the successor's first block.
+    swap_allocator: ((u64, u64, u64), (u64, u64)),
+    /// `bank_collapse_counters()` of the predecessor at the swap and of the last plan at the end.
+    collapses: [[u64; 2]; 2],
+    /// `bank_collapse_transitions()` of the last plan at the end.
+    transitions: [u64; 3],
+    /// The successor's `carry_refusal_count()` after the last block (D6).
+    refusals: u64,
+    /// The successor's `carry_program_retained_bytes`.
+    carry_bytes: u64,
+    /// Effect lanes the predecessor's inventory records.
+    effect_lanes: usize,
+}
+
+fn plain_render(prepared: &mut host_core::PreparedHost, output: &mut [f32]) {
+    let sample = prepared.plan.next_absolute_sample();
+    prepared
+        .plan
+        .render_contiguous(
+            engine::realtime::RenderIo {
+                output: engine::realtime::PlanarBufferMut::try_new(output, 2, QUANTUM, QUANTUM)
+                    .expect("output"),
+            },
+            sample,
+        )
+        .unwrap_or_else(|error| panic!("render: {error:?}"));
+}
+
+/// Render `a` for [`SWAP_BLOCK`] blocks fed `feed`, then -- when `b` is given -- prepare it as
+/// `a`'s successor from `committed`, hand over, and render to [`BLOCKS`]. `successor_dual` forces
+/// the successor's mono collapse off. Without `b` this is the reference: `a` rendered from frame 0.
+fn plain_run(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    feed: &Feed,
+    backend: Backend,
+    successor_dual: bool,
+) -> PlainRun {
+    use bench_support::alloc as bench_alloc;
+    let mut plan = a.prepare(backend);
+    let effect_lanes = plan.inventory.effect_lane_count();
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut carry = CarryOutcome::NotRequested;
+    let mut restarted = Vec::new();
+    let mut swap_allocator = ((0, 0, 0), (0, 0));
+    let mut collapses = [[0; 2]; 2];
+    let mut carry_bytes = 0;
+    feed.submit(&mut plan.sources, 48_000, 0);
+    for block in 0..BLOCKS {
+        if let (SWAP_BLOCK, Some((session, committed))) = (block, b) {
+            collapses[0] = plan.plan.bank_collapse_counters();
+            let mut successor = session
+                .prepare_successor(&plan.inventory, committed, &caps(), backend)
+                .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+            successor.plan.force_mono_collapse_off(successor_dual);
+            restarted = successor.restarted_strips().to_vec();
+            carry_bytes = successor.report.carry_program_retained_bytes;
+            assert_eq!(successor.sources.adopt_persisting(&mut plan.sources), 1);
+            if block + 1 < BLOCKS {
+                feed.submit(&mut successor.sources, 48_000, block + 1);
+            }
+            let mut output = vec![f32::NAN; QUANTUM * 2];
+            engine::realtime::audit::reset();
+            let mark = bench_alloc::current_thread_counters();
+            carry = successor.plan.adopt_predecessor_plan(&mut plan.plan);
+            plain_render(&mut successor, &mut output);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            let audit = engine::realtime::audit::snapshot();
+            swap_allocator = (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            );
+            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            plan = successor;
+            continue;
+        }
+        if block + 1 < BLOCKS {
+            feed.submit(&mut plan.sources, 48_000, block + 1);
+        }
+        let mut output = vec![f32::NAN; QUANTUM * 2];
+        plain_render(&mut plan, &mut output);
+        blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+    }
+    collapses[1] = plan.plan.bank_collapse_counters();
+    PlainRun {
+        blocks,
+        carry,
+        restarted,
+        swap_allocator,
+        collapses,
+        transitions: plan.plan.bank_collapse_transitions(),
+        refusals: graph::carry_refusal_count(&mut plan.plan).expect("a graph plan"),
+        carry_bytes,
+        effect_lanes,
+    }
+}
+
+fn first_plain_difference(left: &PlainRun, right: &PlainRun) -> Option<usize> {
+    assert_eq!(left.blocks.len(), right.blocks.len());
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
+}
+
+/// Gate 1: nine tracks with all six console effects, each doing work on the test signal and each
+/// track configured differently; B adds a muted track whose ID sorts first, so every lane shifts
+/// and two cross into the next bank. Every block of the swapped run equals a fresh B fed from
+/// frame 0, nothing restarts, and no restore is refused.
+fn console_effect_state_survives_a_swap(backend: Backend) {
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let b = Session::compile(with_muted_track(console_session(false, &ALL_SLOTS)));
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(
+        run.carry,
+        CarryOutcome::Carried,
+        "{backend:?}: the swap block"
+    );
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session rendered from frame 0"
+    );
+    assert!(reference.blocks[SWAP_BLOCK].iter().any(|bits| *bits != 0));
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(run.refusals, 0, "{backend:?}: no restore was refused");
+    // Not vacuous: six console effects on nine strips are 54 recorded lanes.
+    assert_eq!(run.effect_lanes, 54, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn console_effect_state_survives_a_swap_at_eight_lanes() {
+    console_effect_state_survives_a_swap(Backend::Simd8);
+}
+
+/// Four lanes: the NEON and simd128 width. A console effect bank binds only at the width its
+/// build executes (decision D4), so on a build with eight lanes this case is ignored.
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn console_effect_state_survives_a_swap_at_four_lanes() {
+    console_effect_state_survives_a_swap(Backend::Simd4);
+}
+
+/// For each of the six effects, alone on every strip, the state it holds at the swap block is
+/// heard: the swapped run equals a fresh B fed from frame 0 (its state carried), and differs from
+/// a B that starts the slot at rest at the swap block on the same PCM (a lane it fails to carry
+/// would render as that). With the input section flat, the slot is the only state in the strip, so
+/// the second oracle is exact. An effect whose state at the swap equals its state at rest -- an
+/// open gate, a feed that never moves it -- fails here by name, and not silently in gate 1.
+fn every_console_effect_does_work(backend: Backend) {
+    let feed = bursty_feed(SOURCE, 5);
+    let from_swap = spliced(SOURCE, &feed, |block| {
+        (block + SWAP_BLOCK < BLOCKS).then_some(block + SWAP_BLOCK)
+    });
+    for slot in ALL_SLOTS {
+        let a_model = unfiltered(console_session(false, &[slot]));
+        let a = Session::compile(a_model.clone());
+        let b = Session::compile(with_muted_track(a_model));
+        let reference = plain_run(&b, None, &feed, backend, false);
+        let at_rest = plain_run(&b, None, &from_swap, backend, false);
+        let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}: {slot}");
+        assert_eq!(run.refusals, 0, "{backend:?}: {slot}");
+        assert_eq!(
+            first_plain_difference(&run, &reference),
+            None,
+            "{backend:?}: {slot} carried equals a fresh B from frame 0"
+        );
+        assert_ne!(
+            run.blocks[SWAP_BLOCK..],
+            at_rest.blocks[..BLOCKS - SWAP_BLOCK],
+            "{backend:?}: {slot} at the swap holds state its rest does not"
+        );
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn every_console_effect_does_work_at_eight_lanes() {
+    every_console_effect_does_work(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn every_console_effect_does_work_at_four_lanes() {
+    every_console_effect_does_work(Backend::Simd4);
+}
+
+/// Gate 4: the swap block of gate 1, with every console effect carried, allocates and frees
+/// nothing: not on the allocator and not in the engine's render audit.
+fn the_effect_carry_allocates_and_frees_nothing(backend: Backend) {
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let b = Session::compile(with_muted_track(console_session(false, &ALL_SLOTS)));
+    let feed = bursty_feed(SOURCE, 5);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(run.effect_lanes, 54, "{backend:?}: every lane is carried");
+    assert_eq!(
+        run.swap_allocator,
+        ((0, 0, 0), (0, 0)),
+        "{backend:?}: allocator and render audit over the swap block"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn the_effect_carry_allocates_and_frees_nothing_at_eight_lanes() {
+    the_effect_carry_allocates_and_frees_nothing(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn the_effect_carry_allocates_and_frees_nothing_at_four_lanes() {
+    the_effect_carry_allocates_and_frees_nothing(Backend::Simd4);
+}
+
+/// `model` with every track's input section flat: no filters, no trim, no polarity inversion.
+fn unfiltered(mut model: SessionModel) -> SessionModel {
+    for track in &mut model.tracks {
+        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+            channel.hpf_hz = 0.0;
+            channel.lpf_hz = 0.0;
+            channel.trim_db = 0.0;
+            channel.polarity_invert = false;
+        }
+    }
+    model
+}
+
+/// `model` with every track's trim set to `-0.0` on both channels: a bit pattern that differs from
+/// the `+0.0` of an [`unfiltered`] session, and so an input section that does not carry (#1276
+/// D1), with the same gain.
+fn with_negative_zero_trims(mut model: SessionModel) -> SessionModel {
+    for track in &mut model.tracks {
+        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+            channel.trim_db = -0.0;
+        }
+    }
+    model
+}
+
+/// Gate 2: a mono-source session whose console is the collapse-capable subset (EQ, compressor,
+/// limiter; the gate/expander, soft-clip and transient shaper declare no channel symmetry, so a
+/// chain that holds one never collapses). Its chains collapse before the swap and, because the
+/// carry disengages them and the successor inherits their agreement, on every block after it, with
+/// no agreement proof; with the successor's collapse forced off the carried lanes' right channels
+/// must hold the state the collapsed predecessor never wrote there. Output is bit-identical to a
+/// fresh B either way.
+///
+/// With `inputs_restart`, B also changes every track's trim to `-0.0` -- the same gain, a different
+/// bit pattern -- so no input section carries and the effect carry alone disengages the
+/// predecessor's collapsed chains.
+fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool, inputs_restart: bool) {
+    const SLOTS: [&str; 3] = ["eq", "comp", "limiter"];
+    let after = |model: SessionModel| {
+        if inputs_restart {
+            with_negative_zero_trims(model)
+        } else {
+            model
+        }
+    };
+    let base = || unfiltered(console_session(true, &SLOTS));
+    let a = Session::compile(base());
+    let b = Session::compile(after(with_muted_track(base())));
+    let feed = bursty_feed(SOURCE, 9);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, successor_dual);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert!(
+        run.collapses[0][0] > 0,
+        "{backend:?}: the predecessor rendered collapsed before the swap"
+    );
+    if inputs_restart {
+        // Not vacuous: the nine input sections did not carry.
+        let kept = Session::compile(with_muted_track(base()));
+        let carried = plain_run(&a, Some((&kept, &a.model)), &feed, backend, false);
+        assert_eq!(
+            carried.carry_bytes - run.carry_bytes,
+            9 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
+            "{backend:?}"
+        );
+    }
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}, successor dual {successor_dual}, inputs restart {inputs_restart}"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+    assert!(reference.collapses[1][0] > 0);
+    if successor_dual {
+        assert_eq!(run.collapses[1][0], 0, "{backend:?}: forced dual");
+    } else {
+        // Every chain that collapses in the reference collapses on every block after the swap,
+        // and none needed an agreement proof to engage.
+        assert_eq!(
+            run.collapses[1][0] * BLOCKS as u64,
+            reference.collapses[1][0] * (BLOCKS - SWAP_BLOCK) as u64,
+            "{backend:?}: successor collapsed blocks"
+        );
+        assert_eq!(run.transitions[2], 0, "{backend:?}: agreement proofs");
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn console_chains_keep_collapsing_across_a_swap_at_eight_lanes() {
+    for inputs_restart in [false, true] {
+        console_chains_keep_collapsing(Backend::Simd8, false, inputs_restart);
+        console_chains_keep_collapsing(Backend::Simd8, true, inputs_restart);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn console_chains_keep_collapsing_across_a_swap_at_four_lanes() {
+    for inputs_restart in [false, true] {
+        console_chains_keep_collapsing(Backend::Simd4, false, inputs_restart);
+        console_chains_keep_collapsing(Backend::Simd4, true, inputs_restart);
+    }
+}
+
+/// `model` with every track's right channel read from the source's right channel: a stereo-source
+/// session, whose strips cannot collapse.
+fn stereo_source(mut model: SessionModel) -> SessionModel {
+    for track in &mut model.tracks {
+        track.right_source_channel = 1;
+    }
+    model
+}
+
+/// The AND rule of the agreement flag (#1276 D5, #1279 D3): a chain that could not collapse hands
+/// its carried lanes' state over without a claim that the two channels agree, because they were fed
+/// different PCM. B maps every track mono, so its chains can collapse, and changes every trim to
+/// `-0.0` so that no input section carries and the effect carry alone speaks for the chain. The
+/// successor must stay dual -- and render exactly what a successor forced dual renders -- instead
+/// of collapsing onto a left channel its carried right state no longer matches.
+fn a_chain_that_could_not_collapse_hands_over_no_agreement(backend: Backend) {
+    const SLOTS: [&str; 3] = ["eq", "comp", "limiter"];
+    let base = || unfiltered(console_session(true, &SLOTS));
+    let a = Session::compile(stereo_source(base()));
+    let b = Session::compile(with_negative_zero_trims(base()));
+    let feed = bursty_feed(SOURCE, 9);
+    let free = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    let dual = plain_run(&a, Some((&b, &a.model)), &feed, backend, true);
+    let mono = plain_run(&b, None, &feed, backend, false);
+    assert_eq!(free.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(
+        free.collapses[0][0], 0,
+        "{backend:?}: the predecessor could not collapse"
+    );
+    assert!(
+        mono.collapses[1][0] > 0,
+        "{backend:?}: the successor's chains could"
+    );
+    assert_eq!(
+        first_plain_difference(&free, &dual),
+        None,
+        "{backend:?}: the successor does not collapse onto a left channel it does not match"
+    );
+    assert_eq!(free.collapses[1][0], 0, "{backend:?}: it stays dual");
+    assert_eq!(free.refusals, 0, "{backend:?}");
+    // The claim, not the bits: the channels of a mirrored source agree in the predecessor too, so
+    // collapsing would be sound. The chain still hands over no claim of agreement, because it
+    // never kept the flag the claim rests on, and the successor stays dual (every launch effect
+    // declines the proof that would bring a collapse back).
+    let mut mirrored = bursty_feed(SOURCE, 9);
+    mirrored.planes[1] = mirrored.planes[0].clone();
+    let run = plain_run(&a, Some((&b, &a.model)), &mirrored, backend, false);
+    assert_eq!(run.collapses[1][0], 0, "{backend:?}: a mirrored source");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_eight_lanes() {
+    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_four_lanes() {
+    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd4);
+}
+
+/// [`console_session`] with the input section's filters, trim and polarity off, so nothing
+/// before the console holds state, and every strip's matrix routes it to one output plane: `solo`
+/// to the left plane, every other strip to the right. A plane then depends on those strips only.
+fn isolated_session(slots: &[&str], solo: &str) -> SessionModel {
+    let mut model = unfiltered(console_session(false, slots));
+    for track in &mut model.tracks {
+        track.matrix_or_pan = if track.id.as_str() == solo {
+            MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 0.0,
+                smoothing_samples: 16,
+            }
+        } else {
+            MatrixOrPan::Matrix {
+                ll: 0.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: 16,
+            }
+        };
+    }
+    model
+}
+
+/// `model` with `track`'s `value` of parameter `parameter_id` of console slot `slot` replaced.
+fn with_console_param(
+    mut model: SessionModel,
+    track: &str,
+    slot: &str,
+    parameter_id: u32,
+    value: f32,
+) -> SessionModel {
+    let entry = track_mut(&mut model, track)
+        .console
+        .iter_mut()
+        .find(|entry| entry.slot.as_str() == slot)
+        .expect("console slot");
+    entry
+        .params
+        .iter_mut()
+        .find(|param| param.parameter_id == parameter_id)
+        .expect("parameter")
+        .value = value;
+    model
+}
+
+/// One plane (`0` left, `1` right) of every block of a run.
+fn plane_of(run: &PlainRun, plane: usize) -> Vec<&[u32]> {
+    run.blocks
+        .iter()
+        .map(|block| &block[plane * QUANTUM..(plane + 1) * QUANTUM])
+        .collect()
+}
+
+/// Gate 3, first case. B changes the compressor threshold of strip `eq3` -- a prepared value, since
+/// an effect bank stage has no live lane -- and adds a muted track. That slot does not carry, every
+/// other lane does, and `restarted_strips()` is exactly `eq3`:
+///
+/// * the right plane, which the other strips alone feed, equals a fresh B on every block: their
+///   lanes carried;
+/// * the carry program holds exactly one move fewer than the same swap without the threshold
+///   change: `eq3`'s other slots carried (with a single slot that is none left to count);
+/// * the left plane, which `eq3` alone feeds, differs from the swap that carries the old
+///   threshold: the slot restarted at the new one.
+fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots: &[&str]) {
+    let a_model = isolated_session(slots, "eq3");
+    let changed = with_console_param(with_muted_track(a_model.clone()), "eq3", "comp", 1, -30.0);
+    let a = Session::compile(a_model.clone());
+    let b = Session::compile(changed);
+    let unchanged = Session::compile(with_muted_track(a_model));
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    let carried_all = plain_run(&a, Some((&unchanged, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
+    assert_eq!(carried_all.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(
+        carried_all.carry_bytes - run.carry_bytes,
+        core::mem::size_of::<graph::GraphEffectMove>() as u64,
+        "{backend:?}: one move fewer"
+    );
+    assert_eq!(
+        plane_of(&run, 1),
+        plane_of(&reference, 1),
+        "{backend:?}: the other strips are unmoved"
+    );
+    assert_ne!(
+        plane_of(&run, 0)[SWAP_BLOCK..],
+        plane_of(&carried_all, 0)[SWAP_BLOCK..],
+        "{backend:?}: eq3 restarted at the new threshold"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+/// The first case with a lone compressor slot, where the restarted slot has an exact oracle: the
+/// left plane after the swap is what a fresh B renders from rest on the same PCM, the compressor at
+/// the new threshold with no history. A rule that carries the slot despite its changed threshold
+/// restores the old threshold's designed words and envelope, and differs.
+fn a_restarted_slot_starts_at_rest_at_its_new_value(backend: Backend) {
+    let a_model = isolated_session(&["comp"], "eq3");
+    let changed = with_console_param(with_muted_track(a_model.clone()), "eq3", "comp", 1, -30.0);
+    let a = Session::compile(a_model);
+    let b = Session::compile(changed);
+    let feed = bursty_feed(SOURCE, 5);
+    let from_swap = spliced(SOURCE, &feed, |block| {
+        (block + SWAP_BLOCK < BLOCKS).then_some(block + SWAP_BLOCK)
+    });
+    let at_rest = plain_run(&b, None, &from_swap, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
+    assert_eq!(
+        plane_of(&run, 0)[SWAP_BLOCK..],
+        plane_of(&at_rest, 0)[..BLOCKS - SWAP_BLOCK],
+        "{backend:?}: eq3's compressor starts at rest"
+    );
+    // Not vacuous: the new threshold is heard.
+    let carried_old = plain_run(
+        &a,
+        Some((
+            &Session::compile(with_muted_track(isolated_session(&["comp"], "eq3"))),
+            &a.model,
+        )),
+        &feed,
+        backend,
+        false,
+    );
+    assert_ne!(
+        plane_of(&run, 0)[SWAP_BLOCK..],
+        plane_of(&carried_old, 0)[SWAP_BLOCK..],
+        "{backend:?}"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_eight_lanes() {
+    a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd8, &ALL_SLOTS);
+    a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_four_lanes() {
+    a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd4, &ALL_SLOTS);
+    a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd4);
+}
+
+/// A compressor insert that changes no sample: threshold at 0 dB and ratio 1.
+fn transparent_insert() -> Effect {
+    Effect {
+        id: id("tc"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        params: vec![
+            param(1, ParameterUnit::Db, 0.0),
+            param(2, ParameterUnit::Ratio, 1.0),
+            param(3, ParameterUnit::Db, 0.0),
+            param(4, ParameterUnit::Milliseconds, 2.0),
+            param(5, ParameterUnit::Milliseconds, 40.0),
+            param(6, ParameterUnit::Db, 0.0),
+            param(7, ParameterUnit::Linear, 1.0),
+        ],
+        sidechain: SidechainDeclaration::None,
+    }
+}
+
+/// Gate 3, second case. B adds a compressor insert to strip `eq3` and a muted track. The insert
+/// changes `eq3`'s chain, so `eq3` -- and only `eq3` -- is in the restart set, but every console
+/// slot of every strip, `eq3`'s included, carries: the insert changes no sample, so the swapped run
+/// equals a fresh B on every block only if `eq3`'s console state continued.
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry(backend: Backend) {
+    let mut with_insert = with_muted_track(console_session(false, &ALL_SLOTS));
+    track_mut(&mut with_insert, "eq3")
+        .inserts
+        .effects
+        .push(transparent_insert());
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let b = Session::compile(with_insert);
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let bare = plain_run(
+        &Session::compile(with_muted_track(console_session(false, &ALL_SLOTS))),
+        None,
+        &feed,
+        backend,
+        false,
+    );
+    assert_eq!(
+        first_plain_difference(&reference, &bare),
+        None,
+        "{backend:?}: the insert is transparent, so the oracle is exact"
+    );
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}: every console slot carried"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_eight_lanes() {
+    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_four_lanes() {
+    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd4);
+}
+
+/// Root amendment of 2026-10-12 to #1277 D6 and #1279: no insert lane carries yet (#1281, #1282),
+/// so a strip whose insert survives the swap restarts that insert at rest and is in
+/// `restarted_strips()`, while a strip without an insert is not. A structural swap adds a muted
+/// track to a session whose `eq3` and `eq5` each hold an unchanged insert: the list is exactly
+/// those two, and every console slot of every strip still carries (the insert is transparent, so
+/// the swapped run equals a fresh B on every block only if the console state continued and the
+/// restarted insert changes no sample).
+fn a_surviving_insert_restarts_its_strip(backend: Backend) {
+    let mut with_inserts = console_session(false, &ALL_SLOTS);
+    for strip in ["eq3", "eq5"] {
+        track_mut(&mut with_inserts, strip)
+            .inserts
+            .effects
+            .push(transparent_insert());
+    }
+    let b_model = with_muted_track(with_inserts.clone());
+    let a = Session::compile(with_inserts);
+    let b = Session::compile(b_model);
+    let feed = bursty_feed(SOURCE, 5);
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from("eq3"), Box::<str>::from("eq5")],
+        "{backend:?}: the strips with a surviving insert, and no other"
+    );
+    assert_eq!(
+        first_plain_difference(&run, &reference),
+        None,
+        "{backend:?}: every console slot carried, and the restarted insert is transparent"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_surviving_insert_restarts_its_strip_at_eight_lanes() {
+    a_surviving_insert_restarts_its_strip(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_surviving_insert_restarts_its_strip_at_four_lanes() {
+    a_surviving_insert_restarts_its_strip(Backend::Simd4);
+}
+
+/// `model` without console slot `slot`: its declaration and every strip's entry.
+fn without_console_slot(mut model: SessionModel, slot: &str) -> SessionModel {
+    model
+        .console
+        .pre_insert
+        .retain(|declared| declared.slot.as_str() != slot);
+    model
+        .console
+        .post_insert
+        .retain(|declared| declared.slot.as_str() != slot);
+    for track in &mut model.tracks {
+        track.console.retain(|entry| entry.slot.as_str() != slot);
+    }
+    model
+}
+
+/// A session console slot removed changes every strip's chain: every strip restarts (D15-9), and
+/// the five slots that remain still carry, on every strip.
+fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
+    let a = Session::compile(console_session(false, &ALL_SLOTS));
+    let removed = Session::compile(without_console_slot(
+        console_session(false, &ALL_SLOTS),
+        "gate",
+    ));
+    let feed = bursty_feed(SOURCE, 5);
+    let run = plain_run(&a, Some((&removed, &a.model)), &feed, backend, false);
+    let kept = Session::compile(console_session(false, &ALL_SLOTS));
+    let unchanged = plain_run(&a, Some((&kept, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
+    assert_eq!(run.restarted, every_strip, "{backend:?}");
+    assert_eq!(unchanged.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(
+        unchanged.carry_bytes - run.carry_bytes,
+        9 * core::mem::size_of::<graph::GraphEffectMove>() as u64,
+        "{backend:?}: the removed slot's nine lanes do not move, the other forty-five do"
+    );
+    assert_eq!(run.refusals, 0, "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_removed_console_slot_restarts_every_strip_at_eight_lanes() {
+    a_removed_console_slot_restarts_every_strip(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_removed_console_slot_restarts_every_strip_at_four_lanes() {
+    a_removed_console_slot_restarts_every_strip(Backend::Simd4);
+}
+
+/// A console slot with live controls is an effect stage with a control lane, which this slice does
+/// not carry (#1280): the plan records no effect lane, the swap prepares and carries what it does
+/// carry, and every strip that has the slot is in the restart set.
+fn a_console_slot_with_live_controls_restarts_its_strip(backend: Backend) {
+    let slots = ["eq", "comp"];
+    let a = Session::compile(console_session(false, &slots));
+    let b = Session::compile(with_muted_track(console_session(false, &slots)));
+    let mut plan = LivePlan::fresh(&a, backend);
+    assert_eq!(
+        plan.prepared.inventory.effect_lane_count(),
+        0,
+        "{backend:?}"
+    );
+    let feed = Feed::new(SOURCE, 3);
+    plan.submit(&feed, QUANTUM, 0);
+    for block in 0..SWAP_BLOCK {
+        plan.submit(&feed, QUANTUM, block + 1);
+        plan.render(QUANTUM);
+    }
+    let mut successor = LivePlan::successor(&b, &plan.prepared.inventory, &a.model, backend);
+    let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
+    assert_eq!(
+        successor.prepared.restarted_strips(),
+        &every_strip[..],
+        "{backend:?}"
+    );
+    assert_eq!(
+        successor
+            .prepared
+            .sources
+            .adopt_persisting(&mut plan.prepared.sources),
+        1
+    );
+    successor.submit(&feed, QUANTUM, SWAP_BLOCK + 1);
+    assert_eq!(
+        successor
+            .prepared
+            .plan
+            .adopt_predecessor_plan(&mut plan.prepared.plan),
+        CarryOutcome::Carried,
+        "{backend:?}"
+    );
+    successor.render(QUANTUM);
+    assert_eq!(
+        graph::carry_refusal_count(&mut successor.prepared.plan),
+        Some(0),
+        "{backend:?}"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_console_slot_with_live_controls_restarts_its_strip_at_eight_lanes() {
+    a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd8);
+}
+
+#[test]
+#[cfg_attr(
+    not(any(target_feature = "neon", target_feature = "simd128")),
+    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
+              is the NEON and simd128 width (#1017)"
+)]
+fn a_console_slot_with_live_controls_restarts_its_strip_at_four_lanes() {
+    a_console_slot_with_live_controls_restarts_its_strip(Backend::Simd4);
 }

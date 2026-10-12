@@ -87,7 +87,9 @@ then structural edit" (D15-7, carry then retarget).
 - **D6. Restart set.** `PreparedHost` gains `restarted_strips()`: the strip IDs present in both
   plans for which at least one owner failed D4 for a prepared difference, sorted. Added strips are
   not in it. *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it,
-  and the later carry slices add their families' restarts to it.
+  and the later carry slices add their families' restarts to it. Amended by the Amendment (root,
+  2026-10-12): inserts that cannot carry restart, below: a strip whose surviving insert lane cannot
+  carry is also in it.
 - **D7. Lane state.** Each of the fader/mute stage, the matrix stage and the fused stage gets a
   fixed-size, plain-data lane state: current gains, ramp targets and positions (`remaining`), and
   the matrix ramp state. Each bank gets `export_lane` and `import_lane`. Import re-syncs derived
@@ -113,14 +115,29 @@ then structural edit" (D15-7, carry then retarget).
 - `crates/host-core/src/live_delta.rs`: only the extraction of D5's per-strip function. This is
   stream B's file, and root orders the merge with *Hold live values in latest-target cells on both
   hosts* (#1312).
+- Added by Amendment 3:
+  - `crates/engine/src/realtime/plan.rs`: D11's method and the handle docs only (B's file).
+  - `crates/control-plane/src/control.rs`: the structural arm's `SuccessorBase` literal
+    (`revision`), the one read of `r` with its range check before `prepare_runtime`, and the
+    existing stamp's use of that value. Nothing else. `compile.rs` is not touched.
+  - `crates/capi/tests/resource_lifecycle.rs`: the one `SuccessorBase` literal, `revision: 1`.
+  - `crates/capi/src/runtime/live_tests.rs`: gate 8 only.
+  - Host-core test support: it must publish `r` on the successor's handle before
+    `reserve_replacement`. Otherwise the stamped retarget is never covered and is never heard.
+- Named exception (root ruling, 2026-10-12): `crates/engine/src/realtime/mod.rs`, only the two
+  `stamp_held_gate` tests of commit `7cfcb20dc`
+  (`a_held_gate_stamps_on_the_pin_the_handle_inherits` and
+  `the_handle_inherits_the_open_stamp_of_a_held_gate`). They test D11's method, whose home is
+  `plan.rs`.
 
 ## Non-goals
 
 - No solo or VCA host state, and no VCA retarget. VCA changes stay prepared until #1247.
 - No effects and no delay lines.
 - No transition for a restarted strip (#1324).
-- No change to the C ABI or the browser call sites. The successor entry points write the records
-  into the cells themselves.
+- No change to the C ABI surface or header, or to the browser call sites. The successor entry
+  points write the records into the cells themselves. The control plane changes only where it reads
+  `r` and builds `SuccessorBase` (D10).
 
 ## Objective gates
 
@@ -148,12 +165,20 @@ then structural edit" (D15-7, carry then retarget).
    - `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core --features builtins-compiler/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `cargo test --locked -p console-workload`
+   - `cargo test --locked -p capi` (added by Amendment 3)
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`, `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
-8. **A refused candidate is never reused (Amendment 2).** A rebuild with a carry retarget is
-   refused at `BeforeProtocolCommit`, then the same rebuild is accepted; no debug assertion fires
-   and the retarget applies exactly once.
+8. **A refused candidate is never reused (Amendment 2; strengthened by Amendment 3).** In
+   `crates/capi/src/runtime/live_tests.rs`, beside
+   `a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone`, with the `Rig` and twin
+   pattern, a debug build and `test_set_structural_faults(.., [Some(BeforeProtocolCommit), None])`:
+   a rebuild that adds a track and changes strip X's fader to g1 (a carry retarget) is refused at
+   `BeforeProtocolCommit`. Then the same structural change is committed *without* X's fader change.
+   The twin takes only that change, and every block is bit-identical. No debug assertion fires. A
+   refused attempt uses no revision, so the next one stamps the same `r`; if the accepted rebuild
+   were the same edit, a kept candidate, cell or stamp would be inaudible and the gate could not go
+   red.
 
 ## Test value
 
@@ -195,3 +220,240 @@ changes.
 - *Hold live values in latest-target cells on both hosts* (#1312): the cells D5 writes and the
   `apply_pending` D8 calls.
 - #1253 and #1276 are on `main`.
+
+## Amendment 3 (root, 2026-10-11): where preparation takes the retarget stamp
+
+Trigger: the stream A coordinator reported a spec gap. In the authorized paths, preparation has
+neither `r` nor the handle: `SuccessorBase` has no revision, and the control plane takes the handle
+after preparation (`compile.rs:673-676`). Gate 8's fault is in the control plane, and its fault
+tests are in capi. Root ruled option (b): an engine method that stamps on the plan's own pin.
+
+- **D5, Amendment 1's stamp sentence becomes:** Each retarget write is stamped with the structural
+  revision `r` on the successor plan's own gate pin, through
+  `PreparedRenderPlan::stamp_held_gate`, while the plan still holds its handle. The open stamp
+  moves with the pin into the handle that the control plane takes after preparation returns (#1502
+  D1, unchanged). The control plane stamps `r` again on that handle as its last fallible step
+  (`GatePin` allows a stamp at the open revision). It publishes `r` before `reservation.commit()`.
+  A preparation that writes no retarget does not stamp.
+- **D10. The revision.** `SuccessorBase` gains `revision: u64`. This is `r`, the revision the
+  successor commits as. Precondition: `1 <= revision <= GATE_REVISION_MAX`.
+  - The control plane reads `r` once from the prepared token, before `prepare_runtime`, and uses
+    that one value for the base and for its stamp.
+  - If `r` is out of range, the control plane returns `CommandError::Internal` before preparation,
+    with nothing built. #1503 D1 makes this unreachable.
+  - Host-core checks the same precondition at entry, before it allocates. It refuses with the
+    whole-session line `host.successor.revision` (`PrepareRejection::Session`).
+  - A `None` or `Err` from `stamp_held_gate` returns the same line. This cannot happen after the
+    entry check, because a pin that was not handed out has published nothing.
+  - `revision` has no neutral value. So #1323 D3's constructor is
+    `SuccessorBase::new(inventory, committed, revision)`, and #1323's sentence "the first slice that
+    adds a field" no longer holds. Root amends #1323. #1310 D2's base and #1344's literals carry `r`
+    too.
+- **D11. Engine method.**
+  `PreparedRenderPlan::stamp_held_gate(&mut self, revision: u64) -> Option<Result<LiveStamp<'_>, StampRefused>>`.
+  It returns `None` after `take_revision_gate`; otherwise it is `GatePin::stamp` on the plan's own
+  pin. The `PlanRevisionGate` doc changes from "only the holder stamps" to "the plan's owner before
+  hand-out, then the holder". No other engine change.
+- **Gate 8** goes in `crates/capi/src/runtime/live_tests.rs`, beside
+  `a_fault_before_the_live_write_leaves_every_cell_and_the_output_alone`. It uses the `Rig` and twin
+  pattern, a debug build and `test_set_structural_faults(.., [Some(BeforeProtocolCommit), None])`.
+  - Change to the gate: after the refused rebuild (add a track, and strip X's fader to g1), commit
+    the same structural change *without* X's fader change. The twin takes only that change, and
+    every block must be bit-identical.
+  - Reason: a refused attempt uses no revision, so the next one stamps the same `r`. If the
+    accepted rebuild is the same edit, a kept candidate, cell or stamp is inaudible and the gate
+    cannot go red. The existing capi test uses this same reasoning.
+  - Gate 8 in "Objective gates" is updated to this shape, and `cargo test --locked -p capi` is added
+    to gate 7.
+- The "Authorized paths" section gains the Amendment 3 bullets, and the last "Non-goals" bullet is
+  replaced, as in the sections above.
+
+## Attempt record
+
+### Attempt 1
+
+Stopped before any edit, on a spec gap: preparation had neither `r` nor the gate handle in the
+authorized paths (see Amendment 3's trigger). No code was written. Root ruled option (b) and issued
+Amendment 3.
+
+### Attempt 2
+
+Implemented D1-D11, Amendments 1-3, gates 1-8. Commits on `codex/d15-stream-a2`: spec amendment
+`3e0449ae5`, `stamp_held_gate` `7cfcb20dc`, carry and join `8e557130f`, gates 1-6 tests
+`b7e86e41b`, gate 8 `4c5b1307d`, chain-walk fix `78eed509b`, plus the closing record commit.
+
+Design notes:
+
+- Lane state: `FaderLaneState` and `MatrixLaneState` in `crates/builtins` (`export_lane`,
+  `import_lane` on `BuiltinFaderBank` and `BuiltinMatrixBank`). The fused stage is the two inner
+  banks, so it carries both halves from a fused predecessor only (D9).
+- Graph: `BuiltinStripOwner`, `BuiltinStripStage`, `GraphStripMove`, `builtin_strip_lanes`,
+  `install_builtin_strip_carry`; the swap block checks every strip move before anything moves,
+  applies each predecessor bank's pending cells once with `LiveSnapshot::ALL`
+  (`drain_for_carry`), then imports.
+- Host-core: the per-owner record functions and `LiveRamps` moved from `live_delta.rs` (gated by
+  `control-provider`) to `prepare.rs`, which needs them on every build; `live_delta.rs`
+  re-exports `LiveRamps` and calls them. `PlanStateInventory` gained `strip_stages` rows and the
+  restart set (`restarted_strips()` reads it, because `PreparedHost` has exhaustive destructures
+  in `crates/capi/tests`). The restart set lists every strip present in both plans with a stage that
+  does not carry: a prepared difference, a different bank form or a different control kind.
+- The strip moves' table is checked against the graph cap after bind, at its exact length, because
+  which strips carry is known only when both plans' lanes are.
+- Test seams `test_only_prepare_host_runtime_between_render_calls_on` and
+  `..._successor_on` (reachable as `host_core::prepare::..`; no `lib.rs` edit).
+- Existing tests re-pinned individually, each for one reason: six exact `carry_program_retained_bytes`
+  expectations in `successor_swap.rs` (a carried strip adds a fader and a matrix move of
+  `size_of::<GraphStripMove>()` bytes each).
+- Not done: the realtime-policy floors (`check-realtime-policy.sh`, 96 regions) were not raised;
+  the tree now has 111 marked regions in 27 files. This spec does not name the standing floor
+  exception.
+
+Gates run (all green): `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core
+--features builtins-compiler/test-support,graph/test-support,host-core/test-support`;
+`cargo test --locked -p capi`; `cargo test --locked -p console-workload`; release `audit`
+builds, `trace-builtins-audit.sh`, `trace-builtins-graph-audit.sh`, `audit capi` (0 allocations,
+0 syscalls); `check-realtime-policy.sh`, `check-workspace-policy.sh`, `check-cross-targets.sh`,
+`check-capi-abi.sh`; `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; the worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`).
+
+Mutation evidence (defect applied: red; reverted: green):
+
+| Defect | Turned red |
+| --- | --- |
+| `stamp_held_gate` stamps `revision + 1` | engine `a_held_gate_stamps_on_the_pin_the_handle_inherits`, `the_handle_inherits_the_open_stamp_of_a_held_gate` |
+| Fader import drops `remaining` | `a_ramp_in_flight_finishes_after_the_swap_*`, builtins `a_fader_lane_imported_mid_fade_*` |
+| Fader import drops `muted` / `fader_gain` | builtins `a_fader_lane_imported_mid_fade_*` only; host-level stays green because a successor prepared from the base already holds the same flag |
+| Matrix import drops `remaining`, `ramp.target`, or skips `sync_settled` | `a_ramp_in_flight_*` (remaining), builtins `a_matrix_lane_imported_mid_ramp_*` (all three) |
+| `drain_for_carry` applies nothing | `a_ramp_in_flight_*` |
+| Export before `apply_pending` | `a_ramp_in_flight_*` (the first draft with `eq3` stayed green; the moved strip is now the first lane of the first bank) |
+| Successor cells applied before the import | `a_live_difference_retargets_the_carried_stage_*` |
+| Live difference treated as prepared; retargets not written | `a_live_difference_retargets_the_carried_stage_*` |
+| VCA treated as live | `a_prepared_change_restarts_the_stage_*` (the first draft ran on a plan without cells and stayed green) |
+| Restart set lists added strips | `strip_state_survives_a_swap_*` |
+| Fused stage does not carry | `a_ramp_in_flight_*` (fused form) |
+| Cross-form pair paired; control kind ignored | `a_cross_form_pair_does_not_carry`; `a_changed_control_kind_carries_no_strip_stage` |
+| Entry revision check removed | `a_successor_revision_its_gate_cannot_stamp_is_refused` |
+| Allocation in `carry_strip_lanes` | `the_strip_carry_allocates_and_frees_nothing` |
+| Stamp taken with no retarget | `a_preparation_without_a_retarget_stamps_nothing` |
+| Predecessor lane taken from the successor's location | `strip_state_survives_a_swap_*` |
+| Chain walk stops at the first non-builtin slot | `a_strip_behind_an_effect_still_carries_at_eight_lanes`, and capi `double_live_oracle_drives_exact_and_one_below_c_caps` |
+| Last retargets kept and re-written into the next successor of the same revision | capi `a_refused_rebuild_with_a_carry_retarget_is_never_reused` |
+
+Test value: `a_strip_behind_an_effect_still_carries_at_eight_lanes` catches a chain walk that
+stops at an effect slot, which no effect-free session shows (found first by capi's double-live
+oracle). The `a_retarget_leaves_its_revision_open_*` draft was deleted: the engine test already
+catches the only defect that could turn it red.
+
+### Attempt 3
+
+Fixes for the attempt 2 verdict (FAIL: BLOCKER 1, MAJOR 2, MINOR 3), on top of `9994001ad`.
+
+- **BLOCKER 1, `cargo doc`.** `live_delta.rs`'s classifier doc linked `checked_fader_gain` and
+  `lower_matrix_or_pan` by bare name; attempt 2 moved their imports away. The links now use their
+  crate paths (`builtins::`, `builtins_compiler::`).
+- **MAJOR 2, a followed mute is prepared (D3).** The classifier refuses a mute change on a track that
+  a `follows_mute` route sends from (`LiveRebuild::FollowedMute`), so by D3 the difference is
+  prepared. `prepare.rs` now owns one predicate, `followed_mute_changes`, beside `fader_records`;
+  the classifier calls it (its private `follows_mute_from` is deleted, so nothing is duplicated)
+  and so does `join_strips`. A strip it refuses has its fader/mute stage restart (no mute retarget
+  is written and the strip is in `restarted_strips()`); in the split form its matrix stage still
+  carries and is retargeted, and in the fused form the one stage restarts whole.
+  - Audit of the other `LiveRebuild` refusals the classifier can return for this family:
+    `Vca` is `vca_in_play`; `Structure` (track set) is a strip with no counterpart; a submix strip
+    has no live family; `Domain` (a fader dB refused by `checked_fader_gain`, a pan/matrix refused
+    by `lower_matrix_or_pan`) was already `Prepared` for the family that errs. Note: the
+    classifier refuses a strip as a whole, so an error in one family leaves the other family with
+    no record too; per the ruling below this does not change the other family. A compiled session
+    cannot hold an out-of-domain value, so the `Domain` branch has no test; the shared
+    `followed_mute_changes` branch has the new gate. The remaining refusals (`PreparedBypass`,
+    `Prepared`, `AutomationTarget`) concern effect instances and automation, not this family.
+  - Coordinator ruling (2026-10-11): D3 decides per value and D4 per stage, so a refusal of one
+    family's value makes only that family prepared. A followed mute (or an out-of-domain fader)
+    makes only the fader/mute stage prepared; the matrix stage of the same strip still carries and
+    is retargeted by `matrix_record`, and the reverse holds for a matrix-family error. (An earlier
+    draft of this attempt made both families prepared; the classifier's whole-delta refusal does
+    not make another stage's value prepared.) In the fused form the one stage carries both halves
+    or neither (D9), so a followed mute restarts the whole fused stage.
+  - D7 note (verdict NIT 5): a change of the matrix's smoothing window alone is no record
+    (`matrix_record`), so a carried matrix stage keeps the predecessor's window; every retarget
+    passes its own, so this is inert. The `join_strips` doc says so.
+- **MINOR 3, realtime floors.** Under STREAMS' standing exception (the awk gate's two floor lines
+  and the self-test's pad), `scripts/check-realtime-policy.sh` now requires 111 marked regions (27
+  files unchanged), re-measured on this tree; `scripts/test-realtime-policy.sh` pads one file to
+  29 regions so the fixture sits exactly on the floors, and its floor message follows. The edit is
+  named here; no other policy edit.
+- **MINOR 4.** The two tests in `crates/engine/src/realtime/mod.rs` stay where they are; root is
+  asked for a named exception.
+
+Gate (new): `a_followed_mute_change_restarts_the_stage_at_{four,eight}_lanes` (both forms). A
+nine-track session with `eq0` sent through a submix by a `follows_mute` route; B adds a muted track
+and mutes `eq0`. `restarted_strips()` is exactly `[eq0]` and the swap block onward equals a fresh
+B; the control (the same change with `follows_mute: false`) is live, carries and restarts nothing.
+Test value: catches a join that treats a followed mute as live, whose restart set would then omit
+the strip that #1324 must duck-swap, and whose carried stage would ramp the mute (once #1054 gives
+mutes a ramp) while the following route steps.
+
+Mutation evidence: the join's `followed_mute_changes` guard disabled (`|| true`): both new tests red
+(`restarted` is `[]`, expected `["eq0"]`); reverted: green.
+
+Second gate: `a_followed_mute_change_leaves_the_matrix_stage_carrying_at_{four,eight}_lanes` (split
+form). X's left mute follows and changes while X's pan also changes (only the left channel mutes, so
+the right channel's pan ramp stays audible). `restarted_strips()` is exactly `[X]`; every block
+equals a reference in which the pan record is written to A just before the swap (as gate 4), so
+the fader/mute stage restarts identically in both runs and only the matrix carry differs; and the
+ramp is audible (not equal to a swap that leaves the pan unchanged). Test value: catches a join
+that lets a followed mute make the matrix family prepared, which restarts the pan stage at its new
+value and drops the pan ramp in flight. Mutation: the matrix family made prepared whenever the
+fader family is (`matrix_live = fader_live && ..`): both tests red, the first gate stays green;
+reverted: green.
+
+Gates run (all green): every run step of the `lint` job of `qualification.yml` in order (31 steps:
+fmt, clippy `--all-features -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked
+--workspace --no-deps`, workspace/realtime/lane/rack/effect policies and their mutation tests, and
+the rest); gate 7: `cargo test --locked -p builtins -p builtins-compiler -p graph -p host-core
+--features builtins-compiler/test-support,graph/test-support,host-core/test-support`,
+`cargo test --locked -p capi`, `cargo test --locked -p console-workload`, release `audit` with
+`trace-builtins-audit.sh` and `trace-builtins-graph-audit.sh` (PASS), `check-realtime-policy.sh`
+(111 regions in 27 files), `check-workspace-policy.sh`, `check-cross-targets.sh` (PASS), fmt and
+clippy; also `check-capi-abi.sh`, `target/release/audit capi` (0 allocations, 0 syscalls),
+`cargo test -p engine --lib`, `cargo test -p control-plane --features test-support`, and the
+worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
+`test-web-audioworklet.sh` with a private TMPDIR, empty afterwards). AArch64 runs in CI only.
+
+### Named exception (root ruling, 2026-10-12)
+
+Root ratified one write outside the authorized paths: the two `stamp_held_gate` tests in
+`crates/engine/src/realtime/mod.rs` (commit `7cfcb20dc`):
+`a_held_gate_stamps_on_the_pin_the_handle_inherits` and
+`the_handle_inherits_the_open_stamp_of_a_held_gate`. They are added to the Authorized paths above as
+a named exception. The other named exception on this branch, the 7 lines of
+`crates/capi/tests/resource_lifecycle.rs` in commit `7852f0a25`, belongs to #1279.
+
+### Follow-ups (verdict of attempt 3)
+
+- **MINOR 1, the fused clamp.** `a_followed_mute_change_restarts_the_fused_stage_whole_at_{four,eight}_lanes`:
+  fused form, X's left mute follows and changes and X's pan changes; `restarted_strips() == [X]` and
+  every block from the swap on equals a fresh B. Test value: catches a carry that moves only the
+  matrix half of a fused stage whose fader half restarts. Mutation: `carries = [both, both]` in
+  `resolve_strip_carry` replaced by `let _ = both;` turns both red (the other four followed-mute
+  tests stay green, which is why the case was missing); reverted, all six green.
+- **MINOR 2.** The Attempt 3 record above now states the per-family behaviour.
+- **NIT 3.** The two doc lines over 100 characters (`live_delta.rs`, `prepare.rs`) are rewrapped.
+
+## Amendment (root, 2026-10-12): inserts that cannot carry restart
+
+Root's ruling of 2026-10-12 that an insert's strip is not in `restarted_strips()` (attempt 2,
+MINOR 1; #1277 D6 as first read; #1324 Context) is reversed. Until #1281/#1282 give inserts a
+carry, a strip whose surviving insert lane cannot carry across the swap is in `restarted_strips()`.
+Its insert restarts at rest, and #1324 D1 ducks it when it lands. #1281/#1282 remove a strip from
+that set when their carry covers it. It follows #1324's reviewed Hazards ("duck-swapped ... no
+click") and D15-9; it is not new policy.
+
+D6's set is therefore the union of the owners that failed D4, #1279's console slots and chain
+changes, and the strips with a surviving insert whose lane cannot carry. Implemented in
+`crates/host-core/src/prepare.rs` (`resolve_effect_carry`) with the test
+`a_surviving_insert_restarts_its_strip_at_{eight,four}_lanes`; the record is #1279's "Root
+follow-up, 2026-10-12".
