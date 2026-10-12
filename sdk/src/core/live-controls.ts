@@ -11,7 +11,7 @@ import type { CommandReport, SessionMap } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
-import { checkedRampLength } from "./writer.ts";
+import { checkedRampLength } from "../internal/ramp.ts";
 import type { LaneEdit } from "./writer.ts";
 
 /**
@@ -123,7 +123,13 @@ export type LiveControlSubmit = (
   edits: readonly LaneEdit[],
 ) => CommandReport | Promise<CommandReport>;
 
-/** Optional owner hook used to serialize observation edits with managed subscriptions. */
+/**
+ * Optional owner hook used to serialize observation edits with managed subscriptions.
+ *
+ * The hook sees the edits as the builders made them. A builder edit given no explicit
+ * `smoothingSamples` shows `smoothingSamples` as `undefined`: the encoder resolves the absent
+ * length (the session's ramp for a ramped kind, `0` for the others), not the builder.
+ */
 export type LiveControlBeforeSubmit = (
   edits: readonly LaneEdit[],
   managed?: boolean,

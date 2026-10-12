@@ -5,7 +5,7 @@ import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
-import { laneEditSmoothingWord } from "../core/writer.ts";
+import { laneEditSmoothingWord } from "../internal/ramp.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
   MisoAudioWorkletHost,

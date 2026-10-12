@@ -1096,12 +1096,16 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
     }
   });
 
-  /** A literal `LaneEdit` (a plain object, as an app writes one), with no `smoothingSamples`. */
+  /**
+   * A literal `LaneEdit` (a plain object, as an app writes one), with no `smoothingSamples`. The
+   * effect kinds address an insert (rack `1`); the strip kinds carry no rack (`255`).
+   */
   function literal(kind, extra = {}) {
+    const effectKind = kind === "effectBypass" || kind.startsWith("observe");
     return {
       kind,
       trackIndex: 0,
-      rack: 255,
+      rack: effectKind ? 1 : 255,
       channel: 2,
       values: [0, 0, 0, 0],
       ...extra,
@@ -1112,6 +1116,16 @@ describe("issue 1364 -- an absent ramp length is the session default", () => {
     "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
   ];
   const UNRAMPED_KINDS = ["effectBypass", "inputFilters", "observeSubscribe", "observeUnsubscribe"];
+
+  test("the package root exports the marker and none of the encoder's ramp helpers", async () => {
+    // Red if `SESSION_DEFAULT_RAMP` stops being public, or if `checkedRampLength` or
+    // `laneEditSmoothingWord` (internal, in `src/internal/ramp.ts`) leak back through
+    // `export *` of the writer module: neither name is public API.
+    const root = await import("../src/index.ts");
+    assert.equal(root.SESSION_DEFAULT_RAMP, MARKER);
+    assert.equal("checkedRampLength" in root, false);
+    assert.equal("laneEditSmoothingWord" in root, false);
+  });
 
   test("a literal LaneEdit without a length encodes the marker through the writer's encoder, by kind", () => {
     // Red if `encodeLaneEdits` writes `smoothingSamples ?? 0` again (a step on a literal edit, the

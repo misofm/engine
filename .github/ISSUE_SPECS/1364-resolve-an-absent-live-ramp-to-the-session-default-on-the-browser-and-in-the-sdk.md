@@ -72,9 +72,14 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
   - The kinds with no ramp keep their rules. A sentinel on input filters or bypass is `MALFORMED`,
     as any non-zero word is today.
 - **D3. SDK.**
-  - `smoothing()` returns `SESSION_DEFAULT_RAMP` when `smoothingSamples` is undefined. An explicit
-    `u32::MAX` is a `MisoUsageError`, because the sentinel is not a length.
-  - `trackEdit`'s default stays 0 for the kinds that carry no ramp.
+  - Root ruling (2026-10-12), replacing the first two bullets as first written ("`smoothing()` returns
+    `SESSION_DEFAULT_RAMP`" and "`trackEdit`'s default stays 0"): `smoothing()` returns the checked
+    explicit length or undefined. An absent length becomes `SESSION_DEFAULT_RAMP` (12 ramped kinds) or
+    0 (others) only in the encoder helper, the one source of truth. An explicit `u32::MAX` throws.
+    In the `beforeSubmit` hook, a builder edit with no explicit length shows `smoothingSamples` as
+    undefined, and the encoder resolves it. (The sentence is in the TSDoc of `LiveControlBeforeSubmit`
+    in `sdk/src/core/live-controls.ts`; the hook is not declared in the shipped `.d.ts` pair, so
+    that pair is unchanged.)
   - `runtimeSmoothing` (effect parameters) is unchanged.
   - (Amendment 1) A literal `LaneEdit` with no `smoothingSamples` resolves by its kind through one
     shared SDK helper: `SESSION_DEFAULT_RAMP` for the twelve ramped kinds, 0 for bypass, input
@@ -111,6 +116,9 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 - (`sdk/src/internal/session-json.ts` and `docs/session-v1.schema.json` are #1054's.)
 - `sdk/src/browser/shipped-host.d.ts` (docs only)
 - (Amendment 1) `sdk/src/core/writer.ts`, `sdk/src/browser/live-controls.ts`
+- Root ruling (2026-10-12): `sdk/src/internal/ramp.ts` (new; the encoder helpers
+  `checkedRampLength` and `laneEditSmoothingWord`, kept out of the package's public exports) and
+  `sdk/README.md`
 
 ## Non-goals
 
@@ -206,7 +214,8 @@ Attempt 1 failed on one MAJOR (verdict `1364-attempt1.md`, M1): a literal `LaneE
 - **SDK.** The two files join the authorized paths, and a D3 bullet (above) makes the absent default
   depend on the kind through one shared helper. `LaneEdit.smoothingSamples` is documented. One eval
   each for the writer path and the browser path, and each goes red when the absent value reverts to 0.
-- **The cached `LiveRamps` in host-web (`SessionRamps`, computed once in `compile_ready`).** The
+- **Amendment 1 note (attempt 2, under root's 2026-10-12 ruling): the cached `LiveRamps` in host-web
+  (`SessionRamps`, computed once in `compile_ready`).** Root confirms the content. The
   question was whether a browser host can commit a `control_smoothing` change, or a change to a
   strip's model `smoothing_samples`, without a rebuild, through a path that exists on this branch.
   It cannot, so no refresh code is added. The reason: `compile_ready` has one caller, `boot`
@@ -221,8 +230,8 @@ Attempt 1 failed on one MAJOR (verdict `1364-attempt1.md`, M1): a literal `LaneE
   resolves it with `LiveRamps::resolve` over the committed model, #1394 D5) **or refresh it on every
   model-only commit**, with a test that goes red without it. #1365's `control_smoothing` edit
   reaches the browser only through that path.
-- Verdict m1 and the NITs n1 and n2 are folded in attempt 2. NIT n5 (`sdk/README.md`) is not an
-  authorized path and is a follow-up (Attempt record).
+- Verdict m1 and the NITs n1 and n2 are folded in attempt 2. NIT n5 (`sdk/README.md`) was not an
+  authorized path; root authorized it on 2026-10-12 and the batch follow-ups below resolve it.
 
 ## Attempt record
 
@@ -354,7 +363,7 @@ that test is deleted (below).
   as given, as before (the engine refuses a non-zero bypass or input-filter word as `MALFORMED`).
 - *B, the cached `LiveRamps`.* No code. Host-web cannot commit a model change without a rebuild on this branch:
   `compile_ready` has one caller, `boot`, and no entry point edits a model. Recorded in Amendment 1 of this spec and
-  of #1365; #1382 must drop or refresh `SessionRamps`.
+  of #1365 (an "Amendment 1 note"); #1382 must drop or refresh `SessionRamps`.
 - *m1.* `a_followed_mute_send_ramps_over_the_resolved_mute_length` is deleted. Every mutation of the follow record's
   ramp it caught turns gate 1 (the `solo` and `vcaMute` rows stage the follow records) and five #1224 follow tests
   red too.
@@ -396,6 +405,54 @@ leg (24 passed); `cargo test --locked -p host-web --features test-support`; `car
 `check-sdk-headless.sh`: 373 evals, `sdk-package.sh check`). No digest moved. Not run: the Chromium legs and
 anything AArch64-only.
 
-**Open items.** `sdk/README.md` (not an authorized path) still shows only `smoothingSamples: 64` and says nothing
-of the absent-length default, `controlSmoothing` or the literal-`LaneEdit` rule; a follow-up edit to that file
-fixes it. #1382 must drop or refresh `SessionRamps` (Amendment 1).
+**Open items.** `sdk/README.md` (then not an authorized path) showed only `smoothingSamples: 64` and said nothing
+of the absent-length default, `controlSmoothing` or the literal-`LaneEdit` rule: resolved in the batch follow-ups
+below. #1382 must drop or refresh `SessionRamps` (Amendment 1 note; now a duty in #1382's spec).
+
+**Batch follow-ups** (stream E2 batch, after the verdicts
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-e2/1364-attempt1.md` (FAIL, M1) and `1364-attempt2.md`
+(PASS)).
+
+- *Root rulings (2026-10-12), recorded in the spec text above:* D3's first two bullets are reworded to what the
+  code does (m1); `sdk/src/internal/ramp.ts` and `sdk/README.md` are authorized; the two SessionRamps notes are
+  relabelled as attempt-2 notes under root's ruling (m3), and #1382's spec now carries the duty.
+- *m2, the two helpers left the public exports.* `checkedRampLength`, `laneEditSmoothingWord`, `RAMPED_KINDS`
+  and `SESSION_DEFAULT_RAMP` moved to `sdk/src/internal/ramp.ts` (a follow-up path, recorded in Authorized paths;
+  the module is in no export map or barrel, like `internal/session-json.ts`). `core/writer.ts` re-exports
+  `SESSION_DEFAULT_RAMP` alone, so that public name stays. `core/live-controls.ts`, `core/writer.ts` and
+  `browser/live-controls.ts` import from it. Checked: `Object.keys` of the package root before (`c7382644c`) and
+  after differ by exactly the two names (`checkedRampLength`, `laneEditSmoothingWord` removed; nothing added);
+  `check-sdk-generated.sh` passes.
+- *n3:* the eval helper `literal()` gives the effect kinds (`effectBypass`, `observeSubscribe`,
+  `observeUnsubscribe`) rack `1` (an insert) and the strip kinds rack `255`; the mock host never read the byte.
+- *n1, open item (behaviour not changed):* a kind with no session ramp (bypass, input filters, effect
+  parameters, observation) does not range-check its word in `laneEditSmoothingWord`. On the headless path
+  `DataView.setUint32` wraps `-1` to `0xFFFFFFFF` and `1.5` to `1`; the browser host's `validU32` refuses both.
+  The bytes are the same before and after #1364 and the engine refuses a non-zero bypass or input-filter word as
+  `MALFORMED`, so nothing is lost silently. A u32 check on every kind would be a separate small fix; no issue
+  filed here.
+- *n2, resolved:* `sdk/README.md` now states the absent-length default (an absent `smoothingSamples` ramps over
+  the session's `controlSmoothing` or the default table; an explicit `0` steps), `controlSmoothing` authoring and
+  bounds, and the `LaneEdit` rule (a hand-written `LaneEdit` resolves the same way through the encoder).
+- *beforeSubmit documentation:* the TSDoc of `LiveControlBeforeSubmit` (`sdk/src/core/live-controls.ts`) says a
+  builder edit with no explicit length shows `smoothingSamples` as `undefined`. The hook is not declared in
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` or its mirror, so the `.d.ts` pair is unchanged.
+- *New eval:* `the package root exports the marker and none of the encoder's ramp helpers`
+  (`sdk/test/live-controls-evals.mjs`). It defends m2: it is red if `SESSION_DEFAULT_RAMP` stops being public or
+  if `checkedRampLength` or `laneEditSmoothingWord` come back through `export *`. Before it, no test caught
+  either (the attempt-2 verifier found the leak by diffing `Object.keys`).
+- *Mutation runs* (`node --test 'test/*-evals.mjs'` against the built artifact, 374 evals; defect applied,
+  run, restored; the baseline is 374 pass, 0 fail):
+  - `laneEditSmoothingWord` writes `?? 0` for a ramped kind (the moved helper): RED, 4 evals.
+  - `vcaMute` dropped from `RAMPED_KINDS`: RED, 3 evals.
+  - the marker accepted as a length (`checkedRampLength` check off): RED, 3 evals.
+  - `browserCommand` writes `smoothingSamples ?? 0`: RED, 1 eval (the browser eval).
+  - `core/writer.ts` no longer re-exports `SESSION_DEFAULT_RAMP`: RED, the new export eval only (373 pass
+    before the eval existed: no test caught it).
+  - `core/writer.ts` re-exports `checkedRampLength` again: RED, the new export eval only.
+  - The `literal()` rack change (n3) is a fixture detail with no behaviour: not mutated.
+- *Gates run (this follow-up).* `build-web-audioworklet.sh --named-twin` (shipped module
+  `1e2175365b3de67dee196cc73bfdb2e9f037ac67a467505dcffa0af50afc6c93`, the digest of the #1365 verdict's
+  build: the batch's Rust edits (a test, a `match` listing, comments) did not move it); `check-sdk-generated.sh` (ok), `check-sdk-deletions.py` (ok),
+  `check-sdk-types.sh` (after an offline `npm ci`, `node_modules` deleted again), `check-sdk-headless.sh`
+  (374 evals), `sdk-package.sh check` (ok).

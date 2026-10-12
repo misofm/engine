@@ -88,6 +88,14 @@ has no `average`) -- and `MisoUsageError`'s `diagnosticCode` is the engine's own
 The seven track taps are `input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`,
 `post_fader` and `post_pan`.
 
+A session also says how long its live mute, fader and pan edits ramp. Pass `controlSmoothing:
+{ muteMs, faderMs, panMs }` to `session(...)`, each a finite number of milliseconds in `[0, 1000]`
+(`0` is a hard step); the builder refuses anything else at `session().controlSmoothing`. Omitted,
+the document says `{ "kind": "default" }` and the engine uses its default table of 10 ms for mute,
+20 ms for fader and 20 ms for pan, rounded to samples at the session's rate. The mute length also
+governs solo, send mutes and VCA mutes, and twice it governs polarity invert; the fader length
+governs input trim, send gain and VCA offsets; the pan length governs the matrix.
+
 ## Render offline
 
 Node 20+ and Bun use the packaged Wasm runtime. Supply a Session V1 document as JSON text, bytes,
@@ -204,6 +212,17 @@ export async function adjustVocal(controls: EngineLiveControls) {
   return report.appliedAtSample;
 }
 ```
+
+An edit that gives no `smoothingSamples` ramps over the session's length for that kind of edit
+(its `controlSmoothing`, or the default table), so a drag never steps by omission. An explicit
+`smoothingSamples` overrides it for that edit, and `smoothingSamples: 0` is a hard step. In the
+example above the fader moves over 64 samples while the other edits take the session's lengths.
+A hand-written `LaneEdit` (a plain object passed to `submit`) follows the same rule: the encoder
+resolves an absent `smoothingSamples` by the edit's kind, so a fader, mute, pan, matrix, solo, trim,
+polarity, route or VCA edit ramps over the session's length, while bypass, input-filter,
+effect-parameter and observation edits carry no session ramp and keep an absent value as `0`.
+`4294967295` is the engine's session-default marker, not a length, and is refused with a
+`MisoUsageError`.
 
 `controls.edit.submix(id)` addresses a submix strip (a bus) the same way, with every edit a track
 offers except `solo` (a bus is solo-safe), and `controls.edit.strip(id)` resolves either kind by
