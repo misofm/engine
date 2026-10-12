@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::whole_plan;
+use crate::{render_wrap, whole_plan};
 
 /// What a finding says. The declaration order is the order in which a report lists findings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,6 +66,22 @@ pub enum Class {
     NoRenderEntry,
     /// Production code of `crates/capi/src/ffi.rs` borrows the whole plan.
     WholePlanReference,
+    /// `hosts/host-web/src/ffi.rs` does not exist.
+    MissingWebFfi,
+    /// `hosts/host-web/src/ffi.rs` does not import `crate::render_lock::render_locked`.
+    RenderLockedNotImported,
+    /// `hosts/host-web/src/ffi.rs` introduces a name `render_locked` other than that import.
+    RenderLockedShadowed,
+    /// A table entry names no top-level `#[unsafe(no_mangle)]` export of that file.
+    ExportMissing,
+    /// A table entry names two top-level `#[unsafe(no_mangle)]` exports of that file.
+    ExportDefinedTwice,
+    /// A table entry is unwrapped and is not one of the policy's named exceptions.
+    UnwrappedNotPermitted,
+    /// A wrapped export's body is not one `render_locked` call of one closure.
+    RenderLockedBody,
+    /// A wrapped export calls a `render_locked` that the file does not resolve to the real one.
+    RenderLockedUnresolved,
     /// Fewer marked files than the policy's floor; the number is the floor.
     MarkedFileFloor(usize),
     /// Fewer marked regions than the policy's floor; the number is the floor.
@@ -118,6 +134,28 @@ impl fmt::Display for Class {
             Self::WholePlanReference => out.write_str(
                 "the C ABI forms a reference to a whole Plan; project the field with &raw const or &raw mut",
             ),
+            Self::MissingWebFfi => write!(out, "missing {}", render_wrap::WEB_FFI),
+            Self::RenderLockedNotImported => out.write_str(
+                "the file does not import crate::render_lock::render_locked, which every wrapped export calls",
+            ),
+            Self::RenderLockedShadowed => out.write_str(
+                "the file introduces a name render_locked other than the import of crate::render_lock::render_locked",
+            ),
+            Self::ExportMissing => out.write_str(
+                "the render-thread table lists an export that the file does not define as a top-level #[unsafe(no_mangle)] function",
+            ),
+            Self::ExportDefinedTwice => out.write_str(
+                "the render-thread table lists an export that the file defines more than once",
+            ),
+            Self::UnwrappedNotPermitted => out.write_str(
+                "the render-thread table lists an unwrapped export that is not one of the policy's named exceptions",
+            ),
+            Self::RenderLockedBody => out.write_str(
+                "the export's body is not exactly one render_locked call whose only argument is a closure",
+            ),
+            Self::RenderLockedUnresolved => out.write_str(
+                "the export calls render_locked, which the file does not resolve to crate::render_lock::render_locked",
+            ),
             Self::MarkedFileFloor(floor) => {
                 write!(out, "expected at least {floor} marked realtime files")
             }
@@ -139,6 +177,8 @@ pub struct Finding {
     pub line: Option<usize>,
     /// The text of that line, trimmed. Set only with a line.
     pub source: Option<String>,
+    /// The export that the finding is about, with its prefix, when it is about one.
+    pub export: Option<String>,
 }
 
 impl Finding {
@@ -149,6 +189,7 @@ impl Finding {
             path: None,
             line: None,
             source: None,
+            export: None,
         }
     }
 
@@ -159,6 +200,7 @@ impl Finding {
             path: Some(path.to_owned()),
             line: None,
             source: None,
+            export: None,
         }
     }
 
@@ -169,7 +211,14 @@ impl Finding {
             path: Some(path.to_owned()),
             line: Some(line),
             source: Some(source.trim().to_owned()),
+            export: None,
         }
+    }
+
+    /// The same finding, about `export`.
+    pub(crate) fn about(mut self, export: &str) -> Self {
+        self.export = Some(export.to_owned());
+        self
     }
 
     /// A finding about a line whose text is not at hand (a lex or parse error).
@@ -179,6 +228,7 @@ impl Finding {
             path: Some(path.to_owned()),
             line: Some(line),
             source: None,
+            export: None,
         }
     }
 }
@@ -186,6 +236,9 @@ impl Finding {
 impl fmt::Display for Finding {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(out, "realtime policy failure: {}", self.class)?;
+        if let Some(export) = &self.export {
+            write!(out, ": export {export}")?;
+        }
         if let Some(path) = &self.path {
             write!(out, ": {path}")?;
             if let Some(line) = self.line {

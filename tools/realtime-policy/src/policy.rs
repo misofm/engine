@@ -1,5 +1,15 @@
 //! The tool's constants.
 
+use crate::table::{self, RenderThreadExport};
+
+/// The table of the exports either AudioWorklet calls after construction, shared with the two
+/// worklet harnesses.
+const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json");
+
+/// The exports of that table that are not wrapped in `render_locked`, each with its reason in the
+/// table: `docs/REALTIME_DEPENDENCY_POLICY.md`, "The browser render-locked allocator".
+const UNWRAPPED_EXPORTS: [&str; 2] = ["dispose", "render_allocation_count"];
+
 /// The constants a check reads. `Policy::workspace` holds the real values; a library case builds
 /// its own by replacing fields, so no case depends on the real tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10,10 +20,18 @@ pub struct Policy {
     pub marked_files_floor: usize,
     /// The fewest marked regions a tree may hold.
     pub marked_regions_floor: usize,
+    /// The exports either AudioWorklet calls after construction (`hosts/host-web/src/ffi.rs`).
+    pub render_thread_exports: Vec<RenderThreadExport>,
+    /// The full names of the table's entries that may be unwrapped.
+    pub unwrapped_exports: Vec<String>,
 }
 
 impl Policy {
     /// The real policy of this workspace.
+    ///
+    /// # Panics
+    ///
+    /// If the embedded `render-thread-exports.json` is malformed; a test holds it well formed.
     #[must_use]
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
@@ -46,6 +64,12 @@ impl Policy {
                 .collect(),
             marked_files_floor: 26,
             marked_regions_floor: 95,
+            render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
+                .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
+            unwrapped_exports: UNWRAPPED_EXPORTS
+                .iter()
+                .map(|name| format!("{}{name}", table::PREFIX))
+                .collect(),
         }
     }
 }

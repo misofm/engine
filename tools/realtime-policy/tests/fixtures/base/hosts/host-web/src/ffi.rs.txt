@@ -1,2 +1,26 @@
 #![allow(unsafe_code)]
+use crate::render_lock::{render_allocation_count, render_locked};
 unsafe fn web_boundary() {}
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_render(handle: u32) -> u32 {
+    render_locked(|| handle)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_seek(handle: u32) -> u32 {
+    render_locked(|| {
+        let next = handle + 1;
+        next
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_spectrum_select(handle: u32) -> u32 {
+    render_locked(move || handle)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
+    handle
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_render_allocation_count() -> u32 {
+    render_allocation_count()
+}

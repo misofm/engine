@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use realtime_policy::{Class, Policy, Report, check};
+use realtime_policy::{Caller, Class, Policy, RenderThreadExport, Report, check};
 
 /// The word that opens an unsafe item. Tests build source text from it so that this file holds no
 /// text the repository's older source scan would read as unsafe code.
@@ -21,12 +21,37 @@ pub(crate) const BASE_REGIONS: usize = 94;
 pub(crate) const FILE_FLOOR: Class = Class::MarkedFileFloor(BASE_FILES);
 pub(crate) const REGION_FLOOR: Class = Class::MarkedRegionFloor(BASE_REGIONS);
 
-/// The case policy: the real policy with the floors set to the base tree's counts. The unsafe
+/// One entry of the case policy's render-thread table: `name` without its prefix.
+pub(crate) fn render_thread_export(name: &str, wrapped: bool) -> RenderThreadExport {
+    RenderThreadExport {
+        name: format!("miso_engine_web_v1_{name}"),
+        wrapped,
+        callers: vec![Caller {
+            worklet: "engine".to_owned(),
+            handler: "process".to_owned(),
+        }],
+        reason: (!wrapped).then(|| "a case reason".to_owned()),
+    }
+}
+
+/// The case policy: the real policy with the floors set to the base tree's counts and a small
+/// render-thread table that the base tree's `hosts/host-web/src/ffi.rs` satisfies. The unsafe
 /// allowlist stays the real one, because the base tree's unsafe files use its paths.
 pub(crate) fn policy() -> Policy {
     Policy {
         marked_files_floor: BASE_FILES,
         marked_regions_floor: BASE_REGIONS,
+        render_thread_exports: vec![
+            render_thread_export("render", true),
+            render_thread_export("source_seek", true),
+            render_thread_export("spectrum_select", true),
+            render_thread_export("dispose", false),
+            render_thread_export("render_allocation_count", false),
+        ],
+        unwrapped_exports: vec![
+            "miso_engine_web_v1_dispose".to_owned(),
+            "miso_engine_web_v1_render_allocation_count".to_owned(),
+        ],
         ..Policy::workspace()
     }
 }

@@ -144,3 +144,102 @@ construction that the table does not list, which no gate checks today.
 - A test that greps source or prose is refused.
 - Attempt budget: two attempts, one adversarial verdict each.
 - Size: half a day.
+
+## Attempt 1 record
+
+Base `58cdcaf5f` (`codex/d15-stream-j3`, J batch 3). Everything below was measured on this branch.
+
+**Re-measured, differing from the Problem.**
+- Set 1 of the policy section (`docs/REALTIME_DEPENDENCY_POLICY.md`, "The browser render-locked
+  allocator") is 33 exports, 31 wrapped; each is defined once in `hosts/host-web/src/ffi.rs` as a
+  top-level `#[unsafe(no_mangle)]` function and the rule passes on all 31 with no ffi change (D4 holds).
+  The engine worklet calls `buffer_ptr`, `prepared_companion_*`, `observation_id_*`,
+  `spectrum_target_id_*` and the other construction-path exports only from `initialize`'s path
+  (`bindLiveControls`, `stageSpectrumRequest`), so they are outside the table, as the ffi header says.
+- `scripts/check-realtime-policy.sh` no longer exists (#1446); the tool runs as
+  `cargo run --locked --release -q -p realtime-policy`.
+- Gate 1 "the tool passes on the tree" does not hold on this branch for a reason that is not this
+  slice: the tool reports exactly one finding, `crates/effect-contract/src/live.rs:366`
+  (`.map(Consumer::try_pop)`), before and after this change (checked with the change stashed). Its fix
+  belongs to #1345 D8 (#1426 names it: "The `live.rs:366` rewrite ... belongs to #1345"). This slice adds
+  no finding on the real tree.
+
+**What changed**
+- D1: `tools/realtime-policy/render-thread-exports.json`, 33 entries: name without the
+  `miso_engine_web_v1_` prefix, `callers` (worklet `engine` or `feed` and the class method that makes
+  the call), `wrapped`, and a `reason` on exactly `dispose` and `render_allocation_count`. `src/table.rs`
+  parses it strictly (unknown key, wrong type, duplicate name, empty callers, unknown worklet, wrapped
+  with a reason, unwrapped without one are errors); `Policy::workspace()` loads it with `include_str!`.
+  `Policy` gains `render_thread_exports` and `unwrapped_exports` (the two named exceptions, a constant of
+  `policy.rs`; a table entry that is unwrapped and not named there is a finding). `serde_json = "=1.0.151"`
+  is a new dependency of the tool (the version `session-validator` and `host-web` already pin);
+  `Cargo.lock` gains one line (`realtime-policy` depends on `serde_json`).
+- D2: `src/render_wrap.rs` parses `hosts/host-web/src/ffi.rs` (always parsed, like the capi ffi) and, per
+  table entry, requires one top-level `#[unsafe(no_mangle)]` function of that name; for a wrapped entry its
+  body is exactly one statement, a call of one closure that takes no parameter, whose callee is
+  `render_locked` or the full path `crate::render_lock::render_locked`. A bare callee needs the file to
+  import `crate::render_lock::render_locked` under its own name (top level, grouped or not) and to
+  introduce no other `render_locked` anywhere (fn, const, static, struct, enum, union, type, trait, mod,
+  `macro_rules!`, foreign fn, any pattern binding including parameters, any other `use`). New classes:
+  `MissingWebFfi`, `RenderLockedNotImported`, `RenderLockedShadowed`, `ExportMissing`, `ExportDefinedTwice`,
+  `UnwrappedNotPermitted`, `RenderLockedBody`, `RenderLockedUnresolved`. `Finding` gains an `export` field
+  that the line prints as `: export <name>`, so each failure names the export and the rule.
+- D3, `scripts/test-web-audioworklet.mjs` (`testProcessor` only): the stubbed `WebAssembly.Instance` hands
+  the worklet a proxy over the fake exports. A processor counts as constructed once its port has posted
+  `miso.ready.v1`; from then the proxy records each `miso_engine_web_v1_*` read and call. Installing it in
+  the Instance stub (not per case) covers every processor of the suite, `testQualificationBoot`'s six
+  included. An unlisted export that the fakes do not define gets a stub that returns 0, so the final check
+  names it instead of a bare `TypeError` stopping the run. The final check requires that `render`,
+  `command_submit`, `source_submit` and `meter_poll` were seen (the recording is not vacuous) and that
+  every recorded name is a table entry with an `engine` caller. Recorded on the real worklet:
+  `command_submit dispose eq_target_config_copy meter_lease meter_poll render source_seek source_submit`.
+- D3, `sdk/test/browser-pcm-evals.mjs`: `recordFeedCalls` wraps the `exports` of both engine fakes the feed
+  worklet drives (the actual-Wasm one and `runPrelude`'s); the last test requires `source_submit` and
+  `source_seek` to have been seen and every recorded name to be a table entry with a `feed` caller.
+- Tests: `tests/policy/render_wrap.rs` (11 cases on a base fixture whose `ffi.rs` now holds a small
+  exports file and a small case table), `src/table.rs`'s two unit tests; `walk.rs`'s root-is-a-file case
+  gains `MissingWebFfi` (the file is gone with its root).
+
+**Gates**
+- Gate 1: `cargo test --locked -p realtime-policy` 196 integration + 2 unit pass; tool on the tree: the one
+  known finding above and nothing else. `bash scripts/test-web-audioworklet.sh` exit 0 and its TMPDIR left
+  empty; `bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts` 363 tests, 0 fail.
+- Gate 4: `cargo clippy --locked -p realtime-policy --all-targets -- -D warnings`, `cargo fmt --all --
+  --check`, `bash scripts/check-workspace-policy.sh` (ok), `python3 scripts/check-ci-path-routing.py`
+  (passed; no CI file changed), `scripts/build-web-audioworklet.sh --named-twin ...` (module
+  `9784d3509dba...`), `scripts/check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts` all exit 0.
+
+**Mutations (each applied alone, then reverted; the revert is green)**
+- Gate 2, on the real `ffi.rs`, tool output after the known finding: (1) `source_seek` body run without
+  `render_locked` -> red, `export miso_engine_web_v1_source_seek: hosts/host-web/src/ffi.rs:3961`;
+  (2) the import replaced by a local `fn render_locked<R>(f: impl FnOnce() -> R) -> R { f() }` -> red:
+  `RenderLockedNotImported`, `RenderLockedShadowed` (`ffi.rs:44`) and 31 `RenderLockedUnresolved`, one per
+  wrapped export (34 lines in all with the known finding); (3) `let _before = handle;` before the call in
+  `spectrum_select` -> red, names `miso_engine_web_v1_spectrum_select:2968`.
+- Gate 3: (a) `this.exports.miso_engine_web_v1_spectrum_selection_epoch()` at the top of the engine
+  worklet's `receiveSource` (a mutated copy through `MISO_ENGINE_WEB_WORKLET_TEST_MODULE`) -> `testProcessor`
+  red, `actual: [ 'spectrum_selection_epoch' ]`, message lists `miso_engine_web_v1_spectrum_selection_epoch`;
+  (b) `source_seek` removed from the table -> `browser-pcm-evals` red, the last test names
+  `miso_engine_web_v1_source_seek`; (c) the same call added to the feed worklet's `applySharedSeek` ->
+  red, names `miso_engine_web_v1_spectrum_selection_epoch`.
+- Harness hooks (not in the spec): ready flag never set in `testProcessor` -> red, "the recording proxy saw
+  the engine worklet call render"; `recordFeedCalls` removed from both fakes -> red, "saw the feed worklet
+  call source_submit".
+- Rule and loader, each against `tests/policy/render_wrap.rs` or `table.rs`'s tests (one red test or more,
+  revert green): only the first statement judged (statement-after case red); shadow scan off (3 cases red);
+  a bare callee always resolved (4 red); closure parameters allowed (call-shape case red); a missing export
+  silent (export case red); every unwrapped entry permitted (exception case red); `#[unsafe(no_mangle)]`
+  not required (export case red); `only_keys` accepting any key and an unwrapped entry without a reason
+  (loader test red; the first run of this mutation stayed green, because the case it used also removed a
+  required key, so three cases that add an extra key were added).
+
+**Test value.** `render_wrap.rs`: a post-construction export that loses its wrap, gains a statement beside
+it, or has `render_locked` shadowed by a local function, a macro, a binding or another import turns it red;
+the #1488 gate-2 shape was green in every earlier test. The two harness checks: a worklet that starts
+calling an export after construction that the table does not list. `table.rs`: a table that loses a wrap
+without a word (a misspelled key, an unwrapped entry with no reason).
+
+**Open.** The headers and the policy section still carry the set as prose (`ffi.rs` header, `render_lock.rs`
+header, policy "set 1"); D4 forbids a header edit here and the policy file is outside the authorized paths.
+Root may point them at the table in a doc pass. The tool run on the whole tree stays red until #1345 D8.

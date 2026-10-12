@@ -9,6 +9,7 @@ mod common;
 mod drain;
 mod forbidden;
 mod markers;
+mod render_wrap;
 mod run;
 mod source_reads;
 mod unsafe_ownership;

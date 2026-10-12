@@ -1,5 +1,5 @@
 //! Checks the marked realtime regions (their boundaries, forbidden spellings and `try_pop` drains),
-//! the C ABI's whole-plan rule and the unsafe-ownership boundary of the workspace from Rust's own
+//! the C ABI's whole-plan rule, the browser host's render-locked wrap rule and the unsafe-ownership boundary of the workspace from Rust's own
 //! lexer and syntax tree.
 //!
 //! [`check`] walks `crates`, `hosts` and `tools` under a workspace root and returns a [`Report`].
@@ -16,10 +16,12 @@ mod forbidden;
 mod leaf;
 mod markers;
 mod policy;
+mod render_wrap;
 mod report;
 mod source;
 mod source_reads;
 mod syntax;
+mod table;
 mod unsafe_scan;
 mod walk;
 mod whole_plan;
@@ -29,6 +31,7 @@ use std::path::Path;
 pub use cli::run;
 pub use policy::Policy;
 pub use report::{Class, Finding, Report};
+pub use table::{Caller, RenderThreadExport};
 
 use source::Source;
 
@@ -67,7 +70,9 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
             files += 1;
             forbidden::scan(&source, &markers.regions, &mut findings);
         }
-        if (markers.mentions_marker || source.path == whole_plan::CAPI_FFI)
+        if (markers.mentions_marker
+            || source.path == whole_plan::CAPI_FFI
+            || source.path == render_wrap::WEB_FFI)
             && let Some(file) = syntax::parse(&source, &mut findings)
         {
             parsed.push((source, file, markers.regions));
@@ -76,6 +81,7 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
     let (debug_assert_trusted, name_findings) = names.finish();
     findings.extend(name_findings);
     let mut capi_ffi = None;
+    let mut web_ffi = None;
     for (source, file, file_regions) in &parsed {
         if !file_regions.is_empty() {
             let boundaries = boundary::Boundaries::new(source, file, file_regions);
@@ -92,11 +98,19 @@ pub fn check(workspace_root: &Path, policy: &Policy) -> Report {
         if source.path == whole_plan::CAPI_FFI {
             capi_ffi = Some((source, file));
         }
+        if source.path == render_wrap::WEB_FFI {
+            web_ffi = Some((source, file));
+        }
     }
     if !workspace_root.join(whole_plan::CAPI_FFI).is_file() {
         findings.push(Finding::bare(Class::MissingCapiFfi));
     } else if let Some((source, file)) = capi_ffi {
         whole_plan::scan(source, file, &mut findings);
+    }
+    if !workspace_root.join(render_wrap::WEB_FFI).is_file() {
+        findings.push(Finding::bare(Class::MissingWebFfi));
+    } else if let Some((source, file)) = web_ffi {
+        render_wrap::scan(source, file, policy, &mut findings);
     }
     if files < policy.marked_files_floor {
         findings.push(Finding::bare(Class::MarkedFileFloor(
